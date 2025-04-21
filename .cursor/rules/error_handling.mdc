@@ -1,0 +1,138 @@
+# Error Handling Standards
+
+## Core Principles
+
+### Type Safety
+- Use typed error classes (e.g., `class AgentError extends Error { ... }`)
+- Define specific error types for different scenarios (e.g., `PluginLoadError`, `TaskExecutionError`)
+- Use discriminated unions for representing success/error states where applicable
+- Ensure proper type narrowing in `catch` blocks (`catch (error: unknown)`) using `instanceof` or type guards
+
+### Error Context
+- Maintain complete error context when catching and re-throwing errors
+- Include relevant state information (e.g., `taskId`, `agentName`, `pluginPath`)
+- Preserve original error stack traces whenever possible
+- Add descriptive error messages explaining the failure
+
+## Error Categories (Examples)
+
+### External API Errors (If applicable)
+- Handle errors from external services (e.g., LLM providers, databases)
+- Convert to standardized internal error types if necessary
+- Preserve original error details (e.g., status codes, messages)
+- Include request context
+
+### Validation Errors
+- Schema validation errors (e.g., invalid `agent.json`)
+- Type validation errors
+- Input validation errors (e.g., invalid task input)
+- State validation errors (e.g., trying to run an already completed task)
+
+### Runtime Errors
+- Handle async operation failures (file system access, network requests)
+- Manage stream processing errors (if applicable)
+- Handle resource cleanup errors
+- Process timeout errors
+
+### Business Logic Errors
+- Agent selection errors (if applicable)
+- Plugin loading/initialization errors
+- Task lifecycle errors (e.g., invalid state transitions)
+- Configuration errors
+
+## Retry Management (If Applicable)
+
+### Retry Logic Usage
+- Use for transient failures (e.g., temporary network issues)
+- Implement exponential backoff or similar strategies
+- Configure maximum retry attempts appropriately
+- Handle retry exhaustion gracefully (e.g., by throwing a final error)
+
+### Retry Conditions
+- Define clear conditions for when retries are appropriate (e.g., specific error codes, timeouts)
+- Identify errors that should not be retried (e.g., validation errors, authentication failures)
+- Set appropriate timeouts for operations within the retry loop
+- Monitor retry patterns for potential underlying issues
+
+## Error Recovery
+
+### Graceful Degradation
+- Provide fallback behavior where possible
+- Maintain partial functionality if feasible
+- Ensure error states are cleared properly upon recovery
+- Attempt to restore system/component state to a known good condition
+
+### Resource Cleanup
+- Ensure resources (file handles, network connections, timers) are released in `finally` blocks or equivalent
+- Close open connections or streams
+- Clear temporary state or files
+
+## Error Reporting
+
+### Error Messages
+- Provide clear and actionable messages
+- Include relevant context or identifiers (e.g., `taskId`, `agentName`)
+- Suggest potential resolution steps if known
+
+### Logging
+- Log error details using the established logging system (see `logging.mdc`)
+- Include stack traces for debugging
+- Add contextual information (input parameters, state)
+- Use the `error` log level for caught exceptions
+
+## Implementation Patterns
+
+### Try-Catch Blocks
+- Use `try...catch` blocks to handle potential exceptions
+- Catch specific error types when possible for targeted handling
+- Handle errors at the appropriate level of abstraction
+- Avoid overly broad `catch` blocks (e.g., `catch (e) {}` without inspection)
+- Rethrow errors (often wrapping them with more context) when they cannot be handled locally
+
+### Async Error Handling
+- Use `try...catch` with `async/await` for handling rejected Promises
+- Ensure all Promise chains have appropriate `.catch()` handlers or are awaited within a `try` block
+- Manage errors in concurrent operations (e.g., using `Promise.allSettled`)
+- Clean up resources in `finally` blocks within async functions
+
+### Stream Error Handling (If applicable)
+- Handle errors emitted by streams (`stream.on('error', ...)`)
+- Manage partial data processing in case of stream failure
+- Ensure stream resources are properly closed/destroyed on error
+- Maintain consistent state management during stream errors
+
+### Error Boundaries
+- Define clear boundaries where errors are handled (e.g., per agent execution, per API request)
+- Handle errors within components to prevent them from crashing the entire application unless necessary
+- Maintain system stability despite localized failures
+
+## Best Practices
+
+### Error Prevention
+- Validate inputs and configurations early
+- Check preconditions before performing operations
+- Verify state transitions are valid
+- Use TypeScript's strict checks and type guards
+
+### Error Recovery
+- Implement specific recovery strategies for common, recoverable errors
+- Handle partial failures gracefully
+- Maintain data consistency during and after errors
+- Provide informative feedback to the user or calling system
+
+### Testing
+- Write specific tests for error conditions and handling logic
+- Verify that the correct error types are thrown/handled
+- Test recovery mechanisms and fallback behaviors
+- Check that error messages and logged context are accurate
+
+### Documentation
+- Document custom error types and their meanings
+- Describe the error handling strategy for key components
+- Explain recovery steps or expected behavior on failure
+- Note known limitations or unhandled error scenarios
+
+# References
+- See `@src/core/utils/retryLogic.ts` for retry implementation examples (if applicable)
+- See `@src/core/errors/customErrors.ts` for error type definitions (if applicable)
+- See `@src/runner/index.ts` for top-level error handling examples (if applicable) 

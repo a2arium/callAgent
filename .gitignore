@@ -1,0 +1,48 @@
+# Node modules
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Jest coverage
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+
+# MacOS
+.DS_Store
+
+# Yarn
+.yarn/
+.pnp.*
+
+# Others
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Cursor
+.cursorignore
+.cursorrules
+.notes/
+
+# Optional build outputs or temp files
+*.js
+*.js.map 
