@@ -1,0 +1,45 @@
+---
+description: Planned Architecture Guidelines. Use when planning new features or changes, or better understanding of what's planned
+globs: 
+alwaysApply: false
+---
+# Cursor Rule: Planned Architecture Guidelines
+
+## Purpose
+This rule provides guidance on adhering to the planned architecture for the TypeScript AI Agent Framework, as detailed in the `/planned_architecture/` directory. While specific implementation details may evolve, the core concepts should guide development.
+
+## Key Architectural Principles
+1.  **Agent Plugin Model:**
+    *   Agents are self-contained TypeScript **plugins**.
+    *   Use the `createAgentPlugin({ manifest, handleTask })` factory.
+    *   Each plugin needs an `agent.json` manifest.
+    *   The core logic resides in the `async handleTask(ctx)` function.
+2.  **Task-Based Execution:**
+    *   Work is modeled as **Tasks** with a defined lifecycle (submitted, working, input-required, completed, failed, canceled).
+    *   The **Task Engine** (planned in `src/core/orchestration`) manages this lifecycle (likely using XState).
+3.  **Context Object (`ctx`):**
+    *   The `handleTask` function receives a `ctx` object.
+    *   Use `ctx` properties for interacting with the framework: `ctx.llm`, `ctx.tools`, `ctx.memory`, `ctx.cognitive`, `ctx.progress`, `ctx.reply`, `ctx.complete`.
+4.  **A2A Communication Protocol:**
+    *   Inter-agent communication uses the defined **A2A Protocol**.
+    *   This involves JSON-RPC 2.0, Server-Sent Events (SSE), and Webhooks.
+    *   The `src/api` layer (planned) should handle protocol implementation.
+5.  **Modular Structure:**
+    *   Adhere to the planned directory structure (e.g., `src/api`, `src/core`, `src/lib`).
+    *   Separate concerns like API handling, core orchestration, plugin management, and shared libraries.
+6.  **Dependencies:**
+    *   Leverage planned libraries like `callllm` (via `ctx.llm`), `xstate` (for Task Engine), `zod` (for validation).
+
+## Applying the Rule
+When developing new features or refactoring:
+*   Consider how the changes fit into the Agent Plugin model.
+*   Ensure interactions align with the Task lifecycle and A2A protocol.
+*   Utilize the `ctx` object for framework services.
+*   Place code in the appropriate module according to the planned structure.
+*   Refer to the detailed documents in `/planned_architecture/` for specifics.
+
+## Relevant Documents
+*   `planned_architecture/2 High-Level Architecture*.md`
+*   `planned_architecture/3 Core Concepts*.md`
+*   `planned_architecture/4 Detailed Component Architecture*.md`
+*   `planned_architecture/5 Agent Development & Plugin Model*.md` 

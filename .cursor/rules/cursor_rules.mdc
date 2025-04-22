@@ -1,4 +1,9 @@
-# Cursor Rules Guide
+---
+description: 
+globs: 
+alwaysApply: false
+---
+ # Cursor Rules Guide
 
 ## Rule Structure
 
@@ -214,9 +219,3 @@ alwaysApply: false
 - See @.cursor/rules/global.mdc for core rule example
 - See @.cursor/rules/typescript.mdc for technical rule example
 - See @.cursor/rules/documentation.mdc for documentation standards example
-
-description: 
-globs: 
-alwaysApply: false
----
- 

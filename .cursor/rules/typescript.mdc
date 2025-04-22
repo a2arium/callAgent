@@ -3,4 +3,114 @@ description:
 globs: 
 alwaysApply: false
 ---
- 
+ # TypeScript Standards
+
+## Type Definitions
+
+### Core Principles
+- NEVER use 'any' type
+- Use `type` instead of `interface`
+- Prefer union types over enums where appropriate (consider enums for fixed, known sets)
+- Use discriminated unions for modeling states or variants
+- Make types as specific as possible
+
+### Type Safety
+- Enable strict TypeScript checks in `tsconfig.json` (`"strict": true`)
+- Use proper type guards (e.g., `typeof`, `instanceof`, custom predicate functions)
+- Avoid type assertions (`as T`) unless absolutely necessary and justified
+- Use `readonly` for properties/arrays that should not be mutated
+- Leverage `const` assertions for literal types (`as const`)
+
+## Function Declarations
+
+### Parameters
+- Use specific types for parameters
+- Use optional properties (`?`) or default values for optional parameters
+- Use rest parameters (`...args: T[]`) for variadic functions
+- Use union types (`string | number`) for parameters accepting multiple types
+- Document complex parameter types using JSDoc
+
+### Return Types
+- Always specify return types explicitly for exported functions/methods
+- Use `Promise<T>` for async functions
+- Use union types (`string | null`) or discriminated unions for multiple possible return shapes
+- Use `void` for functions that do not return a value
+- Use `never` for functions that never return (e.g., always throw)
+- Document return type meanings, especially for complex types or unions
+
+## Error Handling
+- Use typed error classes (e.g., `class PluginError extends Error { ... }`)
+- Define specific error types for different failure scenarios
+- Use discriminated unions to model function results that can be success or error states
+- Properly type `catch` blocks (`catch (error: unknown)`) and use type guards to handle specific error types
+
+## Generics
+- Use generics (`<T>`) for reusable functions, classes, and types
+- Constrain generic types using `extends` where possible (`<T extends BaseType>`)
+- Provide default types for generics if sensible (`<T = DefaultType>`)
+- Document generic type parameters and their constraints
+- Use meaningful generic names (e.g., `TInput`, `TOutput`) for clarity beyond simple `T`, `K`, `V`
+
+## Best Practices
+
+### Type Exports
+- Export types alongside or separately from values using `export type { MyType }`
+- Use meaningful type names
+- Group related types logically, often in dedicated `types.ts` files within a module
+- Document complex type relationships
+
+### Type Guards
+- Use type predicates (`param is Type`) for custom type guards
+- Implement exhaustive checks in switch statements or conditional logic when working with union types (consider `never` type for exhaustiveness checks)
+- Document type guard behavior clearly
+- Test type guards thoroughly
+
+### Async Code
+- Use `async/await` for cleaner asynchronous code
+- Use proper `Promise<T>` typing for all async operations
+- Handle Promise rejections explicitly using `try/catch` or `.catch()`
+- Type async iterators (`AsyncIterable<T>`) and generators (`AsyncGenerator<T>`) properly
+- Document asynchronous behavior and potential race conditions
+
+### Utility Types
+- Use built-in utility types (`Partial`, `Required`, `Readonly`, `Pick`, `Omit`, `Record`, etc.) appropriately to manipulate types
+- Create custom utility types when needed for common type transformations
+- Document the purpose and usage of custom utility types
+- Test utility types to ensure they behave as expected
+
+## Code Organization
+
+### File Structure
+- Consider one main class/logical unit per file
+- Group related types, constants, and functions within module directories
+- Separate type definitions into `types.ts` or similar when they become numerous or complex
+- Use `index.ts` files to re-export public APIs from modules
+
+### Import/Export
+- Prefer named exports (`export const myVar`, `export type MyType`)
+- Avoid default exports to improve refactoring and discoverability
+- Group imports logically (e.g., external libraries, project modules, types)
+- Consider sorting imports alphabetically within groups
+
+### Documentation
+- Document all exported types, functions, classes, and constants using JSDoc
+- Include examples in documentation where helpful
+- Document type constraints, generic parameters, and potential error conditions
+
+## Testing
+
+### Type Testing
+- Write tests that verify complex type manipulations or utility types
+- Verify type guards work correctly for all cases
+- Check error type handling and propagation
+
+### Test Types
+- Use specific types for test fixtures and inputs
+- Type mock functions and their return values accurately using Jest or similar
+- Type test utility functions
+- Document the types used within tests for clarity
+
+# References
+- See `@src/shared/types/index.ts` for core type examples
+- See `@src/core/plugin/types.ts` for example type definitions
+- See `@src/utils/errorUtils.ts` for error handling examples (if applicable)

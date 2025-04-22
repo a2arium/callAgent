@@ -3,4 +3,179 @@ description:
 globs: 
 alwaysApply: false
 ---
- 
+# Naming Conventions
+
+## File Naming
+
+### Directory Names
+- Use lowercase-with-dashes
+- Descriptive and concise
+- Logical grouping
+- Clear purpose
+- Example: `agent-plugins`
+
+### Source Files
+- Use camelCase
+- Descriptive names
+- Clear purpose
+- Type indication
+- Example: `pluginLoader.ts`
+
+### Test Files
+- Mirror source filename
+- Add .test or .spec suffix
+- Match source location
+- Example: `pluginLoader.test.ts`
+
+## Code Naming
+
+### Variables
+- Use camelCase
+- Descriptive names
+- Clear purpose
+- Avoid abbreviations
+- Example: `taskContext`
+
+### Functions
+- Use camelCase
+- Verb-noun combination
+- Clear purpose
+- Action description
+- Example: `loadAgentManifest`
+
+### Classes
+- Use PascalCase
+- Noun or noun phrase
+- Clear responsibility
+- Example: `MinimalRunner`
+
+### Interfaces/Types
+- Use PascalCase
+- Descriptive names
+- Clear purpose
+- Example: `AgentManifest`
+
+## Component Naming
+
+### Core Components
+- Clear responsibility
+- Functional description
+- Standard suffixes (e.g., Manager, Service, Controller)
+- Example: `PluginRegistry`
+
+### Utility Functions
+- Action-focused names
+- Clear purpose
+- Reusability indication
+- Example: `formatOutput`
+
+### Constants
+- Use UPPER_SNAKE_CASE
+- Clear purpose
+- Grouped logically
+- Example: `DEFAULT_PLUGIN_DIRECTORY`
+
+## Parameter Naming
+
+### Function Parameters
+- Descriptive names
+- Clear purpose
+- Consistent across similar functions
+- Example: `config`, `options`, `ctx`
+
+### Generic Types
+- Single letter for simple types (T, K, V)
+- Descriptive for complex types
+- Consistent conventions
+- Example: `TInput`, `TOutput`
+
+### Callback Parameters
+- Action description
+- Clear purpose
+- Event context
+- Example: `onComplete`, `onError`
+
+## Error Naming
+
+### Error Classes
+- Suffix with Error
+- Clear error type
+- Specific purpose
+- Example: `ManifestLoadError`
+
+### Error Messages
+- Clear description
+- Action context
+- Resolution hints
+- Example: `Invalid agent manifest: missing name`
+
+## Event Naming
+
+### Event Names
+- Clear purpose
+- Action description (e.g., nounVerb)
+- Consistent format
+- Example: `taskCompleted`, `pluginLoaded`
+
+### Event Handlers
+- Prefix with 'handle' or 'on'
+- Clear purpose
+- Event context
+- Example: `handleTaskError`, `onPluginLoad`
+
+## Best Practices
+
+### Clarity
+- Self-documenting names
+- Avoid unclear abbreviations
+- Clear purpose
+- Consistent style
+
+### Consistency
+- Follow conventions
+- Use standard patterns
+- Maintain across codebase
+- Regular review
+
+### Context
+- Consider scope
+- Reflect purpose
+- Include type context
+- Match domain language
+
+### Length
+- Balance clarity and brevity
+- Avoid unnecessary words
+- Keep names manageable
+- Use standard abbreviations only when widely understood
+
+## Specific Patterns
+
+### React Components (If Applicable)
+- PascalCase
+- Clear purpose
+- Functional indication
+- Example: `AgentStatusViewer`
+
+### Hooks (If Applicable)
+- Prefix with 'use'
+- Clear purpose
+- Functional description
+- Example: `useAgentContext`
+
+### Higher-Order Functions
+- Action description
+- Clear purpose
+- Transformation indication
+- Example: `withRetryLogic`
+
+### Type Guards
+- Prefix with 'is'
+- Clear type check
+- Boolean indication
+- Example: `isTextMessagePart`
+
+# References
+- See `@src/shared/types/index.ts` for type naming examples
+- See `@src/core/plugin/pluginLoader.ts` for class/function naming
+- See `@src/utils/someUtil.ts` for utility function naming examples 

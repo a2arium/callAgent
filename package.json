@@ -1,7 +1,8 @@
 {
-  "name": "callAgent",
+  "name": "ai-agents-framework-minimal",
   "version": "0.1.0",
-  "description": "A framework for building LLM agents.",
+  "description": "Minimal AI Agents Framework Core",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -17,29 +18,30 @@
     "LICENSE"
   ],
   "scripts": {
-    "clean": "rm -rf dist",
-    "build": "yarn clean && tsc",
-    "test": "jest"
-  },
-  "author": "",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/your-username/callAgent.git"
+    "build": "tsc",
+    "start": "node dist/runner/index.js",
+    "dev": "node --loader ts-node/esm src/runner/index.ts",
+    "agent": "yarn dev examples/hello-agent/AgentModule.ts '{\"name\":\"Developer\"}'",
+    "llm-agent": "yarn dev examples/llm-agent/AgentModule.ts '{\"query\":\"Tell me a random joke about ai?\"}'",
+    "test": "jest",
+    "test:llm": "node --loader ts-node/esm examples/llm-test/test-llm.ts"
   },
   "keywords": [
-    "llm",
     "ai",
     "agent",
     "framework"
   ],
-  "dependencies": {},
+  "author": "Your Name <your.email@example.com>",
+  "license": "ISC",
   "devDependencies": {
+    "@types/node": "^22.14.1",
+    "typescript": "^5.8.3",
     "@types/jest": "^29.5.14",
-    "@types/node": "^22.10.5",
     "jest": "^29.7.0",
-    "ts-jest": "^29.2.5",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.7.2"
+    "ts-jest": "^29.3.2",
+    "ts-node": "^10.9.2"
+  },
+  "dependencies": {
+    "callllm": "1.0.2"
   }
 }

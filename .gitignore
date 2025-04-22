@@ -46,3 +46,8 @@ coverage/
 # Optional build outputs or temp files
 *.js
 *.js.map 
+
+planned_architecture
+
+# A2A specs
+a2a_specs/

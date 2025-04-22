@@ -3,4 +3,64 @@ description:
 globs: 
 alwaysApply: false
 ---
- 
+ # Project Overview
+This project aims to be a framework for building LLM agents in TypeScript.
+
+# Core Principles
+
+## Type Safety
+- NEVER use 'any' types
+- Use `type` instead of `interface`
+- Maintain strict type definitions
+- Document all types thoroughly
+- Ensure proper error handling with type safety
+
+## Code Architecture
+- Follow functional and declarative programming patterns where appropriate
+- Keep code modular and maintainable
+- Use pure functions where possible
+- Maintain clear separation of concerns
+- Preserve existing functionality unless explicitly required to change
+
+## Development Process
+1. Before any changes:
+   - Understand the task scope
+   - Read relevant code sections
+   - Create MECE (Mutually Exclusive, Collectively Exhaustive) task breakdown
+
+2. During development:
+   - Focus only on the task at hand
+   - Preserve existing functionality
+   - Maintain all comments
+   - Ensure type safety
+   - Consider using utility libraries (like radash, if applicable) for complex operations
+
+3. After changes:
+   - Run and analyze tests
+   - Ensure changes don't break existing functionality
+   - Update documentation as needed
+   - Reflect on lessons learned
+
+## Code Standards
+- Use lowercase-with-dashes for directories
+- Use camelCase for variables and filenames
+- Prefer named exports
+- Keep variable names descriptive
+- Add concise comments for non-obvious logic
+- Mark potential improvements with TODO comments
+
+## Error Handling
+- Implement comprehensive error handling
+- Use appropriate retry mechanisms for transient failures (e.g., exponential backoff)
+- Maintain proper error context
+- Add descriptive error messages
+
+## Testing Requirements
+- All tests must be in the `./tests` directory
+- Strive for high test coverage
+- Test both success and error paths
+
+# References
+- See @.cursor/rules/typescript.mdc for TypeScript standards
+- See @.cursor/rules/testing.mdc for testing conventions (if applicable)
+- See @.cursor/rules/documentation.mdc for documentation standards

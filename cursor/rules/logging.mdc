@@ -1,8 +1,3 @@
----
-description: When logging is needed
-globs: 
-alwaysApply: false
----
 # Logging Guidelines
 
 ## Core Principles
@@ -107,5 +102,3 @@ LOG_LEVEL=debug
 
 -   Minimize logging in tests (e.g., set `LOG_LEVEL=error`).
 -   Use mocking/spying (`jest.spyOn`) to verify specific log calls if necessary.
-
-
