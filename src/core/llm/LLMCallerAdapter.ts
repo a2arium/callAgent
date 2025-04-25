@@ -7,14 +7,29 @@ import type {
 } from 'callllm';
 import { ILLMCaller, LLMConfig } from '../../shared/types/LLMTypes.js';
 
+// Type for the recordUsage function that accepts a cost parameter
+type RecordUsageFunction = (cost: number | { cost: number }) => void;
+
 /**
  * Adapter for the callllm library that implements the ILLMCaller interface
  * from our framework architecture.
  */
 export class LLMCallerAdapter implements ILLMCaller {
     private caller: LLMCaller;
+    private recordUsage?: RecordUsageFunction;
 
-    constructor(config: LLMConfig) {
+    constructor(config: LLMConfig, recordUsage?: RecordUsageFunction) {
+        // Store the recordUsage function for later use
+        this.recordUsage = recordUsage;
+
+        // Define the usage callback that will automatically track costs
+        const usageCallback = config.usageCallback || (this.recordUsage ?
+            (usage: Usage) => {
+                if (usage.costs?.total && this.recordUsage) {
+                    this.recordUsage({ cost: usage.costs.total });
+                }
+            } : undefined);
+
         // Initialize the LLMCaller from the callllm library
         // Note: Cast to 'any' to bypass TypeScript's strict checking on the constructor
         // In a real implementation, we would need to ensure our types exactly match callllm
@@ -22,7 +37,11 @@ export class LLMCallerAdapter implements ILLMCaller {
             config.provider,
             config.modelAliasOrName,
             config.systemPrompt || 'You are a helpful assistant.',
-            config.apiKey // If undefined, callllm will use environment variables
+            {
+                apiKey: config.apiKey, // If undefined, callllm will use environment variables
+                historyMode: config.historyMode, // Pass the historyMode setting if provided
+                usageCallback // Set the usageCallback if provided to automatically track usage
+            }
         );
 
         // Apply any default settings
@@ -33,12 +52,6 @@ export class LLMCallerAdapter implements ILLMCaller {
         // Register initial tools if provided
         if (config.initialTools && config.initialTools.length > 0) {
             this.caller.addTools(config.initialTools);
-        }
-
-        // Set up usage tracking callback if provided
-        if (config.usageCallback) {
-            // We'd need to check the callllm documentation to see how to set this
-            // This might require setting it in options per call if not configurable on the LLMCaller instance
         }
     }
 
@@ -53,7 +66,15 @@ export class LLMCallerAdapter implements ILLMCaller {
             // Pass through to the callllm library
             // Get the first response from the array returned by call()
             const responses = await this.caller.call(message, options) as UniversalChatResponse<unknown>[];
-            return responses[0] as UniversalChatResponse<T>;
+            const response = responses[0] as UniversalChatResponse<T>;
+
+            // Automatically record usage if not using the callback approach
+            // and we have a recordUsage function available
+            if (!options?.usageCallback && this.recordUsage && response.metadata?.usage?.costs?.total) {
+                this.recordUsage({ cost: response.metadata.usage.costs.total });
+            }
+
+            return response;
         } catch (error) {
             // Handle errors according to framework standards
             console.error('LLM call error:', error);
@@ -71,6 +92,12 @@ export class LLMCallerAdapter implements ILLMCaller {
         try {
             // Call the underlying library's stream method
             for await (const chunk of this.caller.stream(message, options)) {
+                // If this is the final chunk and we're not using callbacks, record the usage
+                if (chunk.isComplete && !options?.usageCallback && this.recordUsage &&
+                    chunk.metadata?.usage?.costs?.total) {
+                    this.recordUsage({ cost: chunk.metadata.usage.costs.total });
+                }
+
                 // We need to verify that callllm's StreamResponse matches our expected type
                 yield chunk as UniversalStreamResponse<T>;
             }

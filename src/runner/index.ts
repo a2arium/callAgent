@@ -1,12 +1,19 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type MinimalConfig } from '../config/index.js';
 import { listPlugins } from '../core/plugin/pluginRegistry.js';
 import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
+import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
 import { logger } from '../utils/logger.js';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
+import { createLLMForTask } from '../core/llm/LLMFactory.js';
+import { extendContextWithStreaming } from '../core/context/StreamingContext.js';
+import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import type { TaskArtifactUpdateEvent, TaskStatusUpdateEvent, A2AEvent } from '../shared/types/StreamingEvents.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'Runner' });
@@ -94,6 +101,16 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
     // Use base runner logger here
     runnerLogger.info(`Running agent '${agentName}' (v${plugin.manifest.version})`);
 
+    // Debug logging to check plugin state
+    runnerLogger.info(`Plugin found: ${plugin.manifest.name}`, {
+        hasLLMAdapter: !!plugin.llmAdapter,
+        hasLLMConfig: !!plugin.llmConfig,
+        llmConfigDetails: plugin.llmConfig ? {
+            provider: plugin.llmConfig.provider,
+            model: plugin.llmConfig.modelAliasOrName
+        } : 'none'
+    });
+
     // --- Create Task Context ---
     let taskCtx: TaskContext;
 
@@ -106,11 +123,16 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
             input: input,
         },
         // Use agentLogger for context methods that log
-        reply: async (parts: MessagePart[]) => {
-            agentLogger.info(`Agent Reply:`, { parts });
+        reply: async (parts: string | string[] | MessagePart | MessagePart[]) => {
+            agentLogger.info(`Agent Reply (stub - should be overridden):`, { parts });
         },
-        progress: (pct: number, msg?: string) => {
-            agentLogger.info(`Agent Progress: ${pct}%${msg ? `: ${msg}` : ''}`);
+        progress: (pctOrStatus: number | TaskStatus, msg?: string) => {
+            if (typeof pctOrStatus === 'number') {
+                agentLogger.info(`Agent Progress: ${pctOrStatus}%${msg ? `: ${msg}` : ''}`);
+            } else {
+                // Handle TaskStatus object
+                agentLogger.info(`Agent Status: ${pctOrStatus.state}`, pctOrStatus);
+            }
         },
         complete: (pct?: number, status?: string) => {
             agentLogger.info(`Agent Complete: ${status || 'completed'} at ${pct ?? 100}%`);
@@ -174,6 +196,23 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
             // Use the specific agentLogger here
             agentLogger.error(`Agent threw structured error: [${code}] ${message}`, null, { details });
             throw new AgentError(message, agentName, { code, details });
+        },
+        recordUsage: (cost: number | { cost: number } | any): void => {
+            let costValue: number;
+
+            if (typeof cost === 'number') {
+                costValue = cost;
+            } else if ('cost' in cost) {
+                costValue = cost.cost;
+            } else if (cost?.costs?.total) {
+                costValue = cost.costs.total;
+            } else {
+                costValue = 0;
+            }
+
+            if (costValue > 0) {
+                agentLogger.info(`Usage recorded: $${costValue.toFixed(6)}`, { cost: costValue });
+            }
         }
     };
 
@@ -206,6 +245,27 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
             agentLogger.info(`Task ${taskCtx.task.id} marked as failed.`);
         },
     };
+
+    // Replace the LLM stub with a real implementation if we have a config
+    if (!plugin.llmAdapter && plugin.llmConfig) {
+        // Now we can safely use taskCtx since it's fully created
+        runnerLogger.info(`Creating LLM using factory for plugin ${plugin.manifest.name}`, {
+            provider: plugin.llmConfig.provider,
+            model: plugin.llmConfig.modelAliasOrName
+        });
+        taskCtx.llm = createLLMForTask(plugin.llmConfig, taskCtx);
+    } else {
+        runnerLogger.warn(`Not creating LLM - plugin ${plugin.manifest.name} has no config`, {
+            hasAdapter: !!plugin.llmAdapter,
+            hasConfig: !!plugin.llmConfig
+        });
+    }
+
+    // Apply streaming context extensions to get proper reply function
+    extendContextWithStreaming(taskCtx, true);
+
+    // Setup console output for events
+    setupConsoleOutput(taskCtx.task.id);
 
     // --- Execute Agent ---
     // Use agentLogger here
@@ -246,6 +306,54 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
             });
         }
     }
+}
+
+/**
+ * Setup console output for event emissions from the task
+ * @param taskId - The ID of the task to listen for
+ */
+function setupConsoleOutput(taskId: string): void {
+    // Define the handler as a separate function
+    const handler = (event: A2AEvent): void => {
+        const logger = console;
+
+        if ('artifact' in event) {
+            // Display artifacts (replies)
+            const artifactEvent = event as TaskArtifactUpdateEvent;
+            const artifact = artifactEvent.artifact;
+            if (artifact && artifact.parts) {
+                artifact.parts.forEach(part => {
+                    if (part.type === 'text' && part.text) {
+                        logger.log('\n--- LLM Response ---');
+                        logger.log(part.text);
+                        logger.log('-------------------\n');
+                    } else {
+                        logger.log('Non-text artifact part:', part);
+                    }
+                });
+            }
+        }
+
+        if ('status' in event) {
+            const statusEvent = event as TaskStatusUpdateEvent;
+            const status = statusEvent.status;
+            if (status.state === 'completed' || status.state === 'failed') {
+                // Show accumulated cost if available
+                if (status.metadata?.usage && typeof status.metadata.usage === 'object') {
+                    const usage = status.metadata.usage as any;
+                    if (usage.costs?.total) {
+                        logger.log(`\nTotal cost: $${usage.costs.total.toFixed(6)}`);
+                    }
+                }
+
+                // Unsubscribe when task is complete
+                eventBus.unsubscribe(taskChannel(taskId), handler);
+            }
+        }
+    };
+
+    // Subscribe with the handler
+    eventBus.subscribe<A2AEvent>(taskChannel(taskId), handler);
 }
 
 /**

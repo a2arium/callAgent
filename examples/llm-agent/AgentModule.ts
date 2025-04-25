@@ -1,5 +1,5 @@
 import { createAgentPlugin } from '../../src/core/plugin/index.js';
-import type { TaskContext, MessagePart } from '../../src/shared/types/index.js';
+import type { TaskContext } from '../../src/shared/types/index.js';
 import type { LLMConfig } from '../../src/shared/types/LLMTypes.js';
 
 // Define agent-specific LLM configuration
@@ -7,6 +7,7 @@ const llmAgentConfig: LLMConfig = {
     provider: 'openai',
     modelAliasOrName: 'fast',
     systemPrompt: 'You are an AI assistant that provides concise, accurate responses.',
+    historyMode: 'dynamic'
 };
 
 export default createAgentPlugin({
@@ -14,7 +15,7 @@ export default createAgentPlugin({
     llmConfig: llmAgentConfig,
 
     handleTask: async (ctx: TaskContext) => {
-        console.log("[llm-agent] Received task with input:", ctx.task.input);
+        ctx.logger.debug("Received task with input:", ctx.task.input);
 
         // Get the user query from input
         const query = typeof ctx.task.input.query === 'string'
@@ -24,35 +25,27 @@ export default createAgentPlugin({
         ctx.progress(20, 'Processing query: ' + query);
 
         try {
-            console.log("[llm-agent] Calling LLM with query:", query);
+            ctx.logger.debug("Calling LLM with query:", query);
 
             const llmResponse = await ctx.llm.call(query);
 
-            ctx.progress(80, 'Processing LLM response');
-            console.log("[llm-agent] Received LLM response:\n", llmResponse.content);
+            ctx.progress(50, 'Processing LLM response');
+            ctx.logger.debug("Received LLM response", llmResponse.content);
 
-            // Prepare and send reply
-            const responsePart: MessagePart = {
-                type: 'text',
-                text: llmResponse.content || 'No response content received'
-            };
-            await ctx.reply([responsePart]);
+            await ctx.reply(llmResponse.content || '');
 
-            // Include usage information if available
-            if (llmResponse.metadata?.usage) {
-                const usagePart: MessagePart = {
-                    type: 'data',
-                    data: { usage: llmResponse.metadata.usage }
-                };
-                await ctx.reply([usagePart]);
-            }
+            ctx.progress(60, 'Translating response to Russian');
+            const translatedResponse = await ctx.llm.call(`Translate it to Russian`);
+            ctx.logger.debug("Translated response", translatedResponse);
 
-            // Complete the task
-            ctx.complete(100, 'completed');
-            console.log("[llm-agent] Task completed successfully.");
+            await ctx.reply(translatedResponse.content || '');
+
+            // Complete the task (usage will be added automatically by the framework)
+            await ctx.complete(100, 'completed');
+            ctx.logger.debug("Task completed successfully.");
 
         } catch (error) {
-            await ctx.fail(error);
+            ctx.throw('llm-agent-error', 'Failed to execute task', error);
         }
     }
-}, import.meta.url); 
+}, import.meta.url);

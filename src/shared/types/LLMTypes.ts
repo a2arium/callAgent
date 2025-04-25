@@ -31,5 +31,6 @@ export type LLMConfig = {
     apiKey?: string;
     initialTools?: ToolDefinition[];
     usageCallback?: (usage: Usage) => void;
+    historyMode?: 'stateless' | 'dynamic' | 'full';
     defaultSettings?: Record<string, any>; // Match library settings type
 }; 

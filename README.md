@@ -2,6 +2,20 @@
 
 This repository contains the minimal viable core for the AI Agents Framework, as specified in the design document.
 
+## Features
+
+### Automatic LLM Usage Tracking
+
+The framework now automatically tracks LLM API usage without requiring manual calls to `recordUsage`. This tracking works with the [callllm](https://www.npmjs.com/package/callllm) library to:
+
+- Record costs for all LLM calls automatically
+- Accumulate costs throughout the task lifecycle
+- Include usage data in the task completion metadata
+
+Agent developers don't need to add any special code - the framework handles this automatically whenever an agent uses `ctx.llm.call()` or `ctx.llm.stream()`.
+
+[Read more in the usage tracking documentation](docs/usage-tracking.md)
+
 ## Getting Started
 
 1.  **Install dependencies:**
@@ -66,6 +80,46 @@ When you're developing agents using this framework:
 ## Overview
 
 (Describe the project purpose and core concepts here based on the minimal architecture)
+
+## Streaming Support ✓
+
+This framework supports both buffered and streaming responses through the A2A protocol:
+
+- **Buffered mode (`tasks/send`)**: Returns a complete response after the task is finished
+- **Streaming mode (`tasks/sendSubscribe`)**: Streams partial results in real-time using Server-Sent Events (SSE)
+
+Agent code remains the same in both modes - the framework automatically handles buffering or streaming based on the API endpoint used.
+
+### Try the Streaming Demo
+
+```bash
+yarn streaming-demo
+```
+
+This interactive demo shows how the same agent code produces different outputs depending on whether streaming is enabled.
+
+### Implementing Streaming in Your Agent
+
+Your agent can use these methods to emit content:
+
+```typescript
+// Send progress updates
+ctx.progress({ state: 'working', timestamp: new Date().toISOString() });
+
+// Send partial content
+ctx.reply([{ type: 'text', text: 'Partial content...' }], { 
+  append: true,  // Append to previous chunk
+  lastChunk: false // Not the last chunk
+});
+
+// Complete the task
+ctx.complete({
+  state: 'completed',
+  timestamp: new Date().toISOString()
+});
+```
+
+The framework automatically buffers or streams these updates based on the client's request type.
 
 ## Development
 

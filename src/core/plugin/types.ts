@@ -5,7 +5,8 @@ import type { ILLMCaller } from '../../shared/types/LLMTypes.js';
 export type AgentPlugin = {
     manifest: AgentManifest;
     handleTask: (ctx: TaskContext) => Promise<void>;
-    // Store the LLM adapter instance for this plugin
+    // Store either the LLM config or adapter instance for this plugin
+    llmConfig?: LLMConfig;
     llmAdapter?: ILLMCaller;
     // Future hooks: initialize?: () => Promise<void>; shutdown?: () => Promise<void>;
 }

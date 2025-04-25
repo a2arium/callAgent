@@ -1,6 +1,12 @@
 // src/shared/types/index.ts (Consolidated for minimal)
 import type { ILLMCaller } from './LLMTypes.js';
 import type { ComponentLogger } from '../../utils/logger.js'; // Import ComponentLogger
+// Explicitly import only needed types from StreamingEvents
+import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
+import type { Usage } from './LLMTypes.js'; // Import Usage type
+
+// Re-export only specific streaming event types needed externally
+export type { A2AEvent, TaskStatus, Artifact };
 
 // --- Agent Card (Minimal) ---
 export type AgentManifest = {
@@ -50,10 +56,13 @@ export type TaskContext = {
         // Future: status, artifacts, createdAt, etc.
     };
     // Basic Output & Status Control (Implemented minimally)
-    reply: (parts: MessagePart[]) => Promise<void>;
-    progress: (pct: number, msg?: string) => void; // Basic console log
+    reply: (parts: string | string[] | MessagePart | MessagePart[]) => Promise<void>;
+    progress: ((pct: number, msg?: string) => void) & ((status: TaskStatus) => void); // Support both signatures
     complete: (pct?: number, status?: string) => void; // Basic console log
     fail: (error: unknown) => Promise<void>; // Added fail method
+
+    // Add usage recording method that accepts multiple formats for backward compatibility
+    recordUsage: (cost: number | { cost: number } | Usage) => void;
 
     // Use the ILLMCaller interface for llm
     llm: ILLMCaller;

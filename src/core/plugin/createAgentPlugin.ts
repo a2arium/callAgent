@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { logger } from '../../utils/logger.js';
 import { ManifestError, PluginError } from '../../utils/errors.js';
 import { LLMCallerAdapter } from '../llm/LLMCallerAdapter.js';
+import { createLLMForTask } from '../llm/LLMFactory.js';
 
 // Create component-specific logger
 const pluginLogger = logger.createLogger({ prefix: 'PluginLoader' });
@@ -75,12 +76,14 @@ export const createAgentPlugin = (options: CreateAgentPluginOptions, metaUrl: st
                 provider: options.llmConfig.provider,
                 model: options.llmConfig.modelAliasOrName
             });
-            plugin.llmAdapter = new LLMCallerAdapter(options.llmConfig);
-            pluginLogger.info(`LLM adapter created for plugin: ${manifest.name}`);
+            // Store the config instead of creating the adapter directly
+            // The adapter will be created per-task in the runner with automatic usage tracking
+            plugin.llmConfig = options.llmConfig;
+            pluginLogger.info(`LLM config stored for plugin: ${manifest.name}`);
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
-            pluginLogger.error('Failed to create LLM adapter', error);
-            throw new PluginError(`Failed to create LLM adapter for plugin ${manifest.name}: ${message}`);
+            pluginLogger.error('Failed to setup LLM config', error);
+            throw new PluginError(`Failed to setup LLM config for plugin ${manifest.name}: ${message}`);
         }
     }
 
