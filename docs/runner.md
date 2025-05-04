@@ -162,21 +162,13 @@ When implementing an agent's `handleTask` function, you receive a `TaskContext` 
 *   `ctx.llm.call()` / `ctx.llm.stream()`: Makes calls to the configured Large Language Model.
 *   `ctx.logger`: Provides access to a structured logger (debug, info, warn, error).
 
-### Recording Usage Data (New)
+### Recording Usage Data  
 
-To facilitate usage tracking (e.g., for LLM token counts), the `TaskContext` provides a `recordUsage` method:
+The framework automatically aggregates or stores the recorded usage data. When the task finishes (via `ctx.complete` or `ctx.fail`), the framework attaches the recorded usage information to the `metadata` field of the final `TaskStatus` object sent in the concluding `TaskStatusUpdateEvent`. This ensures usage data is consistently reported without cluttering the main message or artifact parts. 
+
+You can also manually record usage data using the `ctx.recordUsage` method:
 
 ```typescript
 ctx.recordUsage(usage: Usage): void;
 ```
-
-Call this method whenever your agent incurs usage, typically after an LLM call:
-
-```typescript
-const llmResponse = await ctx.llm.call(query);
-if (llmResponse.metadata?.usage) {
-    ctx.recordUsage(llmResponse.metadata.usage);
-}
-```
-
-The framework automatically aggregates or stores the recorded usage data. When the task finishes (via `ctx.complete` or `ctx.fail`), the framework attaches the recorded usage information to the `metadata` field of the final `TaskStatus` object sent in the concluding `TaskStatusUpdateEvent`. This ensures usage data is consistently reported without cluttering the main message or artifact parts. 
+ 

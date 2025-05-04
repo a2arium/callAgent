@@ -51,3 +51,5 @@ planned_architecture
 
 # A2A specs
 a2a_specs/
+
+.repomix-output.txt

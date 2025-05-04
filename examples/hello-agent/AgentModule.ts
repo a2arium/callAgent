@@ -1,4 +1,4 @@
-import { createAgentPlugin } from '../../src/core/plugin/index.js';
+import { createAgent } from '../../src/core/plugin/index.js';
 import type { MessagePart, TaskContext } from '../../src/shared/types/index.js';
 
 /**
@@ -6,7 +6,7 @@ import type { MessagePart, TaskContext } from '../../src/shared/types/index.js';
  * 
  * This agent accepts a "name" parameter and responds with a greeting.
  */
-export const helloAgent = createAgentPlugin({
+export const helloAgent = createAgent({
     manifest: {
         name: 'hello-agent',
         version: '1.0.0',

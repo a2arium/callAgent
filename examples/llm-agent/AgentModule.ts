@@ -1,4 +1,4 @@
-import { createAgentPlugin } from '../../src/core/plugin/index.js';
+import { createAgent } from '../../src/core/plugin/index.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
 import type { LLMConfig } from '../../src/shared/types/LLMTypes.js';
 
@@ -10,8 +10,7 @@ const llmAgentConfig: LLMConfig = {
     historyMode: 'dynamic'
 };
 
-export default createAgentPlugin({
-    manifest: './agent.json',
+export default createAgent({
     llmConfig: llmAgentConfig,
 
     handleTask: async (ctx: TaskContext) => {

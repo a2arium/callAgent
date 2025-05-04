@@ -87,7 +87,7 @@ export async function runAgentWithStreaming(
     if (plugins.length === 0) {
         runnerLogger.error(`No plugin registered by file`, null, { path: agentFilePath });
         throw new TaskExecutionError(
-            `No plugin registered by file ${agentFilePath}. Ensure the file exports the result of createAgentPlugin.`,
+            `No plugin registered by file ${agentFilePath}. Ensure the file exports the result of createAgent.`,
             { path: agentFilePath }
         );
     }

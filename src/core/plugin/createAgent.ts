@@ -20,27 +20,30 @@ const pluginLogger = logger.createLogger({ prefix: 'PluginLoader' });
 const getDirname = (metaUrl: string): string => path.dirname(fileURLToPath(metaUrl));
 
 /**
- * Creates and registers an agent plugin with the framework
- * @param options - Configuration options for the plugin
+ * Creates and registers an agent with the framework
+ * @param options - Configuration options for the agent
  * @param metaUrl - import.meta.url from the caller for path resolution
- * @returns The created agent plugin instance
+ * @returns The created agent instance
  * @throws {ManifestError} If the manifest cannot be loaded or is invalid
- * @throws {PluginError} If plugin creation fails for other reasons
+ * @throws {PluginError} If agent creation fails for other reasons
  */
-export const createAgentPlugin = (options: CreateAgentPluginOptions, metaUrl: string): AgentPlugin => {
+export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string): AgentPlugin => {
     // Get caller directory directly from required metaUrl
     const callerDir = getDirname(metaUrl);
 
-    pluginLogger.debug('Creating agent plugin', {
+    pluginLogger.debug('Creating agent', {
         metaUrl,
         callerDir
     });
 
     let manifest: AgentManifest;
 
-    if (typeof options.manifest === 'string') {
+    // Use default manifest path if not provided
+    const manifestValue = options.manifest ?? './agent.json';
+
+    if (typeof manifestValue === 'string') {
         // Resolve path relative to the calling module's directory
-        const manifestPath = path.resolve(callerDir, options.manifest);
+        const manifestPath = path.resolve(callerDir, manifestValue);
         pluginLogger.debug('Loading manifest from path', { manifestPath });
 
         try {
@@ -54,7 +57,7 @@ export const createAgentPlugin = (options: CreateAgentPluginOptions, metaUrl: st
         }
     } else {
         pluginLogger.debug('Using provided manifest object');
-        manifest = options.manifest;
+        manifest = manifestValue;
     }
 
     // Basic validation (can expand later)
@@ -72,33 +75,33 @@ export const createAgentPlugin = (options: CreateAgentPluginOptions, metaUrl: st
     // If llmConfig is provided, create an LLM adapter and store it on the plugin
     if (options.llmConfig) {
         try {
-            pluginLogger.debug('Creating LLM adapter for plugin', {
+            pluginLogger.debug('Creating LLM adapter for agent', {
                 provider: options.llmConfig.provider,
                 model: options.llmConfig.modelAliasOrName
             });
             // Store the config instead of creating the adapter directly
             // The adapter will be created per-task in the runner with automatic usage tracking
             plugin.llmConfig = options.llmConfig;
-            pluginLogger.info(`LLM config stored for plugin: ${manifest.name}`);
+            pluginLogger.info(`LLM config stored for agent: ${manifest.name}`);
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
             pluginLogger.error('Failed to setup LLM config', error);
-            throw new PluginError(`Failed to setup LLM config for plugin ${manifest.name}: ${message}`);
+            throw new PluginError(`Failed to setup LLM config for agent ${manifest.name}: ${message}`);
         }
     }
 
     // Register the plugin
     registerPlugin(plugin);
-    pluginLogger.info(`Plugin registered successfully: ${manifest.name} (v${manifest.version})`);
+    pluginLogger.info(`Agent registered successfully: ${manifest.name} (v${manifest.version})`);
 
     return plugin; // Returned value is primarily for typing consistency
 };
 
 /**
- * Minimal Plugin Discovery & Loading Utility for the Runner
+ * Minimal Agent Discovery & Loading Utility for the Runner
  * This is intentionally left simple/placeholder as the runner will dynamically import.
  * In a full framework, this would be more sophisticated (scanning node_modules, DI containers, etc.)
- * @param pluginDir - Directory to scan for plugins
+ * @param pluginDir - Directory to scan for agents
  */
 export async function loadPlugins(pluginDir: string): Promise<void> {
     // Simple glob/readdir in pluginDir to find AgentModule.ts or AgentModule.js
@@ -107,8 +110,8 @@ export async function loadPlugins(pluginDir: string): Promise<void> {
     // A slightly less minimal version might use glob:
     // const files = await glob('**/AgentModule.{js,ts}', { cwd: pluginDir });
     // for (const file of files) {
-    //     await import(path.resolve(pluginDir, file)); // Importing triggers createAgentPlugin
+    //     await import(path.resolve(pluginDir, file)); // Importing triggers createAgent
     // }
-    pluginLogger.info(`Plugin discovery placeholder. Directory: ${pluginDir}`);
-    pluginLogger.info('Runner should directly import plugin files.');
+    pluginLogger.info(`Agent discovery placeholder. Directory: ${pluginDir}`);
+    pluginLogger.info('Runner should directly import agent files.');
 } 

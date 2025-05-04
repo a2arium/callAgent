@@ -9,9 +9,11 @@ const frameworkLogger = logger.createLogger({ prefix: 'Framework' });
 
 // Export core types
 export * from './shared/types/index.js';
+// Export LLM related types
+export type { LLMConfig } from './shared/types/LLMTypes.js';
 
 // Export plugin system
-export { createAgentPlugin } from './core/plugin/createAgentPlugin.js';
+export { createAgent } from './core/plugin/createAgent.js';
 export { type AgentPlugin, type CreateAgentPluginOptions } from './core/plugin/types.js';
 
 // Export minimal config

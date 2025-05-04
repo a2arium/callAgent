@@ -81,7 +81,7 @@ Existing agents that manually track usage can:
 
 ## Usage Data in Task Results
 
-The accumulated usage data is automatically included in the `metadata` field of the task's final status:
+The accumulated usage data is automatically included in the `metadata` field of the task's final status, using a simplified structure:
 
 ```json
 {
@@ -89,10 +89,10 @@ The accumulated usage data is automatically included in the `metadata` field of 
   "timestamp": "2023-06-15T12:00:00.000Z",
   "metadata": {
     "usage": {
-      "costs": {
-        "total": 0.0075
-      }
+      "cost": 0.0075
     }
   }
 }
-``` 
+```
+
+This simplified format makes it easier to consume and process usage data. The system internally accumulates all costs from various operations and presents only the final total cost. 

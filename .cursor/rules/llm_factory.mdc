@@ -1,0 +1,102 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Cursor Rule: LLM Factory and Configuration
+
+## Purpose
+This rule provides guidance on how to use the LLM factory and configuration system in the framework. The LLM factory provides a standardized way to create and configure Language Model instances with automatic usage tracking.
+
+## Key Concepts
+
+1. **LLM Factory:**
+   * The framework uses a factory pattern to create LLM instances via the `createLLMForTask` function
+   * This factory automatically wires up usage tracking and ensures consistent configuration
+
+2. **LLM Configuration:**
+   * Configure LLMs through the `llmConfig` property in agent plugins
+   * The configuration includes provider, model name, system prompt, and other settings
+
+3. **Automatic Usage Tracking:**
+   * LLMs created through the factory automatically track usage
+   * Costs are accumulated and included in task metadata upon completion
+
+## Guidelines for Using LLMs
+
+### Configuration in Agent Plugins
+
+When creating an agent plugin, define an LLM configuration:
+
+```typescript
+const llmAgentConfig: LLMConfig = {
+    provider: 'openai',  // Provider name (e.g., 'openai', 'anthropic', etc.)
+    modelAliasOrName: 'fast',  // Model name or alias from config
+    systemPrompt: 'You are an AI assistant that provides concise, accurate responses.',
+    historyMode: 'dynamic'  // Optional: 'stateless', 'dynamic', or 'full'
+};
+
+export default createAgent({
+    manifest: './agent.json',
+    llmConfig: llmAgentConfig,  // Pass config to the plugin
+
+    handleTask: async (ctx: TaskContext) => {
+        // The ctx.llm will be automatically configured based on llmConfig
+        // Usage tracking happens automatically
+    }
+});
+```
+
+### Using the LLM in Your Agent
+
+The TaskContext (`ctx`) provides access to the pre-configured LLM:
+
+```typescript
+// Basic LLM call
+const response = await ctx.llm.call("Your prompt here");
+
+// Streaming LLM call
+for await (const chunk of ctx.llm.stream("Your prompt here")) {
+    // Process each chunk
+}
+```
+
+### Manual LLM Creation (Internal Framework Use)
+
+For internal framework components that need to create an LLM:
+
+```typescript
+import { createLLMForTask } from '../core/llm/LLMFactory.js';
+
+// Create an LLM instance with automatic usage tracking
+const llm = createLLMForTask(llmConfig, taskContext);
+```
+
+## Usage Data Output
+
+The framework accumulates all LLM usage costs and includes them in the final task metadata:
+
+```json
+{
+  "status": {
+    "state": "completed",
+    "timestamp": "2023-06-15T12:00:00.000Z",
+    "metadata": {
+      "usage": {
+        "cost": 0.0075
+      }
+    }
+  }
+}
+```
+
+## Best Practices
+
+1. **Always use factory-created LLMs** rather than creating instances directly
+2. **Let the framework handle usage tracking** rather than manually recording usage
+3. **Configure models in the agent plugin** rather than in individual handlers
+4. **Use streaming for long-running processes** to provide real-time updates
+
+## Related Documents
+* `docs/usage-tracking.md` - Details on usage tracking
+* `.cursor/rules/a2a_high_level_summary.mdc` - A2A protocol overview

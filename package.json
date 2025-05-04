@@ -1,7 +1,7 @@
 {
-  "name": "ai-agents-framework-minimal",
+  "name": "callagent",
   "version": "0.1.0",
-  "description": "Minimal AI Agents Framework Core",
+  "description": "AI Agents Framework with A2A Support",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -23,7 +23,7 @@
     "dev": "node --loader ts-node/esm src/runner/index.ts",
     "agent": "yarn dev examples/hello-agent/AgentModule.ts '{\"name\":\"Developer\"}'",
     "run-agent": "node --loader ts-node/esm src/runner/runnerCli.ts",
-    "run-hello": "yarn run-agent examples/llm-agent/AgentModule.ts '{\"query\":\"Explain Reinforcement Learning to me\"}'",
+    "run-hello": "yarn run-agent examples/llm-agent/AgentModule.ts '{\"query\":\"Tell me a random joke about AI?\"}'",
     "test": "jest",
     "test:llm": "node --loader ts-node/esm examples/llm-test/test-llm.ts"
   },
@@ -44,7 +44,5 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
-  "dependencies": {
-    "callllm": "file:/Users/maximantonov/Work/_lab/callllm"
-  }
+  "dependencies": {}
 }

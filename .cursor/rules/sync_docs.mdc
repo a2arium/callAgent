@@ -1,1 +1,28 @@
- 
+# Documentation Synchronization Rule
+
+When implementing new features or making changes to existing functionality, ensure that the corresponding documentation in the `docs` folder is updated to reflect these changes.
+
+## Guidelines
+
+1. For each new feature:
+   - Add appropriate documentation in the relevant files in the `docs` folder
+   - Include usage examples where applicable
+   - Document any configuration options
+
+2. For modifications to existing features:
+   - Update the relevant documentation to reflect the changes
+   - Ensure examples are still valid
+   - Note any breaking changes prominently
+
+3. For deprecations or removals:
+   - Mark deprecated features clearly in the documentation
+   - Provide migration paths where possible
+   - Update or remove examples that reference removed functionality
+
+## Location
+
+Documentation should be maintained in the `docs` folder, with a structure that mirrors the codebase organization where appropriate.
+
+## Review Process
+
+Code reviews should include verification that documentation has been updated alongside code changes. 

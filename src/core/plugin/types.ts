@@ -12,7 +12,7 @@ export type AgentPlugin = {
 }
 
 export type CreateAgentPluginOptions = {
-    manifest: string | AgentManifest; // Path or direct object
+    manifest?: string | AgentManifest; // Path or direct object, defaults to './agent.json' when not provided
     llmConfig?: LLMConfig; // LLM configuration specific to this agent
     handleTask: (ctx: TaskContext) => Promise<void>;
     // Future hooks

@@ -3,7 +3,6 @@ description: When information about a2a is required. We're creating a2a complien
 globs: 
 alwaysApply: false
 ---
-
 # A2A (Agent2Agent) Protocol 
 
 
@@ -183,3 +182,5 @@ For Technical Documenation see `a2a_specs/a2a_technical_documentation.md`
 *   **Push Notifications:** Agents can proactively notify clients about task updates using webhook URLs provided via `tasks/pushNotification/set`. Authentication mechanisms (e.g., Bearer tokens via JWT signed with keys from agent's JWKS endpoint) are supported.
 *   **Authentication:** Defined in `AgentCard` and `PushNotificationConfig`. Can involve various schemes (e.g., API keys, OAuth, JWT). Samples use JWT for push notifications.
 *   **Forms:** Structured data can be requested and submitted using `DataPart` within Messages/Artifacts (demonstrated in ADK sample).
+
+*   **Usage Tracking (Framework Specific):** While the A2A protocol itself does not standardize usage tracking (e.g., token counts), this framework implementation provides a helper method `ctx.recordUsage(cost: number | { cost: number })` on the `TaskContext`. Agents should call this after operations like LLM calls, although it's typically handled automatically by the LLM factory. The framework accumulates cost data and includes it in the `metadata` field of the final `TaskStatus` object as `{ usage: { cost: number } }`.
