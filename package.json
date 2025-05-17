@@ -24,7 +24,7 @@
     "agent": "yarn dev examples/hello-agent/AgentModule.ts '{\"name\":\"Developer\"}'",
     "run-agent": "node --loader ts-node/esm src/runner/runnerCli.ts",
     "run-hello": "yarn run-agent examples/llm-agent/AgentModule.ts '{\"query\":\"Tell me a random joke about AI?\"}'",
-    "test": "jest",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "test:llm": "node --loader ts-node/esm examples/llm-test/test-llm.ts"
   },
   "keywords": [
@@ -40,9 +40,13 @@
     "@types/node": "^22.14.1",
     "@types/uuid": "^10.0.0",
     "jest": "^29.7.0",
+    "jest-mock-extended": "^4.0.0-beta1",
+    "prisma": "^6.7.0",
     "ts-jest": "^29.3.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@prisma/client": "^6.7.0"
+  }
 }
