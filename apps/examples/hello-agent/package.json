@@ -1,0 +1,17 @@
+{
+  "name": "@callagent/hello-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/AgentModule.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node AgentModule.ts"
+  },
+  "exports": {
+    ".": "./dist/AgentModule.js"
+  },
+  "dependencies": {
+    "@callagent/core": "0.1.0"
+  }
+}

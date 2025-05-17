@@ -1,0 +1,20 @@
+// Prisma schema for @callagent/memory-sql
+
+datasource db {
+    provider = "postgresql"
+    url      = env("MEMORY_DATABASE_URL")
+}
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+model AgentMemoryStore {
+    key       String   @id
+    value     Json
+    tags      String[]
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@map("agent_memory_store")
+}

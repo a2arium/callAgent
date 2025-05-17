@@ -2,9 +2,9 @@
   "compilerOptions": {
     /* Language and Environment */
     "target": "ES2020",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "outDir": "./dist",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "dist",
     "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
@@ -14,6 +14,5 @@
     "sourceMap": true,
     "isolatedModules": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 } 

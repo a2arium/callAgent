@@ -175,6 +175,14 @@ alwaysApply: false
 - Link validity
 - Format consistency
 
+## Diagrams
+- Use [Mermaid](mdc:https:/mermaid-js.github.io) for architecture and flow diagrams in Markdown docs.
+- Embed diagrams using triple backticks and the `mermaid` language tag.
+- Keep diagrams up to date with code and architecture changes.
+
+## API Documentation
+- Document public APIs, types, and interfaces with JSDoc or TSDoc comments for best results.
+
 # References
 - See @README.md for project documentation example
 - See @src/some/path/types.ts for type documentation examples

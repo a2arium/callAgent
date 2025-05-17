@@ -1,6 +1,0 @@
-{
-  "name": "memory-agent",
-  "version": "1.0.0",
-  "description": "An agent that demonstrates memory system capabilities",
-  "capabilities": ["text", "memory"]
-}

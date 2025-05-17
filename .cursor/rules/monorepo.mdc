@@ -1,0 +1,38 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Monorepo Structure and Conventions
+
+## Overview
+This repository uses a Turborepo-based monorepo structure with Yarn workspaces. All core packages, adapters, and shared libraries live under `packages/`, while example apps and documentation live under `apps/`.
+
+## Directory Layout
+- `packages/` — Core framework, adapters (e.g., memory-sql), shared types, utilities
+- `apps/` — Example agents, documentation site, integration demos
+- `.cursor/rules/` — Cursor rules for code quality, architecture, and best practices
+
+## Adding New Code
+- **New packages:** Place in `packages/` (e.g., `packages/memory-redis`)
+- **New example apps:** Place in `apps/examples/` (e.g., `apps/examples/hello-agent`)
+- **Documentation site:** Place in `apps/docs/`
+
+## Development Workflow
+- Install all dependencies: `yarn install`
+- Run all lints: `turbo run lint`
+- Build all packages/apps: `turbo run build`
+- Run all tests: `turbo run test`
+- Run a specific pipeline for a package/app: `turbo run test --filter=packages/memory-sql`
+
+## Best Practices
+- All packages/apps should have their own `package.json` and `tsconfig.json` extending the root `tsconfig.base.json`.
+- Shared types/interfaces should go in `packages/types`.
+- Follow naming, error handling, and documentation rules as described in other .mdc files.
+- Keep tests inside each package/app in a `tests/` or `__tests__/` directory.
+- Use environment variables for configuration (see package READMEs).
+
+## See Also
+- `architecture.mdc` for architectural guidelines
+- `naming.mdc` for naming conventions
+- `documentation.mdc` for documentation standards

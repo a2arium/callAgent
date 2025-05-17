@@ -1,0 +1,25 @@
+{
+  "name": "@callagent/types",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "private": false,
+  "description": "Shared types and error classes for the CallAgent framework.",
+  "license": "MIT",
+  "keywords": [
+    "types",
+    "errors",
+    "callagent"
+  ],
+  "type": "module"
+}

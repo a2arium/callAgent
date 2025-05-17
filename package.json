@@ -22,10 +22,10 @@
     "start": "node dist/runner/index.js",
     "dev": "node --loader ts-node/esm src/runner/index.ts",
     "agent": "yarn dev examples/hello-agent/AgentModule.ts '{\"name\":\"Developer\"}'",
-    "run-agent": "node --loader ts-node/esm src/runner/runnerCli.ts",
-    "run-hello": "yarn run-agent examples/llm-agent/AgentModule.ts '{\"query\":\"Tell me a random joke about AI?\"}'",
+    "run-agent": "node packages/core/dist/runner/runnerCli.js",
+    "run-hello": "yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{\"prompt\": \"Tell me a joke about AI.\"}'",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
-    "test:llm": "node --loader ts-node/esm examples/llm-test/test-llm.ts"
+    "postinstall": "node scripts/sync-dotenv.cjs"
   },
   "keywords": [
     "ai",
@@ -44,9 +44,17 @@
     "prisma": "^6.7.0",
     "ts-jest": "^29.3.2",
     "ts-node": "^10.9.2",
+    "turbo": "^2.5.3",
     "typescript": "^5.8.3"
   },
   "dependencies": {
     "@prisma/client": "^6.7.0"
-  }
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "apps/examples/*"
+  ],
+  "private": true,
+  "packageManager": "yarn@1.22.22"
 }
