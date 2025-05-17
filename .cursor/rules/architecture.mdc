@@ -11,7 +11,7 @@ This rule provides guidance on adhering to the planned architecture for the Type
 ## Key Architectural Principles
 1.  **Agent Plugin Model:**
     *   Agents are self-contained TypeScript **plugins**.
-    *   Use the `createAgentPlugin({ manifest, handleTask })` factory.
+    *   Use the `createAgent({ manifest, handleTask })` factory.
     *   Each plugin needs an `agent.json` manifest.
     *   The core logic resides in the `async handleTask(ctx)` function.
 2.  **Task-Based Execution:**
