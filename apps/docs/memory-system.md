@@ -12,8 +12,8 @@ The memory system provides a standardized interface (`IMemory`) for agents to st
 // Inside the handleTask function of an agent
 async handleTask(ctx: TaskContext) {
   // Access memory through the context
-  await ctx.memory.set('conversation-123', { lastMessage: 'Hello' });
-  const conversation = await ctx.memory.get('conversation-123');
+  await ctx.memory.semantic.set('conversation-123', { lastMessage: 'Hello' });
+  const conversation = await ctx.memory.semantic.get('conversation-123');
 }
 ```
 
@@ -89,7 +89,7 @@ export default createAgent({
   manifest: './agent.json',
   handleTask: async (ctx) => {
     // Store information in memory
-    await ctx.memory.set('user-preference', {
+    await ctx.memory.semantic.set('user-preference', {
       theme: 'dark',
       language: 'en-US'
     }, {
@@ -97,7 +97,7 @@ export default createAgent({
     });
 
     // Retrieve information from memory
-    const preference = await ctx.memory.get('user-preference');
+    const preference = await ctx.memory.semantic.get('user-preference');
     ctx.logger.info(`User prefers ${preference.theme} theme`);
     await ctx.reply([{ type: 'text', text: 'Preferences saved!' }]);
     ctx.complete();
@@ -116,7 +116,7 @@ export default createAgent({
   manifest: './agent.json',
   handleTask: async (ctx) => {
     // Store information in memory
-    await ctx.memory.set('user-preference', { 
+    await ctx.memory.semantic.set('user-preference', { 
       theme: 'dark',
       language: 'en-US' 
     }, { 
@@ -124,7 +124,7 @@ export default createAgent({
     });
     
     // Retrieve information from memory
-    const preference = await ctx.memory.get('user-preference');
+    const preference = await ctx.memory.semantic.get('user-preference');
     
     // Use the retrieved data
     ctx.logger.info(`User prefers ${preference.theme} theme`);
@@ -203,13 +203,13 @@ function createMemoryAdapter(): IMemory {
 
 ```typescript
 // Store simple data
-await ctx.memory.set('user-123-settings', { 
+await ctx.memory.semantic.set('user-123-settings', { 
   theme: 'dark', 
   fontSize: 'medium' 
 });
 
 // Store data with tags for organization
-await ctx.memory.set('conversation-456', { 
+await ctx.memory.semantic.set('conversation-456', { 
   messages: [{ role: 'user', content: 'Hello' }]
 }, { 
   tags: ['conversation', 'active'] 
@@ -220,11 +220,11 @@ await ctx.memory.set('conversation-456', {
 
 ```typescript
 // Get a specific value by key
-const settings = await ctx.memory.get('user-123-settings');
+const settings = await ctx.memory.semantic.get('user-123-settings');
 console.log(settings.theme); // 'dark'
 
 // The value maintains its structure
-const conversation = await ctx.memory.get('conversation-456');
+const conversation = await ctx.memory.semantic.get('conversation-456');
 console.log(conversation.messages[0].content); // 'Hello'
 ```
 
@@ -232,12 +232,12 @@ console.log(conversation.messages[0].content); // 'Hello'
 
 ```typescript
 // Find all entries with a specific tag
-const activeConversations = await ctx.memory.query({ 
+const activeConversations = await ctx.memory.semantic.query({ 
   tag: 'active' 
 });
 
 // Query with a result limit
-const recentSettings = await ctx.memory.query({ 
+const recentSettings = await ctx.memory.semantic.query({ 
   tag: 'settings', 
   limit: 5 
 });
@@ -247,7 +247,7 @@ const recentSettings = await ctx.memory.query({
 
 ```typescript
 // Delete a specific key
-await ctx.memory.delete('old-conversation-123');
+await ctx.memory.semantic.delete('old-conversation-123');
 ```
 
 ## Advanced Filtering
@@ -256,7 +256,7 @@ The `MemorySQLAdapter` supports powerful filtering capabilities, allowing you to
 
 ```typescript
 // Find active users with high priority
-const highPriorityUsers = await ctx.memory.query({
+const highPriorityUsers = await ctx.memory.semantic.query({
   tag: 'user',
   filters: [
     { path: 'status', operator: '=', value: 'active' },
@@ -265,7 +265,7 @@ const highPriorityUsers = await ctx.memory.query({
 });
 
 // Search by nested properties
-const premiumCustomers = await ctx.memory.query({
+const premiumCustomers = await ctx.memory.semantic.query({
   filters: [
     { path: 'subscription.tier', operator: '=', value: 'premium' },
     { path: 'subscription.expiresAt', operator: '>', value: new Date().toISOString() }
@@ -273,7 +273,7 @@ const premiumCustomers = await ctx.memory.query({
 });
 
 // Text search
-const smithCustomers = await ctx.memory.query({
+const smithCustomers = await ctx.memory.semantic.query({
   filters: [
     { path: 'name', operator: 'CONTAINS', value: 'Smith' }
   ]
@@ -318,7 +318,7 @@ Maintain consistent data structures for similar types of data to make filtering 
 
 ```typescript
 // Use consistent field names and types
-await memory.set('user:123', {
+await memory.semantic.set('user:123', {
   id: '123',
   name: 'John Smith',
   status: 'active',
@@ -326,7 +326,7 @@ await memory.set('user:123', {
   metadata: { /* additional properties */ }
 });
 
-await memory.set('user:456', {
+await memory.semantic.set('user:456', {
   id: '456',
   name: 'Jane Doe',
   status: 'inactive',
@@ -341,7 +341,7 @@ All memory operations should be wrapped in try/catch blocks to handle potential 
 
 ```typescript
 try {
-  await ctx.memory.set('important-data', { value: 'critical' });
+  await ctx.memory.semantic.set('important-data', { value: 'critical' });
 } catch (error) {
   // Log the error and handle gracefully
   ctx.logger.error('Failed to store memory', error);

@@ -1,11 +1,9 @@
 import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import {
-    IMemory,
     MemoryQueryOptions,
     MemoryQueryResult,
     MemoryFilter,
-    FilterOperator,
     MemoryError
 } from '@callagent/types';
 
@@ -13,7 +11,7 @@ import {
  * PostgreSQL implementation of the IMemory interface using Prisma ORM
  * Provides durable, SQL-backed storage for agent memory
  */
-export class MemorySQLAdapter implements IMemory {
+export class MemorySQLAdapter {
     /**
      * Creates a new MemorySQLAdapter
      * @param prisma Injected PrismaClient instance

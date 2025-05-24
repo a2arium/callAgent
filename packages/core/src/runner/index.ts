@@ -14,6 +14,11 @@ import { extendContextWithStreaming } from '../core/context/StreamingContext.js'
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import type { TaskArtifactUpdateEvent, TaskStatusUpdateEvent, A2AEvent } from '../shared/types/StreamingEvents.js';
+import { SemanticMemoryRegistry } from '../core/memory/SemanticMemoryRegistry.js';
+import { EpisodicMemoryRegistry } from '../core/memory/EpisodicMemoryRegistry.js';
+import { EmbedMemoryRegistry } from '../core/memory/EmbedMemoryRegistry.js';
+import { MemorySQLAdapter } from '@callagent/memory-sql';
+import { PrismaClient } from '@prisma/client';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'Runner' });
@@ -117,6 +122,24 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
     // Create the agent-specific logger using the nested createLogger method
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
+    const prismaClient = new PrismaClient();
+    const sqlAdapter = new MemorySQLAdapter(prismaClient);
+    const semanticBackends = {
+        sql: sqlAdapter,
+    };
+    // For now, only wire up semantic memory; stub the others for future extension
+    const episodicBackends = {};
+    const embedBackends = {};
+
+    const memory = {
+        semantic: new SemanticMemoryRegistry(
+            pickBackends(semanticBackends, config.memory.semantic.backends),
+            config.memory.semantic.default
+        ),
+        episodic: new EpisodicMemoryRegistry(episodicBackends, ''), // TODO: Implement episodic memory adapter
+        embed: new EmbedMemoryRegistry(embedBackends, ''), // TODO: Implement embed memory adapter
+    };
+
     const partialCtx: Omit<TaskContext, 'fail'> = {
         task: {
             id: `local-task-${Date.now()}`,
@@ -138,12 +161,12 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
             agentLogger.info(`Agent Complete: ${status || 'completed'} at ${pct ?? 100}%`);
         },
         llm: plugin.llmAdapter || {
-            async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>> {
+            async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]> {
                 agentLogger.warn(`llm.call is stubbed (no LLM adapter configured)`, { message, options });
-                return {
+                return [{
                     content: "Stubbed LLM response - agent has no llmConfig",
                     role: "assistant"
-                } as UniversalChatResponse<T>;
+                } as UniversalChatResponse<T>];
             },
             async *stream<T = unknown>(message: string, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>> {
                 agentLogger.warn(`llm.stream is stubbed (no LLM adapter configured)`, { message, options });
@@ -168,12 +191,7 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
         },
         // Assign the agentLogger directly
         logger: agentLogger,
-        memory: {
-            get: async <T = unknown>(key: string): Promise<T | null> => { agentLogger.warn(`memory.get is stubbed`, { key }); return null; },
-            set: async <T = unknown>(key: string, value: T): Promise<void> => { agentLogger.warn(`memory.set is stubbed`, { key }); },
-            query: async <T = unknown>(opts: unknown): Promise<Array<{ key: string; value: T }>> => { agentLogger.warn(`memory.query is stubbed`, { opts }); return []; },
-            delete: async (key: string): Promise<void> => { agentLogger.warn(`memory.delete is stubbed`, { key }); }
-        },
+        memory: memory,
         cognitive: {
             loadWorkingMemory: (e: unknown): void => { agentLogger.warn(`cognitive.loadWorkingMemory is stubbed`, { e }); },
             plan: async (prompt: string, options?: unknown): Promise<unknown> => { agentLogger.warn(`cognitive.plan is stubbed`, { prompt, options }); return { steps: [] }; },
@@ -324,9 +342,8 @@ function setupConsoleOutput(taskId: string): void {
             if (artifact && artifact.parts) {
                 artifact.parts.forEach(part => {
                     if (part.type === 'text' && part.text) {
-                        logger.log('\n--- LLM Response ---');
+                        logger.log('\n--- response ---');
                         logger.log(part.text);
-                        logger.log('-------------------\n');
                     } else {
                         logger.log('Non-text artifact part:', part);
                     }
@@ -337,6 +354,31 @@ function setupConsoleOutput(taskId: string): void {
         if ('status' in event) {
             const statusEvent = event as TaskStatusUpdateEvent;
             const status = statusEvent.status;
+
+            // Display progress messages for intermediate states
+            if (status.state === 'working' && status.message?.parts) {
+                const textParts = status.message.parts
+                    .filter(part => part.type === 'text')
+                    .map(part => (part as { text?: string }).text)
+                    .filter(Boolean);
+
+                if (textParts.length > 0) {
+                    // Check if there's a progress percentage
+                    const progressPercentage = status.metadata?.progress;
+                    if (typeof progressPercentage === 'number') {
+                        logger.log(`Progress: ${progressPercentage}% - ${textParts.join(' ')}`);
+                    } else {
+                        logger.log(`Progress: ${textParts.join(' ')}`);
+                    }
+                }
+            } else if (status.state === 'working') {
+                // Check if there's just a progress percentage without message
+                const progressPercentage = status.metadata?.progress;
+                if (typeof progressPercentage === 'number') {
+                    logger.log(`Progress: ${progressPercentage}%`);
+                }
+            }
+
             if (status.state === 'completed' || status.state === 'failed') {
                 // Show accumulated cost if available
                 if (status.metadata?.usage && typeof status.metadata.usage === 'object') {
@@ -388,4 +430,13 @@ async function main(): Promise<void> {
 main().catch(err => {
     runnerLogger.error(`Unhandled error in runner`, err);
     process.exit(1);
-}); 
+});
+
+/**
+ * Helper to pick only the named backends from all available
+ * @param allBackends Map of all backend instances
+ * @param names Array of backend names to include
+ */
+function pickBackends<T>(allBackends: Record<string, T>, names: string[]): Record<string, T> {
+    return Object.fromEntries(Object.entries(allBackends).filter(([k]) => names.includes(k)));
+} 

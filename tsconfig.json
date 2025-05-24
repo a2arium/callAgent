@@ -2,8 +2,8 @@
   "compilerOptions": {
     /* Language and Environment */
     "target": "ES2020",
-    "module": "commonjs",
-    "moduleResolution": "node",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "outDir": "dist",
     "rootDir": ".",
     "strict": true,
@@ -12,7 +12,13 @@
     "forceConsistentCasingInFileNames": true,
     "declaration": true,
     "sourceMap": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "paths": {
+      "@callagent/core": ["packages/core/src"],
+      "@callagent/types": ["packages/types/src"],
+      "@callagent/memory-sql": ["packages/memory-sql/src"]
+    }
   },
   "exclude": ["node_modules", "dist"]
 } 

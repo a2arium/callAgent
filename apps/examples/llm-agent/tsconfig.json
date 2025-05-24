@@ -5,6 +5,6 @@
     "moduleResolution": "nodenext",
     "outDir": "dist"
   },
-  "include": ["AgentModule.ts"],
+  "include": ["AgentModule.ts", "agent.json"],
   "exclude": ["node_modules", "dist"]
 } 

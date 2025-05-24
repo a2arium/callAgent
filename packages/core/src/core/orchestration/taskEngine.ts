@@ -163,10 +163,31 @@ export class TaskEngine {
             llm: {} as any,
             tools: { invoke: async <T>() => ({} as unknown as T) },
             memory: {
-                get: async () => null,
-                set: async () => { },
-                query: async () => [],
-                delete: async () => { }
+                semantic: {
+                    getDefaultBackend: () => 'none',
+                    setDefaultBackend: () => { },
+                    backends: {},
+                    get: async () => null,
+                    set: async () => { },
+                    query: async () => [],
+                    delete: async () => { },
+                },
+                episodic: {
+                    getDefaultBackend: () => 'none',
+                    setDefaultBackend: () => { },
+                    backends: {},
+                    append: async () => { },
+                    getEvents: async () => [],
+                    deleteEvent: async () => { },
+                },
+                embed: {
+                    getDefaultBackend: () => 'none',
+                    setDefaultBackend: () => { },
+                    backends: {},
+                    upsert: async () => { },
+                    queryByVector: async () => [],
+                    delete: async () => { },
+                }
             },
             cognitive: {
                 loadWorkingMemory: () => { },

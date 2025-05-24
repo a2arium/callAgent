@@ -8,7 +8,7 @@
     ".": "./dist/AgentModule.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && copyfiles agent.json dist && copyfiles -u 1 \"assets/**/*\" dist",
     "dev": "ts-node AgentModule.ts"
   },
   "dependencies": {

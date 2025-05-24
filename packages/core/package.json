@@ -23,8 +23,8 @@
     "callagent"
   ],
   "dependencies": {
-    "@callagent/types": "0.1.0",
     "@callagent/memory-sql": "0.1.0",
+    "@callagent/types": "0.1.0",
     "@prisma/client": "^6.7.0",
     "dotenv": "^16.4.5"
   },

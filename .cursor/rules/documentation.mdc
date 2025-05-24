@@ -1,9 +1,11 @@
 ---
-description: 
+description: Whenever we add or update documentation
 globs: 
 alwaysApply: false
 ---
 # Documentation Standards
+
+All documentation should be added to `apps/docs` folder
 
 ## Code Documentation
 

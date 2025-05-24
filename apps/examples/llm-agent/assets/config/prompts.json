@@ -1,0 +1,11 @@
+{
+  "systemPrompts": {
+    "default": "You are a helpful AI assistant.",
+    "creative": "You are a creative AI assistant who thinks outside the box.",
+    "technical": "You are a technical AI assistant with deep expertise in software development."
+  },
+  "templates": {
+    "joke": "Tell me a {type} joke about {topic}.",
+    "explanation": "Explain {concept} in simple terms."
+  }
+}

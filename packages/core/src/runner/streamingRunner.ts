@@ -15,6 +15,11 @@ import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '.
 import fs from 'node:fs';
 import { createLLMForTask } from '../core/llm/LLMFactory.js';
 import { getMemoryAdapter } from '../core/memory/factory.js';
+import { SemanticMemoryRegistry } from '../core/memory/SemanticMemoryRegistry.js';
+import { EpisodicMemoryRegistry } from '../core/memory/EpisodicMemoryRegistry.js';
+import { EmbedMemoryRegistry } from '../core/memory/EmbedMemoryRegistry.js';
+import { MemorySQLAdapter } from '@callagent/memory-sql';
+import { PrismaClient } from '@prisma/client';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -108,13 +113,32 @@ export async function runAgentWithStreaming(
     // Set up event listeners for streaming output if needed
     if (options.isStreaming) {
         setupStreamListeners(taskId, options);
+    } else {
+        // Even in non-streaming mode, we want to see progress events in real-time
+        setupProgressListeners(taskId);
     }
 
     // Create the agent-specific logger using the nested createLogger method
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
     // Get the memory adapter instance
-    const memory = await getMemoryAdapter();
+    const prismaClient = new PrismaClient();
+    const sqlAdapter = new MemorySQLAdapter(prismaClient);
+    const semanticBackends = {
+        sql: sqlAdapter,
+    };
+    // For now, only wire up semantic memory; stub the others for future extension
+    const episodicBackends = {};
+    const embedBackends = {};
+
+    const memory = {
+        semantic: new SemanticMemoryRegistry(
+            pickBackends(semanticBackends, config.memory.semantic.backends),
+            config.memory.semantic.default
+        ),
+        episodic: new EpisodicMemoryRegistry(episodicBackends, ''), // TODO: Implement episodic memory adapter
+        embed: new EmbedMemoryRegistry(embedBackends, ''), // TODO: Implement embed memory adapter
+    };
 
     // Create basic task context
     const partialCtx: Omit<TaskContext, 'fail'> = {
@@ -138,12 +162,12 @@ export async function runAgentWithStreaming(
             agentLogger.info(`Agent Complete: ${status || 'completed'} at ${pct ?? 100}%`);
         },
         llm: plugin.llmAdapter || {
-            async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>> {
+            async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]> {
                 agentLogger.warn(`llm.call is stubbed (no LLM adapter configured)`, { message, options });
-                return {
+                return [{
                     content: "Stubbed LLM response - agent has no llmConfig",
                     role: "assistant"
-                } as UniversalChatResponse<T>;
+                } as UniversalChatResponse<T>];
             },
             async *stream<T = unknown>(message: string, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>> {
                 agentLogger.warn(`llm.stream is stubbed (no LLM adapter configured)`, { message, options });
@@ -372,29 +396,58 @@ function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: Stream
         }
     } else {
         // Default console output
-        console.log(`Status: ${status.state}${isFinal ? ' (FINAL)' : ''}`);
+        if (isFinal) {
+            console.log(`Status: ${status.state} (FINAL)`);
+        } else if (status.state === 'working') {
+            // Display progress messages for working states
+            if (status.message?.parts) {
+                const textParts = status.message.parts
+                    .filter(part => part.type === 'text')
+                    .map(part => (part as { text?: string }).text)
+                    .filter(Boolean);
+
+                if (textParts.length > 0) {
+                    // Check if there's a progress percentage
+                    const progressPercentage = status.metadata?.progress;
+                    if (typeof progressPercentage === 'number') {
+                        console.log(`Progress: ${progressPercentage}% - ${textParts.join(' ')}`);
+                    } else {
+                        console.log(`Progress: ${textParts.join(' ')}`);
+                    }
+                }
+            } else {
+                // Check if there's just a progress percentage without message
+                const progressPercentage = status.metadata?.progress;
+                if (typeof progressPercentage === 'number') {
+                    console.log(`Progress: ${progressPercentage}%`);
+                } else {
+                    console.log(`Status: ${status.state}`);
+                }
+            }
+        } else {
+            console.log(`Status: ${status.state}`);
+        }
 
         // If outputFile is specified, append to file in a human-readable format
         if (options.outputFile) {
-            appendToFile(options.outputFile, `Status: ${status.state}${isFinal ? ' (FINAL)' : ''}\n`);
+            const statusText = isFinal ? `Status: ${status.state} (FINAL)` : `Status: ${status.state}`;
+            appendToFile(options.outputFile, statusText + '\n');
         }
     }
 
-    // If there's a message in the status, print it too
-    if (status.message && status.message.parts && status.message.parts.length > 0) {
+    // If there's a message in the status, print it too (for non-console output types)
+    if (status.message && status.message.parts && status.message.parts.length > 0 && options.outputType && options.outputType !== 'console') {
         const textParts = status.message.parts
             .filter(part => part.type === 'text')
             .map(part => (part as { text?: string }).text)
             .filter(Boolean);
 
         if (textParts.length > 0) {
-            if (options.outputType === 'console') {
-                console.log(`Message: ${textParts.join('\n')}`);
+            console.log(`Message: ${textParts.join('\n')}`);
 
-                // If outputFile is specified, append to file
-                if (options.outputFile) {
-                    appendToFile(options.outputFile, `Message: ${textParts.join('\n')}\n`);
-                }
+            // If outputFile is specified, append to file
+            if (options.outputFile) {
+                appendToFile(options.outputFile, `Message: ${textParts.join('\n')}\n`);
             }
         }
     }
@@ -523,4 +576,54 @@ function appendToFile(filePath: string, content: string): void {
     } catch (error) {
         runnerLogger.error(`Failed to write to output file`, error, { path: filePath });
     }
+}
+
+/**
+ * Helper to pick only the named backends from all available
+ * @param allBackends Map of all backend instances
+ * @param names Array of backend names to include
+ */
+function pickBackends<T>(allBackends: Record<string, T>, names: string[]): Record<string, T> {
+    return Object.fromEntries(Object.entries(allBackends).filter(([k]) => names.includes(k)));
+}
+
+/**
+ * Set up listeners for progress events only (for non-streaming mode)
+ */
+function setupProgressListeners(taskId: string): void {
+    const channel = taskChannel(taskId);
+
+    // Add event listener for this task channel
+    eventBus.subscribe(channel, (event: A2AEvent) => {
+        if ('status' in event && event.status.state === 'working') {
+            // Check for progress percentage first
+            const progressPercentage = event.status.metadata?.progress;
+
+            if (event.status.message?.parts) {
+                // Display progress messages for working states
+                const textParts = event.status.message.parts
+                    .filter(part => part.type === 'text')
+                    .map(part => (part as { text?: string }).text)
+                    .filter(Boolean);
+
+                if (textParts.length > 0) {
+                    if (typeof progressPercentage === 'number') {
+                        console.log(`Progress: ${progressPercentage}% - ${textParts.join(' ')}`);
+                    } else {
+                        console.log(`Progress: ${textParts.join(' ')}`);
+                    }
+                }
+            } else if (typeof progressPercentage === 'number') {
+                // Just show percentage if no message
+                console.log(`Progress: ${progressPercentage}%`);
+            }
+        }
+
+        // Unsubscribe when task is complete
+        if ('status' in event && (event.status.state === 'completed' || event.status.state === 'failed')) {
+            eventBus.unsubscribe(channel, setupProgressListeners);
+        }
+    });
+
+    runnerLogger.debug(`Set up progress listeners for task channel: ${channel}`);
 } 

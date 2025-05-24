@@ -99,8 +99,11 @@ export function extendContextWithStreaming(
                     streaming: isStreaming
                 });
 
-                if (isStreaming) {
-                    // Emit directly to the event bus for streaming
+                // Always emit progress events for 'working' state so they can be shown in real-time
+                const shouldEmitStatusEvent = isStreaming || event.status.state === 'working';
+
+                if (shouldEmitStatusEvent) {
+                    // Emit directly to the event bus for streaming or progress events
                     const isFinal = event.status.state === 'completed' ||
                         event.status.state === 'failed' ||
                         event.status.state === 'canceled';
@@ -195,15 +198,24 @@ export function extendContextWithStreaming(
             });
         },
 
-        // Update task progress with a status
+        // Update task progress with a status or percentage
         progress: function (statusOrPct: TaskStatus | number, msg?: string): void {
-            // If it's a number, it's the original percentage-based progress
+            // If it's a number, convert it to a TaskStatus and emit it
             if (typeof statusOrPct === 'number') {
-                // Call the original implementation if needed
-                logger.debug('Progress update (percentage)', {
+                const progressStatus: TaskStatus = {
+                    state: 'working',
+                    timestamp: new Date().toISOString(),
+                    metadata: { progress: statusOrPct },
+                    message: msg ? {
+                        role: 'agent',
+                        parts: [{ type: 'text', text: msg }]
+                    } : undefined
+                };
+
+                emitEvent({
+                    kind: 'STATUS',
                     taskId: ctx.task.id,
-                    percentage: statusOrPct,
-                    message: msg
+                    status: progressStatus
                 });
                 return;
             }

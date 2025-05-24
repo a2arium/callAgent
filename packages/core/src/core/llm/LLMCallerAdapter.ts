@@ -61,20 +61,29 @@ export class LLMCallerAdapter implements ILLMCaller {
     async call<T = unknown>(
         message: string,
         options?: Record<string, any>
-    ): Promise<UniversalChatResponse<T>> {
+    ): Promise<UniversalChatResponse<T>[]> {
         try {
             // Pass through to the callllm library
-            // Get the first response from the array returned by call()
+            // Return the full array of responses from call()
             const responses = await this.caller.call(message, options) as UniversalChatResponse<unknown>[];
-            const response = responses[0] as UniversalChatResponse<T>;
+            const typedResponses = responses as UniversalChatResponse<T>[];
 
             // Automatically record usage if not using the callback approach
             // and we have a recordUsage function available
-            if (!options?.usageCallback && this.recordUsage && response.metadata?.usage?.costs?.total) {
-                this.recordUsage({ cost: response.metadata.usage.costs.total });
+            // Combine costs from all responses
+            if (!options?.usageCallback && this.recordUsage && responses.length > 0) {
+                let totalCost = 0;
+                for (const response of responses) {
+                    if (response.metadata?.usage?.costs?.total) {
+                        totalCost += response.metadata.usage.costs.total;
+                    }
+                }
+                if (totalCost > 0) {
+                    this.recordUsage({ cost: totalCost });
+                }
             }
 
-            return response;
+            return typedResponses;
         } catch (error) {
             // Handle errors according to framework standards
             console.error('LLM call error:', error);

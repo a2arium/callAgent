@@ -17,7 +17,7 @@ export type {
 
 // Define our framework-specific interface that matches architecture docs
 export interface ILLMCaller {
-    call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>>;
+    call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]>;
     stream<T = unknown>(message: string, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>>;
     addToolResult(id: string, result: string, name: string): void;
     updateSettings(settings: Record<string, any>): void;

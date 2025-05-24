@@ -1,4 +1,4 @@
-import { IMemory, MemoryQueryOptions, MemoryQueryResult, FilterOperator, MemoryFilter, BaseError, MemoryError } from '../src';
+import { IMemory, MemoryQueryOptions, MemoryQueryResult, FilterOperator, MemoryFilter, BaseError, MemoryError } from '../src/index.js';
 
 describe('Type exports', () => {
     it('should export all public classes', () => {
