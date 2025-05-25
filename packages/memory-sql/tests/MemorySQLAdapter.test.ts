@@ -403,4 +403,109 @@ describe('MemorySQLAdapter', () => {
             ).rejects.toThrow(/CONTAINS operator requires a string value/);
         });
     });
+
+    describe('queryByKeyPattern()', () => {
+        test('returns exact match when no wildcards', async () => {
+            const testData = { name: 'John Doe', status: 'active' };
+            prismaMock.agentMemoryStore.findUnique.mockResolvedValue({
+                key: 'user:123',
+                value: testData,
+                tags: [],
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
+
+            const results = await adapter.queryByKeyPattern('user:123');
+
+            expect(results).toEqual([{ key: 'user:123', value: testData }]);
+            expect(prismaMock.agentMemoryStore.findUnique).toHaveBeenCalledWith({
+                where: { key: 'user:123' }
+            });
+        });
+
+        test('returns empty array when exact match not found', async () => {
+            prismaMock.agentMemoryStore.findUnique.mockResolvedValue(null);
+
+            const results = await adapter.queryByKeyPattern('user:999');
+
+            expect(results).toEqual([]);
+        });
+
+        test('executes raw SQL query for wildcard patterns', async () => {
+            const mockResults = [
+                { key: 'user:123:profile', value: { name: 'John' } },
+                { key: 'user:456:profile', value: { name: 'Jane' } }
+            ];
+            prismaMock.$queryRaw.mockResolvedValue(mockResults);
+
+            const results = await adapter.queryByKeyPattern('user:*:profile');
+
+            expect(results).toEqual([
+                { key: 'user:123:profile', value: { name: 'John' } },
+                { key: 'user:456:profile', value: { name: 'Jane' } }
+            ]);
+            expect(prismaMock.$queryRaw).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    strings: expect.arrayContaining([
+                        expect.stringContaining('SELECT key, value'),
+                        expect.stringContaining('WHERE key LIKE')
+                    ])
+                }),
+                'user:%:profile'
+            );
+        });
+
+        test('throws MemoryError on database error', async () => {
+            const error = new Error('Database connection failed');
+            prismaMock.$queryRaw.mockRejectedValue(error);
+
+            await expect(adapter.queryByKeyPattern('user:*')).rejects.toThrow(
+                expect.objectContaining({
+                    message: expect.stringContaining("Failed to query keys by pattern 'user:*'")
+                })
+            );
+        });
+    });
+
+    describe('queryByKeyPatternAdvanced()', () => {
+        test('supports both * and ? wildcards', async () => {
+            const mockResults = [
+                { key: 'user123profile', value: { name: 'John' } },
+                { key: 'userABCprofile', value: { name: 'Jane' } }
+            ];
+            prismaMock.$queryRaw.mockResolvedValue(mockResults);
+
+            const results = await adapter.queryByKeyPatternAdvanced('user???profile');
+
+            expect(results).toEqual([
+                { key: 'user123profile', value: { name: 'John' } },
+                { key: 'userABCprofile', value: { name: 'Jane' } }
+            ]);
+            expect(prismaMock.$queryRaw).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    strings: expect.arrayContaining([
+                        expect.stringContaining('SELECT key, value'),
+                        expect.stringContaining('WHERE key LIKE')
+                    ])
+                }),
+                'user___profile' // ? converted to _
+            );
+        });
+
+        test('handles mixed wildcards', async () => {
+            prismaMock.$queryRaw.mockResolvedValue([]);
+
+            await adapter.queryByKeyPatternAdvanced('prefix:*:?:suffix');
+
+            expect(prismaMock.$queryRaw).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    strings: expect.arrayContaining([
+                        expect.stringContaining('SELECT key, value'),
+                        expect.stringContaining('WHERE key LIKE')
+                    ])
+                }),
+                'prefix:%:_:suffix'
+            );
+        });
+    });
 }); 

@@ -238,4 +238,64 @@ export class MemorySQLAdapter {
                 throw new Error(`Unsupported operator: ${operator}`);
         }
     }
+
+    /**
+     * Queries memory entries by key patterns (supports * wildcard)
+     * @param keyPattern Key pattern with * as wildcard (e.g., "user:*:profile")
+     * @returns Array of matching key/value entries
+     */
+    async queryByKeyPattern<T>(keyPattern: string): Promise<MemoryQueryResult<T>[]> {
+        try {
+            // If no wildcards, use exact match
+            if (!keyPattern.includes('*')) {
+                const result = await this.get<T>(keyPattern);
+                return result ? [{ key: keyPattern, value: result }] : [];
+            }
+
+            // For patterns with wildcards, use raw SQL for proper LIKE matching
+            const sqlPattern = keyPattern.replace(/\*/g, '%');
+
+            const results = await this.prisma.$queryRaw<Array<{ key: string; value: any }>>`
+                SELECT key, value 
+                FROM agent_memory_store 
+                WHERE key LIKE ${sqlPattern}
+            `;
+
+            return results.map((r: { key: string; value: unknown }) => ({
+                key: r.key,
+                value: r.value as T
+            }));
+        } catch (error: any) {
+            throw new MemoryError(`Failed to query keys by pattern '${keyPattern}': ${error.message}`,
+                { originalError: error, keyPattern });
+        }
+    }
+
+    /**
+     * Advanced key pattern matching using raw SQL LIKE queries
+     * @param keyPattern Key pattern with * as wildcard and ? as single character wildcard
+     * @returns Array of matching key/value entries
+     */
+    async queryByKeyPatternAdvanced<T>(keyPattern: string): Promise<MemoryQueryResult<T>[]> {
+        try {
+            // Convert wildcard pattern to SQL LIKE pattern
+            const sqlPattern = keyPattern
+                .replace(/\*/g, '%')    // * matches any sequence of characters
+                .replace(/\?/g, '_');   // ? matches any single character
+
+            const results = await this.prisma.$queryRaw<Array<{ key: string; value: any }>>`
+                SELECT key, value 
+                FROM agent_memory_store 
+                WHERE key LIKE ${sqlPattern}
+            `;
+
+            return results.map((r: { key: string; value: unknown }) => ({
+                key: r.key,
+                value: r.value as T
+            }));
+        } catch (error: any) {
+            throw new MemoryError(`Failed to query keys by advanced pattern '${keyPattern}': ${error.message}`,
+                { originalError: error, keyPattern });
+        }
+    }
 } 
