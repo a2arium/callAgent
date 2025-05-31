@@ -6,7 +6,7 @@ import { listPlugins } from '../core/plugin/pluginRegistry.js';
 import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
-import { logger } from '../utils/logger.js';
+import { logger } from '@callagent/utils';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { createLLMForTask } from '../core/llm/LLMFactory.js';

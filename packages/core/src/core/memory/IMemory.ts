@@ -34,6 +34,30 @@ export type MemoryQueryResult<T> = {
 };
 
 /**
+ * Union type for getMany input parameter
+ */
+export type GetManyInput = string | {
+    tag?: string;
+    filters?: MemoryFilter[];
+    limit?: number;
+    orderBy?: {
+        path: string;
+        direction: 'asc' | 'desc';
+    };
+};
+
+/**
+ * Options for getMany method
+ */
+export type GetManyOptions = {
+    limit?: number;
+    orderBy?: {
+        path: string;
+        direction: 'asc' | 'desc';
+    };
+};
+
+/**
  * Interface for Agent's long-term memory storage
  */
 export interface IMemory {
@@ -45,19 +69,20 @@ export interface IMemory {
     get<T>(key: string): Promise<T | null>;
 
     /**
+     * Retrieves multiple values using pattern matching or query objects
+     * @param input Pattern string (e.g., 'user:*') or query object
+     * @param options Optional settings like limit and ordering
+     * @returns Array of matching key/value entries
+     */
+    getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
+
+    /**
      * Stores a value with an associated key
      * @param key The unique identifier for the memory entry
      * @param value The data to store
      * @param options Optional settings like tags
      */
     set<T>(key: string, value: T, options?: { tags?: string[] }): Promise<void>;
-
-    /**
-     * Queries memory entries based on tag, vector similarity, or JSON field filters
-     * @param opts Query options including tag, similarity vector, filters, and/or limit
-     * @returns Array of matching key/value entries
-     */
-    query<T>(opts: MemoryQueryOptions): Promise<Array<MemoryQueryResult<T>>>;
 
     /**
      * Deletes a memory entry by key

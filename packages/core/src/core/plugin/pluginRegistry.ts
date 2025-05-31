@@ -1,5 +1,5 @@
 import type { AgentPlugin } from './types.js';
-import { logger } from '../../utils/logger.js';
+import { logger } from '@callagent/utils';
 
 // Create component-specific logger
 const registryLogger = logger.createLogger({ prefix: 'PluginRegistry' });

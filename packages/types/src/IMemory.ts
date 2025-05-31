@@ -5,12 +5,13 @@ export type FilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' |
 
 /**
  * A filter condition for querying memory entries by JSON path and operator.
+ * Can be either an object with explicit fields or a string like 'priority >= 8'.
  */
 export type MemoryFilter = {
     path: string;          // JSON path like 'status' or 'customer.profile.name'
     operator: FilterOperator;
     value: any;
-};
+} | string;
 
 /**
  * Options for querying memory, including tag, similarity, limit, filters, and ordering.
@@ -40,16 +41,69 @@ export type MemoryQueryResult<T> = {
 };
 
 /**
+ * Options for setting memory entries with entity alignment support.
+ */
+export type MemorySetOptions = {
+    tags?: string[];
+    entities?: Record<string, string>;  // field -> entityType mapping
+    alignmentThreshold?: number;        // Override default threshold
+    autoCreateEntities?: boolean;       // Default: true
+    backend?: string;                   // Backend selection
+};
+
+/**
+ * Options for getMany method
+ */
+export type GetManyOptions = {
+    limit?: number;
+    orderBy?: {
+        path: string;
+        direction: 'asc' | 'desc';
+    };
+    backend?: string;
+};
+
+/**
+ * Query object for getMany method
+ */
+export type GetManyQuery = {
+    tag?: string;
+    filters?: MemoryFilter[];
+    limit?: number;
+    orderBy?: {
+        path: string;
+        direction: 'asc' | 'desc';
+    };
+    backend?: string;
+};
+
+/**
+ * Union type for getMany input parameter
+ */
+export type GetManyInput = string | GetManyQuery;
+
+/**
  * Interface for a semantic memory backend, supporting key-value storage and advanced queries.
  *
  * Semantic memory is used for storing structured, queryable knowledge (e.g., facts, user profiles).
- * Backends may support tags, filtering, and similarity search.
+ * Backends may support tags, filtering, similarity search, and entity alignment.
  */
 export type SemanticMemoryBackend = {
     get<T>(key: string, opts?: { backend?: string }): Promise<T | null>;
-    set<T>(key: string, value: T, opts?: { backend?: string, tags?: string[] }): Promise<void>;
-    query<T>(opts: MemoryQueryOptions & { backend?: string }): Promise<Array<MemoryQueryResult<T>>>;
+    getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
+    set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
     delete(key: string, opts?: { backend?: string }): Promise<void>;
+
+    // Entity alignment methods (optional - available when alignment is enabled)
+    entities?: {
+        unlink(memoryKey: string, fieldPath: string): Promise<void>;
+        realign(memoryKey: string, fieldPath: string, newEntityId: string): Promise<void>;
+        stats(entityType?: string): Promise<{
+            totalEntities: number;
+            totalAlignments: number;
+            entitiesByType: Record<string, number>;
+        }>;
+    };
 };
 
 /**

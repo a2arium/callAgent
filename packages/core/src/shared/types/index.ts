@@ -1,6 +1,6 @@
 // src/shared/types/index.ts (Consolidated for minimal)
 import type { ILLMCaller } from './LLMTypes.js';
-import type { ComponentLogger } from '../../utils/logger.js'; // Import ComponentLogger
+import type { ComponentLogger } from '@callagent/utils'; // Import ComponentLogger
 // Explicitly import only needed types from StreamingEvents
 import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
 import type { Usage } from './LLMTypes.js'; // Import Usage type

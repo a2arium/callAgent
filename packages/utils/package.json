@@ -1,5 +1,5 @@
 {
-  "name": "@callagent/core",
+  "name": "@callagent/utils",
   "version": "0.1.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,27 +8,21 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "jest",
-    "dev": "ts-node --project tsconfig.json src/runner/runnerCli.ts"
+    "test": "jest"
   },
   "publishConfig": {
     "access": "public"
   },
   "private": false,
-  "description": "Core framework for the CallAgent AI agent system.",
+  "description": "Shared utilities for the CallAgent framework.",
   "license": "MIT",
   "keywords": [
-    "core",
-    "framework",
+    "utils",
+    "utilities",
+    "logging",
     "callagent"
   ],
-  "dependencies": {
-    "@callagent/memory-sql": "0.1.0",
-    "@callagent/types": "0.1.0",
-    "@callagent/utils": "0.1.0",
-    "@prisma/client": "^6.7.0",
-    "dotenv": "^16.4.5"
-  },
+  "dependencies": {},
   "devDependencies": {
     "jest": "^29.7.0",
     "ts-jest": "^29.3.2",

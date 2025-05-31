@@ -4,3 +4,4 @@ export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse } from '
 // Removed build utilities - use simple copying instead:
 // "build": "tsc && copyfiles agent.json dist" or "tsc && cp agent.json dist/"
 // Add other exports as needed for the public API 
+export { createEmbeddingFunction, createEmbeddingFunctionWithTracking, isEmbeddingAvailable, getEmbeddingModel } from './core/llm/LLMFactory.js'; 

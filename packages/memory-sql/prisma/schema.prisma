@@ -10,11 +10,46 @@ generator client {
 }
 
 model AgentMemoryStore {
-    key       String   @id
+    key       String                       @id
     value     Json
     tags      String[]
-    createdAt DateTime @default(now()) @map("created_at")
-    updatedAt DateTime @updatedAt @map("updated_at")
+    embedding Unsupported("vector(1536)")? // pgvector type for embeddings
+    createdAt DateTime                     @default(now()) @map("created_at")
+    updatedAt DateTime                     @updatedAt @map("updated_at")
 
     @@map("agent_memory_store")
+}
+
+model EntityStore {
+    id            String                      @id @default(cuid())
+    entityType    String                      @map("entity_type") // User-defined: 'location', 'person', etc.
+    canonicalName String                      @map("canonical_name") // The "main" name for this entity
+    aliases       String[] // All known variations/spellings
+    embedding     Unsupported("vector(1536)") // pgvector type for embeddings
+    metadata      Json                        @default("{}") // Additional properties
+    confidence    Float                       @default(1.0) // Overall confidence in this entity
+    createdAt     DateTime                    @default(now()) @map("created_at")
+    updatedAt     DateTime                    @updatedAt @map("updated_at")
+
+    // Relations
+    alignments EntityAlignment[]
+
+    @@unique([entityType, canonicalName])
+    @@map("entity_store")
+}
+
+model EntityAlignment {
+    id            String   @id @default(cuid())
+    memoryKey     String   @map("memory_key") // Reference to AgentMemoryStore.key
+    fieldPath     String   @map("field_path") // Field name like 'venue' or 'details.location'
+    entityId      String   @map("entity_id") // Reference to EntityStore.id
+    originalValue String   @map("original_value") // What user originally entered
+    confidence    String // 'high', 'medium', 'low'
+    alignedAt     DateTime @default(now()) @map("aligned_at")
+
+    // Relations
+    entity EntityStore @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+    @@unique([memoryKey, fieldPath])
+    @@map("entity_alignment")
 }

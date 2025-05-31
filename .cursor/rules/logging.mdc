@@ -7,7 +7,7 @@ alwaysApply: false
 
 ## Core Principles
 
-1.  **Use the Centralized Logger:** Always use the provided logger instance.
+1.  **Use the Centralized Logger:** Always use the provided logger instance from `@callagent/utils`.
 2.  **Avoid `console.log`:** Use logger methods (`debug`, `info`, `warn`, `error`) for structured and controllable output.
 3.  **Use Appropriate Levels:** Choose the level that best reflects the message's importance.
 4.  **Include Context:** Log relevant variables and error objects.
@@ -15,26 +15,29 @@ alwaysApply: false
 
 ## Logger Structure
 
-The framework uses a singleton `logger` factory (`src/utils/logger.ts`) to create `ComponentLogger` instances. These instances support nested creation for clear component/sub-component identification.
+The framework uses a singleton `logger` factory from `@callagent/utils` to create `ComponentLogger` instances. These instances support nested creation for clear component/sub-component identification.
 
--   **Base Loggers:** Components like the Runner create a base logger:
+-   **Import the Logger:**
     ```typescript
-    import { logger } from '../utils/logger.js';
-    const runnerLogger = logger.createLogger({ prefix: 'Runner' });
-    runnerLogger.info('Runner starting...'); 
-    // Output: [Runner] INFO: Runner starting...
+    import { logger } from '@callagent/utils';
+    ```
+
+-   **Base Loggers:** Components create a base logger:
+    ```typescript
+    const componentLogger = logger.createLogger({ prefix: 'ComponentName' });
+    componentLogger.info('Component starting...'); 
+    // Output: [ComponentName] Component starting...
     ```
 -   **Nested Loggers:** Base loggers can create child loggers with extended prefixes:
     ```typescript
-    const agentName = 'hello-agent';
-    const agentLogger = runnerLogger.createLogger({ prefix: agentName });
-    agentLogger.info('Agent task initiated.');
-    // Output: [Runner: hello-agent] INFO: Agent task initiated.
+    const childLogger = componentLogger.createLogger({ prefix: 'SubComponent' });
+    childLogger.info('Sub-component initialized.');
+    // Output: [ComponentName: SubComponent] Sub-component initialized.
     ```
 
 ## Agent Logging (`ctx.logger`)
 
-Agents should **always** use the logger provided on the task context (`ctx.logger`). This logger is automatically created by the runner with the correct nested prefix (e.g., `[Runner: agent-name]`).
+Agents should **always** use the logger provided on the task context (`ctx.logger`). This logger is automatically created by the runner with the correct nested prefix (e.g., `[StreamingRunner: agent-name]`).
 
 ```typescript
 // Inside an agent's handleTask(ctx)
@@ -82,7 +85,8 @@ async handleTask(ctx: TaskContext) {
 ## Best Practices
 
 1.  **Use `ctx.logger` in Agents:** Always prefer the context logger.
-2.  **Structured Logging:** Pass objects/errors as separate arguments, not stringified.
+2.  **Import from Utils:** For non-agent code, import from `@callagent/utils`.
+3.  **Structured Logging:** Pass objects/errors as separate arguments, not stringified.
     ```typescript
     // Good
     ctx.logger.info('User data retrieved', { userId: user.id });
@@ -92,11 +96,11 @@ async handleTask(ctx: TaskContext) {
     ctx.logger.info(`User data retrieved: ${JSON.stringify(user)}`);
     ctx.logger.error(`API call failed: ${apiError.message}`); 
     ```
-3.  **Error Handling:** Use `ctx.fail(error)` for standard task failures. Log specific errors with `ctx.logger.error` *before* calling `ctx.fail` if extra context is needed.
+4.  **Error Handling:** Use `ctx.fail(error)` for standard task failures. Log specific errors with `ctx.logger.error` *before* calling `ctx.fail` if extra context is needed.
 
 ## Configuration
 
-The root logger's level can typically be configured via the `LOG_LEVEL` environment variable (`debug`, `info`, `warn`, `error`). Child loggers inherit the level from their parent at creation time.
+The root logger's level can be configured via the `LOG_LEVEL` environment variable (`debug`, `info`, `warn`, `error`). Child loggers inherit the level from their parent at creation time.
 
 ```env
 # .env file example
@@ -108,4 +112,11 @@ LOG_LEVEL=debug
 -   Minimize logging in tests (e.g., set `LOG_LEVEL=error`).
 -   Use mocking/spying (`jest.spyOn`) to verify specific log calls if necessary.
 
+## Architecture
 
+The logging system follows proper layering:
+- **Foundation Layer**: `@callagent/utils` (contains logger)
+- **Infrastructure Layer**: `@callagent/memory-sql`, adapters
+- **Application Layer**: `@callagent/core`, business logic
+
+This ensures all packages can use consistent logging without circular dependencies.

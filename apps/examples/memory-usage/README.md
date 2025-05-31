@@ -1,49 +1,45 @@
-# Memory Usage Example
+# Memory System Demo
 
-This example demonstrates comprehensive memory usage in the CallAgent framework, including basic operations, advanced querying, and pattern matching capabilities.
+A simple demonstration of the CallAgent memory system features.
 
-## Running the Example
+## What This Demo Shows
 
-From the repository root:
+The `AgentModule.ts` demonstrates:
 
-```bash
-yarn turbo run dev --filter=apps/examples/memory-usage
+1. **Entity Alignment** - Automatic alignment of similar entities (names, departments)
+2. **Pattern Matching** - Using wildcards (`*`) to find records by key patterns  
+3. **String-Based Filters** - Intuitive filter syntax like `'salary > 70000'`
+
+## Key Features Demonstrated
+
+### Entity Alignment
+```typescript
+// These will be automatically aligned:
+name: 'John Smith' ← 'J. Smith'
+department: 'Engineering' ← 'Engineering Dept'
 ```
 
-Or, from this directory:
-
-```bash
-yarn dev
+### Pattern Matching
+```typescript
+// Find all users with wildcard
+await ctx.memory.semantic.getMany('user:*');
 ```
 
-## What It Demonstrates
+### String-Based Filters
+```typescript
+// Much cleaner than object syntax
+filters: [
+  'salary > 70000',
+  'active = true', 
+  'department contains "Engineering"',
+  'email ends_with "@example.com"'
+]
+```
 
-### Basic Memory Operations
-- Setting values in memory with structured keys and tags
-- Getting values by key
-- Querying by tag
-- Querying by JSON field filters
+## Running the Demo
 
-### Pattern Matching (SQL Backend Only)
-- **Key wildcards**: Find all keys matching a pattern like `user:*:profile`
-- **Advanced patterns**: Use both `*` (multiple characters) and `?` (single character) wildcards
-- **Structured key queries**: Efficiently find related data using key hierarchies
+1. Ensure you have the memory system set up with PostgreSQL and pgvector
+2. Configure embedding function for entity alignment
+3. Run the agent to see the demo in action
 
-### Pattern Matching Examples
-- `user:*:profile` - Find all user profiles
-- `user:123:*` - Find all data for a specific user
-- `config:*` - Find all configuration entries
-- `user:???:*` - Find users with 3-character IDs (advanced pattern)
-
-### Alternative Approaches
-The example also demonstrates tag-based querying as a more portable alternative to pattern matching, which works across all memory backend types.
-
-## Key Features Highlighted
-
-1. **Structured Keys**: Using hierarchical keys like `user:123:profile` for logical organization
-2. **Pattern Matching**: Leveraging wildcards for bulk operations and related data discovery
-3. **Tag-Based Organization**: Using tags for cross-cutting concerns and categorization
-4. **Filter Queries**: Advanced JSON field filtering with various operators
-5. **Backend Compatibility**: Graceful handling when pattern matching isn't available
-
-The agent demonstrates both the power of structured memory access and the importance of choosing the right approach for your use case. 
+The demo stores 3 user records, demonstrates pattern matching and filtering, and shows entity alignment results. 

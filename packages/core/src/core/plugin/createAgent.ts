@@ -4,7 +4,7 @@ import type { AgentPlugin, CreateAgentPluginOptions } from './types.js';
 import type { AgentManifest } from '../../shared/types/index.js';
 import { registerPlugin } from './pluginRegistry.js';
 import { fileURLToPath } from 'node:url';
-import { logger } from '../../utils/logger.js';
+import { logger } from '@callagent/utils';
 import { ManifestError, PluginError } from '../../utils/errors.js';
 import { LLMCallerAdapter } from '../llm/LLMCallerAdapter.js';
 import { createLLMForTask } from '../llm/LLMFactory.js';

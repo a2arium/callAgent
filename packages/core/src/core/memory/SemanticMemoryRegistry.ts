@@ -1,4 +1,4 @@
-import { SemanticMemoryBackend, MemoryRegistry } from '@callagent/types';
+import { SemanticMemoryBackend, MemoryRegistry, GetManyInput, GetManyOptions, MemoryQueryResult, MemorySetOptions } from '@callagent/types';
 
 /**
  * Registry/facade for semantic memory backends.
@@ -53,19 +53,20 @@ export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBack
      * @param value The data to store
      * @param opts Optional backend override and tags
      */
-    async set<T>(key: string, value: T, opts?: { backend?: string, tags?: string[] }): Promise<void> {
+    async set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void> {
         const backend = this.backends[opts?.backend ?? this.defaultBackend];
         return backend.set<T>(key, value, opts);
     }
 
     /**
-     * Query memory entries in the selected backend
-     * @param opts Query options, may include backend override
+     * Get many memory entries from the selected backend
+     * @param input Pattern string or query object
+     * @param options Optional query options including backend override
      */
-    async query<T>(opts: any): Promise<Array<{ key: string; value: T }>> {
-        const backendName = opts?.backend ?? this.defaultBackend;
+    async getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> {
+        const backendName = options?.backend ?? this.defaultBackend;
         const backend = this.backends[backendName];
-        return backend.query<T>(opts);
+        return backend.getMany<T>(input, options);
     }
 
     /**
@@ -76,5 +77,13 @@ export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBack
     async delete(key: string, opts?: { backend?: string }): Promise<void> {
         const backend = this.backends[opts?.backend ?? this.defaultBackend];
         return backend.delete(key, opts);
+    }
+
+    /**
+     * Get entity management interface from the default backend
+     */
+    get entities() {
+        const backend = this.backends[this.defaultBackend];
+        return backend.entities;
     }
 } 

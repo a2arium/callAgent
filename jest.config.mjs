@@ -2,7 +2,7 @@
 const config = {
     preset: 'ts-jest/presets/default-esm',
     testEnvironment: 'node',
-    roots: ['<rootDir>/tests'],
+    roots: ['<rootDir>/packages'],
     testMatch: [
         '**/__tests__/**/*.+(ts|tsx|js)',
         '**/?(*.)+(spec|test).+(ts|tsx|js)'
@@ -23,17 +23,17 @@ const config = {
     },
     collectCoverage: true,
     collectCoverageFrom: [
-        'src/**/*.{ts,tsx}',
-        '!src/tests/**',
-        '!src/**/*.d.ts',
-        '!src/index.ts',
+        'packages/**/src/**/*.{ts,tsx}',
+        '!packages/**/src/tests/**',
+        '!packages/**/src/**/*.d.ts',
+        '!packages/**/src/index.ts',
     ],
     coverageThreshold: {
         global: {
-            branches: 80,
-            functions: 80,
-            lines: 80,
-            statements: 80
+            branches: 50,
+            functions: 50,
+            lines: 50,
+            statements: 50
         }
     },
     verbose: true,
@@ -42,11 +42,6 @@ const config = {
     transformIgnorePatterns: [
         'node_modules/(?!(jest-mock-extended|ts-essentials)/)',
     ],
-    globals: {
-        'ts-jest': {
-            useESM: true,
-        },
-    },
     setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
 };
 

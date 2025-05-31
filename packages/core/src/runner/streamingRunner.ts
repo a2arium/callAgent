@@ -5,7 +5,7 @@ import { listPlugins } from '../core/plugin/pluginRegistry.js';
 import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus, Artifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
-import { logger, type LoggerConfig } from '../utils/logger.js';
+import { logger, type LoggerConfig } from '@callagent/utils';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
@@ -18,8 +18,6 @@ import { getMemoryAdapter } from '../core/memory/factory.js';
 import { SemanticMemoryRegistry } from '../core/memory/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../core/memory/EpisodicMemoryRegistry.js';
 import { EmbedMemoryRegistry } from '../core/memory/EmbedMemoryRegistry.js';
-import { MemorySQLAdapter } from '@callagent/memory-sql';
-import { PrismaClient } from '@prisma/client';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -122,11 +120,8 @@ export async function runAgentWithStreaming(
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
     // Get the memory adapter instance
-    const prismaClient = new PrismaClient();
-    const sqlAdapter = new MemorySQLAdapter(prismaClient);
-    const semanticBackends = {
-        sql: sqlAdapter,
-    };
+    const memoryAdapter = await getMemoryAdapter();
+    const semanticBackends = memoryAdapter.semantic.backends;
     // For now, only wire up semantic memory; stub the others for future extension
     const episodicBackends = {};
     const embedBackends = {};

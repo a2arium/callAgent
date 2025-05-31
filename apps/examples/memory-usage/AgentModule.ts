@@ -2,69 +2,101 @@ import { createAgent } from '@callagent/core';
 
 export default createAgent({
     async handleTask(ctx) {
-        // Store structured data with meaningful keys for pattern matching
-        await ctx.memory.semantic.set('user:123:profile', { name: 'John Doe', email: 'john@example.com', status: 'active' }, { tags: ['user', 'profile'] });
-        await ctx.memory.semantic.set('user:123:preferences', { theme: 'dark', language: 'en' }, { tags: ['user', 'preferences'] });
-        await ctx.memory.semantic.set('user:456:profile', { name: 'Jane Smith', email: 'jane@example.com', status: 'active' }, { tags: ['user', 'profile'] });
-        await ctx.memory.semantic.set('user:456:preferences', { theme: 'light', language: 'es' }, { tags: ['user', 'preferences'] });
-        await ctx.memory.semantic.set('admin:789:profile', { name: 'Admin User', email: 'admin@example.com', status: 'active' }, { tags: ['admin', 'profile'] });
-        await ctx.memory.semantic.set('config:app:database', { host: 'localhost', port: 5432 }, { tags: ['config'] });
+        await ctx.reply('🧠 Memory System Demo\n');
 
-        // Original functionality demonstrations
-        const value = await ctx.memory.semantic.get('user:123:profile');
-        const results = await ctx.memory.semantic.query({ tag: 'profile' });
-        const filtered = await ctx.memory.semantic.query({ filters: [{ path: 'status', operator: '=', value: 'active' }] });
+        try {
+            // 1. Store some user data with entity alignment
+            await ctx.reply('📝 Storing user data...');
 
-        // Access the underlying SQL adapter for pattern matching (if available)
-        const sqlBackend = (ctx.memory.semantic as any).backends?.sql;
-        let patternResults = 'Pattern matching not available (requires MemorySQLAdapter)';
-        let advancedPatternResults = 'Advanced pattern matching not available (requires MemorySQLAdapter)';
+            await ctx.memory.semantic.set('user:001', {
+                name: 'John Smith',
+                email: 'john@example.com',
+                department: 'Engineering',
+                salary: 75000,
+                active: true
+            }, {
+                tags: ['user', 'employee'],
+                entities: { name: 'person', department: 'organization' }
+            });
 
-        if (sqlBackend && typeof sqlBackend.queryByKeyPattern === 'function') {
-            try {
-                // Pattern matching examples
-                const userProfiles = await sqlBackend.queryByKeyPattern('user:*:profile');
-                const user123Data = await sqlBackend.queryByKeyPattern('user:123:*');
-                const configEntries = await sqlBackend.queryByKeyPattern('config:*');
+            await ctx.memory.semantic.set('user:002', {
+                name: 'J. Smith',  // Will align to "John Smith"
+                email: 'jane@company.org',
+                department: 'Engineering Dept',  // Will align to "Engineering"
+                salary: 82000,
+                active: true
+            }, {
+                tags: ['user', 'employee'],
+                entities: { name: 'person', department: 'organization' }
+            });
 
-                patternResults = [
-                    `User profiles (user:*:profile): ${JSON.stringify(userProfiles)}`,
-                    `User 123 data (user:123:*): ${JSON.stringify(user123Data)}`,
-                    `Config entries (config:*): ${JSON.stringify(configEntries)}`
-                ].join('\n    ');
+            await ctx.memory.semantic.set('user:003', {
+                name: 'Bob Johnson',
+                email: 'bob@example.com',
+                department: 'Marketing',
+                salary: 65000,
+                active: false
+            }, {
+                tags: ['user', 'employee'],
+                entities: { name: 'person', department: 'organization' }
+            });
 
-                // Advanced pattern matching with single character wildcards
-                if (typeof sqlBackend.queryByKeyPatternAdvanced === 'function') {
-                    const advancedPattern = await sqlBackend.queryByKeyPatternAdvanced('user:???:*');
-                    advancedPatternResults = `Advanced pattern (user:???:*): ${JSON.stringify(advancedPattern)}`;
-                }
-            } catch (error: any) {
-                patternResults = `Pattern matching error: ${error.message}`;
+            // 2. Pattern matching with wildcards
+            await ctx.reply('🔍 Pattern matching with wildcards...');
+            const allUsers = await ctx.memory.semantic.getMany('user:*');
+            await ctx.reply(`Found ${allUsers.length} users with pattern 'user:*'`);
+
+            // 3. String-based filter operators
+            await ctx.reply('🎯 Using string-based filters...');
+
+            // High salary employees
+            const highEarners = await ctx.memory.semantic.getMany({
+                filters: ['salary > 70000']
+            });
+            await ctx.reply(`High earners (>70k): ${highEarners.length} users`);
+
+            // Active engineering employees
+            const activeEngineers = await ctx.memory.semantic.getMany({
+                filters: [
+                    'active = true',
+                    'department contains "Engineering"'
+                ]
+            });
+            await ctx.reply(`Active engineers: ${activeEngineers.length} users`);
+
+            // Email domain search
+            const exampleEmails = await ctx.memory.semantic.getMany({
+                filters: ['email ends_with "@example.com"']
+            });
+            await ctx.reply(`@example.com emails: ${exampleEmails.length} users`);
+
+            // 4. Show entity alignment results
+            const user2 = await ctx.memory.semantic.get('user:002') as any;
+            let alignmentResults = [];
+
+            if (user2?.name?._wasAligned) {
+                alignmentResults.push(`Name: "${user2.name._original}" → "${user2.name._canonical}"`);
             }
-        }
+            if (user2?.department?._wasAligned) {
+                alignmentResults.push(`Dept: "${user2.department._original}" → "${user2.department._canonical}"`);
+            }
 
-        await ctx.reply([
-            '=== Memory Usage Examples ===',
-            '',
-            '1. Basic Operations:',
-            `   Get user:123:profile: ${JSON.stringify(value)}`,
-            `   Query by tag "profile": Found ${results.length} entries`,
-            `   Query by filter (status=active): Found ${filtered.length} entries`,
-            '',
-            '2. Pattern Matching (Key Wildcards):',
-            `   ${patternResults}`,
-            '',
-            '3. Advanced Pattern Matching:',
-            `   ${advancedPatternResults}`,
-            '',
-            '=== Alternative: Using Tags ===',
-            'For most use cases, consider using tags instead of key patterns:',
-            '- More portable across different memory backends',
-            '- Better performance in many cases',
-            '- More explicit and maintainable',
-            '',
-            `Example: Query by tag "user": Found ${await ctx.memory.semantic.query({ tag: 'user' }).then(r => r.length)} entries`
-        ].join('\n'));
+            await ctx.reply([
+                '✅ Demo complete!',
+                '',
+                '🎯 Entity Alignments:',
+                ...alignmentResults,
+                '',
+                '📊 Summary:',
+                `• Pattern matching: Found ${allUsers.length} users`,
+                `• High earners: ${highEarners.length} users`,
+                `• Active engineers: ${activeEngineers.length} users`,
+                `• @example.com: ${exampleEmails.length} users`
+            ].join('\n'));
+
+        } catch (error: any) {
+            await ctx.reply(`❌ Error: ${error.message}`);
+        }
 
         ctx.complete();
     },

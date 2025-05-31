@@ -1,0 +1,403 @@
+---
+description: Instructions about how to set up and work with tests
+globs: 
+alwaysApply: false
+---
+# Jest ESM Testing Setup for Turbo Monorepo
+
+This document provides a standardized Jest ESM (ES Modules) testing configuration for packages in this turbo monorepo.
+
+## Quick Setup Checklist
+
+For any new package that needs testing:
+
+1. ✅ Create `jest.config.mjs` with ESM preset
+2. ✅ Update `package.json` test script with experimental VM modules
+3. ✅ Set up proper mock structure in `tests/__mocks__/`
+4. ✅ Use `@jest/globals` imports in all test files
+5. ✅ Configure module name mapping for internal packages
+
+## Configuration Templates
+
+### `jest.config.mjs` Template
+```javascript
+export default {
+  preset: 'ts-jest/presets/default-esm',
+  extensionsToTreatAsEsm: ['.ts'],
+  transform: {
+    '^.+\\.ts$': ['ts-jest', { useESM: true }]
+  },
+  moduleNameMapper: {
+    // Map .js imports to .ts source files
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+    // Map internal packages - adjust paths as needed
+    '^@callagent/types$': '<rootDir>/../../packages/types/src/index.ts',
+    '^@callagent/core$': '<rootDir>/../../packages/core/src/index.ts',
+    // Add other internal packages as needed
+  },
+  testEnvironment: 'node',
+  roots: ['<rootDir>/tests'],
+  moduleFileExtensions: ['ts', 'js', 'json'],
+  transformIgnorePatterns: [
+    'node_modules/(?!(@callagent)/)'
+  ]
+};
+```
+
+### `package.json` Test Script Template
+```json
+{
+  "scripts": {
+    "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js --coverage"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-mock-extended": "^4.0.0-beta1",
+    "ts-jest": "^29.3.2",
+    "typescript": "^5.8.3"
+  }
+}
+```
+
+## Standard Test Structure
+
+```
+packages/your-package/
+├── src/
+│   ├── index.ts
+│   └── YourClass.ts
+├── tests/
+│   ├── __mocks__/
+│   │   ├── prisma.ts          # For Prisma packages
+│   │   ├── external-api.ts    # For API mocking
+│   │   └── filesystem.ts      # For file system mocking
+│   ├── YourClass.test.ts      # Main functionality tests
+│   ├── integration.test.ts    # Integration tests
+│   └── jest-esm.test.ts       # ESM configuration verification
+├── jest.config.mjs
+└── package.json
+```
+
+## Essential Test Patterns
+
+### 1. Proper ESM Imports
+```typescript
+import { describe, test, expect, jest, beforeEach, afterEach } from '@jest/globals';
+import { YourClass } from '../src/YourClass.js';
+import { mockDependency } from './__mocks__/dependency.js';
+```
+
+### 2. Mock Setup Template
+```typescript
+// tests/__mocks__/your-dependency.ts
+import { jest } from '@jest/globals';
+import { mockDeep, mockReset, type DeepMockProxy } from 'jest-mock-extended';
+import { YourDependency } from 'your-dependency';
+
+export const mockDependency = mockDeep<YourDependency>() as DeepMockProxy<YourDependency>;
+
+beforeEach(() => {
+  mockReset(mockDependency);
+});
+```
+
+### 3. TypeScript-Safe Mocking
+```typescript
+// For functions
+const mockFunction = jest.fn<(param: string) => Promise<number>>()
+  .mockResolvedValue(42);
+
+// For classes with complex types
+const mockService = mockDeep<ComplexService>();
+mockService.method.mockResolvedValue(expectedResult);
+```
+
+### 4. ESM Configuration Test
+```typescript
+// tests/jest-esm.test.ts
+import { describe, test, expect, jest } from '@jest/globals';
+
+describe('Jest ESM Configuration', () => {
+  test('can import from @jest/globals', () => {
+    expect(describe).toBeDefined();
+    expect(test).toBeDefined();
+    expect(expect).toBeDefined();
+    expect(jest).toBeDefined();
+  });
+
+  test('can import ES modules with .js extension', async () => {
+    const { YourClass } = await import('../src/YourClass.js');
+    expect(YourClass).toBeDefined();
+    expect(typeof YourClass).toBe('function');
+  });
+});
+```
+
+## Package-Specific Configurations
+
+### For Prisma Packages
+```javascript
+// Additional moduleNameMapper entries
+moduleNameMapper: {
+  // ... standard mappings
+  '@prisma/client': '<rootDir>/tests/__mocks__/prisma.ts'
+}
+```
+
+### For API Client Packages
+```javascript
+// Additional transformIgnorePatterns
+transformIgnorePatterns: [
+  'node_modules/(?!(@callagent|axios|node-fetch)/)'
+]
+```
+
+### For Core/Shared Packages
+```javascript
+// Simplified moduleNameMapper (fewer internal deps)
+moduleNameMapper: {
+  '^(\\.{1,2}/.*)\\.js$': '$1'
+}
+```
+
+## Common Mock Patterns
+
+### Database/Prisma Mocking
+```typescript
+// tests/__mocks__/prisma.ts
+import { jest } from '@jest/globals';
+import { mockDeep, mockReset, type DeepMockProxy } from 'jest-mock-extended';
+import { PrismaClient } from '@prisma/client';
+
+export const prismaMock = mockDeep<PrismaClient>() as DeepMockProxy<PrismaClient>;
+
+beforeEach(() => {
+  mockReset(prismaMock);
+});
+```
+
+### HTTP Client Mocking
+```typescript
+// tests/__mocks__/http-client.ts
+import { jest } from '@jest/globals';
+
+export const mockHttpClient = {
+  get: jest.fn(),
+  post: jest.fn(),
+  put: jest.fn(),
+  delete: jest.fn()
+};
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
+```
+
+### File System Mocking
+```typescript
+// tests/__mocks__/fs.ts
+import { jest } from '@jest/globals';
+
+export const mockFs = {
+  readFile: jest.fn(),
+  writeFile: jest.fn(),
+  exists: jest.fn(),
+  mkdir: jest.fn()
+};
+```
+
+## Testing Best Practices
+
+### 1. Test Organization
+```typescript
+describe('YourClass', () => {
+  let instance: YourClass;
+  let mockDependency: DeepMockProxy<Dependency>;
+
+  beforeEach(() => {
+    mockDependency = mockDeep<Dependency>();
+    instance = new YourClass(mockDependency);
+  });
+
+  describe('method()', () => {
+    test('handles success case', async () => {
+      // Arrange
+      mockDependency.someMethod.mockResolvedValue('success');
+      
+      // Act
+      const result = await instance.method();
+      
+      // Assert
+      expect(result).toBe('success');
+      expect(mockDependency.someMethod).toHaveBeenCalledWith(expectedParams);
+    });
+
+    test('handles error case', async () => {
+      // Arrange
+      mockDependency.someMethod.mockRejectedValue(new Error('Failed'));
+      
+      // Act & Assert
+      await expect(instance.method()).rejects.toThrow('Failed');
+    });
+  });
+});
+```
+
+### 2. Async Testing
+```typescript
+test('async operation completes', async () => {
+  const promise = instance.asyncMethod();
+  
+  // Test intermediate state if needed
+  expect(instance.isLoading).toBe(true);
+  
+  const result = await promise;
+  
+  expect(result).toBeDefined();
+  expect(instance.isLoading).toBe(false);
+});
+```
+
+### 3. Complex Mock Sequences
+```typescript
+test('handles complex workflow', async () => {
+  // Mock multiple calls in sequence
+  mockService.step1.mockResolvedValueOnce('result1');
+  mockService.step2.mockResolvedValueOnce('result2');
+  mockService.step3.mockResolvedValueOnce('result3');
+  
+  const result = await instance.complexWorkflow();
+  
+  expect(mockService.step1).toHaveBeenCalledTimes(1);
+  expect(mockService.step2).toHaveBeenCalledWith('result1');
+  expect(mockService.step3).toHaveBeenCalledWith('result2');
+  expect(result).toBe('result3');
+});
+```
+
+## Running Tests
+
+### Standard Commands
+```bash
+# Run all tests in package
+yarn test
+
+# Run with coverage
+yarn test:coverage
+
+# Run in watch mode
+yarn test:watch
+
+# Run specific test file
+yarn test YourClass.test.ts
+
+# Run tests matching pattern
+yarn test --testNamePattern="method"
+
+# Run with verbose output
+yarn test --verbose
+```
+
+### Turbo Commands (from repo root)
+```bash
+# Run tests for specific package
+turbo test --filter=@callagent/your-package
+
+# Run tests for all packages
+turbo test
+
+# Run tests with dependencies
+turbo test --filter=@callagent/your-package...
+```
+
+## Troubleshooting Guide
+
+### Common Issues & Solutions
+
+1. **"Cannot use import statement outside a module"**
+   ```bash
+   # Solution: Ensure jest.config.mjs uses .mjs extension
+   # and extensionsToTreatAsEsm: ['.ts'] is set
+   ```
+
+2. **"Module not found" with .js extension**
+   ```javascript
+   // Solution: Add to moduleNameMapper
+   '^(\\.{1,2}/.*)\\.js$': '$1'
+   ```
+
+3. **Internal package resolution fails**
+   ```javascript
+   // Solution: Add to moduleNameMapper
+   '^@callagent/package-name$': '<rootDir>/../../packages/package-name/src/index.ts'
+   ```
+
+4. **Prisma mock type errors**
+   ```typescript
+   // Solution: Use proper typing
+   const prismaMock = mockDeep<PrismaClient>() as DeepMockProxy<PrismaClient>;
+   ```
+
+5. **Jest utilities not available**
+   ```typescript
+   // Solution: Import from @jest/globals
+   import { jest, expect } from '@jest/globals';
+   ```
+
+## Performance Optimization
+
+### Test Execution Speed
+- Use `--maxWorkers=50%` for CI environments
+- Implement proper mock resets to avoid memory leaks
+- Use `--testPathIgnorePatterns` for large files
+
+### Memory Management
+```javascript
+// In jest.config.mjs
+export default {
+  // ... other config
+  maxWorkers: '50%',
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '/dist/',
+    '/coverage/'
+  ],
+  clearMocks: true,
+  restoreMocks: true
+};
+```
+
+## Integration with Turbo
+
+### Package Dependencies
+```json
+// In package.json
+{
+  "scripts": {
+    "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
+  }
+}
+```
+
+### Turbo Configuration
+```json
+// In turbo.json (repo root)
+{
+  "pipeline": {
+    "test": {
+      "dependsOn": ["build"],
+      "outputs": ["coverage/**"]
+    }
+  }
+}
+```
+
+## Future Enhancements
+
+- [ ] Add snapshot testing guidelines
+- [ ] Create shared test utilities package
+- [ ] Implement visual regression testing
+- [ ] Add performance benchmarking patterns
+- [ ] Create automated test generation tools 

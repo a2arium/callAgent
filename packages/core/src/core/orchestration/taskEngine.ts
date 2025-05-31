@@ -169,7 +169,7 @@ export class TaskEngine {
                     backends: {},
                     get: async () => null,
                     set: async () => { },
-                    query: async () => [],
+                    getMany: async () => [],
                     delete: async () => { },
                 },
                 episodic: {
