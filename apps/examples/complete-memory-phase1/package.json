@@ -1,0 +1,25 @@
+{
+  "name": "@callagent/complete-memory-phase1",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/agent.js",
+  "exports": {
+    ".": "./dist/agent.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node demo.ts",
+    "demo": "yarn build && node dist/demo.js",
+    "test": "yarn demo"
+  },
+  "dependencies": {
+    "@callagent/core": "0.1.0",
+    "@callagent/types": "0.1.0",
+    "@callagent/utils": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  }
+}

@@ -145,6 +145,7 @@ export type MemoryRegistry<T> = {
  * - `semantic`: Structured, queryable knowledge (facts, profiles, etc.)
  * - `episodic`: Time-ordered event log (conversations, actions, etc.)
  * - `embed`: Vector/embedding storage and similarity search
+ * - `working`: Agent's active cognitive state (goals, thoughts, decisions, variables)
  *
  * Each tier is a registry supporting multiple backends and default selection.
  */
@@ -152,4 +153,5 @@ export type IMemory = {
     semantic: MemoryRegistry<SemanticMemoryBackend>;
     episodic: MemoryRegistry<EpisodicMemoryBackend>;
     embed: MemoryRegistry<EmbedMemoryBackend>;
+    working?: MemoryRegistry<import('./workingMemory.js').WorkingMemoryBackend>;
 }; 

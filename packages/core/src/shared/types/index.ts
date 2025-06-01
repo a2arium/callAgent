@@ -5,9 +5,22 @@ import type { ComponentLogger } from '@callagent/utils'; // Import ComponentLogg
 import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
 import type { Usage } from './LLMTypes.js'; // Import Usage type
 import type { IMemory } from '@callagent/types';
+// Import working memory types for TaskContext
+import type { ThoughtEntry, DecisionEntry, WorkingVariables } from './workingMemory.js';
+import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';
 
 // Re-export only specific streaming event types needed externally
 export type { A2AEvent, TaskStatus, Artifact };
+
+// Working Memory Types
+export * from './workingMemory.js';
+export * from './memoryLifecycle.js';
+
+// MLO Configuration Types
+export * from '../../core/memory/lifecycle/config/types.js';
+
+// MLO Interface Types
+export * from '../../core/memory/lifecycle/interfaces/index.js';
 
 // --- Agent Card (Minimal) ---
 export type AgentManifest = {
@@ -70,9 +83,27 @@ export type TaskContext = {
     // Use the ILLMCaller interface for llm
     llm: ILLMCaller;
 
+    // NEW: Working Memory Operations (Optional in Phase 0)
+    setGoal?: (goal: string) => Promise<void>;
+    getGoal?: () => Promise<string | null>;
+    addThought?: (thought: string) => Promise<void>;
+    getThoughts?: () => Promise<ThoughtEntry[]>;
+    makeDecision?: (key: string, decision: string, reasoning?: string) => Promise<void>;
+    getDecision?: (key: string) => Promise<DecisionEntry | null>;
+
+    // NEW: Working memory variables (Optional in Phase 0)
+    vars?: WorkingVariables;
+
+    // NEW: Unified memory operations (Optional in Phase 0)
+    recall?: (query: string, options?: RecallOptions) => Promise<unknown[]>;
+    remember?: (key: string, value: unknown, options?: RememberOptions) => Promise<void>;
+
     // Future Capabilities (Stubbed/Placeholder - DO NOT USE in minimal agent logic)
     tools: { invoke: <T = unknown>(toolName: string, args: unknown) => Promise<T> };
-    memory: IMemory;
+    memory: IMemory & {
+        // NEW: Direct MLO access (will be defined later)
+        mlo?: unknown; // UnifiedMemoryService - placeholder for now
+    };
     cognitive: { loadWorkingMemory: (e: unknown) => void; plan: (prompt: string, options?: unknown) => Promise<unknown>; record: (state: unknown) => void; flush: () => Promise<void>; };
     logger: TaskLogger; // Use the defined TaskLogger type
     config: unknown; // Minimal config object

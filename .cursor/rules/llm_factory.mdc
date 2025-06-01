@@ -52,14 +52,42 @@ export default createAgent({
 The TaskContext (`ctx`) provides access to the pre-configured LLM:
 
 ```typescript
-// Basic LLM call
-const response = await ctx.llm.call("Your prompt here");
+// Basic LLM call - returns an array of responses
+const responses = await ctx.llm.call("Your prompt here");
 
-// Streaming LLM call
-for await (const chunk of ctx.llm.stream("Your prompt here")) {
-    // Process each chunk
+// Handle single or multiple responses
+if (responses.length === 1) {
+    // Single response
+    const content = responses[0].content;
+} else {
+    // Multiple responses - process each one
+    responses.forEach((response, index) => {
+        console.log(`Response ${index + 1}: ${response.content}`);
+    });
 }
+
+// Streaming LLM call - returns individual chunks
+for await (const chunk of ctx.llm.stream("Your prompt here")) {
+    console.log(chunk.content);
+    if (chunk.isComplete) {
+        // Final chunk
+        break;
+    }
+}
+
+// Add tool results for multi-turn conversations
+ctx.llm.addToolResult("tool-call-id", "tool result", "tool-name");
+
+// Update LLM settings
+ctx.llm.updateSettings({ temperature: 0.8 });
 ```
+
+### Important Notes About LLM Responses
+
+- **Array Return Type**: The `ctx.llm.call()` method returns an array of `UniversalChatResponse` objects, not a single response
+- **Multiple Responses**: Some LLM configurations or providers may return multiple responses (e.g., when using multiple candidate generation)
+- **Backward Compatibility**: Most simple use cases will receive a single response in the array (length === 1)
+- **Usage Tracking**: Usage costs are automatically tracked by combining the costs from all responses in the array. If multiple responses are returned, their individual costs are summed together before being recorded.
 
 ### Manual LLM Creation (Internal Framework Use)
 

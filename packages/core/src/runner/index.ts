@@ -14,9 +14,7 @@ import { extendContextWithStreaming } from '../core/context/StreamingContext.js'
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import type { TaskArtifactUpdateEvent, TaskStatusUpdateEvent, A2AEvent } from '../shared/types/StreamingEvents.js';
-import { SemanticMemoryRegistry } from '../core/memory/SemanticMemoryRegistry.js';
-import { EpisodicMemoryRegistry } from '../core/memory/EpisodicMemoryRegistry.js';
-import { EmbedMemoryRegistry } from '../core/memory/EmbedMemoryRegistry.js';
+import { extendContextWithMemory } from '../core/context/workingMemoryContext.js';
 import { MemorySQLAdapter } from '@callagent/memory-sql';
 import { PrismaClient } from '@prisma/client';
 
@@ -122,25 +120,11 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
     // Create the agent-specific logger using the nested createLogger method
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
+    // Create semantic memory adapter for backward compatibility
     const prismaClient = new PrismaClient();
     const sqlAdapter = new MemorySQLAdapter(prismaClient, undefined, {
         defaultTenantId: plugin.tenantId
     });
-    const semanticBackends = {
-        sql: sqlAdapter,
-    };
-    // For now, only wire up semantic memory; stub the others for future extension
-    const episodicBackends = {};
-    const embedBackends = {};
-
-    const memory = {
-        semantic: new SemanticMemoryRegistry(
-            pickBackends(semanticBackends, config.memory.semantic.backends),
-            config.memory.semantic.default
-        ),
-        episodic: new EpisodicMemoryRegistry(episodicBackends, ''), // TODO: Implement episodic memory adapter
-        embed: new EmbedMemoryRegistry(embedBackends, ''), // TODO: Implement embed memory adapter
-    };
 
     const partialCtx: Omit<TaskContext, 'fail'> = {
         tenantId: plugin.tenantId,
@@ -194,7 +178,6 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
         },
         // Assign the agentLogger directly
         logger: agentLogger,
-        memory: memory,
         cognitive: {
             loadWorkingMemory: (e: unknown): void => { agentLogger.warn(`cognitive.loadWorkingMemory is stubbed`, { e }); },
             plan: async (prompt: string, options?: unknown): Promise<unknown> => { agentLogger.warn(`cognitive.plan is stubbed`, { prompt, options }); return { steps: [] }; },
@@ -235,10 +218,19 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
                 agentLogger.info(`Usage recorded: $${costValue.toFixed(6)}`, { cost: costValue });
             }
         }
-    };
+    } as any; // Temporary type assertion since memory will be added by extendContextWithMemory
+
+    // Extend context with MLO-backed memory operations
+    const contextWithMemory = extendContextWithMemory(
+        partialCtx,
+        plugin.tenantId,
+        agentName,
+        plugin.manifest, // Agent config for memory profile
+        sqlAdapter // Existing semantic adapter for backward compatibility
+    );
 
     taskCtx = {
-        ...partialCtx,
+        ...contextWithMemory,
         fail: async (error: unknown): Promise<void> => {
             const errorMessage = error instanceof Error ? error.message : String(error);
             // Use agentLogger here

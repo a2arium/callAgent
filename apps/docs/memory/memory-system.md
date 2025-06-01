@@ -8,6 +8,8 @@ This document explains how to use the agent framework's memory system to provide
 
 The memory system provides a standardized interface (`IMemory`) for agents to store, retrieve, and query data persistently across different executions. It's accessible through the context object passed to agents:
 
+> **New:** The framework now also includes a **Working Memory & Cognitive Context API** for managing active cognitive state during task execution. See [Working Memory API](./working-memory-api.md) for details on goal tracking, thought management, and decision making.
+
 ```typescript
 // Inside the handleTask function of an agent
 async handleTask(ctx: TaskContext) {

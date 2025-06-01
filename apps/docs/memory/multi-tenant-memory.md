@@ -4,6 +4,8 @@
 
 The CallAgent framework provides comprehensive multi-tenant memory isolation, allowing multiple customers, organizations, or applications to use the same agent instances while maintaining complete data separation. This document covers the implementation, configuration, and usage of the multi-tenant memory system.
 
+> **Note:** Multi-tenant isolation applies to both long-term memory (semantic/episodic) and the new **Working Memory & Cognitive Context API**. See [Working Memory API](./working-memory-api.md) for details on tenant-aware cognitive state management.
+
 ## Benefits
 
 ### 🏢 Business Benefits

@@ -1,0 +1,11 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./",
+    "module": "NodeNext",
+    "target": "ES2022"
+  },
+  "include": ["*.ts"],
+  "exclude": ["dist", "node_modules"]
+} 

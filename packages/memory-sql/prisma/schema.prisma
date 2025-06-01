@@ -62,3 +62,61 @@ model EntityAlignment {
     @@index([tenantId, memoryKey]) // Index for tenant-scoped memory alignments
     @@map("entity_alignment")
 }
+
+// Working Memory Tables
+model WorkingMemorySession {
+    tenantId      String    @map("tenant_id")
+    agentId       String    @map("agent_id")
+    currentGoal   String?   @map("current_goal")
+    goalTimestamp DateTime? @map("goal_timestamp")
+    createdAt     DateTime  @default(now()) @map("created_at")
+    updatedAt     DateTime  @updatedAt @map("updated_at")
+
+    @@id([tenantId, agentId]) // Compound primary key for tenant + agent isolation
+    @@index([tenantId]) // Index for tenant-scoped queries
+    @@map("working_memory_sessions")
+}
+
+model WorkingMemoryThought {
+    id                 String   @id @default(cuid())
+    tenantId           String   @map("tenant_id")
+    agentId            String   @map("agent_id")
+    content            String
+    type               String   @default("thought") // 'thought', 'observation', 'decision', 'internal'
+    timestamp          DateTime
+    processingMetadata Json?    @map("processing_metadata") // MLO processing history
+    createdAt          DateTime @default(now()) @map("created_at")
+
+    @@index([tenantId, agentId, timestamp]) // Index for chronological queries
+    @@index([tenantId]) // Index for tenant-scoped queries
+    @@map("working_memory_thoughts")
+}
+
+model WorkingMemoryDecision {
+    tenantId    String   @map("tenant_id")
+    agentId     String   @map("agent_id")
+    decisionKey String   @map("decision_key")
+    decision    String
+    reasoning   String?
+    timestamp   DateTime
+    createdAt   DateTime @default(now()) @map("created_at")
+
+    @@id([tenantId, agentId, decisionKey]) // Compound primary key
+    @@index([tenantId]) // Index for tenant-scoped queries
+    @@index([tenantId, agentId]) // Index for agent-scoped queries
+    @@map("working_memory_decisions")
+}
+
+model WorkingMemoryVariable {
+    tenantId      String   @map("tenant_id")
+    agentId       String   @map("agent_id")
+    variableKey   String   @map("variable_key")
+    variableValue Json     @map("variable_value")
+    createdAt     DateTime @default(now()) @map("created_at")
+    updatedAt     DateTime @updatedAt @map("updated_at")
+
+    @@id([tenantId, agentId, variableKey]) // Compound primary key
+    @@index([tenantId]) // Index for tenant-scoped queries
+    @@index([tenantId, agentId]) // Index for agent-scoped queries
+    @@map("working_memory_variables")
+}

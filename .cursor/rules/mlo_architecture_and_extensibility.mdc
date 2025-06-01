@@ -1,0 +1,380 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# callAgent MLO Architecture & Extensibility Guide
+
+## 1. Introduction
+
+This guide provides a comprehensive overview of the callAgent Memory Lifecycle Orchestrator (MLO) system. It details how to integrate various memory types, extend lifecycle stages, and leverage the full capabilities of the framework for building sophisticated AI agents with robust memory.
+
+The MLO processes all memory operations through a 6-stage pipeline:
+1.  **Acquisition**: Capturing raw data and initial filtering.
+2.  **Encoding**: Transforming inputs into structured representations.
+3.  **Derivation**: Extracting higher-level insights (reflection, summarization, etc.).
+4.  **Retrieval**: Indexing and matching memories.
+5.  **Neural Memory**: Specialized neural architectures for associative recall or parametric storage.
+6.  **Utilization**: Using memories for RAG, long-context modeling, and hallucination mitigation.
+
+## 2. Understanding Memory Types in callAgent
+
+callAgent supports several memory types, mirroring human cognitive functions:
+
+### 2.1. Sensory Memory
+
+Captures immediate, raw perceptual inputs.
+*   **Text-based Sensory Memory**: Ingests raw text, performs lightweight filtering.
+*   **Multi-modal Sensory Memory**: Incorporates visual, auditory, or other sensor streams.
+
+**Extensibility**:
+*   Currently, sensory memory processing is largely embedded within the initial phases of the **Acquisition Stage** of the MLO.
+*   To integrate custom sensory pre-processors (e.g., a new speech-to-text engine, specialized image classifiers before main MLO filtering):
+    *   These would typically operate *before* creating a `MemoryItem` and passing it to `UnifiedMemoryService`.
+    *   Alternatively, a highly specialized sensory processor could be implemented as a custom **Acquisition Filter** (see Section 4.1.1).
+
+### 2.2. Short-Term Memory (STM)
+
+Maintains recently relevant items for ongoing reasoning.
+
+*   **2.2.1. Context Memory (LLM Native)**:
+    *   Utilizes the LLM's native context window (e.g., token limit).
+    *   Managed by strategies like sliding windows or tools like MemGPT, often abstracted from the LTM backend developer.
+*   **2.2.2. Working Memory (MLO Managed)**:
+    *   Actively retrieves, manipulates, and integrates facts or partial inferences.
+    *   Managed by `UnifiedMemoryService` and `WorkingMemoryManager` via the MLO pipeline.
+    *   Accessed via `TaskContext` methods: `setGoal`, `addThought`, `makeDecision`, `setVariable`/`getVariable` (`ctx.vars.*`). (See Section 5 for details).
+
+### 2.3. Long-Term Memory (LTM)
+
+Stores information that persists across sessions. Developers primarily integrate backends for these LTM types.
+
+*   **2.3.1. Semantic Memory**:
+    *   Stores structured, queryable knowledge (facts, user profiles, concepts).
+    *   Requires a `SemanticMemoryBackend` implementation.
+*   **2.3.2. Episodic Memory**:
+    *   Logs specific past events or interaction histories with timestamps.
+    *   Requires an `EpisodicMemoryBackend` implementation.
+*   **2.3.3. Embed Memory (Vector Memory)**:
+    *   Stores vector representations (embeddings) for similarity search.
+    *   Requires an `EmbedMemoryBackend` implementation.
+*   **2.3.4. Procedural Memory**:
+    *   Stores routines, skills, or executable code modules.
+    *   **Integration Strategy**: The framework does not currently define a distinct `ProceduralMemoryBackend`. Options for integration:
+        1.  **Specialized Semantic Entries**: Store skills/scripts as structured JSON or text in Semantic Memory with specific tags/namespaces (e.g., `skill:my_function_name`). The agent logic would retrieve and execute these.
+        2.  **Plugin/Skill System**: Manage procedures through a dedicated plugin or skill registration system, potentially storing skill metadata in Semantic Memory.
+        3.  **Future Distinct Backend**: A future `ProceduralMemoryBackend` could be defined if complex storage/management needs arise (e.g., versioning, dependency tracking for skills).
+    *   The `UnifiedMemoryService` does not have dedicated methods for procedural memory; its storage and retrieval would be handled via Semantic Memory calls or a custom agent capability.
+
+## 3. Integrating LTM Backend Adapters
+
+This section details how to implement and register backend adapters for Semantic, Episodic, and Embed LTM.
+
+### 3.1. Required Interfaces (from `@callagent/types`)
+
+*   **`SemanticMemoryBackend`**:
+    ```typescript
+    type SemanticMemoryBackend = {
+      get<T>(key: string, opts?: { backend?: string }): Promise<T | null>;
+      getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
+      set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
+      delete(key: string, opts?: { backend?: string }): Promise<void>;
+      entities?: { /* ... entity alignment methods ... */ };
+    };
+    ```
+*   **`EpisodicMemoryBackend`**:
+    ```typescript
+    type EpisodicMemoryBackend = {
+      append<T>(event: T, opts?: { backend?: string, tags?: string[] }): Promise<void>;
+      getEvents<T>(filter?: MemoryQueryOptions & { backend?: string }): Promise<Array<MemoryQueryResult<T>>>;
+      deleteEvent(id: string, opts?: { backend?: string }): Promise<void>;
+    };
+    ```
+*   **`EmbedMemoryBackend`**:
+    ```typescript
+    type EmbedMemoryBackend = {
+      upsert<T>(key: string, embedding: number[], value: T, opts?: { backend?: string }): Promise<void>;
+      queryByVector<T>(vector: number[], opts?: { backend?: string, limit?: number }): Promise<Array<MemoryQueryResult<T>>>;
+      delete(key: string, opts?: { backend?: string }): Promise<void>;
+    };
+    ```
+    *(Refer to `@callagent/types/IMemory.ts` for full type definitions of `GetManyInput`, `MemorySetOptions`, etc.)*
+
+### 3.2. Package Structure for `memory-[backend-name]`
+
+```
+packages/memory-[backend-name]/
+├── src/
+│   ├── index.ts                    # Main exports
+│   ├── adapters/
+│   │   ├── SemanticAdapter.ts     # YourSemanticAdapter implementation
+│   │   ├── EpisodicAdapter.ts     # YourEpisodicAdapter implementation
+│   │   └── EmbedAdapter.ts        # YourEmbedAdapter implementation
+│   ├── types.ts                    # Backend-specific types
+│   ├── config.ts                   # Backend-specific configuration helpers
+│   └── utils/                      # Shared utilities for this backend
+├── tests/
+│   ├── adapters/                   # Unit tests for each adapter
+│   └── integration.test.ts         # MLO integration tests
+├── package.json
+└── README.md
+```
+
+### 3.3. Adapter Implementation Examples
+
+*(These are conceptual skeletons. Replace `YourClient`, `YourVectorClient`, and internal logic with your specific backend details.)*
+
+*   **`YourSemanticAdapter.ts`**:
+    ```typescript
+    import { SemanticMemoryBackend, /* other types */ } from '@callagent/types';
+    // ... other imports ...
+    export class YourSemanticAdapter implements SemanticMemoryBackend {
+      constructor(
+        private client: YourClient, // Your database/service client
+        private embedFunction?: (text: string) => Promise<number[]>, // For entity alignment
+        private config: YourBackendConfig = {}
+      ) {}
+      async get<T>(key: string, opts?: { backend?: string }): Promise<T | null> { /* ... tenant-aware logic ... */ }
+      async getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> { /* ... tenant-aware logic ... */ }
+      async set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void> {
+        if (opts?.entities && this.embedFunction) { /* ... handle entity alignment ... */ }
+        else { /* ... regular set ... */ }
+      }
+      async delete(key: string, opts?: { backend?: string }): Promise<void> { /* ... tenant-aware logic ... */ }
+      get entities() {
+        if (!this.embedFunction) throw new Error('Embedding function required for entities');
+        return { /* ... unlink, realign, stats implementations ... */ };
+      }
+      // Private helpers for addAlignedProxies, setWithEntityAlignment, getByPattern etc.
+    }
+    ```
+
+*   **`YourEpisodicAdapter.ts`**:
+    ```typescript
+    import { EpisodicMemoryBackend, /* other types */ } from '@callagent/types';
+    export class YourEpisodicAdapter implements EpisodicMemoryBackend {
+      constructor(private client: YourClient, private config: YourBackendConfig = {}) {}
+      async append<T>(event: T, opts?: { backend?: string, tags?: string[] }): Promise<void> { /* ... tenant-aware logic ... */ }
+      async getEvents<T>(filter?: MemoryQueryOptions & { backend?: string }): Promise<Array<MemoryQueryResult<T>>> { /* ... tenant-aware logic ... */ }
+      async deleteEvent(id: string, opts?: { backend?: string }): Promise<void> { /* ... tenant-aware logic ... */ }
+    }
+    ```
+
+*   **`YourEmbedAdapter.ts`**:
+    ```typescript
+    import { EmbedMemoryBackend, /* other types */ } from '@callagent/types';
+    export class YourEmbedAdapter implements EmbedMemoryBackend {
+      constructor(private client: YourVectorClient, private config: YourBackendConfig = {}) {}
+      async upsert<T>(key: string, embedding: number[], value: T, opts?: { backend?: string }): Promise<void> { /* ... tenant-aware logic ... */ }
+      async queryByVector<T>(vector: number[], opts?: { backend?: string, limit?: number }): Promise<Array<MemoryQueryResult<T>>> { /* ... tenant-aware logic ... */ }
+      async delete(key: string, opts?: { backend?: string }): Promise<void> { /* ... tenant-aware logic ... */ }
+    }
+    ```
+
+### 3.4. Memory Factory Registration (`packages/core/src/core/memory/factory.ts`)
+
+Register your adapters so the system can instantiate them based on configuration.
+
+```typescript
+import { IMemory, SemanticMemoryRegistry, EpisodicMemoryRegistry, EmbedMemoryRegistry } from '@callagent/types';
+// ... other imports ...
+
+export async function getMemoryAdapter(tenantId?: string, embedFunction?: (text: string) => Promise<number[]>): Promise<IMemory> {
+    const adapterType = process.env.MEMORY_ADAPTER || 'sql'; // Example: 'sql', 'your-backend'
+
+    if (adapterType === 'your-backend') {
+        const { YourClient, YourVectorClient } = await import('your-client-library'); // Your actual client library
+        const { 
+            YourSemanticAdapter, 
+            YourEpisodicAdapter, 
+            YourEmbedAdapter 
+        } = await import('@callagent/memory-your-backend'); // Your adapter package
+
+        const client = new YourClient(/* connectionString, config */);
+        const vectorClient = new YourVectorClient(/* connectionString, config */);
+        
+        const backendConfig = { defaultTenantId: tenantId };
+
+        const semanticAdapter = new YourSemanticAdapter(client, embedFunction, backendConfig);
+        const episodicAdapter = new YourEpisodicAdapter(client, backendConfig);
+        const embedAdapter = new YourEmbedAdapter(vectorClient, backendConfig);
+
+        return {
+            semantic: new SemanticMemoryRegistry({ 'your-backend-default': semanticAdapter }, 'your-backend-default'),
+            episodic: new EpisodicMemoryRegistry({ 'your-backend-default': episodicAdapter }, 'your-backend-default'),
+            embed: new EmbedMemoryRegistry({ 'your-backend-default': embedAdapter }, 'your-backend-default'),
+        };
+    }
+    // ... other existing adapter instantiations (e.g., for 'sql')
+    throw new Error(`Unsupported memory adapter type: ${adapterType}`);
+}
+```
+*Note: The `MemoryRegistry` types (e.g., `SemanticMemoryRegistry`) are provided by `@callagent/types` or `@callagent/core` and typically take a map of named backend instances and a default backend name.*
+
+### 3.5. MLO Backend Wrapper Integration
+
+The MLO system uses wrappers (`MLOSemanticBackend`, `MLOEpisodicBackend`, `MLOEmbedBackend` from `@callagent/core`) to route operations through the `UnifiedMemoryService` and its MLO pipeline. These wrappers are instantiated in `extendContextWithMemory` in `@callagent/core`.
+
+```typescript
+// In packages/core/src/core/context/workingMemoryContext.ts
+// ...
+const unifiedMemory = new UnifiedMemoryService(tenantId, {
+    memoryLifecycleConfig, // Loaded based on MEMORY_PROFILE
+    semanticAdapter: rawMemoryAdapter.semantic.backends[rawMemoryAdapter.semantic.getDefaultBackend()], // Your registered adapter
+    episodicAdapter: rawMemoryAdapter.episodic.backends[rawMemoryAdapter.episodic.getDefaultBackend()],
+    embedAdapter: rawMemoryAdapter.embed.backends[rawMemoryAdapter.embed.getDefaultBackend()],
+    agentId
+});
+
+context.memory = {
+    semantic: new SemanticMemoryRegistry(
+        { mlo: new MLOSemanticBackend(unifiedMemory, /* pass your semanticAdapter here for entity alignment */) },
+        'mlo'
+    ),
+    episodic: new EpisodicMemoryRegistry(
+        { mlo: new MLOEpisodicBackend(unifiedMemory) },
+        'mlo'
+    ),
+    embed: new EmbedMemoryRegistry(
+        { mlo: new MLOEmbedBackend(unifiedMemory) },
+        'mlo'
+    )
+};
+// ...
+```
+Ensure your `SemanticMemoryBackend` instance (if it supports entity alignment) is passed as the second argument to `MLOSemanticBackend` constructor.
+
+### 3.6. Flow of Operations Through MLO vs. Direct Adapter Access
+
+*   **Operations Processed Through MLO Pipeline**:
+    *   Semantic: `set` (non-entity), `getMany`
+    *   Episodic: `append`
+    *   Embed: `upsert`
+    *   Working Memory: All operations (`setGoal`, `addThought`, etc.) via `UnifiedMemoryService`.
+*   **Operations Bypassing MLO (Direct Adapter Access for performance/specificity)**:
+    *   Semantic: Single `get`, `delete`, all `entities` operations.
+    *   Episodic: `getEvents`, `deleteEvent`.
+    *   Embed: `queryByVector`, `delete`.
+
+## 4. Extending MLO Lifecycle Stages
+
+You can provide custom implementations for components within each of the 6 MLO stages.
+
+### 4.1. General Principles
+
+*   **Interfaces**: Each stage component typically implements an interface (e.g., `IFilter`, `ICompressor`) derived from `IStageProcessor`. These are found in `packages/core/src/core/memory/lifecycle/interfaces/`.
+*   **Configuration**: Custom implementations are registered in the `MemoryLifecycleConfig` (usually defined in `packages/core/src/core/memory/lifecycle/config/profiles/`), often by setting `implementation: 'custom'` and providing `customInstance: new YourCustomComponent()`.
+
+### 4.2. Stage-by-Stage Extensibility
+
+(Interfaces are in `@callagent/core/src/core/memory/lifecycle/interfaces`)
+
+*   **4.2.1. Acquisition Stage (`IAcquisitionStage`)**
+    *   **Purpose**: Ingests raw items, filters, compresses, and consolidates.
+    *   **Components & Interfaces**:
+        *   `IFilter`: Determines if an item should be processed.
+        *   `ICompressor`: Reduces item size.
+        *   `IConsolidator`: Merges related items.
+    *   **Example Custom Filter**:
+        ```typescript
+        // YourCustomFilter.ts
+        import { IFilter, MemoryItem } from '@callagent/core';
+        export class YourCustomFilter implements IFilter {
+            readonly stageName = 'acquisition';
+            readonly componentName = 'filter';
+            readonly processorName = 'YourCustomFilter';
+            isEnabled = true;
+            async process(item: MemoryItem<unknown>): Promise<MemoryItem<unknown> | null> {
+                if (JSON.stringify(item.data).length > 100000) return null; // Example
+                return item;
+            }
+            configure(config: any): void {}
+        }
+        // Configuration in a memory profile:
+        // acquisition: { filter: { implementation: 'custom', customInstance: new YourCustomFilter() } }
+        ```
+
+*   **4.2.2. Encoding Stage (`IEncodingStage`)**
+    *   **Purpose**: Transforms items into structured representations.
+    *   **Components & Interfaces**:
+        *   `IAttentionScorer`: Ranks memory candidates.
+        *   `IMultimodalFusion`: Aligns and merges features from different modalities.
+    *   **Extensibility**: Implement `IAttentionScorer` or `IMultimodalFusion` and register.
+
+*   **4.2.3. Derivation Stage (`IDerivationStage`)**
+    *   **Purpose**: Extracts higher-level insights.
+    *   **Components & Interfaces**:
+        *   `IReflectionProcessor`: Identifies patterns, lessons from past memories.
+        *   `ISummarizationProcessor`: Condenses lengthy content.
+        *   `IKnowledgeDistillationProcessor`: Reduces low-level facts into rules/prototypes.
+        *   `IForgettingProcessor`: Removes outdated or irrelevant memories.
+    *   **Extensibility**: Implement and register any of these processor interfaces.
+
+*   **4.2.4. Retrieval Stage (`IRetrievalStage`)**
+    *   **Purpose**: Locates relevant memories.
+    *   **Components & Interfaces**:
+        *   `IIndexingProcessor`: Builds efficient data structures for lookups (often tied to backend).
+        *   `IMatchingProcessor`: Finds relevant memories for a query.
+    *   **Extensibility**: While indexing is often backend-specific, custom `IMatchingProcessor` could implement novel similarity or relevance scoring.
+
+*   **4.2.5. Neural Memory Stage (`INeuralMemoryStage`)**
+    *   **Purpose**: Integrates specialized neural architectures.
+    *   **Components & Interfaces**:
+        *   `IAssociativeMemory`: For recall based on partial/noisy cues (e.g., Hopfield nets).
+        *   `IParameterIntegration`: For embedding memory into model weights.
+    *   **Extensibility**: This is an advanced area. If the framework supports pluggable neural modules, implement these interfaces.
+
+*   **4.2.6. Utilization Stage (`IUtilizationStage`)**
+    *   **Purpose**: Uses retrieved memories to inform agent actions.
+    *   **Components & Interfaces**:
+        *   `IRAGProcessor`: Implements Retrieval-Augmented Generation logic.
+        *   `ILongContextProcessor`: Manages long dialogues/documents.
+        *   `IHallucinationMitigationProcessor`: Verifies or constrains generations.
+    *   **Extensibility**: Implement and register custom processors for these tasks.
+
+## 5. Working Memory Deep Dive
+
+Working memory is crucial for an agent's active reasoning and task execution.
+
+*   **MLO-Managed**: Handled by `UnifiedMemoryService` and `WorkingMemoryManager` within `@callagent/core`. **No separate backend adapter is needed from the integrator.**
+*   **`TaskContext` API**: Agents interact with working memory via methods on the `ctx` object:
+    *   `ctx.setGoal(goal: string)`
+    *   `ctx.getGoal(): Promise<string | null>`
+    *   `ctx.addThought(thought: string)`
+    *   `ctx.getThoughts(): Promise<ThoughtEntry[]>`
+    *   `ctx.makeDecision(key: string, decision: string, reasoning?: string)`
+    *   `ctx.getDecision(key: string): Promise<DecisionEntry | null>`
+    *   `ctx.vars.<your_var_name> = value` (via `setWorkingVariable`)
+    *   `ctx.vars.<your_var_name>` (via `getWorkingVariable`)
+*   **MLO Pipeline Flow**: All these operations create `MemoryItem` instances that are processed through the MLO pipeline, configured by the active `MEMORY_PROFILE`. This allows for compression, reflection, etc., on working memory elements too.
+*   **Persistence**: The `WorkingMemoryManager` (via `WorkingMemoryStore`) typically serializes its state to be persisted. This persistence itself might leverage one of the LTM backends (e.g., semantic memory) if configured, or could be a simple file/object store depending on the `WorkingMemoryStore` implementation. The current `WorkingMemoryStore` is in-memory during an agent run but relies on the agent runner or orchestrator to save/load its serialized state.
+
+## 6. Configuration and Profiles
+
+*   **Environment Variables**:
+    *   `MEMORY_ADAPTER`: (e.g., `sql`, `your-backend`) Selects the LTM adapter via the factory.
+    *   `YOUR_CONNECTION_STRING`, `YOUR_VECTOR_CONNECTION`: Backend-specific.
+    *   `EMBEDDING_PROVIDER`, `OPENAI_API_KEY` (or other provider keys): For embedding functions used in Entity Alignment and potentially other MLO stages.
+    *   `MEMORY_PROFILE`: (e.g., `minimal`, `optimized`, `research`, `experimental`) Selects a pre-defined `MemoryLifecycleConfig` for the MLO pipeline. Found in `packages/core/src/core/memory/lifecycle/config/profiles/`.
+*   **Custom MLO Profiles**: Developers can create new profile files or directly construct a `MemoryLifecycleConfig` object to finely tune every stage and component of the MLO pipeline.
+
+## 7. Testing Strategies
+
+*   **Adapter Unit Tests**: For each LTM adapter (`Semantic`, `Episodic`, `Embed`), write unit tests mocking its specific client (e.g., mock database client) to verify its core logic against the required interfaces.
+*   **Lifecycle Component Unit Tests**: If you implement custom MLO stage components (e.g., a custom `ICompressor`), unit test them in isolation.
+*   **MLO Integration Tests**:
+    *   Use `createTestContext` (or similar test utility) to get a `TaskContext` with a fully initialized MLO pipeline.
+    *   Test that operations on `ctx.memory.semantic`, `ctx.memory.episodic`, `ctx.memory.embed`, and working memory methods (`ctx.setGoal`, etc.) behave as expected.
+    *   Verify that data flows correctly through the MLO pipeline (e.g., a `set` operation on semantic memory indeed invokes configured acquisition, encoding, etc. stages).
+    *   Test entity alignment through the `MLOSemanticBackend` if your semantic adapter supports it.
+
+## 8. Advanced Topics & Best Practices
+
+*   **Tenant Isolation**: Ensure all adapter operations and custom lifecycle components are strictly tenant-aware. `UnifiedMemoryService` and MLO core are designed with tenantId propagation.
+*   **Asynchronous Operations**: All adapter methods and MLO stage processors must be `async`.
+*   **Error Handling**: Implement robust error handling in adapters and custom components.
+*   **Performance**: Consider caching, batch operations, and efficient querying within your backend adapters.
+*   **Idempotency**: Design operations to be idempotent where possible.
+*   **Observability**: Utilize the shared `logger` from `@callagent/utils` within your custom components and adapters for consistent logging. The MLO pipeline also has built-in metrics.
+
+This guide provides a foundational understanding. Refer to the source code in `packages/core/src/core/memory/` and `packages/types/` for precise interface definitions and existing implementations.
