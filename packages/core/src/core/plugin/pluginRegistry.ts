@@ -35,4 +35,12 @@ export const getPlugin = (name: string): AgentPlugin | undefined => pluginRegist
  * List all registered plugins
  * @returns Array of all registered plugins
  */
-export const listPlugins = (): AgentPlugin[] => Array.from(pluginRegistry.values()); 
+export const listPlugins = (): AgentPlugin[] => Array.from(pluginRegistry.values());
+
+/**
+ * Clear all registered plugins (useful for testing)
+ */
+export const clearPlugins = (): void => {
+    registryLogger.debug('Clearing all registered plugins');
+    pluginRegistry.clear();
+}; 

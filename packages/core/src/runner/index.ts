@@ -123,7 +123,9 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
     const prismaClient = new PrismaClient();
-    const sqlAdapter = new MemorySQLAdapter(prismaClient);
+    const sqlAdapter = new MemorySQLAdapter(prismaClient, undefined, {
+        defaultTenantId: plugin.tenantId
+    });
     const semanticBackends = {
         sql: sqlAdapter,
     };
@@ -141,6 +143,7 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
     };
 
     const partialCtx: Omit<TaskContext, 'fail'> = {
+        tenantId: plugin.tenantId,
         task: {
             id: `local-task-${Date.now()}`,
             input: input,

@@ -148,6 +148,7 @@ export class TaskEngine {
         // This is a simplified version - a real implementation would
         // inject all required dependencies like LLM, tools, etc.
         return {
+            tenantId: 'default', // TODO: Get from agent/task context
             task: {
                 id: task.id,
                 input: task.input as TaskInput

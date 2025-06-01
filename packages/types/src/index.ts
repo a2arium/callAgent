@@ -6,4 +6,15 @@ export type {
     EpisodicMemoryBackend,
     EmbedMemoryBackend,
     MemoryRegistry,
-} from './IMemory.js'; 
+} from './IMemory.js';
+
+// Tenant-related types for multi-tenant support
+export type TenantContext = {
+    tenantId: string;
+    isSystemTenant?: boolean;
+};
+
+export type AgentConfig = {
+    tenantId?: string;
+    // Future: Additional agent configuration options
+}; 

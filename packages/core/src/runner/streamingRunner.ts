@@ -18,6 +18,7 @@ import { getMemoryAdapter } from '../core/memory/factory.js';
 import { SemanticMemoryRegistry } from '../core/memory/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../core/memory/EpisodicMemoryRegistry.js';
 import { EmbedMemoryRegistry } from '../core/memory/EmbedMemoryRegistry.js';
+import { resolveTenantId } from '../core/plugin/tenantResolver.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -29,6 +30,7 @@ type StreamingOptions = {
     isStreaming: boolean;
     outputType?: 'json' | 'sse' | 'console';
     outputFile?: string;
+    tenantId?: string; // CLI-specified tenant override
 };
 
 /**
@@ -102,8 +104,13 @@ export async function runAgentWithStreaming(
     }
 
     const agentName = plugin.manifest.name;
+
+    // Resolve final tenant ID using hierarchy: CLI override → agent tenantId → env → default
+    const explicitTenantId = options.tenantId || plugin.tenantId;
+    const finalTenantId = resolveTenantId(explicitTenantId);
+
     // Use base runner logger here
-    logInfoMethod.call(runnerLogger, `Running agent '${agentName}' (v${plugin.manifest.version}) with streaming=${options.isStreaming}`);
+    logInfoMethod.call(runnerLogger, `Running agent '${agentName}' (v${plugin.manifest.version}) with streaming=${options.isStreaming} and tenant=${finalTenantId}`);
 
     // --- Create Task Context ---
     const taskId = `local-task-${Date.now()}`;
@@ -119,8 +126,8 @@ export async function runAgentWithStreaming(
     // Create the agent-specific logger using the nested createLogger method
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
-    // Get the memory adapter instance
-    const memoryAdapter = await getMemoryAdapter();
+    // Get the memory adapter instance with resolved tenant context
+    const memoryAdapter = await getMemoryAdapter(finalTenantId);
     const semanticBackends = memoryAdapter.semantic.backends;
     // For now, only wire up semantic memory; stub the others for future extension
     const episodicBackends = {};
@@ -135,8 +142,9 @@ export async function runAgentWithStreaming(
         embed: new EmbedMemoryRegistry(embedBackends, ''), // TODO: Implement embed memory adapter
     };
 
-    // Create basic task context
+    // Create basic task context with resolved tenant information
     const partialCtx: Omit<TaskContext, 'fail'> = {
+        tenantId: finalTenantId,
         task: {
             id: taskId,
             input: input,

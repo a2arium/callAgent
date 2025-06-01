@@ -57,6 +57,7 @@ function parseArgs(): {
         isStreaming: boolean;
         outputType: 'json' | 'sse' | 'console';
         outputFile?: string;
+        tenantId?: string;
     };
 } {
     // Basic args (required)
@@ -66,8 +67,8 @@ function parseArgs(): {
     // Check for required agent file path
     if (!agentFileArg) {
         cliLogger.error(`Missing required argument: agent file path`);
-        console.error("Usage: yarn run-agent <path-to-agent-module.ts> [json-input-string] [--stream] [--format=json|sse]");
-        console.error(`Example: yarn run-agent examples/hello-agent/AgentModule.ts '{"name": "World"}' --stream --format=json`);
+        console.error("Usage: yarn run-agent <path-to-agent-module.ts> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id]");
+        console.error(`Example: yarn run-agent examples/hello-agent/AgentModule.ts '{"name": "World"}' --stream --format=json --tenant=customer-123`);
         process.exit(1);
     }
 
@@ -87,7 +88,8 @@ function parseArgs(): {
     const options = {
         isStreaming: false,
         outputType: 'console' as 'json' | 'sse' | 'console',
-        outputFile: undefined as string | undefined
+        outputFile: undefined as string | undefined,
+        tenantId: undefined as string | undefined
     };
 
     // Look for flags in remaining arguments
@@ -105,6 +107,13 @@ function parseArgs(): {
             }
         } else if (arg.startsWith('--output=')) {
             options.outputFile = arg.split('=')[1];
+        } else if (arg.startsWith('--tenant=')) {
+            options.tenantId = arg.split('=')[1];
+            if (!options.tenantId || options.tenantId.trim() === '') {
+                cliLogger.error(`Invalid tenant ID provided`);
+                console.error(`Tenant ID cannot be empty`);
+                process.exit(1);
+            }
         }
     }
 
@@ -112,7 +121,8 @@ function parseArgs(): {
         agentFilePath: agentFileArg,
         streaming: options.isStreaming,
         format: options.outputType,
-        outputFile: options.outputFile
+        outputFile: options.outputFile,
+        tenantId: options.tenantId || 'default (from agent/env)'
     });
 
     return {

@@ -10,13 +10,16 @@ generator client {
 }
 
 model AgentMemoryStore {
-    key       String                       @id
+    key       String
     value     Json
     tags      String[]
     embedding Unsupported("vector(1536)")? // pgvector type for embeddings
+    tenantId  String                       @default("default") @map("tenant_id")
     createdAt DateTime                     @default(now()) @map("created_at")
     updatedAt DateTime                     @updatedAt @map("updated_at")
 
+    @@id([tenantId, key]) // Compound primary key for tenant isolation
+    @@index([tenantId]) // Index for fast tenant-scoped queries
     @@map("agent_memory_store")
 }
 
@@ -28,13 +31,16 @@ model EntityStore {
     embedding     Unsupported("vector(1536)") // pgvector type for embeddings
     metadata      Json                        @default("{}") // Additional properties
     confidence    Float                       @default(1.0) // Overall confidence in this entity
+    tenantId      String                      @default("default") @map("tenant_id")
     createdAt     DateTime                    @default(now()) @map("created_at")
     updatedAt     DateTime                    @updatedAt @map("updated_at")
 
     // Relations
     alignments EntityAlignment[]
 
-    @@unique([entityType, canonicalName])
+    @@unique([tenantId, entityType, canonicalName]) // Updated to include tenantId
+    @@index([tenantId]) // Index for tenant-scoped entity queries
+    @@index([tenantId, entityType]) // Index for tenant-scoped entity type queries
     @@map("entity_store")
 }
 
@@ -45,11 +51,14 @@ model EntityAlignment {
     entityId      String   @map("entity_id") // Reference to EntityStore.id
     originalValue String   @map("original_value") // What user originally entered
     confidence    String // 'high', 'medium', 'low'
+    tenantId      String   @default("default") @map("tenant_id")
     alignedAt     DateTime @default(now()) @map("aligned_at")
 
     // Relations
     entity EntityStore @relation(fields: [entityId], references: [id], onDelete: Cascade)
 
-    @@unique([memoryKey, fieldPath])
+    @@unique([tenantId, memoryKey, fieldPath]) // Updated to include tenantId
+    @@index([tenantId]) // Index for tenant-scoped alignment queries
+    @@index([tenantId, memoryKey]) // Index for tenant-scoped memory alignments
     @@map("entity_alignment")
 }

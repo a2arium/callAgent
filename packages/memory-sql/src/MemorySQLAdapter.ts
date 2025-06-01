@@ -6,19 +6,39 @@ import { EntityAlignmentService } from './EntityAlignmentService.js';
 import { addAlignedProxies } from './AlignedValueProxy.js';
 import { FilterParser } from './FilterParser.js';
 
+// Define system tenant constants locally for this adapter
+const SYSTEM_TENANT = '__system__';
+const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT;
+
 export class MemorySQLAdapter implements SemanticMemoryBackend {
     private entityService?: EntityAlignmentService;
+    private defaultTenantId: string;
 
     constructor(
         private prisma: PrismaClient,
-        private embedFunction?: (text: string) => Promise<number[]>
+        private embedFunction?: (text: string) => Promise<number[]>,
+        private options: { defaultTenantId?: string } = {}
     ) {
+        this.defaultTenantId = options.defaultTenantId || 'default';
+
         if (embedFunction) {
-            this.entityService = new EntityAlignmentService(prisma, embedFunction);
+            this.entityService = new EntityAlignmentService(prisma, embedFunction, {
+                defaultThreshold: 0.6
+            });
         }
     }
 
     async set(key: string, value: any, options: MemorySetOptions = {}): Promise<void> {
+        const tenantId = options.tenantId || this.defaultTenantId;
+
+        // System tenant can set across tenants by prefixing key with tenant:
+        if (isSystemTenant(tenantId) && key.includes(':')) {
+            const [targetTenant, actualKey] = key.split(':', 2);
+            if (targetTenant && actualKey) {
+                return this.set(actualKey, value, { ...options, tenantId: targetTenant });
+            }
+        }
+
         // Check if entity alignment is requested and available
         if (options.entities && this.entityService) {
             await this.setWithEntityAlignment(key, value, options);
@@ -42,23 +62,25 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
         // Use raw SQL to handle vector type properly
         const embeddingLiteral = embedding ? `'[${embedding.join(',')}]'::vector` : 'NULL';
+        const tenantId = options.tenantId || this.defaultTenantId;
         await this.prisma.$executeRawUnsafe(`
-            INSERT INTO agent_memory_store (key, value, tags, embedding, created_at, updated_at)
+            INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
             VALUES (
                 $1,
-                $2::jsonb,
-                $3::text[],
+                $2,
+                $3::jsonb,
+                $4::text[],
                 ${embeddingLiteral},
                 NOW(),
                 NOW()
             )
-            ON CONFLICT (key) 
+            ON CONFLICT (tenant_id, key) 
             DO UPDATE SET 
                 value = EXCLUDED.value,
                 tags = EXCLUDED.tags,
                 embedding = EXCLUDED.embedding,
                 updated_at = NOW()
-        `, key, JSON.stringify(value), options.tags || []);
+        `, tenantId, key, JSON.stringify(value), options.tags || []);
     }
 
     private async setWithEntityAlignment(key: string, value: any, options: MemorySetOptions): Promise<void> {
@@ -66,13 +88,16 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             throw new Error('Entity alignment service not available');
         }
 
+        const tenantId = options.tenantId || this.defaultTenantId;
+
         // Parse entity fields from the value using static method
         const entityFields = EntityFieldParser.parseEntityFields(value, options.entities);
 
-        // Perform entity alignment
+        // Perform entity alignment with tenant context
         const alignments = await this.entityService.alignEntityFields(key, entityFields, {
             threshold: options.alignmentThreshold,
-            autoCreate: options.autoCreateEntities
+            autoCreate: options.autoCreateEntities,
+            tenantId: tenantId
         });
 
         // Generate embedding for the entire value
@@ -90,25 +115,36 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         // Store the memory entry with embedding
         const embeddingLiteral = embedding ? `'[${embedding.join(',')}]'::vector` : 'NULL';
         await this.prisma.$executeRawUnsafe(`
-            INSERT INTO agent_memory_store (key, value, tags, embedding, created_at, updated_at)
+            INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
             VALUES (
                 $1,
-                $2::jsonb,
-                $3::text[],
+                $2,
+                $3::jsonb,
+                $4::text[],
                 ${embeddingLiteral},
                 NOW(),
                 NOW()
             )
-            ON CONFLICT (key) 
+            ON CONFLICT (tenant_id, key) 
             DO UPDATE SET 
                 value = EXCLUDED.value,
                 tags = EXCLUDED.tags,
                 embedding = EXCLUDED.embedding,
                 updated_at = NOW()
-        `, key, JSON.stringify(value), options.tags || []);
+        `, tenantId, key, JSON.stringify(value), options.tags || []);
     }
 
-    async get(key: string): Promise<any> {
+    async get(key: string, opts?: { backend?: string; tenantId?: string }): Promise<any> {
+        const tenantId = opts?.tenantId || this.defaultTenantId;
+
+        // System tenant can query across all tenants by prefixing key with tenant:
+        if (isSystemTenant(tenantId) && key.includes(':')) {
+            const [targetTenant, actualKey] = key.split(':', 2);
+            if (targetTenant && actualKey) {
+                return this.get(actualKey, { ...opts, tenantId: targetTenant });
+            }
+        }
+
         const result = await this.prisma.$queryRaw<Array<{
             key: string;
             value: any;
@@ -118,7 +154,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         }>>`
             SELECT key, value, tags, created_at, updated_at
             FROM agent_memory_store 
-            WHERE key = ${key}
+            WHERE key = ${key} AND tenant_id = ${tenantId}
         `;
 
         if (result.length === 0) {
@@ -130,7 +166,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
         // If entity service is available, add aligned proxies
         if (this.entityService) {
-            const alignments = await this.getAlignmentsForMemory(key);
+            const alignments = await this.getAlignmentsForMemory(key, tenantId);
             if (Object.keys(alignments).length > 0) {
                 value = addAlignedProxies(value, alignments);
             }
@@ -139,7 +175,8 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         return value;
     }
 
-    private async getAlignmentsForMemory(memoryKey: string): Promise<Record<string, EntityAlignment>> {
+    private async getAlignmentsForMemory(memoryKey: string, tenantId?: string): Promise<Record<string, EntityAlignment>> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
         const alignmentResults = await this.prisma.$queryRaw<Array<{
             field_path: string;
             entity_id: string;
@@ -157,7 +194,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 es.canonical_name
             FROM entity_alignment ea
             JOIN entity_store es ON ea.entity_id = es.id
-            WHERE ea.memory_key = ${memoryKey}
+            WHERE ea.memory_key = ${memoryKey} AND ea.tenant_id = ${resolvedTenantId}
         `;
 
         const alignments: Record<string, EntityAlignment> = {};
@@ -275,14 +312,15 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         }
     }
 
-    async delete(key: string): Promise<void> {
+    async delete(key: string, opts?: { backend?: string; tenantId?: string }): Promise<void> {
+        const tenantId = opts?.tenantId || this.defaultTenantId;
         // Delete memory and associated alignments
         await this.prisma.$transaction(async (tx) => {
             await tx.$executeRaw`
-                DELETE FROM entity_alignment WHERE memory_key = ${key}
+                DELETE FROM entity_alignment WHERE memory_key = ${key} AND tenant_id = ${tenantId}
             `;
             await tx.$executeRaw`
-                DELETE FROM agent_memory_store WHERE key = ${key}
+                DELETE FROM agent_memory_store WHERE key = ${key} AND tenant_id = ${tenantId}
             `;
         });
     }
@@ -339,15 +377,24 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
      * Pattern matching implementation
      */
     private async queryByPattern<T>(pattern: string, options?: GetManyOptions): Promise<MemoryQueryResult<T>[]> {
+        const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+        const limit = options?.limit ?? 100;
+
+        // System tenant can query across all tenants by prefixing pattern with tenant:
+        if (isSystemTenant(tenantId) && pattern.includes(':')) {
+            const [targetTenant, actualPattern] = pattern.split(':', 2);
+            if (targetTenant && actualPattern) {
+                return this.queryByPattern(actualPattern, { ...options, tenantId: targetTenant });
+            }
+        }
+
         // Convert pattern to SQL LIKE pattern
         const sqlPattern = this.convertPatternToSQL(pattern);
-
-        const limit = options?.limit ?? 100;
 
         let query = `
             SELECT key, value, tags
             FROM agent_memory_store 
-            WHERE key LIKE $1
+            WHERE key LIKE $1 AND tenant_id = $2
         `;
 
         // Add ordering if specified
@@ -372,12 +419,12 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             key: string;
             value: any;
             tags: string[];
-        }>>(query, sqlPattern);
+        }>>(query, sqlPattern, tenantId);
 
         // Add aligned proxies to results if entity service is available
         if (this.entityService) {
             for (const result of results) {
-                const alignments = await this.getAlignmentsForMemory(result.key);
+                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
                 if (Object.keys(alignments).length > 0) {
                     result.value = addAlignedProxies(result.value, alignments);
                 }
@@ -435,15 +482,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
     private async querySimple<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
         const { tag, limit = 100 } = options;
+        const tenantId = (options as any)?.tenantId || this.defaultTenantId;
 
         let query = `
             SELECT key, value, tags
             FROM agent_memory_store 
+            WHERE tenant_id = $1
         `;
-        const queryParams: any[] = [];
+        const queryParams: any[] = [tenantId];
 
         if (tag) {
-            query += ' WHERE $1 = ANY(tags)';
+            query += ' AND $2 = ANY(tags)';
             queryParams.push(tag);
         }
 
@@ -458,7 +507,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         // Add aligned proxies to results if entity service is available
         if (this.entityService) {
             for (const result of results) {
-                const alignments = await this.getAlignmentsForMemory(result.key);
+                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
                 if (Object.keys(alignments).length > 0) {
                     result.value = addAlignedProxies(result.value, alignments);
                 }
@@ -473,9 +522,12 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
     private async queryWithFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
         const { tag, filters, limit = 100 } = options;
+        const tenantId = (options as any)?.tenantId || this.defaultTenantId;
 
         // Build Prisma query conditions
-        const whereConditions: any = {};
+        const whereConditions: any = {
+            tenantId: tenantId  // Always filter by tenant
+        };
 
         // Handle tag filtering
         if (tag) {
@@ -519,7 +571,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             let value = result.value;
 
             if (this.entityService) {
-                const alignments = await this.getAlignmentsForMemory(result.key);
+                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
                 if (Object.keys(alignments).length > 0) {
                     value = addAlignedProxies(value, alignments);
                 }

@@ -25,7 +25,7 @@
     "run-agent": "yarn turbo run build && node packages/core/dist/runner/runnerCli.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "run:llm": "yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{\"prompt\": \"Tell me a joke about AI.\"}'",
-    "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream",
+    "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream --tenant=customer-123",
     "clean": "find . -type d -name dist -exec rm -rf {} +"
   },
   "keywords": [

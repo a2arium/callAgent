@@ -102,6 +102,7 @@ describe('MemorySQLAdapter', () => {
 
             expect(prismaMock.$executeRawUnsafe).toHaveBeenCalledWith(
                 expect.stringContaining('INSERT INTO agent_memory_store'),
+                'default', // tenantId
                 key,
                 JSON.stringify(value),
                 tags

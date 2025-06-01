@@ -51,6 +51,8 @@ export type TaskLogger = {
 
 // --- Task Context (Interface for agent task handling) ---
 export type TaskContext = {
+    // Tenant context for multi-tenant operations
+    tenantId: string;
     task: {
         id: string;
         input: TaskInput;

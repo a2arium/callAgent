@@ -34,6 +34,7 @@ export type MemorySetOptions = {
     alignmentThreshold?: number;  // Override default threshold
     autoCreateEntities?: boolean; // Default: true
     backend?: string;             // Backend selection
+    tenantId?: string;            // Tenant context for memory operations
 };
 
 export type ParsedEntityField = {
@@ -66,6 +67,7 @@ export type GetManyOptions = {
         direction: 'asc' | 'desc';
     };
     backend?: string;
+    tenantId?: string;            // Tenant context for query operations
 };
 
 export type GetManyQuery = {
@@ -77,6 +79,7 @@ export type GetManyQuery = {
         direction: 'asc' | 'desc';
     };
     backend?: string;
+    tenantId?: string;            // Tenant context for query operations
 };
 
 // Union type for getMany parameter

@@ -19,9 +19,10 @@ export class EntityAlignmentService {
     async alignEntityFields(
         memoryKey: string,
         entityFields: ParsedEntityField[],
-        options: { threshold?: number; autoCreate?: boolean } = {}
+        options: { threshold?: number; autoCreate?: boolean; tenantId?: string } = {}
     ): Promise<Record<string, EntityAlignment | null>> {
         const results: Record<string, EntityAlignment | null> = {};
+        const tenantId = options.tenantId || 'default';
 
         for (const field of entityFields) {
             // Priority: field-specific threshold > global override > default
@@ -33,7 +34,8 @@ export class EntityAlignmentService {
                 memoryKey,
                 field,
                 threshold,
-                options.autoCreate ?? true
+                options.autoCreate ?? true,
+                tenantId
             );
 
             results[field.fieldName] = alignment;
@@ -49,7 +51,8 @@ export class EntityAlignmentService {
         memoryKey: string,
         field: ParsedEntityField,
         threshold: number,
-        autoCreate: boolean
+        autoCreate: boolean,
+        tenantId: string = 'default'
     ): Promise<EntityAlignment | null> {
         alignmentLogger.debug(`Aligning entity: "${field.value}" (type: ${field.entityType}, threshold: ${threshold})`);
 
@@ -66,7 +69,8 @@ export class EntityAlignmentService {
         const matches = await this.findSimilarEntities(
             field.entityType,
             embedding,
-            threshold
+            threshold,
+            tenantId
         );
 
         let entityId: string;
@@ -83,14 +87,15 @@ export class EntityAlignmentService {
             alignmentLogger.debug(`Aligned "${field.value}" → "${canonicalName}" (similarity: ${bestMatch.similarity.toFixed(3)})`);
 
             // Update entity with new alias if not already present
-            await this.addAliasToEntity(entityId, field.value);
+            await this.addAliasToEntity(entityId, field.value, tenantId);
         } else if (autoCreate) {
             // Create new entity
             alignmentLogger.debug(`Creating new entity for "${field.value}"`);
             const newEntity = await this.createNewEntity(
                 field.value,
                 field.entityType,
-                embedding
+                embedding,
+                tenantId
             );
             entityId = newEntity.entityId;
             canonicalName = newEntity.canonicalName;
@@ -106,7 +111,8 @@ export class EntityAlignmentService {
             field.fieldName,
             entityId,
             field.value,
-            confidence
+            confidence,
+            tenantId
         );
 
         return {
@@ -121,7 +127,8 @@ export class EntityAlignmentService {
     private async findSimilarEntities(
         entityType: string,
         embedding: number[],
-        threshold: number
+        threshold: number,
+        tenantId: string = 'default'
     ): Promise<EntityMatch[]> {
         alignmentLogger.debug(`Searching for similar entities of type "${entityType}" with threshold ${threshold}`);
 
@@ -136,7 +143,7 @@ export class EntityAlignmentService {
                 canonical_name,
                 1 - (embedding <=> ${embedding}::vector) as similarity
             FROM entity_store 
-            WHERE entity_type = ${entityType}
+            WHERE entity_type = ${entityType} AND tenant_id = ${tenantId}
             ORDER BY embedding <=> ${embedding}::vector
             LIMIT 10
         `;
@@ -166,11 +173,12 @@ export class EntityAlignmentService {
     private async createNewEntity(
         value: string,
         entityType: string,
-        embedding: number[]
+        embedding: number[],
+        tenantId: string = 'default'
     ): Promise<{ entityId: string; canonicalName: string }> {
         // Use raw SQL to create entity since Prisma types don't handle vector properly
         const result = await this.prisma.$queryRaw<Array<{ id: string }>>`
-            INSERT INTO entity_store (id, entity_type, canonical_name, aliases, embedding, metadata, confidence, created_at, updated_at)
+            INSERT INTO entity_store (id, entity_type, canonical_name, aliases, embedding, metadata, confidence, tenant_id, created_at, updated_at)
             VALUES (
                 gen_random_uuid()::text,
                 ${entityType},
@@ -179,6 +187,7 @@ export class EntityAlignmentService {
                 ${embedding}::vector,
                 '{}'::jsonb,
                 1.0,
+                ${tenantId},
                 NOW(),
                 NOW()
             )
@@ -191,12 +200,12 @@ export class EntityAlignmentService {
         };
     }
 
-    private async addAliasToEntity(entityId: string, alias: string): Promise<void> {
+    private async addAliasToEntity(entityId: string, alias: string, tenantId: string = 'default'): Promise<void> {
         // Check if alias already exists and add if not
         await this.prisma.$executeRaw`
             UPDATE entity_store 
             SET aliases = array_append(aliases, ${alias})
-            WHERE id = ${entityId} 
+            WHERE id = ${entityId} AND tenant_id = ${tenantId}
             AND NOT (${alias} = ANY(aliases))
         `;
     }
@@ -206,12 +215,13 @@ export class EntityAlignmentService {
         fieldPath: string,
         entityId: string,
         originalValue: string,
-        confidence: 'high' | 'medium' | 'low'
+        confidence: 'high' | 'medium' | 'low',
+        tenantId: string = 'default'
     ): Promise<void> {
         await this.prisma.$executeRaw`
-            INSERT INTO entity_alignment (id, memory_key, field_path, entity_id, original_value, confidence, aligned_at)
-            VALUES (gen_random_uuid()::text, ${memoryKey}, ${fieldPath}, ${entityId}, ${originalValue}, ${confidence}, NOW())
-            ON CONFLICT (memory_key, field_path) 
+            INSERT INTO entity_alignment (id, tenant_id, memory_key, field_path, entity_id, original_value, confidence, aligned_at)
+            VALUES (gen_random_uuid()::text, ${tenantId}, ${memoryKey}, ${fieldPath}, ${entityId}, ${originalValue}, ${confidence}, NOW())
+            ON CONFLICT (tenant_id, memory_key, field_path) 
             DO UPDATE SET 
                 entity_id = EXCLUDED.entity_id,
                 original_value = EXCLUDED.original_value,
@@ -221,21 +231,22 @@ export class EntityAlignmentService {
     }
 
     // Manual override methods
-    async unlinkEntity(memoryKey: string, fieldPath: string): Promise<void> {
+    async unlinkEntity(memoryKey: string, fieldPath: string, tenantId: string = 'default'): Promise<void> {
         await this.prisma.$executeRaw`
             DELETE FROM entity_alignment 
-            WHERE memory_key = ${memoryKey} AND field_path = ${fieldPath}
+            WHERE memory_key = ${memoryKey} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
         `;
     }
 
     async forceRealign(
         memoryKey: string,
         fieldPath: string,
-        newEntityId: string
+        newEntityId: string,
+        tenantId: string = 'default'
     ): Promise<void> {
         // Check if entity exists
         const entity = await this.prisma.$queryRaw<Array<{ id: string }>>`
-            SELECT id FROM entity_store WHERE id = ${newEntityId}
+            SELECT id FROM entity_store WHERE id = ${newEntityId} AND tenant_id = ${tenantId}
         `;
 
         if (entity.length === 0) {
@@ -245,27 +256,30 @@ export class EntityAlignmentService {
         await this.prisma.$executeRaw`
             UPDATE entity_alignment 
             SET entity_id = ${newEntityId}, confidence = 'high', aligned_at = NOW()
-            WHERE memory_key = ${memoryKey} AND field_path = ${fieldPath}
+            WHERE memory_key = ${memoryKey} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
         `;
     }
 
-    async getEntityStats(entityType?: string): Promise<{
+    async getEntityStats(entityType?: string, tenantId: string = 'default'): Promise<{
         totalEntities: number;
         totalAlignments: number;
         entitiesByType: Record<string, number>;
     }> {
-        const whereClause = entityType ? `WHERE entity_type = '${entityType}'` : '';
+        const whereClause = entityType
+            ? `WHERE entity_type = '${entityType}' AND tenant_id = '${tenantId}'`
+            : `WHERE tenant_id = '${tenantId}'`;
 
         const [totalEntitiesResult, totalAlignmentsResult, entitiesByTypeResult] = await Promise.all([
             this.prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
                 `SELECT COUNT(*) as count FROM entity_store ${whereClause}`
             ),
             this.prisma.$queryRaw<Array<{ count: bigint }>>`
-                SELECT COUNT(*) as count FROM entity_alignment
+                SELECT COUNT(*) as count FROM entity_alignment WHERE tenant_id = ${tenantId}
             `,
             this.prisma.$queryRaw<Array<{ entity_type: string; count: bigint }>>`
                 SELECT entity_type, COUNT(*) as count 
                 FROM entity_store 
+                WHERE tenant_id = ${tenantId}
                 GROUP BY entity_type
             `
         ]);

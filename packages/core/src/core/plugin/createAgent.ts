@@ -8,6 +8,7 @@ import { logger } from '@callagent/utils';
 import { ManifestError, PluginError } from '../../utils/errors.js';
 import { LLMCallerAdapter } from '../llm/LLMCallerAdapter.js';
 import { createLLMForTask } from '../llm/LLMFactory.js';
+import { resolveTenantId, validateTenantId } from './tenantResolver.js';
 
 // Create component-specific logger
 const pluginLogger = logger.createLogger({ prefix: 'PluginLoader' });
@@ -31,9 +32,14 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
     // Get caller directory directly from required metaUrl
     const callerDir = getDirname(metaUrl);
 
+    // Resolve tenant ID using hierarchy: explicit → env → default
+    const tenantId = resolveTenantId(options.tenantId);
+    validateTenantId(tenantId);
+
     pluginLogger.debug('Creating agent', {
         metaUrl,
-        callerDir
+        callerDir,
+        tenantId
     });
 
     let manifest: AgentManifest;
@@ -69,6 +75,7 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
     const plugin: AgentPlugin = {
         manifest,
         handleTask: options.handleTask,
+        tenantId: tenantId,
         // Future hooks (initialize, etc.) would be stored here
     };
 
@@ -77,12 +84,13 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
         try {
             pluginLogger.debug('Creating LLM adapter for agent', {
                 provider: options.llmConfig.provider,
-                model: options.llmConfig.modelAliasOrName
+                model: options.llmConfig.modelAliasOrName,
+                tenantId
             });
             // Store the config instead of creating the adapter directly
             // The adapter will be created per-task in the runner with automatic usage tracking
             plugin.llmConfig = options.llmConfig;
-            pluginLogger.info(`LLM config stored for agent: ${manifest.name}`);
+            pluginLogger.info(`LLM config stored for agent: ${manifest.name} (tenant: ${tenantId})`);
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
             pluginLogger.error('Failed to setup LLM config', error);
@@ -92,7 +100,7 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
 
     // Register the plugin
     registerPlugin(plugin);
-    pluginLogger.info(`Agent registered successfully: ${manifest.name} (v${manifest.version})`);
+    pluginLogger.info(`Agent registered successfully: ${manifest.name} (v${manifest.version}) with tenant: ${tenantId}`);
 
     return plugin; // Returned value is primarily for typing consistency
 };

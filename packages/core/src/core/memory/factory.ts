@@ -4,9 +4,12 @@ import { logger } from '@callagent/utils';
 
 const memoryLogger = logger.createLogger({ prefix: 'MemoryFactory' });
 
-export async function getMemoryAdapter(): Promise<IMemory> {
+export async function getMemoryAdapter(tenantId?: string): Promise<IMemory> {
     const adapterType = process.env.MEMORY_ADAPTER || 'sql';
+    const resolvedTenantId = tenantId || 'default';
+
     memoryLogger.debug('Memory factory - adapter type:', adapterType);
+    memoryLogger.debug('Memory factory - tenant context:', resolvedTenantId);
     memoryLogger.debug('Environment check:', {
         EMBEDDING_PROVIDER: process.env.EMBEDDING_PROVIDER,
         EMBEDDING_MODEL: process.env.EMBEDDING_MODEL,
@@ -33,8 +36,15 @@ export async function getMemoryAdapter(): Promise<IMemory> {
             }
         }
 
-        const sqlAdapter = new MemorySQLAdapter(prisma, embedFunction);
-        memoryLogger.debug('MemorySQLAdapter created with embedding function:', !!embedFunction);
+        // Create tenant-aware memory adapter
+        const sqlAdapter = new MemorySQLAdapter(prisma, embedFunction, {
+            defaultTenantId: resolvedTenantId
+        });
+        memoryLogger.debug('MemorySQLAdapter created with tenant context:', {
+            tenantId: resolvedTenantId,
+            embeddingEnabled: !!embedFunction
+        });
+
         const semantic: import('@callagent/types').MemoryRegistry<import('@callagent/types').SemanticMemoryBackend> = {
             getDefaultBackend: () => 'sql',
             setDefaultBackend: () => { },
