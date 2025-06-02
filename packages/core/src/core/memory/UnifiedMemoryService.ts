@@ -1,6 +1,6 @@
 import { logger } from '@callagent/utils';
 import { MemoryLifecycleOrchestrator } from './lifecycle/orchestrator/MemoryLifecycleOrchestrator.js';
-import { WorkingMemoryStore } from './stores/WorkingMemoryStore.js';
+
 import { MemoryLifecycleConfig } from './lifecycle/config/types.js';
 import {
     MemoryItem,
@@ -9,7 +9,7 @@ import {
     RecallOptions,
     RememberOptions
 } from '../../shared/types/memoryLifecycle.js';
-import { ThoughtEntry, DecisionEntry } from '../../shared/types/workingMemory.js';
+import { ThoughtEntry, DecisionEntry, WorkingMemoryBackend } from '@callagent/types';
 import {
     MemoryQueryOptions,
     MemoryQueryResult,
@@ -68,6 +68,8 @@ export type EmbedMemoryAdapter = {
 export type UnifiedMemoryServiceConfig = {
     /** Memory lifecycle configuration */
     memoryLifecycleConfig: MemoryLifecycleConfig;
+    /** Working memory backend adapter */
+    workingMemoryAdapter?: WorkingMemoryBackend;
     /** Existing semantic memory adapter (optional for backward compatibility) */
     semanticAdapter?: SemanticMemoryAdapter;
     /** Existing episodic memory adapter (optional for backward compatibility) */
@@ -95,7 +97,8 @@ export type UnifiedMemoryServiceConfig = {
 export class UnifiedMemoryService {
     private logger = logger.createLogger({ prefix: 'UnifiedMemory' });
     private mlo: MemoryLifecycleOrchestrator;
-    private workingMemoryStore: WorkingMemoryStore;
+
+    private workingMemoryAdapter?: WorkingMemoryBackend;
     private semanticMemoryAdapter?: SemanticMemoryAdapter;
     private episodicMemoryAdapter?: EpisodicMemoryAdapter;
     private embedMemoryAdapter?: EmbedMemoryAdapter;
@@ -111,7 +114,8 @@ export class UnifiedMemoryService {
             tenantId,
             this.defaultAgentId
         );
-        this.workingMemoryStore = new WorkingMemoryStore();
+
+        this.workingMemoryAdapter = config.workingMemoryAdapter;
         this.semanticMemoryAdapter = config.semanticAdapter;
         this.episodicMemoryAdapter = config.episodicAdapter;
         this.embedMemoryAdapter = config.embedAdapter;
@@ -119,6 +123,7 @@ export class UnifiedMemoryService {
         this.logger.info('UnifiedMemoryService initialized', {
             tenantId: this.tenantId,
             agentId: this.defaultAgentId,
+            hasWorkingMemoryAdapter: !!this.workingMemoryAdapter,
             hasSemanticAdapter: !!this.semanticMemoryAdapter,
             hasEpisodicAdapter: !!this.episodicMemoryAdapter,
             hasEmbedAdapter: !!this.embedMemoryAdapter,
@@ -252,11 +257,24 @@ export class UnifiedMemoryService {
                 goalText = goalText.substring(7);
             }
 
-            await this.workingMemoryStore.storeGoal(
-                { content: goalText, timestamp: item.metadata.timestamp },
-                this.tenantId,
-                effectiveAgentId
-            );
+            // Store the processed goal in the working memory adapter
+            if (this.workingMemoryAdapter) {
+                try {
+                    await this.workingMemoryAdapter.setGoal(goalText, effectiveAgentId, this.tenantId);
+                    this.logger.debug('Goal stored in adapter successfully', {
+                        agentId: effectiveAgentId,
+                        processedLength: goalText.length
+                    });
+                } catch (error) {
+                    this.logger.error('Failed to store goal in adapter', {
+                        agentId: effectiveAgentId,
+                        error
+                    });
+                    // Don't throw - MLO processing was successful
+                }
+            } else {
+                this.logger.warn('No working memory adapter configured - goal processed but not stored');
+            }
 
             this.logger.debug('Goal set successfully', {
                 originalLength: goal.length,
@@ -278,7 +296,21 @@ export class UnifiedMemoryService {
      */
     async getGoal(agentId?: string): Promise<string | null> {
         const effectiveAgentId = agentId || this.defaultAgentId;
-        return this.workingMemoryStore.getGoal(this.tenantId, effectiveAgentId);
+
+        if (!this.workingMemoryAdapter) {
+            this.logger.warn('No working memory adapter configured');
+            return null;
+        }
+
+        try {
+            return await this.workingMemoryAdapter.getGoal(effectiveAgentId, this.tenantId);
+        } catch (error) {
+            this.logger.error('Failed to get goal from adapter', {
+                agentId: effectiveAgentId,
+                error
+            });
+            return null;
+        }
     }
 
     /**
@@ -315,20 +347,30 @@ export class UnifiedMemoryService {
                 thoughtText = thoughtText.substring(7);
             }
 
-            await this.workingMemoryStore.addThought(
-                {
-                    content: thoughtText,
-                    timestamp: processedThought.metadata.timestamp,
-                    type: 'thought',
-                    processingMetadata: {
-                        processingHistory: processedThought.metadata.processingHistory,
-                        compressed: processedThought.metadata.compressed,
-                        summarized: processedThought.metadata.summarized
-                    }
-                },
-                this.tenantId,
-                effectiveAgentId
-            );
+            // Store the processed thought in the working memory adapter
+            if (this.workingMemoryAdapter) {
+                try {
+                    const thoughtEntry: ThoughtEntry = {
+                        timestamp: new Date().toISOString(),
+                        content: thoughtText,
+                        type: 'thought',
+                        processingMetadata: processedThought.metadata
+                    };
+                    await this.workingMemoryAdapter.addThought(thoughtEntry, effectiveAgentId, this.tenantId);
+                    this.logger.debug('Thought stored in adapter successfully', {
+                        agentId: effectiveAgentId,
+                        processedLength: thoughtText.length
+                    });
+                } catch (error) {
+                    this.logger.error('Failed to store thought in adapter', {
+                        agentId: effectiveAgentId,
+                        error
+                    });
+                    // Don't throw - MLO processing was successful
+                }
+            } else {
+                this.logger.warn('No working memory adapter configured - thought processed but not stored');
+            }
 
             this.logger.debug('Thought added successfully', {
                 originalLength: thought.length,
@@ -350,7 +392,21 @@ export class UnifiedMemoryService {
      */
     async getThoughts(agentId?: string): Promise<ThoughtEntry[]> {
         const effectiveAgentId = agentId || this.defaultAgentId;
-        return this.workingMemoryStore.getThoughts(this.tenantId, effectiveAgentId);
+
+        if (!this.workingMemoryAdapter) {
+            this.logger.warn('No working memory adapter configured');
+            return [];
+        }
+
+        try {
+            return await this.workingMemoryAdapter.getThoughts(effectiveAgentId, this.tenantId);
+        } catch (error) {
+            this.logger.error('Failed to get thoughts from adapter', {
+                agentId: effectiveAgentId,
+                error
+            });
+            return [];
+        }
     }
 
     /**
@@ -407,13 +463,30 @@ export class UnifiedMemoryService {
                 extractedReasoning = reasoning;
             }
 
-            await this.workingMemoryStore.makeDecision(
-                extractedKey,
-                extractedDecision,
-                extractedReasoning,
-                this.tenantId,
-                effectiveAgentId
-            );
+            // Store the processed decision in the working memory adapter
+            if (this.workingMemoryAdapter) {
+                try {
+                    const decisionEntry: DecisionEntry = {
+                        decision: extractedDecision,
+                        reasoning: extractedReasoning,
+                        timestamp: new Date().toISOString()
+                    };
+                    await this.workingMemoryAdapter.makeDecision(extractedKey, decisionEntry, effectiveAgentId, this.tenantId);
+                    this.logger.debug('Decision stored in adapter successfully', {
+                        key: extractedKey,
+                        agentId: effectiveAgentId
+                    });
+                } catch (error) {
+                    this.logger.error('Failed to store decision in adapter', {
+                        key: extractedKey,
+                        agentId: effectiveAgentId,
+                        error
+                    });
+                    // Don't throw - MLO processing was successful
+                }
+            } else {
+                this.logger.warn('No working memory adapter configured - decision processed but not stored');
+            }
 
             this.logger.debug('Decision made successfully', {
                 key: extractedKey,
@@ -434,7 +507,22 @@ export class UnifiedMemoryService {
      */
     async getDecision(key: string, agentId?: string): Promise<DecisionEntry | null> {
         const effectiveAgentId = agentId || this.defaultAgentId;
-        return this.workingMemoryStore.getDecision(key, this.tenantId, effectiveAgentId);
+
+        if (!this.workingMemoryAdapter) {
+            this.logger.warn('No working memory adapter configured');
+            return null;
+        }
+
+        try {
+            return await this.workingMemoryAdapter.getDecision(key, effectiveAgentId, this.tenantId);
+        } catch (error) {
+            this.logger.error('Failed to get decision from adapter', {
+                key,
+                agentId: effectiveAgentId,
+                error
+            });
+            return null;
+        }
     }
 
     /**
@@ -486,12 +574,25 @@ export class UnifiedMemoryService {
                 extractedValue = value;
             }
 
-            await this.workingMemoryStore.setVariable(
-                extractedKey,
-                extractedValue,
-                this.tenantId,
-                effectiveAgentId
-            );
+            // Store the processed variable in the working memory adapter
+            if (this.workingMemoryAdapter) {
+                try {
+                    await this.workingMemoryAdapter.setVariable(extractedKey, extractedValue, effectiveAgentId, this.tenantId);
+                    this.logger.debug('Variable stored in adapter successfully', {
+                        key: extractedKey,
+                        agentId: effectiveAgentId
+                    });
+                } catch (error) {
+                    this.logger.error('Failed to store variable in adapter', {
+                        key: extractedKey,
+                        agentId: effectiveAgentId,
+                        error
+                    });
+                    // Don't throw - MLO processing was successful
+                }
+            } else {
+                this.logger.warn('No working memory adapter configured - variable processed but not stored');
+            }
 
             this.logger.debug('Working variable set successfully', {
                 key: extractedKey,
@@ -512,7 +613,22 @@ export class UnifiedMemoryService {
      */
     async getWorkingVariable(key: string, agentId?: string): Promise<unknown> {
         const effectiveAgentId = agentId || this.defaultAgentId;
-        return this.workingMemoryStore.getVariable(key, this.tenantId, effectiveAgentId);
+
+        if (!this.workingMemoryAdapter) {
+            this.logger.warn('No working memory adapter configured');
+            return null;
+        }
+
+        try {
+            return await this.workingMemoryAdapter.getVariable(key, effectiveAgentId, this.tenantId);
+        } catch (error) {
+            this.logger.error('Failed to get variable from adapter', {
+                key,
+                agentId: effectiveAgentId,
+                error
+            });
+            return null;
+        }
     }
 
     // ========================================

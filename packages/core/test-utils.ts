@@ -1,4 +1,4 @@
-import { extendContextWithMemory } from './src/core/context/workingMemoryContext.js';
+import { extendContextWithMemory } from './src/core/memory/types/working/context/workingMemoryContext.js';
 import { TaskContext } from './src/shared/types/index.js';
 import { SemanticMemoryAdapter, EpisodicMemoryAdapter } from './src/core/memory/UnifiedMemoryService.js';
 import {
@@ -129,11 +129,11 @@ class MockEpisodicMemoryAdapter implements EpisodicMemoryAdapter {
 /**
  * Create a test context with full memory capabilities
  */
-export function createTestContext(
+export async function createTestContext(
     tenantId: string = 'test-tenant',
     agentConfig?: unknown,
     agentId: string = 'test-agent'
-): TaskContext {
+): Promise<TaskContext> {
     // Create mock adapters
     const semanticAdapter = new MockSemanticMemoryAdapter();
     const episodicAdapter = new MockEpisodicMemoryAdapter();
@@ -194,7 +194,7 @@ export function createTestContext(
     };
 
     // Extend with memory capabilities
-    const context = extendContextWithMemory(
+    const context = await extendContextWithMemory(
         baseContext,
         tenantId,
         agentId,

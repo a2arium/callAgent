@@ -171,12 +171,12 @@ packages/memory-[backend-name]/
     }
     ```
 
-### 3.4. Memory Factory Registration (`packages/core/src/core/memory/factory.ts`)
+### 3.4. Memory Factory Registration (`packages/core/src/core/memory/createMemoryRegistry.ts`)
 
 Register your adapters so the system can instantiate them based on configuration.
 
 ```typescript
-import { IMemory, SemanticMemoryRegistry, EpisodicMemoryRegistry, EmbedMemoryRegistry } from '@callagent/types';
+import { IMemory, SemanticMemoryRegistry, EpisodicMemoryRegistry, EmbedMemoryRegistry, WorkingMemoryRegistry } from '@callagent/types';
 // ... other imports ...
 
 export async function getMemoryAdapter(tenantId?: string, embedFunction?: (text: string) => Promise<number[]>): Promise<IMemory> {
@@ -216,7 +216,7 @@ export async function getMemoryAdapter(tenantId?: string, embedFunction?: (text:
 The MLO system uses wrappers (`MLOSemanticBackend`, `MLOEpisodicBackend`, `MLOEmbedBackend` from `@callagent/core`) to route operations through the `UnifiedMemoryService` and its MLO pipeline. These wrappers are instantiated in `extendContextWithMemory` in `@callagent/core`.
 
 ```typescript
-// In packages/core/src/core/context/workingMemoryContext.ts
+// In packages/core/src/core/memory/types/working/context/workingMemoryContext.ts
 // ...
 const unifiedMemory = new UnifiedMemoryService(tenantId, {
     memoryLifecycleConfig, // Loaded based on MEMORY_PROFILE
@@ -336,7 +336,7 @@ You can provide custom implementations for components within each of the 6 MLO s
 
 Working memory is crucial for an agent's active reasoning and task execution.
 
-*   **MLO-Managed**: Handled by `UnifiedMemoryService` and `WorkingMemoryManager` within `@callagent/core`. **No separate backend adapter is needed from the integrator.**
+*   **MLO-Managed**: Handled by `UnifiedMemoryService` and `WorkingMemoryRegistry` within `@callagent/core`. **Working memory is now externalized through backend adapters following the same pattern as other memory types.**
 *   **`TaskContext` API**: Agents interact with working memory via methods on the `ctx` object:
     *   `ctx.setGoal(goal: string)`
     *   `ctx.getGoal(): Promise<string | null>`
@@ -347,7 +347,7 @@ Working memory is crucial for an agent's active reasoning and task execution.
     *   `ctx.vars.<your_var_name> = value` (via `setWorkingVariable`)
     *   `ctx.vars.<your_var_name>` (via `getWorkingVariable`)
 *   **MLO Pipeline Flow**: All these operations create `MemoryItem` instances that are processed through the MLO pipeline, configured by the active `MEMORY_PROFILE`. This allows for compression, reflection, etc., on working memory elements too.
-*   **Persistence**: The `WorkingMemoryManager` (via `WorkingMemoryStore`) typically serializes its state to be persisted. This persistence itself might leverage one of the LTM backends (e.g., semantic memory) if configured, or could be a simple file/object store depending on the `WorkingMemoryStore` implementation. The current `WorkingMemoryStore` is in-memory during an agent run but relies on the agent runner or orchestrator to save/load its serialized state.
+*   **Persistence**: Working memory is now externalized and persisted through dedicated backend adapters (e.g., `WorkingMemorySQLAdapter`). The `WorkingMemoryRegistry` routes operations to the appropriate backend, following the same pattern as semantic, episodic, and embed memory types.
 
 ## 6. Configuration and Profiles
 

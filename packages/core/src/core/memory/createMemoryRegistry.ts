@@ -10,6 +10,10 @@ import {
 } from '@callagent/types';
 import { logger } from '@callagent/utils';
 import { createEmbeddingFunction, isEmbeddingAvailable } from '../llm/LLMFactory.js';
+import { SemanticMemoryRegistry } from './types/semantic/SemanticMemoryRegistry.js';
+import { EpisodicMemoryRegistry } from './types/episodic/EpisodicMemoryRegistry.js';
+import { EmbedMemoryRegistry } from './types/embed/EmbedMemoryRegistry.js';
+import { WorkingMemoryRegistry } from './types/working/WorkingMemoryRegistry.js';
 
 const memoryLogger = logger.createLogger({ prefix: 'MemoryRegistry' });
 

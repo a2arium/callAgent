@@ -1,0 +1,1 @@
+export { EmbedMemoryRegistry } from './EmbedMemoryRegistry.js'; 

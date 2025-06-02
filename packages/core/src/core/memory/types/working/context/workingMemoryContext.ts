@@ -1,12 +1,13 @@
-import { UnifiedMemoryService } from '../memory/UnifiedMemoryService.js';
-import { MemoryLifecycleConfig } from '../memory/lifecycle/config/types.js';
-import { getMemoryProfile } from '../memory/lifecycle/config/MemoryProfiles.js';
-import { WorkingVariables } from '../../shared/types/workingMemory.js';
-import { TaskContext } from '../../shared/types/index.js';
-import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../memory/MLOBackends.js';
-import { SemanticMemoryRegistry } from '../memory/SemanticMemoryRegistry.js';
-import { EpisodicMemoryRegistry } from '../memory/EpisodicMemoryRegistry.js';
-import { EmbedMemoryRegistry } from '../memory/EmbedMemoryRegistry.js';
+import { UnifiedMemoryService } from '../../../UnifiedMemoryService.js';
+import { MemoryLifecycleConfig } from '../../../lifecycle/config/types.js';
+import { getMemoryProfile } from '../../../lifecycle/config/MemoryProfiles.js';
+import { WorkingVariables } from '../../../../../shared/types/workingMemory.js';
+import { TaskContext } from '../../../../../shared/types/index.js';
+import { WorkingMemoryBackend } from '@callagent/types';
+import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../../MLOBackends.js';
+import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
+import { EpisodicMemoryRegistry } from '../../episodic/EpisodicMemoryRegistry.js';
+import { EmbedMemoryRegistry } from '../../embed/EmbedMemoryRegistry.js';
 import { logger } from '@callagent/utils';
 
 const contextLogger = logger.createLogger({ prefix: 'WorkingMemoryContext' });
@@ -93,41 +94,6 @@ function createSimpleWorkingVariablesProxy(
     });
 }
 
-/**
- * Legacy async proxy for backward compatibility
- * @deprecated Use createCachedWorkingVariablesProxy instead
- */
-function createAsyncWorkingVariablesProxy(
-    unifiedMemory: UnifiedMemoryService,
-    agentId: string
-): WorkingVariables {
-    return new Proxy({} as WorkingVariables, {
-        get(target, prop: string) {
-            // Return a Promise for async operations
-            // Note: This breaks the sync interface but is necessary for MLO integration
-            return unifiedMemory.getWorkingVariable(prop, agentId);
-        },
-        set(target, prop: string, value: unknown) {
-            // Fire and forget for set operations
-            unifiedMemory.setWorkingVariable(prop, value, agentId).catch(error => {
-                console.warn(`Failed to set working variable ${prop}:`, error);
-            });
-            return true;
-        },
-        has(target, prop: string) {
-            // This is problematic as it needs to be sync but the underlying operation is async
-            // For now, return true and let the get operation handle the actual check
-            return true;
-        },
-        deleteProperty(target, prop: string) {
-            // Delete by setting to undefined
-            unifiedMemory.setWorkingVariable(prop, undefined, agentId).catch(error => {
-                console.warn(`Failed to delete working variable ${prop}:`, error);
-            });
-            return true;
-        }
-    });
-}
 
 /**
  * Resolve memory configuration from agent manifest
@@ -185,18 +151,42 @@ function resolveMemoryConfiguration(agentConfig: unknown): MemoryLifecycleConfig
  * - Unified recall/remember operations
  * - Direct MLO access
  */
-export function extendContextWithMemory(
+export async function extendContextWithMemory(
     baseContext: Record<string, unknown>,
     tenantId: string,
     agentId: string,
     agentConfig: unknown,
     existingSemanticAdapter?: unknown
-): TaskContext {
+): Promise<TaskContext> {
     const memoryConfig = resolveMemoryConfiguration(agentConfig);
+
+    // Create working memory adapter if SQL adapter is available
+    let workingMemoryAdapter: WorkingMemoryBackend | undefined;
+    try {
+        const { PrismaClient } = await import('@prisma/client');
+        const { WorkingMemorySQLAdapter } = await import('@callagent/memory-sql') as any;
+
+        const prisma = new PrismaClient();
+        workingMemoryAdapter = new WorkingMemorySQLAdapter(prisma, {
+            defaultTenantId: tenantId
+        });
+
+        contextLogger.debug('Working memory adapter created successfully', {
+            tenantId,
+            agentId
+        });
+    } catch (error) {
+        contextLogger.warn('Failed to create working memory adapter, using placeholder', {
+            tenantId,
+            agentId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
 
     // Create UnifiedMemoryService with proper configuration
     const unifiedMemory = new UnifiedMemoryService(tenantId, {
         memoryLifecycleConfig: memoryConfig,
+        workingMemoryAdapter,
         semanticAdapter: existingSemanticAdapter as any, // Type assertion for backward compatibility
         agentId
     });
@@ -207,7 +197,16 @@ export function extendContextWithMemory(
     context.setGoal = async (goal: string) => unifiedMemory.setGoal(goal, agentId);
     context.getGoal = async () => unifiedMemory.getGoal(agentId);
     context.addThought = async (thought: string) => unifiedMemory.addThought(thought, agentId);
-    context.getThoughts = async () => unifiedMemory.getThoughts(agentId);
+    context.getThoughts = async () => {
+        const thoughts = await unifiedMemory.getThoughts(agentId);
+        // Convert from @callagent/types ThoughtEntry to core ThoughtEntry
+        return thoughts.map(thought => ({
+            timestamp: thought.timestamp,
+            content: thought.content,
+            type: thought.type === 'thought' || thought.type === 'observation' ? thought.type : undefined,
+            processingMetadata: thought.processingMetadata
+        }));
+    };
     context.makeDecision = async (key: string, decision: string, reasoning?: string) =>
         unifiedMemory.makeDecision(key, decision, reasoning, agentId);
     context.getDecision = async (key: string) => unifiedMemory.getDecision(key, agentId);

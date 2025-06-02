@@ -15,7 +15,7 @@ import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '.
 import fs from 'node:fs';
 import { createLLMForTask } from '../core/llm/LLMFactory.js';
 import { getMemoryAdapter } from '../core/memory/factory.js';
-import { extendContextWithMemory } from '../core/context/workingMemoryContext.js';
+import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
 
 // Create base runner logger
@@ -210,7 +210,7 @@ export async function runAgentWithStreaming(
     } as any; // Temporary type assertion since memory will be added by extendContextWithMemory
 
     // Extend context with MLO-backed memory operations
-    const contextWithMemory = extendContextWithMemory(
+    const contextWithMemory = await extendContextWithMemory(
         partialCtx,
         finalTenantId,
         agentName,

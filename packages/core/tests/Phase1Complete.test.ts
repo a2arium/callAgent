@@ -1,6 +1,6 @@
 import { createTestContext, cleanupTestContext, waitForAsync } from '../test-utils.js';
 import { getMemoryProfile } from '../src/core/memory/lifecycle/config/MemoryProfiles.js';
-import { extendContextWithMemory } from '../src/core/context/workingMemoryContext.js';
+import { extendContextWithMemory } from '../src/core/memory/types/working/context/workingMemoryContext.js';
 
 describe('Phase 1 Complete Memory System', () => {
     describe('Backward Compatibility', () => {

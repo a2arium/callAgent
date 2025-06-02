@@ -1,4 +1,5 @@
-import { UnifiedMemoryService, SemanticMemoryAdapter, EpisodicMemoryAdapter } from '../src/core/memory/UnifiedMemoryService.js';
+import { UnifiedMemoryService } from '../src/core/memory/UnifiedMemoryService.js';
+import type { SemanticMemoryAdapter, EpisodicMemoryAdapter } from '../src/core/memory/UnifiedMemoryService.js';
 import { getMemoryProfile } from '../src/core/memory/lifecycle/config/MemoryProfiles.js';
 
 describe('UnifiedMemoryService', () => {
@@ -13,15 +14,14 @@ describe('UnifiedMemoryService', () => {
         mockSemanticAdapter = {
             set: jest.fn().mockResolvedValue(undefined),
             get: jest.fn().mockResolvedValue('mock-value'),
-            query: jest.fn().mockResolvedValue(['result1', 'result2']),
+            getMany: jest.fn().mockResolvedValue([{ key: 'test', value: 'result1' }, { key: 'test2', value: 'result2' }]),
             delete: jest.fn().mockResolvedValue(undefined),
             clear: jest.fn().mockResolvedValue(undefined)
         };
 
         mockEpisodicAdapter = {
             append: jest.fn().mockResolvedValue(undefined),
-            getEvents: jest.fn().mockResolvedValue([{ event: 'test' }]),
-            query: jest.fn().mockResolvedValue(['episode1', 'episode2']),
+            getEvents: jest.fn().mockResolvedValue([{ key: 'event1', value: { event: 'test' } }]),
             clear: jest.fn().mockResolvedValue(undefined)
         };
 
@@ -256,18 +256,18 @@ describe('UnifiedMemoryService', () => {
             expect(result).toBe('mock-value');
         });
 
-        it('should query semantic memory through adapter', async () => {
+        it('should get many semantic memory entries through adapter', async () => {
             const query = 'machine learning concepts';
             const options = { limit: 10 };
 
-            const results = await service.querySemanticMemory(query, options);
+            const results = await service.getManySemanticMemory(query, options);
 
-            expect(mockSemanticAdapter.query).toHaveBeenCalledWith(
+            expect(mockSemanticAdapter.getMany).toHaveBeenCalledWith(
                 query,
                 options,
                 tenantId
             );
-            expect(results).toEqual(['result1', 'result2']);
+            expect(results).toEqual([{ key: 'test', value: 'result1' }, { key: 'test2', value: 'result2' }]);
         });
 
         it('should throw error when no semantic adapter configured', async () => {
@@ -348,7 +348,7 @@ describe('UnifiedMemoryService', () => {
 
                 const results = await service.recall(query, options);
 
-                expect(mockSemanticAdapter.query).toHaveBeenCalledWith(
+                expect(mockSemanticAdapter.getMany).toHaveBeenCalledWith(
                     query,
                     options,
                     tenantId
@@ -362,12 +362,11 @@ describe('UnifiedMemoryService', () => {
 
                 const results = await service.recall(query, options);
 
-                expect(mockEpisodicAdapter.query).toHaveBeenCalledWith(
-                    query,
+                expect(mockEpisodicAdapter.getEvents).toHaveBeenCalledWith(
                     options,
                     tenantId
                 );
-                expect(results).toEqual(['episode1', 'episode2']);
+                expect(results).toEqual([{ event: 'test' }]);
             });
 
             it('should recall from working memory by default', async () => {

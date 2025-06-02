@@ -14,7 +14,7 @@ import { extendContextWithStreaming } from '../core/context/StreamingContext.js'
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import type { TaskArtifactUpdateEvent, TaskStatusUpdateEvent, A2AEvent } from '../shared/types/StreamingEvents.js';
-import { extendContextWithMemory } from '../core/context/workingMemoryContext.js';
+import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
 import { MemorySQLAdapter } from '@callagent/memory-sql';
 import { PrismaClient } from '@prisma/client';
 
@@ -221,7 +221,7 @@ async function runAgentLocally(agentFilePath: string, input: TaskInput): Promise
     } as any; // Temporary type assertion since memory will be added by extendContextWithMemory
 
     // Extend context with MLO-backed memory operations
-    const contextWithMemory = extendContextWithMemory(
+    const contextWithMemory = await extendContextWithMemory(
         partialCtx,
         plugin.tenantId,
         agentName,

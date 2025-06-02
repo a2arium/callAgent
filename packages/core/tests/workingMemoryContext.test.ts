@@ -1,4 +1,4 @@
-import { extendContextWithMemory, extendContextWithWorkingMemory, createLegacyWorkingVariablesProxy } from '../src/core/context/workingMemoryContext.js';
+import { extendContextWithMemory, extendContextWithWorkingMemory, createLegacyWorkingVariablesProxy } from '../src/core/memory/types/working/context/workingMemoryContext.js';
 import { TaskContext } from '../src/shared/types/index.js';
 
 describe('workingMemoryContext', () => {
@@ -15,7 +15,7 @@ describe('workingMemoryContext', () => {
         complete: jest.fn(),
         fail: jest.fn(),
         recordUsage: jest.fn(),
-        llm: {} as any,
+        llm: {} as unknown as Record<string, unknown>,
         tools: { invoke: jest.fn() },
         memory: {},
         cognitive: {
@@ -66,7 +66,7 @@ describe('workingMemoryContext', () => {
         afterEach(async () => {
             // Cleanup the UnifiedMemoryService
             if (context.memory?.mlo) {
-                await (context.memory.mlo as any).shutdown();
+                await (context.memory.mlo as unknown as { shutdown: () => Promise<void> }).shutdown();
             }
         });
 
@@ -166,7 +166,7 @@ describe('workingMemoryContext', () => {
             const value = 'Machine Learning';
 
             // Access the extended memory interface
-            const extendedMemory = context.memory as any;
+            const extendedMemory = context.memory as unknown as { semantic?: { set: (key: string, value: unknown, namespace: string) => Promise<void>; get: (key: string, namespace: string) => Promise<unknown> } };
 
             // This will throw since no semantic adapter is configured
             await expect(
@@ -182,7 +182,7 @@ describe('workingMemoryContext', () => {
             const event = { action: 'test_action', timestamp: Date.now() };
 
             // Access the extended memory interface
-            const extendedMemory = context.memory as any;
+            const extendedMemory = context.memory as unknown as { episodic?: { append: (event: unknown) => Promise<void>; getEvents: () => Promise<unknown[]> } };
 
             // This will throw since no episodic adapter is configured
             await expect(
@@ -196,8 +196,8 @@ describe('workingMemoryContext', () => {
 
         it('should provide direct MLO access', () => {
             expect(context.memory.mlo).toBeDefined();
-            expect(typeof (context.memory.mlo as any).getMetrics).toBe('function');
-            expect(typeof (context.memory.mlo as any).getConfiguration).toBe('function');
+            expect(typeof (context.memory.mlo as unknown as { getMetrics: () => unknown }).getMetrics).toBe('function');
+            expect(typeof (context.memory.mlo as unknown as { getConfiguration: () => unknown }).getConfiguration).toBe('function');
         });
     });
 
@@ -210,7 +210,7 @@ describe('workingMemoryContext', () => {
                 {}
             );
 
-            const mlo = context.memory.mlo as any;
+            const mlo = context.memory.mlo as unknown as { getConfiguration: () => { profile: string } };
             expect(mlo.getConfiguration().profile).toBe('basic');
         });
 
@@ -228,7 +228,7 @@ describe('workingMemoryContext', () => {
                 agentConfig
             );
 
-            const mlo = context.memory.mlo as any;
+            const mlo = context.memory.mlo as unknown as { getConfiguration: () => { profile: string } };
             expect(mlo.getConfiguration().profile).toBe('conversational');
         });
 
@@ -247,7 +247,7 @@ describe('workingMemoryContext', () => {
                 agentConfig
             );
 
-            const mlo = context.memory.mlo as any;
+            const mlo = context.memory.mlo as unknown as { getConfiguration: () => { profile: string } };
             expect(mlo.getConfiguration().profile).toBe('basic');
         });
 
@@ -269,7 +269,7 @@ describe('workingMemoryContext', () => {
                 agentConfig
             );
 
-            const config = (context.memory.mlo as any).getConfiguration();
+            const config = (context.memory.mlo as unknown as { getConfiguration: () => { workingMemory: { maxThoughts: number; customSetting: boolean } } }).getConfiguration();
             expect(config.workingMemory.maxThoughts).toBe(100);
             expect(config.workingMemory.customSetting).toBe(true);
         });
@@ -292,7 +292,7 @@ describe('workingMemoryContext', () => {
         it('should throw errors for legacy working memory operations', async () => {
             const result = extendContextWithWorkingMemory(baseContext, {});
 
-            await expect((result as any).setGoal()).rejects.toThrow(
+            await expect((result as unknown as { setGoal: () => Promise<void> }).setGoal()).rejects.toThrow(
                 'Legacy working memory not supported. Use extendContextWithMemory.'
             );
         });
@@ -324,7 +324,7 @@ describe('workingMemoryContext', () => {
             await expect(context.addThought!('test')).resolves.not.toThrow();
 
             // Cleanup
-            await (context.memory.mlo as any).shutdown();
+            await (context.memory.mlo as unknown as { shutdown: () => Promise<void> }).shutdown();
         });
 
         it('should handle missing agent config gracefully', () => {
