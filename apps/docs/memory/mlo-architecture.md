@@ -622,6 +622,603 @@ processorFactory.registerProcessor('TaskFocusedAttention', TaskFocusedAttention)
 }
 ```
 
+## Agent-Level Configuration
+
+### Overview
+
+Each agent can define its own memory configuration through multiple mechanisms:
+
+1. **Agent Manifest**: Core memory profile and basic configuration
+2. **Agent.json**: Detailed processor and stage configuration (future)
+3. **Runtime Configuration**: Dynamic configuration updates
+4. **Environment Variables**: Global defaults and overrides
+
+### Agent Manifest Configuration
+
+The most common way to configure memory is through the agent's manifest:
+
+```typescript
+// agent.ts
+import { createAgent } from '@callagent/core';
+
+export default createAgent({
+    manifest: {
+        name: "my-agent",
+        version: "1.0.0",
+        memory: {
+            // Use a predefined profile
+            profile: "conversational",
+            
+            // Override specific memory type configurations
+            workingMemory: {
+                acquisition: {
+                    config: {
+                        filter: {
+                            maxInputSize: 3000,
+                            basicRelevanceThreshold: 0.3
+                        }
+                    }
+                },
+                encoding: {
+                    config: {
+                        attention: {
+                            scoringCriteria: ["task-relevance", "urgency"],
+                            attentionWindowSize: 512
+                        }
+                    }
+                }
+            },
+            
+            // Configure semantic memory differently
+            semanticLTM: {
+                derivation: {
+                    config: {
+                        summarization: {
+                            strategy: "extractive",
+                            maxSummaryLength: 300
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    async handleTask(ctx) {
+        // Agent implementation
+        // Memory operations will use the configured pipeline
+        await ctx.setGoal("Process customer inquiry");
+        await ctx.addThought("Customer seems frustrated");
+    }
+}, import.meta.url);
+```
+
+### Available Memory Profiles
+
+#### 1. Basic Profile
+**Use Case**: Simple agents with minimal memory requirements
+```typescript
+{
+    memory: {
+        profile: "basic"
+    }
+}
+```
+
+**Characteristics:**
+- Minimal processing overhead
+- Simple text truncation and filtering
+- Pass-through attention (no complex processing)
+- Suitable for lightweight chatbots and simple task agents
+
+#### 2. Conversational Profile
+**Use Case**: Dialogue agents, chatbots, virtual assistants
+```typescript
+{
+    memory: {
+        profile: "conversational"
+    }
+}
+```
+
+**Characteristics:**
+- Conversation-aware processing
+- Speaker tracking and turn boundaries
+- Enhanced reflection on dialogue patterns
+- Topic-aware summarization
+- Temporal relationship preservation
+
+#### 3. Research-Optimized Profile
+**Use Case**: Research assistants, knowledge workers, academic tools
+```typescript
+{
+    memory: {
+        profile: "research-optimized"
+    }
+}
+```
+
+**Characteristics:**
+- Enhanced processing for complex content
+- Hierarchical context management
+- Fact-checking and source verification
+- Advanced semantic indexing
+- Higher processing overhead but better quality
+
+### Per-Memory-Type Configuration
+
+You can configure each memory type independently:
+
+```typescript
+{
+    memory: {
+        profile: "basic", // Base profile
+        
+        // Working memory optimized for task management
+        workingMemory: {
+            acquisition: {
+                filter: "TenantAwareFilter",
+                compressor: "TextTruncationCompressor",
+                config: {
+                    filter: {
+                        maxInputSize: 2000,
+                        taskFocused: true
+                    },
+                    compressor: {
+                        preserveGoalStructure: true
+                    }
+                }
+            },
+            encoding: {
+                attention: "ConversationAttention",
+                config: {
+                    attention: {
+                        scoringCriteria: ["task-relevance", "urgency", "actionability"],
+                        preserveOrder: true
+                    }
+                }
+            }
+        },
+        
+        // Semantic memory optimized for facts
+        semanticLTM: {
+            acquisition: {
+                config: {
+                    filter: {
+                        maxInputSize: 5000,
+                        factualValidation: true
+                    }
+                }
+            },
+            encoding: {
+                config: {
+                    attention: {
+                        scoringCriteria: ["factual-accuracy", "completeness"],
+                        preserveOrder: false
+                    }
+                }
+            }
+        },
+        
+        // Episodic memory optimized for conversations
+        episodicLTM: {
+            encoding: {
+                config: {
+                    attention: {
+                        conversationAware: true,
+                        speakerTracking: true,
+                        scoringCriteria: ["temporal-relevance", "emotional-content"]
+                    }
+                }
+            },
+            derivation: {
+                config: {
+                    forgetting: {
+                        decayRate: 0.05,
+                        preserveImportantTurns: true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### Stage-Level Processor Configuration
+
+Configure individual processors within each stage:
+
+```typescript
+{
+    memory: {
+        workingMemory: {
+            // Stage 1: Acquisition
+            acquisition: {
+                filter: "TenantAwareFilter",
+                compressor: "TextTruncationCompressor", 
+                consolidator: "NoveltyConsolidator",
+                config: {
+                    filter: {
+                        maxInputSize: 1500,
+                        tenantIsolation: true,
+                        customValidation: true
+                    },
+                    compressor: {
+                        maxLength: 800,
+                        preserveStructure: true,
+                        compressionStrategy: "smart"
+                    },
+                    consolidator: {
+                        enabled: true,
+                        noveltyThreshold: 0.7
+                    }
+                }
+            },
+            
+            // Stage 2: Encoding
+            encoding: {
+                attention: "ConversationAttention",
+                fusion: "ModalityFusion",
+                config: {
+                    attention: {
+                        passThrough: false,
+                        preserveOrder: true,
+                        conversationAware: true,
+                        scoringCriteria: ["relevance", "novelty", "importance"],
+                        attentionWindowSize: 512,
+                        llmProvider: "openai" // Future: LLM-based attention
+                    },
+                    fusion: {
+                        enabled: false, // Disable for text-only agents
+                        modalityType: "text"
+                    }
+                }
+            },
+            
+            // Stage 3: Derivation
+            derivation: {
+                reflection: "ConversationReflection",
+                summarization: "SimpleSummarizer",
+                distillation: "SimpleDistiller",
+                forgetting: "TimeDecayForgetter",
+                config: {
+                    reflection: {
+                        enabled: true,
+                        analysisDepth: "moderate",
+                        trackPatterns: true
+                    },
+                    summarization: {
+                        strategy: "extractive",
+                        maxSummaryLength: 300,
+                        preserveKeyPoints: true
+                    },
+                    forgetting: {
+                        decayRate: 0.1,
+                        retentionThreshold: 0.3,
+                        importanceWeighting: true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### Custom Processor Registration
+
+For advanced use cases, you can create and register custom processors:
+
+```typescript
+// 1. Create custom processor
+class TaskPriorityAttention extends ConversationAttention {
+    constructor(config?: any) {
+        super({
+            ...config,
+            scoringCriteria: ['priority', 'deadline', 'complexity']
+        });
+    }
+
+    protected scorePriority(segment: string): number {
+        const priorityKeywords = ['urgent', 'critical', 'asap', 'deadline'];
+        const matches = priorityKeywords.filter(keyword => 
+            segment.toLowerCase().includes(keyword)
+        ).length;
+        return Math.min(matches * 0.3, 1.0);
+    }
+
+    protected scoreDeadline(segment: string): number {
+        const datePattern = /\b\d{1,2}\/\d{1,2}\/\d{4}\b|\btoday\b|\btomorrow\b|\bthis week\b/i;
+        return datePattern.test(segment) ? 0.8 : 0.2;
+    }
+}
+
+// 2. Register processor (in agent initialization)
+import { ProcessorFactory } from '@callagent/core';
+
+const processorFactory = new ProcessorFactory();
+processorFactory.registerProcessor('TaskPriorityAttention', TaskPriorityAttention);
+
+// 3. Use in agent configuration
+export default createAgent({
+    manifest: {
+        memory: {
+            workingMemory: {
+                encoding: {
+                    attention: "TaskPriorityAttention",
+                    config: {
+                        attention: {
+                            priorityWeighting: 0.4,
+                            deadlineWeighting: 0.3,
+                            complexityWeighting: 0.3
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ... rest of agent
+});
+```
+
+### Runtime Configuration Updates
+
+Agents can update their memory configuration at runtime:
+
+```typescript
+export default createAgent({
+    async handleTask(ctx) {
+        // Check if this is a high-priority task
+        const isHighPriority = (ctx.task.input as any).priority === 'high';
+        
+        if (isHighPriority) {
+            // Switch to more intensive processing
+            await ctx.memory.mlo.configure({
+                workingMemory: {
+                    acquisition: {
+                        config: {
+                            filter: {
+                                maxInputSize: 5000, // Allow larger inputs
+                                basicRelevanceThreshold: 0.1 // Lower threshold
+                            }
+                        }
+                    },
+                    encoding: {
+                        config: {
+                            attention: {
+                                passThrough: false, // Enable full attention processing
+                                scoringCriteria: ["urgency", "impact", "complexity"]
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Continue with task processing
+        await ctx.setGoal("Handle high-priority request");
+    }
+});
+```
+
+### Environment-Based Configuration
+
+Use environment variables for global configuration:
+
+```bash
+# .env file
+MEMORY_PROFILE=conversational
+MEMORY_LOG_LEVEL=debug
+MEMORY_ENABLE_METRICS=true
+MEMORY_MAX_INPUT_SIZE=3000
+```
+
+```typescript
+// Agent can read environment-based defaults
+export default createAgent({
+    manifest: {
+        memory: {
+            profile: process.env.MEMORY_PROFILE || "basic",
+            workingMemory: {
+                acquisition: {
+                    config: {
+                        filter: {
+                            maxInputSize: parseInt(process.env.MEMORY_MAX_INPUT_SIZE || "1000")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ... rest of agent
+});
+```
+
+### Configuration Validation
+
+The system validates configuration at startup:
+
+```typescript
+// Invalid configuration will throw errors
+{
+    memory: {
+        workingMemory: {
+            encoding: {
+                attention: "NonExistentProcessor", // ❌ Error: Unknown processor
+                config: {
+                    attention: {
+                        invalidOption: true // ❌ Warning: Unknown config option
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### Configuration Best Practices
+
+#### 1. Start with Profiles
+```typescript
+// ✅ Good: Start with a profile, then customize
+{
+    memory: {
+        profile: "conversational",
+        workingMemory: {
+            // Only override what you need
+            encoding: {
+                config: {
+                    attention: {
+                        scoringCriteria: ["task-relevance"]
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ❌ Avoid: Configuring everything from scratch
+{
+    memory: {
+        workingMemory: {
+            acquisition: { /* lots of config */ },
+            encoding: { /* lots of config */ },
+            // ... very verbose
+        }
+    }
+}
+```
+
+#### 2. Memory Type Specialization
+```typescript
+// ✅ Good: Specialize each memory type for its purpose
+{
+    memory: {
+        profile: "basic",
+        workingMemory: {
+            // Optimize for task management
+            encoding: {
+                config: {
+                    attention: {
+                        scoringCriteria: ["task-relevance", "urgency"]
+                    }
+                }
+            }
+        },
+        semanticLTM: {
+            // Optimize for fact storage
+            encoding: {
+                config: {
+                    attention: {
+                        scoringCriteria: ["factual-accuracy", "completeness"]
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+#### 3. Performance Considerations
+```typescript
+// ✅ Good: Balance performance and capability
+{
+    memory: {
+        profile: "basic", // Start lightweight
+        workingMemory: {
+            // Enable only needed features
+            encoding: {
+                config: {
+                    attention: {
+                        passThrough: false, // Only if you need attention processing
+                    }
+                }
+            },
+            derivation: {
+                config: {
+                    reflection: {
+                        enabled: true // Only if you need reflection
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### Configuration Examples by Use Case
+
+#### Task Management Agent
+```typescript
+{
+    memory: {
+        profile: "basic",
+        workingMemory: {
+            encoding: {
+                config: {
+                    attention: {
+                        scoringCriteria: ["task-relevance", "urgency", "actionability"]
+                    }
+                }
+            },
+            derivation: {
+                config: {
+                    reflection: {
+                        enabled: true,
+                        trackTaskProgress: true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+#### Customer Service Agent
+```typescript
+{
+    memory: {
+        profile: "conversational",
+        episodicLTM: {
+            encoding: {
+                config: {
+                    attention: {
+                        conversationAware: true,
+                        emotionalTracking: true,
+                        scoringCriteria: ["customer-satisfaction", "issue-resolution"]
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+#### Research Assistant Agent
+```typescript
+{
+    memory: {
+        profile: "research-optimized",
+        semanticLTM: {
+            acquisition: {
+                config: {
+                    filter: {
+                        maxInputSize: 10000,
+                        factualValidation: true
+                    }
+                }
+            },
+            derivation: {
+                config: {
+                    summarization: {
+                        strategy: "hierarchical",
+                        preserveReferences: true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
 ## Performance Characteristics
 
 Based on performance testing, the MLO pipeline provides:
