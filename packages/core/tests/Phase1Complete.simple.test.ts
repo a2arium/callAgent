@@ -2,38 +2,43 @@ import { createTestContext, cleanupTestContext } from '../test-utils.js';
 
 describe('Phase 1 Complete Memory System - Simple', () => {
     describe('Basic Functionality', () => {
-        it('should create test context successfully', () => {
-            const ctx = createTestContext('test-tenant');
+        it('should create test context successfully', async () => {
+            const ctx = await createTestContext('test-tenant');
             expect(ctx).toBeDefined();
             expect(ctx.memory).toBeDefined();
             expect(ctx.memory.mlo).toBeDefined();
         });
 
         it('should handle working memory operations', async () => {
-            const ctx = createTestContext('test-tenant');
+            const ctx = await createTestContext('test-tenant-working');
 
-            // Test goal operations - currently placeholder implementations
+            // Test goal operations
             if (ctx.setGoal && ctx.getGoal) {
                 await ctx.setGoal('Test goal');
                 const goal = await ctx.getGoal();
-                // Currently returns null as it's a placeholder implementation
-                expect(goal).toBe(null);
+                // Should return the goal we just set
+                expect(goal).toBe('Test goal');
             }
 
-            // Test thought operations - currently placeholder implementations
+            // Test thought operations
             if (ctx.addThought && ctx.getThoughts) {
+                const initialThoughts = await ctx.getThoughts();
+                const initialCount = initialThoughts.length;
+
                 await ctx.addThought('Test thought');
                 const thoughts = await ctx.getThoughts();
                 expect(Array.isArray(thoughts)).toBe(true);
-                // Currently returns empty array as it's a placeholder implementation
-                expect(thoughts.length).toBe(0);
+                // Should have one more thought than before
+                expect(thoughts.length).toBe(initialCount + 1);
+                // The last thought should be the one we just added
+                expect(thoughts[thoughts.length - 1].content).toBe('Test thought');
             }
 
             await cleanupTestContext(ctx);
         });
 
         it('should handle unified operations', async () => {
-            const ctx = createTestContext('test-tenant');
+            const ctx = await createTestContext('test-tenant-unified');
 
             // Test recall operation
             if (ctx.recall) {
@@ -50,8 +55,8 @@ describe('Phase 1 Complete Memory System - Simple', () => {
             await cleanupTestContext(ctx);
         });
 
-        it('should provide MLO access', () => {
-            const ctx = createTestContext('test-tenant');
+        it('should provide MLO access', async () => {
+            const ctx = await createTestContext('test-tenant-mlo');
 
             expect(ctx.memory).toBeDefined();
             expect(ctx.memory.mlo).toBeDefined();

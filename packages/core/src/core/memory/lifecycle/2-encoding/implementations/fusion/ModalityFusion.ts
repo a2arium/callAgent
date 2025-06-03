@@ -137,6 +137,17 @@ export class ModalityFusion implements IMultiModalFusion {
         }
     }
 
+    /**
+     * Extract modalities from memory item data
+     * 
+     * This method is designed to be extensible - it can handle any modality type:
+     * - text, audio, image, video (media modalities)
+     * - metadata, structured, temporal (context modalities) 
+     * - sensor, geolocation, biometric (IoT modalities)
+     * - custom domain-specific modalities
+     * 
+     * To add new modality extractors, simply add detection logic below.
+     */
     async extractModalities(item: MemoryItem<unknown>): Promise<Array<{
         type: string;
         content: unknown;
@@ -151,6 +162,26 @@ export class ModalityFusion implements IMultiModalFusion {
                 type: 'text',
                 content: textContent,
                 confidence: 0.9
+            });
+        }
+
+        // Extract image modality (example for future implementation)
+        const imageContent = this.extractImageContent(item.data);
+        if (imageContent) {
+            modalities.push({
+                type: 'image',
+                content: imageContent,
+                confidence: 0.8
+            });
+        }
+
+        // Extract audio modality (example for future implementation) 
+        const audioContent = this.extractAudioContent(item.data);
+        if (audioContent) {
+            modalities.push({
+                type: 'audio',
+                content: audioContent,
+                confidence: 0.8
             });
         }
 
@@ -204,6 +235,38 @@ export class ModalityFusion implements IMultiModalFusion {
             }
         }
 
+        return null;
+    }
+
+    private extractImageContent(data: unknown): unknown | null {
+        // FUTURE: Implement image content extraction
+        // Look for base64 data, image URLs, buffer data, etc.
+        if (typeof data === 'object' && data !== null) {
+            const obj = data as Record<string, unknown>;
+            const imageFields = ['image', 'img', 'imageData', 'imageUrl', 'picture'];
+
+            for (const field of imageFields) {
+                if (obj[field]) {
+                    return obj[field];
+                }
+            }
+        }
+        return null;
+    }
+
+    private extractAudioContent(data: unknown): unknown | null {
+        // FUTURE: Implement audio content extraction  
+        // Look for audio buffers, audio URLs, waveform data, etc.
+        if (typeof data === 'object' && data !== null) {
+            const obj = data as Record<string, unknown>;
+            const audioFields = ['audio', 'audioData', 'audioUrl', 'sound', 'recording'];
+
+            for (const field of audioFields) {
+                if (obj[field]) {
+                    return obj[field];
+                }
+            }
+        }
         return null;
     }
 
@@ -308,19 +371,19 @@ export class ModalityFusion implements IMultiModalFusion {
             const weight = weights[modality.type] || 1.0;
 
             if (typeof modality.content === 'string') {
-                fusedData[`${modality.type}_content`] = {
+                fusedData[modality.type] = {
                     content: modality.content,
                     weight,
                     length: modality.content.length
                 };
             } else if (typeof modality.content === 'object' && modality.content !== null) {
-                fusedData[`${modality.type}_data`] = {
+                fusedData[modality.type] = {
                     content: modality.content,
                     weight,
                     complexity: Object.keys(modality.content as Record<string, unknown>).length
                 };
             } else {
-                fusedData[`${modality.type}_value`] = {
+                fusedData[modality.type] = {
                     content: modality.content,
                     weight
                 };

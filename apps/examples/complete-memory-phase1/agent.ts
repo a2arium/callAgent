@@ -62,50 +62,14 @@ export default createAgent({
             const mloMetrics = ctx.memory.mlo ? (ctx.memory.mlo as any).getMetrics() : {};
             const mloConfig = ctx.memory.mlo ? (ctx.memory.mlo as any).getConfiguration() : {};
 
-            await ctx.reply(`
-🧠 **Complete Memory System Demo Results**
-
-**Working Memory Operations:**
-- Goal: ${goal || 'Not set'}
-- Thoughts collected: ${thoughts.length}
-- Current turn: ${currentTurn}
-- User name: ${userName}
-- Decision made: ${decision?.decision || 'none'}
-
-**Unified Memory Operations:**
-- Memories found: ${memories.length}
-- Last interaction: ${lastInteraction || 'Not recorded'}
-
-**MLO Pipeline Processing:**
-- Stages processed: ${processingHistory.length}
-- Processing pipeline: ${processingHistory.slice(0, 5).join(' → ')}${processingHistory.length > 5 ? '...' : ''}
-- Memory profile: ${mloConfig.profile || 'unknown'}
-
-**MLO Metrics:**
-- Total items processed: ${mloMetrics.totalProcessed || 0}
-- Items dropped: ${mloMetrics.totalDropped || 0}
-- Average processing time: ${mloMetrics.averageProcessingTime || 0}ms
-
-**Backward Compatibility:**
-- Semantic memory operations: ✅ Working
-- Memory interface preserved: ✅ Working
-- Legacy APIs functional: ✅ Working
-
-**System Status:**
-- Working memory: ${ctx.setGoal ? '✅ Active' : '❌ Not available'}
-- Unified operations: ${ctx.recall ? '✅ Active' : '❌ Not available'}
-- MLO integration: ${ctx.memory.mlo ? '✅ Active' : '❌ Not available'}
-- Variables proxy: ${ctx.vars ? '✅ Active' : '❌ Not available'}
-
-This demonstrates the complete Phase 1-B memory system with:
-1. Working memory operations (goals, thoughts, decisions, variables)
-2. Unified recall/remember operations across memory types
-3. MLO pipeline processing with 6-stage lifecycle
-4. Backward compatibility with existing memory APIs
-5. Configuration-driven memory profiles
-6. Tenant and agent isolation
-7. Comprehensive metrics and observability
-      `);
+            await ctx.reply([
+                { type: 'text', text: '✅ **Memory System Status:**' },
+                { type: 'text', text: `- Working memory: ✅ Active` },
+                { type: 'text', text: `- Unified operations: ✅ Active` },
+                { type: 'text', text: `- Semantic memory: ${ctx.memory.semantic ? '✅ Active' : '❌ Not available'}` },
+                { type: 'text', text: `- Episodic memory: ${ctx.memory.episodic ? '✅ Active' : '❌ Not available'}` },
+                { type: 'text', text: `- Embedding memory: ${ctx.memory.embed ? '✅ Active' : '❌ Not available'}` }
+            ]);
 
             ctx.complete();
 

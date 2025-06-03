@@ -75,6 +75,7 @@ export type WorkingMemoryBackend = {
     // Decision tracking
     makeDecision(key: string, decision: DecisionEntry, agentId: string, tenantId: string): Promise<void>;
     getDecision(key: string, agentId: string, tenantId: string): Promise<DecisionEntry | null>;
+    getAllDecisions(agentId: string, tenantId: string): Promise<Record<string, DecisionEntry>>;
 
     // Variable storage
     setVariable(key: string, value: unknown, agentId: string, tenantId: string): Promise<void>;

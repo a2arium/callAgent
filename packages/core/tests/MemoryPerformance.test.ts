@@ -6,7 +6,7 @@ describe('Memory Performance Tests', () => {
     let ctx: TaskContext;
 
     beforeEach(async () => {
-        ctx = createTestContext('perf-test-tenant', { memory: { profile: 'basic' } }, 'perf-agent');
+        ctx = await createTestContext('perf-test-tenant', { memory: { profile: 'basic' } }, 'perf-agent');
         await waitForAsync(50); // Allow initialization
     });
 
@@ -295,7 +295,7 @@ describe('Memory Performance Tests', () => {
             const basicTime = Date.now() - basicStart;
 
             // Create context with conversational profile
-            const conversationalCtx = createTestContext(
+            const conversationalCtx = await createTestContext(
                 'perf-conversational-tenant',
                 { memory: { profile: 'conversational' } },
                 'perf-conversational-agent'

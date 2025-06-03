@@ -20,12 +20,13 @@
   "scripts": {
     "postinstall": "node scripts/sync-dotenv.cjs",
     "build": "tsc",
-    "start": "node dist/runner/index.js",
-    "dev": "node --loader ts-node/esm src/runner/index.ts",
+    "start": "node packages/core/dist/runner/runnerCli.js",
+    "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn turbo run build && node packages/core/dist/runner/runnerCli.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "run:llm": "yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{\"prompt\": \"Tell me a joke about AI.\"}'",
     "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream --tenant=customer-123",
+    "run:a2a": "yarn build && node -r dotenv/config dist/apps/examples/a2a-local-demo/run-demo.js",
     "clean": "find . -type d -name dist -exec rm -rf {} +"
   },
   "keywords": [

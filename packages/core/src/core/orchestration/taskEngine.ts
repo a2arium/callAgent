@@ -149,6 +149,7 @@ export class TaskEngine {
         // inject all required dependencies like LLM, tools, etc.
         return {
             tenantId: 'default', // TODO: Get from agent/task context
+            agentId: 'default', // TODO: Get from agent/task context
             task: {
                 id: task.id,
                 input: task.input as TaskInput
@@ -214,7 +215,20 @@ export class TaskEngine {
             updateStatus: () => { },
             services: { get: () => undefined },
             getEnv: () => undefined,
-            throw: (code, message) => { throw new Error(`${code}: ${message}`); }
+            throw: (code, message) => { throw new Error(`${code}: ${message}`); },
+            sendTaskToAgent: async () => { throw new Error('A2A not available in basic task engine'); },
+
+            // Required working memory operations
+            setGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            getGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            addThought: async () => { throw new Error('Working memory not available in basic task engine'); },
+            getThoughts: async () => { throw new Error('Working memory not available in basic task engine'); },
+            makeDecision: async () => { throw new Error('Working memory not available in basic task engine'); },
+            getDecision: async () => { throw new Error('Working memory not available in basic task engine'); },
+            getAllDecisions: async () => { throw new Error('Working memory not available in basic task engine'); },
+            vars: {},
+            recall: async () => { throw new Error('Memory not available in basic task engine'); },
+            remember: async () => { throw new Error('Memory not available in basic task engine'); }
         };
     }
 }

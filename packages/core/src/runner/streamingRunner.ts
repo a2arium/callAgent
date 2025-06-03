@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig, type MinimalConfig } from '../config/index.js';
-import { listPlugins } from '../core/plugin/pluginRegistry.js';
+import { PluginManager } from '../core/plugin/pluginManager.js';
 import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus, Artifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
@@ -17,6 +17,7 @@ import { createLLMForTask } from '../core/llm/LLMFactory.js';
 import { getMemoryAdapter } from '../core/memory/factory.js';
 import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
+import { globalA2AService } from '../core/orchestration/A2AService.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -30,6 +31,16 @@ type StreamingOptions = {
     outputFile?: string;
     tenantId?: string; // CLI-specified tenant override
 };
+
+/**
+ * Type for the partial context before memory extension
+ * This excludes working memory methods that will be added by extendContextWithMemory
+ */
+type PartialTaskContext = Omit<TaskContext,
+    'fail' | 'setGoal' | 'getGoal' | 'addThought' | 'getThoughts' |
+    'makeDecision' | 'getDecision' | 'getAllDecisions' | 'vars' |
+    'recall' | 'remember' | 'sendTaskToAgent'
+>;
 
 /**
  * Run an agent locally with the given input and streaming options
@@ -65,8 +76,9 @@ export async function runAgentWithStreaming(
     }
     logInfoMethod.call(runnerLogger, `Plugin loaded successfully`);
 
-    const plugins: AgentPlugin[] = listPlugins();
-    if (plugins.length === 0) {
+    // Get all registered agents from the unified registry
+    const registeredAgents = PluginManager.listAgents();
+    if (registeredAgents.length === 0) {
         runnerLogger.error(`No plugin registered by file`, null, { path: agentFilePath });
         throw new TaskExecutionError(
             `No plugin registered by file ${agentFilePath}. Ensure the file exports the result of createAgent.`,
@@ -78,19 +90,27 @@ export async function runAgentWithStreaming(
     const filename = path.basename(agentFilePath);
 
     // Try to find plugin by matching names in the path
-    plugin = plugins.find((p: AgentPlugin) => agentFilePath.includes(p.manifest.name));
+    plugin = PluginManager.findAgent(path.basename(agentFilePath, '.js').replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')) || undefined;
 
-    // If not found and only one plugin, use that
-    if (!plugin && plugins.length === 1) {
-        plugin = plugins[0];
-        runnerLogger.warn(`Could not definitively match plugin by name in path, using the only registered plugin`, {
-            name: plugin.manifest.name,
-            path: agentFilePath
-        });
+    // If not found, try fuzzy matching with the file name
+    if (!plugin) {
+        const baseName = path.basename(agentFilePath, '.js');
+        plugin = PluginManager.findAgent(baseName) || undefined;
+    }
+
+    // If still not found and only one agent, use that
+    if (!plugin && registeredAgents.length === 1) {
+        plugin = PluginManager.findAgent(registeredAgents[0].name) || undefined;
+        if (plugin) {
+            runnerLogger.warn(`Could not definitively match plugin by name in path, using the only registered plugin`, {
+                name: registeredAgents[0].name,
+                path: agentFilePath
+            });
+        }
     }
 
     if (!plugin) {
-        const availablePlugins = plugins.map((p: AgentPlugin) => p.manifest.name).join(', ');
+        const availablePlugins = registeredAgents.map(a => a.name).join(', ');
         runnerLogger.error(`Could not determine which plugin to run`, null, {
             path: agentFilePath,
             availablePlugins
@@ -100,6 +120,8 @@ export async function runAgentWithStreaming(
             { path: agentFilePath, availablePlugins }
         );
     }
+
+    // Plugin is already registered in the unified registry via createAgent()
 
     const agentName = plugin.manifest.name;
 
@@ -128,9 +150,10 @@ export async function runAgentWithStreaming(
     const memoryAdapter = await getMemoryAdapter(finalTenantId);
     const semanticAdapter = memoryAdapter.semantic.backends[config.memory.semantic.default];
 
-    // Create basic task context with resolved tenant information
-    const partialCtx: Omit<TaskContext, 'fail'> = {
+    // Create basic task context with resolved tenant information (excluding working memory methods)
+    const partialCtx: PartialTaskContext = {
         tenantId: finalTenantId,
+        agentId: agentName,
         task: {
             id: taskId,
             input: input,
@@ -206,8 +229,35 @@ export async function runAgentWithStreaming(
         },
         recordUsage: (usage: unknown): void => {
             agentLogger.warn('recordUsage is stubbed in local runner', { usage });
+        },
+        memory: {
+            semantic: {
+                getDefaultBackend: () => 'none',
+                setDefaultBackend: () => { },
+                backends: {},
+                get: async () => null,
+                set: async () => { },
+                getMany: async () => [],
+                delete: async () => { },
+            },
+            episodic: {
+                getDefaultBackend: () => 'none',
+                setDefaultBackend: () => { },
+                backends: {},
+                append: async () => { },
+                getEvents: async () => [],
+                deleteEvent: async () => { },
+            },
+            embed: {
+                getDefaultBackend: () => 'none',
+                setDefaultBackend: () => { },
+                backends: {},
+                upsert: async () => { },
+                queryByVector: async () => [],
+                delete: async () => { },
+            }
         }
-    } as any; // Temporary type assertion since memory will be added by extendContextWithMemory
+    };
 
     // Extend context with MLO-backed memory operations
     const contextWithMemory = await extendContextWithMemory(
@@ -218,7 +268,13 @@ export async function runAgentWithStreaming(
         semanticAdapter // Existing semantic adapter for backward compatibility
     );
 
-    let taskCtx: TaskContext = {
+    // Add A2A capability - contextWithMemory is already a complete TaskContext
+    contextWithMemory.sendTaskToAgent = async (targetAgent, taskInput, options) => {
+        return globalA2AService.sendTaskToAgent(contextWithMemory as any, targetAgent, taskInput, options);
+    };
+
+    // The context is now complete - no need for type assertion
+    const taskCtx: TaskContext = {
         ...contextWithMemory,
         fail: async (error: unknown): Promise<void> => {
             const errorMessage = error instanceof Error ? error.message : String(error);

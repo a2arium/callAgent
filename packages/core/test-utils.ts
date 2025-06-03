@@ -141,6 +141,7 @@ export async function createTestContext(
     // Base context with required TaskContext properties
     const baseContext = {
         tenantId,
+        agentId,
         task: {
             id: 'test-task',
             input: { test: true }
@@ -207,15 +208,22 @@ export async function createTestContext(
         (context.memory as any).mlo.episodicMemoryAdapter = episodicAdapter;
     }
 
+    // Add A2A capability for testing
+    const { globalA2AService } = await import('./src/core/orchestration/A2AService.js');
+    context.sendTaskToAgent = async (targetAgent, taskInput, options) => {
+        return globalA2AService.sendTaskToAgent(context as any, targetAgent, taskInput, options);
+    };
+
     return context;
 }
 
 /**
  * Create a minimal test context without memory capabilities
  */
-export function createMinimalTestContext(tenantId: string = 'test-tenant'): Partial<TaskContext> {
+export function createMinimalTestContext(tenantId: string = 'test-tenant', agentId: string = 'test-agent'): Partial<TaskContext> {
     return {
         tenantId,
+        agentId,
         task: {
             id: 'test-task',
             input: { test: true }

@@ -245,6 +245,46 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
         }
     }
 
+    async getAllDecisions(agentId: string, tenantId: string): Promise<Record<string, DecisionEntry>> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
+
+        try {
+            const decisions = await this.prisma.workingMemoryDecision.findMany({
+                where: {
+                    tenantId: resolvedTenantId,
+                    agentId
+                },
+                orderBy: {
+                    timestamp: 'asc' // Chronological order
+                }
+            });
+
+            const decisionsMap: Record<string, DecisionEntry> = {};
+            decisions.forEach(d => {
+                decisionsMap[d.decisionKey] = {
+                    decision: d.decision,
+                    reasoning: d.reasoning || undefined,
+                    timestamp: d.timestamp.toISOString()
+                };
+            });
+
+            this.logger.debug('Retrieved all decisions successfully', {
+                tenantId: resolvedTenantId,
+                agentId,
+                count: decisions.length
+            });
+
+            return decisionsMap;
+        } catch (error) {
+            this.logger.error('Failed to get all decisions', {
+                tenantId: resolvedTenantId,
+                agentId,
+                error
+            });
+            throw new Error(`Failed to get all decisions: ${error}`);
+        }
+    }
+
     // ========================================
     // Variable Storage
     // ========================================

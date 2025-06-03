@@ -52,6 +52,10 @@ export class WorkingMemoryRegistry implements WorkingMemoryBackend {
         return this.unifiedMemoryService.getDecision(key, agentId);
     }
 
+    async getAllDecisions(agentId: string, tenantId: string): Promise<Record<string, DecisionEntry>> {
+        return this.unifiedMemoryService.getAllDecisions(agentId);
+    }
+
     // ========================================
     // Variable Storage
     // ========================================

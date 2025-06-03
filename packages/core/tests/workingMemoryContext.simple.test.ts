@@ -11,14 +11,14 @@ describe('workingMemoryContext - Simple Tests', () => {
         }
     };
 
-    it('should create context with memory capabilities', () => {
+    it('should create context with memory capabilities', async () => {
         const agentConfig = {
             memory: {
                 profile: 'basic'
             }
         };
 
-        const context = extendContextWithMemory(
+        const context = await extendContextWithMemory(
             baseContext,
             tenantId,
             agentId,
@@ -36,30 +36,33 @@ describe('workingMemoryContext - Simple Tests', () => {
         expect(context.remember).toBeDefined();
         expect(context.memory).toBeDefined();
         expect(context.memory.mlo).toBeDefined();
-    });
-
-    it('should handle basic goal operations', async () => {
-        const agentConfig = { memory: { profile: 'basic' } };
-        const context = extendContextWithMemory(baseContext, tenantId, agentId, agentConfig);
-
-        const goal = 'Test goal';
-        await context.setGoal?.(goal);
-        const retrievedGoal = await context.getGoal?.();
-
-        // Currently returns null as it's a placeholder implementation
-        expect(retrievedGoal).toBe(null);
 
         // Cleanup
         await (context.memory.mlo as unknown as { shutdown: () => Promise<void> }).shutdown();
     });
 
-    it('should handle configuration resolution', () => {
+    it('should handle basic goal operations', async () => {
+        const agentConfig = { memory: { profile: 'basic' } };
+        const context = await extendContextWithMemory(baseContext, tenantId, agentId, agentConfig);
+
+        const goal = 'Test goal';
+        await context.setGoal?.(goal);
+        const retrievedGoal = await context.getGoal?.();
+
+        // Should return the goal we just set
+        expect(retrievedGoal).toBe(goal);
+
+        // Cleanup
+        await (context.memory.mlo as unknown as { shutdown: () => Promise<void> }).shutdown();
+    });
+
+    it('should handle configuration resolution', async () => {
         // Test with no config
-        const context1 = extendContextWithMemory(baseContext, tenantId, agentId, {});
+        const context1 = await extendContextWithMemory(baseContext, tenantId, agentId, {});
         expect((context1.memory.mlo as unknown as { getConfiguration: () => { profile: string } }).getConfiguration().profile).toBe('basic');
 
         // Test with specific profile
-        const context2 = extendContextWithMemory(
+        const context2 = await extendContextWithMemory(
             baseContext,
             tenantId,
             agentId,
@@ -68,7 +71,7 @@ describe('workingMemoryContext - Simple Tests', () => {
         expect((context2.memory.mlo as unknown as { getConfiguration: () => { profile: string } }).getConfiguration().profile).toBe('conversational');
 
         // Cleanup
-        (context1.memory.mlo as unknown as { shutdown: () => void }).shutdown();
-        (context2.memory.mlo as unknown as { shutdown: () => void }).shutdown();
+        await (context1.memory.mlo as unknown as { shutdown: () => Promise<void> }).shutdown();
+        await (context2.memory.mlo as unknown as { shutdown: () => Promise<void> }).shutdown();
     });
 }); 

@@ -6,8 +6,8 @@ describe('Phase 1 Complete Memory System', () => {
     describe('Backward Compatibility', () => {
         let ctx: any;
 
-        beforeEach(() => {
-            ctx = createTestContext('test-tenant');
+        beforeEach(async () => {
+            ctx = await createTestContext('test-tenant');
         });
 
         afterEach(async () => {
@@ -78,7 +78,7 @@ describe('Phase 1 Complete Memory System', () => {
             };
 
             // Extend with memory but NO adapters
-            const ctxWithoutAdapters = extendContextWithMemory(
+            const ctxWithoutAdapters = await extendContextWithMemory(
                 baseContext,
                 'test-tenant',
                 'test-agent',
@@ -104,8 +104,8 @@ describe('Phase 1 Complete Memory System', () => {
     describe('Working Memory', () => {
         let ctx: any;
 
-        beforeEach(() => {
-            ctx = createTestContext('test-tenant');
+        beforeEach(async () => {
+            ctx = await createTestContext('test-tenant');
         });
 
         afterEach(async () => {
@@ -152,8 +152,8 @@ describe('Phase 1 Complete Memory System', () => {
         });
 
         it('should isolate working memory by agent', async () => {
-            const ctx1 = createTestContext('test-tenant', {}, 'agent1');
-            const ctx2 = createTestContext('test-tenant', {}, 'agent2');
+            const ctx1 = await createTestContext('test-tenant', {}, 'agent1');
+            const ctx2 = await createTestContext('test-tenant', {}, 'agent2');
 
             // Set different goals for different agents
             await ctx1.setGoal?.('Agent 1 goal');
@@ -188,8 +188,8 @@ describe('Phase 1 Complete Memory System', () => {
     describe('MLO Pipeline', () => {
         let ctx: any;
 
-        beforeEach(() => {
-            ctx = createTestContext('test-tenant');
+        beforeEach(async () => {
+            ctx = await createTestContext('test-tenant');
         });
 
         afterEach(async () => {
@@ -273,7 +273,7 @@ describe('Phase 1 Complete Memory System', () => {
                 }
             };
 
-            const ctx = createTestContext('test-tenant', agentConfig);
+            const ctx = await createTestContext('test-tenant', agentConfig);
 
             await ctx.addThought?.('This goes through conversational pipeline');
             const thoughts = await ctx.getThoughts?.();
@@ -289,7 +289,7 @@ describe('Phase 1 Complete Memory System', () => {
         });
 
         it('should use basic profile by default', async () => {
-            const ctx = createTestContext('test-tenant', {});
+            const ctx = await createTestContext('test-tenant', {});
 
             const mlo = ctx.memory.mlo as any;
             if (mlo) {
@@ -308,7 +308,7 @@ describe('Phase 1 Complete Memory System', () => {
             };
 
             // Should not throw, should fall back to basic
-            const ctx = createTestContext('test-tenant', agentConfig);
+            const ctx = await createTestContext('test-tenant', agentConfig);
 
             const mlo = ctx.memory.mlo as any;
             if (mlo) {
@@ -330,7 +330,7 @@ describe('Phase 1 Complete Memory System', () => {
                 }
             };
 
-            const ctx = createTestContext('test-tenant', agentConfig);
+            const ctx = await createTestContext('test-tenant', agentConfig);
 
             const mlo = ctx.memory.mlo as any;
             if (mlo) {
@@ -346,8 +346,8 @@ describe('Phase 1 Complete Memory System', () => {
     describe('Unified Operations', () => {
         let ctx: any;
 
-        beforeEach(() => {
-            ctx = createTestContext('test-tenant');
+        beforeEach(async () => {
+            ctx = await createTestContext('test-tenant');
         });
 
         afterEach(async () => {
@@ -433,8 +433,8 @@ describe('Phase 1 Complete Memory System', () => {
     describe('System Integration', () => {
         let ctx: any;
 
-        beforeEach(() => {
-            ctx = createTestContext('test-tenant');
+        beforeEach(async () => {
+            ctx = await createTestContext('test-tenant');
         });
 
         afterEach(async () => {
@@ -479,8 +479,8 @@ describe('Phase 1 Complete Memory System', () => {
         });
 
         it('should maintain tenant isolation', async () => {
-            const ctx1 = createTestContext('tenant1');
-            const ctx2 = createTestContext('tenant2');
+            const ctx1 = await createTestContext('tenant1');
+            const ctx2 = await createTestContext('tenant2');
 
             // Add data to different tenants
             await ctx1.addThought?.('Tenant 1 thought');

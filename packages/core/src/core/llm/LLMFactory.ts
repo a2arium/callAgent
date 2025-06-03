@@ -52,6 +52,12 @@ export async function createEmbeddingFunction(): Promise<(text: string) => Promi
     // Return the embedding function
     return async (text: string): Promise<number[]> => {
         try {
+            // Handle edge cases where text might be undefined or empty
+            if (!text || text === 'undefined' || text === 'null') {
+                console.warn('Received invalid text for embedding, skipping');
+                return [];
+            }
+
             const response = await embeddingCaller.embeddings({
                 input: text,
                 model: config.model,
@@ -61,7 +67,7 @@ export async function createEmbeddingFunction(): Promise<(text: string) => Promi
 
             return response.embeddings[0].embedding;
         } catch (error) {
-            console.warn(`Failed to generate embedding for text: "${text.substring(0, 50)}..."`, error);
+            console.warn(`Failed to generate embedding for text: "${text?.substring?.(0, 50) || 'invalid text'}..."`, error);
             // Return empty array as fallback to prevent breaking the system
             return [];
         }
@@ -101,6 +107,12 @@ export async function createEmbeddingFunctionWithTracking(
 
     return async (text: string): Promise<number[]> => {
         try {
+            // Handle edge cases where text might be undefined or empty
+            if (!text || text === 'undefined' || text === 'null') {
+                console.warn('Received invalid text for embedding, skipping');
+                return [];
+            }
+
             const response = await embeddingCaller.embeddings({
                 input: text,
                 model: config.model,
@@ -110,7 +122,7 @@ export async function createEmbeddingFunctionWithTracking(
 
             return response.embeddings[0].embedding;
         } catch (error) {
-            console.warn(`Failed to generate embedding for text: "${text.substring(0, 50)}..."`, error);
+            console.warn(`Failed to generate embedding for text: "${text?.substring?.(0, 50) || 'invalid text'}..."`, error);
             return [];
         }
     };

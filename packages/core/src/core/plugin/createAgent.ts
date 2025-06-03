@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs'; // Use sync read for simplicity in minimal setup
 import type { AgentPlugin, CreateAgentPluginOptions } from './types.js';
 import type { AgentManifest } from '../../shared/types/index.js';
-import { registerPlugin } from './pluginRegistry.js';
+import { PluginManager } from './pluginManager.js';
 import { fileURLToPath } from 'node:url';
 import { logger } from '@callagent/utils';
 import { ManifestError, PluginError } from '../../utils/errors.js';
@@ -98,8 +98,9 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
         }
     }
 
-    // Register the plugin
-    registerPlugin(plugin);
+    // Register the plugin with the unified PluginManager (which uses AgentRegistry)
+    // This replaces the old registerPlugin() call and ensures A2A compatibility
+    PluginManager.registerAgent(plugin);
     pluginLogger.info(`Agent registered successfully: ${manifest.name} (v${manifest.version}) with tenant: ${tenantId}`);
 
     return plugin; // Returned value is primarily for typing consistency

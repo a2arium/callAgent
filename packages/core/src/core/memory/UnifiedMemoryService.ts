@@ -246,8 +246,10 @@ export class UnifiedMemoryService {
             let goalText: string;
             if (typeof processedData === 'string') {
                 goalText = processedData;
-            } else if (processedData && typeof processedData === 'object' && 'text' in processedData) {
-                goalText = (processedData as any).text;
+            } else if (processedData && typeof processedData === 'object') {
+                const obj = processedData as any;
+                // Handle ModalityFusion output dynamically - try any modality type
+                goalText = this.extractContentFromModalityFusion(obj);
             } else {
                 goalText = JSON.stringify(processedData);
             }
@@ -336,8 +338,10 @@ export class UnifiedMemoryService {
             const processedData = processedThought.data;
             if (typeof processedData === 'string') {
                 thoughtText = processedData;
-            } else if (processedData && typeof processedData === 'object' && 'text' in processedData) {
-                thoughtText = (processedData as any).text;
+            } else if (processedData && typeof processedData === 'object') {
+                const obj = processedData as any;
+                // Handle ModalityFusion output dynamically - try any modality type
+                thoughtText = this.extractContentFromModalityFusion(obj);
             } else {
                 thoughtText = JSON.stringify(processedData);
             }
@@ -522,6 +526,35 @@ export class UnifiedMemoryService {
                 error
             });
             return null;
+        }
+    }
+
+    /**
+     * Get all decisions for an agent (for A2A context transfer)
+     * This method should be a first-class, typed member of the service.
+     */
+    async getAllDecisions(agentId?: string): Promise<Record<string, DecisionEntry>> {
+        const effectiveAgentId = agentId || this.defaultAgentId;
+
+        if (!this.workingMemoryAdapter) {
+            this.logger.warn('No working memory adapter available for getAllDecisions');
+            return {};
+        }
+
+        try {
+            // Ensure this method is properly defined and typed on the adapter
+            const decisions = await this.workingMemoryAdapter.getAllDecisions(
+                effectiveAgentId,
+                this.tenantId
+            );
+
+            return decisions || {};
+        } catch (error) {
+            this.logger.error('Failed to get all decisions', error, {
+                agentId: effectiveAgentId,
+                tenantId: this.tenantId
+            });
+            return {}; // Or rethrow, depending on desired error handling
         }
     }
 
@@ -1161,6 +1194,15 @@ export class UnifiedMemoryService {
         if (result.success && result.processedItems.length > 0) {
             const processedData = result.processedItems[0].data;
 
+            console.log('🔍 MLO processed data for remember:', {
+                originalKey: key,
+                originalValue: value,
+                originalOptions: options,
+                processedData: processedData,
+                processedDataType: typeof processedData,
+                processedDataKeys: processedData && typeof processedData === 'object' ? Object.keys(processedData) : 'not object'
+            });
+
             // Extract key, value, options from potentially transformed data
             let extractedKey: string;
             let extractedValue: unknown;
@@ -1173,16 +1215,46 @@ export class UnifiedMemoryService {
                 extractedValue = directData.value;
                 extractedOptions = directData.options;
             } else if (processedData && typeof processedData === 'object' && 'structured' in processedData) {
-                // Fusion transformed structure
-                const fusedData = processedData as { structured: { key: string; value: unknown; options?: RememberOptions } };
-                extractedKey = fusedData.structured.key;
-                extractedValue = fusedData.structured.value;
-                extractedOptions = fusedData.structured.options;
+                // MLO output structure: { structured: { content: {...}, weight: 1, complexity: 3 }, ... }
+                const structuredData = (processedData as any).structured;
+                if (structuredData && typeof structuredData === 'object' && 'content' in structuredData) {
+                    const content = structuredData.content;
+
+                    // The content should contain our original { key, value, options } structure
+                    if (content && typeof content === 'object' && 'key' in content && 'value' in content) {
+                        extractedKey = content.key;
+                        extractedValue = content.value;
+                        extractedOptions = content.options;
+
+                        console.log('🔍 Successfully extracted from MLO structured.content:', {
+                            extractedKey,
+                            extractedValueType: typeof extractedValue,
+                            extractedOptions
+                        });
+                    } else {
+                        // Fallback: use original parameters
+                        this.logger.warn('MLO structured.content does not contain expected key/value structure, using original parameters', {
+                            content: content
+                        });
+                        extractedKey = key;
+                        extractedValue = value;
+                        extractedOptions = options;
+                    }
+                } else {
+                    // Fallback: use original parameters
+                    this.logger.warn('MLO structured data does not contain content property, using original parameters', {
+                        structuredData: structuredData
+                    });
+                    extractedKey = key;
+                    extractedValue = value;
+                    extractedOptions = options;
+                }
             } else {
                 // Fallback: use original parameters
                 this.logger.warn('Could not extract remember structure from processed data, using original parameters', {
                     processedDataType: typeof processedData,
-                    hasKey: processedData && typeof processedData === 'object' && 'key' in processedData
+                    hasKey: processedData && typeof processedData === 'object' && 'key' in processedData,
+                    hasStructured: processedData && typeof processedData === 'object' && 'structured' in processedData
                 });
                 extractedKey = key;
                 extractedValue = value;
@@ -1253,6 +1325,7 @@ export class UnifiedMemoryService {
                 hasSemanticAdapter: !!this.semanticMemoryAdapter,
                 hasEpisodicAdapter: !!this.episodicMemoryAdapter,
                 hasEmbedAdapter: !!this.embedMemoryAdapter,
+                hasWorkingMemoryAdapter: !!this.workingMemoryAdapter,
                 profile: this.mlo.getConfiguration().profile
             }
         };
@@ -1307,5 +1380,31 @@ export class UnifiedMemoryService {
         await this.mlo.shutdown();
 
         this.logger.info('UnifiedMemoryService shutdown complete');
+    }
+
+    /**
+     * Dynamically extract content from ModalityFusion output
+     * Supports any modality type (text, audio, image, video, sensor, etc.)
+     */
+    private extractContentFromModalityFusion(obj: any): string {
+        // First, try to find any modality with .content property
+        for (const [key, value] of Object.entries(obj)) {
+            if (value && typeof value === 'object' && (value as any).content) {
+                const content = (value as any).content;
+                if (typeof content === 'string') {
+                    return content;
+                } else if (content && typeof content === 'object') {
+                    // Handle nested structures
+                    return JSON.stringify(content);
+                }
+            }
+        }
+
+        // Fallback: try direct properties
+        if (obj.text) return typeof obj.text === 'string' ? obj.text : JSON.stringify(obj.text);
+        if (obj.content) return typeof obj.content === 'string' ? obj.content : JSON.stringify(obj.content);
+
+        // Final fallback: stringify the whole object
+        return JSON.stringify(obj);
     }
 } 

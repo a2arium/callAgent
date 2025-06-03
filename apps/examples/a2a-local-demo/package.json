@@ -1,0 +1,19 @@
+{
+  "name": "a2a-local-demo",
+  "version": "1.0.0",
+  "description": "Demonstration of agent-to-agent communication with memory context transfer",
+  "type": "module",
+  "scripts": {
+    "demo": "tsx demo.ts",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "dependencies": {
+    "@callagent/core": "0.1.0",
+    "@callagent/types": "0.1.0",
+    "@callagent/utils": "0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

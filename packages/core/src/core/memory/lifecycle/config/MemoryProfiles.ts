@@ -21,7 +21,7 @@ const BASIC_STAGE_CONFIG: StageConfiguration = {
         consolidator: 'NoveltyConsolidator',
         config: {
             filter: {
-                maxInputSize: 1000,
+                maxInputSize: 2500, // Increased to accommodate MLO processing overhead
                 tenantIsolation: true,
                 basicRelevanceThreshold: 0.1
             },

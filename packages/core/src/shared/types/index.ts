@@ -16,17 +16,36 @@ export type { A2AEvent, TaskStatus, Artifact };
 export * from './workingMemory.js';
 export * from './memoryLifecycle.js';
 
+// A2A (Agent-to-Agent) Communication Types
+export * from './A2ATypes.js';
+
 // MLO Configuration Types
 export * from '../../core/memory/lifecycle/config/types.js';
 
 // MLO Interface Types
 export * from '../../core/memory/lifecycle/interfaces/index.js';
 
-// --- Agent Card (Minimal) ---
+// --- Agent Card (Enhanced for A2A) ---
+/**
+ * Agent manifest defines the metadata and capabilities of an agent
+ * Used for A2A communication to identify and configure target agents
+ */
 export type AgentManifest = {
+    /** Agent name identifier */
     name: string;
+    /** Agent version */
     version: string;
+    /** Optional agent description */
+    description?: string;
+    /** Memory configuration for A2A context inheritance */
+    memory?: {
+        /** Memory profile (e.g., 'basic', 'advanced', 'custom') */
+        profile?: string;
+        /** Additional memory configuration */
+        [key: string]: unknown;
+    };
     // Future: capabilities, endpoint, auth, plugins, tools, etc.
+    [key: string]: unknown;
 }
 
 // --- Messages & Parts (Simplified) ---
@@ -66,6 +85,8 @@ export type TaskLogger = {
 export type TaskContext = {
     // Tenant context for multi-tenant operations
     tenantId: string;
+    // Agent identifier for the current agent
+    agentId: string;
     task: {
         id: string;
         input: TaskInput;
@@ -83,26 +104,30 @@ export type TaskContext = {
     // Use the ILLMCaller interface for llm
     llm: ILLMCaller;
 
-    // NEW: Working Memory Operations (Optional in Phase 0)
-    setGoal?: (goal: string) => Promise<void>;
-    getGoal?: () => Promise<string | null>;
-    addThought?: (thought: string) => Promise<void>;
-    getThoughts?: () => Promise<ThoughtEntry[]>;
-    makeDecision?: (key: string, decision: string, reasoning?: string) => Promise<void>;
-    getDecision?: (key: string) => Promise<DecisionEntry | null>;
+    // Working Memory Operations - REQUIRED for all agents
+    setGoal: (goal: string) => Promise<void>;
+    getGoal: () => Promise<string | null>;
+    addThought: (thought: string) => Promise<void>;
+    getThoughts: () => Promise<ThoughtEntry[]>;
+    makeDecision: (key: string, decision: string, reasoning?: string) => Promise<void>;
+    getDecision: (key: string) => Promise<DecisionEntry | null>;
+    getAllDecisions: () => Promise<Record<string, DecisionEntry>>; // A2A: Required for context serialization
 
-    // NEW: Working memory variables (Optional in Phase 0)
-    vars?: WorkingVariables;
+    // Working memory variables - REQUIRED
+    vars: WorkingVariables;
 
-    // NEW: Unified memory operations (Optional in Phase 0)
-    recall?: (query: string, options?: RecallOptions) => Promise<unknown[]>;
-    remember?: (key: string, value: unknown, options?: RememberOptions) => Promise<void>;
+    // Unified memory operations - REQUIRED
+    recall: (query: string, options?: RecallOptions) => Promise<unknown[]>;
+    remember: (key: string, value: unknown, options?: RememberOptions) => Promise<void>;
 
     // Future Capabilities (Stubbed/Placeholder - DO NOT USE in minimal agent logic)
     tools: { invoke: <T = unknown>(toolName: string, args: unknown) => Promise<T> };
     memory: IMemory & {
         // NEW: Direct MLO access (will be defined later)
-        mlo?: unknown; // UnifiedMemoryService - placeholder for now
+        mlo?: unknown; // Enhanced for A2A serialization - UnifiedMemoryService or compatible service
+        semantic?: unknown; // Placeholder for semantic adapter access
+        episodic?: unknown; // Placeholder for episodic adapter access
+        embed?: unknown; // Placeholder for embed adapter access
     };
     cognitive: { loadWorkingMemory: (e: unknown) => void; plan: (prompt: string, options?: unknown) => Promise<unknown>; record: (state: unknown) => void; flush: () => Promise<void>; };
     logger: TaskLogger; // Use the defined TaskLogger type
@@ -115,4 +140,66 @@ export type TaskContext = {
     services: { get: <T = unknown>(name: string) => T | undefined }; // Placeholder for service registry
     getEnv: (key: string, defaultValue?: string) => string | undefined;
     throw: (code: string, message: string, details?: unknown) => never; // Structured error throw
+
+    /** 
+     * A2A: Send task to another agent with context inheritance
+     * This method enables agent-to-agent communication with memory context transfer
+     * @param targetAgent - Name of the target agent
+     * @param taskInput - Input data for the target agent
+     * @param options - A2A communication options (memory inheritance, tenant context, etc.)
+     * @returns Promise resolving to task result or interactive task handle
+     */
+    sendTaskToAgent: (
+        targetAgent: string,
+        taskInput: TaskInput,
+        options?: import('./A2ATypes.js').A2ACallOptions
+    ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
+}
+
+/**
+ * Guaranteed Agent Task Context
+ * This type ensures that all working memory and A2A methods are definitely available
+ * Use this type for agent implementations to avoid "possibly undefined" errors
+ */
+export type AgentTaskContext = Required<Pick<TaskContext,
+    'setGoal' | 'getGoal' | 'addThought' | 'getThoughts' |
+    'makeDecision' | 'getDecision' | 'getAllDecisions' | 'vars' |
+    'recall' | 'remember' | 'sendTaskToAgent'
+>> & TaskContext;
+
+/**
+ * Type assertion helper for agents to guarantee they have all working memory methods
+ * Use this at the start of your agent's handleTask function to ensure TypeScript
+ * recognizes that all working memory methods are available.
+ * 
+ * @param ctx - The task context passed to the agent
+ * @returns The same context but typed as AgentTaskContext
+ * 
+ * @example
+ * ```typescript
+ * async handleTask(ctx) {
+ *   const agentCtx = ensureAgentContext(ctx);
+ *   await agentCtx.setGoal('My goal'); // No TypeScript errors
+ * }
+ * ```
+ */
+export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
+    // Runtime validation to ensure all required methods are present
+    const requiredMethods = [
+        'setGoal', 'getGoal', 'addThought', 'getThoughts',
+        'makeDecision', 'getDecision', 'getAllDecisions',
+        'recall', 'remember', 'sendTaskToAgent'
+    ];
+
+    for (const method of requiredMethods) {
+        if (typeof (ctx as any)[method] !== 'function') {
+            throw new Error(`Agent context is missing required method: ${method}. Ensure the agent is run through the proper runner with memory support.`);
+        }
+    }
+
+    if (!ctx.vars || typeof ctx.vars !== 'object') {
+        throw new Error('Agent context is missing required vars object. Ensure the agent is run through the proper runner with memory support.');
+    }
+
+    return ctx as AgentTaskContext;
 } 

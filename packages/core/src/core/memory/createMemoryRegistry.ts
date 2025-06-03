@@ -104,6 +104,10 @@ export async function createMemoryRegistry(tenantId?: string, agentId?: string):
                 memoryLogger.info('Working memory getDecision called', { key, agentId: resolvedAgentId });
                 return null;
             },
+            getAllDecisions: async () => {
+                memoryLogger.info('Working memory getAllDecisions called', { agentId: resolvedAgentId });
+                return {};
+            },
             setVariable: async (key, value) => {
                 memoryLogger.info('Working memory setVariable called', { key, value, agentId: resolvedAgentId });
             },

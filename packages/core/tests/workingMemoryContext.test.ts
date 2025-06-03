@@ -48,14 +48,14 @@ describe('workingMemoryContext', () => {
     describe('extendContextWithMemory', () => {
         let context: TaskContext;
 
-        beforeEach(() => {
+        beforeEach(async () => {
             const agentConfig = {
                 memory: {
                     profile: 'basic'
                 }
             };
 
-            context = extendContextWithMemory(
+            context = await extendContextWithMemory(
                 baseContext,
                 tenantId,
                 agentId,
@@ -202,8 +202,8 @@ describe('workingMemoryContext', () => {
     });
 
     describe('Configuration Resolution', () => {
-        it('should use basic profile by default', () => {
-            const context = extendContextWithMemory(
+        it('should use basic profile by default', async () => {
+            const context = await extendContextWithMemory(
                 baseContext,
                 tenantId,
                 agentId,
@@ -214,14 +214,14 @@ describe('workingMemoryContext', () => {
             expect(mlo.getConfiguration().profile).toBe('basic');
         });
 
-        it('should use specified profile from agent config', () => {
+        it('should use specified profile from agent config', async () => {
             const agentConfig = {
                 memory: {
                     profile: 'conversational'
                 }
             };
 
-            const context = extendContextWithMemory(
+            const context = await extendContextWithMemory(
                 baseContext,
                 tenantId,
                 agentId,
@@ -232,7 +232,7 @@ describe('workingMemoryContext', () => {
             expect(mlo.getConfiguration().profile).toBe('conversational');
         });
 
-        it('should handle unknown profile gracefully', () => {
+        it('should handle unknown profile gracefully', async () => {
             const agentConfig = {
                 memory: {
                     profile: 'unknown_profile'
@@ -240,7 +240,7 @@ describe('workingMemoryContext', () => {
             };
 
             // Should not throw, should fall back to basic
-            const context = extendContextWithMemory(
+            const context = await extendContextWithMemory(
                 baseContext,
                 tenantId,
                 agentId,
@@ -251,7 +251,7 @@ describe('workingMemoryContext', () => {
             expect(mlo.getConfiguration().profile).toBe('basic');
         });
 
-        it('should apply working memory overrides', () => {
+        it('should apply working memory overrides', async () => {
             const agentConfig = {
                 memory: {
                     profile: 'basic',
@@ -262,7 +262,7 @@ describe('workingMemoryContext', () => {
                 }
             };
 
-            const context = extendContextWithMemory(
+            const context = await extendContextWithMemory(
                 baseContext,
                 tenantId,
                 agentId,
@@ -313,7 +313,7 @@ describe('workingMemoryContext', () => {
 
     describe('Error Handling', () => {
         it('should handle MLO processing failures gracefully', async () => {
-            const context = extendContextWithMemory(
+            const context = await extendContextWithMemory(
                 baseContext,
                 tenantId,
                 agentId,

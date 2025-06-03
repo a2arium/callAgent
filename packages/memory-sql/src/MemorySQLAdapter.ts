@@ -29,6 +29,26 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     }
 
     async set(key: string, value: any, options: MemorySetOptions = {}): Promise<void> {
+        console.error('🚨 MemorySQLAdapter.set called with:', {
+            key: key,
+            keyType: typeof key,
+            keyValue: key,
+            value: value,
+            valueType: typeof value,
+            valueValue: value,
+            options: options
+        });
+
+        if (key === null || key === undefined) {
+            console.error('🚨 KEY IS NULL/UNDEFINED!');
+            throw new Error(`Key is null/undefined: ${key}`);
+        }
+
+        if (value === null || value === undefined) {
+            console.error('🚨 VALUE IS NULL/UNDEFINED!');
+            throw new Error(`Value is null/undefined: ${value}`);
+        }
+
         const tenantId = options.tenantId || this.defaultTenantId;
 
         // System tenant can set across tenants by prefixing key with tenant:
@@ -48,39 +68,83 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     }
 
     private async setRegular(key: string, value: any, options: MemorySetOptions): Promise<void> {
+        console.log('🔍 MemorySQLAdapter.setRegular called with:', {
+            key: key,
+            keyType: typeof key,
+            value: value,
+            valueType: typeof value,
+            options: options
+        });
+
         // Generate embedding for the entire value if embedding function is available
         let embedding: VectorEmbedding = null;
         if (this.embedFunction) {
             try {
-                const text = typeof value === 'string' ? value : JSON.stringify(value);
-                embedding = await this.embedFunction(text);
+                const text = typeof value === 'string' ? value :
+                    value !== undefined && value !== null ? JSON.stringify(value) : '';
+                if (text && text !== 'undefined' && text !== 'null') {
+                    embedding = await this.embedFunction(text);
+                }
             } catch (error) {
                 console.warn('Failed to generate embedding:', error);
                 embedding = null;
             }
         }
 
-        // Use raw SQL to handle vector type properly
-        const embeddingLiteral = embedding ? `'[${embedding.join(',')}]'::vector` : 'NULL';
         const tenantId = options.tenantId || this.defaultTenantId;
-        await this.prisma.$executeRawUnsafe(`
-            INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
-            VALUES (
-                $1,
-                $2,
-                $3::jsonb,
-                $4::text[],
-                ${embeddingLiteral},
-                NOW(),
-                NOW()
-            )
-            ON CONFLICT (tenant_id, key) 
-            DO UPDATE SET 
-                value = EXCLUDED.value,
-                tags = EXCLUDED.tags,
-                embedding = EXCLUDED.embedding,
-                updated_at = NOW()
-        `, tenantId, key, JSON.stringify(value), options.tags || []);
+
+        // If we have an embedding, use raw SQL to handle vector type properly
+        if (embedding) {
+            const embeddingLiteral = `'[${embedding.join(',')}]'::vector`;
+            await this.prisma.$executeRawUnsafe(`
+                INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
+                VALUES (
+                    $1,
+                    $2,
+                    $3::jsonb,
+                    $4::text[],
+                    ${embeddingLiteral},
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (tenant_id, key) 
+                DO UPDATE SET 
+                    value = EXCLUDED.value,
+                    tags = EXCLUDED.tags,
+                    embedding = EXCLUDED.embedding,
+                    updated_at = NOW()
+            `, tenantId, key, JSON.stringify(value), options.tags || []);
+        } else {
+            console.log('🔍 Using Prisma typed query with:', {
+                tenantId,
+                key,
+                valueJson: JSON.stringify(value),
+                tags: options.tags || []
+            });
+
+            // Use Prisma's typed query when no embedding to avoid vector dimension errors
+            await this.prisma.agentMemoryStore.upsert({
+                where: {
+                    tenantId_key: {
+                        tenantId: tenantId,
+                        key: key
+                    }
+                },
+                update: {
+                    value: JSON.stringify(value),
+                    tags: options.tags || [],
+                    updatedAt: new Date()
+                },
+                create: {
+                    tenantId: tenantId,
+                    key: key,
+                    value: JSON.stringify(value),
+                    tags: options.tags || [],
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                }
+            });
+        }
     }
 
     private async setWithEntityAlignment(key: string, value: any, options: MemorySetOptions): Promise<void> {
@@ -104,8 +168,11 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         let embedding: VectorEmbedding = null;
         if (this.embedFunction) {
             try {
-                const text = typeof value === 'string' ? value : JSON.stringify(value);
-                embedding = await this.embedFunction(text);
+                const text = typeof value === 'string' ? value :
+                    value !== undefined && value !== null ? JSON.stringify(value) : '';
+                if (text && text !== 'undefined' && text !== 'null') {
+                    embedding = await this.embedFunction(text);
+                }
             } catch (error) {
                 console.warn('Failed to generate embedding:', error);
                 embedding = null;
@@ -113,25 +180,50 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         }
 
         // Store the memory entry with embedding
-        const embeddingLiteral = embedding ? `'[${embedding.join(',')}]'::vector` : 'NULL';
-        await this.prisma.$executeRawUnsafe(`
-            INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
-            VALUES (
-                $1,
-                $2,
-                $3::jsonb,
-                $4::text[],
-                ${embeddingLiteral},
-                NOW(),
-                NOW()
-            )
-            ON CONFLICT (tenant_id, key) 
-            DO UPDATE SET 
-                value = EXCLUDED.value,
-                tags = EXCLUDED.tags,
-                embedding = EXCLUDED.embedding,
-                updated_at = NOW()
-        `, tenantId, key, JSON.stringify(value), options.tags || []);
+        if (embedding) {
+            const embeddingLiteral = `'[${embedding.join(',')}]'::vector`;
+            await this.prisma.$executeRawUnsafe(`
+                INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
+                VALUES (
+                    $1,
+                    $2,
+                    $3::jsonb,
+                    $4::text[],
+                    ${embeddingLiteral},
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (tenant_id, key) 
+                DO UPDATE SET 
+                    value = EXCLUDED.value,
+                    tags = EXCLUDED.tags,
+                    embedding = EXCLUDED.embedding,
+                    updated_at = NOW()
+            `, tenantId, key, JSON.stringify(value), options.tags || []);
+        } else {
+            // Use Prisma's typed query when no embedding to avoid vector dimension errors
+            await this.prisma.agentMemoryStore.upsert({
+                where: {
+                    tenantId_key: {
+                        tenantId: tenantId,
+                        key: key
+                    }
+                },
+                update: {
+                    value: JSON.stringify(value),
+                    tags: options.tags || [],
+                    updatedAt: new Date()
+                },
+                create: {
+                    tenantId: tenantId,
+                    key: key,
+                    value: JSON.stringify(value),
+                    tags: options.tags || [],
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                }
+            });
+        }
     }
 
     async get(key: string, opts?: { backend?: string; tenantId?: string }): Promise<any> {

@@ -1,5 +1,12 @@
 export * from './core/plugin/createAgent.js';
-export type { TaskContext } from './shared/types/index.js';
+export type { AgentPlugin, CreateAgentPluginOptions } from './core/plugin/types.js';
+export { AgentRegistry, globalAgentRegistry } from './core/plugin/AgentRegistry.js';
+export { PluginManager } from './core/plugin/pluginManager.js';
+export { ContextSerializer } from './core/orchestration/ContextSerializer.js';
+export { A2AService, globalA2AService } from './core/orchestration/A2AService.js';
+export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
+export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
+export { ensureAgentContext } from './shared/types/index.js';
 export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse } from './shared/types/LLMTypes.js';
 // Removed build utilities - use simple copying instead:
 // "build": "tsc && copyfiles agent.json dist" or "tsc && cp agent.json dist/"

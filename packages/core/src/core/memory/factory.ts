@@ -53,7 +53,7 @@ export async function getMemoryAdapter(tenantId?: string): Promise<IMemory> {
             set: <T>(key: string, value: T, opts?: { backend?: string; tags?: string[] }) => sqlAdapter.set(key, value, opts),
             getMany: <T>(input: import('@callagent/types').GetManyInput, options?: import('@callagent/types').GetManyOptions) => sqlAdapter.getMany(input, options),
             delete: (key: string, opts?: { backend?: string }) => sqlAdapter.delete(key),
-            entities: sqlAdapter.entities,
+            entities: embedFunction ? sqlAdapter.entities : undefined,
         };
         return {
             semantic,

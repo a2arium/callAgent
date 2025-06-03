@@ -210,6 +210,7 @@ export async function extendContextWithMemory(
     context.makeDecision = async (key: string, decision: string, reasoning?: string) =>
         unifiedMemory.makeDecision(key, decision, reasoning, agentId);
     context.getDecision = async (key: string) => unifiedMemory.getDecision(key, agentId);
+    context.getAllDecisions = async () => unifiedMemory.getAllDecisions(agentId);
 
     // Add simple working variables for synchronous access
     context.vars = createSimpleWorkingVariablesProxy(unifiedMemory, agentId);

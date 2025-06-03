@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "jest",
+    "test": "cd ../../ && yarn test --testPathPattern=\"packages/core\"",
     "dev": "ts-node --project tsconfig.json src/runner/runnerCli.ts"
   },
   "publishConfig": {
