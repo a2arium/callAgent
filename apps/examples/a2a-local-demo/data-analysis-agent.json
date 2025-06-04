@@ -1,0 +1,5 @@
+{
+  "name": "data-analysis-agent",
+  "version": "1.0.0",
+  "description": "Specialized agent for data analysis with context inheritance"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "coordinator-agent",
+  "version": "1.0.0",
+  "description": "Orchestrates multi-agent workflows with context sharing",
+  "dependencies": {
+    "agents": ["data-analysis-agent", "reporting-agent"]
+  },
+  "memory": {
+    "profile": "conversational"
+  }
+}

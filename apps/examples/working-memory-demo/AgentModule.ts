@@ -84,18 +84,18 @@ export default createAgent({
             }, { type: 'semantic', persist: true });
 
             // Recall information from memory
-            const projectInfo = await ctx.recall!('project', { type: 'semantic' });
+            const projectInfo = await ctx.recall('project', { type: 'semantic' });
             console.log('Recalled project information:', projectInfo);
 
             // 6. Update Goal and Add More Context
             console.log('\n🔄 === Updating Working Memory ===');
 
-            await ctx.setGoal!('Complete and present the quarterly sales report by Friday with focus on Q3 growth');
+            await ctx.setGoal('Complete and present the quarterly sales report by Friday with focus on Q3 growth');
             await ctx.addThought!('Updated goal to include presentation requirement');
 
             ctx.vars!.progress = 0.6;
 
-            const updatedGoal = await ctx.getGoal!();
+            const updatedGoal = await ctx.getGoal();
             console.log('Updated goal:', updatedGoal);
             console.log('Updated progress: 0.6');
 
@@ -121,9 +121,9 @@ export default createAgent({
             // 9. Final Summary
             console.log('\n📋 === Final Summary ===');
 
-            const finalGoal = await ctx.getGoal!();
-            const finalThoughts = await ctx.getThoughts!();
-            const nextStepsDecision = await ctx.getDecision!('next-steps');
+            const finalGoal = await ctx.getGoal();
+            const finalThoughts = await ctx.getThoughts();
+            const nextStepsDecision = await ctx.getDecision('next-steps');
 
             const summary = {
                 goal: finalGoal,

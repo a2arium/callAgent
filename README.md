@@ -117,6 +117,35 @@ When you're developing agents using this framework:
 
 (Describe the project purpose and core concepts here based on the minimal architecture)
 
+## Agent Dependencies & A2A Communication ✓
+
+The framework provides automatic dependency resolution for Agent-to-Agent (A2A) communication:
+
+- **Automatic Dependency Resolution**: Agents declare dependencies in their manifests
+- **Topological Loading**: Dependencies loaded in correct order automatically  
+- **A2A Communication**: Agents can call other agents via `ctx.sendTaskToAgent()`
+- **Circular Dependency Detection**: Prevents infinite loops and provides clear error messages
+
+### Quick Example
+
+```typescript
+// agent.json
+{
+  "name": "hello-to-llm-agent",
+  "dependencies": { "agents": ["hello-agent"] }
+}
+
+// AgentModule.ts  
+export default createAgent({
+  async handleTask(ctx) {
+    const result = await ctx.sendTaskToAgent('hello-agent', { name: 'User' });
+    return { success: true, dependencyResult: result };
+  }
+});
+```
+
+[Read the complete Agent Dependencies documentation](docs/agent-dependencies.md)
+
 ## Streaming Support ✓
 
 This framework supports both buffered and streaming responses through the A2A protocol:

@@ -26,7 +26,8 @@
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "run:llm": "yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{\"prompt\": \"Tell me a joke about AI.\"}'",
     "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream --tenant=customer-123",
-    "run:a2a": "yarn build && node -r dotenv/config dist/apps/examples/a2a-local-demo/run-demo.js",
+    "run:hello": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}'",
+    "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}' --no-resolve-deps",
     "clean": "find . -type d -name dist -exec rm -rf {} +"
   },
   "keywords": [

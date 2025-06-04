@@ -1,4 +1,8 @@
 {
   "name": "memory-usage",
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "description": "Demonstration agent showing memory system capabilities including working, semantic, and episodic memory",
+  "memory": {
+    "profile": "analytical"
+  }
 }

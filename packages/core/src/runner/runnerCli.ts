@@ -58,6 +58,7 @@ function parseArgs(): {
         outputType: 'json' | 'sse' | 'console';
         outputFile?: string;
         tenantId?: string;
+        resolveDeps?: boolean;
     };
 } {
     // Basic args (required)
@@ -67,8 +68,8 @@ function parseArgs(): {
     // Check for required agent file path
     if (!agentFileArg) {
         cliLogger.error(`Missing required argument: agent file path`);
-        console.error("Usage: yarn run-agent <path-to-agent-module.ts> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id]");
-        console.error(`Example: yarn run-agent examples/hello-agent/AgentModule.ts '{"name": "World"}' --stream --format=json --tenant=customer-123`);
+        console.error("Usage: yarn run-agent <path-to-agent-module.ts> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id] [--resolve-deps|--no-resolve-deps]");
+        console.error(`Example: yarn run-agent examples/hello-agent/AgentModule.ts '{"name": "World"}' --stream --format=json --tenant=customer-123 --resolve-deps`);
         process.exit(1);
     }
 
@@ -89,7 +90,8 @@ function parseArgs(): {
         isStreaming: false,
         outputType: 'console' as 'json' | 'sse' | 'console',
         outputFile: undefined as string | undefined,
-        tenantId: undefined as string | undefined
+        tenantId: undefined as string | undefined,
+        resolveDeps: true  // Default to true for dependency resolution
     };
 
     // Look for flags in remaining arguments
@@ -114,6 +116,10 @@ function parseArgs(): {
                 console.error(`Tenant ID cannot be empty`);
                 process.exit(1);
             }
+        } else if (arg === '--resolve-deps') {
+            options.resolveDeps = true;
+        } else if (arg === '--no-resolve-deps') {
+            options.resolveDeps = false;
         }
     }
 
@@ -122,7 +128,8 @@ function parseArgs(): {
         streaming: options.isStreaming,
         format: options.outputType,
         outputFile: options.outputFile,
-        tenantId: options.tenantId || 'default (from agent/env)'
+        tenantId: options.tenantId || 'default (from agent/env)',
+        resolveDeps: options.resolveDeps
     });
 
     return {

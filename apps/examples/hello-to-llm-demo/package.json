@@ -1,6 +1,6 @@
 {
-  "name": "@callagent/hello-agent",
-  "version": "0.1.0",
+  "name": "@callagent/hello-to-llm-demo",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "main": "dist/AgentModule.js",

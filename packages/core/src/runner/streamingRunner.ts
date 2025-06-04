@@ -30,6 +30,7 @@ type StreamingOptions = {
     outputType?: 'json' | 'sse' | 'console';
     outputFile?: string;
     tenantId?: string; // CLI-specified tenant override
+    resolveDeps?: boolean; // Whether to resolve dependencies (default: true)
 };
 
 /**
@@ -59,66 +60,115 @@ export async function runAgentWithStreaming(
     // Determine log method based on output format for runner logs
     const logInfoMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.info;
 
-    logInfoMethod.call(runnerLogger, `Loading plugin from ${agentFilePath}...`);
-
     let plugin: AgentPlugin | undefined;
-    try {
-        // Resolve path and convert to file URL
-        const agentModulePath = path.resolve(agentFilePath);
-        const agentModuleUrl = pathToFileURL(agentModulePath).href;
-        await import(agentModuleUrl);
-    } catch (error: unknown) {
-        runnerLogger.error(`Failed to load agent file`, error, { path: agentFilePath });
-        throw new TaskExecutionError(`Failed to load agent module from ${agentFilePath}`, {
-            path: agentFilePath,
-            originalError: error
-        });
-    }
-    logInfoMethod.call(runnerLogger, `Plugin loaded successfully`);
 
-    // Get all registered agents from the unified registry
-    const registeredAgents = PluginManager.listAgents();
-    if (registeredAgents.length === 0) {
-        runnerLogger.error(`No plugin registered by file`, null, { path: agentFilePath });
-        throw new TaskExecutionError(
-            `No plugin registered by file ${agentFilePath}. Ensure the file exports the result of createAgent.`,
-            { path: agentFilePath }
-        );
-    }
+    // Dependency resolution (if enabled)
+    if (options.resolveDeps !== false) {  // Default is true
+        logInfoMethod.call(runnerLogger, `🔍 Resolving agent dependencies...`);
 
-    // Heuristic: try to find the plugin whose file path roughly matches the input
-    const filename = path.basename(agentFilePath);
+        try {
+            const loadedAgents = await PluginManager.loadAgentWithDependencies(agentFilePath);
 
-    // Try to find plugin by matching names in the path
-    plugin = PluginManager.findAgent(path.basename(agentFilePath, '.js').replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')) || undefined;
+            if (loadedAgents.length > 1) {
+                logInfoMethod.call(runnerLogger, `📦 Loaded ${loadedAgents.length} agents (including dependencies)`);
+                loadedAgents.forEach(agent => {
+                    logInfoMethod.call(runnerLogger, `  ✅ ${agent.manifest.name} (v${agent.manifest.version})`);
+                });
+            } else if (loadedAgents.length === 1) {
+                logInfoMethod.call(runnerLogger, `📦 Loaded agent: ${loadedAgents[0].manifest.name} (no dependencies)`);
+            }
 
-    // If not found, try fuzzy matching with the file name
-    if (!plugin) {
-        const baseName = path.basename(agentFilePath, '.js');
-        plugin = PluginManager.findAgent(baseName) || undefined;
-    }
+            // The main agent should be the first one loaded (root agent)
+            plugin = loadedAgents[0];
+            logInfoMethod.call(runnerLogger, `Plugin loaded successfully via dependency resolution`);
+        } catch (error: unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
 
-    // If still not found and only one agent, use that
-    if (!plugin && registeredAgents.length === 1) {
-        plugin = PluginManager.findAgent(registeredAgents[0].name) || undefined;
-        if (plugin) {
-            runnerLogger.warn(`Could not definitively match plugin by name in path, using the only registered plugin`, {
-                name: registeredAgents[0].name,
-                path: agentFilePath
+            if (errorMessage.includes('Circular dependency')) {
+                runnerLogger.error('❌ Circular dependency detected:', error);
+                throw new TaskExecutionError(`Circular dependency detected: ${errorMessage}`, {
+                    path: agentFilePath,
+                    originalError: error
+                });
+            } else if (errorMessage.includes('not found')) {
+                runnerLogger.error('❌ Missing dependency:', error);
+                throw new TaskExecutionError(`Missing dependency: ${errorMessage}`, {
+                    path: agentFilePath,
+                    originalError: error
+                });
+            } else {
+                runnerLogger.error('❌ Dependency resolution failed:', error);
+                throw new TaskExecutionError(`Dependency resolution failed: ${errorMessage}`, {
+                    path: agentFilePath,
+                    originalError: error
+                });
+            }
+        }
+    } else {
+        logInfoMethod.call(runnerLogger, `⚠️ Dependency resolution disabled - loading single agent only`);
+        logInfoMethod.call(runnerLogger, `Loading plugin from ${agentFilePath}...`);
+
+        try {
+            // Resolve path and convert to file URL
+            const agentModulePath = path.resolve(agentFilePath);
+            const agentModuleUrl = pathToFileURL(agentModulePath).href;
+            await import(agentModuleUrl);
+        } catch (error: unknown) {
+            runnerLogger.error(`Failed to load agent file`, error, { path: agentFilePath });
+            throw new TaskExecutionError(`Failed to load agent module from ${agentFilePath}`, {
+                path: agentFilePath,
+                originalError: error
             });
         }
+        logInfoMethod.call(runnerLogger, `Plugin loaded successfully`);
     }
 
-    if (!plugin) {
-        const availablePlugins = registeredAgents.map(a => a.name).join(', ');
-        runnerLogger.error(`Could not determine which plugin to run`, null, {
-            path: agentFilePath,
-            availablePlugins
-        });
-        throw new TaskExecutionError(
-            `Could not determine which plugin to run from ${agentFilePath}. Found: ${availablePlugins}`,
-            { path: agentFilePath, availablePlugins }
-        );
+    // If dependency resolution was disabled, we need to find the plugin manually
+    if (options.resolveDeps === false || !plugin) {
+        // Get all registered agents from the unified registry
+        const registeredAgents = PluginManager.listAgents();
+        if (registeredAgents.length === 0) {
+            runnerLogger.error(`No plugin registered by file`, null, { path: agentFilePath });
+            throw new TaskExecutionError(
+                `No plugin registered by file ${agentFilePath}. Ensure the file exports the result of createAgent.`,
+                { path: agentFilePath }
+            );
+        }
+
+        // Heuristic: try to find the plugin whose file path roughly matches the input
+        const filename = path.basename(agentFilePath);
+
+        // Try to find plugin by matching names in the path
+        plugin = PluginManager.findAgent(path.basename(agentFilePath, '.js').replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')) || undefined;
+
+        // If not found, try fuzzy matching with the file name
+        if (!plugin) {
+            const baseName = path.basename(agentFilePath, '.js');
+            plugin = PluginManager.findAgent(baseName) || undefined;
+        }
+
+        // If still not found and only one agent, use that
+        if (!plugin && registeredAgents.length === 1) {
+            plugin = PluginManager.findAgent(registeredAgents[0].name) || undefined;
+            if (plugin) {
+                runnerLogger.warn(`Could not definitively match plugin by name in path, using the only registered plugin`, {
+                    name: registeredAgents[0].name,
+                    path: agentFilePath
+                });
+            }
+        }
+
+        if (!plugin) {
+            const availablePlugins = registeredAgents.map(a => a.name).join(', ');
+            runnerLogger.error(`Could not determine which plugin to run`, null, {
+                path: agentFilePath,
+                availablePlugins
+            });
+            throw new TaskExecutionError(
+                `Could not determine which plugin to run from ${agentFilePath}. Found: ${availablePlugins}`,
+                { path: agentFilePath, availablePlugins }
+            );
+        }
     }
 
     // Plugin is already registered in the unified registry via createAgent()

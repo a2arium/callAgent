@@ -1,0 +1,8 @@
+{
+  "name": "hello-to-llm-agent",
+  "version": "1.0.0",
+  "description": "Demonstrates A2A communication via dependencies",
+  "dependencies": {
+    "agents": ["hello-agent"]
+  }
+}
