@@ -36,58 +36,63 @@ export interface DependencyResolutionResult {
  */
 export class AgentDependencyResolver {
     /**
-     * Resolve all dependencies for a root agent and return loading order
+     * Resolve dependencies for an agent and return loading order
+     * Supports both folder-based and filename-based discovery
      * @param rootAgent - Name of the root agent to resolve dependencies for
-     * @returns Resolved dependency information with loading order
+     * @param contextPath - Optional context path for same-folder discovery
+     * @returns Dependency resolution result with loading order
      * @throws DependencyResolutionError if resolution fails
      */
-    static async resolveDependencies(rootAgent: string): Promise<DependencyResolutionResult> {
-        resolverLogger.info('Starting dependency resolution', { rootAgent });
+    static async resolveDependencies(rootAgent: string, contextPath?: string): Promise<DependencyResolutionResult> {
+        resolverLogger.info('Starting dependency resolution', { rootAgent, contextPath });
+
+        const visited = new Set<string>();
+        const dependencyGraph = new Map<string, string[]>();
+        const warnings: string[] = [];
 
         try {
             // Build the complete dependency graph
-            const dependencyGraph = new Map<string, string[]>();
-            const visited = new Set<string>();
-            const warnings: string[] = [];
-
-            await this.buildDependencyGraph(rootAgent, visited, dependencyGraph, warnings);
+            await this.buildDependencyGraph(rootAgent, visited, dependencyGraph, warnings, contextPath);
 
             // Check for circular dependencies
-            const circularDeps = this.detectCircularDependencies(dependencyGraph);
-            if (circularDeps) {
+            const circularDependency = this.detectCircularDependencies(dependencyGraph);
+            if (circularDependency) {
                 throw new DependencyResolutionError(
-                    `Circular dependency detected: ${circularDeps.join(' -> ')} -> ${circularDeps[0]}`,
-                    { circularDependencyPath: circularDeps, rootAgent }
+                    `Circular dependency detected: ${circularDependency.join(' -> ')}`,
+                    { rootAgent, circularDependency, dependencyGraph: Object.fromEntries(dependencyGraph) }
                 );
             }
 
-            // Perform topological sort to get loading order
+            // Determine loading order using topological sort
             const loadingOrder = this.topologicalSort(dependencyGraph);
             const allAgents = Array.from(dependencyGraph.keys());
 
-            resolverLogger.info('Dependency resolution completed', {
-                rootAgent,
-                loadingOrder,
-                totalAgents: allAgents.length,
-                warningsCount: warnings.length
-            });
-
-            return {
+            const result: DependencyResolutionResult = {
                 loadingOrder,
                 allAgents,
                 dependencyGraph,
                 warnings
             };
 
-        } catch (error) {
-            resolverLogger.error('Dependency resolution failed', error, { rootAgent });
+            resolverLogger.info('Dependency resolution completed successfully', {
+                rootAgent,
+                loadingOrder,
+                totalAgents: allAgents.length,
+                warningCount: warnings.length
+            });
 
+            return result;
+
+        } catch (error) {
             if (error instanceof DependencyResolutionError) {
+                resolverLogger.error('Dependency resolution failed', error, { rootAgent });
                 throw error;
             }
 
+            const message = error instanceof Error ? error.message : String(error);
+            resolverLogger.error('Unexpected error during dependency resolution', error, { rootAgent });
             throw new DependencyResolutionError(
-                `Failed to resolve dependencies for '${rootAgent}': ${error instanceof Error ? error.message : String(error)}`,
+                `Unexpected error during dependency resolution for '${rootAgent}': ${message}`,
                 { rootAgent, originalError: error }
             );
         }
@@ -117,12 +122,14 @@ export class AgentDependencyResolver {
 
     /**
      * Load and validate manifest for an agent
+     * Supports inline manifests, agent.json files, and same-directory discovery
      * @param agentName - Name of the agent
+     * @param contextPath - Optional context path for same-directory discovery
      * @returns Validated agent manifest
      * @throws DependencyResolutionError if manifest cannot be loaded or is invalid
      */
-    static async loadManifest(agentName: string): Promise<AgentManifest> {
-        resolverLogger.debug('Loading manifest', { agentName });
+    static async loadManifest(agentName: string, contextPath?: string): Promise<AgentManifest> {
+        resolverLogger.debug('Loading manifest', { agentName, contextPath });
 
         try {
             // First check if agent is already registered with an inline manifest
@@ -147,12 +154,45 @@ export class AgentDependencyResolver {
                 return registeredAgent.manifest;
             }
 
-            // Fall back to file-based manifest discovery
-            const manifestPath = await AgentDiscoveryService.findManifestFile(agentName);
+            // If we have a context path, try to load the agent from the same directory
+            if (contextPath) {
+                const agentPath = await AgentDiscoveryService.findAgentFile(agentName, contextPath);
+                if (agentPath) {
+                    resolverLogger.debug('Found agent file in same directory, attempting to load', {
+                        agentName,
+                        agentPath,
+                        contextPath
+                    });
+
+                    // Load the agent to register its inline manifest
+                    const loadedAgent = await PluginManager.loadAgent(agentName, contextPath);
+                    if (loadedAgent) {
+                        resolverLogger.debug('Successfully loaded agent from same directory', {
+                            agentName,
+                            manifestName: loadedAgent.manifest.name
+                        });
+
+                        // Validate the inline manifest content
+                        const validationResult = ManifestValidator.validate(loadedAgent.manifest);
+                        if (!validationResult.isValid) {
+                            throw new DependencyResolutionError(
+                                `Inline manifest validation failed for agent '${agentName}': ${validationResult.errors.join(', ')}`,
+                                { agentName, errors: validationResult.errors, source: 'same-directory' }
+                            );
+                        }
+
+                        return loadedAgent.manifest;
+                    }
+                }
+            }
+
+            // Fall back to agent.json discovery (only in folders matching agent name)
+            const manifestPath = await AgentDiscoveryService.findManifestFile(agentName, contextPath);
             if (!manifestPath) {
                 throw new DependencyResolutionError(
-                    `Manifest not found for agent '${agentName}' (not registered and no manifest file found)`,
-                    { agentName, searchPaths: AgentDiscoveryService.getManifestSearchPaths() }
+                    `Manifest not found for agent '${agentName}'. ` +
+                    `Agent must either be registered with inline manifest or have agent.json in folder named '${agentName}'.`,
+                    { agentName, searchPaths: AgentDiscoveryService.getManifestSearchPaths(), contextPath }
                 );
             }
 
@@ -167,6 +207,35 @@ export class AgentDependencyResolver {
                 );
             }
 
+            // Validate that agent name matches folder structure for agent.json
+            // Support both traditional and category-based naming
+            const validateAgentNameStructure = (manifestName: string, expectedName: string): boolean => {
+                // Direct match (traditional)
+                if (manifestName === expectedName) {
+                    return true;
+                }
+
+                // Category-based match: if expectedName is 'category/agent', 
+                // manifestName should also be 'category/agent'
+                if (expectedName.includes('/') && manifestName === expectedName) {
+                    return true;
+                }
+
+                return false;
+            };
+
+            if (!validateAgentNameStructure(manifest.name, agentName)) {
+                const expectedStructure = agentName.includes('/')
+                    ? `category-based name '${agentName}'`
+                    : `simple name '${agentName}'`;
+
+                throw new DependencyResolutionError(
+                    `agent.json can only be used when agent name matches expected structure. ` +
+                    `Expected ${expectedStructure}, got '${manifest.name}'.`,
+                    { agentName, manifestPath, expectedName: agentName, actualName: manifest.name }
+                );
+            }
+
             // Validate manifest content
             const validationResult = ManifestValidator.validate(manifest);
             if (!validationResult.isValid) {
@@ -176,7 +245,7 @@ export class AgentDependencyResolver {
                 );
             }
 
-            resolverLogger.debug('Manifest loaded successfully from file', { agentName, manifestPath });
+            resolverLogger.debug('Manifest loaded successfully from agent.json', { agentName, manifestPath });
             return manifest;
 
         } catch (error) {
@@ -197,12 +266,14 @@ export class AgentDependencyResolver {
      * @param visited - Set of already visited agents
      * @param graph - Dependency graph being built
      * @param warnings - Array to collect warnings
+     * @param contextPath - Optional context path for same-folder discovery
      */
     private static async buildDependencyGraph(
         agentName: string,
         visited: Set<string>,
         graph: Map<string, string[]>,
-        warnings: string[]
+        warnings: string[],
+        contextPath?: string
     ): Promise<void> {
         if (visited.has(agentName)) {
             return; // Already processed
@@ -212,7 +283,7 @@ export class AgentDependencyResolver {
         resolverLogger.debug('Processing agent dependencies', { agentName });
 
         try {
-            const manifest = await this.loadManifest(agentName);
+            const manifest = await this.loadManifest(agentName, contextPath);
             const dependencies = manifest.dependencies?.agents || [];
 
             // Add agent to graph with its dependencies
@@ -229,7 +300,7 @@ export class AgentDependencyResolver {
                 }
 
                 // Validate dependency exists
-                const dependencyStructure = await AgentDiscoveryService.validateAgentStructure(dependency);
+                const dependencyStructure = await AgentDiscoveryService.validateAgentStructure(dependency, contextPath);
                 if (!dependencyStructure.isValid) {
                     throw new DependencyResolutionError(
                         `Dependency '${dependency}' not found for agent '${agentName}'`,
@@ -243,7 +314,7 @@ export class AgentDependencyResolver {
                 }
 
                 // Recursively resolve dependencies
-                await this.buildDependencyGraph(dependency, visited, graph, warnings);
+                await this.buildDependencyGraph(dependency, visited, graph, warnings, contextPath);
             }
 
             if (dependencies.length > 0) {

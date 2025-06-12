@@ -27,6 +27,7 @@ export type SemanticMemoryAdapter = {
     get(key: string, namespace?: string, tenantId?: string): Promise<unknown>;
     getMany?(input: GetManyInput, options?: GetManyOptions, tenantId?: string): Promise<Array<MemoryQueryResult<unknown>>>;
     delete?(key: string, namespace?: string, tenantId?: string): Promise<void>;
+    deleteMany?(input: GetManyInput, options?: GetManyOptions, tenantId?: string): Promise<number>;
     clear?(namespace?: string, tenantId?: string): Promise<void>;
     // Entity alignment methods (optional)
     entities?: {
@@ -845,6 +846,123 @@ export class UnifiedMemoryService {
             });
             throw new Error(`Failed to delete semantic memory: ${result.metadata?.error || 'Unknown error'}`);
         }
+    }
+
+    /**
+ * Delete multiple semantic memory entries with MLO processing
+ */
+    async deleteManySemanticMemory(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        this.logger.debug('Deleting many semantic memory entries', {
+            input: typeof input === 'string' ? input : 'query object',
+            hasOptions: !!options,
+            tenantId: this.tenantId
+        });
+
+        if (!this.semanticMemoryAdapter) {
+            throw new Error('No semantic memory adapter configured');
+        }
+
+        // If the adapter supports deleteMany, use it directly for better performance
+        if (this.semanticMemoryAdapter.deleteMany) {
+            this.logger.debug('Using adapter deleteMany for bulk deletion');
+
+            // Process the query through MLO pipeline for potential transformation
+            const item = createMemoryItem(
+                { input, options },
+                'semanticLTM',
+                'semantic.deleteMany',
+                this.tenantId
+            );
+            const result = await this.mlo.processMemoryItem(item, 'semanticLTM');
+
+            let processedInput: GetManyInput;
+            let processedOptions: GetManyOptions | undefined;
+
+            if (result.success && result.processedItems.length > 0) {
+                const processedData = result.processedItems[0].data;
+                if (processedData && typeof processedData === 'object' && 'input' in processedData) {
+                    const data = processedData as { input: GetManyInput; options?: GetManyOptions };
+                    processedInput = data.input;
+                    processedOptions = data.options;
+                } else {
+                    processedInput = input;
+                    processedOptions = options;
+                }
+            } else {
+                processedInput = input;
+                processedOptions = options;
+            }
+
+            const deletedCount = await this.semanticMemoryAdapter.deleteMany(processedInput, processedOptions, this.tenantId);
+
+            this.logger.debug(`Bulk deleted ${deletedCount} entries via adapter`);
+            return deletedCount;
+        }
+
+        // Fallback: individual deletions through MLO pipeline
+        this.logger.debug('Adapter does not support deleteMany, falling back to individual deletions');
+
+        // First, get the entries to be deleted to know how many we're deleting
+        const entriesToDelete = await this.getManySemanticMemory(input, options);
+
+        if (entriesToDelete.length === 0) {
+            this.logger.debug('No entries found to delete');
+            return 0;
+        }
+
+        this.logger.debug(`Found ${entriesToDelete.length} entries to delete`);
+
+        // Process each deletion through MLO pipeline
+        let deletedCount = 0;
+        for (const entry of entriesToDelete) {
+            try {
+                const item = createMemoryItem(
+                    { key: entry.key },
+                    'semanticLTM',
+                    'semantic.deleteMany',
+                    this.tenantId
+                );
+                const result = await this.mlo.processMemoryItem(item, 'semanticLTM');
+
+                if (result.success && result.processedItems.length > 0) {
+                    const processedData = result.processedItems[0].data;
+
+                    // Extract key from potentially transformed data
+                    let extractedKey: string;
+
+                    if (processedData && typeof processedData === 'object' && 'key' in processedData) {
+                        extractedKey = (processedData as { key: string }).key;
+                    } else {
+                        extractedKey = entry.key;
+                    }
+
+                    if (this.semanticMemoryAdapter?.delete) {
+                        await this.semanticMemoryAdapter.delete(extractedKey, undefined, this.tenantId);
+                        deletedCount++;
+
+                        this.logger.debug('Semantic memory entry deleted via adapter', {
+                            key: extractedKey
+                        });
+                    } else {
+                        this.logger.warn('Semantic memory adapter does not support delete operation', {
+                            key: extractedKey
+                        });
+                    }
+                } else {
+                    this.logger.warn('Failed to process semantic memory deletion', {
+                        key: entry.key,
+                        error: result.metadata?.error
+                    });
+                }
+            } catch (error) {
+                this.logger.error('Error deleting semantic memory entry', error, {
+                    key: entry.key
+                });
+            }
+        }
+
+        this.logger.debug(`Successfully deleted ${deletedCount} out of ${entriesToDelete.length} entries`);
+        return deletedCount;
     }
 
     // ========================================

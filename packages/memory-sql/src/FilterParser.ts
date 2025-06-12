@@ -15,6 +15,9 @@ export class FilterParser {
         { pattern: /\s+contains\s+/i, operator: 'CONTAINS' as FilterOperator },
         { pattern: /\s+starts_with\s+/i, operator: 'STARTS_WITH' as FilterOperator },
         { pattern: /\s+ends_with\s+/i, operator: 'ENDS_WITH' as FilterOperator },
+        { pattern: /\s+entity_is\s+/i, operator: 'ENTITY_EXACT' as FilterOperator },
+        { pattern: /\s+entity_like\s+/i, operator: 'ENTITY_ALIAS' as FilterOperator },
+        { pattern: /\s*(~)\s*/, operator: 'ENTITY_FUZZY' as FilterOperator },
     ];
 
     /**

@@ -15,9 +15,11 @@ import { createAgent } from '@callagent/core';
 
 export default createAgent({
   // Inline manifest - no separate agent.json needed
-  name: 'my-agent',
-  version: '1.0.0',
-  description: 'A simple agent',
+  manifest: {
+    name: 'my-agent',
+    version: '1.0.0',
+    description: 'A simple agent'
+  },
   
   llmConfig: {
     provider: 'openai',
@@ -65,14 +67,16 @@ hello-agent/
 └── package.json      # "build": "tsc"
 ```
 
-### Agent with Manifest
+### Agent with External Manifest (Single-Agent Folder)
 ```
 memory-agent/
 ├── AgentModule.ts
-├── agent.json        # External manifest
+├── agent.json        # External manifest (folder name must match agent name)
 ├── tsconfig.json
 └── package.json      # "build": "tsc && copyfiles agent.json dist"
 ```
+
+**Important:** External `agent.json` files can only be used when the folder name matches the agent name in the JSON. For multi-agent folders, only the main agent (matching folder name) can optionally use external JSON.
 
 ### Agent with Assets
 ```

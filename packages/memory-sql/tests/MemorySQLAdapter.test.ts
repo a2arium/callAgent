@@ -96,17 +96,38 @@ describe('MemorySQLAdapter', () => {
             const value = { foo: 'bar' };
             const tags = ['tag1', 'tag2'];
 
-            prismaMock.$executeRawUnsafe.mockResolvedValue(1);
+            prismaMock.agentMemoryStore.upsert.mockResolvedValue({
+                tenantId: 'default',
+                key,
+                value: value,
+                tags,
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
 
             await adapter.set(key, value, { tags });
 
-            expect(prismaMock.$executeRawUnsafe).toHaveBeenCalledWith(
-                expect.stringContaining('INSERT INTO agent_memory_store'),
-                'default', // tenantId
-                key,
-                JSON.stringify(value),
-                tags
-            );
+            expect(prismaMock.agentMemoryStore.upsert).toHaveBeenCalledWith({
+                where: {
+                    tenantId_key: {
+                        tenantId: 'default',
+                        key: key
+                    }
+                },
+                update: {
+                    value: value,
+                    tags: tags,
+                    updatedAt: expect.any(Date)
+                },
+                create: {
+                    tenantId: 'default',
+                    key: key,
+                    value: value,
+                    tags: tags,
+                    createdAt: expect.any(Date),
+                    updatedAt: expect.any(Date)
+                }
+            });
         });
 
         test('stores data with entity alignment', async () => {
@@ -123,7 +144,14 @@ describe('MemorySQLAdapter', () => {
             prismaMock.$executeRaw.mockResolvedValue(1);
 
             // Mock the main memory storage
-            prismaMock.$executeRawUnsafe.mockResolvedValue(1);
+            prismaMock.agentMemoryStore.upsert.mockResolvedValue({
+                tenantId: 'default',
+                key: 'event-1',
+                value: { venue: 'Main Hall', speaker: 'Dr. Smith' },
+                tags: [],
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
 
             await adapterWithEmbedding.set('event-1',
                 { venue: 'Main Hall', speaker: 'Dr. Smith' },
@@ -132,19 +160,26 @@ describe('MemorySQLAdapter', () => {
 
             expect(mockEmbedFunction).toHaveBeenCalledWith('Main Hall');
             expect(mockEmbedFunction).toHaveBeenCalledWith('Dr. Smith');
-            expect(prismaMock.$executeRawUnsafe).toHaveBeenCalled();
+            expect(prismaMock.agentMemoryStore.upsert).toHaveBeenCalled();
         });
 
-        test('throws error when entities provided but no embedding function', async () => {
+        test('stores data normally when entities provided but no embedding function', async () => {
             // This should go through the regular set path, not entity alignment
-            prismaMock.$executeRawUnsafe.mockResolvedValue(1);
+            prismaMock.agentMemoryStore.upsert.mockResolvedValue({
+                tenantId: 'default',
+                key: 'test-key',
+                value: { venue: 'Main Hall' },
+                tags: [],
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
 
             // The adapter without embedding function should just store normally, not throw
             await adapter.set('test-key', { venue: 'Main Hall' }, {
                 entities: { venue: 'location' }
             });
 
-            expect(prismaMock.$executeRawUnsafe).toHaveBeenCalled();
+            expect(prismaMock.agentMemoryStore.upsert).toHaveBeenCalled();
         });
 
         test('handles embedding generation errors gracefully', async () => {

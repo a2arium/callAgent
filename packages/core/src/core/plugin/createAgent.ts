@@ -44,26 +44,74 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
 
     let manifest: AgentManifest;
 
-    // Use default manifest path if not provided
-    const manifestValue = options.manifest ?? './agent.json';
-
-    if (typeof manifestValue === 'string') {
-        // Resolve path relative to the calling module's directory
-        const manifestPath = path.resolve(callerDir, manifestValue);
-        pluginLogger.debug('Loading manifest from path', { manifestPath });
+    if (options.manifest === undefined) {
+        // No manifest specified - use default agent.json
+        const manifestPath = path.resolve(callerDir, 'agent.json');
+        pluginLogger.debug('Loading default agent.json manifest', { manifestPath });
 
         try {
-            // Synchronous read for simplicity in minimal setup, async in prod
+            const manifestJson = fs.readFileSync(manifestPath, 'utf8');
+            manifest = JSON.parse(manifestJson);
+
+            // Validate that agent name matches folder structure for agent.json
+            // Handle case where agent is running from dist/ subdirectory
+            let folderName = path.basename(callerDir);
+            if (folderName === 'dist') {
+                // If we're in a dist directory, use the parent directory name
+                folderName = path.basename(path.dirname(callerDir));
+            }
+
+            // Support category-based validation
+            const validateFolderStructure = (manifestName: string, actualFolderName: string): boolean => {
+                if (manifestName.includes('/')) {
+                    // Category-based agent name (e.g., 'data-processing/csv-parser')
+                    const parts = manifestName.split('/');
+                    if (parts.length === 2) {
+                        const [category, agentName] = parts;
+                        // Check if we're in the correct agent folder within a category
+                        const parentDir = path.dirname(callerDir === 'dist' ? path.dirname(callerDir) : callerDir);
+                        const categoryName = path.basename(path.dirname(parentDir));
+                        return agentName === actualFolderName && category === categoryName;
+                    }
+                }
+                // Traditional validation: simple name must match folder
+                return manifestName === actualFolderName;
+            };
+
+            if (!validateFolderStructure(manifest.name, folderName)) {
+                const expectedStructure = manifest.name.includes('/')
+                    ? `category structure matching '${manifest.name}'`
+                    : `folder named '${manifest.name}'`;
+
+                throw new ManifestError(
+                    `agent.json can only be used when agent name matches folder structure. ` +
+                    `Expected ${expectedStructure}, but found folder '${folderName}'. ` +
+                    `Use inline manifest or specify custom JSON file instead.`,
+                    { manifestPath, expectedName: manifest.name, actualFolderName: folderName }
+                );
+            }
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            pluginLogger.error('Failed to load default agent.json manifest', error, { manifestPath });
+            throw new ManifestError(`Failed to load agent manifest from ${manifestPath}: ${message}`, { manifestPath });
+        }
+    } else if (typeof options.manifest === 'string') {
+        // Custom JSON file specified
+        const manifestPath = path.resolve(callerDir, options.manifest);
+        pluginLogger.debug('Loading manifest from specified path', { manifestPath });
+
+        try {
             const manifestJson = fs.readFileSync(manifestPath, 'utf8');
             manifest = JSON.parse(manifestJson);
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
-            pluginLogger.error('Failed to load manifest', error, { manifestPath });
+            pluginLogger.error('Failed to load manifest from specified path', error, { manifestPath });
             throw new ManifestError(`Failed to load agent manifest from ${manifestPath}: ${message}`, { manifestPath });
         }
     } else {
-        pluginLogger.debug('Using provided manifest object');
-        manifest = manifestValue;
+        // Inline manifest object provided
+        pluginLogger.debug('Using provided inline manifest object');
+        manifest = options.manifest;
     }
 
     // Basic validation (can expand later)

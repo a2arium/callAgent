@@ -173,6 +173,7 @@ export class TaskEngine {
                     set: async () => { },
                     getMany: async () => [],
                     delete: async () => { },
+                    deleteMany: async () => 0,
                 },
                 episodic: {
                     getDefaultBackend: () => 'none',

@@ -48,6 +48,7 @@ export class MemoryLifecycleOrchestrator implements IMemoryLifecycleOrchestrator
         tenantId: string,
         agentId: string = 'default'
     ) {
+
         this.config = config;
         this.tenantId = tenantId;
         this.agentId = agentId;
@@ -254,6 +255,7 @@ export class MemoryLifecycleOrchestrator implements IMemoryLifecycleOrchestrator
         item: MemoryItem<unknown>,
         memoryType: 'workingMemory' | 'semanticLTM' | 'episodicLTM' | 'retrieval'
     ): Promise<MemoryOperationResult> {
+
         const startTime = Date.now();
         const intent = memoryType as MemoryIntent;
 
@@ -386,6 +388,7 @@ export class MemoryLifecycleOrchestrator implements IMemoryLifecycleOrchestrator
         const startTime = Date.now();
         let currentItems: MemoryItem<unknown>[] = [item];
 
+
         this.logger.debug('Starting MLO pipeline', {
             intent: effectiveIntent,
             itemId: item.id,
@@ -404,9 +407,12 @@ export class MemoryLifecycleOrchestrator implements IMemoryLifecycleOrchestrator
                     const result = await processor.process(currentItem);
 
                     if (result === null || result === undefined) {
-                        this.logger.debug('Item filtered out', {
+
+                        this.logger.warn('Item filtered out by stage', {
                             stage: processor.stageName,
-                            itemId: currentItem.id
+                            processorName: processor.constructor.name,
+                            itemId: currentItem.id,
+                            sourceOperation: currentItem.metadata.sourceOperation
                         });
                         continue;
                     }
@@ -467,8 +473,21 @@ export class MemoryLifecycleOrchestrator implements IMemoryLifecycleOrchestrator
             stagesProcessed: currentItems[0]?.metadata.processingHistory?.length || 0
         });
 
+        const success = currentItems.length > 0;
+        let errorMessage: string | undefined;
+
+        if (!success) {
+            errorMessage = `All items were filtered out during MLO processing. Stages processed: ${processors.map(p => p.stageName).join(' -> ')}`;
+            this.logger.warn('MLO processing failed - all items filtered out', {
+                intent: effectiveIntent,
+                inputItemId: item.id,
+                stagesProcessed: processors.map(p => p.stageName),
+                totalDurationMs: totalDuration
+            });
+        }
+
         return {
-            success: currentItems.length > 0,
+            success,
             processedItems: currentItems,
             targetStore: this.determineTargetStore(effectiveIntent),
             metadata: {
@@ -476,7 +495,8 @@ export class MemoryLifecycleOrchestrator implements IMemoryLifecycleOrchestrator
                 stagesProcessed: processors.length,
                 intent: effectiveIntent,
                 tenantId: this.tenantId,
-                agentId: this.agentId
+                agentId: this.agentId,
+                error: errorMessage
             }
         };
     }

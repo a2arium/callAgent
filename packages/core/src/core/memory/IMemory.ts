@@ -1,7 +1,7 @@
 /**
  * Query options for memory retrieval
  */
-export type FilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' | 'STARTS_WITH' | 'ENDS_WITH';
+export type FilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' | 'STARTS_WITH' | 'ENDS_WITH' | 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS';
 
 export type MemoryFilter = {
     path: string;          // JSON path like 'status' or 'customer.profile.name'

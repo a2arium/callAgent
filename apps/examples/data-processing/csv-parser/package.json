@@ -1,0 +1,17 @@
+{
+  "name": "@callagent/csv-parser-agent",
+  "version": "1.0.0",
+  "description": "CSV parsing agent in data-processing category",
+  "type": "module",
+  "main": "dist/AgentModule.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@callagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

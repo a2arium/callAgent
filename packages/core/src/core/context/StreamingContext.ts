@@ -338,7 +338,46 @@ export function extendContextWithStreaming(
                 (errorToThrow as any).code = code;
                 (errorToThrow as any).details = details;
             }
-            logger.error(`Agent threw structured error: [${code}] ${message}`, errorToThrow, { details });
+
+            // Use a WeakSet to track circular references
+            const seen = new WeakSet();
+
+            // Safe serialization of details to avoid circular reference issues
+            const safeDetails = details ? (() => {
+                try {
+                    // Try to serialize details safely
+                    if (details instanceof Error) {
+                        const errorDetails: any = {
+                            name: details.name,
+                            message: details.message,
+                            stack: details.stack
+                        };
+                        // Safely check for cause property (ES2022 feature)
+                        if ('cause' in details && details.cause) {
+                            errorDetails.cause = String(details.cause);
+                        }
+                        return errorDetails;
+                    } else if (typeof details === 'object' && details !== null) {
+                        // For objects, try JSON.stringify with circular reference handling
+                        return JSON.parse(JSON.stringify(details, (key, value) => {
+                            if (typeof value === 'object' && value !== null) {
+                                // Simple circular reference detection
+                                if (seen.has(value)) {
+                                    return '[Circular Reference]';
+                                }
+                                seen.add(value);
+                            }
+                            return value;
+                        }));
+                    } else {
+                        return details;
+                    }
+                } catch (serializationError) {
+                    return `[Serialization Error: ${serializationError instanceof Error ? serializationError.message : String(serializationError)}]`;
+                }
+            })() : undefined;
+
+            logger.error(`Agent threw structured error: [${code}] ${message}`, errorToThrow, { details: safeDetails });
             throw errorToThrow;
         },
     });

@@ -93,14 +93,16 @@ export class ManifestValidator {
             warnings: []
         };
 
-        // Name validation
+        // Name validation - supports both traditional and category-based names
         if (!manifest.name || manifest.name.trim().length === 0) {
             result.isValid = false;
             result.errors.push('Agent name is required and cannot be empty');
         } else if (manifest.name !== manifest.name.toLowerCase()) {
             result.warnings.push('Agent name should be lowercase for consistency');
-        } else if (!/^[a-z0-9-_]+$/.test(manifest.name)) {
-            result.warnings.push('Agent name should only contain lowercase letters, numbers, hyphens, and underscores');
+        } else {
+            // Validate category-based or traditional naming
+            const nameValidation = this.validateAgentName(manifest.name);
+            this.mergeResults(result, nameValidation);
         }
 
         // Version validation
@@ -119,6 +121,82 @@ export class ManifestValidator {
         }
 
         return result;
+    }
+
+    /**
+     * Validate agent name format
+     * Supports both traditional names (e.g., 'hello-agent') and category-based names (e.g., 'data-processing/csv-parser')
+     * @param name - Agent name to validate
+     * @returns Validation result
+     */
+    private static validateAgentName(name: string): ValidationResult {
+        const errors: string[] = [];
+        const warnings: string[] = [];
+
+        // Check if this is a category-based name (contains forward slash)
+        if (name.includes('/')) {
+            const parts = name.split('/');
+
+            // Must have exactly 2 parts: category/agent-name
+            if (parts.length !== 2) {
+                errors.push('Category-based agent name must have format "category/agent-name"');
+                return { isValid: false, errors, warnings };
+            }
+
+            const [category, agentName] = parts;
+
+            // Validate category part
+            if (!category || category.trim() === '') {
+                errors.push('Category name cannot be empty');
+            } else if (!/^[a-z0-9_-]+$/.test(category)) {
+                errors.push('Category name should only contain lowercase letters, numbers, hyphens, and underscores');
+            }
+
+            // Validate agent name part
+            if (!agentName || agentName.trim() === '') {
+                errors.push('Agent name cannot be empty');
+            } else if (!/^[a-z0-9_-]+$/.test(agentName)) {
+                errors.push('Agent name should only contain lowercase letters, numbers, hyphens, and underscores');
+            }
+
+            // Check for valid format in both parts (no leading/trailing hyphens or underscores)
+            if (category && (/^[-_]|[-_]$/.test(category))) {
+                warnings.push('Category name should not start or end with hyphens or underscores');
+            }
+            if (agentName && (/^[-_]|[-_]$/.test(agentName))) {
+                warnings.push('Agent name should not start or end with hyphens or underscores');
+            }
+
+            // Check for consecutive special characters in both parts
+            if (category && /[-_]{2,}/.test(category)) {
+                warnings.push('Category name should not contain consecutive hyphens or underscores');
+            }
+            if (agentName && /[-_]{2,}/.test(agentName)) {
+                warnings.push('Agent name should not contain consecutive hyphens or underscores');
+            }
+        } else {
+            // Traditional single-name validation
+            // Check for valid characters (lowercase letters, numbers, hyphens, underscores)
+            if (!/^[a-z0-9_-]+$/.test(name)) {
+                warnings.push('Agent name should only contain lowercase letters, numbers, hyphens, and underscores');
+            }
+
+            // Check for valid format (no leading/trailing hyphens or underscores)
+            if (/^[-_]|[-_]$/.test(name)) {
+                warnings.push('Agent name should not start or end with hyphens or underscores');
+            }
+
+            // Check for consecutive special characters
+            if (/[-_]{2,}/.test(name)) {
+                warnings.push('Agent name should not contain consecutive hyphens or underscores');
+            }
+        }
+
+        return {
+            isValid: errors.length === 0,
+            errors,
+            warnings
+        };
     }
 
     /**
@@ -255,14 +333,27 @@ export class ManifestValidator {
                 continue;
             }
 
-            // Check for naming conventions
+            // Check for naming conventions - supports category-based names
             if (dep !== dep.toLowerCase()) {
-                result.warnings.push(`Dependency '${dep}' should be lowercase for consistency`);
+                result.isValid = false;
+                result.errors.push(`Dependency '${dep}' must be lowercase for consistency. Use '${dep.toLowerCase()}' instead.`);
             }
 
-            if (!/^[a-z0-9-_]+$/.test(dep)) {
-                result.warnings.push(`Dependency '${dep}' should only contain lowercase letters, numbers, hyphens, and underscores`);
+            // Validate dependency name format (supports category-based names)
+            const depValidation = this.validateAgentName(dep);
+            if (!depValidation.isValid) {
+                result.isValid = false;
+                result.errors.push(...depValidation.errors.map(err => `Dependency '${dep}': ${err}`));
+            } else {
+                // Additional check for invalid characters that might not be caught by category validation
+                // This handles cases like 'image@summary' which contains invalid characters
+                // For backward compatibility, use the original error message format
+                if (!/^[a-z0-9_/-]+$/.test(dep)) {
+                    result.isValid = false;
+                    result.errors.push(`Dependency '${dep}' must only contain lowercase letters, numbers, hyphens, and underscores`);
+                }
             }
+            result.warnings.push(...depValidation.warnings.map(warn => `Dependency '${dep}': ${warn}`));
         }
 
         // Check for duplicates

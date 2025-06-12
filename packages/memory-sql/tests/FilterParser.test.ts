@@ -164,6 +164,68 @@ describe('FilterParser', () => {
             expect(() => FilterParser.parseFilter('>= 8')).toThrow('missing path');
             expect(() => FilterParser.parseFilter('')).toThrow('no valid operator found');
         });
+
+        it('should parse entity fuzzy operator (~)', () => {
+            expect(FilterParser.parseFilter('speaker ~ "John"')).toEqual({
+                path: 'speaker',
+                operator: 'ENTITY_FUZZY',
+                value: 'John'
+            });
+        });
+
+        it('should parse entity exact operator (entity_is)', () => {
+            expect(FilterParser.parseFilter('speaker entity_is "John Smith"')).toEqual({
+                path: 'speaker',
+                operator: 'ENTITY_EXACT',
+                value: 'John Smith'
+            });
+        });
+
+        it('should parse entity alias operator (entity_like)', () => {
+            expect(FilterParser.parseFilter('speaker entity_like "Johnny"')).toEqual({
+                path: 'speaker',
+                operator: 'ENTITY_ALIAS',
+                value: 'Johnny'
+            });
+        });
+
+        it('should handle entity operators with nested paths', () => {
+            expect(FilterParser.parseFilter('profile.speaker ~ "John"')).toEqual({
+                path: 'profile.speaker',
+                operator: 'ENTITY_FUZZY',
+                value: 'John'
+            });
+        });
+
+        it('should handle entity operators case insensitively', () => {
+            expect(FilterParser.parseFilter('speaker ENTITY_IS "John"')).toEqual({
+                path: 'speaker',
+                operator: 'ENTITY_EXACT',
+                value: 'John'
+            });
+
+            expect(FilterParser.parseFilter('speaker Entity_Like "John"')).toEqual({
+                path: 'speaker',
+                operator: 'ENTITY_ALIAS',
+                value: 'John'
+            });
+        });
+
+        it('should parse mixed entity and regular filters', () => {
+            const filters = [
+                'speaker ~ "John"',
+                'priority >= 8',
+                'location entity_like "NYC"'
+            ];
+
+            const result = FilterParser.parseFilters(filters);
+
+            expect(result).toEqual([
+                { path: 'speaker', operator: 'ENTITY_FUZZY', value: 'John' },
+                { path: 'priority', operator: '>=', value: 8 },
+                { path: 'location', operator: 'ENTITY_ALIAS', value: 'NYC' }
+            ]);
+        });
     });
 
     describe('parseFilters', () => {

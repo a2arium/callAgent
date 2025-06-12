@@ -2,7 +2,7 @@ import { loadConfig } from '@callagent/core/dist/config/index.js';
 import { PluginManager } from '@callagent/core';
 import { logger } from '@callagent/utils';
 import { extendContextWithStreaming } from '@callagent/core/dist/core/context/StreamingContext.js';
-import { getMemoryAdapter } from '@callagent/core/dist/core/memory/factory.js';
+import { createMemoryRegistry } from '@callagent/core/dist/core/memory/createMemoryRegistry.js';
 import { extendContextWithMemory } from '@callagent/core/dist/core/memory/types/working/context/workingMemoryContext.js';
 import { resolveTenantId } from '@callagent/core/dist/core/plugin/tenantResolver.js';
 import { globalA2AService } from '@callagent/core/dist/core/orchestration/A2AService.js';
@@ -74,8 +74,8 @@ async function runA2ADemo() {
     const agentLogger = demoLogger.createLogger({ prefix: agentName });
 
     // Get memory adapter
-    const memoryAdapter = await getMemoryAdapter(tenantId);
-    const semanticAdapter = memoryAdapter.semantic.backends[config.memory.semantic.default];
+    const memoryRegistry = await createMemoryRegistry(tenantId);
+    const semanticAdapter = memoryRegistry.semantic.backends[config.memory.semantic.default];
 
     // Create basic task context
     const partialCtx = {
@@ -150,33 +150,7 @@ async function runA2ADemo() {
             throw new AgentError(message, agentName, { code, details });
         },
         recordUsage: () => { },
-        memory: {
-            semantic: {
-                getDefaultBackend: () => 'none',
-                setDefaultBackend: () => { },
-                backends: {},
-                get: async () => null,
-                set: async () => { },
-                getMany: async () => [],
-                delete: async () => { },
-            },
-            episodic: {
-                getDefaultBackend: () => 'none',
-                setDefaultBackend: () => { },
-                backends: {},
-                append: async () => { },
-                getEvents: async () => [],
-                deleteEvent: async () => { },
-            },
-            embed: {
-                getDefaultBackend: () => 'none',
-                setDefaultBackend: () => { },
-                backends: {},
-                upsert: async () => { },
-                queryByVector: async () => [],
-                delete: async () => { },
-            }
-        }
+        memory: memoryRegistry
     };
 
     // Extend context with memory

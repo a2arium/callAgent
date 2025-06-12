@@ -75,30 +75,88 @@ apps/examples/
 - Easier to maintain and test
 - Perfect for reusable agent libraries
 
+**Requirements:**
+- **Folder name MUST match agent name** in `agent.json`
+- Each agent has its own `agent.json` manifest file
+- Agent file can be named `AgentModule.ts` or follow other patterns
+
 ### Approach 2: Multiple Agents in One Folder (Great for workflows)
 
 Multiple related agents can live together in a single folder:
 
 ```
-apps/examples/my-workflow/
-├── CoordinatorAgent.ts
-├── DataAnalysisAgent.ts
-├── ReportingAgent.ts
-├── coordinator-agent.json
-├── data-analysis-agent.json
-├── reporting-agent.json
+apps/examples/calculator-workflow/
+├── CoordinatorAgent.ts           # Main agent (name must match folder)
+├── ArithmeticAgent.ts           # Dependent agent (inline manifest only)
+├── MultiplicationAgent.ts       # Dependent agent (inline manifest only)
+├── SubtractionAgent.ts          # Dependent agent (inline manifest only)
+├── calculator-workflow.json     # ONLY for main agent (optional)
 ├── package.json
 └── dist/
     ├── CoordinatorAgent.js
-    ├── DataAnalysisAgent.js
-    └── ReportingAgent.js
+    ├── ArithmeticAgent.js
+    ├── MultiplicationAgent.js
+    └── SubtractionAgent.js
 ```
+
+**Critical Requirements:**
+- **Main agent name MUST match folder name** (`calculator-workflow`)
+- **Only the main agent can have an external JSON manifest** (optional)
+- **All other agents MUST use inline manifests** (no separate JSON files)
+- **No multiple JSON files allowed** in multi-agent folders
 
 **Benefits:**
 - All related agents in one place
 - Shared dependencies and build process
 - Easier for tightly coupled workflows
 - Simplified project structure for demos
+
+## Manifest Discovery Logic
+
+The framework follows **exactly four manifest discovery methods** in this priority order:
+
+### 1. Inline Manifest Object (Highest Priority)
+```typescript
+export default createAgent({
+  manifest: {
+    name: 'my-agent',
+    version: '1.0.0',
+    dependencies: { agents: ['other-agent'] }
+  },
+  async handleTask(ctx) { /* ... */ }
+}, import.meta.url);
+```
+
+### 2. Specified JSON File
+```typescript
+export default createAgent({
+  manifest: 'custom-manifest.json',  // Custom filename
+  async handleTask(ctx) { /* ... */ }
+}, import.meta.url);
+```
+
+### 3. Default agent.json (Only when folder name = agent name)
+```typescript
+export default createAgent({
+  // No manifest specified - uses agent.json
+  async handleTask(ctx) { /* ... */ }
+}, import.meta.url);
+```
+**Requirements:**
+- File must be named exactly `agent.json`
+- Folder name MUST match agent name in the JSON
+- Only works for single-agent folders (Approach 1)
+
+### 4. Filename-based Discovery (Multi-agent folders only)
+For multi-agent folders, agent names are inferred from filenames:
+- `CoordinatorAgent.ts` → `coordinator-agent`
+- `DataAnalysisAgent.ts` → `data-analysis-agent`
+- `arithmetic-agent.ts` → `arithmetic-agent`
+
+**Critical Rules:**
+- **Main agent name MUST match folder name**
+- **Only inline manifests allowed** for non-main agents
+- **No external JSON files** for dependent agents
 
 ## Enhanced Discovery System
 
@@ -108,6 +166,7 @@ The framework automatically detects agents using both approaches:
 1. Scans directories in search paths
 2. Uses folder name as agent name
 3. Looks for `AgentModule.js` and `agent.json`
+4. **Validates folder name matches agent name in JSON**
 
 ### Enhanced Discovery (Approach 2)
 1. Scans for agent files matching patterns:
@@ -117,7 +176,8 @@ The framework automatically detects agents using both approaches:
 2. Converts filenames to agent names:
    - `DataAnalysisAgent.ts` → `data-analysis-agent`
    - `coordinator-agent.ts` → `coordinator-agent`
-3. Finds corresponding manifest files
+3. **Main agent name MUST match folder name**
+4. **Only inline manifests supported** for dependent agents
 
 ### Discovery Priority
 1. **Traditional first**: If folder structure matches, uses traditional approach
@@ -131,50 +191,33 @@ Here's a complete example using Approach 2 (multiple agents in one folder):
 ### Directory Structure
 ```
 apps/examples/business-workflow/
-├── CoordinatorAgent.ts
-├── DataAnalysisAgent.ts
-├── ReportingAgent.ts
-├── coordinator-agent.json
-├── data-analysis-agent.json
-├── reporting-agent.json
+├── BusinessWorkflowAgent.ts      # Main agent (matches folder name)
+├── DataAnalysisAgent.ts         # Dependent agent
+├── ReportingAgent.ts            # Dependent agent
+├── business-workflow.json       # Optional: only for main agent
 └── dist/ (built files)
 ```
 
-### Agent Manifests
+### Main Agent (External Manifest - Optional)
 
 ```json
-// coordinator-agent.json
+// business-workflow.json (optional - can use inline instead)
 {
-  "name": "coordinator-agent",
+  "name": "business-workflow",
   "version": "1.0.0",
   "description": "Orchestrates business workflow",
   "dependencies": {
     "agents": ["data-analysis-agent", "reporting-agent"]
   }
 }
-
-// data-analysis-agent.json
-{
-  "name": "data-analysis-agent", 
-  "version": "1.0.0",
-  "description": "Analyzes business data"
-}
-
-// reporting-agent.json
-{
-  "name": "reporting-agent",
-  "version": "1.0.0", 
-  "description": "Generates business reports"
-}
 ```
 
-### Agent Implementations
-
 ```typescript
-// CoordinatorAgent.ts
+// BusinessWorkflowAgent.ts
 import { createAgent } from '@callagent/core';
 
 export default createAgent({
+  // Uses business-workflow.json OR can use inline manifest
   async handleTask(ctx) {
     await ctx.reply('🎯 Starting business workflow...');
     
@@ -197,11 +240,21 @@ export default createAgent({
     };
   }
 }, import.meta.url);
+```
 
+### Dependent Agents (Inline Manifests ONLY)
+
+```typescript
 // DataAnalysisAgent.ts
 import { createAgent } from '@callagent/core';
 
 export default createAgent({
+  manifest: {
+    name: 'data-analysis-agent',
+    version: '1.0.0',
+    description: 'Analyzes business data'
+    // No external JSON file allowed!
+  },
   async handleTask(ctx) {
     const { dataset, metrics } = ctx.task.input as any;
     
@@ -225,6 +278,12 @@ export default createAgent({
 import { createAgent } from '@callagent/core';
 
 export default createAgent({
+  manifest: {
+    name: 'reporting-agent',
+    version: '1.0.0',
+    description: 'Generates business reports'
+    // No external JSON file allowed!
+  },
   async handleTask(ctx) {
     const { analysis, format } = ctx.task.input as any;
     
@@ -249,8 +308,8 @@ export default createAgent({
 # Build the agents
 yarn build
 
-# Run the coordinator (dependencies auto-resolved)
-yarn run-agent apps/examples/business-workflow/dist/CoordinatorAgent.js '{}'
+# Run the main agent (dependencies auto-resolved)
+yarn run-agent apps/examples/business-workflow/dist/BusinessWorkflowAgent.js '{}'
 ```
 
 **Expected Output:**
@@ -297,7 +356,7 @@ interface AgentManifest {
 }
 ```
 
-### Inline Manifests (Alternative)
+### Inline Manifests (Required for Multi-Agent Folders)
 
 ```typescript
 export default createAgent({
@@ -314,6 +373,8 @@ export default createAgent({
   }
 }, import.meta.url);
 ```
+
+**Important:** In multi-agent folders, only the main agent (whose name matches the folder) can optionally use an external JSON file. All other agents MUST use inline manifests.
 
 ## Dependency Resolution
 
@@ -608,8 +669,11 @@ The enhanced discovery recognizes these patterns:
 ### Manifest Resolution Priority
 
 1. **Inline manifests** (from `createAgent({ manifest: {...} })`)
-2. **External files** (from `agent.json` files)
-3. **Filename inference** (as fallback for agent naming)
+2. **Specified JSON files** (from `createAgent({ manifest: 'custom.json' })`)
+3. **Default agent.json** (only when folder name matches agent name)
+4. **Filename inference** (for agent naming in multi-agent folders)
+
+**Critical Rule:** In multi-agent folders, only the main agent (matching folder name) can use external JSON. All others must use inline manifests.
 
 ### Agent Registration
 
@@ -633,12 +697,14 @@ All agents are registered in a global registry with:
 - Agents have different lifecycles
 - Independent versioning needed
 - Following microservices architecture
+- Each agent needs its own external manifest file
 
 **Use Multi-Agent Folders (Approach 2) when:**
 - Building specific workflows or demos
 - Agents are tightly coupled
 - Shared dependencies and configuration
 - Simplified project structure desired
+- **Remember:** Main agent name MUST match folder name
 
 ### 3. Dependency Management
 
@@ -650,9 +716,15 @@ All agents are registered in a global registry with:
 ### 4. File Naming
 
 For multi-agent folders, use clear naming patterns:
-- `CoordinatorAgent.ts` (PascalCase with Agent suffix)
-- `data-analysis-agent.ts` (kebab-case with agent suffix)
-- Match manifest names: `coordinator-agent.json`
+- **Main agent:** `FolderNameAgent.ts` (must match folder name when converted to kebab-case)
+- **Dependent agents:** `SpecificAgent.ts` (PascalCase with Agent suffix)
+- **No external JSON files** for dependent agents (inline manifests only)
+- **Optional JSON file** for main agent only: `folder-name.json`
+
+**Examples:**
+- Folder: `calculator-workflow/`
+- Main agent: `CalculatorWorkflowAgent.ts` → `calculator-workflow`
+- Dependent: `ArithmeticAgent.ts` → `arithmetic-agent` (inline manifest only)
 
 ### 5. Testing
 

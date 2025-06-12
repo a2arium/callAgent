@@ -14,7 +14,7 @@ export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse } from '
 export { createEmbeddingFunction, createEmbeddingFunctionWithTracking, isEmbeddingAvailable, getEmbeddingModel } from './core/llm/LLMFactory.js';
 
 // Memory system exports
-export { createMemoryRegistry, getMemoryAdapter } from './core/memory/createMemoryRegistry.js';
+export { createMemoryRegistry } from './core/memory/createMemoryRegistry.js';
 export type { ExtendedIMemory } from './core/memory/createMemoryRegistry.js';
 
 // Tenant management exports

@@ -1,0 +1,18 @@
+{
+  "name": "calculator-workflow",
+  "version": "1.0.0",
+  "description": "Multi-agent calculator workflow demonstrating agent collaboration",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && copyfiles *.json dist",
+    "test": "yarn build && yarn run-agent dist/CoordinatorAgent.js '{\"expression\": \"5 * 2 + 3 - 1\"}'"
+  },
+  "dependencies": {
+    "@callagent/core": "workspace:*",
+    "@callagent/utils": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "copyfiles": "^2.4.1"
+  }
+}

@@ -8,6 +8,12 @@ export default createAgent({
             // 1. Store some user data with entity alignment
             await ctx.reply('📝 Storing user data...');
 
+            await ctx.memory.semantic.set('simple', {
+                name: 'John Smith'
+            }, {
+                tags: ['user', 'employee']
+            });
+
             await ctx.memory.semantic.set('user:001', {
                 name: 'John Smith',
                 email: 'john@example.com',

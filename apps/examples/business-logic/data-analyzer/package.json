@@ -1,0 +1,17 @@
+{
+  "name": "@callagent/data-analyzer-agent",
+  "version": "1.0.0",
+  "description": "Data analysis agent in business-logic category",
+  "type": "module",
+  "main": "dist/AgentModule.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@callagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

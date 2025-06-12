@@ -43,6 +43,11 @@ export class TenantAwareFilter implements IAcquisitionFilter {
         this.conversationAware = config?.conversationAware || false;
         this.researchMode = config?.researchMode || false;
         this.complexityAware = config?.complexityAware || false;
+
+        this.logger.debug('TenantAwareFilter initialized', {
+            relevanceThreshold: this.relevanceThreshold,
+            maxInputSize: this.maxInputSize
+        });
     }
 
     /**
@@ -131,6 +136,12 @@ export class TenantAwareFilter implements IAcquisitionFilter {
 
         // Placeholder relevance scoring
         const relevanceScore = this.calculateRelevanceScore(item);
+        this.logger.debug('Relevance score calculated', {
+            itemId: item.id,
+            score: relevanceScore,
+            threshold: this.relevanceThreshold
+        });
+
         if (relevanceScore < this.relevanceThreshold) {
             this.logger.debug('Item below relevance threshold', {
                 itemId: item.id,

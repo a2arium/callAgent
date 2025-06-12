@@ -80,6 +80,18 @@ export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBack
     }
 
     /**
+     * Delete multiple memory entries from the selected backend
+     * @param input Pattern string or query object
+     * @param options Optional query options including backend override
+     * @returns Number of entries deleted
+     */
+    async deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        const backendName = options?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        return backend.deleteMany(input, options);
+    }
+
+    /**
      * Get entity management interface from the default backend
      */
     get entities() {

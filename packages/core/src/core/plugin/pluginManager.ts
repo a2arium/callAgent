@@ -42,41 +42,55 @@ export class PluginManager {
     }
 
     /**
-     * Load an agent with all its dependencies in the correct order
-     * @param agentNameOrPath - Agent name or file path to resolve dependencies for
+     * Load an agent and all its dependencies in the correct order
+     * Supports both folder-based and filename-based discovery
+     * @param agentNameOrPath - Agent name or file path
      * @returns Array of loaded agent plugins in dependency order
-     * @throws DependencyResolutionError if resolution fails
      */
     static async loadAgentWithDependencies(agentNameOrPath: string): Promise<AgentPlugin[]> {
         pluginLogger.info('Loading agent with dependencies', { agentNameOrPath });
 
         try {
-            // Extract agent name from file path if necessary
-            const agentName = this.extractAgentNameFromPath(agentNameOrPath);
-            pluginLogger.debug('Extracted agent name', { original: agentNameOrPath, extracted: agentName });
+            // Determine context path for multi-agent folder discovery
+            const contextPath = agentNameOrPath.includes('/') || agentNameOrPath.includes('\\') ? agentNameOrPath : undefined;
 
-            // Resolve dependencies and get loading order
-            const resolution = await AgentDependencyResolver.resolveDependencies(agentName);
+            // First, load the main agent to register its inline manifest (if any)
+            // This ensures the dependency resolver can access the inline manifest
+            const mainAgent = await this.loadAgent(agentNameOrPath);
+            if (!mainAgent) {
+                throw new Error(`Failed to load main agent: ${agentNameOrPath}`);
+            }
+
+            // Use the actual agent name from the loaded agent's manifest
+            const agentName = mainAgent.manifest.name;
+            pluginLogger.debug('Using agent name from manifest', {
+                original: agentNameOrPath,
+                actualName: agentName
+            });
+
+            // Now resolve dependencies using the registered agent's manifest
+            const resolution = await AgentDependencyResolver.resolveDependencies(agentName, contextPath);
             const loadedAgents: AgentPlugin[] = [];
 
             pluginLogger.info('Dependency resolution completed', {
                 agentNameOrPath,
                 agentName,
+                contextPath,
                 loadingOrder: resolution.loadingOrder,
                 totalAgents: resolution.allAgents.length,
                 warnings: resolution.warnings
             });
 
             // Load agents in dependency order
-            for (const agentName of resolution.loadingOrder) {
-                if (!this.isAgentLoaded(agentName)) {
-                    const agentPlugin = await this.loadAgent(agentName);
+            for (const dependencyAgentName of resolution.loadingOrder) {
+                if (!this.isAgentLoaded(dependencyAgentName)) {
+                    const agentPlugin = await this.loadAgent(dependencyAgentName, contextPath);
                     if (agentPlugin) {
                         loadedAgents.push(agentPlugin);
                     }
                 } else {
-                    pluginLogger.debug('Agent already loaded, skipping', { agentName });
-                    const existingAgent = this.findAgent(agentName);
+                    pluginLogger.debug('Agent already loaded, skipping', { agentName: dependencyAgentName });
+                    const existingAgent = this.findAgent(dependencyAgentName);
                     if (existingAgent) {
                         loadedAgents.push(existingAgent);
                     }
@@ -98,21 +112,45 @@ export class PluginManager {
 
     /**
      * Load a single agent by name or path
+     * Supports direct file paths, folder-based discovery, and filename-based discovery
      * @param agentNameOrPath - Agent name or file path
+     * @param contextPath - Optional context path for same-folder discovery
      * @returns Loaded agent plugin or null if not found
      */
-    static async loadAgent(agentNameOrPath: string): Promise<AgentPlugin | null> {
-        pluginLogger.debug('Loading single agent', { agentNameOrPath });
+    static async loadAgent(agentNameOrPath: string, contextPath?: string): Promise<AgentPlugin | null> {
+        pluginLogger.debug('Loading single agent', { agentNameOrPath, contextPath });
 
         try {
-            // Find the agent file
-            const agentPath = await AgentDiscoveryService.findAgentFile(agentNameOrPath);
+            let agentPath: string | null = null;
+
+            // Check if this is a direct file path
+            if (agentNameOrPath.includes('/') || agentNameOrPath.includes('\\')) {
+                // This looks like a file path - check if it exists
+                const fs = await import('node:fs/promises');
+                const path = await import('node:path');
+
+                try {
+                    const resolvedPath = path.resolve(agentNameOrPath);
+                    await fs.access(resolvedPath);
+                    agentPath = resolvedPath;
+                    pluginLogger.debug('Using direct file path', { agentNameOrPath, resolvedPath });
+                } catch {
+                    // File doesn't exist at direct path, fall back to discovery
+                    pluginLogger.debug('Direct file path not found, falling back to discovery', { agentNameOrPath });
+                }
+            }
+
+            // If not a direct path or direct path doesn't exist, use discovery service
             if (!agentPath) {
-                pluginLogger.warn('Agent file not found', {
-                    agentNameOrPath,
-                    searchPaths: AgentDiscoveryService.getAgentSearchPaths()
-                });
-                return null;
+                agentPath = await AgentDiscoveryService.findAgentFile(agentNameOrPath, contextPath);
+                if (!agentPath) {
+                    pluginLogger.warn('Agent file not found', {
+                        agentNameOrPath,
+                        contextPath,
+                        searchPaths: AgentDiscoveryService.getAgentSearchPaths()
+                    });
+                    return null;
+                }
             }
 
             // Convert to absolute path and file URL for proper importing
@@ -236,63 +274,5 @@ export class PluginManager {
             pluginLogger.error('Failed to list discoverable agents', error);
             return [];
         }
-    }
-
-    /**
-     * Extract agent name from a file path or return as-is if it's already an agent name
-     * @param agentNameOrPath - Agent name or file path
-     * @returns Extracted agent name
-     * 
-     * Examples:
-     * - 'hello-agent' -> 'hello-agent'
-     * - 'apps/examples/hello-agent/dist/AgentModule.js' -> 'hello-agent'
-     * - 'apps/examples/coordinator-agent/AgentModule.ts' -> 'coordinator-agent'
-     */
-    private static extractAgentNameFromPath(agentNameOrPath: string): string {
-        // If it doesn't look like a path (no slashes), return as-is
-        if (!agentNameOrPath.includes('/') && !agentNameOrPath.includes('\\')) {
-            return agentNameOrPath;
-        }
-
-        // Split the path and find the part that looks like an agent directory
-        const parts = agentNameOrPath.replace(/\\/g, '/').split('/');
-
-        // Look for common patterns:
-        // - apps/examples/{agent-name}/...
-        // - examples/{agent-name}/...
-        // - {agent-name}/...
-
-        for (let i = 0; i < parts.length; i++) {
-            const part = parts[i];
-
-            // Skip common path prefixes
-            if (part === 'apps' || part === 'examples' || part === 'dist' || part === 'src') {
-                continue;
-            }
-
-            // Skip file names (containing dots)
-            if (part.includes('.')) {
-                continue;
-            }
-
-            // If this part looks like an agent name (contains dashes or is a simple name)
-            if (part && (part.includes('-') || (part.length > 2 && !part.includes('.')))) {
-                return part;
-            }
-        }
-
-        // Fallback: use the last directory name before any file
-        const fileNameIndex = parts.findIndex(part => part.includes('.'));
-        if (fileNameIndex > 0) {
-            return parts[fileNameIndex - 1];
-        }
-
-        // Last resort: use the second-to-last part if it exists
-        if (parts.length >= 2) {
-            return parts[parts.length - 2];
-        }
-
-        // Ultimate fallback: return the original string
-        return agentNameOrPath;
     }
 } 

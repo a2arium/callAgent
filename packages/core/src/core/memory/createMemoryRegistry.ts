@@ -75,6 +75,8 @@ export async function createMemoryRegistry(tenantId?: string, agentId?: string):
             getMany: <T>(input: GetManyInput, options?: GetManyOptions) =>
                 semanticAdapter.getMany(input, options),
             delete: (key: string, opts?: { backend?: string }) => semanticAdapter.delete(key),
+            deleteMany: (input: GetManyInput, options?: GetManyOptions) =>
+                semanticAdapter.deleteMany(input, options),
             entities: semanticAdapter.entities,
         };
 
@@ -172,14 +174,3 @@ export async function createMemoryRegistry(tenantId?: string, agentId?: string):
     throw new Error(`Unknown MEMORY_ADAPTER: ${adapterType}`);
 }
 
-/**
- * Legacy factory function for backward compatibility
- */
-export async function getMemoryAdapter(tenantId?: string): Promise<IMemory> {
-    const registry = await createMemoryRegistry(tenantId);
-    return {
-        semantic: registry.semantic,
-        episodic: registry.episodic,
-        embed: registry.embed
-    };
-} 

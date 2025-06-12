@@ -1,7 +1,7 @@
 /**
  * Supported filter operators for querying memory entries.
  */
-export type FilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' | 'STARTS_WITH' | 'ENDS_WITH';
+export type FilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' | 'STARTS_WITH' | 'ENDS_WITH' | 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS';
 
 /**
  * A filter condition for querying memory entries by JSON path and operator.
@@ -93,6 +93,7 @@ export type SemanticMemoryBackend = {
     getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
     set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
     delete(key: string, opts?: { backend?: string }): Promise<void>;
+    deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number>;
 
     // Entity alignment methods (optional - available when alignment is enabled)
     entities?: {

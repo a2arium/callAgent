@@ -48,6 +48,10 @@ export class MLOSemanticBackend implements SemanticMemoryBackend {
         await this.unifiedMemory.deleteSemanticMemory(key);
     }
 
+    async deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        return this.unifiedMemory.deleteManySemanticMemory(input, options);
+    }
+
     // Entity alignment methods - delegate to the underlying adapter if available
     entities = {
         unlink: async (memoryKey: string, fieldPath: string): Promise<void> => {

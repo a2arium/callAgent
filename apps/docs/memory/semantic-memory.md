@@ -10,12 +10,19 @@ The memory system provides a standardized interface (`IMemory`) for agents to st
 
 > **New:** The framework now also includes a **Working Memory & Cognitive Context API** for managing active cognitive state during task execution. See [Working Memory API](./working-memory-api.md) for details on goal tracking, thought management, and decision making.
 
+> **New:** The framework now supports **Entity-Aware Search** that allows querying memory using entity alignment. You can search for memories by entity names, aliases, and similar entities using fuzzy matching. See [Entity-Aware Search](#entity-aware-search) for details.
+
 ```typescript
 // Inside the handleTask function of an agent
 async handleTask(ctx: TaskContext) {
   // Access memory through the context
   await ctx.memory.semantic.set('conversation-123', { lastMessage: 'Hello' });
   const conversation = await ctx.memory.semantic.get('conversation-123');
+  
+  // NEW: Search using entity alignment
+  const johnMemories = await ctx.memory.semantic.getMany({
+    filters: ['speaker ~ "Johnny"']  // Finds memories where speaker is similar to "Johnny"
+  });
 }
 ```
 
@@ -253,7 +260,7 @@ const recentSettings = await ctx.memory.semantic.getMany({
   limit: 5 
 });
 
-// Pattern with options - combine pattern matching with limits
+// Pattern with options - combine pattern matching with limits (default limit is 1000)
 const limitedUserData = await ctx.memory.semantic.getMany('user:*', { limit: 10 });
 ```
 
@@ -262,7 +269,94 @@ const limitedUserData = await ctx.memory.semantic.getMany('user:*', { limit: 10 
 ```typescript
 // Delete a specific key
 await ctx.memory.semantic.delete('old-conversation-123');
+
+// Delete multiple entries using pattern matching
+const deletedCount = await ctx.memory.semantic.deleteMany('user:123:*');
+console.log(`Deleted ${deletedCount} entries`);
+
+// Delete multiple entries using query object
+const deletedCount = await ctx.memory.semantic.deleteMany({ 
+  tag: 'temporary' 
+});
+
+// Delete with filters - remove all inactive users
+const deletedCount = await ctx.memory.semantic.deleteMany({
+  tag: 'user',
+  filters: ['status = "inactive"']
+});
+
+// Delete with pattern and limit (deletes first 10 matching entries)
+const deletedCount = await ctx.memory.semantic.deleteMany('session:*', { 
+  limit: 10 
+});
 ```
+
+## Bulk Deletion with deleteMany
+
+The `deleteMany()` method provides efficient bulk deletion capabilities, supporting the same query patterns as `getMany()`:
+
+### Basic Usage
+
+```typescript
+// Delete by pattern - all user data
+const deletedCount = await ctx.memory.semantic.deleteMany('user:*');
+
+// Delete by tag - all temporary entries
+const deletedCount = await ctx.memory.semantic.deleteMany({ tag: 'temporary' });
+
+// Delete with filters - inactive users only
+const deletedCount = await ctx.memory.semantic.deleteMany({
+  tag: 'user',
+  filters: ['status = "inactive"']
+});
+```
+
+### Advanced Deletion Patterns
+
+```typescript
+// Delete specific user's data
+await ctx.memory.semantic.deleteMany('user:123:*');
+
+// Delete old sessions (with date filter)
+await ctx.memory.semantic.deleteMany({
+  tag: 'session',
+  filters: [`lastAccessed < "${thirtyDaysAgo.toISOString()}"`]
+});
+
+// Delete all matching entries (limit is ignored for deleteMany - all matches are deleted)
+await ctx.memory.semantic.deleteMany('cache:*', { 
+  orderBy: { path: 'createdAt', direction: 'asc' }
+});
+
+// Delete by multiple criteria
+await ctx.memory.semantic.deleteMany({
+  filters: [
+    'type = "temporary"',
+    'expiresAt < "2024-01-01T00:00:00Z"',
+    'priority < 5'
+  ]
+});
+```
+
+### Return Value
+
+The `deleteMany()` method returns the number of entries actually deleted:
+
+```typescript
+const deletedCount = await ctx.memory.semantic.deleteMany('old-data:*');
+if (deletedCount > 0) {
+  console.log(`Successfully cleaned up ${deletedCount} old entries`);
+} else {
+  console.log('No entries found to delete');
+}
+```
+
+### Performance Considerations
+
+- **Bulk Operations**: `deleteMany()` is optimized for bulk deletions and performs better than multiple individual `delete()` calls
+- **Transaction Safety**: All deletions are performed within a database transaction to ensure consistency
+- **Entity Alignment**: When entity alignment is enabled, associated entity alignments are automatically cleaned up
+- **Filtering**: Complex filters are processed efficiently at the database level
 
 ## Pattern Matching
 
@@ -422,6 +516,8 @@ When storing data with entity alignment enabled, the system:
 ### Prerequisites
 
 Entity alignment requires additional setup beyond basic memory functionality:
+
+**Important**: Embeddings are only created for entity alignment purposes. Regular memory storage does not generate embeddings - they are created per-entity-field only when entity alignment is explicitly requested.
 
 1. **pgvector Extension**: Install the pgvector extension in your PostgreSQL database:
 ```sql
@@ -737,6 +833,266 @@ const embedding2 = await embedFunction('Main Hall');
 // Calculate cosine similarity manually if needed
 ```
 
+## Entity-Aware Search
+
+The memory system now supports **entity-aware search** that leverages the entity alignment system to find memories using entity names, aliases, and similar entities. This allows you to search for memories even when the exact entity name doesn't match what's stored.
+
+### Overview
+
+Entity-aware search works by:
+1. **Analyzing your search terms** to identify potential entity references
+2. **Finding similar entities** using embedding-based similarity or exact/alias matching
+3. **Locating memory records** that are aligned to those entities
+4. **Returning matching memories** with full entity alignment information
+
+This is particularly powerful for:
+- **Cross-lingual search** - Find "John Smith" when searching for "Johnny"
+- **Alias resolution** - Find memories about "NYC" when searching for "New York City"
+- **Fuzzy matching** - Handle typos and variations in entity names
+- **Relationship discovery** - Find all memories related to similar entities
+
+### Entity-Aware Operators
+
+Three new filter operators enable entity-aware search:
+
+| Operator | Syntax | Description | Use Case |
+|----------|--------|-------------|----------|
+| `~` | `field ~ "value"` | **Fuzzy entity matching** using embedding similarity | Find similar entities across languages/variations |
+| `entity_is` | `field entity_is "value"` | **Exact entity matching** by canonical name | Find memories aligned to a specific canonical entity |
+| `entity_like` | `field entity_like "value"` | **Alias matching** within entity aliases | Find memories using any known alias of an entity |
+
+### Basic Usage Examples
+
+#### Fuzzy Entity Search (`~`)
+
+Find memories where the speaker is similar to "Johnny" (might match "John Smith", "John", "J. Smith", etc.):
+
+```typescript
+const johnMemories = await ctx.memory.semantic.getMany({
+  filters: ['speaker ~ "Johnny"']
+});
+
+// Also works with other entity types
+const nycMemories = await ctx.memory.semantic.getMany({
+  filters: ['location ~ "NYC"']  // Might match "New York City", "New York", etc.
+});
+```
+
+#### Exact Entity Search (`entity_is`)
+
+Find memories aligned to the exact canonical entity "John Smith":
+
+```typescript
+const exactMatches = await ctx.memory.semantic.getMany({
+  filters: ['speaker entity_is "John Smith"']
+});
+```
+
+#### Alias Entity Search (`entity_like`)
+
+Find memories where the speaker field contains any alias of an entity:
+
+```typescript
+const aliasMatches = await ctx.memory.semantic.getMany({
+  filters: ['speaker entity_like "Johnny"']  // Matches if "Johnny" is an alias
+});
+```
+
+### Advanced Usage Examples
+
+#### Combining Entity and Regular Filters
+
+```typescript
+// Find high-priority memories about John from the last month
+const results = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "John"',           // Entity-aware: similar to John
+    'priority >= 8',              // Regular filter: high priority
+    'date >= "2024-01-01"'        // Regular filter: recent
+  ]
+});
+```
+
+#### Multiple Entity Filters (AND Logic)
+
+```typescript
+// Find memories where speaker is like "John" AND location is like "NYC"
+const results = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "John"',
+    'location ~ "NYC"'
+  ]
+});
+```
+
+#### Cross-Lingual Entity Search
+
+```typescript
+// Search for memories about "Jean" (French) that might match "John" (English)
+const crossLingualResults = await ctx.memory.semantic.getMany({
+  filters: ['speaker ~ "Jean"']  // Might find "John Smith" if embeddings are multilingual
+});
+```
+
+### Real-World Use Cases
+
+#### Customer Support System
+
+```typescript
+// Find all support tickets for a customer, handling name variations
+const customerTickets = await ctx.memory.semantic.getMany({
+  filters: [
+    'customer ~ "J. Smith"',      // Fuzzy match for name variations
+    'status = "open"'             // Only open tickets
+  ],
+  tag: 'support-ticket'
+});
+
+// Find tickets about a specific product using aliases
+const productIssues = await ctx.memory.semantic.getMany({
+  filters: ['product entity_like "iPhone"'],  // Matches "iPhone", "iPhone 15", "Apple iPhone", etc.
+  tag: 'support-ticket'
+});
+```
+
+#### Meeting Notes System
+
+```typescript
+// Find all meetings where a person participated (handling name variations)
+const personMeetings = await ctx.memory.semantic.getMany({
+  filters: [
+    'attendees ~ "Sarah"',        // Fuzzy match for "Sarah", "Sara", "Sarah Johnson", etc.
+    'date >= "2024-01-01"'        // This year only
+  ],
+  tag: 'meeting-notes'
+});
+
+// Find meetings at similar locations
+const locationMeetings = await ctx.memory.semantic.getMany({
+  filters: ['venue ~ "Main Conference Room"'],  // Matches similar room names
+  tag: 'meeting-notes'
+});
+```
+
+#### Knowledge Base Search
+
+```typescript
+// Find documents about similar topics/entities
+const relatedDocs = await ctx.memory.semantic.getMany({
+  filters: [
+    'topic ~ "machine learning"', // Finds "ML", "AI", "artificial intelligence", etc.
+    'status = "published"'
+  ],
+  tag: 'knowledge-base'
+});
+```
+
+### Performance Considerations
+
+#### Embedding Requirements
+
+- **Fuzzy search (`~`)** requires an embedding function to be configured
+- **Exact/alias search** works without embeddings but requires entity alignment to be enabled
+- **Embedding generation** happens at query time for fuzzy search (consider caching)
+
+#### Query Performance
+
+```typescript
+// ✅ Efficient: Entity filters first, then regular filters
+const efficient = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "John"',           // Entity filter (uses indexes)
+    'priority >= 8'               // Regular filter (applied to subset)
+  ]
+});
+
+// ⚠️ Less efficient: Many regular filters with entity filters
+const lessEfficient = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "John"',
+    'priority >= 8',
+    'status = "active"',
+    'category contains "important"',
+    'date >= "2024-01-01"'        // Many regular filters applied in memory
+  ]
+});
+```
+
+#### Similarity Thresholds
+
+The fuzzy search (`~`) uses the same similarity threshold as entity alignment (default: 0.6). You can adjust this:
+
+```typescript
+// Configure threshold when setting up the adapter
+const adapter = new MemorySQLAdapter(prisma, embedFunction, {
+  defaultThreshold: 0.7  // Higher threshold = more precise matches
+});
+```
+
+### Error Handling
+
+```typescript
+try {
+  const results = await ctx.memory.semantic.getMany({
+    filters: ['speaker ~ "John"']
+  });
+} catch (error) {
+  if (error.code === 'ENTITY_SERVICE_UNAVAILABLE') {
+    // Entity alignment not configured - fall back to regular search
+    const fallback = await ctx.memory.semantic.getMany({
+      filters: ['speaker contains "John"']  // Regular text search
+    });
+  } else if (error.code === 'EMBEDDING_UNAVAILABLE') {
+    // Embedding function not available - use exact/alias search instead
+    const fallback = await ctx.memory.semantic.getMany({
+      filters: ['speaker entity_like "John"']  // Alias search
+    });
+  }
+}
+```
+
+### Migration from Regular Search
+
+#### Before (Regular Text Search)
+
+```typescript
+// Old approach: literal text matching only
+const results = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker contains "John"',    // Only finds exact substring matches
+    'location = "New York"'       // Only finds exact matches
+  ]
+});
+```
+
+#### After (Entity-Aware Search)
+
+```typescript
+// New approach: intelligent entity matching
+const results = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "John"',           // Finds "John Smith", "Johnny", "J. Smith", etc.
+    'location ~ "New York"'       // Finds "NYC", "New York City", "Manhattan", etc.
+  ]
+});
+```
+
+### Debugging Entity-Aware Search
+
+```typescript
+// Check what entities would match your search
+const debugSearch = async (searchTerm: string) => {
+  // This would be internal to the adapter, but conceptually:
+  const embedding = await embedFunction(searchTerm);
+  const similarEntities = await findSimilarEntities('person', embedding, 0.6);
+  console.log(`"${searchTerm}" matches:`, similarEntities.map(e => e.canonical_name));
+};
+
+// Check entity alignment for a specific memory
+const memory = await ctx.memory.semantic.get('meeting:123');
+console.log('Aligned entities:', memory._alignments); // If available
+```
+
 ## Best Practices
 
 ### Key Naming Strategies
@@ -808,10 +1164,15 @@ The memory system has been simplified with a unified `getMany()` method that rep
 ### New Unified API
 
 ```typescript
-// Single method for all bulk operations
+// Single method for all bulk retrieval operations
 await ctx.memory.semantic.getMany('user:*');                    // Pattern matching
 await ctx.memory.semantic.getMany({ tag: 'user' });             // Query object
 await ctx.memory.semantic.getMany('user:*', { limit: 5 });      // Pattern + options
+
+// Single method for all bulk deletion operations
+await ctx.memory.semantic.deleteMany('user:*');                 // Pattern matching
+await ctx.memory.semantic.deleteMany({ tag: 'user' });          // Query object
+await ctx.memory.semantic.deleteMany('user:*', { limit: 5 });   // Pattern + options
 ```
 
 ### New String-Based Filter Syntax

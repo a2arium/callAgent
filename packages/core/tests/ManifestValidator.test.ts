@@ -220,6 +220,45 @@ describe('ManifestValidator', () => {
             expect(result.isValid).toBe(false);
             expect(result.errors).toContain('Agent cannot depend on itself');
         });
+
+        it('should error on camelCase dependency names', () => {
+            const dependencies = ['agent-one', 'imageSummary', 'another-agent'];
+
+            const result = ManifestValidator.validateDependencies(dependencies);
+
+            expect(result.isValid).toBe(false);
+            expect(result.errors).toContain("Dependency 'imageSummary' must be lowercase for consistency. Use 'imagesummary' instead.");
+        });
+
+        it('should error on dependency names with invalid characters', () => {
+            const dependencies = ['agent-one', 'image@summary', 'another-agent'];
+
+            const result = ManifestValidator.validateDependencies(dependencies);
+
+            expect(result.isValid).toBe(false);
+            expect(result.errors).toContain("Dependency 'image@summary' must only contain lowercase letters, numbers, hyphens, and underscores");
+        });
+
+        it('should validate category-based dependency names', () => {
+            const dependencies = ['data-processing/csv-parser', 'business-logic/data-analyzer', 'utils/logger'];
+
+            const result = ManifestValidator.validateDependencies(dependencies);
+
+            expect(result.isValid).toBe(true);
+            expect(result.errors).toHaveLength(0);
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it('should error on invalid category-based dependency names', () => {
+            const dependencies = ['data-processing/csv@parser', 'business-logic/', '/data-analyzer'];
+
+            const result = ManifestValidator.validateDependencies(dependencies);
+
+            expect(result.isValid).toBe(false);
+            expect(result.errors).toContain("Dependency 'data-processing/csv@parser': Agent name should only contain lowercase letters, numbers, hyphens, and underscores");
+            expect(result.errors).toContain("Dependency 'business-logic/': Agent name cannot be empty");
+            expect(result.errors).toContain("Dependency '/data-analyzer': Category name cannot be empty");
+        });
     });
 
     describe('validateA2AConfig', () => {

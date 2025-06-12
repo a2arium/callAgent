@@ -11,9 +11,11 @@ This example demonstrates A2A (Agent-to-Agent) communication using the dependenc
 
 ## Structure
 
-- `agent.json` - Manifest declaring dependency on `llm-agent`
+- `agent.json` - External manifest declaring dependency on `llm-agent` (folder name matches agent name)
 - `AgentModule.ts` - Main agent implementation
 - `package.json` - Package configuration following standard pattern
+
+**Note:** This example uses an external `agent.json` file because the folder name (`hello-to-llm-demo`) matches the agent name (`hello-to-llm-agent`). For multi-agent folders, only the main agent can use external JSON files.
 
 ## Dependencies
 
@@ -58,7 +60,7 @@ export OPENAI_API_KEY=your_api_key_here
 
 ## Learning Points
 
-1. **Dependency Declaration**: How to declare agent dependencies in `agent.json`
+1. **Dependency Declaration**: How to declare agent dependencies in external `agent.json` (when folder name matches agent name)
 2. **Automatic Loading**: Dependencies are loaded automatically by the system
 3. **A2A Communication**: Clean agent-to-agent communication patterns
 4. **Error Propagation**: How errors flow between dependent agents 

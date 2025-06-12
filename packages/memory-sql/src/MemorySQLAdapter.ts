@@ -8,46 +8,32 @@ import { FilterParser } from './FilterParser.js';
 
 // Define system tenant constants locally for this adapter
 const SYSTEM_TENANT = '__system__';
+const DEFAULT_ENTITY_ALIGNMENT_THRESHOLD = 0.7;
 const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT;
 
 export class MemorySQLAdapter implements SemanticMemoryBackend {
     private entityService?: EntityAlignmentService;
     private defaultTenantId: string;
+    private readonly DEFAULT_QUERY_LIMIT = 1000;
 
     constructor(
         private prisma: PrismaClient,
         private embedFunction?: (text: string) => Promise<number[]>,
-        private options: { defaultTenantId?: string } = {}
+        private options: { defaultTenantId?: string; defaultQueryLimit?: number } = {}
     ) {
         this.defaultTenantId = options.defaultTenantId || 'default';
+        if (options.defaultQueryLimit) {
+            (this as any).DEFAULT_QUERY_LIMIT = options.defaultQueryLimit;
+        }
 
         if (embedFunction) {
             this.entityService = new EntityAlignmentService(prisma, embedFunction, {
-                defaultThreshold: 0.6
+                defaultThreshold: DEFAULT_ENTITY_ALIGNMENT_THRESHOLD
             });
         }
     }
 
     async set(key: string, value: any, options: MemorySetOptions = {}): Promise<void> {
-        console.error('🚨 MemorySQLAdapter.set called with:', {
-            key: key,
-            keyType: typeof key,
-            keyValue: key,
-            value: value,
-            valueType: typeof value,
-            valueValue: value,
-            options: options
-        });
-
-        if (key === null || key === undefined) {
-            console.error('🚨 KEY IS NULL/UNDEFINED!');
-            throw new Error(`Key is null/undefined: ${key}`);
-        }
-
-        if (value === null || value === undefined) {
-            console.error('🚨 VALUE IS NULL/UNDEFINED!');
-            throw new Error(`Value is null/undefined: ${value}`);
-        }
 
         const tenantId = options.tenantId || this.defaultTenantId;
 
@@ -68,83 +54,32 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     }
 
     private async setRegular(key: string, value: any, options: MemorySetOptions): Promise<void> {
-        console.log('🔍 MemorySQLAdapter.setRegular called with:', {
-            key: key,
-            keyType: typeof key,
-            value: value,
-            valueType: typeof value,
-            options: options
-        });
-
-        // Generate embedding for the entire value if embedding function is available
-        let embedding: VectorEmbedding = null;
-        if (this.embedFunction) {
-            try {
-                const text = typeof value === 'string' ? value :
-                    value !== undefined && value !== null ? JSON.stringify(value) : '';
-                if (text && text !== 'undefined' && text !== 'null') {
-                    embedding = await this.embedFunction(text);
-                }
-            } catch (error) {
-                console.warn('Failed to generate embedding:', error);
-                embedding = null;
-            }
-        }
-
         const tenantId = options.tenantId || this.defaultTenantId;
 
-        // If we have an embedding, use raw SQL to handle vector type properly
-        if (embedding) {
-            const embeddingLiteral = `'[${embedding.join(',')}]'::vector`;
-            await this.prisma.$executeRawUnsafe(`
-                INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
-                VALUES (
-                    $1,
-                    $2,
-                    $3::jsonb,
-                    $4::text[],
-                    ${embeddingLiteral},
-                    NOW(),
-                    NOW()
-                )
-                ON CONFLICT (tenant_id, key) 
-                DO UPDATE SET 
-                    value = EXCLUDED.value,
-                    tags = EXCLUDED.tags,
-                    embedding = EXCLUDED.embedding,
-                    updated_at = NOW()
-            `, tenantId, key, JSON.stringify(value), options.tags || []);
-        } else {
-            console.log('🔍 Using Prisma typed query with:', {
-                tenantId,
-                key,
-                valueJson: JSON.stringify(value),
-                tags: options.tags || []
-            });
+        // No entity alignment requested - store without embeddings
+        // Embeddings are only created for entity alignment purposes
 
-            // Use Prisma's typed query when no embedding to avoid vector dimension errors
-            await this.prisma.agentMemoryStore.upsert({
-                where: {
-                    tenantId_key: {
-                        tenantId: tenantId,
-                        key: key
-                    }
-                },
-                update: {
-                    value: JSON.stringify(value),
-                    tags: options.tags || [],
-                    updatedAt: new Date()
-                },
-                create: {
+        await this.prisma.agentMemoryStore.upsert({
+            where: {
+                tenantId_key: {
                     tenantId: tenantId,
-                    key: key,
-                    value: JSON.stringify(value),
-                    tags: options.tags || [],
-                    createdAt: new Date(),
-                    updatedAt: new Date()
+                    key: key
                 }
-            });
-        }
+            },
+            update: {
+                value: value,
+                tags: options.tags || [],
+                updatedAt: new Date()
+            },
+            create: {
+                tenantId: tenantId,
+                key: key,
+                value: value,
+                tags: options.tags || [],
+                createdAt: new Date(),
+                updatedAt: new Date()
+            }
+        });
     }
 
     private async setWithEntityAlignment(key: string, value: any, options: MemorySetOptions): Promise<void> {
@@ -158,72 +93,36 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         const entityFields = EntityFieldParser.parseEntityFields(value, options.entities);
 
         // Perform entity alignment with tenant context
+        // This creates embeddings for individual entity fields only
         const alignments = await this.entityService.alignEntityFields(key, entityFields, {
             threshold: options.alignmentThreshold,
             autoCreate: options.autoCreateEntities,
             tenantId: tenantId
         });
 
-        // Generate embedding for the entire value
-        let embedding: VectorEmbedding = null;
-        if (this.embedFunction) {
-            try {
-                const text = typeof value === 'string' ? value :
-                    value !== undefined && value !== null ? JSON.stringify(value) : '';
-                if (text && text !== 'undefined' && text !== 'null') {
-                    embedding = await this.embedFunction(text);
-                }
-            } catch (error) {
-                console.warn('Failed to generate embedding:', error);
-                embedding = null;
-            }
-        }
-
-        // Store the memory entry with embedding
-        if (embedding) {
-            const embeddingLiteral = `'[${embedding.join(',')}]'::vector`;
-            await this.prisma.$executeRawUnsafe(`
-                INSERT INTO agent_memory_store (tenant_id, key, value, tags, embedding, created_at, updated_at)
-                VALUES (
-                    $1,
-                    $2,
-                    $3::jsonb,
-                    $4::text[],
-                    ${embeddingLiteral},
-                    NOW(),
-                    NOW()
-                )
-                ON CONFLICT (tenant_id, key) 
-                DO UPDATE SET 
-                    value = EXCLUDED.value,
-                    tags = EXCLUDED.tags,
-                    embedding = EXCLUDED.embedding,
-                    updated_at = NOW()
-            `, tenantId, key, JSON.stringify(value), options.tags || []);
-        } else {
-            // Use Prisma's typed query when no embedding to avoid vector dimension errors
-            await this.prisma.agentMemoryStore.upsert({
-                where: {
-                    tenantId_key: {
-                        tenantId: tenantId,
-                        key: key
-                    }
-                },
-                update: {
-                    value: JSON.stringify(value),
-                    tags: options.tags || [],
-                    updatedAt: new Date()
-                },
-                create: {
+        // Store the memory entry without content embedding
+        // Only entity fields get embeddings for alignment purposes
+        await this.prisma.agentMemoryStore.upsert({
+            where: {
+                tenantId_key: {
                     tenantId: tenantId,
-                    key: key,
-                    value: JSON.stringify(value),
-                    tags: options.tags || [],
-                    createdAt: new Date(),
-                    updatedAt: new Date()
+                    key: key
                 }
-            });
-        }
+            },
+            update: {
+                value: value,
+                tags: options.tags || [],
+                updatedAt: new Date()
+            },
+            create: {
+                tenantId: tenantId,
+                key: key,
+                value: value,
+                tags: options.tags || [],
+                createdAt: new Date(),
+                updatedAt: new Date()
+            }
+        });
     }
 
     async get(key: string, opts?: { backend?: string; tenantId?: string }): Promise<any> {
@@ -312,7 +211,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
      * @returns A Prisma-compatible query condition
      * @private
      */
-    private buildJsonFilterCondition(filter: Exclude<MemoryFilter, string>): any {
+    private buildJsonFilterCondition(filter: { path: string; operator: FilterOperator; value: any }): any {
         const { path, operator, value } = filter;
 
         // Validate path - must be a non-empty string
@@ -399,6 +298,10 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                         string_ends_with: value
                     }
                 };
+            case 'ENTITY_FUZZY':
+            case 'ENTITY_EXACT':
+            case 'ENTITY_ALIAS':
+                throw new Error(`Entity operator ${operator} should be handled by entity-aware query path, not regular JSON filtering`);
             default:
                 throw new Error(`Unsupported operator: ${operator}`);
         }
@@ -415,6 +318,44 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 DELETE FROM agent_memory_store WHERE key = ${key} AND tenant_id = ${tenantId}
             `;
         });
+    }
+
+    async deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+
+        // Use getMany with unlimited results to find all matching entries
+        const unlimitedOptions = {
+            ...options,
+            limit: Number.MAX_SAFE_INTEGER  // Remove any limit for deletion
+        };
+        const entriesToDelete = await this.getMany(input, unlimitedOptions);
+
+        if (entriesToDelete.length === 0) {
+            return 0;
+        }
+
+        // Extract keys for deletion
+        const keysToDelete = entriesToDelete.map(entry => entry.key);
+
+        // Delete in transaction to ensure consistency
+        const deletedCount = await this.prisma.$transaction(async (tx) => {
+            // Delete entity alignments for all keys
+            await tx.$executeRaw`
+                DELETE FROM entity_alignment 
+                WHERE memory_key = ANY(${keysToDelete}::text[]) AND tenant_id = ${tenantId}
+            `;
+
+            // Delete memory entries
+            const memoryDeleteResult = await tx.$executeRaw`
+                DELETE FROM agent_memory_store 
+                WHERE key = ANY(${keysToDelete}::text[]) AND tenant_id = ${tenantId}
+            `;
+
+            // Return the number of deleted memory entries
+            return Number(memoryDeleteResult);
+        });
+
+        return deletedCount;
     }
 
     async clear(): Promise<void> {
@@ -470,7 +411,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
      */
     private async queryByPattern<T>(pattern: string, options?: GetManyOptions): Promise<MemoryQueryResult<T>[]> {
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
-        const limit = options?.limit ?? 100;
+        const limit = options?.limit ?? this.DEFAULT_QUERY_LIMIT;
 
         // System tenant can query across all tenants by prefixing pattern with tenant:
         if (isSystemTenant(tenantId) && pattern.includes(':')) {
@@ -573,7 +514,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     }
 
     private async querySimple<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
-        const { tag, limit = 100 } = options;
+        const { tag, limit = this.DEFAULT_QUERY_LIMIT } = options;
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
 
         let query = `
@@ -613,8 +554,21 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     }
 
     private async queryWithFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
-        const { tag, filters, limit = 100 } = options;
+        const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+
+        // Check if we have entity-aware filters that require special handling
+        const hasEntityFilters = filters?.some(filter => {
+            if (typeof filter === 'string') {
+                const parsed = FilterParser.parseFilter(filter);
+                return ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(parsed.operator);
+            }
+            return ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator);
+        });
+
+        if (hasEntityFilters && this.entityService) {
+            return await this.queryWithEntityFilters<T>(options);
+        }
 
         // Build Prisma query conditions
         const whereConditions: any = {
@@ -676,5 +630,261 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         }
 
         return processedResults;
+    }
+
+    /**
+     * Handle queries with entity-aware filters
+     */
+    private async queryWithEntityFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
+        const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
+        const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+
+        if (!this.entityService) {
+            throw new MemoryError('Entity service not available for entity-aware queries', {
+                code: 'ENTITY_SERVICE_UNAVAILABLE'
+            });
+        }
+
+        // Parse all filters
+        const parsedFilters = FilterParser.parseFilters(filters || []);
+
+        // Separate entity filters from regular filters
+        const entityFilters = parsedFilters.filter(f =>
+            ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(f.operator)
+        );
+        const regularFilters = parsedFilters.filter(f =>
+            !['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(f.operator)
+        );
+
+        // Find memory keys that match entity filters
+        const entityMatchedKeys = new Set<string>();
+
+        for (const entityFilter of entityFilters) {
+            const matchedKeys = await this.findMemoryKeysByEntityFilter(
+                entityFilter.path,
+                entityFilter.operator as 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS',
+                entityFilter.value,
+                tenantId
+            );
+
+            // If this is the first entity filter, add all matches
+            // Otherwise, intersect with existing matches (AND logic)
+            if (entityMatchedKeys.size === 0) {
+                matchedKeys.forEach(key => entityMatchedKeys.add(key));
+            } else {
+                // Keep only keys that match both this filter and previous filters
+                const intersection = new Set<string>();
+                for (const key of entityMatchedKeys) {
+                    if (matchedKeys.has(key)) {
+                        intersection.add(key);
+                    }
+                }
+                entityMatchedKeys.clear();
+                intersection.forEach(key => entityMatchedKeys.add(key));
+            }
+        }
+
+        // If no entity matches found, return empty results
+        if (entityMatchedKeys.size === 0) {
+            return [];
+        }
+
+        // Build query for memory records that match entity filters
+        let query = `
+            SELECT key, value, tags
+            FROM agent_memory_store 
+            WHERE tenant_id = $1 AND key = ANY($2)
+        `;
+        const queryParams: any[] = [tenantId, Array.from(entityMatchedKeys)];
+
+        // Add tag filter if specified
+        if (tag) {
+            query += ' AND $3 = ANY(tags)';
+            queryParams.push(tag);
+        }
+
+        // Add regular JSON filters if any
+        if (regularFilters.length > 0) {
+            // For now, we'll use a simple approach and filter in memory
+            // A more sophisticated approach would build complex SQL
+            console.warn('Regular filters combined with entity filters will be applied in memory - may be slower');
+        }
+
+        query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
+
+        const results = await this.prisma.$queryRawUnsafe<Array<{
+            key: string;
+            value: any;
+            tags: string[];
+        }>>(query, ...queryParams);
+
+        // Apply regular filters in memory if needed
+        let filteredResults = results;
+        if (regularFilters.length > 0) {
+            filteredResults = results.filter(result => {
+                return regularFilters.every(filter => {
+                    try {
+                        return this.evaluateFilterInMemory(result.value, filter);
+                    } catch {
+                        return false; // Skip records that can't be evaluated
+                    }
+                });
+            });
+        }
+
+        // Add aligned proxies to results
+        const processedResults: MemoryQueryResult<T>[] = [];
+        for (const result of filteredResults) {
+            let value = result.value;
+
+            const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
+            if (Object.keys(alignments).length > 0) {
+                value = addAlignedProxies(value, alignments);
+            }
+
+            processedResults.push({
+                key: result.key,
+                value: value as T
+            });
+        }
+
+        return processedResults;
+    }
+
+    /**
+     * Find memory keys that match an entity filter
+     */
+    private async findMemoryKeysByEntityFilter(
+        fieldPath: string,
+        operator: 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS',
+        searchValue: string,
+        tenantId: string
+    ): Promise<Set<string>> {
+        const matchedKeys = new Set<string>();
+
+        if (operator === 'ENTITY_FUZZY') {
+            // Use embedding similarity to find similar entities
+            if (!this.embedFunction) {
+                throw new MemoryError('Embedding function not available for fuzzy entity search', {
+                    code: 'EMBEDDING_UNAVAILABLE'
+                });
+            }
+
+            // Generate embedding for search value
+            const searchEmbedding = await this.embedFunction(searchValue);
+
+            // Find similar entities across all types (we don't know the type from the filter)
+            const similarEntities = await this.prisma.$queryRaw<Array<{
+                id: string;
+                canonical_name: string;
+                entity_type: string;
+                similarity: number;
+            }>>`
+                SELECT 
+                    id,
+                    canonical_name,
+                    entity_type,
+                    1 - (embedding <=> ${searchEmbedding}::vector) as similarity
+                FROM entity_store 
+                WHERE tenant_id = ${tenantId}
+                ORDER BY embedding <=> ${searchEmbedding}::vector
+                LIMIT 20
+            `;
+
+            // Filter by similarity threshold (use default 0.6 or could be configurable)
+            const threshold = 0.6;
+            const matchingEntities = similarEntities.filter(e => e.similarity > threshold);
+
+            // Find memory records aligned to these entities
+            for (const entity of matchingEntities) {
+                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT memory_key
+                    FROM entity_alignment
+                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                `;
+
+                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+            }
+
+        } else if (operator === 'ENTITY_EXACT') {
+            // Find entities with exact canonical name match
+            const exactEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
+                SELECT id
+                FROM entity_store
+                WHERE canonical_name = ${searchValue} AND tenant_id = ${tenantId}
+            `;
+
+            // Find memory records aligned to these entities
+            for (const entity of exactEntities) {
+                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT memory_key
+                    FROM entity_alignment
+                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                `;
+
+                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+            }
+
+        } else if (operator === 'ENTITY_ALIAS') {
+            // Find entities where search value is in aliases array
+            const aliasEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
+                SELECT id
+                FROM entity_store
+                WHERE ${searchValue} = ANY(aliases) AND tenant_id = ${tenantId}
+            `;
+
+            // Find memory records aligned to these entities
+            for (const entity of aliasEntities) {
+                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT memory_key
+                    FROM entity_alignment
+                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                `;
+
+                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+            }
+        }
+
+        return matchedKeys;
+    }
+
+    /**
+     * Evaluate a filter condition against a value in memory (for post-processing)
+     */
+    private evaluateFilterInMemory(value: any, filter: { path: string; operator: FilterOperator; value: any }): boolean {
+        // Get the field value using JSON path
+        const fieldValue = this.getValueByPath(value, filter.path);
+
+        switch (filter.operator) {
+            case '=':
+                return fieldValue === filter.value;
+            case '!=':
+                return fieldValue !== filter.value;
+            case '>':
+                return fieldValue > filter.value;
+            case '>=':
+                return fieldValue >= filter.value;
+            case '<':
+                return fieldValue < filter.value;
+            case '<=':
+                return fieldValue <= filter.value;
+            case 'CONTAINS':
+                return String(fieldValue).includes(String(filter.value));
+            case 'STARTS_WITH':
+                return String(fieldValue).startsWith(String(filter.value));
+            case 'ENDS_WITH':
+                return String(fieldValue).endsWith(String(filter.value));
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Get a value from an object using a dot-notation path
+     */
+    private getValueByPath(obj: any, path: string): any {
+        return path.split('.').reduce((current, key) => {
+            return current && current[key] !== undefined ? current[key] : undefined;
+        }, obj);
     }
 } 

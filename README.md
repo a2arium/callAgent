@@ -129,7 +129,7 @@ The framework provides automatic dependency resolution for Agent-to-Agent (A2A) 
 ### Quick Example
 
 ```typescript
-// agent.json
+// agent.json (only when folder name matches agent name)
 {
   "name": "hello-to-llm-agent",
   "dependencies": { "agents": ["hello-agent"] }
@@ -141,8 +141,10 @@ export default createAgent({
     const result = await ctx.sendTaskToAgent('hello-agent', { name: 'User' });
     return { success: true, dependencyResult: result };
   }
-});
+}, import.meta.url);
 ```
+
+**Important:** For multi-agent folders, only the main agent (whose name matches the folder) can use external JSON. All other agents must use inline manifests.
 
 [Read the complete Agent Dependencies documentation](docs/agent-dependencies.md)
 

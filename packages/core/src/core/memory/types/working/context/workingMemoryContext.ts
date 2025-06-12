@@ -183,11 +183,14 @@ export async function extendContextWithMemory(
         });
     }
 
+    // Use the provided semantic adapter (should be inherited from parent)
+    const semanticMemoryAdapter = existingSemanticAdapter as any;
+
     // Create UnifiedMemoryService with proper configuration
     const unifiedMemory = new UnifiedMemoryService(tenantId, {
         memoryLifecycleConfig: memoryConfig,
         workingMemoryAdapter,
-        semanticAdapter: existingSemanticAdapter as any, // Type assertion for backward compatibility
+        semanticAdapter: semanticMemoryAdapter,
         agentId
     });
 

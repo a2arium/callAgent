@@ -14,7 +14,7 @@ import { extendContextWithStreaming } from '../core/context/StreamingContext.js'
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
 import { createLLMForTask } from '../core/llm/LLMFactory.js';
-import { getMemoryAdapter } from '../core/memory/factory.js';
+import { createMemoryRegistry } from '../core/memory/createMemoryRegistry.js';
 import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
 import { globalA2AService } from '../core/orchestration/A2AService.js';
@@ -196,9 +196,9 @@ export async function runAgentWithStreaming(
     // Create the agent-specific logger using the nested createLogger method
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
-    // Get the memory adapter instance with resolved tenant context for backward compatibility
-    const memoryAdapter = await getMemoryAdapter(finalTenantId);
-    const semanticAdapter = memoryAdapter.semantic.backends[config.memory.semantic.default];
+    // Get the memory registry instance with resolved tenant context
+    const memoryRegistry = await createMemoryRegistry(finalTenantId, agentName);
+    const semanticAdapter = memoryRegistry.semantic.backends[config.memory.semantic.default];
 
     // Create basic task context with resolved tenant information (excluding working memory methods)
     const partialCtx: PartialTaskContext = {
@@ -280,33 +280,7 @@ export async function runAgentWithStreaming(
         recordUsage: (usage: unknown): void => {
             agentLogger.warn('recordUsage is stubbed in local runner', { usage });
         },
-        memory: {
-            semantic: {
-                getDefaultBackend: () => 'none',
-                setDefaultBackend: () => { },
-                backends: {},
-                get: async () => null,
-                set: async () => { },
-                getMany: async () => [],
-                delete: async () => { },
-            },
-            episodic: {
-                getDefaultBackend: () => 'none',
-                setDefaultBackend: () => { },
-                backends: {},
-                append: async () => { },
-                getEvents: async () => [],
-                deleteEvent: async () => { },
-            },
-            embed: {
-                getDefaultBackend: () => 'none',
-                setDefaultBackend: () => { },
-                backends: {},
-                upsert: async () => { },
-                queryByVector: async () => [],
-                delete: async () => { },
-            }
-        }
+        memory: memoryRegistry
     };
 
     // Extend context with MLO-backed memory operations

@@ -105,7 +105,24 @@ export class ComponentLogger {
      */
     error(message: string, error?: unknown, context?: Record<string, unknown>): void {
         if (this.shouldLog('error')) {
-            const contextStr = context ? ` ${JSON.stringify(context)}` : '';
+            // Safe JSON serialization to avoid circular reference issues
+            const contextStr = context ? (() => {
+                try {
+                    const seenObjects = new WeakSet();
+                    return ` ${JSON.stringify(context, (key, value) => {
+                        if (typeof value === 'object' && value !== null) {
+                            // Simple circular reference detection using a WeakSet
+                            if (seenObjects.has(value)) {
+                                return '[Circular Reference]';
+                            }
+                            seenObjects.add(value);
+                        }
+                        return value;
+                    })}`;
+                } catch (serializationError) {
+                    return ` [Context Serialization Error: ${serializationError instanceof Error ? serializationError.message : String(serializationError)}]`;
+                }
+            })() : '';
 
             if (error instanceof Error) {
                 console.error(`${this.getPrefix()} ${message}`, error.message, contextStr);
