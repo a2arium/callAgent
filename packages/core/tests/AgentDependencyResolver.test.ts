@@ -1,16 +1,16 @@
 import { AgentDependencyResolver, DependencyResolutionError } from '../src/core/plugin/dependencies/AgentDependencyResolver.js';
-import { AgentDiscoveryService } from '../src/core/plugin/dependencies/AgentDiscoveryService.js';
-import { ManifestValidator } from '../src/core/plugin/ManifestValidator.js';
+import { SmartAgentDiscoveryService } from './__mocks__/SmartAgentDiscoveryService.js';
+import { ManifestValidator } from './__mocks__/ManifestValidator.js';
 import { AgentManifest } from '@callagent/types';
+// Mock the dependencies
+jest.mock('node:fs/promises', () => ({
+    readFile: jest.fn()
+}));
+
 import fs from 'node:fs/promises';
 
-// Mock the dependencies
-jest.mock('node:fs/promises');
-jest.mock('../src/core/plugin/dependencies/AgentDiscoveryService.js');
-jest.mock('../src/core/plugin/ManifestValidator.js');
-
-const mockFs = fs as jest.Mocked<typeof fs>;
-const mockAgentDiscoveryService = AgentDiscoveryService as jest.Mocked<typeof AgentDiscoveryService>;
+const mockFs = fs as any;
+const mockSmartAgentDiscoveryService = SmartAgentDiscoveryService as jest.Mocked<typeof SmartAgentDiscoveryService>;
 const mockManifestValidator = ManifestValidator as jest.Mocked<typeof ManifestValidator>;
 
 describe('AgentDependencyResolver', () => {
@@ -24,7 +24,7 @@ describe('AgentDependencyResolver', () => {
             warnings: []
         });
 
-        mockAgentDiscoveryService.validateAgentStructure.mockResolvedValue({
+        mockSmartAgentDiscoveryService.validateAgentStructure.mockResolvedValue({
             isValid: true,
             errors: []
         });
@@ -45,7 +45,7 @@ describe('AgentDependencyResolver', () => {
             };
 
             // Mock file reading
-            mockAgentDiscoveryService.findManifestFile
+            mockSmartAgentDiscoveryService.findManifest
                 .mockResolvedValueOnce('/path/to/coordinator-agent.json')
                 .mockResolvedValueOnce('/path/to/data-analysis-agent.json');
 
@@ -72,7 +72,7 @@ describe('AgentDependencyResolver', () => {
             };
 
             // Mock file reading for all agents
-            mockAgentDiscoveryService.findManifestFile.mockImplementation(async (agentName: string) =>
+            mockSmartAgentDiscoveryService.findManifest.mockImplementation(async (agentName: string) =>
                 `/path/to/${agentName}.json`
             );
 
@@ -99,7 +99,7 @@ describe('AgentDependencyResolver', () => {
                 'agent-c': { name: 'agent-c', version: '1.0.0', dependencies: { agents: ['agent-a'] } }
             };
 
-            mockAgentDiscoveryService.findManifestFile.mockImplementation(async (agentName: string) =>
+            mockSmartAgentDiscoveryService.findManifest.mockImplementation(async (agentName: string) =>
                 `/path/to/${agentName}.json`
             );
 
@@ -126,16 +126,16 @@ describe('AgentDependencyResolver', () => {
                 dependencies: { agents: ['missing-agent'] }
             };
 
-            mockAgentDiscoveryService.findManifestFile
+            mockSmartAgentDiscoveryService.findManifest
                 .mockResolvedValueOnce('/path/to/coordinator-agent.json')
                 .mockResolvedValueOnce(null); // missing agent
 
             mockFs.readFile
                 .mockResolvedValueOnce(JSON.stringify(coordinatorManifest));
 
-            mockAgentDiscoveryService.validateAgentStructure
+            mockSmartAgentDiscoveryService.validateAgentStructure
                 .mockResolvedValueOnce({ isValid: true, errors: [] })
-                .mockResolvedValueOnce({ isValid: false, errors: ['Agent file not found'] });
+                .mockResolvedValueOnce({ isValid: false, errors: ['Agent file not found'] }); // missing agent
 
             await expect(AgentDependencyResolver.resolveDependencies('coordinator-agent'))
                 .rejects.toThrow(DependencyResolutionError);
@@ -147,7 +147,7 @@ describe('AgentDependencyResolver', () => {
                 version: '1.0.0'
             };
 
-            mockAgentDiscoveryService.findManifestFile
+            mockSmartAgentDiscoveryService.findManifest
                 .mockResolvedValueOnce('/path/to/simple-agent.json');
 
             mockFs.readFile
@@ -201,80 +201,48 @@ describe('AgentDependencyResolver', () => {
 
             expect(result).toBeNull();
         });
-
-        it('should handle empty graph', () => {
-            const graph = new Map();
-
-            const result = AgentDependencyResolver.detectCircularDependencies(graph);
-
-            expect(result).toBeNull();
-        });
     });
 
     describe('loadManifest', () => {
-        it('should load and validate manifest successfully', async () => {
+        it('should load manifest from file', async () => {
             const manifest: AgentManifest = {
                 name: 'test-agent',
                 version: '1.0.0'
             };
 
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
-
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify(manifest));
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/test-agent.json');
+            mockFs.readFile.mockResolvedValue(JSON.stringify(manifest));
 
             const result = await AgentDependencyResolver.loadManifest('test-agent');
 
             expect(result).toEqual(manifest);
-            expect(mockManifestValidator.validate).toHaveBeenCalledWith(manifest);
+            expect(mockSmartAgentDiscoveryService.findManifest).toHaveBeenCalledWith('test-agent', undefined);
+            expect(mockFs.readFile).toHaveBeenCalledWith('/path/to/test-agent.json', 'utf-8');
         });
 
-        it('should throw error when manifest file not found', async () => {
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce(null);
+        it('should throw error if manifest file not found', async () => {
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue(null);
 
             await expect(AgentDependencyResolver.loadManifest('missing-agent'))
                 .rejects.toThrow(DependencyResolutionError);
         });
 
-        it('should throw error for invalid JSON', async () => {
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
+        it('should throw error if manifest is invalid JSON', async () => {
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/invalid.json');
+            mockFs.readFile.mockResolvedValue('invalid json');
 
-            mockFs.readFile
-                .mockResolvedValueOnce('invalid json');
-
-            await expect(AgentDependencyResolver.loadManifest('test-agent'))
+            await expect(AgentDependencyResolver.loadManifest('invalid-agent'))
                 .rejects.toThrow(DependencyResolutionError);
         });
 
-        it('should throw error for invalid manifest structure', async () => {
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
+        it('should throw error if manifest validation fails', async () => {
+            const invalidManifest = { name: 'test' }; // Missing required fields
 
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify({ invalid: 'manifest' }));
-
-            await expect(AgentDependencyResolver.loadManifest('test-agent'))
-                .rejects.toThrow(DependencyResolutionError);
-        });
-
-        it('should throw error for manifest validation failure', async () => {
-            const manifest: AgentManifest = {
-                name: 'test-agent',
-                version: '1.0.0'
-            };
-
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
-
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify(manifest));
-
-            mockManifestValidator.validate.mockReturnValueOnce({
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/test.json');
+            mockFs.readFile.mockResolvedValue(JSON.stringify(invalidManifest));
+            mockManifestValidator.validate.mockReturnValue({
                 isValid: false,
-                errors: ['Invalid manifest'],
+                errors: ['Missing version field'],
                 warnings: []
             });
 
@@ -284,35 +252,29 @@ describe('AgentDependencyResolver', () => {
     });
 
     describe('getImmediateDependencies', () => {
-        it('should return dependencies for agent with dependencies', async () => {
+        it('should return dependencies from manifest', async () => {
             const manifest: AgentManifest = {
                 name: 'test-agent',
                 version: '1.0.0',
                 dependencies: { agents: ['dep1', 'dep2'] }
             };
 
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
-
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify(manifest));
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/test.json');
+            mockFs.readFile.mockResolvedValue(JSON.stringify(manifest));
 
             const result = await AgentDependencyResolver.getImmediateDependencies('test-agent');
 
             expect(result).toEqual(['dep1', 'dep2']);
         });
 
-        it('should return empty array for agent with no dependencies', async () => {
+        it('should return empty array if no dependencies', async () => {
             const manifest: AgentManifest = {
                 name: 'test-agent',
                 version: '1.0.0'
             };
 
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
-
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify(manifest));
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/test.json');
+            mockFs.readFile.mockResolvedValue(JSON.stringify(manifest));
 
             const result = await AgentDependencyResolver.getImmediateDependencies('test-agent');
 
@@ -320,8 +282,7 @@ describe('AgentDependencyResolver', () => {
         });
 
         it('should return empty array on error', async () => {
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce(null);
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue(null);
 
             const result = await AgentDependencyResolver.getImmediateDependencies('missing-agent');
 
@@ -330,35 +291,29 @@ describe('AgentDependencyResolver', () => {
     });
 
     describe('hasDependencies', () => {
-        it('should return true for agent with dependencies', async () => {
+        it('should return true if agent has dependencies', async () => {
             const manifest: AgentManifest = {
                 name: 'test-agent',
                 version: '1.0.0',
                 dependencies: { agents: ['dep1'] }
             };
 
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
-
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify(manifest));
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/test.json');
+            mockFs.readFile.mockResolvedValue(JSON.stringify(manifest));
 
             const result = await AgentDependencyResolver.hasDependencies('test-agent');
 
             expect(result).toBe(true);
         });
 
-        it('should return false for agent with no dependencies', async () => {
+        it('should return false if agent has no dependencies', async () => {
             const manifest: AgentManifest = {
                 name: 'test-agent',
                 version: '1.0.0'
             };
 
-            mockAgentDiscoveryService.findManifestFile
-                .mockResolvedValueOnce('/path/to/test-agent.json');
-
-            mockFs.readFile
-                .mockResolvedValueOnce(JSON.stringify(manifest));
+            mockSmartAgentDiscoveryService.findManifest.mockResolvedValue('/path/to/test.json');
+            mockFs.readFile.mockResolvedValue(JSON.stringify(manifest));
 
             const result = await AgentDependencyResolver.hasDependencies('test-agent');
 

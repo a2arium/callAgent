@@ -1,3 +1,5 @@
+# NOTE: This is a very early work in progress.
+
 # Working in the Monorepo
 
 This project uses a Turborepo-based monorepo structure with Yarn workspaces for modular development. All core packages and example apps live under `packages/` and `apps/` respectively.

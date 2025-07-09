@@ -251,7 +251,22 @@ export function waitForAsync(ms: number = 10): Promise<void> {
  * Clean up test context resources
  */
 export async function cleanupTestContext(context: TaskContext): Promise<void> {
-    if (context.memory?.mlo) {
-        await (context.memory.mlo as any).shutdown?.();
+    // Clear memory adapters first
+    if (context.memory) {
+        // Clear semantic memory (cast to any to access clear method)
+        const semanticMemory = context.memory.semantic as any;
+        if (semanticMemory && typeof semanticMemory.clear === 'function') {
+            await semanticMemory.clear(undefined, context.tenantId);
+        }
+
+        // Clear episodic memory
+        if ((context.memory as any).episodic && typeof (context.memory as any).episodic.clear === 'function') {
+            await (context.memory as any).episodic.clear(context.tenantId);
+        }
+
+        // Clear MLO system
+        if (context.memory?.mlo) {
+            await (context.memory.mlo as any).shutdown?.();
+        }
     }
 } 

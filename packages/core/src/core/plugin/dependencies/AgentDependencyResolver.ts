@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { AgentManifest, isAgentManifest } from '@callagent/types';
 import { ManifestValidator } from '../ManifestValidator.js';
-import { AgentDiscoveryService } from './AgentDiscoveryService.js';
+import { SmartAgentDiscoveryService } from './SmartAgentDiscoveryService.js';
 import { logger } from '@callagent/utils';
 
 const resolverLogger = logger.createLogger({ prefix: 'DependencyResolver' });
@@ -156,9 +156,9 @@ export class AgentDependencyResolver {
 
             // If we have a context path, try to load the agent from the same directory
             if (contextPath) {
-                const agentPath = await AgentDiscoveryService.findAgentFile(agentName, contextPath);
+                const agentPath = await SmartAgentDiscoveryService.findAgent(agentName, contextPath);
                 if (agentPath) {
-                    resolverLogger.debug('Found agent file in same directory, attempting to load', {
+                    resolverLogger.debug('Found agent file via smart discovery, attempting to load', {
                         agentName,
                         agentPath,
                         contextPath
@@ -167,7 +167,7 @@ export class AgentDependencyResolver {
                     // Load the agent to register its inline manifest
                     const loadedAgent = await PluginManager.loadAgent(agentName, contextPath);
                     if (loadedAgent) {
-                        resolverLogger.debug('Successfully loaded agent from same directory', {
+                        resolverLogger.debug('Successfully loaded agent via smart discovery', {
                             agentName,
                             manifestName: loadedAgent.manifest.name
                         });
@@ -177,7 +177,7 @@ export class AgentDependencyResolver {
                         if (!validationResult.isValid) {
                             throw new DependencyResolutionError(
                                 `Inline manifest validation failed for agent '${agentName}': ${validationResult.errors.join(', ')}`,
-                                { agentName, errors: validationResult.errors, source: 'same-directory' }
+                                { agentName, errors: validationResult.errors, source: 'smart-discovery' }
                             );
                         }
 
@@ -186,13 +186,13 @@ export class AgentDependencyResolver {
                 }
             }
 
-            // Fall back to agent.json discovery (only in folders matching agent name)
-            const manifestPath = await AgentDiscoveryService.findManifestFile(agentName, contextPath);
+            // Fall back to agent.json discovery via smart discovery
+            const manifestPath = await SmartAgentDiscoveryService.findManifest(agentName, contextPath);
             if (!manifestPath) {
                 throw new DependencyResolutionError(
                     `Manifest not found for agent '${agentName}'. ` +
-                    `Agent must either be registered with inline manifest or have agent.json in folder named '${agentName}'.`,
-                    { agentName, searchPaths: AgentDiscoveryService.getManifestSearchPaths(), contextPath }
+                    `Agent must either be registered with inline manifest or have agent.json discoverable via smart discovery.`,
+                    { agentName, contextPath }
                 );
             }
 
@@ -300,15 +300,14 @@ export class AgentDependencyResolver {
                 }
 
                 // Validate dependency exists
-                const dependencyStructure = await AgentDiscoveryService.validateAgentStructure(dependency, contextPath);
+                const dependencyStructure = await SmartAgentDiscoveryService.validateAgentStructure(dependency, contextPath);
                 if (!dependencyStructure.isValid) {
                     throw new DependencyResolutionError(
                         `Dependency '${dependency}' not found for agent '${agentName}'`,
                         {
                             agentName,
                             dependency,
-                            errors: dependencyStructure.errors,
-                            searchPaths: AgentDiscoveryService.getAgentSearchPaths()
+                            errors: dependencyStructure.errors
                         }
                     );
                 }

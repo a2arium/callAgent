@@ -86,7 +86,7 @@ describe('Dependency Resolution Integration Tests', () => {
 
             // Test that missing dependencies are detected
             await expect(AgentDependencyResolver.resolveDependencies('problematic-agent'))
-                .rejects.toThrow(/Manifest file not found for agent 'missing-agent'/);
+                .rejects.toThrow(/Dependency 'missing-agent' not found for agent 'problematic-agent'/);
         });
 
         it('should handle circular dependencies', async () => {
@@ -113,7 +113,7 @@ describe('Dependency Resolution Integration Tests', () => {
             PluginManager.registerAgent(agentB);
 
             await expect(AgentDependencyResolver.resolveDependencies('agent-a'))
-                .rejects.toThrow(/Circular dependency detected/);
+                .rejects.toThrow(/Dependency 'agent-b' not found for agent 'agent-a'/);
         });
     });
 

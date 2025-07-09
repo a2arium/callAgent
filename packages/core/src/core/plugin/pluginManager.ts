@@ -1,6 +1,7 @@
 import { globalAgentRegistry } from './AgentRegistry.js';
 import { AgentPlugin } from './types.js';
-import { AgentDependencyResolver, AgentDiscoveryService, DependencyResolutionError } from './dependencies/index.js';
+import { AgentDependencyResolver, DependencyResolutionError } from './dependencies/index.js';
+import { SmartAgentDiscoveryService } from './dependencies/SmartAgentDiscoveryService.js';
 import { logger } from '@callagent/utils';
 
 const pluginLogger = logger.createLogger({ prefix: 'PluginManager' });
@@ -140,14 +141,13 @@ export class PluginManager {
                 }
             }
 
-            // If not a direct path or direct path doesn't exist, use discovery service
+            // If not a direct path or direct path doesn't exist, use smart discovery service
             if (!agentPath) {
-                agentPath = await AgentDiscoveryService.findAgentFile(agentNameOrPath, contextPath);
+                agentPath = await SmartAgentDiscoveryService.findAgent(agentNameOrPath, contextPath);
                 if (!agentPath) {
-                    pluginLogger.warn('Agent file not found', {
+                    pluginLogger.warn('Agent file not found via smart discovery', {
                         agentNameOrPath,
-                        contextPath,
-                        searchPaths: AgentDiscoveryService.getAgentSearchPaths()
+                        contextPath
                     });
                     return null;
                 }
@@ -203,6 +203,13 @@ export class PluginManager {
             }
 
             if (loadedAgent) {
+                // Auto-register the agent in SmartAgentDiscoveryService for faster future lookups
+                SmartAgentDiscoveryService.registerAgent(loadedAgent.manifest.name, {
+                    path: agentPath,
+                    manifest: loadedAgent.manifest,
+                    loadedAt: new Date()
+                });
+
                 pluginLogger.info('Agent loaded successfully', {
                     agentName: loadedAgent.manifest.name,
                     version: loadedAgent.manifest.version,
@@ -269,7 +276,7 @@ export class PluginManager {
      */
     static async listDiscoverableAgents(): Promise<Array<{ name: string; agentPath: string; manifestPath: string | null }>> {
         try {
-            return await AgentDiscoveryService.listAvailableAgents();
+            return await SmartAgentDiscoveryService.listAvailableAgents();
         } catch (error) {
             pluginLogger.error('Failed to list discoverable agents', error);
             return [];
