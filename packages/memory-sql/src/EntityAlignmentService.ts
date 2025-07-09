@@ -45,7 +45,50 @@ export class EntityAlignmentService {
     }
 
     /**
-     * Align a single entity field
+     * Normalize text for better venue name matching
+     */
+    private normalizeVenueText(text: string): string {
+        return text
+            .toLowerCase()
+            .normalize('NFD')  // Decompose accented characters
+            .replace(/[\u0300-\u036f]/g, '')  // Remove diacritics
+            .replace(/['"''""„]/g, '')  // Remove various quote styles
+            .replace(/[^\w\s]/g, ' ')  // Replace punctuation with spaces
+            .replace(/\s+/g, ' ')  // Normalize whitespace
+            .trim();
+    }
+
+    /**
+     * Extract core terms from venue name for better matching
+     */
+    private extractCoreTerms(venueText: string): string[] {
+        const normalized = this.normalizeVenueText(venueText);
+        const words = normalized.split(' ').filter(w => w.length > 0);
+
+        // Remove common prefixes and suffixes
+        const stopWords = ['the', 'a', 'an', 'and', 'or', 'of', 'at', 'in', 'on', 'ktmc', 'center', 'centre'];
+        const coreWords = words.filter(word => !stopWords.includes(word) && word.length > 2);
+
+        return coreWords;
+    }
+
+    /**
+     * Check if two venue names are similar based on core terms
+     */
+    private areVenueNamesSimilar(name1: string, name2: string): boolean {
+        const core1 = this.extractCoreTerms(name1);
+        const core2 = this.extractCoreTerms(name2);
+
+        // Check for significant overlap in core terms
+        const overlap = core1.filter(term => core2.includes(term));
+        const minLength = Math.min(core1.length, core2.length);
+
+        // Consider similar if >50% of terms overlap
+        return overlap.length > 0 && overlap.length >= minLength * 0.5;
+    }
+
+    /**
+     * Enhanced entity alignment with multiple strategies
      */
     private async alignSingleEntity(
         memoryKey: string,
@@ -56,7 +99,53 @@ export class EntityAlignmentService {
     ): Promise<EntityAlignment | null> {
         alignmentLogger.debug(`Aligning entity: "${field.value}" (type: ${field.entityType}, threshold: ${threshold})`);
 
-        // Generate embedding for the field value
+        // Strategy 1: Exact match (case-insensitive, normalized)
+        const exactMatch = await this.findExactMatch(field.value, field.entityType, tenantId);
+        if (exactMatch) {
+            alignmentLogger.debug(`Exact match found: "${field.value}" → "${exactMatch.canonicalName}"`);
+            await this.addAliasToEntity(exactMatch.entityId, field.value, tenantId);
+            await this.storeAlignment(memoryKey, field.fieldName, exactMatch.entityId, field.value, 'high', tenantId);
+            return {
+                entityId: exactMatch.entityId,
+                canonicalName: exactMatch.canonicalName,
+                originalValue: field.value,
+                confidence: 'high',
+                alignedAt: new Date()
+            };
+        }
+
+        // Strategy 2: Alias match
+        const aliasMatch = await this.findAliasMatch(field.value, field.entityType, tenantId);
+        if (aliasMatch) {
+            alignmentLogger.debug(`Alias match found: "${field.value}" → "${aliasMatch.canonicalName}"`);
+            await this.storeAlignment(memoryKey, field.fieldName, aliasMatch.entityId, field.value, 'high', tenantId);
+            return {
+                entityId: aliasMatch.entityId,
+                canonicalName: aliasMatch.canonicalName,
+                originalValue: field.value,
+                confidence: 'high',
+                alignedAt: new Date()
+            };
+        }
+
+        // Strategy 3: Venue name similarity (for location types)
+        if (field.entityType === 'location') {
+            const venueMatch = await this.findVenueNameMatch(field.value, tenantId);
+            if (venueMatch) {
+                alignmentLogger.debug(`Venue name match found: "${field.value}" → "${venueMatch.canonicalName}"`);
+                await this.addAliasToEntity(venueMatch.entityId, field.value, tenantId);
+                await this.storeAlignment(memoryKey, field.fieldName, venueMatch.entityId, field.value, 'medium', tenantId);
+                return {
+                    entityId: venueMatch.entityId,
+                    canonicalName: venueMatch.canonicalName,
+                    originalValue: field.value,
+                    confidence: 'medium',
+                    alignedAt: new Date()
+                };
+            }
+        }
+
+        // Strategy 4: Embedding similarity (fallback)
         let embedding: number[];
         try {
             embedding = await this.embedFunction(field.value);
@@ -65,7 +154,6 @@ export class EntityAlignmentService {
             return null;
         }
 
-        // Search for similar entities
         const matches = await this.findSimilarEntities(
             field.entityType,
             embedding,
@@ -84,7 +172,7 @@ export class EntityAlignmentService {
             canonicalName = bestMatch.canonicalName;
             confidence = bestMatch.confidence;
 
-            alignmentLogger.debug(`Aligned "${field.value}" → "${canonicalName}" (similarity: ${bestMatch.similarity.toFixed(3)})`);
+            alignmentLogger.debug(`Embedding match found: "${field.value}" → "${canonicalName}" (similarity: ${bestMatch.similarity.toFixed(3)})`);
 
             // Update entity with new alias if not already present
             await this.addAliasToEntity(entityId, field.value, tenantId);
@@ -102,7 +190,7 @@ export class EntityAlignmentService {
             confidence = 'high';
         } else {
             alignmentLogger.debug(`No match found for "${field.value}" and auto-create disabled`);
-            return null; // No match and auto-create disabled
+            return null;
         }
 
         // Store alignment record
@@ -122,6 +210,92 @@ export class EntityAlignmentService {
             confidence,
             alignedAt: new Date()
         };
+    }
+
+    /**
+     * Find exact match using normalized text
+     */
+    private async findExactMatch(
+        value: string,
+        entityType: string,
+        tenantId: string
+    ): Promise<{ entityId: string; canonicalName: string } | null> {
+        const normalized = this.normalizeVenueText(value);
+
+        const results = await this.prisma.entityStore.findMany({
+            where: {
+                entityType,
+                tenantId,
+                OR: [
+                    { canonicalName: { equals: value, mode: 'insensitive' } },
+                    // Also check if normalized version matches
+                ]
+            },
+            select: { id: true, canonicalName: true }
+        });
+
+        if (results.length > 0) {
+            return { entityId: results[0].id, canonicalName: results[0].canonicalName };
+        }
+
+        // Check normalized matches
+        const allEntities = await this.prisma.entityStore.findMany({
+            where: { entityType, tenantId },
+            select: { id: true, canonicalName: true }
+        });
+
+        for (const entity of allEntities) {
+            if (this.normalizeVenueText(entity.canonicalName) === normalized) {
+                return { entityId: entity.id, canonicalName: entity.canonicalName };
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Find alias match
+     */
+    private async findAliasMatch(
+        value: string,
+        entityType: string,
+        tenantId: string
+    ): Promise<{ entityId: string; canonicalName: string } | null> {
+        const results = await this.prisma.$queryRaw<Array<{ id: string; canonical_name: string }>>`
+            SELECT id, canonical_name
+            FROM entity_store
+            WHERE entity_type = ${entityType} 
+            AND tenant_id = ${tenantId}
+            AND ${value} = ANY(aliases)
+            LIMIT 1
+        `;
+
+        if (results.length > 0) {
+            return { entityId: results[0].id, canonicalName: results[0].canonical_name };
+        }
+
+        return null;
+    }
+
+    /**
+     * Find venue name match using core term similarity
+     */
+    private async findVenueNameMatch(
+        value: string,
+        tenantId: string
+    ): Promise<{ entityId: string; canonicalName: string } | null> {
+        const allVenues = await this.prisma.entityStore.findMany({
+            where: { entityType: 'location', tenantId },
+            select: { id: true, canonicalName: true }
+        });
+
+        for (const venue of allVenues) {
+            if (this.areVenueNamesSimilar(value, venue.canonicalName)) {
+                return { entityId: venue.id, canonicalName: venue.canonicalName };
+            }
+        }
+
+        return null;
     }
 
     private async findSimilarEntities(

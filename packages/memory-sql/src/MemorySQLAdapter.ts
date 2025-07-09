@@ -400,7 +400,8 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 ...input,
                 limit: options?.limit ?? input.limit,
                 orderBy: options?.orderBy ?? input.orderBy,
-                backend: options?.backend ?? input.backend
+                backend: options?.backend ?? input.backend,
+                tenantId: (options as any)?.tenantId ?? (input as any)?.tenantId
             };
             return await this.queryByObject<T>(mergedQuery);
         }
@@ -763,47 +764,112 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         const matchedKeys = new Set<string>();
 
         if (operator === 'ENTITY_FUZZY') {
-            // Use embedding similarity to find similar entities
-            if (!this.embedFunction) {
-                throw new MemoryError('Embedding function not available for fuzzy entity search', {
-                    code: 'EMBEDDING_UNAVAILABLE'
-                });
-            }
+            // Multi-strategy fuzzy search for better venue name matching
 
-            // Generate embedding for search value
-            const searchEmbedding = await this.embedFunction(searchValue);
-
-            // Find similar entities across all types (we don't know the type from the filter)
-            const similarEntities = await this.prisma.$queryRaw<Array<{
-                id: string;
-                canonical_name: string;
-                entity_type: string;
-                similarity: number;
-            }>>`
-                SELECT 
-                    id,
-                    canonical_name,
-                    entity_type,
-                    1 - (embedding <=> ${searchEmbedding}::vector) as similarity
-                FROM entity_store 
-                WHERE tenant_id = ${tenantId}
-                ORDER BY embedding <=> ${searchEmbedding}::vector
-                LIMIT 20
+            // Strategy 1: Exact match (case-insensitive)
+            const exactEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
+                SELECT id
+                FROM entity_store
+                WHERE LOWER(canonical_name) = LOWER(${searchValue}) AND tenant_id = ${tenantId}
             `;
 
-            // Filter by similarity threshold (use default 0.6 or could be configurable)
-            const threshold = 0.6;
-            const matchingEntities = similarEntities.filter(e => e.similarity > threshold);
-
-            // Find memory records aligned to these entities
-            for (const entity of matchingEntities) {
+            for (const entity of exactEntities) {
                 const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
                     SELECT DISTINCT memory_key
                     FROM entity_alignment
                     WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                 `;
-
                 alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+            }
+
+            // Strategy 2: Alias match
+            const aliasEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
+                SELECT id
+                FROM entity_store
+                WHERE ${searchValue} = ANY(aliases) AND tenant_id = ${tenantId}
+            `;
+
+            for (const entity of aliasEntities) {
+                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT memory_key
+                    FROM entity_alignment
+                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                `;
+                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+            }
+
+            // Strategy 3: Text similarity (normalized comparison)
+            const normalizedSearch = this.normalizeForSearch(searchValue);
+            const allEntities = await this.prisma.entityStore.findMany({
+                where: { tenantId },
+                select: { id: true, canonicalName: true, aliases: true }
+            });
+
+            for (const entity of allEntities) {
+                const normalizedCanonical = this.normalizeForSearch(entity.canonicalName);
+
+                // Check if normalized search matches canonical name or aliases
+                if (this.areTextsSimilar(normalizedSearch, normalizedCanonical)) {
+                    const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                    `;
+                    alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                }
+
+                // Check aliases
+                for (const alias of entity.aliases) {
+                    const normalizedAlias = this.normalizeForSearch(alias);
+                    if (this.areTextsSimilar(normalizedSearch, normalizedAlias)) {
+                        const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                            SELECT DISTINCT memory_key
+                            FROM entity_alignment
+                            WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                        `;
+                        alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                        break; // Avoid duplicates
+                    }
+                }
+            }
+
+            // Strategy 4: Embedding similarity (fallback for cases not covered by text similarity)
+            if (this.embedFunction && matchedKeys.size === 0) {
+                try {
+                    const searchEmbedding = await this.embedFunction(searchValue);
+
+                    const similarEntities = await this.prisma.$queryRaw<Array<{
+                        id: string;
+                        canonical_name: string;
+                        entity_type: string;
+                        similarity: number;
+                    }>>`
+                        SELECT 
+                            id,
+                            canonical_name,
+                            entity_type,
+                            1 - (embedding <=> ${searchEmbedding}::vector) as similarity
+                        FROM entity_store 
+                        WHERE tenant_id = ${tenantId}
+                        ORDER BY embedding <=> ${searchEmbedding}::vector
+                        LIMIT 20
+                    `;
+
+                    // Use a lower threshold for embedding similarity as a fallback
+                    const threshold = 0.4;
+                    const matchingEntities = similarEntities.filter(e => e.similarity > threshold);
+
+                    for (const entity of matchingEntities) {
+                        const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                            SELECT DISTINCT memory_key
+                            FROM entity_alignment
+                            WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                        `;
+                        alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                    }
+                } catch (error) {
+                    console.warn('Embedding similarity search failed:', error);
+                }
             }
 
         } else if (operator === 'ENTITY_EXACT') {
@@ -846,6 +912,79 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         }
 
         return matchedKeys;
+    }
+
+    /**
+     * Normalize text for better search matching
+     */
+    private normalizeForSearch(text: string): string {
+        return text
+            .toLowerCase()
+            .normalize('NFD')  // Decompose accented characters
+            .replace(/[\u0300-\u036f]/g, '')  // Remove diacritics
+            .replace(/['"''""„]/g, '')  // Remove various quote styles
+            .replace(/[^\w\s]/g, ' ')  // Replace punctuation with spaces
+            .replace(/\s+/g, ' ')  // Normalize whitespace
+            .trim();
+    }
+
+    /**
+     * Check if two normalized texts are similar using multiple strategies
+     */
+    private areTextsSimilar(normalized1: string, normalized2: string): boolean {
+        // Strategy 1: Exact match after normalization
+        if (normalized1 === normalized2) {
+            return true;
+        }
+
+        // Strategy 2: Whole phrase containment (for prefix/suffix cases)
+        // Only apply if both are multi-word OR both are single-word
+        const words1 = normalized1.split(' ').filter(w => w.length > 0);
+        const words2 = normalized2.split(' ').filter(w => w.length > 0);
+
+        const isSingleWord1 = words1.length === 1;
+        const isSingleWord2 = words2.length === 1;
+
+        // Allow containment only if both are single words, or both are multi-word
+        if ((isSingleWord1 && isSingleWord2) || (!isSingleWord1 && !isSingleWord2)) {
+            if (normalized1.includes(normalized2) || normalized2.includes(normalized1)) {
+                return true;
+            }
+        }
+
+        // Strategy 3: Core words overlap (for venue names) - but be more conservative
+        const longWords1 = words1.filter(w => w.length > 2);
+        const longWords2 = words2.filter(w => w.length > 2);
+
+        // Remove common stop words
+        const stopWords = ['the', 'a', 'an', 'and', 'or', 'of', 'at', 'in', 'on', 'ktmc', 'center', 'centre'];
+        const coreWords1 = longWords1.filter(word => !stopWords.includes(word));
+        const coreWords2 = longWords2.filter(word => !stopWords.includes(word));
+
+        // Only apply word overlap logic if both have multiple core words
+        // This prevents single words from matching multi-word entities
+        if (coreWords1.length > 1 && coreWords2.length > 1) {
+            // For multi-word comparisons, use flexible word matching (handles possessives, plurals)
+            const overlap = coreWords1.filter(word1 =>
+                coreWords2.some(word2 =>
+                    word1 === word2 || word1.includes(word2) || word2.includes(word1)
+                )
+            );
+            const minLength = Math.min(coreWords1.length, coreWords2.length);
+
+            // Consider similar if >50% of core words overlap
+            return overlap.length > 0 && overlap.length >= minLength * 0.5;
+        }
+
+        // Strategy 4: Single word containment (for possessive/plural forms)
+        // This was already handled in Strategy 2, but keeping for clarity
+        if (coreWords1.length === 1 && coreWords2.length === 1) {
+            const word1 = coreWords1[0];
+            const word2 = coreWords2[0];
+            return word1.includes(word2) || word2.includes(word1);
+        }
+
+        return false;
     }
 
     /**
