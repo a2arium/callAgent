@@ -612,6 +612,174 @@ if (event.speaker._wasAligned) {
 }
 ```
 
+### Natural Array Support
+
+The entity alignment system now supports **natural array traversal**, allowing you to access fields within arrays using intuitive dot notation without requiring explicit array indexing.
+
+#### Overview
+
+
+You can now use natural, intuitive syntax:
+```typescript
+// ✅ Now: Natural array traversal
+entities: {
+  "titleAndDescription.title": "event",        // Automatically searches array elements
+  "eventOccurences.date": "date",              // Finds first matching element
+  "venue.name": "location"                     // Still works for nested objects
+}
+```
+
+#### Real-World Example
+
+```typescript
+// Store complex event data with nested arrays
+await ctx.memory.semantic.set('conference-2024', {
+  titleAndDescription: [
+    { title: "AI Summit 2024", description: "Annual AI conference", language: "en" }
+  ],
+  venue: {
+    name: "Convention Center",
+    address: "123 Tech Street"
+  },
+  eventOccurences: [
+    { date: "2024-01-15", time: "19:00", isSoldOut: false },
+    { date: "2024-01-16", time: "20:00", isSoldOut: true }
+  ],
+  speakers: [
+    { name: "Dr. Alice Johnson", affiliation: "MIT" },
+    { name: "Prof. Bob Wilson", affiliation: "Stanford" }
+  ]
+}, {
+  tags: ['conference', 'ai'],
+  entities: {
+    // ✅ Natural array syntax - automatically finds within arrays
+    "titleAndDescription.title": "event:0.8",       // Finds "AI Summit 2024"
+    "eventOccurences.date": "date",                  // Finds "2024-01-15" (first occurrence)
+    "speakers.name": "person:0.75",                  // Finds "Dr. Alice Johnson" (first speaker)
+    "speakers.affiliation": "organization:0.8",     // Finds "MIT" (first speaker's affiliation)
+    
+    // ✅ Still works for nested objects
+    "venue.name": "location:0.65"                   // Finds "Convention Center"
+  }
+});
+```
+
+#### Array Traversal Behavior
+
+| Syntax | Behavior | Example Result |
+|--------|----------|----------------|
+| `titleAndDescription.title` | Searches array elements for `.title` | Returns first string match found |
+| `speakers.name` | Searches array elements for `.name` | Returns first speaker's name |
+| `eventOccurences.date` | Searches array elements for `.date` | Returns first event date |
+| `venue.name` | Standard object navigation | Returns venue name (unchanged) |
+
+#### Advanced Array Scenarios
+
+##### Multiple Nested Arrays
+```typescript
+// Handle deeply nested arrays naturally
+const conferenceData = {
+  sessions: [
+    {
+      title: "Session 1",
+      presenters: [
+        { name: "Speaker A", company: "Corp X" },
+        { name: "Speaker B", company: "Corp Y" }
+      ]
+    },
+    {
+      title: "Session 2", 
+      presenters: [
+        { name: "Speaker C", company: "Corp Z" }
+      ]
+    }
+  ]
+};
+
+await ctx.memory.semantic.set('multi-session-event', conferenceData, {
+  entities: {
+    "sessions.title": "topic",                    // Finds "Session 1" (first session)
+    "sessions.presenters.name": "person",         // Finds "Speaker A" (first presenter of first session)
+    "sessions.presenters.company": "organization" // Finds "Corp X" (first presenter's company)
+  }
+});
+```
+
+##### Mixed Objects and Arrays
+```typescript
+// Handle combination of objects and arrays
+const mixedData = {
+  event: {
+    details: {
+      speakers: [{ name: "John Doe" }],      // Array within nested objects
+      venue: { name: "Main Hall" }          // Standard nested object
+    }
+  }
+};
+
+await ctx.memory.semantic.set('mixed-structure', mixedData, {
+  entities: {
+    "event.details.speakers.name": "person",    // object.object.array.field
+    "event.details.venue.name": "location"      // object.object.object.field
+  }
+});
+```
+
+#### How It Works
+
+1. **Object Navigation**: Standard dot notation works as before (`venue.name`)
+2. **Array Detection**: When an array is encountered, the system searches within each element
+3. **Field Matching**: Returns the first element that contains the requested field
+4. **String Priority**: For entity alignment, only string values are considered
+5. **Recursive Search**: Supports arbitrary nesting depth
+
+#### Filter Queries with Arrays
+
+Natural array support also works with filter queries:
+
+```typescript
+// Search using natural array syntax
+const results = await ctx.memory.semantic.getMany({
+  filters: [
+    'titleAndDescription.title contains "AI"',    // Searches within array elements
+    'speakers.name ~ "John"',                     // Entity-aware search within arrays
+    'eventOccurences.date >= "2024-01-01"'       // Date filtering within arrays
+  ]
+});
+```
+
+#### Migration from Explicit Indexing
+
+If you have existing code using explicit array indexing, it will continue to work, but you can now simplify it:
+
+```typescript
+// ✅ Before (still works)
+entities: {
+  "titleAndDescription[0].title": "event"
+}
+
+// ✅ After (recommended)
+entities: {
+  "titleAndDescription.title": "event"        // Simpler and more maintainable
+}
+```
+
+#### Edge Cases and Behavior
+
+- **Empty Arrays**: Return `undefined` (no error thrown)
+- **Mixed Types**: Searches only object elements, ignores primitives
+- **Multiple Matches**: Always returns the **first** matching element
+- **Non-String Fields**: For entity alignment, only string values are processed
+- **Deep Nesting**: Supports unlimited nesting depth (`a.b.c.d.e...`)
+
+#### Best Practices
+
+1. **Prefer Natural Syntax**: Use `titleAndDescription.title` over `titleAndDescription[0].title`
+2. **Consistent Data Structure**: Ensure array elements have consistent schema
+3. **First Element Strategy**: Design your data so the most important element is first
+4. **Fallback Handling**: Handle cases where arrays might be empty
+5. **Entity Type Consistency**: Use consistent entity types across similar data structures
+
 ### Advanced Entity Alignment
 
 #### Custom Similarity Thresholds
@@ -1093,6 +1261,455 @@ const memory = await ctx.memory.semantic.get('meeting:123');
 console.log('Aligned entities:', memory._alignments); // If available
 ```
 
+## Cross-Referencing Through Shared Entities
+
+One of the most powerful features of the entity alignment system is its ability to create automatic relationships between different memory keys through shared entities. This enables sophisticated cross-referencing, relationship discovery, and recommendation systems without manual relationship management.
+
+### How Cross-Referencing Works
+
+When you store memories with entity alignment, the system creates an implicit **knowledge graph** where:
+
+1. **Memory keys** become nodes in the graph
+2. **Shared entities** create edges between nodes
+3. **Entity similarity** enables fuzzy relationship discovery
+4. **Query operations** can traverse these relationships
+
+This means that storing `meeting:001` with speaker "Dr. Jane Smith" and `project:ai-research` with lead "Jane Smith" automatically creates a discoverable relationship between the meeting and the project through the shared person entity.
+
+### Setting Up Related Memories
+
+First, let's store related memories that share entities:
+
+```typescript
+// Store related memories that will be automatically cross-referenced
+async function setupRelatedMemories(ctx) {
+  // Meeting 1 - Dr. Jane Smith at Main Auditorium
+  await ctx.memory.semantic.set('meeting:2024-001', {
+    title: 'AI Research Review',
+    date: '2024-03-15',
+    speaker: 'Dr. Jane Smith',        // Entity: person
+    venue: 'Main Auditorium',        // Entity: location
+    attendees: 45,
+    topics: ['machine learning', 'neural networks']
+  }, {
+    tags: ['meeting', 'research'],
+    entities: {
+      speaker: 'person',
+      venue: 'location'
+    }
+  });
+
+  // Workshop - Same speaker, different venue
+  await ctx.memory.semantic.set('workshop:2024-003', {
+    title: 'Deep Learning Workshop',
+    date: '2024-03-20',
+    speaker: 'Jane Smith',           // Same entity (will align to Dr. Jane Smith)
+    venue: 'Conference Room A',      // Different location entity
+    attendees: 12,
+    format: 'hands-on'
+  }, {
+    tags: ['workshop', 'training'],
+    entities: {
+      speaker: 'person',
+      venue: 'location'
+    }
+  });
+
+  // Lecture - Same venue, different speaker
+  await ctx.memory.semantic.set('lecture:2024-007', {
+    title: 'Ethics in AI',
+    date: '2024-03-22',
+    speaker: 'Prof. Robert Chen',    // Different person entity
+    venue: 'Main Hall',              // Similar to Main Auditorium (might align)
+    attendees: 200,
+    department: 'Philosophy'
+  }, {
+    tags: ['lecture', 'ethics'],
+    entities: {
+      speaker: 'person',
+      venue: 'location'
+    }
+  });
+
+  // Project record - mentions same speaker
+  await ctx.memory.semantic.set('project:ai-ethics-2024', {
+    title: 'AI Ethics Research Project',
+    lead: 'Dr. Jane Smith',          // Same person entity
+    collaborators: ['Prof. Robert Chen', 'Dr. Sarah Wilson'],
+    status: 'active',
+    budget: 250000
+  }, {
+    tags: ['project', 'research'],
+    entities: {
+      lead: 'person',
+      collaborators: 'person'  // Arrays get processed individually
+    }
+  });
+}
+```
+
+### Discovering Cross-References
+
+Once memories with shared entities are stored, you can discover relationships in multiple ways:
+
+#### 1. Find All Activities by a Specific Person
+
+```typescript
+// Find everything related to Jane Smith (matches name variations)
+const janeActivities = await ctx.memory.semantic.getMany({
+  filters: ['speaker ~ "Jane Smith" OR lead ~ "Jane Smith" OR collaborators ~ "Jane Smith"']
+});
+
+console.log('Jane Smith activities:', janeActivities.map(r => ({
+  key: r.key,
+  title: r.value.title,
+  role: r.value.speaker ? 'speaker' : r.value.lead ? 'lead' : 'collaborator'
+})));
+
+// Output:
+// [
+//   { key: 'meeting:2024-001', title: 'AI Research Review', role: 'speaker' },
+//   { key: 'workshop:2024-003', title: 'Deep Learning Workshop', role: 'speaker' },
+//   { key: 'project:ai-ethics-2024', title: 'AI Ethics Research Project', role: 'lead' }
+// ]
+```
+
+#### 2. Find All Events at Similar Venues
+
+```typescript
+// Find all events at venues similar to "Main Auditorium"
+const mainVenueEvents = await ctx.memory.semantic.getMany({
+  filters: ['venue ~ "Main Auditorium"']
+});
+
+console.log('Main venue events:', mainVenueEvents.map(r => ({
+  key: r.key,
+  title: r.value.title,
+  venue: r.value.venue,
+  speaker: r.value.speaker
+})));
+
+// Might include both "Main Auditorium" and "Main Hall" if they're similar enough
+```
+
+#### 3. Find Collaborations Between People
+
+```typescript
+// Find all activities involving both Jane Smith and Robert Chen
+const collaborations = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "Jane Smith" OR lead ~ "Jane Smith" OR collaborators ~ "Jane Smith"',
+    'speaker ~ "Robert Chen" OR lead ~ "Robert Chen" OR collaborators ~ "Robert Chen"'
+  ]
+});
+
+console.log('Jane-Robert collaborations:', collaborations.map(r => r.value.title));
+// Output: ['AI Ethics Research Project']
+```
+
+### Building a Relationship Discovery System
+
+Here's a comprehensive function that discovers all related memories for any entity:
+
+```typescript
+async function findRelatedMemories(entityName: string, entityType: string = 'person') {
+  // Step 1: Find all memories directly involving this entity
+  const directMemories = await ctx.memory.semantic.getMany({
+    filters: [`speaker ~ "${entityName}" OR lead ~ "${entityName}" OR collaborators ~ "${entityName}" OR venue ~ "${entityName}"`]
+  });
+
+  // Step 2: Extract other entities from those memories
+  const relatedEntities = new Set<string>();
+  const entityFrequency = new Map<string, number>();
+  
+  for (const memory of directMemories) {
+    const value = memory.value;
+    
+    // Collect other people mentioned
+    if (value.speaker && !value.speaker.toLowerCase().includes(entityName.toLowerCase())) {
+      relatedEntities.add(value.speaker);
+      entityFrequency.set(value.speaker, (entityFrequency.get(value.speaker) || 0) + 1);
+    }
+    
+    if (value.lead && !value.lead.toLowerCase().includes(entityName.toLowerCase())) {
+      relatedEntities.add(value.lead);
+      entityFrequency.set(value.lead, (entityFrequency.get(value.lead) || 0) + 1);
+    }
+    
+    if (value.collaborators) {
+      for (const collab of value.collaborators) {
+        if (!collab.toLowerCase().includes(entityName.toLowerCase())) {
+          relatedEntities.add(collab);
+          entityFrequency.set(collab, (entityFrequency.get(collab) || 0) + 1);
+        }
+      }
+    }
+    
+    // Collect venues
+    if (value.venue) {
+      relatedEntities.add(value.venue);
+      entityFrequency.set(value.venue, (entityFrequency.get(value.venue) || 0) + 1);
+    }
+  }
+
+  // Step 3: Find memories involving those related entities
+  const indirectMemories = new Map<string, any[]>();
+  
+  for (const entity of relatedEntities) {
+    const entityMemories = await ctx.memory.semantic.getMany({
+      filters: [`speaker ~ "${entity}" OR venue ~ "${entity}" OR lead ~ "${entity}" OR collaborators ~ "${entity}"`]
+    });
+    
+    // Filter out memories we already found
+    const newMemories = entityMemories.filter(m => 
+      !directMemories.some(dm => dm.key === m.key)
+    );
+    
+    if (newMemories.length > 0) {
+      indirectMemories.set(entity, newMemories);
+    }
+  }
+
+  // Step 4: Build relationship strength scores
+  const relationshipStrength = Array.from(entityFrequency.entries())
+    .map(([entity, frequency]) => ({
+      entity,
+      frequency,
+      indirectConnections: indirectMemories.get(entity)?.length || 0,
+      strength: frequency + (indirectMemories.get(entity)?.length || 0) * 0.5
+    }))
+    .sort((a, b) => b.strength - a.strength);
+
+  return {
+    query: entityName,
+    directMemories,
+    relatedEntities: Array.from(relatedEntities),
+    indirectMemories: Object.fromEntries(indirectMemories),
+    relationshipStrength
+  };
+}
+
+// Usage
+const janeNetwork = await findRelatedMemories('Jane Smith', 'person');
+console.log('Jane Smith network:', {
+  directConnections: janeNetwork.directMemories.length,
+  relatedPeople: janeNetwork.relationshipStrength.filter(r => 
+    janeNetwork.directMemories.some(m => 
+      m.value.speaker === r.entity || m.value.lead === r.entity
+    )
+  ),
+  strongestRelationships: janeNetwork.relationshipStrength.slice(0, 3)
+});
+```
+
+### Building a Recommendation System
+
+Use cross-referencing to build intelligent recommendations:
+
+```typescript
+async function findRecommendations(memoryKey: string) {
+  // Get the source memory
+  const sourceMemory = await ctx.memory.semantic.get(memoryKey);
+  if (!sourceMemory) return [];
+
+  const recommendations = [];
+
+  // Find memories with same speaker
+  if (sourceMemory.speaker) {
+    const sameSpeaker = await ctx.memory.semantic.getMany({
+      filters: [`speaker ~ "${sourceMemory.speaker}"`]
+    });
+    
+    recommendations.push({
+      type: 'same_speaker',
+      reason: `Other activities by ${sourceMemory.speaker}`,
+      score: 0.9,
+      memories: sameSpeaker.filter(m => m.key !== memoryKey).slice(0, 3)
+    });
+  }
+
+  // Find memories at same venue
+  if (sourceMemory.venue) {
+    const sameVenue = await ctx.memory.semantic.getMany({
+      filters: [`venue ~ "${sourceMemory.venue}"`]
+    });
+    
+    recommendations.push({
+      type: 'same_venue',
+      reason: `Other events at ${sourceMemory.venue}`,
+      score: 0.7,
+      memories: sameVenue.filter(m => m.key !== memoryKey).slice(0, 3)
+    });
+  }
+
+  // Find memories with similar topics/tags
+  if (sourceMemory.topics) {
+    for (const topic of sourceMemory.topics) {
+      const topicMemories = await ctx.memory.semantic.getMany({
+        filters: [`topics contains "${topic}"`]
+      });
+      
+      recommendations.push({
+        type: 'similar_topic',
+        reason: `Related to ${topic}`,
+        score: 0.6,
+        memories: topicMemories.filter(m => m.key !== memoryKey).slice(0, 2)
+      });
+    }
+  }
+
+  // Find collaborator networks
+  if (sourceMemory.collaborators) {
+    for (const collaborator of sourceMemory.collaborators) {
+      const collabMemories = await ctx.memory.semantic.getMany({
+        filters: [`speaker ~ "${collaborator}" OR lead ~ "${collaborator}"`]
+      });
+      
+      recommendations.push({
+        type: 'collaborator_network',
+        reason: `Other work by ${collaborator}`,
+        score: 0.8,
+        memories: collabMemories.filter(m => m.key !== memoryKey).slice(0, 2)
+      });
+    }
+  }
+
+  // Sort by score and remove duplicates
+  return recommendations
+    .sort((a, b) => b.score - a.score)
+    .reduce((unique, current) => {
+      const existingKeys = new Set(unique.flatMap(r => r.memories.map(m => m.key)));
+      current.memories = current.memories.filter(m => !existingKeys.has(m.key));
+      
+      if (current.memories.length > 0) {
+        unique.push(current);
+      }
+      
+      return unique;
+    }, []);
+}
+
+// Usage
+const recs = await findRecommendations('meeting:2024-001');
+console.log('Recommendations for AI Research Review:');
+recs.forEach(r => {
+  console.log(`${r.reason} (${r.memories.length} items, score: ${r.score})`);
+  r.memories.forEach(m => console.log(`  - ${m.value.title}`));
+});
+```
+
+### Cross-Reference Use Cases
+
+#### 1. Academic Conference System
+
+```typescript
+// Find all papers by an author
+const authorPapers = await ctx.memory.semantic.getMany({
+  filters: ['author ~ "Dr. Smith" OR presenter ~ "Dr. Smith"']
+});
+
+// Find papers from same institution
+const institutionPapers = await ctx.memory.semantic.getMany({
+  filters: ['affiliation ~ "MIT"']
+});
+
+// Find papers in same session/track
+const sessionPapers = await ctx.memory.semantic.getMany({
+  filters: ['session ~ "Machine Learning Track"']
+});
+```
+
+#### 2. Customer Support System
+
+```typescript
+// Find all issues reported by a customer
+const customerIssues = await ctx.memory.semantic.getMany({
+  filters: ['reporter ~ "John Doe" OR customer ~ "John Doe"']
+});
+
+// Find similar issues by product
+const productIssues = await ctx.memory.semantic.getMany({
+  filters: ['product ~ "iPhone 15"']
+});
+
+// Find issues handled by same support agent
+const agentIssues = await ctx.memory.semantic.getMany({
+  filters: ['assignee ~ "Sarah Wilson"']
+});
+```
+
+#### 3. Project Management System
+
+```typescript
+// Find all projects involving a team member
+const memberProjects = await ctx.memory.semantic.getMany({
+  filters: ['lead ~ "Alice Johnson" OR members ~ "Alice Johnson"']
+});
+
+// Find projects using same technology
+const techProjects = await ctx.memory.semantic.getMany({
+  filters: ['technologies ~ "React"']
+});
+
+// Find projects for same client
+const clientProjects = await ctx.memory.semantic.getMany({
+  filters: ['client ~ "ACME Corp"']
+});
+```
+
+### Performance Considerations
+
+#### Entity Index Optimization
+
+The cross-referencing system relies on efficient entity lookups. Ensure your database has proper indexes:
+
+```sql
+-- Key indexes for entity alignment queries
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_alignment_entity_field 
+  ON entity_alignment(tenant_id, entity_id, field_path);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_alignment_memory 
+  ON entity_alignment(tenant_id, memory_key);
+
+-- Vector similarity index for embedding searches
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_store_embedding 
+  ON entity_store USING ivfflat (embedding vector_cosine_ops) 
+  WITH (lists = 100);
+```
+
+#### Query Optimization Strategies
+
+```typescript
+// ✅ Efficient: Use specific entity types when possible
+const speakers = await ctx.memory.semantic.getMany({
+  filters: ['speaker ~ "John"']  // Scoped to speaker field
+});
+
+// ⚠️ Less efficient: Broad searches across all fields
+const everything = await ctx.memory.semantic.getMany({
+  filters: ['speaker ~ "John" OR lead ~ "John" OR collaborators ~ "John" OR venue ~ "John"']
+});
+
+// ✅ Efficient: Combine entity filters with regular filters
+const recentSpeakers = await ctx.memory.semantic.getMany({
+  filters: [
+    'speaker ~ "John"',           // Entity filter (uses indexes)
+    'date >= "2024-01-01"'        // Regular filter (applied to subset)
+  ]
+});
+```
+
+### Benefits of Cross-Referencing
+
+1. **Automatic Relationship Discovery** - No manual relationship management required
+2. **Fuzzy Matching** - Handles variations in entity names and typos
+3. **Bidirectional Relationships** - Finding Jane's activities also discovers related venues, people, projects
+4. **Query Flexibility** - Search by any entity field, not just predefined relationships
+5. **Entity Consolidation** - Similar entities get merged over time, improving relationship quality
+6. **Scalable Architecture** - Supports millions of entities and relationships efficiently
+
+This cross-referencing system transforms your memory storage from isolated data silos into an interconnected knowledge graph, enabling powerful relationship discovery and recommendation capabilities without complex graph database management.
+
 ## Best Practices
 
 ### Key Naming Strategies
@@ -1258,6 +1875,9 @@ await ctx.memory.semantic.queryByKeyPattern('user:*');
 
 **Q: Can I use both string and object filter syntax?**
 > Yes! You can mix both syntaxes in the same query. The string syntax (`'priority >= 8'`) is more intuitive and concise, while the object syntax (`{ path: 'priority', operator: '>=', value: 8 }`) is useful for programmatic filter construction. Both are fully supported.
+
+**Q: How do I handle nested arrays in entity alignment?**
+> The system now supports **natural array traversal** using intuitive dot notation. Instead of explicit indexing like `"titleAndDescription[0].title"`, you can use `"titleAndDescription.title"` and the system will automatically search within array elements for the first matching string value. This works for deeply nested arrays and mixed object/array structures. The natural syntax works for both entity alignment during storage and filter queries during search. See the [Natural Array Support](#natural-array-support) section for comprehensive examples.
 
 ## Limitations and Future Enhancements
 

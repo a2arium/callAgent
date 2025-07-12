@@ -1019,11 +1019,71 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     }
 
     /**
-     * Get a value from an object using a dot-notation path
+     * Get a value from an object using a dot-notation path with automatic array traversal
+     * Examples:
+     * - "venue.name" → looks for obj.venue.name
+     * - "titleAndDescription.title" → looks for obj.titleAndDescription[*].title (automatic array search)
+     * - "sessions.speakers.name" → handles arrays at any level
      */
     private getValueByPath(obj: any, path: string): any {
-        return path.split('.').reduce((current, key) => {
-            return current && current[key] !== undefined ? current[key] : undefined;
-        }, obj);
+        return this.getValueByPathRecursive(obj, path.split('.'), 0);
+    }
+
+    /**
+     * Recursive helper for getValueByPath that handles arrays naturally
+     */
+    private getValueByPathRecursive(obj: any, pathParts: string[], partIndex: number): any {
+        // Base case: we've processed all path parts
+        if (partIndex >= pathParts.length) {
+            return obj;
+        }
+
+        // Invalid current object
+        if (!obj || typeof obj !== 'object') {
+            return undefined;
+        }
+
+        const currentPart = pathParts[partIndex];
+        const remainingParts = pathParts.slice(partIndex + 1);
+
+        // Case 1: Direct property access (standard object navigation)
+        if (currentPart in obj) {
+            const value = obj[currentPart];
+
+            // If there are more parts to traverse
+            if (remainingParts.length > 0) {
+                // If the value is an array, search within array elements
+                if (Array.isArray(value)) {
+                    return this.searchArrayForPath(value, remainingParts);
+                }
+                // Otherwise continue normal traversal
+                return this.getValueByPathRecursive(value, pathParts, partIndex + 1);
+            }
+
+            // No more parts, return the value
+            return value;
+        }
+
+        // Case 2: Current object is an array - search within array elements
+        if (Array.isArray(obj)) {
+            return this.searchArrayForPath(obj, pathParts.slice(partIndex));
+        }
+
+        // Case 3: Property doesn't exist
+        return undefined;
+    }
+
+    /**
+     * Search for a field path within an array of objects
+     * Returns the first matching value found (not limited to strings like EntityFieldParser)
+     */
+    private searchArrayForPath(array: any[], remainingPath: string[]): any {
+        for (const item of array) {
+            const result = this.getValueByPathRecursive(item, remainingPath, 0);
+            if (result !== undefined) {
+                return result; // Return first match found
+            }
+        }
+        return undefined;
     }
 } 

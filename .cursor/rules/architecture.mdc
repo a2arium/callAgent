@@ -1,8 +1,3 @@
----
-description: Planned Architecture Guidelines. Use when planning new features or changes, or better understanding of what's planned
-globs: 
-alwaysApply: false
----
 # Cursor Rule: Planned Architecture Guidelines
 
 ## Purpose
@@ -12,7 +7,9 @@ This rule provides guidance on adhering to the planned architecture for the Type
 1.  **Agent Plugin Model:**
     *   Agents are self-contained TypeScript **plugins**.
     *   Use the `createAgent({ manifest, handleTask })` factory.
-    *   Each plugin needs an `agent.json` manifest.
+    *   Manifests can be inline objects or external JSON files (with naming restrictions).
+    *   **Critical:** External `agent.json` only allowed when folder name matches agent name.
+    *   **Multi-agent folders:** Only main agent (matching folder name) can use external JSON.
     *   The core logic resides in the `async handleTask(ctx)` function.
 2.  **Task-Based Execution:**
     *   Work is modeled as **Tasks** with a defined lifecycle (submitted, working, input-required, completed, failed, canceled).
@@ -30,12 +27,66 @@ This rule provides guidance on adhering to the planned architecture for the Type
 6.  **Dependencies:**
     *   Leverage planned libraries like `callllm` (via `ctx.llm`), `xstate` (for Task Engine), `zod` (for validation).
 
+## Memory Architecture & Implementation Placement
+
+### Core vs. Adapter Separation
+The memory system follows a strict separation between **core interfaces/orchestration** and **adapter-specific implementations**:
+
+**`packages/core/src/core/memory/`** - Contains:
+- **Interfaces**: `IMemory.ts` and related type definitions
+- **Orchestration**: `UnifiedMemoryService.ts`, `MLOBackends.ts`
+- **Registry Logic**: `createMemoryRegistry.ts` 
+- **Lifecycle Management**: `lifecycle/` directory with MLO stages
+- **Type Registries**: `types/` directory with memory type abstractions
+
+**`packages/memory-[adapter]/src/`** - Contains:
+- **Concrete Implementations**: Actual adapter classes (e.g., `MemorySQLAdapter.ts`)
+- **Adapter-Specific Logic**: Entity alignment, filtering, field parsing
+- **Backend Services**: Database-specific operations and optimizations
+- **Adapter Types**: Types specific to the implementation
+
+### Implementation Placement Rules
+
+1. **Abstract/Interface Logic → Core**
+   - Memory interfaces and type definitions
+   - MLO orchestration and lifecycle management
+   - Cross-adapter functionality and registries
+
+2. **Concrete Implementation → Adapter Package**
+   - Database/storage-specific operations
+   - Entity alignment and similarity matching
+   - Field parsing and query translation
+   - Performance optimizations and indexing
+
+3. **New Memory Features → Follow Existing Pattern**
+   - If the feature uses adapter-specific logic (like entity alignment), place it in the adapter package
+   - If the feature is cross-adapter orchestration, place it in core
+   - If unsure, check existing similar functionality for placement guidance
+
+### Examples of Correct Placement
+
+**Correctly in `memory-sql`:**
+- `EntityAlignmentService.ts` - Uses SQL vector operations
+- `FilterParser.ts` - Translates filters to SQL queries
+- `WorkingMemorySQLAdapter.ts` - SQL-specific working memory
+
+**Correctly in `core`:**
+- `UnifiedMemoryService.ts` - Orchestrates across adapters
+- `lifecycle/` - Abstract MLO stages
+- `types/` - Memory type registries
+
+**New Features Should Follow This Pattern:**
+- Recognition/similarity features → `memory-sql` (uses entity alignment)
+- New MLO stages → `core/memory/lifecycle/`
+- New memory interfaces → `core/memory/`
+
 ## Applying the Rule
 When developing new features or refactoring:
 *   Consider how the changes fit into the Agent Plugin model.
 *   Ensure interactions align with the Task lifecycle and A2A protocol.
 *   Utilize the `ctx` object for framework services.
 *   Place code in the appropriate module according to the planned structure.
+*   **For memory features:** Use the core vs. adapter placement rules above.
 *   Refer to the detailed documents in `/planned_architecture/` for specifics.
 
 ## Relevant Documents

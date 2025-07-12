@@ -63,21 +63,72 @@ export class EntityFieldParser {
     }
 
     /**
-     * Get field value from object, supporting nested paths
+     * Get field value from object, supporting nested paths with automatic array traversal
+     * Examples:
+     * - "venue.name" → looks for obj.venue.name
+     * - "titleAndDescription.title" → looks for obj.titleAndDescription[*].title (automatic array search)
+     * - "sessions.speakers.name" → handles arrays at any level
      */
     private static getFieldValue(obj: any, fieldPath: string): any {
-        const parts = fieldPath.split('.');
-        let current = obj;
+        return this.getFieldValueRecursive(obj, fieldPath.split('.'), 0);
+    }
 
-        for (const part of parts) {
-            if (current && typeof current === 'object' && part in current) {
-                current = current[part];
-            } else {
-                return undefined;
-            }
+    /**
+     * Recursive helper for getFieldValue that handles arrays naturally
+     */
+    private static getFieldValueRecursive(obj: any, pathParts: string[], partIndex: number): any {
+        // Base case: we've processed all path parts
+        if (partIndex >= pathParts.length) {
+            return obj;
         }
 
-        return current;
+        // Invalid current object
+        if (!obj || typeof obj !== 'object') {
+            return undefined;
+        }
+
+        const currentPart = pathParts[partIndex];
+        const remainingParts = pathParts.slice(partIndex + 1);
+
+        // Case 1: Direct property access (standard object navigation)
+        if (currentPart in obj) {
+            const value = obj[currentPart];
+
+            // If there are more parts to traverse
+            if (remainingParts.length > 0) {
+                // If the value is an array, search within array elements
+                if (Array.isArray(value)) {
+                    return this.searchInArray(value, remainingParts);
+                }
+                // Otherwise continue normal traversal
+                return this.getFieldValueRecursive(value, pathParts, partIndex + 1);
+            }
+
+            // No more parts, return the value
+            return value;
+        }
+
+        // Case 2: Current object is an array - search within array elements
+        if (Array.isArray(obj)) {
+            return this.searchInArray(obj, pathParts.slice(partIndex));
+        }
+
+        // Case 3: Property doesn't exist
+        return undefined;
+    }
+
+    /**
+     * Search for a field path within an array of objects
+     * Returns the first matching string value found
+     */
+    private static searchInArray(array: any[], remainingPath: string[]): any {
+        for (const item of array) {
+            const result = this.getFieldValueRecursive(item, remainingPath, 0);
+            if (result !== undefined && typeof result === 'string') {
+                return result; // Return first string match found
+            }
+        }
+        return undefined;
     }
 
     /**

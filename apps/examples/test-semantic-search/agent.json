@@ -1,0 +1,13 @@
+{
+  "name": "test-semantic-search",
+  "description": "Simple agent to test semantic search functionality",
+  "version": "1.0.0",
+  "category": "testing",
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "tags": ["test", "semantic-search", "memory"],
+  "dependencies": []
+}
