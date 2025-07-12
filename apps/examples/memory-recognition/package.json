@@ -1,0 +1,24 @@
+{
+  "name": "@callagent/memory-recognition",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/agent.js",
+  "exports": {
+    ".": "./dist/agent.js"
+  },
+  "scripts": {
+    "build": "tsc && copyfiles agent.json dist",
+    "dev": "ts-node agent.ts",
+    "test": "yarn build && cd ../../../ && node packages/core/dist/runner/runnerCli.js apps/examples/memory-recognition/dist/agent.js",
+    "run": "cd ../../../ && node packages/core/dist/runner/runnerCli.js apps/examples/memory-recognition/dist/agent.js"
+  },
+  "dependencies": {
+    "@callagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "copyfiles": "^2.4.1"
+  }
+}

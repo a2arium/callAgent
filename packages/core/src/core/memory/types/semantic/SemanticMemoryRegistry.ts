@@ -1,4 +1,15 @@
-import { SemanticMemoryBackend, MemoryRegistry, GetManyInput, GetManyOptions, MemoryQueryResult, MemorySetOptions } from '@callagent/types';
+import {
+    SemanticMemoryBackend,
+    MemoryRegistry,
+    GetManyInput,
+    GetManyOptions,
+    MemoryQueryResult,
+    MemorySetOptions,
+    RecognitionOptions,
+    RecognitionResult,
+    EnrichmentOptions,
+    EnrichmentResult
+} from '@callagent/types';
 
 /**
  * Registry/facade for semantic memory backends.
@@ -97,5 +108,28 @@ export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBack
     get entities() {
         const backend = this.backends[this.defaultBackend];
         return backend.entities;
+    }
+
+    /**
+     * Recognize if candidate data matches existing memory entries
+     * @param candidateData The data to check for recognition
+     * @param options Recognition options
+     */
+    async recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>> {
+        const backendName = options?.entities?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        return backend.recognize<T>(candidateData, options);
+    }
+
+    /**
+     * Enrich memory data by consolidating multiple sources
+     * @param key The memory key to enrich
+     * @param additionalData Array of additional data to consolidate
+     * @param options Enrichment options
+     */
+    async enrich<T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>> {
+        const backendName = (options as any)?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        return backend.enrich<T>(key, additionalData, options);
     }
 } 

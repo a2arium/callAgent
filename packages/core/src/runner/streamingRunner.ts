@@ -283,7 +283,27 @@ export async function runAgentWithStreaming(
         memory: memoryRegistry
     };
 
-    // Extend context with MLO-backed memory operations
+    // Replace the LLM stub with a real implementation BEFORE creating memory registry
+    if (!plugin.llmAdapter && plugin.llmConfig) {
+        logInfoMethod.call(runnerLogger, `Creating LLM using factory for plugin ${plugin.manifest.name}`, {
+            provider: plugin.llmConfig.provider,
+            model: plugin.llmConfig.modelAliasOrName
+        });
+        try {
+            partialCtx.llm = createLLMForTask(plugin.llmConfig, partialCtx as any);
+            logInfoMethod.call(runnerLogger, `LLM created successfully for plugin ${plugin.manifest.name}`);
+        } catch (error) {
+            logInfoMethod.call(runnerLogger, `Failed to create LLM for plugin ${plugin.manifest.name}`, { error: error instanceof Error ? error.message : String(error) });
+            // Keep the stub LLM that was already assigned
+        }
+    } else if (!plugin.llmAdapter) {
+        logInfoMethod.call(runnerLogger, `Not creating LLM - plugin ${plugin.manifest.name} has no config`, {
+            hasAdapter: !!plugin.llmAdapter,
+            hasConfig: !!plugin.llmConfig
+        });
+    }
+
+    // Extend context with MLO-backed memory operations (now with real LLM)
     const contextWithMemory = await extendContextWithMemory(
         partialCtx,
         finalTenantId,
@@ -330,21 +350,6 @@ export async function runAgentWithStreaming(
 
     // Extend the context with streaming capabilities
     extendContextWithStreaming(taskCtx, options.isStreaming);
-
-    // Replace the LLM stub with a real implementation if we have a config
-    if (!plugin.llmAdapter && plugin.llmConfig) {
-        // Now we can safely use taskCtx since it's fully created
-        logInfoMethod.call(runnerLogger, `Creating LLM using factory for plugin ${plugin.manifest.name}`, {
-            provider: plugin.llmConfig.provider,
-            model: plugin.llmConfig.modelAliasOrName
-        });
-        taskCtx.llm = createLLMForTask(plugin.llmConfig, taskCtx);
-    } else if (!plugin.llmAdapter) {
-        logInfoMethod.call(runnerLogger, `Not creating LLM - plugin ${plugin.manifest.name} has no config`, {
-            hasAdapter: !!plugin.llmAdapter,
-            hasConfig: !!plugin.llmConfig
-        });
-    }
 
     // --- Execute Agent ---
     // Use agentLogger here (agentLogger.info goes to stdout, which is fine as agent logs will use debug)

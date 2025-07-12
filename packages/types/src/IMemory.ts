@@ -1,4 +1,80 @@
 /**
+ * Result from the recognize() operation, indicating potential matches
+ */
+export type RecognitionResult<T> = {
+    /** Whether a confident match was found */
+    isMatch: boolean;
+    /** Confidence score between 0 and 1 */
+    confidence: number;
+    /** The memory key of the matching entry (if found) */
+    matchingKey?: string;
+    /** The matching memory data (if found) */
+    matchingData?: T;
+    /** Whether LLM was used for disambiguation */
+    usedLLM: boolean;
+    /** Explanation of the matching decision (if LLM was used) */
+    explanation?: string;
+};
+
+/**
+ * Options for the recognize() method
+ */
+export type RecognitionOptions = {
+    /** Task context containing LLM and tenant information (required for LLM operations) */
+    taskContext?: any;
+    /** Confidence threshold for automatic matching (default: 0.75) */
+    threshold?: number;
+    /** Lower bound for LLM disambiguation (default: 0.65) */
+    llmLowerBound?: number;
+    /** Upper bound for LLM disambiguation (default: 0.85) */
+    llmUpperBound?: number;
+    /** Entity field mappings for alignment matching */
+    entities?: Record<string, string>;
+    /** Tags to filter potential matches */
+    tags?: string[];
+    /** Custom LLM prompt for disambiguation */
+    customPrompt?: string;
+    /** Limit number of potential matches to consider */
+    limit?: number;
+};
+
+/**
+ * Result from the enrich() operation
+ */
+export type EnrichmentResult<T> = {
+    /** The enriched/consolidated data */
+    enrichedData: T;
+    /** Changes made during enrichment */
+    changes: {
+        field: string;
+        action: 'added' | 'updated' | 'resolved_conflict' | 'combined';
+        oldValue?: any;
+        newValue: any;
+        source: 'llm' | 'automatic';
+    }[];
+    /** Whether LLM was used for enrichment */
+    usedLLM: boolean;
+    /** LLM explanation of enrichment decisions */
+    explanation?: string;
+};
+
+/**
+ * Options for the enrich() method
+ */
+export type EnrichmentOptions = {
+    /** Task context containing LLM and tenant information (required for LLM operations) */
+    taskContext?: any;
+    /** Zod schema defining the expected structure for LLM enrichment (required) */
+    schema: any;
+    /** Custom LLM prompt for enrichment guidance */
+    customPrompt?: string;
+    /** Specific fields to focus enrichment on */
+    focusFields?: string[];
+    /** Whether to force LLM usage for all conflicts (default: false) */
+    forceLLMEnrichment?: boolean;
+};
+
+/**
  * Supported filter operators for querying memory entries.
  */
 export type FilterOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'CONTAINS' | 'STARTS_WITH' | 'ENDS_WITH' | 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS';
@@ -94,6 +170,10 @@ export type SemanticMemoryBackend = {
     set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
     delete(key: string, opts?: { backend?: string }): Promise<void>;
     deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number>;
+
+    // Recognition and enrichment methods
+    recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>>;
+    enrich<T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>>;
 
     // Entity alignment methods (optional - available when alignment is enabled)
     entities?: {

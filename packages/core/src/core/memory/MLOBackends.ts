@@ -7,7 +7,11 @@ import {
     MemorySetOptions,
     GetManyInput,
     GetManyOptions,
-    MemoryQueryOptions
+    MemoryQueryOptions,
+    RecognitionOptions,
+    RecognitionResult,
+    EnrichmentOptions,
+    EnrichmentResult
 } from '@callagent/types';
 
 /**
@@ -19,7 +23,8 @@ import {
 export class MLOSemanticBackend implements SemanticMemoryBackend {
     constructor(
         private unifiedMemory: UnifiedMemoryService,
-        private underlyingAdapter?: any // Optional underlying adapter for entity alignment
+        private underlyingAdapter?: any, // Optional underlying adapter for entity alignment
+        private taskContext?: any // Task context for automatic injection
     ) { }
 
     async get<T>(key: string, opts?: { backend?: string }): Promise<T | null> {
@@ -77,6 +82,31 @@ export class MLOSemanticBackend implements SemanticMemoryBackend {
             throw new Error('Entity alignment not available - no underlying adapter with entity support');
         }
     };
+
+    // Recognition and enrichment methods - delegate to the underlying adapter if available
+    async recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>> {
+        if (this.underlyingAdapter?.recognize) {
+            // Automatically inject task context if not provided
+            const enhancedOptions = {
+                ...options,
+                taskContext: options?.taskContext || this.taskContext
+            };
+            return this.underlyingAdapter.recognize(candidateData, enhancedOptions);
+        }
+        throw new Error('Recognition not available - no underlying adapter with recognition support');
+    }
+
+    async enrich<T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>> {
+        if (this.underlyingAdapter?.enrich) {
+            // Automatically inject task context if not provided
+            const enhancedOptions = {
+                ...options,
+                taskContext: options?.taskContext || this.taskContext
+            };
+            return this.underlyingAdapter.enrich(key, additionalData, enhancedOptions);
+        }
+        throw new Error('Enrichment not available - no underlying adapter with enrichment support');
+    }
 }
 
 /**

@@ -6,7 +6,11 @@ import {
     EmbedMemoryBackend,
     WorkingMemoryBackend,
     GetManyInput,
-    GetManyOptions
+    GetManyOptions,
+    RecognitionOptions,
+    RecognitionResult,
+    EnrichmentOptions,
+    EnrichmentResult
 } from '@callagent/types';
 import { logger } from '@callagent/utils';
 import { createEmbeddingFunction, isEmbeddingAvailable } from '../llm/LLMFactory.js';
@@ -28,7 +32,7 @@ export type ExtendedIMemory = IMemory & {
  * Create a comprehensive memory registry with all memory types
  * Routes all operations through MLO while maintaining backward compatibility
  */
-export async function createMemoryRegistry(tenantId?: string, agentId?: string): Promise<ExtendedIMemory> {
+export async function createMemoryRegistry(tenantId?: string, agentId?: string, taskContext?: any): Promise<ExtendedIMemory> {
     const adapterType = process.env.MEMORY_ADAPTER || 'sql';
     const resolvedTenantId = tenantId || 'default';
     const resolvedAgentId = agentId || 'default';
@@ -78,6 +82,16 @@ export async function createMemoryRegistry(tenantId?: string, agentId?: string):
             deleteMany: (input: GetManyInput, options?: GetManyOptions) =>
                 semanticAdapter.deleteMany(input, options),
             entities: semanticAdapter.entities,
+            recognize: <T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>> =>
+                semanticAdapter.recognize(candidateData, {
+                    ...options,
+                    taskContext: options?.taskContext || taskContext
+                }),
+            enrich: <T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>> =>
+                semanticAdapter.enrich(key, additionalData, {
+                    ...options,
+                    taskContext: options?.taskContext || taskContext
+                })
         };
 
         // Create working memory registry (placeholder implementation for now)

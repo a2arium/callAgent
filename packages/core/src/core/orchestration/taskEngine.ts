@@ -174,6 +174,8 @@ export class TaskEngine {
                     getMany: async () => [],
                     delete: async () => { },
                     deleteMany: async () => 0,
+                    recognize: async () => { throw new Error('Semantic memory recognition not available in basic task engine'); },
+                    enrich: async () => { throw new Error('Semantic memory enrichment not available in basic task engine'); },
                 },
                 episodic: {
                     getDefaultBackend: () => 'none',

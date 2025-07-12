@@ -1,0 +1,21 @@
+{
+  "name": "Memory Recognition Demo",
+  "description": "Demonstrates semantic memory recognize() and enrich() functionality with real-world event and venue data",
+  "version": "1.0.0",
+  "agent": {
+    "goal": "Test and demonstrate semantic memory recognition and enrichment capabilities",
+    "capabilities": [
+      "Entity recognition in memory using entity alignment",
+      "LLM-powered disambiguation for uncertain matches",
+      "Data enrichment by consolidating multiple sources",
+      "Automatic conflict resolution"
+    ]
+  },
+  "parameters": {
+    "mode": {
+      "type": "string",
+      "description": "Demo mode: 'recognize' or 'enrich' or 'both'",
+      "default": "both"
+    }
+  }
+}

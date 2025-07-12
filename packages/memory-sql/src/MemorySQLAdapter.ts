@@ -5,6 +5,7 @@ import { EntityFieldParser } from './EntityFieldParser.js';
 import { EntityAlignmentService } from './EntityAlignmentService.js';
 import { addAlignedProxies } from './AlignedValueProxy.js';
 import { FilterParser } from './FilterParser.js';
+import { RecognitionService, EnrichmentService } from './recognition/index.js';
 
 // Define system tenant constants locally for this adapter
 const SYSTEM_TENANT = '__system__';
@@ -13,6 +14,8 @@ const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT
 
 export class MemorySQLAdapter implements SemanticMemoryBackend {
     private entityService?: EntityAlignmentService;
+    private recognitionService?: RecognitionService;
+    private enrichmentService?: EnrichmentService;
     private defaultTenantId: string;
     private readonly DEFAULT_QUERY_LIMIT = 1000;
 
@@ -30,6 +33,10 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             this.entityService = new EntityAlignmentService(prisma, embedFunction, {
                 defaultThreshold: DEFAULT_ENTITY_ALIGNMENT_THRESHOLD
             });
+
+            // Initialize recognition and enrichment services
+            this.recognitionService = new RecognitionService(prisma, this.entityService);
+            this.enrichmentService = new EnrichmentService();
         }
     }
 
@@ -1085,5 +1092,48 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             }
         }
         return undefined;
+    }
+
+    /**
+     * Recognize if a candidate object exists in memory using entity alignment and LLM disambiguation
+     */
+    async recognize<T>(candidateData: T, options: any = {}): Promise<any> {
+        if (!this.recognitionService) {
+            throw new Error('Recognition service not available. Entity alignment with embedFunction required.');
+        }
+
+        // Extract the taskContext from options
+        const { taskContext, ...recognitionOptions } = options;
+
+        if (!taskContext) {
+            throw new Error('TaskContext is required for recognition');
+        }
+
+        return await this.recognitionService.recognize(candidateData, taskContext, recognitionOptions);
+    }
+
+    /**
+     * Enrich a memory entry by consolidating it with additional data using LLM
+     */
+    async enrich<T>(key: string, additionalData: T[], options: any = {}): Promise<any> {
+        if (!this.enrichmentService) {
+            throw new Error('Enrichment service not available. Entity alignment with embedFunction required.');
+        }
+
+        // Extract the taskContext from options  
+        const { taskContext, ...enrichmentOptions } = options;
+
+        if (!taskContext) {
+            throw new Error('TaskContext is required for enrichment');
+        }
+
+        // Get the existing data
+        const existingData = await this.get(key, { tenantId: taskContext.tenantId });
+
+        if (!existingData) {
+            throw new Error(`Memory entry with key "${key}" not found`);
+        }
+
+        return await this.enrichmentService.enrich(key, existingData, additionalData, taskContext, enrichmentOptions);
     }
 } 

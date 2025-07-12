@@ -227,7 +227,7 @@ export async function extendContextWithMemory(
     context.memory = {
         // Create MLO-backed registries that route all operations through UnifiedMemoryService
         semantic: new SemanticMemoryRegistry(
-            { mlo: new MLOSemanticBackend(unifiedMemory, existingSemanticAdapter) },
+            { mlo: new MLOSemanticBackend(unifiedMemory, existingSemanticAdapter, context) },
             'mlo'
         ),
         episodic: new EpisodicMemoryRegistry(

@@ -1,6 +1,6 @@
 {
   "name": "callagent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "AI Agents Framework with A2A Support",
   "type": "module",
   "main": "dist/index.js",
@@ -31,7 +31,7 @@
     "run:calc": "run-agent apps/examples/calculator-workflow/dist/CoordinatorAgent.js '{\"expression\": \"5 * 2 + 3 - 1\"}'",
     "run:csv-parser": "yarn run-agent apps/examples/data-processing/csv-parser/dist/AgentModule.js '{\"csvData\": \"name,age,city\\nJohn,25,NYC\\nJane,30,LA\"}'",
     "run:data-analyzer": "yarn run-agent apps/examples/business-logic/data-analyzer/dist/AgentModule.js '{\"csvData\": \"name,age,salary\\nJohn,25,50000\\nJane,30,60000\\nBob,35,70000\", \"analysisType\": \"statistics\"}'",
-    "run:search-test": "yarn run-agent apps/examples/test-semantic-search/dist/agent.js",
+    "run:memory-recognition": "yarn run-agent apps/examples/memory-recognition/dist/agent.js '{}'",
     "clean": "find . -type d -name dist -exec rm -rf {} +"
   },
   "keywords": [
