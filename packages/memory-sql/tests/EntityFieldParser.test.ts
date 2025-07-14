@@ -191,212 +191,325 @@ describe('EntityFieldParser', () => {
             expect(result[0].fieldName).toBe('name');
         });
 
-        // Natural Array Support Tests
-        describe('Natural Array Support', () => {
-            it('handles titleAndDescription array naturally', () => {
-                const value = {
-                    titleAndDescription: [
-                        { title: "Event Title", description: "Event Description", language: "en" }
-                    ],
-                    venue: { name: "Main Hall" }
-                };
 
-                const entitySpec = {
-                    "titleAndDescription.title": "event",       // Should find "Event Title"
-                    "titleAndDescription.description": "text",  // Should find "Event Description"  
-                    "venue.name": "location"                    // Should still work
-                };
+    });
+});
 
-                const result = EntityFieldParser.parseEntityFields(value, entitySpec);
-                expect(result).toHaveLength(3);
-                expect(result[0].value).toBe("Event Title");
-                expect(result[1].value).toBe("Event Description");
-                expect(result[2].value).toBe("Main Hall");
-            });
+describe('Array Expansion Support', () => {
+    describe('parseEntityFields with array syntax', () => {
+        it('should expand array field paths to explicit indices', () => {
+            const value = {
+                titleAndDescription: [
+                    { title: 'AI Summit 2024', description: 'Annual conference' },
+                    { title: 'Tech Workshop', description: 'Hands-on session' }
+                ],
+                venue: { name: 'Convention Center' }
+            };
 
-            it('handles multiple array elements (returns first match)', () => {
-                const value = {
-                    speakers: [
-                        { name: "Dr. John Smith", affiliation: "MIT" },
-                        { name: "Prof. Jane Doe", affiliation: "Stanford" }
-                    ]
-                };
+            const entitySpec = {
+                'titleAndDescription[].title': 'event',
+                'venue.name': 'location'
+            };
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "speakers.name": "person",
-                    "speakers.affiliation": "organization"
-                });
+            const result = EntityFieldParser.parseEntityFields(value, entitySpec);
 
-                expect(result).toHaveLength(2);
-                expect(result[0].value).toBe("Dr. John Smith");  // First match
-                expect(result[1].value).toBe("MIT");              // First match
-            });
+            expect(result).toEqual([
+                {
+                    fieldName: 'titleAndDescription[0].title',
+                    entityType: 'event',
+                    value: 'AI Summit 2024',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'titleAndDescription[1].title',
+                    entityType: 'event',
+                    value: 'Tech Workshop',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'venue.name',
+                    entityType: 'location',
+                    value: 'Convention Center',
+                    threshold: undefined
+                }
+            ]);
+        });
 
-            it('handles eventOccurences array naturally', () => {
-                const value = {
-                    eventOccurences: [
-                        { date: "2024-01-15", time: "19:00", isSoldOut: false },
-                        { date: "2024-01-16", time: "20:00", isSoldOut: true }
-                    ]
-                };
+        it('should handle array syntax with thresholds', () => {
+            const value = {
+                speakers: [
+                    { name: 'Dr. Jane Smith', affiliation: 'MIT' },
+                    { name: 'Prof. Bob Wilson', affiliation: 'Stanford' }
+                ]
+            };
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "eventOccurences.date": "date",
-                    "eventOccurences.time": "time"
-                });
+            const entitySpec = {
+                'speakers[].name': 'person:0.8',
+                'speakers[].affiliation': 'organization:0.75'
+            };
 
-                expect(result).toHaveLength(2);
-                expect(result[0].value).toBe("2024-01-15");  // First occurrence
-                expect(result[1].value).toBe("19:00");        // First occurrence
-            });
+            const result = EntityFieldParser.parseEntityFields(value, entitySpec);
 
-            it('handles deeply nested arrays', () => {
-                const value = {
-                    sessions: [
-                        {
-                            presenters: [
-                                { name: "Speaker 1", company: "Corp A" },
-                                { name: "Speaker 2", company: "Corp B" }
-                            ]
-                        }
-                    ]
-                };
+            expect(result).toEqual(expect.arrayContaining([
+                {
+                    fieldName: 'speakers[0].name',
+                    entityType: 'person',
+                    value: 'Dr. Jane Smith',
+                    threshold: 0.8
+                },
+                {
+                    fieldName: 'speakers[1].name',
+                    entityType: 'person',
+                    value: 'Prof. Bob Wilson',
+                    threshold: 0.8
+                },
+                {
+                    fieldName: 'speakers[0].affiliation',
+                    entityType: 'organization',
+                    value: 'MIT',
+                    threshold: 0.75
+                },
+                {
+                    fieldName: 'speakers[1].affiliation',
+                    entityType: 'organization',
+                    value: 'Stanford',
+                    threshold: 0.75
+                }
+            ]));
+            expect(result).toHaveLength(4);
+        });
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "sessions.presenters.name": "person"  // Double array traversal
-                });
+        it('should handle empty arrays gracefully', () => {
+            const value = {
+                titleAndDescription: [],
+                venue: { name: 'Convention Center' }
+            };
 
-                expect(result).toHaveLength(1);
-                expect(result[0].value).toBe("Speaker 1");
-            });
+            const entitySpec = {
+                'titleAndDescription[].title': 'event',
+                'venue.name': 'location'
+            };
 
-            it('handles mixed objects and arrays', () => {
-                const value = {
-                    event: {
-                        details: {
-                            speakers: [{ name: "John" }],
-                            venue: { name: "Hall A" }
-                        }
+            const result = EntityFieldParser.parseEntityFields(value, entitySpec);
+
+            expect(result).toEqual([
+                {
+                    fieldName: 'venue.name',
+                    entityType: 'location',
+                    value: 'Convention Center',
+                    threshold: undefined
+                }
+            ]);
+        });
+
+        it('should handle non-array fields with array syntax gracefully', () => {
+            const value = {
+                titleAndDescription: { title: 'Single Title' },
+                venue: { name: 'Convention Center' }
+            };
+
+            const entitySpec = {
+                'titleAndDescription[].title': 'event',
+                'venue.name': 'location'
+            };
+
+            const result = EntityFieldParser.parseEntityFields(value, entitySpec);
+
+            expect(result).toEqual([
+                {
+                    fieldName: 'venue.name',
+                    entityType: 'location',
+                    value: 'Convention Center',
+                    threshold: undefined
+                }
+            ]);
+        });
+
+        it('should handle nested array paths', () => {
+            const value = {
+                sessions: [
+                    {
+                        title: 'Session 1',
+                        speakers: [
+                            { name: 'Speaker A', company: 'Corp X' },
+                            { name: 'Speaker B', company: 'Corp Y' }
+                        ]
+                    },
+                    {
+                        title: 'Session 2',
+                        speakers: [
+                            { name: 'Speaker C', company: 'Corp Z' }
+                        ]
                     }
-                };
+                ]
+            };
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "event.details.speakers.name": "person",  // object.object.array.field
-                    "event.details.venue.name": "location"    // object.object.object.field
-                });
+            const entitySpec = {
+                'sessions[].title': 'topic',
+                'sessions[].speakers[].name': 'person',
+                'sessions[].speakers[].company': 'organization'
+            };
 
-                expect(result).toHaveLength(2);
-                expect(result[0].value).toBe("John");
-                expect(result[1].value).toBe("Hall A");
-            });
+            const result = EntityFieldParser.parseEntityFields(value, entitySpec);
 
-            it('handles arrays at different levels', () => {
-                const value = {
-                    conferences: [
-                        {
-                            name: "AI Summit",
-                            sessions: [
-                                { title: "Machine Learning", speaker: "Dr. A" },
-                                { title: "Deep Learning", speaker: "Dr. B" }
-                            ]
-                        },
-                        {
-                            name: "Tech Conference",
-                            sessions: [
-                                { title: "Web Development", speaker: "Prof. C" }
-                            ]
-                        }
-                    ]
-                };
+            expect(result).toEqual(expect.arrayContaining([
+                {
+                    fieldName: 'sessions[0].title',
+                    entityType: 'topic',
+                    value: 'Session 1',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[0].speakers[0].name',
+                    entityType: 'person',
+                    value: 'Speaker A',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[0].speakers[0].company',
+                    entityType: 'organization',
+                    value: 'Corp X',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[0].speakers[1].name',
+                    entityType: 'person',
+                    value: 'Speaker B',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[0].speakers[1].company',
+                    entityType: 'organization',
+                    value: 'Corp Y',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[1].title',
+                    entityType: 'topic',
+                    value: 'Session 2',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[1].speakers[0].name',
+                    entityType: 'person',
+                    value: 'Speaker C',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'sessions[1].speakers[0].company',
+                    entityType: 'organization',
+                    value: 'Corp Z',
+                    threshold: undefined
+                }
+            ]));
+            expect(result).toHaveLength(8);
+        });
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "conferences.name": "event",                    // Array -> object field
-                    "conferences.sessions.title": "topic",         // Array -> array -> object field
-                    "conferences.sessions.speaker": "person"       // Array -> array -> object field
-                });
+        it('should skip non-string values in arrays', () => {
+            const value = {
+                mixedArray: [
+                    { title: 'Valid Title', count: 42 },
+                    { title: null, count: 100 },
+                    { title: 'Another Title', count: 7 }
+                ]
+            };
 
-                expect(result).toHaveLength(3);
-                expect(result[0].value).toBe("AI Summit");        // First conference
-                expect(result[1].value).toBe("Machine Learning"); // First session of first conference
-                expect(result[2].value).toBe("Dr. A");            // First session of first conference
-            });
+            const entitySpec = {
+                'mixedArray[].title': 'event',
+                'mixedArray[].count': 'number'
+            };
 
-            it('handles edge cases gracefully', () => {
-                const value = {
-                    emptyArray: [],
-                    nullArray: null,
-                    mixedArray: [{ name: "John" }, "string", 123, null],
-                    undefinedArray: undefined
-                };
+            const result = EntityFieldParser.parseEntityFields(value, entitySpec);
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "emptyArray.name": "person",      // Should return empty
-                    "nullArray.name": "person",       // Should return empty  
-                    "mixedArray.name": "person",      // Should find "John"
-                    "undefinedArray.name": "person"   // Should return empty
-                });
+            expect(result).toEqual([
+                {
+                    fieldName: 'mixedArray[0].title',
+                    entityType: 'event',
+                    value: 'Valid Title',
+                    threshold: undefined
+                },
+                {
+                    fieldName: 'mixedArray[2].title',
+                    entityType: 'event',
+                    value: 'Another Title',
+                    threshold: undefined
+                }
+            ]);
+        });
+    });
 
-                expect(result).toHaveLength(1);  // Only mixedArray.name should match
-                expect(result[0].value).toBe("John");
-                expect(result[0].fieldName).toBe("mixedArray.name");
-            });
+    describe('detectArrayShrinkage', () => {
+        it('should detect orphaned paths when array shrinks', () => {
+            const currentValue = {
+                titleAndDescription: [
+                    { title: 'AI Summit 2024' },
+                    { title: 'Tech Workshop' }
+                ]
+            };
 
-            it('handles arrays with non-object elements', () => {
-                const value = {
-                    items: ["string1", "string2"],
-                    mixed: [{ name: "John" }, "plain string", { name: "Jane" }]
-                };
+            const previousFieldPaths = [
+                'titleAndDescription[0].title',
+                'titleAndDescription[1].title',
+                'titleAndDescription[2].title',
+                'titleAndDescription[3].title',
+                'venue.name'
+            ];
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "items.name": "person",    // Should not match (strings don't have .name)
-                    "mixed.name": "person"     // Should find "John" (first object with .name)
-                });
+            const entitySpec = {
+                'titleAndDescription[].title': 'event',
+                'venue.name': 'location'
+            };
 
-                expect(result).toHaveLength(1);
-                expect(result[0].value).toBe("John");
-                expect(result[0].fieldName).toBe("mixed.name");
-            });
+            const result = EntityFieldParser.detectArrayShrinkage(currentValue, previousFieldPaths, entitySpec);
 
-            it('maintains backward compatibility with existing object notation', () => {
-                const value = {
-                    user: {
-                        profile: {
-                            name: "John Smith",
-                            contact: {
-                                email: "john@example.com"
-                            }
-                        }
-                    }
-                };
+            expect(result).toEqual([
+                'titleAndDescription[2].title',
+                'titleAndDescription[3].title'
+            ]);
+        });
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "user.profile.name": "person",
-                    "user.profile.contact.email": "email"
-                });
+        it('should handle empty arrays', () => {
+            const currentValue = {
+                titleAndDescription: []
+            };
 
-                expect(result).toHaveLength(2);
-                expect(result[0].value).toBe("John Smith");
-                expect(result[1].value).toBe("john@example.com");
-            });
+            const previousFieldPaths = [
+                'titleAndDescription[0].title',
+                'titleAndDescription[1].title'
+            ];
 
-            it('works with entity specs that have thresholds', () => {
-                const value = {
-                    titleAndDescription: [
-                        { title: "AI Conference", description: "Annual conference" }
-                    ]
-                };
+            const entitySpec = {
+                'titleAndDescription[].title': 'event'
+            };
 
-                const result = EntityFieldParser.parseEntityFields(value, {
-                    "titleAndDescription.title": "event:0.8",         // Array access with threshold
-                    "titleAndDescription.description": "text:0.6"     // Array access with threshold
-                });
+            const result = EntityFieldParser.detectArrayShrinkage(currentValue, previousFieldPaths, entitySpec);
 
-                expect(result).toHaveLength(2);
-                expect(result[0].value).toBe("AI Conference");
-                expect(result[0].threshold).toBe(0.8);
-                expect(result[1].value).toBe("Annual conference");
-                expect(result[1].threshold).toBe(0.6);
-            });
+            expect(result).toEqual([
+                'titleAndDescription[0].title',
+                'titleAndDescription[1].title'
+            ]);
+        });
+
+        it('should handle no shrinkage case', () => {
+            const currentValue = {
+                titleAndDescription: [
+                    { title: 'AI Summit 2024' },
+                    { title: 'Tech Workshop' }
+                ]
+            };
+
+            const previousFieldPaths = [
+                'titleAndDescription[0].title',
+                'titleAndDescription[1].title'
+            ];
+
+            const entitySpec = {
+                'titleAndDescription[].title': 'event'
+            };
+
+            const result = EntityFieldParser.detectArrayShrinkage(currentValue, previousFieldPaths, entitySpec);
+
+            expect(result).toEqual([]);
         });
     });
 }); 

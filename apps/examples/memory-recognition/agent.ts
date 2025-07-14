@@ -80,7 +80,7 @@ const recognitionCandidates = [
             }
         },
         entities: {
-            "titleAndDescription.title": "event",
+            "titleAndDescription[].title": "event",
             "venue.name": "location"
         },
         expectedMatch: true
@@ -99,7 +99,7 @@ const recognitionCandidates = [
             }
         },
         entities: {
-            "titleAndDescription.title": "event",
+            "titleAndDescription[].title": "event",
             "venue.name": "location"
         },
         expectedMatch: false // Changed: confidence below 0.65 threshold = no match
@@ -118,7 +118,7 @@ const recognitionCandidates = [
             }
         },
         entities: {
-            "titleAndDescription.title": "event",
+            "titleAndDescription[].title": "event",
             "venue.name": "location"
         },
         expectedMatch: false
@@ -144,10 +144,56 @@ const recognitionCandidates = [
             ]
         },
         entities: {
-            "titleAndDescription.title": "event",
+            "titleAndDescription[].title": "event",
             "venue.name": "location"
         },
         expectedMatch: "uncertain - needs LLM"
+    },
+    {
+        name: "Multiple titles with array expansion",
+        data: {
+            "titleAndDescription": [
+                {
+                    "title": "Jazz Concert in Old Town",
+                    "language": "en"
+                },
+                {
+                    "title": "Evening Jazz Performance",
+                    "language": "en"
+                }
+            ],
+            "venue": {
+                "name": "Old Town Music Hall"
+            }
+        },
+        entities: {
+            "titleAndDescription[].title": "event",
+            "venue.name": "location"
+        },
+        expectedMatch: true
+    },
+    {
+        name: "Array with different elements",
+        data: {
+            "titleAndDescription": [
+                {
+                    "title": "Rock Concert Tonight",
+                    "language": "en"
+                },
+                {
+                    "title": "Jazz Concert in Old Town",  // This should match
+                    "language": "en"
+                }
+            ],
+            "venue": {
+                "name": "Old Town Music Hall"
+            }
+        },
+        entities: {
+            "titleAndDescription[].title": "event",
+            "venue.name": "location"
+        },
+        expectedMatch: true  // Should match because one of the titles matches
     }
 ];
 
@@ -205,6 +251,11 @@ async function handleMemoryRecognitionTask(ctx: any) {
 
         if (mode === 'recognize' || mode === 'both') {
             await demonstrateRecognition(ctx);
+        }
+
+        // NEW: Demonstrate array functionality
+        if (mode === 'array' || mode === 'both') {
+            await demonstrateArraySupport(ctx);
         }
 
         if (mode === 'enrich' || mode === 'both') {
@@ -364,5 +415,124 @@ async function cleanupDemoData(ctx: any) {
         }
     }
 
-    ctx.logger.info(`🧹 Cleanup completed!`);
+    ctx.logger.info(`🧹 Cleanup completed!\n`);
+}
+
+/**
+ * NEW: Demonstrate array expansion functionality
+ */
+async function demonstrateArraySupport(ctx: any) {
+    ctx.logger.info(`🔄 === ARRAY EXPANSION DEMONSTRATION ===\n`);
+
+    // Test data with multiple array elements
+    const arrayTestData = {
+        "titleAndDescription": [
+            { "title": "AI Summit 2024", "language": "en" },
+            { "title": "Tech Conference Extraordinaire", "language": "en" },
+            { "title": "Innovation Showcase", "language": "en" }
+        ],
+        "speakers": [
+            { "name": "Dr. Jane Smith", "affiliation": "MIT" },
+            { "name": "Prof. Bob Wilson", "affiliation": "Stanford" },
+            { "name": "Dr. Alice Johnson", "affiliation": "Harvard" }
+        ],
+        "venue": { "name": "Convention Center" },
+        "eventOccurrences": [
+            { "date": "2024-03-15", "time": "09:00" },
+            { "date": "2024-03-16", "time": "10:00" }
+        ]
+    };
+
+    ctx.logger.info(`📊 Storing event with array expansion...`);
+    ctx.logger.info(`   Titles: ${arrayTestData.titleAndDescription.map(t => t.title).join(', ')}`);
+    ctx.logger.info(`   Speakers: ${arrayTestData.speakers.map(s => s.name).join(', ')}`);
+    ctx.logger.info(`   Occurrences: ${arrayTestData.eventOccurrences.map(o => o.date).join(', ')}`);
+
+    // Store with array expansion
+    await ctx.memory.semantic.set('demo:array:multi-event', arrayTestData, {
+        tags: ['demo', 'array', 'conference'],
+        entities: {
+            "titleAndDescription[].title": "event",
+            "speakers[].name": "person",
+            "speakers[].affiliation": "organization",
+            "venue.name": "location",
+            "eventOccurrences[].date": "date"
+        }
+    });
+
+    ctx.logger.info(`   ✅ Stored with array expansion!\n`);
+
+    // Test recognition with array cross-product comparison
+    ctx.logger.info(`🔍 Testing array-aware recognition...`);
+
+    const candidateWithArrays = {
+        "titleAndDescription": [
+            { "title": "AI Summit 2024", "language": "en" },  // Should match
+            { "title": "Different Event", "language": "en" }   // Won't match
+        ],
+        "speakers": [
+            { "name": "Dr. Jane Smith", "affiliation": "MIT" } // Should match
+        ],
+        "venue": { "name": "Convention Center" }
+    };
+
+    const recognitionResult = await ctx.memory.semantic.recognize(candidateWithArrays, {
+        taskContext: ctx,
+        entities: {
+            "titleAndDescription[].title": "event",
+            "speakers[].name": "person",
+            "venue.name": "location"
+        }
+    });
+
+    ctx.logger.info(`   Recognition result: ${recognitionResult.isMatch ? '✅ MATCH' : '❌ NO MATCH'}`);
+    ctx.logger.info(`   Confidence: ${recognitionResult.confidence.toFixed(3)}`);
+    if (recognitionResult.matchingKey) {
+        ctx.logger.info(`   Matching key: ${recognitionResult.matchingKey}`);
+    }
+    if (recognitionResult.usedLLM) {
+        ctx.logger.info(`   Used LLM: ${recognitionResult.explanation}`);
+    }
+
+    // Test queries with array patterns
+    ctx.logger.info(`\n🔎 Testing array-aware queries...`);
+
+    const queryResults = await ctx.memory.semantic.getMany({
+        filters: ['titleAndDescription[].title ~ "AI"'],
+        tag: 'demo'
+    });
+
+    ctx.logger.info(`   Query 'titleAndDescription[].title ~ "AI"' found ${queryResults.length} results`);
+    for (const result of queryResults) {
+        ctx.logger.info(`   - ${result.key}: ${result.value.titleAndDescription[0].title}`);
+    }
+
+    // Test enrichment with arrays
+    ctx.logger.info(`\n🔗 Testing array enrichment...`);
+
+    const enrichmentData = [{
+        "titleAndDescription": [
+            { "title": "AI Summit 2024", "language": "en", "description": "Updated description" },
+            { "title": "Tech Conference Extraordinaire", "language": "en", "description": "Enhanced info" },
+            { "title": "Innovation Showcase", "language": "en", "description": "New details" },
+            { "title": "Networking Session", "language": "en", "description": "New event added" }  // New element
+        ],
+        "capacity": 500,
+        "registrationRequired": true
+    }];
+
+    const enrichmentResult = await ctx.memory.semantic.enrich('demo:array:multi-event', enrichmentData, {
+        taskContext: ctx,
+        entities: {
+            "titleAndDescription[].title": "event"
+        }
+    });
+
+    ctx.logger.info(`   Enrichment result: ${enrichmentResult.addedFields?.length || 0} new fields added`);
+    ctx.logger.info(`   Added fields: ${enrichmentResult.addedFields?.join(', ') || 'none'}`);
+    ctx.logger.info(`   Confidence: ${enrichmentResult.confidence?.toFixed(3) || 'unknown'}`);
+
+    // Cleanup
+    await ctx.memory.semantic.delete('demo:array:multi-event');
+    ctx.logger.info(`\n🧹 Array demo cleanup completed!\n`);
 }

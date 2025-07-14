@@ -4,6 +4,7 @@ export class EntityFieldParser {
     /**
      * Extract entity fields from value object using explicit entities configuration
      * Supports new syntax: 'type:threshold' (e.g., 'person:0.7', 'location:0.65')
+     * NEW: Supports array expansion syntax: 'titleAndDescription[].title' 
      */
     static parseEntityFields<T>(
         value: T,
@@ -17,22 +18,127 @@ export class EntityFieldParser {
 
         // Process explicit entity specifications
         for (const [fieldName, entityTypeSpec] of Object.entries(entitySpec)) {
-            const fieldValue = this.getFieldValue(value, fieldName);
+            // NEW: Check if field path contains [] syntax
+            if (fieldName.includes('[]')) {
+                const expandedFields = this.expandArrayFieldPath(value, fieldName, entityTypeSpec);
+                entityFields.push(...expandedFields);
+            } else {
+                // Direct field access for non-array fields only (simple object navigation)
+                const fieldValue = this.getSimpleNestedValue(value, fieldName);
 
+                if (fieldValue && typeof fieldValue === 'string') {
+                    // Parse entity type and optional threshold from 'type:threshold' syntax
+                    const { entityType, threshold } = this.parseEntityTypeSpec(entityTypeSpec);
+
+                    entityFields.push({
+                        fieldName,
+                        entityType,
+                        value: fieldValue,
+                        threshold
+                    });
+                }
+            }
+        }
+
+        return entityFields;
+    }
+
+    /**
+     * NEW: Expand array field path to multiple explicit paths
+     * "titleAndDescription[].title" → ["titleAndDescription[0].title", "titleAndDescription[1].title", ...]
+     * Supports nested arrays: "sessions[].speakers[].name"
+     */
+    private static expandArrayFieldPath<T>(
+        value: T,
+        fieldPath: string,
+        entityTypeSpec: string
+    ): ParsedEntityField[] {
+        const expandedFields: ParsedEntityField[] = [];
+        const { entityType, threshold } = this.parseEntityTypeSpec(entityTypeSpec);
+
+        // Handle simple case first
+        if (!fieldPath.includes('[]')) {
+            const fieldValue = this.getSimpleNestedValue(value, fieldPath);
             if (fieldValue && typeof fieldValue === 'string') {
-                // Parse entity type and optional threshold from 'type:threshold' syntax
-                const { entityType, threshold } = this.parseEntityTypeSpec(entityTypeSpec);
-
-                entityFields.push({
-                    fieldName,
+                expandedFields.push({
+                    fieldName: fieldPath,
                     entityType,
                     value: fieldValue,
                     threshold
                 });
             }
+            return expandedFields;
         }
 
-        return entityFields;
+        // Find the first array pattern
+        const arrayMatch = fieldPath.match(/^(.+?)\[\](.*)$/);
+        if (!arrayMatch) {
+            return expandedFields;
+        }
+
+        const [, arrayPath, remainingPath] = arrayMatch;
+
+        // Get the array from the object
+        const arrayValue = this.getSimpleNestedValue(value, arrayPath);
+
+        if (!Array.isArray(arrayValue)) {
+            return expandedFields;
+        }
+
+        // Expand to explicit indices
+        for (let i = 0; i < arrayValue.length; i++) {
+            const expandedPath = `${arrayPath}[${i}]${remainingPath}`;
+
+            // If there are more arrays in the remaining path, recurse
+            if (remainingPath.includes('[]')) {
+                const nestedFields = this.expandArrayFieldPath(value, expandedPath, entityTypeSpec);
+                expandedFields.push(...nestedFields);
+            } else {
+                // This is the final expansion
+                const fieldValue = this.getSimpleNestedValue(value, expandedPath);
+                if (fieldValue && typeof fieldValue === 'string') {
+                    expandedFields.push({
+                        fieldName: expandedPath,
+                        entityType,
+                        value: fieldValue,
+                        threshold
+                    });
+                }
+            }
+        }
+
+        return expandedFields;
+    }
+
+    /**
+     * NEW: Detect array shrinkage for cleanup
+     */
+    static detectArrayShrinkage<T>(
+        currentValue: T,
+        previousFieldPaths: string[],
+        entitySpec: EntityFieldSpec
+    ): string[] {
+        const orphanedPaths: string[] = [];
+
+        for (const [fieldPattern, entityTypeSpec] of Object.entries(entitySpec)) {
+            if (fieldPattern.includes('[]')) {
+                // Find current expanded paths
+                const currentExpandedFields = this.expandArrayFieldPath(currentValue, fieldPattern, entityTypeSpec);
+                const currentPaths = currentExpandedFields.map(f => f.fieldName);
+
+                // Find orphaned paths from previous
+                const arrayPathRegex = new RegExp(
+                    '^' + fieldPattern.replace('[]', '\\[\\d+\\]').replace(/\./g, '\\.') + '$'
+                );
+                const previousArrayPaths = previousFieldPaths.filter(p =>
+                    arrayPathRegex.test(p)
+                );
+
+                orphanedPaths.push(...previousArrayPaths.filter(p => !currentPaths.includes(p)));
+            }
+        }
+
+        return orphanedPaths;
     }
 
     /**
@@ -63,73 +169,42 @@ export class EntityFieldParser {
     }
 
     /**
-     * Get field value from object, supporting nested paths with automatic array traversal
-     * Examples:
-     * - "venue.name" → looks for obj.venue.name
-     * - "titleAndDescription.title" → looks for obj.titleAndDescription[*].title (automatic array search)
-     * - "sessions.speakers.name" → handles arrays at any level
-     */
-    private static getFieldValue(obj: any, fieldPath: string): any {
-        return this.getFieldValueRecursive(obj, fieldPath.split('.'), 0);
-    }
+ * Simple nested value getter - supports basic object navigation and explicit array indexing
+ * Examples: "venue.name" → obj.venue.name, "speakers[0].name" → obj.speakers[0].name
+ */
+    private static getSimpleNestedValue(obj: any, fieldPath: string): any {
+        const pathParts = fieldPath.split('.');
+        let current = obj;
 
-    /**
-     * Recursive helper for getFieldValue that handles arrays naturally
-     */
-    private static getFieldValueRecursive(obj: any, pathParts: string[], partIndex: number): any {
-        // Base case: we've processed all path parts
-        if (partIndex >= pathParts.length) {
-            return obj;
-        }
+        for (const part of pathParts) {
+            if (!current || typeof current !== 'object') {
+                return undefined;
+            }
 
-        // Invalid current object
-        if (!obj || typeof obj !== 'object') {
-            return undefined;
-        }
+            // Handle explicit array indexing like "speakers[0]"
+            const arrayMatch = part.match(/^(.+?)\[(\d+)\]$/);
+            if (arrayMatch) {
+                const [, arrayName, indexStr] = arrayMatch;
+                const index = parseInt(indexStr, 10);
 
-        const currentPart = pathParts[partIndex];
-        const remainingParts = pathParts.slice(partIndex + 1);
-
-        // Case 1: Direct property access (standard object navigation)
-        if (currentPart in obj) {
-            const value = obj[currentPart];
-
-            // If there are more parts to traverse
-            if (remainingParts.length > 0) {
-                // If the value is an array, search within array elements
-                if (Array.isArray(value)) {
-                    return this.searchInArray(value, remainingParts);
+                if (!(arrayName in current) || !Array.isArray(current[arrayName])) {
+                    return undefined;
                 }
-                // Otherwise continue normal traversal
-                return this.getFieldValueRecursive(value, pathParts, partIndex + 1);
-            }
 
-            // No more parts, return the value
-            return value;
-        }
-
-        // Case 2: Current object is an array - search within array elements
-        if (Array.isArray(obj)) {
-            return this.searchInArray(obj, pathParts.slice(partIndex));
-        }
-
-        // Case 3: Property doesn't exist
-        return undefined;
-    }
-
-    /**
-     * Search for a field path within an array of objects
-     * Returns the first matching string value found
-     */
-    private static searchInArray(array: any[], remainingPath: string[]): any {
-        for (const item of array) {
-            const result = this.getFieldValueRecursive(item, remainingPath, 0);
-            if (result !== undefined && typeof result === 'string') {
-                return result; // Return first string match found
+                current = current[arrayName][index];
+            } else {
+                // Regular object property access
+                if (!(part in current)) {
+                    return undefined;
+                }
+                current = current[part];
             }
         }
-        return undefined;
+
+        return current;
     }
+
+
 
     /**
      * Set field value in object, supporting nested paths

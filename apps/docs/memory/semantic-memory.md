@@ -628,14 +628,22 @@ The entity alignment system now supports **natural array traversal**, allowing y
 
 #### Overview
 
+You can use intuitive syntax to work with arrays and nested objects:
 
-You can now use natural, intuitive syntax:
 ```typescript
-// ✅ Now: Natural array traversal
+// ✅ Recommended: Array expansion (matches all array elements)
 entities: {
-  "titleAndDescription.title": "event",        // Automatically searches array elements
-  "eventOccurences.date": "date",              // Finds first matching element
-  "venue.name": "location"                     // Still works for nested objects
+  "titleAndDescription[].title": "event",      // Creates alignments for all titles
+  "eventOccurences[].date": "date",            // Creates alignments for all dates
+  "speakers[].name": "person",                 // Creates alignments for all speakers
+  "venue.name": "location"                     // Works for nested objects
+}
+
+// ✅ For non-array nested objects
+entities: {
+  "venue.name": "location",                    // Works for nested objects
+  "user.profile.name": "person",               // Standard object navigation
+  "metadata.category": "category"              // Nested object fields
 }
 ```
 
@@ -645,7 +653,8 @@ entities: {
 // Store complex event data with nested arrays
 await ctx.memory.semantic.set('conference-2024', {
   titleAndDescription: [
-    { title: "AI Summit 2024", description: "Annual AI conference", language: "en" }
+    { title: "AI Summit 2024", description: "Annual AI conference", language: "en" },
+    { title: "Tech Conference Extraordinaire", description: "Alternative title", language: "en" }
   ],
   venue: {
     name: "Convention Center",
@@ -662,32 +671,32 @@ await ctx.memory.semantic.set('conference-2024', {
 }, {
   tags: ['conference', 'ai'],
   entities: {
-    // ✅ Natural array syntax - automatically finds within arrays
-    "titleAndDescription.title": "event:0.8",       // Finds "AI Summit 2024"
-    "eventOccurences.date": "date",                  // Finds "2024-01-15" (first occurrence)
-    "speakers.name": "person:0.75",                  // Finds "Dr. Alice Johnson" (first speaker)
-    "speakers.affiliation": "organization:0.8",     // Finds "MIT" (first speaker's affiliation)
+    // ✅ Array expansion - creates entity alignment for each element
+    "titleAndDescription[].title": "event:0.8",       // Aligns both "AI Summit 2024" and "Tech Conference Extraordinaire"
+    "eventOccurences[].date": "date",                  // Aligns both "2024-01-15" and "2024-01-16"
+    "speakers[].name": "person:0.75",                  // Aligns both "Dr. Alice Johnson" and "Prof. Bob Wilson"
+    "speakers[].affiliation": "organization:0.8",     // Aligns both "MIT" and "Stanford"
     
     // ✅ Still works for nested objects
-    "venue.name": "location:0.65"                   // Finds "Convention Center"
+    "venue.name": "location:0.65"                     // Aligns "Convention Center"
   }
 });
 ```
 
-#### Array Traversal Behavior
+#### Array Expansion Syntax
 
-| Syntax | Behavior | Example Result |
-|--------|----------|----------------|
-| `titleAndDescription.title` | Searches array elements for `.title` | Returns first string match found |
-| `speakers.name` | Searches array elements for `.name` | Returns first speaker's name |
-| `eventOccurences.date` | Searches array elements for `.date` | Returns first event date |
-| `venue.name` | Standard object navigation | Returns venue name (unchanged) |
+| Syntax | Behavior | Use Case | Example Result |
+|--------|----------|----------|----------------|
+| `titleAndDescription[].title` | Expands to **all** array elements | Entity alignment | Creates alignments for all titles |
+| `speakers[].name` | Expands to **all** speaker names | Complete entity tracking | Creates alignments for all speakers |
+| `sessions[].speakers[].name` | Expands **nested** arrays | Multi-level tracking | Creates alignments for all speakers in all sessions |
+| `venue.name` | Standard object navigation | Non-array fields | Direct property access |
 
 #### Advanced Array Scenarios
 
 ##### Multiple Nested Arrays
 ```typescript
-// Handle deeply nested arrays naturally
+// Handle deeply nested arrays with expansion
 const conferenceData = {
   sessions: [
     {
@@ -708,9 +717,9 @@ const conferenceData = {
 
 await ctx.memory.semantic.set('multi-session-event', conferenceData, {
   entities: {
-    "sessions.title": "topic",                    // Finds "Session 1" (first session)
-    "sessions.presenters.name": "person",         // Finds "Speaker A" (first presenter of first session)
-    "sessions.presenters.company": "organization" // Finds "Corp X" (first presenter's company)
+    "sessions[].title": "topic",                      // Aligns "Session 1" and "Session 2"
+    "sessions[].presenters[].name": "person",         // Aligns all presenter names
+    "sessions[].presenters[].company": "organization" // Aligns all presenter companies
   }
 });
 ```
@@ -729,68 +738,85 @@ const mixedData = {
 
 await ctx.memory.semantic.set('mixed-structure', mixedData, {
   entities: {
-    "event.details.speakers.name": "person",    // object.object.array.field
-    "event.details.venue.name": "location"      // object.object.object.field
+    "event.details.speakers[].name": "person",    // object.object.array[].field
+    "event.details.venue.name": "location"       // object.object.object.field
   }
 });
 ```
 
-#### How It Works
+#### How Array Expansion Works
 
-1. **Object Navigation**: Standard dot notation works as before (`venue.name`)
-2. **Array Detection**: When an array is encountered, the system searches within each element
-3. **Field Matching**: Returns the first element that contains the requested field
-4. **String Priority**: For entity alignment, only string values are considered
-5. **Recursive Search**: Supports arbitrary nesting depth
+1. **Expansion Phase**: `titleAndDescription[].title` gets expanded to:
+   - `titleAndDescription[0].title` 
+   - `titleAndDescription[1].title`
+   - `titleAndDescription[2].title` (etc.)
 
-#### Filter Queries with Arrays
+2. **Entity Alignment**: Each expanded path gets its own entity alignment:
+   - `titleAndDescription[0].title` → Entity alignment for "AI Summit 2024"
+   - `titleAndDescription[1].title` → Entity alignment for "Tech Conference Extraordinaire"
 
-Natural array support also works with filter queries:
+3. **Cross-Product Recognition**: During recognition, all candidate array elements are compared against all existing array elements for comprehensive matching.
+
+#### Filter Queries with Array Expansion
+
+Array expansion also works with filter queries:
 
 ```typescript
-// Search using natural array syntax
+// Search using array expansion syntax
 const results = await ctx.memory.semantic.getMany({
   filters: [
-    'titleAndDescription.title contains "AI"',    // Searches within array elements
-    'speakers.name ~ "John"',                     // Entity-aware search within arrays
-    'eventOccurences.date >= "2024-01-01"'       // Date filtering within arrays
+    'titleAndDescription[].title contains "AI"',    // Searches all title elements
+    'speakers[].name ~ "John"',                     // Entity-aware search across all speakers
+    'eventOccurences[].date >= "2024-01-01"'       // Date filtering across all occurrences
   ]
 });
 ```
 
-#### Migration from Explicit Indexing
+#### Array Expansion Usage
 
-If you have existing code using explicit array indexing, it will continue to work, but you can now simplify it:
+Use array expansion syntax to create entity alignments for all elements in arrays:
 
 ```typescript
-// ✅ Before (still works)
+// ✅ Array expansion - creates alignments for all elements
 entities: {
-  "titleAndDescription[0].title": "event"
+  "titleAndDescription[].title": "event",       // All titles
+  "speakers[].name": "person",                  // All speakers
+  "sessions[].speakers[].name": "person"        // All speakers in all sessions
 }
 
-// ✅ After (recommended)
+// ✅ Standard object navigation - for non-array fields
 entities: {
-  "titleAndDescription.title": "event"        // Simpler and more maintainable
+  "venue.name": "location",                     // Direct property access
+  "metadata.category": "category"               // Nested object fields
 }
 ```
 
 #### Edge Cases and Behavior
 
-- **Empty Arrays**: Return `undefined` (no error thrown)
-- **Mixed Types**: Searches only object elements, ignores primitives
-- **Multiple Matches**: Always returns the **first** matching element
+- **Empty Arrays**: Return no expanded paths (no error thrown)
+- **Mixed Types**: Processes only object elements, ignores primitives
+- **Deep Nesting**: Supports unlimited nesting depth (`a[].b[].c[].d...`)
 - **Non-String Fields**: For entity alignment, only string values are processed
-- **Deep Nesting**: Supports unlimited nesting depth (`a.b.c.d.e...`)
+- **Performance**: Each array element creates a separate entity alignment
 
 #### Best Practices
 
-1. **Prefer Natural Syntax**: Use `titleAndDescription.title` over `titleAndDescription[0].title`
-2. **Consistent Data Structure**: Ensure array elements have consistent schema
-3. **First Element Strategy**: Design your data so the most important element is first
-4. **Fallback Handling**: Handle cases where arrays might be empty
-5. **Entity Type Consistency**: Use consistent entity types across similar data structures
+1. **Use Array Expansion for Arrays**: Use `[]` syntax when you need entity alignment for all array elements
+2. **Use Standard Navigation for Objects**: Use dot notation for nested object property access
+3. **Consistent Data Structure**: Ensure array elements have consistent schema for best results
+4. **Entity Type Consistency**: Use consistent entity types across similar data structures
+5. **Performance Consideration**: Array expansion creates more entity alignments, so use thoughtfully for large arrays
 
-### Advanced Entity Alignment
+#### Array Traversal Behavior
+
+| Syntax | Behavior | Example Result |
+|--------|----------|----------------|
+| `titleAndDescription[].title` | Expands to all array elements | Creates individual alignments for each title |
+| `speakers[].name` | Expands to all array elements | Creates individual alignments for each speaker name |
+| `eventOccurences[].date` | Expands to all array elements | Creates individual alignments for each event date |
+| `venue.name` | Standard object navigation | Returns venue name (unchanged) |
+
+#### Advanced Entity Alignment
 
 #### Custom Similarity Thresholds
 

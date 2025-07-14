@@ -155,7 +155,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             WHERE key = ${key} AND tenant_id = ${tenantId}
         `;
 
-        if (result.length === 0) {
+        if (!result || result.length === 0) {
             return undefined;
         }
 
@@ -770,6 +770,12 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     ): Promise<Set<string>> {
         const matchedKeys = new Set<string>();
 
+        // NEW: Handle array patterns
+        const isArrayPattern = fieldPath.includes('[]');
+        const sqlFieldPattern = isArrayPattern ?
+            fieldPath.replace('[]', '[%]') :
+            fieldPath;
+
         if (operator === 'ENTITY_FUZZY') {
             // Multi-strategy fuzzy search for better venue name matching
 
@@ -781,11 +787,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             `;
 
             for (const entity of exactEntities) {
-                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                    SELECT DISTINCT memory_key
-                    FROM entity_alignment
-                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                `;
+                const alignedMemories = isArrayPattern ?
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                    ` :
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                    `;
                 alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
             }
 
@@ -797,11 +809,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             `;
 
             for (const entity of aliasEntities) {
-                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                    SELECT DISTINCT memory_key
-                    FROM entity_alignment
-                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                `;
+                const alignedMemories = isArrayPattern ?
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                    ` :
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                    `;
                 alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
             }
 
@@ -817,11 +835,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
                 // Check if normalized search matches canonical name or aliases
                 if (this.areTextsSimilar(normalizedSearch, normalizedCanonical)) {
-                    const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                    `;
+                    const alignedMemories = isArrayPattern ?
+                        await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                            SELECT DISTINCT memory_key
+                            FROM entity_alignment
+                            WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                        ` :
+                        await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                            SELECT DISTINCT memory_key
+                            FROM entity_alignment
+                            WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                        `;
                     alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
                 }
 
@@ -829,11 +853,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 for (const alias of entity.aliases) {
                     const normalizedAlias = this.normalizeForSearch(alias);
                     if (this.areTextsSimilar(normalizedSearch, normalizedAlias)) {
-                        const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                            SELECT DISTINCT memory_key
-                            FROM entity_alignment
-                            WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                        `;
+                        const alignedMemories = isArrayPattern ?
+                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                                SELECT DISTINCT memory_key
+                                FROM entity_alignment
+                                WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                            ` :
+                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                                SELECT DISTINCT memory_key
+                                FROM entity_alignment
+                                WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                            `;
                         alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
                         break; // Avoid duplicates
                     }
@@ -867,11 +897,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                     const matchingEntities = similarEntities.filter(e => e.similarity > threshold);
 
                     for (const entity of matchingEntities) {
-                        const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                            SELECT DISTINCT memory_key
-                            FROM entity_alignment
-                            WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                        `;
+                        const alignedMemories = isArrayPattern ?
+                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                                SELECT DISTINCT memory_key
+                                FROM entity_alignment
+                                WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                            ` :
+                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                                SELECT DISTINCT memory_key
+                                FROM entity_alignment
+                                WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                            `;
                         alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
                     }
                 } catch (error) {
@@ -889,11 +925,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
             // Find memory records aligned to these entities
             for (const entity of exactEntities) {
-                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                    SELECT DISTINCT memory_key
-                    FROM entity_alignment
-                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                `;
+                const alignedMemories = isArrayPattern ?
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                    ` :
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                    `;
 
                 alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
             }
@@ -908,11 +950,17 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
             // Find memory records aligned to these entities
             for (const entity of aliasEntities) {
-                const alignedMemories = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                    SELECT DISTINCT memory_key
-                    FROM entity_alignment
-                    WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                `;
+                const alignedMemories = isArrayPattern ?
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
+                    ` :
+                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                        SELECT DISTINCT memory_key
+                        FROM entity_alignment
+                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
+                    `;
 
                 alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
             }

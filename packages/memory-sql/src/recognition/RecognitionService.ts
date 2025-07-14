@@ -206,77 +206,233 @@ export class RecognitionService {
 
         // For each entity field, find aligned entities
         for (const [fieldPath, entityType] of Object.entries(entities)) {
-            const fieldValue = this.getNestedValue(candidateObj, fieldPath);
-            if (!fieldValue) continue;
-
-            // Debug: First check if we have any entity alignments at all
-            console.log('DEBUG: Checking entity alignments...');
-            const allAlignments = await this.prisma.entityAlignment.findMany({
-                where: { tenantId },
-                take: 5,
-                include: {
-                    entity: true
-                }
-            });
-            console.log('DEBUG: Found alignments:', allAlignments.length);
-
-            // Debug: Check if we have any entities of this type
-            const entitiesOfType = await this.prisma.entityStore.findMany({
-                where: {
+            if (fieldPath.includes('[]')) {
+                // NEW: Handle array patterns with cross-product comparison
+                const arrayMatches = await this.findMatchesByArrayPattern<T>(
+                    candidateObj,
+                    fieldPath,
+                    entityType,
                     tenantId,
-                    entityType
-                },
-                take: 5
-            });
-            console.log(`DEBUG: Found entities of type '${entityType}':`, entitiesOfType.length);
+                    limit
+                );
+                matches.push(...arrayMatches);
+            } else {
+                // Original logic for non-array fields
+                const fieldValue = this.getNestedValue(candidateObj, fieldPath);
+                if (!fieldValue) continue;
 
-            // Use Prisma ORM approach instead of raw SQL for now
-            const alignments = await this.prisma.entityAlignment.findMany({
-                where: {
-                    tenantId,
-                    entity: {
-                        entityType,
-                        OR: [
-                            { canonicalName: { equals: fieldValue, mode: 'insensitive' } },
-                            { aliases: { has: fieldValue } }
-                        ]
+                // Debug: First check if we have any entity alignments at all
+                console.log('DEBUG: Checking entity alignments...');
+                const allAlignments = await this.prisma.entityAlignment.findMany({
+                    where: { tenantId },
+                    take: 5,
+                    include: {
+                        entity: true
                     }
-                },
-                include: {
-                    entity: true
-                },
-                take: limit
-            });
+                });
+                console.log('DEBUG: Found alignments:', allAlignments?.length || 0);
 
-            console.log(`DEBUG: Found ${alignments.length} alignments for field '${fieldPath}' = '${fieldValue}'`);
+                // Debug: Check if we have any entities of this type
+                const entitiesOfType = await this.prisma.entityStore.findMany({
+                    where: {
+                        tenantId,
+                        entityType
+                    },
+                    take: 5
+                });
+                console.log(`DEBUG: Found entities of type '${entityType}':`, entitiesOfType.length);
 
-            // Get memory entries for these alignments
-            for (const alignment of alignments) {
-                try {
-                    const memoryEntry = await this.prisma.agentMemoryStore.findUnique({
-                        where: {
-                            tenantId_key: {
-                                tenantId,
-                                key: alignment.memoryKey
-                            }
+                // Use Prisma ORM approach instead of raw SQL for now
+                const alignments = await this.prisma.entityAlignment.findMany({
+                    where: {
+                        tenantId,
+                        entity: {
+                            entityType,
+                            OR: [
+                                { canonicalName: { equals: fieldValue, mode: 'insensitive' } },
+                                { aliases: { has: fieldValue } }
+                            ]
                         }
-                    });
+                    },
+                    include: {
+                        entity: true
+                    },
+                    take: limit
+                });
 
-                    if (memoryEntry) {
-                        const data = typeof memoryEntry.value === 'string' ?
-                            JSON.parse(memoryEntry.value) : memoryEntry.value;
-                        matches.push({
-                            key: memoryEntry.key,
-                            data: data as T
+                console.log(`DEBUG: Found ${alignments?.length || 0} alignments for field '${fieldPath}' = '${fieldValue}'`);
+
+                // Get memory entries for these alignments
+                for (const alignment of alignments || []) {
+                    try {
+                        const memoryEntry = await this.prisma.agentMemoryStore.findUnique({
+                            where: {
+                                tenantId_key: {
+                                    tenantId,
+                                    key: alignment.memoryKey
+                                }
+                            }
                         });
+
+                        if (memoryEntry) {
+                            const data = typeof memoryEntry.value === 'string' ?
+                                JSON.parse(memoryEntry.value) : memoryEntry.value;
+                            matches.push({
+                                key: memoryEntry.key,
+                                data: data as T
+                            });
+                        }
+                    } catch (error) {
+                        console.warn(`Failed to parse memory data for key ${alignment.memoryKey}:`, error);
                     }
-                } catch (error) {
-                    console.warn(`Failed to parse memory data for key ${alignment.memoryKey}:`, error);
                 }
             }
         }
 
         return matches;
+    }
+
+    /**
+     * NEW: Find matches for array patterns using cross-product comparison
+     */
+    private async findMatchesByArrayPattern<T>(
+        candidateData: any,
+        fieldPattern: string, // "titleAndDescription[].title"
+        entityType: string,
+        tenantId: string,
+        limit: number
+    ): Promise<Array<{ key: string; data: T }>> {
+        const matches: Array<{ key: string; data: T }> = [];
+
+        // Extract all values from candidate array
+        const candidateValues = this.extractAllArrayValues(candidateData, fieldPattern);
+        if (candidateValues.length === 0) return matches;
+
+        // Find all alignments matching the pattern
+        const alignments = await this.findAlignmentsByPattern(fieldPattern, entityType, tenantId);
+
+        // Cross-product comparison
+        for (const candidateValue of candidateValues) {
+            for (const alignment of alignments) {
+                try {
+                    const similarity = await this.calculateEntitySimilarity(
+                        candidateValue,
+                        alignment.entity.canonicalName,
+                        entityType
+                    );
+
+                    if (similarity > 0.6) { // threshold for recognition
+                        const memoryEntry = await this.prisma.agentMemoryStore.findUnique({
+                            where: {
+                                tenantId_key: {
+                                    tenantId,
+                                    key: alignment.memoryKey
+                                }
+                            }
+                        });
+
+                        if (memoryEntry) {
+                            const data = typeof memoryEntry.value === 'string' ?
+                                JSON.parse(memoryEntry.value) : memoryEntry.value;
+                            matches.push({
+                                key: memoryEntry.key,
+                                data: data as T
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.warn(`Failed to calculate similarity for ${candidateValue}:`, error);
+                }
+            }
+        }
+
+        return matches.slice(0, limit);
+    }
+
+    /**
+     * NEW: Extract all values from array using pattern
+     */
+    private extractAllArrayValues(obj: any, fieldPattern: string): string[] {
+        const values: string[] = [];
+
+        // Parse the pattern: "titleAndDescription[].title"
+        const arrayMatch = fieldPattern.match(/^(.+?)\[\](.*)$/);
+        if (!arrayMatch) return values;
+
+        const [, arrayPath, remainingPath] = arrayMatch;
+        const arrayValue = this.getNestedValue(obj, arrayPath);
+
+        if (Array.isArray(arrayValue)) {
+            for (const item of arrayValue) {
+                const value = remainingPath ? this.getNestedValue(item, remainingPath.substring(1)) : item;
+                if (value && typeof value === 'string') {
+                    values.push(value);
+                }
+            }
+        }
+
+        return values;
+    }
+
+    /**
+     * NEW: Find alignments by pattern
+     */
+    private async findAlignmentsByPattern(
+        fieldPattern: string,
+        entityType: string,
+        tenantId: string
+    ): Promise<Array<{ memoryKey: string; entity: { canonicalName: string; aliases: string[] } }>> {
+        // Convert pattern to SQL LIKE pattern
+        const sqlPattern = fieldPattern.replace('[]', '[%]');
+
+        const alignments = await this.prisma.$queryRaw<Array<{
+            memory_key: string;
+            canonical_name: string;
+            aliases: string[];
+        }>>`
+            SELECT DISTINCT ea.memory_key, es.canonical_name, es.aliases
+            FROM entity_alignment ea
+            JOIN entity_store es ON ea.entity_id = es.id
+            WHERE ea.tenant_id = ${tenantId}
+            AND es.entity_type = ${entityType}
+            AND ea.field_path LIKE ${sqlPattern.replace('%', '%')}
+        `;
+
+        return alignments.map(a => ({
+            memoryKey: a.memory_key,
+            entity: {
+                canonicalName: a.canonical_name,
+                aliases: a.aliases
+            }
+        }));
+    }
+
+    /**
+     * NEW: Calculate entity similarity for recognition
+     */
+    private async calculateEntitySimilarity(
+        value1: string,
+        value2: string,
+        entityType: string
+    ): Promise<number> {
+        // Simple text similarity for now
+        const normalized1 = value1.toLowerCase().trim();
+        const normalized2 = value2.toLowerCase().trim();
+
+        if (normalized1 === normalized2) return 1.0;
+
+        // Check if one contains the other
+        if (normalized1.includes(normalized2) || normalized2.includes(normalized1)) {
+            return 0.8;
+        }
+
+        // Calculate word overlap
+        const words1 = normalized1.split(/\s+/);
+        const words2 = normalized2.split(/\s+/);
+        const intersection = words1.filter(w => words2.includes(w));
+        const union = [...new Set([...words1, ...words2])];
+
+        return intersection.length / union.length;
     }
 
     /**
