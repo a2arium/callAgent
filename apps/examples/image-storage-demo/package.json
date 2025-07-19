@@ -1,0 +1,20 @@
+{
+  "name": "image-storage-demo",
+  "version": "1.0.0",
+  "description": "Demonstrates blob storage for images and files in CallAgent",
+  "type": "module",
+  "main": "dist/AgentModule.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@callagent/core": "workspace:*",
+    "@callagent/memory-sql": "workspace:*",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.8.3"
+  }
+}

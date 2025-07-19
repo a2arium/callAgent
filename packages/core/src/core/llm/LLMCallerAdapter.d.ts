@@ -14,7 +14,7 @@ export declare class LLMCallerAdapter implements ILLMCaller {
     /**
      * Make a non-streaming LLM call
      */
-    call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>>;
+    call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]>;
     /**
      * Make a streaming LLM call
      */

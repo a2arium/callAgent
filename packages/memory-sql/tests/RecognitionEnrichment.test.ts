@@ -168,7 +168,9 @@ describe('MemorySQLAdapter - Recognition and Enrichment', () => {
                 value: { speaker: 'John Smith', venue: 'Main Hall' },
                 tags: [],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             }]);
 
             // Mock entity alignment results

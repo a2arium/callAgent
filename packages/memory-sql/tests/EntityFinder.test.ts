@@ -39,7 +39,7 @@ describe('EntityFinder', () => {
 
         it('should find alias matches when exact match fails', async () => {
             // Setup: Mock no exact match, then alias match
-            (prismaMock.entityStore.findMany as jest.Mock)
+            (prismaMock.entityStore.findMany as any)
                 .mockResolvedValueOnce([]) // No exact match
                 .mockResolvedValueOnce([   // Alias match
                     { id: 'entity-2' }

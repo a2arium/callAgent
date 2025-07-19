@@ -98,5 +98,6 @@ if (sqlBackend && typeof sqlBackend.queryByKeyPattern === 'function') {
 
 ## See Also
 - [Memory Usage Example](../examples/memory-usage/) - Comprehensive demonstration including pattern matching
+- [Binary Data Storage](./memory/binary-data-storage.md) - Store images, files, and other binary content
 - [Monorepo Overview](./monorepo-overview.md)
 - [Full Memory System Guide](./docs/memory-system.md) 

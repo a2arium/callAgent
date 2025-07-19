@@ -102,7 +102,9 @@ describe('MemorySQLAdapter', () => {
                 value: value,
                 tags,
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             });
 
             await adapter.set(key, value, { tags });
@@ -150,7 +152,9 @@ describe('MemorySQLAdapter', () => {
                 value: { venue: 'Main Hall', speaker: 'Dr. Smith' },
                 tags: [],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             });
 
             await adapterWithEmbedding.set('event-1',
@@ -171,7 +175,9 @@ describe('MemorySQLAdapter', () => {
                 value: { venue: 'Main Hall' },
                 tags: [],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             });
 
             // The adapter without embedding function should just store normally, not throw

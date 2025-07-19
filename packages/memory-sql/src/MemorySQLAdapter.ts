@@ -6,6 +6,7 @@ import { EntityAlignmentService } from './EntityAlignmentService.js';
 import { addAlignedProxies } from './AlignedValueProxy.js';
 import { FilterParser } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
+import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
 
 // Define system tenant constants locally for this adapter
 const SYSTEM_TENANT = '__system__';
@@ -40,6 +41,83 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         }
     }
 
+    /**
+     * Processes value to detect and handle binary data automatically
+     * Returns processed binary data or null if no binary data detected
+     */
+    private async processBinaryDataIfNeeded(value: any, options: MemorySetOptions = {}): Promise<any> {
+        // Check if the value contains a 'data' field that might be binary
+        if (value && typeof value === 'object' && value.data) {
+            const dataType = detectDataType(value.data);
+
+            if (dataType !== 'unknown') {
+                // Process the binary data
+                const processed = await processDataForStorage(value.data, {
+                    filename: value.filename,
+                    mimeType: value.mimeType,
+                    description: value.description,
+                    ...value.metadata
+                });
+
+                if (processed) {
+                    return {
+                        originalValue: value,
+                        processedData: processed,
+                        shouldUseBlob: processed.buffer.length > 1024 // Use BLOB for files >1KB
+                    };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Stores binary data using the appropriate storage method (JSON or BLOB)
+     */
+    private async storeBinaryData(key: string, processedBinary: any, options: MemorySetOptions): Promise<void> {
+        const tenantId = options.tenantId || this.defaultTenantId;
+        const { originalValue, processedData, shouldUseBlob } = processedBinary;
+
+        if (shouldUseBlob) {
+            // Store large binary data in BYTEA fields
+            await this.setBlob(key, processedData.buffer, processedData.metadata, {
+                tags: options.tags || [],
+                tenantId: tenantId
+            });
+        } else {
+            // Store small binary data as Base64 in JSON
+            const valueWithBase64 = {
+                ...originalValue,
+                data: processedData.buffer.toString('base64'),
+                encoding: 'base64',
+                metadata: processedData.metadata
+            };
+
+            await this.prisma.agentMemoryStore.upsert({
+                where: {
+                    tenantId_key: {
+                        tenantId: tenantId,
+                        key: key
+                    }
+                },
+                update: {
+                    value: valueWithBase64,
+                    tags: options.tags || [],
+                    updatedAt: new Date()
+                },
+                create: {
+                    tenantId: tenantId,
+                    key: key,
+                    value: valueWithBase64,
+                    tags: options.tags || [],
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                }
+            });
+        }
+    }
+
     async set(key: string, value: any, options: MemorySetOptions = {}): Promise<void> {
 
         const tenantId = options.tenantId || this.defaultTenantId;
@@ -63,30 +141,36 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     private async setRegular(key: string, value: any, options: MemorySetOptions): Promise<void> {
         const tenantId = options.tenantId || this.defaultTenantId;
 
-        // No entity alignment requested - store without embeddings
-        // Embeddings are only created for entity alignment purposes
+        // Check if the value contains binary data that needs processing
+        const processedBinary = await this.processBinaryDataIfNeeded(value, options);
 
-        await this.prisma.agentMemoryStore.upsert({
-            where: {
-                tenantId_key: {
+        if (processedBinary) {
+            // Store binary data using blob storage
+            await this.storeBinaryData(key, processedBinary, options);
+        } else {
+            // Regular JSON storage for non-binary data
+            await this.prisma.agentMemoryStore.upsert({
+                where: {
+                    tenantId_key: {
+                        tenantId: tenantId,
+                        key: key
+                    }
+                },
+                update: {
+                    value: value,
+                    tags: options.tags || [],
+                    updatedAt: new Date()
+                },
+                create: {
                     tenantId: tenantId,
-                    key: key
+                    key: key,
+                    value: value,
+                    tags: options.tags || [],
+                    createdAt: new Date(),
+                    updatedAt: new Date()
                 }
-            },
-            update: {
-                value: value,
-                tags: options.tags || [],
-                updatedAt: new Date()
-            },
-            create: {
-                tenantId: tenantId,
-                key: key,
-                value: value,
-                tags: options.tags || [],
-                createdAt: new Date(),
-                updatedAt: new Date()
-            }
-        });
+            });
+        }
     }
 
     private async setWithEntityAlignment(key: string, value: any, options: MemorySetOptions): Promise<void> {
@@ -96,40 +180,50 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
         const tenantId = options.tenantId || this.defaultTenantId;
 
-        // Parse entity fields from the value using static method
-        const entityFields = EntityFieldParser.parseEntityFields(value, options.entities);
+        // Check if the value contains binary data that needs processing
+        const processedBinary = await this.processBinaryDataIfNeeded(value, options);
 
-        // Perform entity alignment with tenant context
-        // This creates embeddings for individual entity fields only
-        const alignments = await this.entityService.alignEntityFields(key, entityFields, {
-            threshold: options.alignmentThreshold,
-            autoCreate: options.autoCreateEntities,
-            tenantId: tenantId
-        });
+        if (processedBinary) {
+            // Store binary data using blob storage (entity alignment not applied to binary data)
+            await this.storeBinaryData(key, processedBinary, options);
+        } else {
+            // Regular entity alignment flow for non-binary data
 
-        // Store the memory entry without content embedding
-        // Only entity fields get embeddings for alignment purposes
-        await this.prisma.agentMemoryStore.upsert({
-            where: {
-                tenantId_key: {
+            // Parse entity fields from the value using static method
+            const entityFields = EntityFieldParser.parseEntityFields(value, options.entities);
+
+            // Perform entity alignment with tenant context
+            // This creates embeddings for individual entity fields only
+            const alignments = await this.entityService.alignEntityFields(key, entityFields, {
+                threshold: options.alignmentThreshold,
+                autoCreate: options.autoCreateEntities,
+                tenantId: tenantId
+            });
+
+            // Store the memory entry without content embedding
+            // Only entity fields get embeddings for alignment purposes
+            await this.prisma.agentMemoryStore.upsert({
+                where: {
+                    tenantId_key: {
+                        tenantId: tenantId,
+                        key: key
+                    }
+                },
+                update: {
+                    value: value,
+                    tags: options.tags || [],
+                    updatedAt: new Date()
+                },
+                create: {
                     tenantId: tenantId,
-                    key: key
+                    key: key,
+                    value: value,
+                    tags: options.tags || [],
+                    createdAt: new Date(),
+                    updatedAt: new Date()
                 }
-            },
-            update: {
-                value: value,
-                tags: options.tags || [],
-                updatedAt: new Date()
-            },
-            create: {
-                tenantId: tenantId,
-                key: key,
-                value: value,
-                tags: options.tags || [],
-                createdAt: new Date(),
-                updatedAt: new Date()
-            }
-        });
+            });
+        }
     }
 
     async get(key: string, opts?: { backend?: string; tenantId?: string }): Promise<any> {
@@ -143,6 +237,25 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             }
         }
 
+        // First check if this key has blob data
+        const blobData = await this.getBlob(key, tenantId);
+        if (blobData) {
+            // Reconstruct the original object structure for blob data
+            return {
+                data: blobData.buffer,
+                filename: blobData.metadata.filename,
+                mimeType: blobData.metadata.mimeType,
+                description: blobData.metadata.description,
+                metadata: blobData.metadata,
+                // Include binary data information
+                size: blobData.buffer.length,
+                dataType: blobData.metadata.dataType || 'buffer',
+                originalUrl: blobData.metadata.originalUrl,
+                downloadedAt: blobData.metadata.downloadedAt
+            };
+        }
+
+        // Fall back to regular JSON storage
         const result = await this.prisma.$queryRaw<Array<{
             key: string;
             value: any;
@@ -161,6 +274,15 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
         const memory = result[0];
         let value = memory.value;
+
+        // Handle Base64 encoded data in JSON
+        if (value && typeof value === 'object' && value.encoding === 'base64' && value.data) {
+            // Convert Base64 back to Buffer for consistent interface
+            value = {
+                ...value,
+                data: Buffer.from(value.data, 'base64')
+            };
+        }
 
         // If entity service is available, add aligned proxies
         if (this.entityService) {
@@ -1216,5 +1338,199 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             ...enrichmentResult,
             saved: !dryRun
         };
+    }
+
+    // ========================================
+    // Blob Storage Methods
+    // ========================================
+
+    /**
+     * Store binary data (images, files, etc.) with metadata
+     * @param key The unique identifier for the blob entry
+     * @param buffer Binary data to store
+     * @param metadata Metadata about the blob (filename, mimeType, etc.)
+     * @param options Storage options (tags, tenantId, etc.)
+     */
+    async setBlob(key: string, buffer: Buffer, metadata: any = {}, options: MemorySetOptions = {}): Promise<void> {
+        const tenantId = options.tenantId || this.defaultTenantId;
+
+        // Prepare blob metadata with standard fields
+        const blobMetadata = {
+            size: buffer.length,
+            storedAt: new Date().toISOString(),
+            encoding: 'binary',
+            ...metadata
+        };
+
+        await this.prisma.agentMemoryStore.upsert({
+            where: {
+                tenantId_key: { tenantId, key }
+            },
+            update: {
+                value: { type: 'blob', message: 'Binary data stored in blobData field' },
+                blobData: buffer,
+                blobMetadata: blobMetadata,
+                tags: options.tags || [],
+                updatedAt: new Date()
+            },
+            create: {
+                tenantId,
+                key,
+                value: { type: 'blob', message: 'Binary data stored in blobData field' },
+                blobData: buffer,
+                blobMetadata: blobMetadata,
+                tags: options.tags || []
+            }
+        });
+    }
+
+    /**
+     * Retrieve binary data and metadata
+     * @param key The unique identifier for the blob entry
+     * @param tenantId Optional tenant ID override
+     * @returns Object with buffer and metadata, or null if not found
+     */
+    async getBlob(key: string, tenantId?: string): Promise<{ buffer: Buffer; metadata: any } | null> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
+
+        const result = await this.prisma.agentMemoryStore.findUnique({
+            where: {
+                tenantId_key: {
+                    tenantId: resolvedTenantId,
+                    key
+                }
+            },
+            select: {
+                blobData: true,
+                blobMetadata: true
+            }
+        });
+
+        if (!result?.blobData) {
+            return null;
+        }
+
+        return {
+            buffer: Buffer.from(result.blobData),
+            metadata: result.blobMetadata as any
+        };
+    }
+
+    /**
+     * Check if a key has blob data
+     * @param key The unique identifier to check
+     * @param tenantId Optional tenant ID override
+     * @returns true if blob data exists, false otherwise
+     */
+    async hasBlob(key: string, tenantId?: string): Promise<boolean> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
+
+        const result = await this.prisma.agentMemoryStore.findUnique({
+            where: {
+                tenantId_key: {
+                    tenantId: resolvedTenantId,
+                    key
+                }
+            },
+            select: {
+                blobData: true
+            }
+        });
+
+        return !!result?.blobData;
+    }
+
+    /**
+     * Remove blob data while keeping the regular value data
+     * @param key The unique identifier for the blob entry
+     * @param tenantId Optional tenant ID override
+     */
+    async deleteBlob(key: string, tenantId?: string): Promise<void> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
+
+        await this.prisma.agentMemoryStore.update({
+            where: {
+                tenantId_key: {
+                    tenantId: resolvedTenantId,
+                    key
+                }
+            },
+            data: {
+                blobData: undefined,
+                blobMetadata: undefined,
+                updatedAt: new Date()
+            }
+        });
+    }
+
+    /**
+     * Get blob metadata without the binary data (useful for listings)
+     * @param key The unique identifier for the blob entry
+     * @param tenantId Optional tenant ID override
+     * @returns Metadata object or null if not found
+     */
+    async getBlobMetadata(key: string, tenantId?: string): Promise<any | null> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
+
+        const result = await this.prisma.agentMemoryStore.findUnique({
+            where: {
+                tenantId_key: {
+                    tenantId: resolvedTenantId,
+                    key
+                }
+            },
+            select: {
+                blobMetadata: true
+            }
+        });
+
+        return result?.blobMetadata as any || null;
+    }
+
+    /**
+     * List all blob entries for a tenant (returns metadata only, not binary data)
+     * @param tenantId Optional tenant ID override
+     * @param options Query options (limit, tags, etc.)
+     * @returns Array of blob entries with metadata
+     */
+    async listBlobs(tenantId?: string, options: { limit?: number; tags?: string[] } = {}): Promise<Array<{
+        key: string;
+        metadata: any;
+        tags: string[];
+        createdAt: Date;
+        updatedAt: Date;
+    }>> {
+        const resolvedTenantId = tenantId || this.defaultTenantId;
+        const { limit = 100, tags } = options;
+
+        const whereClause: any = {
+            tenantId: resolvedTenantId,
+            blobData: { not: null }
+        };
+
+        if (tags && tags.length > 0) {
+            whereClause.tags = { hasSome: tags };
+        }
+
+        const results = await this.prisma.agentMemoryStore.findMany({
+            where: whereClause,
+            select: {
+                key: true,
+                blobMetadata: true,
+                tags: true,
+                createdAt: true,
+                updatedAt: true
+            },
+            take: limit,
+            orderBy: { updatedAt: 'desc' }
+        });
+
+        return results.map(result => ({
+            key: result.key,
+            metadata: result.blobMetadata as any,
+            tags: result.tags,
+            createdAt: result.createdAt,
+            updatedAt: result.updatedAt
+        }));
     }
 } 

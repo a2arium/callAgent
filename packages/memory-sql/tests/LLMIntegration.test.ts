@@ -67,7 +67,9 @@ describe('MemorySQLAdapter - LLM Integration', () => {
                 },
                 tags: ['event'],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             }]);
 
             // Mock entity alignment to return medium confidence alignments
@@ -99,7 +101,9 @@ describe('MemorySQLAdapter - LLM Integration', () => {
                 value: { title: 'Annual Conference', speaker: 'Jane Doe' },
                 tags: [],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             }]);
 
             prismaMock.$queryRaw.mockResolvedValue([]);
@@ -228,7 +232,9 @@ describe('MemorySQLAdapter - LLM Integration', () => {
                 value: { title: 'Similar Event' },
                 tags: [],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             }]);
 
             prismaMock.$queryRaw.mockResolvedValue([]);
@@ -287,7 +293,9 @@ describe('MemorySQLAdapter - LLM Integration', () => {
                 value: { title: 'Exact Match Event', speaker: 'John Smith' },
                 tags: [],
                 createdAt: new Date(),
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                blobData: null,
+                blobMetadata: null
             }]);
 
             prismaMock.$queryRaw.mockResolvedValue([]);
