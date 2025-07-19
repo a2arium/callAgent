@@ -6,13 +6,14 @@
   "main": "dist/AgentModule.js",
   "types": "dist/AgentModule.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && copyfiles agent.json dist",
     "dev": "tsc --watch"
   },
   "dependencies": {
     "@callagent/core": "workspace:*"
   },
   "devDependencies": {
+    "copyfiles": "^2.4.1",
     "typescript": "^5.4.5"
   }
 }

@@ -421,10 +421,32 @@ export async function runAgentWithStreaming(
     // Use agentLogger here (agentLogger.info goes to stdout, which is fine as agent logs will use debug)
     agentLogger.info(`Starting Agent Execution for Task ${taskCtx.task.id}`);
     try {
+        const handleAndCache = async () => {
+            const agentResult = await plugin.handleTask(taskCtx);
+
+            // Cache the result if caching is enabled (for both streaming and non-streaming)
+            if (agentResultCache) {
+                try {
+                    await agentResultCache.setCachedResult(
+                        plugin.manifest.name,
+                        input,
+                        agentResult,
+                        plugin.manifest.cache?.ttlSeconds || 300,
+                        plugin.manifest.cache?.excludePaths || [],
+                        finalTenantId
+                    );
+                    agentLogger.info(`Result cached for agent ${plugin.manifest.name} in ${options.isStreaming ? 'streaming' : 'non-streaming'} mode`);
+                } catch (error) {
+                    agentLogger.error('Failed to cache agent result', error);
+                }
+            }
+            return agentResult;
+        };
+
         // For streaming mode, we don't await completion
         if (options.isStreaming) {
             // We'll start the agent execution but not await its completion
-            plugin.handleTask(taskCtx).catch(error => {
+            handleAndCache().catch(error => {
                 // Let's log the raw error *first* to see what it is
                 console.error(">>> Raw error caught in streamingRunner:", error);
 
@@ -450,23 +472,7 @@ export async function runAgentWithStreaming(
         }
 
         // For non-streaming mode, await completion
-        const agentResult = await plugin.handleTask(taskCtx);
-
-        // Cache the result if caching is enabled (only for non-streaming mode)
-        if (agentResultCache && !options.isStreaming) {
-            try {
-                await agentResultCache.setCachedResult(
-                    plugin.manifest.name,
-                    input,
-                    agentResult,
-                    plugin.manifest.cache?.ttlSeconds || 300,
-                    plugin.manifest.cache?.excludePaths || [],
-                    finalTenantId
-                );
-            } catch (error) {
-                agentLogger.error('Failed to cache agent result', error);
-            }
-        }
+        await handleAndCache();
 
         // Get buffered results if available
         if (!options.isStreaming && (taskCtx as any).getBufferedResults) {
