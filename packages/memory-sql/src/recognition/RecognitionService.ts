@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { EntityAlignmentService } from '../EntityAlignmentService.js';
+import { EntityFinder } from './EntityFinder.js';
 import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { LLMDisambiguator } from './LLMDisambiguator.js';
 // Import types from the types package - these were defined in IMemory.ts
@@ -31,6 +32,7 @@ type RecognitionResult<T> = {
 export class RecognitionService {
     private confidenceScorer: ConfidenceScorer;
     private llmDisambiguator: LLMDisambiguator;
+    private entityFinder: EntityFinder;
 
     constructor(
         private prisma: PrismaClient,
@@ -38,6 +40,11 @@ export class RecognitionService {
     ) {
         this.confidenceScorer = new ConfidenceScorer(entityAlignmentService);
         this.llmDisambiguator = new LLMDisambiguator();
+        // Create EntityFinder instance with access to embedding function
+        this.entityFinder = new EntityFinder(
+            prisma,
+            (entityAlignmentService as any).embedFunction
+        );
     }
 
     /**
@@ -193,7 +200,7 @@ export class RecognitionService {
     }
 
     /**
-     * Find matches based on entity alignment
+     * Find matches based on entity alignment using the shared EntityFinder service
      */
     private async findMatchesByEntities<T>(
         candidateData: T,
@@ -201,13 +208,13 @@ export class RecognitionService {
         tenantId: string,
         limit: number
     ): Promise<Array<{ key: string; data: T }>> {
-        const matches: Array<{ key: string; data: T }> = [];
         const candidateObj = candidateData as any;
+        const allMatchingMemoryKeys = new Set<string>();
 
-        // For each entity field, find aligned entities
+        // For each entity field, find aligned entities using EntityFinder
         for (const [fieldPath, entityType] of Object.entries(entities)) {
             if (fieldPath.includes('[]')) {
-                // NEW: Handle array patterns with cross-product comparison
+                // Handle array patterns with cross-product comparison
                 const arrayMatches = await this.findMatchesByArrayPattern<T>(
                     candidateObj,
                     fieldPath,
@@ -215,13 +222,13 @@ export class RecognitionService {
                     tenantId,
                     limit
                 );
-                matches.push(...arrayMatches);
+                arrayMatches.forEach(match => allMatchingMemoryKeys.add(match.key));
             } else {
-                // Original logic for non-array fields
+                // Handle single field values using EntityFinder
                 const fieldValue = this.getNestedValue(candidateObj, fieldPath);
                 if (!fieldValue) continue;
 
-                // Debug: First check if we have any entity alignments at all
+                // Debug: Keep existing debug logging for comparison
                 console.log('DEBUG: Checking entity alignments...');
                 const allAlignments = await this.prisma.entityAlignment.findMany({
                     where: { tenantId },
@@ -242,54 +249,51 @@ export class RecognitionService {
                 });
                 console.log(`DEBUG: Found entities of type '${entityType}':`, entitiesOfType.length);
 
-                // Use Prisma ORM approach instead of raw SQL for now
-                const alignments = await this.prisma.entityAlignment.findMany({
-                    where: {
-                        tenantId,
-                        entity: {
-                            entityType,
-                            OR: [
-                                { canonicalName: { equals: fieldValue, mode: 'insensitive' } },
-                                { aliases: { has: fieldValue } }
-                            ]
-                        }
-                    },
-                    include: {
-                        entity: true
-                    },
-                    take: limit
-                });
+                // NEW: Use EntityFinder instead of limited Prisma query
+                const matchingEntityIds = await this.entityFinder.findMatchingEntityIds(
+                    fieldValue,
+                    entityType,
+                    tenantId
+                );
 
-                console.log(`DEBUG: Found ${alignments?.length || 0} alignments for field '${fieldPath}' = '${fieldValue}'`);
+                console.log(`DEBUG: Found ${matchingEntityIds.length} matching entities for field '${fieldPath}' = '${fieldValue}' using EntityFinder`);
 
-                // Get memory entries for these alignments
-                for (const alignment of alignments || []) {
-                    try {
-                        const memoryEntry = await this.prisma.agentMemoryStore.findUnique({
-                            where: {
-                                tenantId_key: {
-                                    tenantId,
-                                    key: alignment.memoryKey
-                                }
-                            }
-                        });
+                if (matchingEntityIds.length > 0) {
+                    // Find all memory entries aligned with these entities
+                    const alignments = await this.prisma.entityAlignment.findMany({
+                        where: {
+                            tenantId,
+                            entityId: { in: matchingEntityIds }
+                        },
+                        select: { memoryKey: true },
+                    });
 
-                        if (memoryEntry) {
-                            const data = typeof memoryEntry.value === 'string' ?
-                                JSON.parse(memoryEntry.value) : memoryEntry.value;
-                            matches.push({
-                                key: memoryEntry.key,
-                                data: data as T
-                            });
-                        }
-                    } catch (error) {
-                        console.warn(`Failed to parse memory data for key ${alignment.memoryKey}:`, error);
-                    }
+                    alignments.forEach(alignment => allMatchingMemoryKeys.add(alignment.memoryKey));
+                    console.log(`DEBUG: Found ${alignments.length} alignments for matching entities`);
                 }
             }
         }
 
-        return matches;
+        if (allMatchingMemoryKeys.size === 0) {
+            console.log('DEBUG: No matching memory keys found');
+            return [];
+        }
+
+        // Load the memory entries for the unique keys
+        const memoryEntries = await this.prisma.agentMemoryStore.findMany({
+            where: {
+                tenantId,
+                key: { in: Array.from(allMatchingMemoryKeys) }
+            },
+            take: limit
+        });
+
+        console.log(`DEBUG: Loaded ${memoryEntries.length} memory entries from ${allMatchingMemoryKeys.size} unique keys`);
+
+        return memoryEntries.map(entry => ({
+            key: entry.key,
+            data: (typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value) as T
+        }));
     }
 
     /**
@@ -311,39 +315,50 @@ export class RecognitionService {
         // Find all alignments matching the pattern
         const alignments = await this.findAlignmentsByPattern(fieldPattern, entityType, tenantId);
 
-        // Cross-product comparison
+        // Use EntityFinder for each candidate value
+        const matchingMemoryKeys = new Set<string>();
         for (const candidateValue of candidateValues) {
-            for (const alignment of alignments) {
-                try {
-                    const similarity = await this.calculateEntitySimilarity(
-                        candidateValue,
-                        alignment.entity.canonicalName,
-                        entityType
-                    );
+            try {
+                // Use EntityFinder to find matching entities for this candidate value
+                const matchingEntityIds = await this.entityFinder.findMatchingEntityIds(
+                    candidateValue,
+                    entityType,
+                    tenantId
+                );
 
-                    if (similarity > 0.6) { // threshold for recognition
-                        const memoryEntry = await this.prisma.agentMemoryStore.findUnique({
-                            where: {
-                                tenantId_key: {
-                                    tenantId,
-                                    key: alignment.memoryKey
-                                }
-                            }
-                        });
+                if (matchingEntityIds.length > 0) {
+                    // Find alignments for these entities that match the pattern
+                    const sqlPattern = fieldPattern.replace('[]', '[%]');
+                    const patternAlignments = await this.prisma.entityAlignment.findMany({
+                        where: {
+                            tenantId,
+                            entityId: { in: matchingEntityIds },
+                            fieldPath: { contains: sqlPattern.replace('%', '') } // Simple pattern match for now
+                        },
+                        select: { memoryKey: true }
+                    });
 
-                        if (memoryEntry) {
-                            const data = typeof memoryEntry.value === 'string' ?
-                                JSON.parse(memoryEntry.value) : memoryEntry.value;
-                            matches.push({
-                                key: memoryEntry.key,
-                                data: data as T
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.warn(`Failed to calculate similarity for ${candidateValue}:`, error);
+                    patternAlignments.forEach(alignment => matchingMemoryKeys.add(alignment.memoryKey));
                 }
+            } catch (error) {
+                console.warn(`Failed to find matches for array value ${candidateValue}:`, error);
             }
+        }
+
+        // Load memory entries for matching keys
+        if (matchingMemoryKeys.size > 0) {
+            const memoryEntries = await this.prisma.agentMemoryStore.findMany({
+                where: {
+                    tenantId,
+                    key: { in: Array.from(matchingMemoryKeys) }
+                },
+                take: limit
+            });
+
+            matches.push(...memoryEntries.map(entry => ({
+                key: entry.key,
+                data: (typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value) as T
+            })));
         }
 
         return matches.slice(0, limit);
@@ -407,33 +422,7 @@ export class RecognitionService {
         }));
     }
 
-    /**
-     * NEW: Calculate entity similarity for recognition
-     */
-    private async calculateEntitySimilarity(
-        value1: string,
-        value2: string,
-        entityType: string
-    ): Promise<number> {
-        // Simple text similarity for now
-        const normalized1 = value1.toLowerCase().trim();
-        const normalized2 = value2.toLowerCase().trim();
 
-        if (normalized1 === normalized2) return 1.0;
-
-        // Check if one contains the other
-        if (normalized1.includes(normalized2) || normalized2.includes(normalized1)) {
-            return 0.8;
-        }
-
-        // Calculate word overlap
-        const words1 = normalized1.split(/\s+/);
-        const words2 = normalized2.split(/\s+/);
-        const intersection = words1.filter(w => words2.includes(w));
-        const union = [...new Set([...words1, ...words2])];
-
-        return intersection.length / union.length;
-    }
 
     /**
      * Find matches based on tags
