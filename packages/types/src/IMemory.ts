@@ -56,6 +56,8 @@ export type EnrichmentResult<T> = {
     usedLLM: boolean;
     /** LLM explanation of enrichment decisions */
     explanation?: string;
+    /** Whether the enriched data was saved back to memory (false only when dryRun=true) */
+    saved: boolean;
 };
 
 /**
@@ -64,14 +66,16 @@ export type EnrichmentResult<T> = {
 export type EnrichmentOptions = {
     /** Task context containing LLM and tenant information (required for LLM operations) */
     taskContext?: any;
-    /** Zod schema defining the expected structure for LLM enrichment (required) */
-    schema: any;
+    /** Zod schema defining the expected structure for LLM enrichment (optional) */
+    schema?: any;
     /** Custom LLM prompt for enrichment guidance */
     customPrompt?: string;
     /** Specific fields to focus enrichment on */
     focusFields?: string[];
     /** Whether to force LLM usage for all conflicts (default: false) */
     forceLLMEnrichment?: boolean;
+    /** If true, only return enriched data without saving to memory (default: false) */
+    dryRun?: boolean;
 };
 
 /**

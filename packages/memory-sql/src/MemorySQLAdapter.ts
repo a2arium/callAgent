@@ -1162,26 +1162,59 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
     /**
      * Enrich a memory entry by consolidating it with additional data using LLM
+     * By default, the enriched data is automatically saved back to memory.
+     * Use dryRun: true to preview enrichment without saving.
      */
     async enrich<T>(key: string, additionalData: T[], options: any = {}): Promise<any> {
         if (!this.enrichmentService) {
             throw new Error('Enrichment service not available. Entity alignment with embedFunction required.');
         }
 
-        // Extract the taskContext from options  
-        const { taskContext, ...enrichmentOptions } = options;
+        // Extract the taskContext and dryRun from options  
+        const { taskContext, dryRun = false, ...enrichmentOptions } = options;
 
         if (!taskContext) {
             throw new Error('TaskContext is required for enrichment');
         }
 
-        // Get the existing data
+        // Get the existing data and its metadata
         const existingData = await this.get(key, { tenantId: taskContext.tenantId });
 
         if (!existingData) {
             throw new Error(`Memory entry with key "${key}" not found`);
         }
 
-        return await this.enrichmentService.enrich(key, existingData, additionalData, taskContext, enrichmentOptions);
+        // Get the original memory entry metadata (tags, etc.)
+        const originalMemoryEntry = await this.prisma.$queryRaw<Array<{
+            key: string;
+            value: any;
+            tags: string[];
+            created_at: Date;
+            updated_at: Date;
+        }>>`
+            SELECT key, value, tags, created_at, updated_at
+            FROM agent_memory_store 
+            WHERE key = ${key} AND tenant_id = ${taskContext.tenantId}
+        `;
+
+        const originalMetadata = originalMemoryEntry[0];
+
+        // Get enriched data from the enrichment service
+        const enrichmentResult = await this.enrichmentService.enrich(key, existingData, additionalData, taskContext, enrichmentOptions);
+
+        // If not a dry run, save the enriched data back to memory
+        if (!dryRun) {
+            await this.set(key, enrichmentResult.enrichedData, {
+                tenantId: taskContext.tenantId,
+                // Preserve existing tags from the original memory entry
+                tags: originalMetadata?.tags || []
+            });
+        }
+
+        // Return the enrichment result with saved flag
+        return {
+            ...enrichmentResult,
+            saved: !dryRun
+        };
     }
 } 

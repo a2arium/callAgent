@@ -1,6 +1,6 @@
 {
   "name": "callagent",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "AI Agents Framework with A2A Support",
   "type": "module",
   "main": "dist/index.js",

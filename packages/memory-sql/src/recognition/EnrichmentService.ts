@@ -67,14 +67,16 @@ export class EnrichmentService {
                 enrichedData: resolvedData,
                 changes,
                 usedLLM: true,
-                explanation: llmResult.explanation
+                explanation: llmResult.explanation,
+                saved: false // Will be overridden by MemorySQLAdapter
             };
         }
 
         return {
             enrichedData: resolvedData,
             changes,
-            usedLLM: false
+            usedLLM: false,
+            saved: false // Will be overridden by MemorySQLAdapter
         };
     }
 

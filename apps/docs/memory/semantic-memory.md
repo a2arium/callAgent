@@ -1974,10 +1974,10 @@ const docResult = await ctx.memory.semantic.recognize(
 
 ### Memory Enrichment
 
-The `enrich()` method consolidates data from multiple sources to enhance existing memories:
+The `enrich()` method consolidates data from multiple sources to enhance existing memories and **automatically saves the enriched data back to memory**:
 
 ```typescript
-// Basic enrichment
+// Basic enrichment - automatically saves enriched data
 const enrichmentResult = await ctx.memory.semantic.enrich(
   'conference-2024-key',  // Existing memory key
   [
@@ -1986,14 +1986,31 @@ const enrichmentResult = await ctx.memory.semantic.enrich(
     { category: 'technology', livestream: true }
   ],
   {
-    autoResolveConflicts: true,
     focusFields: ['venue', 'capacity', 'duration']
   }
 );
 
 console.log(enrichmentResult.enrichedData);   // Consolidated data
-console.log(enrichmentResult.addedFields);    // ['capacity', 'ticketPrice', 'category', 'livestream']
-console.log(enrichmentResult.confidence);     // 0.92
+console.log(enrichmentResult.saved);          // true (data was saved)
+console.log(enrichmentResult.changes);        // Array of changes made
+```
+
+#### Dry Run Mode
+
+If you want to preview enrichment without saving, use the `dryRun` option:
+
+```typescript
+// Preview enrichment without saving
+const preview = await ctx.memory.semantic.enrich(
+  'conference-2024-key',
+  [{ capacity: 500, livestream: true }],
+  {
+    dryRun: true  // Only preview, don't save
+  }
+);
+
+console.log(preview.enrichedData);  // Preview of enriched data
+console.log(preview.saved);         // false (not saved)
 ```
 
 #### Enrichment Options
@@ -2010,6 +2027,8 @@ type EnrichmentOptions = {
   schema?: any;
   /** Whether to force LLM usage for all conflicts (default: false) */
   forceLLMEnrichment?: boolean;
+  /** If true, only return enriched data without saving to memory (default: false) */
+  dryRun?: boolean;
 };
 ```
 
@@ -2066,12 +2085,10 @@ Data Conflicts → Resolution Process
 type EnrichmentResult<T> = {
   /** The enriched data with consolidated information */
   enrichedData: T;
-  /** List of fields that were added during enrichment */
-  addedFields: string[];
-  /** Confidence score for the enrichment quality */
-  confidence: number;
   /** Whether LLM was used for complex enrichment */
   usedLLM: boolean;
+  /** Whether the enriched data was saved back to memory (false only when dryRun=true) */
+  saved: boolean;
   /** Explanation of enrichment decisions */
   explanation?: string;
   /** Detailed change log */
@@ -2091,7 +2108,8 @@ type EnrichmentResult<T> = {
 2. **Conflict Resolution** - Automatically resolves simple conflicts or uses LLM for complex cases
 3. **Field Prioritization** - Focuses on specified fields if provided
 4. **Change Tracking** - Records all changes made during enrichment
-5. **Quality Assessment** - Provides confidence score for enrichment quality
+5. **Automatic Saving** - Saves enriched data back to memory (unless `dryRun: true`)
+6. **Metadata Preservation** - Preserves original tags and entity alignments
 
 #### Enrichment Examples
 
@@ -2158,7 +2176,7 @@ async function smartMemoryStorage(ctx: TaskContext, newData: any, entityConfig: 
   });
 
   if (recognition.isMatch && recognition.matchingKey) {
-    // If we found a match, enrich the existing memory
+    // If we found a match, enrich the existing memory (automatically saves)
     const enrichment = await ctx.memory.semantic.enrich(
       recognition.matchingKey,
       [newData],
@@ -2169,7 +2187,8 @@ async function smartMemoryStorage(ctx: TaskContext, newData: any, entityConfig: 
     );
 
     console.log(`Enhanced existing memory: ${recognition.matchingKey}`);
-    console.log(`Added fields: ${enrichment.addedFields.join(', ')}`);
+    console.log(`Changes made: ${enrichment.changes.length}`);
+    console.log(`Data saved: ${enrichment.saved}`);
     
     return {
       action: 'enriched',
