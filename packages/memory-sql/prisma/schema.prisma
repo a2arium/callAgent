@@ -120,3 +120,18 @@ model WorkingMemoryVariable {
     @@index([tenantId, agentId]) // Index for agent-scoped queries
     @@map("working_memory_variables")
 }
+
+model AgentResultCache {
+    id        String   @id @default(cuid())
+    tenantId  String   @map("tenant_id")
+    agentName String   @map("agent_name")
+    cacheKey  String   @map("cache_key")
+    result    Json
+    createdAt DateTime @default(now()) @map("created_at")
+    expiresAt DateTime @map("expires_at")
+
+    @@unique([tenantId, agentName, cacheKey])
+    @@index([tenantId, agentName])
+    @@index([expiresAt])
+    @@map("agent_result_cache")
+}

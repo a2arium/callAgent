@@ -1,5 +1,10 @@
 {
   "name": "hello-agent",
   "version": "0.1.0",
-  "description": "A simple greeting agent that says hello to users"
+  "description": "A simple greeting agent that says hello to users",
+  "cache": {
+    "enabled": true,
+    "ttlSeconds": 300,
+    "excludePaths": ["timestamp", "requestId"]
+  }
 }

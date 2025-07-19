@@ -18,6 +18,7 @@ import { createMemoryRegistry } from '../core/memory/createMemoryRegistry.js';
 import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
 import { globalA2AService } from '../core/orchestration/A2AService.js';
+import { AgentResultCache } from '../core/cache/index.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -200,6 +201,22 @@ export async function runAgentWithStreaming(
     const memoryRegistry = await createMemoryRegistry(finalTenantId, agentName);
     const semanticAdapter = memoryRegistry.semantic.backends[config.memory.semantic.default];
 
+    // Create cache service for agent result caching
+    let agentResultCache: AgentResultCache | null = null;
+    if (plugin.manifest.cache?.enabled) {
+        try {
+            const { PrismaClient } = await import('@prisma/client');
+            const prisma = new PrismaClient();
+            agentResultCache = new AgentResultCache(prisma);
+            agentLogger.debug('Agent result cache initialized', {
+                ttlSeconds: plugin.manifest.cache.ttlSeconds,
+                excludePaths: plugin.manifest.cache.excludePaths
+            });
+        } catch (error) {
+            agentLogger.error('Failed to initialize agent result cache, continuing without caching', error);
+        }
+    }
+
     // Create basic task context with resolved tenant information (excluding working memory methods)
     const partialCtx: PartialTaskContext = {
         tenantId: finalTenantId,
@@ -351,6 +368,55 @@ export async function runAgentWithStreaming(
     // Extend the context with streaming capabilities
     extendContextWithStreaming(taskCtx, options.isStreaming);
 
+    // --- Check Cache Before Agent Execution ---
+    if (agentResultCache) {
+        const cachedResult = await agentResultCache.getCachedResult(
+            plugin.manifest.name,
+            input,
+            plugin.manifest.cache?.excludePaths || [],
+            finalTenantId
+        );
+
+        if (cachedResult) {
+            agentLogger.info(`Cache hit - returning cached result for agent ${plugin.manifest.name}`);
+
+            if (options.isStreaming) {
+                // For streaming mode, replay cached result as stream events
+                try {
+                    // Emit cached result as final status
+                    await taskCtx.reply([{
+                        type: 'text',
+                        text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult)
+                    }]);
+                    taskCtx.complete(100, 'completed');
+                } catch (error) {
+                    agentLogger.error('Failed to replay cached result in streaming mode', error);
+                    await taskCtx.fail(error);
+                }
+            } else {
+                // For non-streaming mode, create a proper result structure for cached result
+                const results = {
+                    status: {
+                        state: 'completed' as const,
+                        timestamp: new Date().toISOString()
+                    },
+                    artifacts: [{
+                        id: 'cached-response',
+                        type: 'text' as const,
+                        title: 'Cached Response',
+                        parts: [{
+                            type: 'text' as const,
+                            text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult, null, 2)
+                        }]
+                    }]
+                };
+                outputResults(results, options);
+                logInfoMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
+            }
+            return;
+        }
+    }
+
     // --- Execute Agent ---
     // Use agentLogger here (agentLogger.info goes to stdout, which is fine as agent logs will use debug)
     agentLogger.info(`Starting Agent Execution for Task ${taskCtx.task.id}`);
@@ -384,7 +450,23 @@ export async function runAgentWithStreaming(
         }
 
         // For non-streaming mode, await completion
-        await plugin.handleTask(taskCtx);
+        const agentResult = await plugin.handleTask(taskCtx);
+
+        // Cache the result if caching is enabled (only for non-streaming mode)
+        if (agentResultCache && !options.isStreaming) {
+            try {
+                await agentResultCache.setCachedResult(
+                    plugin.manifest.name,
+                    input,
+                    agentResult,
+                    plugin.manifest.cache?.ttlSeconds || 300,
+                    plugin.manifest.cache?.excludePaths || [],
+                    finalTenantId
+                );
+            } catch (error) {
+                agentLogger.error('Failed to cache agent result', error);
+            }
+        }
 
         // Get buffered results if available
         if (!options.isStreaming && (taskCtx as any).getBufferedResults) {

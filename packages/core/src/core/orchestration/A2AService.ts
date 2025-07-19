@@ -13,6 +13,7 @@ import { extendContextWithMemory } from '../memory/types/working/context/working
 import { InteractiveTaskHandler } from './InteractiveTaskResult.js';
 import { logger } from '@callagent/utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
+import { AgentResultCache } from '../cache/index.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -21,9 +22,30 @@ const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
  * Handles local agent discovery, context transfer, and task execution
  */
 export class A2AService implements IA2AService {
+    private agentResultCache: AgentResultCache | null = null;
+
     constructor(
         private eventBus?: any // Future: for interactive communication
-    ) { }
+    ) {
+        // Initialize cache service
+        this.initializeCacheService().catch(error => {
+            a2aLogger.error('Failed to initialize A2A cache service', error);
+        });
+    }
+
+    /**
+     * Initialize cache service for A2A operations
+     */
+    private async initializeCacheService(): Promise<void> {
+        try {
+            const { PrismaClient } = await import('@prisma/client');
+            const prisma = new PrismaClient();
+            this.agentResultCache = new AgentResultCache(prisma);
+            a2aLogger.debug('A2A cache service initialized successfully');
+        } catch (error) {
+            a2aLogger.warn('A2A cache service initialization failed, continuing without caching', error);
+        }
+    }
 
     /**
      * Send task to another agent with context inheritance
@@ -400,7 +422,7 @@ export class A2AService implements IA2AService {
     }
 
     /**
-     * Execute target agent with error handling
+     * Execute target agent with error handling and caching
      */
     private async executeTargetAgent(
         targetPlugin: AgentPlugin,
@@ -408,6 +430,26 @@ export class A2AService implements IA2AService {
         operationId: string
     ): Promise<unknown> {
         try {
+            // Check cache if enabled for target agent
+            if (this.agentResultCache && targetPlugin.manifest.cache?.enabled) {
+                const cachedResult = await this.agentResultCache.getCachedResult(
+                    targetPlugin.manifest.name,
+                    targetCtx.task.input,
+                    targetPlugin.manifest.cache.excludePaths || [],
+                    targetCtx.tenantId
+                );
+
+                if (cachedResult) {
+                    a2aLogger.info('A2A cache hit', {
+                        operationId,
+                        targetAgent: targetPlugin.manifest.name,
+                        taskId: targetCtx.task.id
+                    });
+                    console.log(`⚡ ${targetPlugin.manifest.name} (cached result)\n`);
+                    return cachedResult;
+                }
+            }
+
             console.log(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
 
             a2aLogger.debug('Executing target agent', {
@@ -417,6 +459,25 @@ export class A2AService implements IA2AService {
             });
 
             const result = await targetPlugin.handleTask(targetCtx);
+
+            // Cache the result if caching is enabled
+            if (this.agentResultCache && targetPlugin.manifest.cache?.enabled) {
+                try {
+                    await this.agentResultCache.setCachedResult(
+                        targetPlugin.manifest.name,
+                        targetCtx.task.input,
+                        result,
+                        targetPlugin.manifest.cache.ttlSeconds || 300,
+                        targetPlugin.manifest.cache.excludePaths || [],
+                        targetCtx.tenantId
+                    );
+                } catch (cacheError) {
+                    a2aLogger.error('Failed to cache A2A result', cacheError, {
+                        operationId,
+                        targetAgent: targetPlugin.manifest.name
+                    });
+                }
+            }
 
             console.log(`✅ ${targetPlugin.manifest.name} completed\n`);
 

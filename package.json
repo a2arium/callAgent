@@ -32,6 +32,10 @@
     "run:csv-parser": "yarn run-agent apps/examples/data-processing/csv-parser/dist/AgentModule.js '{\"csvData\": \"name,age,city\\nJohn,25,NYC\\nJane,30,LA\"}'",
     "run:data-analyzer": "yarn run-agent apps/examples/business-logic/data-analyzer/dist/AgentModule.js '{\"csvData\": \"name,age,salary\\nJohn,25,50000\\nJane,30,60000\\nBob,35,70000\", \"analysisType\": \"statistics\"}'",
     "run:memory-recognition": "yarn run-agent apps/examples/memory-recognition/dist/agent.js '{}'",
+    "agent-cache": "yarn build && node packages/core/dist/runner/cacheCli.js",
+    "cache:cleanup": "yarn agent-cache cleanup",
+    "cache:stats": "yarn agent-cache stats",
+    "cache:clear": "yarn agent-cache clear",
     "clean": "find . -type d -name dist -exec rm -rf {} +"
   },
   "keywords": [

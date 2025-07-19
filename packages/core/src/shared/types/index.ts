@@ -44,6 +44,15 @@ export type AgentManifest = {
         /** Additional memory configuration */
         [key: string]: unknown;
     };
+    /** Agent result caching configuration */
+    cache?: {
+        /** Enable/disable caching for this agent (default: false) */
+        enabled?: boolean;
+        /** Cache TTL in seconds (default: 300 = 5 minutes) */
+        ttlSeconds?: number;
+        /** Paths to exclude from cache key (dot notation for nested objects) */
+        excludePaths?: string[];
+    };
     // Future: capabilities, endpoint, auth, plugins, tools, etc.
     [key: string]: unknown;
 }

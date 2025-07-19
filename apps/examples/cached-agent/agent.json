@@ -1,0 +1,13 @@
+{
+  "name": "cached-agent",
+  "version": "1.0.0",
+  "description": "Example agent demonstrating result caching functionality with TTL and path exclusions",
+  "cache": {
+    "enabled": true,
+    "ttlSeconds": 60,
+    "excludePaths": ["timestamp", "requestId", "user.sessionId"]
+  },
+  "memory": {
+    "profile": "basic"
+  }
+}

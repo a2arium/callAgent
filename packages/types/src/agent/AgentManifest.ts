@@ -47,6 +47,16 @@ export interface AgentManifest {
         };
     };
 
+    /** Agent result caching configuration */
+    cache?: {
+        /** Enable/disable caching for this agent (default: false) */
+        enabled?: boolean;
+        /** Cache TTL in seconds (default: 300 = 5 minutes) */
+        ttlSeconds?: number;
+        /** Paths to exclude from cache key (dot notation for nested objects) */
+        excludePaths?: string[];
+    };
+
     // Allow additional fields for future expansion
     [key: string]: unknown;
 }
