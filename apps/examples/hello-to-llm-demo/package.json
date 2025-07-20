@@ -1,5 +1,5 @@
 {
-  "name": "@callagent/hello-to-llm-demo",
+  "name": "@a2arium/hello-to-llm-demo",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -12,6 +12,6 @@
     "dev": "ts-node AgentModule.ts"
   },
   "dependencies": {
-    "@callagent/core": "0.1.0"
+    "@a2arium/callagent-core": "workspace:*"
   }
 }

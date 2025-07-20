@@ -1,5 +1,5 @@
 {
-  "name": "@callagent/test-semantic-search",
+  "name": "@a2arium/test-semantic-search",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "run": "node ../../../packages/core/dist/runner/runnerCli.js dist/agent.js"
   },
   "dependencies": {
-    "@callagent/core": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

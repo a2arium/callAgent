@@ -8,9 +8,9 @@
     "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {
-    "@callagent/core": "0.1.0",
-    "@callagent/types": "0.1.0",
-    "@callagent/utils": "0.1.0"
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-types": "workspace:*",
+    "@a2arium/callagent-utils": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.0.0",

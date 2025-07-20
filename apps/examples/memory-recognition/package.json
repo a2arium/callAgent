@@ -1,5 +1,5 @@
 {
-  "name": "@callagent/memory-recognition",
+  "name": "@a2arium/memory-recognition",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "run": "cd ../../../ && node packages/core/dist/runner/runnerCli.js apps/examples/memory-recognition/dist/agent.js"
   },
   "dependencies": {
-    "@callagent/core": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

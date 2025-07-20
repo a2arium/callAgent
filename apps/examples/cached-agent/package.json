@@ -10,7 +10,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@callagent/core": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*"
   },
   "devDependencies": {
     "copyfiles": "^2.4.1",

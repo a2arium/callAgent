@@ -1,5 +1,5 @@
 {
-  "name": "@callagent/memory-usage",
+  "name": "@a2arium/memory-usage",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,6 +12,6 @@
     "dev": "ts-node AgentModule.ts"
   },
   "dependencies": {
-    "@callagent/core": "0.1.0"
+    "@a2arium/callagent-core": "workspace:*"
   }
 }

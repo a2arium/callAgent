@@ -1,5 +1,5 @@
 {
-  "name": "@callagent/csv-parser-agent",
+  "name": "@a2arium/csv-parser-agent",
   "version": "1.0.0",
   "description": "CSV parsing agent in data-processing category",
   "type": "module",
@@ -9,7 +9,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@callagent/core": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

@@ -9,8 +9,8 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@callagent/core": "workspace:*",
-    "@callagent/memory-sql": "workspace:*",
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-memory-sql": "workspace:*",
     "uuid": "^10.0.0"
   },
   "devDependencies": {

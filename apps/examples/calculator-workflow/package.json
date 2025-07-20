@@ -8,8 +8,8 @@
     "test": "yarn build && yarn run-agent dist/CoordinatorAgent.js '{\"expression\": \"5 * 2 + 3 - 1\"}'"
   },
   "dependencies": {
-    "@callagent/core": "workspace:*",
-    "@callagent/utils": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-utils": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

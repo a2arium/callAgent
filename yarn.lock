@@ -2,6 +2,37 @@
 # yarn lockfile v1
 
 
+"@a2arium/callagent-core@workspace:*":
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/@a2arium/callagent-core/-/callagent-core-0.2.0.tgz#19e629919eb95e4e4bb43878122bd87bf4604294"
+  integrity sha512-dgM8C0oyWaR/dovug0LZxougkNjca7pRxsx6edWLoCWYjRq3AHKjuLOKGIQfHl8qHFGKuJiui16xbz4nCPMdVA==
+  dependencies:
+    "@a2arium/callagent-memory-sql" "0.2.0"
+    "@a2arium/callagent-types" "0.2.0"
+    "@a2arium/callagent-utils" "0.2.0"
+    "@prisma/client" "^6.7.0"
+    dotenv "^16.4.5"
+    uuid "^11.1.0"
+
+"@a2arium/callagent-memory-sql@workspace:*":
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/@a2arium/callagent-memory-sql/-/callagent-memory-sql-0.2.0.tgz#614e2b2dd655eec57e16260f2c053b292772279d"
+  integrity sha512-Il8hm77ZyINjvvSO5vjn8w+CkAOji6/02iNUHZL2+IPndAThzrvU2Sh6DGrKBBiosu4JB06lBWFOJl65bRPi2A==
+  dependencies:
+    "@a2arium/callagent-types" "0.2.0"
+    "@a2arium/callagent-utils" "0.2.0"
+    "@prisma/client" "^6.7.0"
+
+"@a2arium/callagent-types@workspace:*":
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/@a2arium/callagent-types/-/callagent-types-0.2.0.tgz#7ba4ef139910a619e3548b3a9c73180a184b9769"
+  integrity sha512-bRuYgkINuSZQ00+1mkDMcth5t8yZLED5VUidTH1Jzmiajw10mabf2yYKCBih+f1K38cqsrr6P8nJHdY/yOSRNg==
+
+"@a2arium/callagent-utils@workspace:*":
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/@a2arium/callagent-utils/-/callagent-utils-0.2.0.tgz#16853e5941ee1028fc8e36642b1dd481c413b402"
+  integrity sha512-LTKIGSb9tRRRzh+a5P1S3X1cCNcruFULmpIpHhBscn2ej1PkU5UxYIUWMUwnBT8V8Ygsr4Y/EtmKKYX+Y6iHvw==
+
 "@ampproject/remapping@^2.2.0":
   version "2.3.0"
   resolved "https://registry.yarnpkg.com/@ampproject/remapping/-/remapping-2.3.0.tgz#ed441b6fa600072520ce18b43d2c8cc8caecc7f4"
@@ -2621,7 +2652,7 @@ type-fest@^4.39.1:
   resolved "https://registry.yarnpkg.com/type-fest/-/type-fest-4.40.0.tgz#62bc09caccb99a75e1ad6b9b4653e8805e5e1eee"
   integrity sha512-ABHZ2/tS2JkvH1PEjxFDTUWC8dB5OsIGZP4IFLhR293GqT5Y5qB1WwL2kMPYhQW9DVgVD8Hd7I8gjwPIf5GFkw==
 
-typescript@^5.0.0, typescript@^5.8.3:
+typescript@^5.0.0, typescript@^5.4.5, typescript@^5.8.3:
   version "5.8.3"
   resolved "https://registry.yarnpkg.com/typescript/-/typescript-5.8.3.tgz#92f8a3e5e3cf497356f4178c34cd65a7f5e8440e"
   integrity sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ==
@@ -2648,6 +2679,11 @@ util-deprecate@~1.0.1:
   version "1.0.2"
   resolved "https://registry.yarnpkg.com/util-deprecate/-/util-deprecate-1.0.2.tgz#450d4dc9fa70de732762fbd2d4a28981419a0ccf"
   integrity sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==
+
+uuid@^10.0.0:
+  version "10.0.0"
+  resolved "https://registry.yarnpkg.com/uuid/-/uuid-10.0.0.tgz#5a95aa454e6e002725c79055fd42aaba30ca6294"
+  integrity sha512-8XkAphELsDnEGrDxUOHB3RGvXz6TeuYSGEZBOjtTtPm2lwhGBjLgOzLHB63IUWfBpNucQjND6d3AOudO+H3RWQ==
 
 uuid@^11.1.0:
   version "11.1.0"
