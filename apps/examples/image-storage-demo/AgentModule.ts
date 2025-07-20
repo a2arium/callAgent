@@ -1,4 +1,4 @@
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/callagent-core';
 
 export default createAgent({
     manifest: {
@@ -57,7 +57,7 @@ export default createAgent({
 
                     await ctx.reply(`📋 Found ${storedImages.length} images in memory:\\n`);
 
-                    storedImages.forEach((image, index) => {
+                    storedImages.forEach((image: { key: string; value: unknown }, index: number) => {
                         const metadata = image.value as any;
                         ctx.reply(`${index + 1}. **${metadata.filename}** (${metadata.mimeType}) - ${metadata.description}\\n`);
                     });
@@ -91,7 +91,7 @@ export default createAgent({
                     return {
                         status: 'success',
                         count: images.length,
-                        images: images.map(img => ({
+                        images: images.map((img: { key: string; value: unknown }) => ({
                             key: img.key,
                             filename: (img.value as any).filename,
                             mimeType: (img.value as any).mimeType,

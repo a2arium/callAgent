@@ -8,8 +8,8 @@
  * showing how agents can maintain cognitive state across interactions.
  */
 
-import { createAgent } from '@callagent/core';
-import { logger } from '@callagent/utils';
+import { createAgent } from '@a2arium/callagent-core';
+import { logger } from '@a2arium/callagent-utils';
 
 const demoLogger = logger.createLogger({ prefix: 'WorkingMemoryAgent' });
 

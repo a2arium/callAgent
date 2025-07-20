@@ -1,4 +1,4 @@
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/callagent-core';
 
 // Test data - variations of the same event/venue
 const testEvents = [
@@ -177,7 +177,7 @@ export default createAgent({
                         field: test.field,
                         type: test.type,
                         matches: searchResults.length,
-                        keys: searchResults.map(r => r.key)
+                        keys: searchResults.map((r: { key: string; value: unknown }) => r.key)
                     });
 
                 } catch (error) {

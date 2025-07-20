@@ -1,4 +1,4 @@
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/callagent-core';
 
 export default createAgent({
     manifest: {

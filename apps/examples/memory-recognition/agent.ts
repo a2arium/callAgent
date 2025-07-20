@@ -1,4 +1,4 @@
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/callagent-core';
 import { completeEventSchema } from './eventSchema.js';
 
 // LLM configuration for memory recognition and enrichment

@@ -1,14 +1,14 @@
-import { loadConfig } from '@callagent/core/dist/config/index.js';
-import { PluginManager } from '@callagent/core';
-import { logger } from '@callagent/utils';
-import { extendContextWithStreaming } from '@callagent/core/dist/core/context/StreamingContext.js';
-import { createMemoryRegistry } from '@callagent/core/dist/core/memory/createMemoryRegistry.js';
-import { extendContextWithMemory } from '@callagent/core/dist/core/memory/types/working/context/workingMemoryContext.js';
-import { resolveTenantId } from '@callagent/core/dist/core/plugin/tenantResolver.js';
-import { globalA2AService } from '@callagent/core/dist/core/orchestration/A2AService.js';
-import { AgentError } from '@callagent/core/dist/utils/errors.js';
-import type { TaskContext, TaskInput, MessagePart } from '@callagent/core/dist/shared/types/index.js';
-import type { TaskStatus } from '@callagent/core/dist/shared/types/StreamingEvents.js';
+import { loadConfig } from '@a2arium/callagent-core/dist/config/index.js';
+import { PluginManager } from '@a2arium/callagent-core';
+import { logger } from '@a2arium/callagent-utils';
+import { extendContextWithStreaming } from '@a2arium/callagent-core/dist/core/context/StreamingContext.js';
+import { createMemoryRegistry } from '@a2arium/callagent-core/dist/core/memory/createMemoryRegistry.js';
+import { extendContextWithMemory } from '@a2arium/callagent-core/dist/core/memory/types/working/context/workingMemoryContext.js';
+import { resolveTenantId } from '@a2arium/callagent-core/dist/core/plugin/tenantResolver.js';
+import { globalA2AService } from '@a2arium/callagent-core/dist/core/orchestration/A2AService.js';
+import { AgentError } from '@a2arium/callagent-core/dist/utils/errors.js';
+import type { TaskContext, TaskInput, MessagePart } from '@a2arium/callagent-core/dist/shared/types/index.js';
+import type { TaskStatus } from '@a2arium/callagent-core/dist/shared/types/StreamingEvents.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 

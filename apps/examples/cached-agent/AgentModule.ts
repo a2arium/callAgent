@@ -1,5 +1,5 @@
-import { createAgent } from '@callagent/core';
-import type { TaskContext } from '@callagent/core';
+import { createAgent } from '@a2arium/callagent-core';
+import type { TaskContext } from '@a2arium/callagent-core';
 
 interface CacheExampleInput {
     operation: string;
