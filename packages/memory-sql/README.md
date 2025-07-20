@@ -1,95 +1,108 @@
-# @callagent/memory-sql
+# @a2arium/callagent-memory-sql
 
-SQL-backed memory adapter for the CallAgent framework with entity alignment capabilities.
-
-## Features
-
-- ✅ **Persistent Memory Storage**: PostgreSQL-backed memory with JSON support
-- ✅ **Entity Alignment**: Automatic entity recognition and alignment using vector embeddings
-- ✅ **Advanced Filtering**: Complex JSON path queries with multiple operators
-- ✅ **Vector Similarity**: pgvector integration for semantic entity matching
-- ✅ **Transaction Support**: Atomic operations for data consistency
-- ✅ **TypeScript**: Full type safety with proxy objects for aligned entities
+SQL-backed memory persistence adapter for the CallAgent framework using Prisma.
 
 ## Installation
 
 ```bash
-yarn add @callagent/memory-sql
+npm install @a2arium/callagent-memory-sql
 ```
 
-## Quick Start
-
-```typescript
-import { MemorySQLAdapter } from '@callagent/memory-sql';
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
-const adapter = new MemorySQLAdapter(prisma);
-
-// Basic usage
-await adapter.set('user-1', { name: 'John', age: 30 });
-const user = await adapter.get('user-1');
-```
-
-## Entity Alignment
-
-```typescript
-// With entity alignment
-const embedFunction = async (text: string) => {
-  // Your embedding implementation
-  return [0.1, 0.2, 0.3, ...]; // 1536-dimensional vector
-};
-
-const adapter = new MemorySQLAdapter(prisma, embedFunction);
-
-await adapter.set('event-1', 
-  { venue: 'Main Hall', speaker: 'Dr. Smith' },
-  { entities: { venue: 'location', speaker: 'person' } }
-);
-
-const event = await adapter.get('event-1');
-console.log(event.venue.toString()); // "Main Auditorium" (aligned)
-console.log(event.venue._original);  // "Main Hall"
-console.log(event.venue._wasAligned); // true
-```
-
-## Testing
-
-This package uses Jest with ESM configuration. For detailed testing setup and patterns, see:
-
-**📋 [Jest ESM Testing Rules](../../.cursor/rules/jest-esm-testing.md)**
-
-### Running Tests
+or with yarn:
 
 ```bash
-# Run all tests
-yarn test
-
-# Run with coverage
-yarn test:coverage
-
-# Run in watch mode
-yarn test:watch
+yarn add @a2arium/callagent-memory-sql
 ```
 
-## Documentation
+## Setup
 
-- [Memory System Documentation](../../apps/docs/memory-system.md)
-- [Entity Alignment Guide](../../apps/docs/memory-system.md#entity-alignment)
-- [Advanced Filtering](../../apps/docs/memory-system.md#advanced-filtering)
-
-## Database Setup
+1. **Database Setup**: Configure your database connection in your environment:
 
 ```bash
-# Setup database and vectors
-yarn db:setup
-
-# Reset database
-yarn db:reset
-
-# Development migrations
-yarn db:dev
+DATABASE_URL="postgresql://username:password@localhost:5432/callagent"
 ```
+
+2. **Run Migrations**: Set up the database schema:
+
+```bash
+npx prisma migrate deploy
+```
+
+3. **Generate Client**: Generate the Prisma client:
+
+```bash
+npx prisma generate
+```
+
+## Usage
+
+### Working Memory
+
+```typescript
+import { WorkingMemoryRegistry } from '@a2arium/callagent-memory-sql';
+
+const workingMemory = new WorkingMemoryRegistry({
+  tenantId: 'user-123'
+});
+
+// Store data
+await workingMemory.store('key', 'value');
+
+// Retrieve data
+const record = await workingMemory.recall('key');
+console.log(record?.content); // 'value'
+```
+
+### Episodic Memory
+
+```typescript
+import { EpisodicMemoryRegistry } from '@a2arium/callagent-memory-sql';
+
+const episodicMemory = new EpisodicMemoryRegistry({
+  tenantId: 'user-123'
+});
+
+// Store an event
+await episodicMemory.store({
+  event: 'user_login',
+  timestamp: new Date(),
+  context: { userId: '123', ip: '192.168.1.1' }
+});
+```
+
+### Semantic Memory
+
+```typescript
+import { SemanticMemoryRegistry } from '@a2arium/callagent-memory-sql';
+
+const semanticMemory = new SemanticMemoryRegistry({
+  tenantId: 'user-123'
+});
+
+// Store knowledge
+await semanticMemory.store({
+  concept: 'AI Agent',
+  definition: 'An autonomous software entity...',
+  embeddings: vectorData
+});
+
+// Semantic search
+const results = await semanticMemory.search('artificial intelligence');
+```
+
+## Features
+
+- **Multi-tenant Support**: Isolated data per tenant/user
+- **Vector Storage**: Semantic search with embeddings
+- **ACID Transactions**: Reliable data persistence
+- **Binary Data Support**: Store files, images, and binary content
+- **Optimized Queries**: Performance-tuned database operations
+
+## Database Support
+
+- PostgreSQL (recommended)
+- MySQL
+- SQLite (for development)
 
 ## License
 

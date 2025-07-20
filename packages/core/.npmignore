@@ -1,0 +1,37 @@
+# Source files
+src/
+tests/
+__tests__/
+__mocks__/
+
+# Config files
+tsconfig.json
+jest.config.*
+*.config.js
+*.config.ts
+*.config.mjs
+
+# Development files
+.env*
+.vscode/
+.cursor/
+
+# Build artifacts
+*.tsbuildinfo
+coverage/
+
+# Documentation (keep README.md)
+docs/
+*.md
+!README.md
+
+# Logs and temp files
+logs/
+*.log
+tmp/
+temp/
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db 

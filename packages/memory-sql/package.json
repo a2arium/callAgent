@@ -1,6 +1,6 @@
 {
-  "name": "@callagent/memory-sql",
-  "version": "0.1.0",
+  "name": "@a2arium/callagent-memory-sql",
+  "version": "0.2.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -16,7 +16,12 @@
     "db:setup-vectors": "tsx scripts/setup-vectors.ts",
     "db:setup": "yarn db:migrate && yarn db:generate && yarn db:setup-vectors",
     "db:reset": "prisma migrate reset && yarn db:setup",
-    "db:dev": "prisma migrate dev && yarn db:setup-vectors"
+    "db:dev": "prisma migrate dev && yarn db:setup-vectors",
+    "npm:publish": "npm publish --access public",
+    "npm:publish:dry-run": "npm publish --access public --dry-run",
+    "version:patch": "npm version patch",
+    "version:minor": "npm version minor",
+    "version:major": "npm version major"
   },
   "publishConfig": {
     "access": "public"
@@ -31,8 +36,8 @@
     "callagent"
   ],
   "dependencies": {
-    "@callagent/types": "0.1.0",
-    "@callagent/utils": "0.1.0",
+    "@a2arium/callagent-types": "0.2.0",
+    "@a2arium/callagent-utils": "0.2.0",
     "@prisma/client": "^6.7.0"
   },
   "devDependencies": {
@@ -45,6 +50,10 @@
   },
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
   }
 }

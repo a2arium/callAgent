@@ -36,7 +36,13 @@
     "cache:cleanup": "yarn agent-cache cleanup",
     "cache:stats": "yarn agent-cache stats",
     "cache:clear": "yarn agent-cache clear",
-    "clean": "find . -type d -name dist -exec rm -rf {} +"
+    "clean": "find . -type d -name dist -exec rm -rf {} +",
+    "publish:prepare": "yarn build && yarn test",
+    "publish:packages": "yarn workspaces run npm:publish",
+    "publish:dry-run": "yarn workspaces run npm:publish:dry-run",
+    "version:patch": "yarn workspaces run version:patch",
+    "version:minor": "yarn workspaces run version:minor",
+    "version:major": "yarn workspaces run version:major"
   },
   "keywords": [
     "ai",
