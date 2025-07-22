@@ -8,36 +8,115 @@ import { FilterParser } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
 import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
 
+/**
+ * Configuration options for MemorySQLAdapter
+ */
+export interface MemorySQLConfig {
+  /** Pre-configured Prisma client instance */
+  prismaClient?: PrismaClient;
+  /** Database connection URL (used if prismaClient not provided) */
+  databaseUrl?: string;
+  /** Default tenant ID for operations */
+  defaultTenantId?: string;
+  /** Embedding function for vector operations */
+  embedFunction?: (text: string) => Promise<number[]>;
+  /** Default query result limit */
+  defaultQueryLimit?: number;
+}
+
 // Define system tenant constants locally for this adapter
 const SYSTEM_TENANT = '__system__';
 const DEFAULT_ENTITY_ALIGNMENT_THRESHOLD = 0.7;
 const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT;
 
 export class MemorySQLAdapter implements SemanticMemoryBackend {
+    private prisma: PrismaClient;
+    private ownsPrisma: boolean = false;
+    private embedFunction?: (text: string) => Promise<number[]>;
     private entityService?: EntityAlignmentService;
     private recognitionService?: RecognitionService;
     private enrichmentService?: EnrichmentService;
     private defaultTenantId: string;
     private readonly DEFAULT_QUERY_LIMIT = 1000;
 
+    // Support both old and new constructor signatures for backward compatibility
     constructor(
-        private prisma: PrismaClient,
-        private embedFunction?: (text: string) => Promise<number[]>,
-        private options: { defaultTenantId?: string; defaultQueryLimit?: number } = {}
+        configOrPrisma?: MemorySQLConfig | PrismaClient,
+        embedFunction?: (text: string) => Promise<number[]>,
+        options: { defaultTenantId?: string; defaultQueryLimit?: number } = {}
     ) {
-        this.defaultTenantId = options.defaultTenantId || 'default';
-        if (options.defaultQueryLimit) {
-            (this as any).DEFAULT_QUERY_LIMIT = options.defaultQueryLimit;
+        let config: MemorySQLConfig;
+
+        // Detect old vs new constructor signature
+        if (configOrPrisma && typeof (configOrPrisma as any).$connect === 'function') {
+            // Old signature: constructor(prisma, embedFunction?, options?)
+            config = {
+                prismaClient: configOrPrisma as PrismaClient,
+                embedFunction,
+                defaultTenantId: options.defaultTenantId,
+                defaultQueryLimit: options.defaultQueryLimit
+            };
+        } else {
+            // New signature: constructor(config?)
+            config = configOrPrisma as MemorySQLConfig || {};
+        }
+        // Initialize Prisma client
+        if (config.prismaClient) {
+            // Use provided client
+            this.prisma = config.prismaClient;
+            this.ownsPrisma = false;
+        } else if (config.databaseUrl) {
+            // Create client with provided URL
+            this.prisma = new PrismaClient({
+                datasources: { db: { url: config.databaseUrl } }
+            });
+            this.ownsPrisma = true;
+        } else if (process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL) {
+            // Fallback to environment variables
+            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+            this.prisma = new PrismaClient({
+                datasources: { db: { url: dbUrl } }
+            });
+            this.ownsPrisma = true;
+        } else {
+            throw new Error(`
+MemorySQLAdapter requires database configuration. Provide either:
+1. config.prismaClient: Pre-configured PrismaClient
+2. config.databaseUrl: Database connection string  
+3. Environment variable: MEMORY_DATABASE_URL or DATABASE_URL
+
+Example:
+new MemorySQLAdapter({ 
+  databaseUrl: "postgresql://user:pass@localhost:5432/mydb" 
+})
+            `.trim());
         }
 
-        if (embedFunction) {
-            this.entityService = new EntityAlignmentService(prisma, embedFunction, {
+        // Set configuration options
+        this.defaultTenantId = config.defaultTenantId || 'default';
+        this.embedFunction = config.embedFunction;
+        if (config.defaultQueryLimit) {
+            (this as any).DEFAULT_QUERY_LIMIT = config.defaultQueryLimit;
+        }
+
+        // Initialize embedding-dependent services if embedFunction provided
+        if (config.embedFunction) {
+            this.entityService = new EntityAlignmentService(this.prisma, config.embedFunction, {
                 defaultThreshold: DEFAULT_ENTITY_ALIGNMENT_THRESHOLD
             });
 
             // Initialize recognition and enrichment services
-            this.recognitionService = new RecognitionService(prisma, this.entityService);
+            this.recognitionService = new RecognitionService(this.prisma, this.entityService);
             this.enrichmentService = new EnrichmentService();
+        }
+    }
+
+    /**
+     * Disconnect from the database (only if we created the Prisma client)
+     */
+    async disconnect(): Promise<void> {
+        if (this.ownsPrisma && this.prisma) {
+            await this.prisma.$disconnect();
         }
     }
 

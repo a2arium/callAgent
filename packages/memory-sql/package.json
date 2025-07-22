@@ -3,14 +3,17 @@
   "version": "0.2.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "callagent-memory-sql": "./scripts/setup-database.js"
+  },
   "files": [
     "dist",
-    "prisma"
+    "prisma",
+    "scripts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js",
-    "postinstall": "prisma generate",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "db:setup-vectors": "tsx scripts/setup-vectors.ts",

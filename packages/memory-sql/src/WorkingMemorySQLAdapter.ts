@@ -3,6 +3,18 @@ import { logger } from '@a2arium/callagent-utils';
 import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
 
 /**
+ * Configuration options for WorkingMemorySQLAdapter
+ */
+export interface WorkingMemorySQLConfig {
+  /** Pre-configured Prisma client instance */
+  prismaClient?: PrismaClient;
+  /** Database connection URL (used if prismaClient not provided) */
+  databaseUrl?: string;
+  /** Default tenant ID for operations */
+  defaultTenantId?: string;
+}
+
+/**
  * SQL-based Working Memory Adapter using PostgreSQL and Prisma
  * 
  * Provides persistent storage for agent working memory including:
@@ -19,13 +31,68 @@ import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState }
  */
 export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
     private logger = logger.createLogger({ prefix: 'WorkingMemorySQL' });
+    private prisma: PrismaClient;
+    private ownsPrisma: boolean = false;
     private defaultTenantId: string;
 
+    // Support both old and new constructor signatures for backward compatibility
     constructor(
-        private prisma: PrismaClient,
-        private options: { defaultTenantId?: string } = {}
+        configOrPrisma?: WorkingMemorySQLConfig | PrismaClient,
+        options: { defaultTenantId?: string } = {}
     ) {
-        this.defaultTenantId = options.defaultTenantId || 'default';
+        let config: WorkingMemorySQLConfig;
+
+        // Detect old vs new constructor signature
+        if (configOrPrisma && typeof (configOrPrisma as any).$connect === 'function') {
+            // Old signature: constructor(prisma, options?)
+            config = {
+                prismaClient: configOrPrisma as PrismaClient,
+                defaultTenantId: options.defaultTenantId
+            };
+        } else {
+            // New signature: constructor(config?)
+            config = configOrPrisma as WorkingMemorySQLConfig || {};
+        }
+
+        // Initialize Prisma client
+        if (config.prismaClient) {
+            this.prisma = config.prismaClient;
+            this.ownsPrisma = false;
+        } else if (config.databaseUrl) {
+            this.prisma = new PrismaClient({
+                datasources: { db: { url: config.databaseUrl } }
+            });
+            this.ownsPrisma = true;
+        } else if (process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL) {
+            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+            this.prisma = new PrismaClient({
+                datasources: { db: { url: dbUrl } }
+            });
+            this.ownsPrisma = true;
+        } else {
+            throw new Error(`
+WorkingMemorySQLAdapter requires database configuration. Provide either:
+1. config.prismaClient: Pre-configured PrismaClient
+2. config.databaseUrl: Database connection string  
+3. Environment variable: MEMORY_DATABASE_URL or DATABASE_URL
+
+Example:
+new WorkingMemorySQLAdapter({ 
+  databaseUrl: "postgresql://user:pass@localhost:5432/mydb" 
+})
+            `.trim());
+        }
+
+        this.defaultTenantId = config.defaultTenantId || 'default';
+    }
+
+    /**
+     * Disconnect from the database (only if we created the Prisma client)
+     */
+    async disconnect(): Promise<void> {
+        if (this.ownsPrisma && this.prisma) {
+            await this.prisma.$disconnect();
+        }
     }
 
     // ========================================

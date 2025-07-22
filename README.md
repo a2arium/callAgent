@@ -36,9 +36,16 @@ This project uses a Turborepo-based monorepo structure with Yarn workspaces for 
 
 ---
 
-# Minimal AI Agents Framework Core
+# CallAgent AI Framework 🤖
 
-This repository contains the minimal viable core for the AI Agents Framework, as specified in the design document.
+A modern, flexible AI agent framework that can be used both as a **consumable library** and for **framework development**. Build intelligent agents with memory, LLM integration, and agent-to-agent communication.
+
+## 🔗 Quick Navigation
+
+- **📚 [Using CallAgent as a Library](#using-callagent-as-a-library-📚)** - For building applications with CallAgent
+- **🛠️ [Framework Development](#framework-development-🛠️)** - For contributing to CallAgent itself
+
+---
 
 ## Features
 
@@ -223,28 +230,231 @@ This monorepo uses **ECMAScript Modules (ESM)** and modern TypeScript for all pa
 
 For more, see the [Node.js ESM docs](https://nodejs.org/api/esm.html) and [TypeScript ESM docs](https://www.typescriptlang.org/docs/handbook/esm-node.html).
 
-## Environment Variables & dotenv
+## Using CallAgent as a Library 📚
 
-This monorepo uses [dotenv](https://www.npmjs.com/package/dotenv) to load environment variables from a `.env` file at the project root. This ensures all packages and apps have access to required configuration (e.g., database URLs) during local development and CI.
+This project can be used as a **consumable library** in your applications, not just for framework development. Here are the main usage patterns:
 
-### Best Practices
-- Place all shared environment variables in the root `.env` file.
-- The runner and any entrypoint scripts automatically load `.env` via `dotenv`.
-- For tools like Prisma that require `.env` in a package directory, a symlink or copy is created as needed.
-- In CI, ensure the `.env` file is present or variables are set in the environment.
+### 🚀 Quick Start for Library Users
 
-### Automating .env Propagation
-To avoid manual copying, a postinstall script can symlink or copy the root `.env` to all packages that need it (e.g., `packages/memory-sql`).
-
-Example (add to root `package.json`):
-```json
-"scripts": {
-  "postinstall": "node scripts/sync-dotenv.js"
-}
+#### 1. Install the Core Package
+```bash
+npm install @a2arium/callagent-core
+# Optional: For database persistence
+npm install @a2arium/callagent-memory-sql
 ```
 
-See the `scripts/sync-dotenv.js` utility for details.
+#### 2. Set Up Your Database (if using SQL memory)
+```bash
+# Set your database URL
+export DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
 
-### Troubleshooting
-- If you see errors about missing environment variables, ensure `.env` is present in the root and/or the relevant package directory.
-- For local development, restart your shell after editing `.env`. 
+# Set up the database schema
+npx @a2arium/callagent-memory-sql setup
+```
+
+#### 3. Create Your First Agent
+```typescript
+// my-agent.ts
+import { createAgent } from '@a2arium/callagent-core';
+
+const manifest = {
+  name: 'my-agent',
+  version: '1.0.0',
+  description: 'My custom agent',
+  inputs: {
+    message: { type: 'string', required: true }
+  },
+  outputs: {
+    response: { type: 'string' }
+  }
+};
+
+export default createAgent(manifest, {
+  async handleTask(ctx) {
+    const { message } = ctx.input;
+    
+    // Use memory
+    await ctx.memory.semantic.set('last_message', message);
+    
+    // Use LLM
+    const response = await ctx.llm.call({
+      messages: [{ role: 'user', content: `Respond to: ${message}` }]
+    });
+    
+    return {
+      response: response.content
+    };
+  }
+});
+```
+
+#### 4. Run Your Agent
+```typescript
+// main.ts
+import myAgent from './my-agent.js';
+
+const result = await myAgent.execute({ 
+  message: "Hello, agent!" 
+});
+
+console.log(result.response);
+```
+
+### 💾 Database Configuration Options
+
+The library supports multiple database configuration approaches:
+
+#### Option 1: Environment Variables (Recommended)
+```bash
+export DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
+```
+```typescript
+// The library automatically uses DATABASE_URL or MEMORY_DATABASE_URL
+const agent = createAgent(manifest, handler);
+```
+
+#### Option 2: Direct Database URL
+```typescript
+import { createAgent } from '@a2arium/callagent-core';
+
+const agent = createAgent(manifest, handler, {
+  memory: {
+    database: {
+      url: "postgresql://user:pass@localhost:5432/yourdb"
+    }
+  }
+});
+```
+
+#### Option 3: Pre-configured Prisma Client
+```typescript
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient({
+  // Your custom Prisma configuration
+});
+
+const agent = createAgent(manifest, handler, {
+  memory: {
+    database: {
+      prismaClient: prisma
+    }
+  }
+});
+```
+
+#### Option 4: Custom Memory Adapters
+```typescript
+import { createAgent } from '@a2arium/callagent-core';
+import { MyCustomMemoryAdapter } from './my-adapter.js';
+
+const agent = createAgent(manifest, handler, {
+  memory: {
+    adapters: {
+      semantic: new MyCustomMemoryAdapter(),
+      // working: new MyCustomWorkingMemoryAdapter()
+    }
+  }
+});
+```
+
+### 🔧 Advanced Configuration
+
+#### Full Configuration Example
+```typescript
+import { createAgent } from '@a2arium/callagent-core';
+import { PrismaClient } from '@prisma/client';
+
+const agent = createAgent(manifest, handler, {
+  memory: {
+    database: {
+      url: process.env.DATABASE_URL,
+      // OR prismaClient: customPrismaClient
+    },
+    // Custom adapters override database config
+    adapters: {
+      // semantic: customSemanticAdapter,
+      // working: customWorkingAdapter
+    }
+  },
+  // Other configuration options...
+});
+```
+
+#### Multi-Agent Systems
+```typescript
+// coordinator.ts
+import { createAgent } from '@a2arium/callagent-core';
+
+const coordinator = createAgent({
+  name: 'coordinator',
+  dependencies: { agents: ['data-processor', 'report-generator'] }
+}, {
+  async handleTask(ctx) {
+    // Call other agents
+    const data = await ctx.sendTaskToAgent('data-processor', { 
+      source: ctx.input.dataSource 
+    });
+    
+    const report = await ctx.sendTaskToAgent('report-generator', { 
+      data: data.processed 
+    });
+    
+    return { report: report.content };
+  }
+});
+```
+
+### 🏗️ Production Deployment
+
+For production deployments, the library is designed to be **environment-agnostic**:
+
+- ✅ **Works with any database setup** (your choice of connection management)
+- ✅ **No file system dependencies** (no `.env` file requirements)
+- ✅ **Container-friendly** (Docker, Kubernetes, etc.)
+- ✅ **Cloud-ready** (works with managed databases, secret managers)
+
+Example production setup:
+```typescript
+// In production, use your deployment platform's configuration
+const agent = createAgent(manifest, handler, {
+  memory: {
+    database: {
+      // Read from your secret manager, env vars, config service, etc.
+      url: await getSecretValue('DATABASE_URL')
+    }
+  }
+});
+```
+
+### 📖 Package Documentation
+
+- **[@a2arium/callagent-core](packages/core/README.md)** - Core framework and agent creation
+- **[@a2arium/callagent-memory-sql](packages/memory-sql/README.md)** - SQL-based memory persistence  
+- **[@a2arium/callagent-types](packages/types/README.md)** - Shared TypeScript types
+- **[@a2arium/callagent-utils](packages/utils/README.md)** - Shared utilities
+
+---
+
+## Framework Development 🛠️
+
+The following sections are for **developing the CallAgent framework itself**, not for using it as a library.
+
+### Environment Variables & Development
+
+For framework developers, this monorepo uses [dotenv](https://www.npmjs.com/package/dotenv) to load environment variables from a `.env` file at the project root during development.
+
+#### Development Best Practices
+- Place all shared environment variables in the root `.env` file
+- The sync script automatically propagates `.env` to packages that need it (like `packages/memory-sql`)
+- In production library usage, consumers manage their own environment variables
+
+#### Environment Sync Behavior
+The `scripts/sync-dotenv.cjs` script automatically detects the environment:
+- ✅ **Framework Development**: Syncs `.env` file to packages
+- ✅ **Library Consumer**: Skips sync entirely (safe for production)
+- ✅ **CI/Production**: Skips sync (environment-aware)
+
+#### Troubleshooting Development Setup
+- If you see errors about missing environment variables during framework development, ensure `.env` exists in the project root
+- For library consumers: manage environment variables using your deployment platform's standard approach 

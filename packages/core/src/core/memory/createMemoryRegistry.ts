@@ -32,7 +32,32 @@ export type ExtendedIMemory = IMemory & {
  * Create a comprehensive memory registry with all memory types
  * Routes all operations through MLO while maintaining backward compatibility
  */
-export async function createMemoryRegistry(tenantId?: string, agentId?: string, taskContext?: any): Promise<ExtendedIMemory> {
+/**
+ * Configuration options for memory registry
+ */
+export interface MemoryRegistryConfig {
+    /** Database configuration */
+    database?: {
+        /** Database connection URL */
+        url?: string;
+        /** Pre-configured Prisma client */
+        prismaClient?: any;
+    };
+    /** Custom memory adapters */
+    adapters?: {
+        /** Custom semantic memory adapter */
+        semantic?: SemanticMemoryBackend;
+        /** Custom working memory adapter */
+        working?: WorkingMemoryBackend;
+    };
+}
+
+export async function createMemoryRegistry(
+    tenantId?: string, 
+    agentId?: string, 
+    taskContext?: any,
+    config?: MemoryRegistryConfig
+): Promise<ExtendedIMemory> {
     const adapterType = process.env.MEMORY_ADAPTER || 'sql';
     const resolvedTenantId = tenantId || 'default';
     const resolvedAgentId = agentId || 'default';
@@ -44,29 +69,49 @@ export async function createMemoryRegistry(tenantId?: string, agentId?: string, 
     });
 
     if (adapterType === 'sql') {
-        // Import SQL adapters
-        const { PrismaClient } = await import('@prisma/client');
-        const { MemorySQLAdapter } = await import('@a2arium/callagent-memory-sql');
-
-        const prisma = new PrismaClient();
-
-        // Create embedding function if available
+        let semanticAdapter: SemanticMemoryBackend;
         let embedFunction: ((text: string) => Promise<number[]>) | undefined;
-        const embeddingAvailable = isEmbeddingAvailable();
-
-        if (embeddingAvailable) {
+        
+        if (config?.adapters?.semantic) {
+            // Use provided semantic adapter
+            semanticAdapter = config.adapters.semantic;
+            memoryLogger.debug('Using provided semantic memory adapter');
+        } else {
+            // Create SQL adapter
             try {
-                embedFunction = await createEmbeddingFunction();
-                memoryLogger.debug('Embedding function created successfully');
+                const { MemorySQLAdapter } = await import('@a2arium/callagent-memory-sql');
+
+                // Create embedding function if available
+                const embeddingAvailable = isEmbeddingAvailable();
+
+                if (embeddingAvailable) {
+                    try {
+                        embedFunction = await createEmbeddingFunction();
+                        memoryLogger.debug('Embedding function created successfully');
+                    } catch (error) {
+                        memoryLogger.warn('Failed to create embedding function:', error);
+                    }
+                }
+
+                // Create adapter with flexible configuration
+                semanticAdapter = new MemorySQLAdapter({
+                    prismaClient: config?.database?.prismaClient,
+                    databaseUrl: config?.database?.url,
+                    defaultTenantId: resolvedTenantId,
+                    embedFunction
+                });
+
+                memoryLogger.debug('Created MemorySQLAdapter with configuration');
             } catch (error) {
-                memoryLogger.warn('Failed to create embedding function:', error);
+                throw new Error(`
+Failed to initialize semantic memory adapter. Please either:
+1. Install @a2arium/callagent-memory-sql and configure database
+2. Provide your own semantic memory adapter via config.adapters.semantic
+
+Error: ${error}
+                `.trim());
             }
         }
-
-        // Create underlying adapters
-        const semanticAdapter = new MemorySQLAdapter(prisma, embedFunction, {
-            defaultTenantId: resolvedTenantId
-        });
 
         // Create semantic memory registry using the existing adapter
         const semantic: MemoryRegistry<SemanticMemoryBackend> = {
