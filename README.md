@@ -245,11 +245,23 @@ npm install @a2arium/callagent-memory-sql
 
 #### 2. Set Up Your Database (if using SQL memory)
 ```bash
-# Set your database URL
+# Option A: Create a .env file in your project root (recommended)
+# DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
+
+# Option B: Export as environment variable
 export DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
 
 # Set up the database schema
 npx @a2arium/callagent-memory-sql setup
+```
+
+#### 2a. View Your Database (optional)
+```bash
+# Open Prisma Studio to view/edit your data
+npx @a2arium/callagent-memory-sql studio
+
+# Opens at http://localhost:5555
+# Use Ctrl+C to stop
 ```
 
 #### 3. Create Your First Agent
