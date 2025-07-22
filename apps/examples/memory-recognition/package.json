@@ -14,7 +14,8 @@
     "run": "cd ../../../ && node packages/core/dist/runner/runnerCli.js apps/examples/memory-recognition/dist/agent.js"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
