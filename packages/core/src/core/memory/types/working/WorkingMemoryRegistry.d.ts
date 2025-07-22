@@ -1,4 +1,4 @@
-import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@callagent/types';
+import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
 import { UnifiedMemoryService } from '../../UnifiedMemoryService.js';
 /**
  * Registry for working memory operations.

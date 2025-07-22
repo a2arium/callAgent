@@ -1,7 +1,7 @@
 import { ILongContextManager } from '../../interfaces/ILongContextManager.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class SimpleLongContextManager implements ILongContextManager {
     readonly stageName = 'utilization' as const;

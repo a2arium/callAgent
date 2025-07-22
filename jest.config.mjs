@@ -33,9 +33,9 @@ const config = {
     // Module resolution
     moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
-        '^@callagent/core/(.*)$': '<rootDir>/packages/core/src/$1',
-        '^@callagent/types/(.*)$': '<rootDir>/packages/types/src/$1',
-        '^@callagent/memory-sql/(.*)$': '<rootDir>/packages/memory-sql/src/$1',
+        '^@a2arium/core/(.*)$': '<rootDir>/packages/core/src/$1',
+        '^@a2arium/types/(.*)$': '<rootDir>/packages/types/src/$1',
+        '^@a2arium/memory-sql/(.*)$': '<rootDir>/packages/memory-sql/src/$1',
         // Handle .js imports that should resolve to .ts files
         '^(\\.{1,2}/.*)\\.js$': '$1',
     },

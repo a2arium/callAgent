@@ -1,7 +1,7 @@
 import { IKnowledgeDistiller } from '../../interfaces/IKnowledgeDistiller.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class SimpleDistiller implements IKnowledgeDistiller {
     readonly stageName = 'derivation' as const;

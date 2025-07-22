@@ -1,5 +1,5 @@
 import { ManifestValidator, ValidationResult } from '../src/core/plugin/ManifestValidator.js';
-import { AgentManifest } from '@callagent/types';
+import { AgentManifest } from '@a2arium/types';
 
 describe('ManifestValidator', () => {
     describe('validate', () => {

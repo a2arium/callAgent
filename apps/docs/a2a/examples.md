@@ -18,7 +18,7 @@ The most basic A2A pattern - one agent calling another.
 
 ```typescript
 // MathCoordinator.ts
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   manifest: {
@@ -83,7 +83,7 @@ export default createAgent({
 
 ```typescript
 // demo.ts
-import { PluginManager, runAgentWithStreaming } from '@callagent/core';
+import { PluginManager, runAgentWithStreaming } from '@a2arium/core';
 import MathCoordinator from './MathCoordinator.js';
 import Calculator from './Calculator.js';
 

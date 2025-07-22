@@ -1,7 +1,7 @@
 import { IInformationCompressor } from '../../interfaces/IInformationCompressor.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class LLMCompressor implements IInformationCompressor {
     readonly stageName = 'acquisition' as const;

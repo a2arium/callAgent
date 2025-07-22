@@ -1,7 +1,7 @@
 import { IAcquisitionFilter } from '../../interfaces/IAcquisitionFilter.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class TenantAwareFilter implements IAcquisitionFilter {
     readonly stageName = 'acquisition' as const;

@@ -1,4 +1,4 @@
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 import { SYSTEM_TENANT, DEFAULT_TENANT } from './tenantValidator.js';
 
 // Create component-specific logger

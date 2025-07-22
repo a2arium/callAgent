@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { runAgentWithStreaming } from './streamingRunner.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 // Log uncaught exceptions and unhandled rejections early
 process.on('uncaughtException', (err) => {

@@ -1,6 +1,6 @@
 import { AgentPlugin } from './types.js';
 import { AgentManifest } from '../../shared/types/index.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const registryLogger = logger.createLogger({ prefix: 'AgentRegistry' });
 

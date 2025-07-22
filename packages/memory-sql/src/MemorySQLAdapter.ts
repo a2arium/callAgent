@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { SemanticMemoryBackend, MemoryQueryOptions, MemoryQueryResult, MemoryFilter, FilterOperator, MemoryError } from '@callagent/types';
+import { SemanticMemoryBackend, MemoryQueryOptions, MemoryQueryResult, MemoryFilter, FilterOperator, MemoryError } from '@a2arium/callagent-types';
 import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetManyOptions, GetManyQuery } from './types.js';
 import { EntityFieldParser } from './EntityFieldParser.js';
 import { EntityAlignmentService } from './EntityAlignmentService.js';

@@ -639,7 +639,7 @@ The most common way to configure memory is through the agent's manifest:
 
 ```typescript
 // agent.ts
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
     manifest: {
@@ -932,7 +932,7 @@ class TaskPriorityAttention extends ConversationAttention {
 }
 
 // 2. Register processor (in agent initialization)
-import { ProcessorFactory } from '@callagent/core';
+import { ProcessorFactory } from '@a2arium/core';
 
 const processorFactory = new ProcessorFactory();
 processorFactory.registerProcessor('TaskPriorityAttention', TaskPriorityAttention);

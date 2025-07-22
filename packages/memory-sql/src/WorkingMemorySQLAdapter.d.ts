@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@callagent/types';
+import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
 /**
  * SQL-based Working Memory Adapter using PostgreSQL and Prisma
  *

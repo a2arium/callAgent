@@ -271,7 +271,7 @@ yarn cache clear --agent=llm-agent --tenant=customer-123
 ### Programmatic Management
 
 ```typescript
-import { AgentResultCache, CacheCleanupService } from '@callagent/core';
+import { AgentResultCache, CacheCleanupService } from '@a2arium/core';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();

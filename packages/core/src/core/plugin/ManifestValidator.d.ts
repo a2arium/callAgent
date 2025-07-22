@@ -1,4 +1,4 @@
-import { AgentManifest } from '@callagent/types';
+import { AgentManifest } from '@a2arium/callagent-types';
 /**
  * Result of manifest validation
  */

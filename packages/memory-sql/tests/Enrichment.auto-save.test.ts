@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { MemorySQLAdapter } from '../src/MemorySQLAdapter.js';
 import { prismaMock } from './__mocks__/prisma.js';
-import type { EnrichmentOptions } from '@callagent/types';
+import type { EnrichmentOptions } from '@a2arium/types';
 
 describe('MemorySQLAdapter - Enrichment Auto-Save', () => {
     let adapter: MemorySQLAdapter;

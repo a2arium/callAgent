@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 import { validateTenantId } from './tenantValidator.js';
 
 // Create component-specific logger

@@ -11,7 +11,7 @@ import { ContextSerializer } from './ContextSerializer.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import { extendContextWithMemory } from '../memory/types/working/context/workingMemoryContext.js';
 import { InteractiveTaskHandler } from './InteractiveTaskResult.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '../cache/index.js';
 

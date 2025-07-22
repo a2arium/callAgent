@@ -1,10 +1,10 @@
 // src/shared/types/index.ts (Consolidated for minimal)
 import type { ILLMCaller } from './LLMTypes.js';
-import type { ComponentLogger } from '@callagent/utils'; // Import ComponentLogger
+import type { ComponentLogger } from '@a2arium/callagent-utils'; // Import ComponentLogger
 // Explicitly import only needed types from StreamingEvents
 import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
 import type { Usage } from './LLMTypes.js'; // Import Usage type
-import type { IMemory } from '@callagent/types';
+import type { IMemory } from '@a2arium/callagent-types';
 // Import working memory types for TaskContext
 import type { ThoughtEntry, DecisionEntry, WorkingVariables } from './workingMemory.js';
 import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';

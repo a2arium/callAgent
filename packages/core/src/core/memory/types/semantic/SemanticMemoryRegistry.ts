@@ -9,7 +9,7 @@ import {
     RecognitionResult,
     EnrichmentOptions,
     EnrichmentResult
-} from '@callagent/types';
+} from '@a2arium/callagent-types';
 
 /**
  * Registry/facade for semantic memory backends.

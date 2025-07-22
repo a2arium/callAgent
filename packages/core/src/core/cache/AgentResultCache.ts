@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { TaskInput } from '../../shared/types/index.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 /**
  * Agent Result Cache Service

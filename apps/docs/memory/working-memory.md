@@ -124,7 +124,7 @@ await ctx.remember("user_preference", "detailed_explanations", {
 Here's a comprehensive example showing how to use the working memory system in an agent:
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
     manifest: './agent.json',

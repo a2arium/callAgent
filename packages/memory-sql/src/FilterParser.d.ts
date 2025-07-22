@@ -1,4 +1,4 @@
-import { MemoryFilter, FilterOperator } from '@callagent/types';
+import { MemoryFilter, FilterOperator } from '@a2arium/callagent-types';
 /**
  * Parser for string-based filter syntax
  * Converts strings like 'priority >= 8' to { path: 'priority', operator: '>=', value: 8 }

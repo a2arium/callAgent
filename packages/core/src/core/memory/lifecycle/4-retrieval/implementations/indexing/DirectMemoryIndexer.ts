@@ -1,7 +1,7 @@
 import { IIndexingOrchestrator } from '../../interfaces/IIndexingOrchestrator.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class DirectMemoryIndexer implements IIndexingOrchestrator {
     readonly stageName = 'retrieval' as const;

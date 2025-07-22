@@ -1,4 +1,4 @@
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 import { MemoryItem, MemoryIntent, MemoryOperationResult, RecallOptions, RememberOptions } from '../../../../shared/types/memoryLifecycle.js';
 import { MemoryLifecycleConfig } from '../config/types.js';
 import { ProcessorFactory } from '../ProcessorFactory.js';

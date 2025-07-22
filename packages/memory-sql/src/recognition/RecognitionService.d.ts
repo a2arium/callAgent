@@ -30,7 +30,7 @@ export declare class RecognitionService {
     /**
      * Recognize if a candidate object exists in memory using entity alignment and LLM disambiguation
      */
-    recognize<T>(candidateData: T, taskContext: any, // TaskContext from @callagent/core
+    recognize<T>(candidateData: T, taskContext: any, // TaskContext from @a2arium/core
     options?: RecognitionOptions): Promise<RecognitionResult<T>>;
     /**
      * Find potential matches using entity alignment and tag filtering

@@ -1,7 +1,7 @@
 import type { ILLMCaller } from './LLMTypes.js';
 import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
 import type { Usage } from './LLMTypes.js';
-import type { IMemory } from '@callagent/types';
+import type { IMemory } from '@a2arium/callagent-types';
 import type { ThoughtEntry, DecisionEntry, WorkingVariables } from './workingMemory.js';
 import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';
 export type { A2AEvent, TaskStatus, Artifact };

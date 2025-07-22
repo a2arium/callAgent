@@ -11,7 +11,7 @@ Keep it simple! There are two main approaches:
 Put everything in your TypeScript code - no external files needed:
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   // Inline manifest - no separate agent.json needed

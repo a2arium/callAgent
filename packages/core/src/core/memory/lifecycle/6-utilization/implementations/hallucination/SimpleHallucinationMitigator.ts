@@ -1,7 +1,7 @@
 import { IHallucinationMitigator } from '../../interfaces/IHallucinationMitigator.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class SimpleHallucinationMitigator implements IHallucinationMitigator {
     readonly stageName = 'utilization' as const;

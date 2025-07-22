@@ -230,7 +230,7 @@ describe('FilterParser', () => {
 
     describe('parseFilters', () => {
         test('parses mixed array of string and object filters', () => {
-            const filters: import('@callagent/types').MemoryFilter[] = [
+            const filters: import('@a2arium/types').MemoryFilter[] = [
                 'priority >= 8',
                 { path: 'status', operator: '=' as const, value: 'active' },
                 'name contains "John"'

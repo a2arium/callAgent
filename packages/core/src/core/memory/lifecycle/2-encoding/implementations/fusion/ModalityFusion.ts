@@ -1,7 +1,7 @@
 import { IMultiModalFusion } from '../../interfaces/IMultiModalFusion.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class ModalityFusion implements IMultiModalFusion {
     readonly stageName = 'encoding' as const;

@@ -1,6 +1,6 @@
 import type { InteractiveTaskResult } from '../../shared/types/A2ATypes.js';
 import type { TaskStatus, Artifact } from '../../shared/types/index.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const interactiveLogger = logger.createLogger({ prefix: 'InteractiveTask' });
 

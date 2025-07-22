@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const discoveryLogger = logger.createLogger({ prefix: 'SmartAgentDiscovery' });
 

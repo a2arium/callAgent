@@ -6,7 +6,7 @@ export declare class LLMDisambiguator {
      * Determine if two objects represent the same entity using LLM
      * Requires a TaskContext with LLM capabilities
      */
-    disambiguateMatch<T>(candidateData: T, existingData: T, confidence: number, taskContext: any, // TaskContext from @callagent/core
+    disambiguateMatch<T>(candidateData: T, existingData: T, confidence: number, taskContext: any, // TaskContext from @a2arium/core
     options?: {
         customPrompt?: string;
         agentGoal?: string;

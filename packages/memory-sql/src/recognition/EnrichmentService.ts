@@ -1,4 +1,4 @@
-import { EnrichmentOptions, EnrichmentResult } from '@callagent/types';
+import { EnrichmentOptions, EnrichmentResult } from '@a2arium/callagent-types';
 
 /**
  * Service that implements the enrich() functionality for semantic memory
@@ -11,7 +11,7 @@ export class EnrichmentService {
         key: string,
         existingData: T,
         additionalData: T[],
-        taskContext: any, // TaskContext from @callagent/core  
+        taskContext: any, // TaskContext from @a2arium/core  
         options: EnrichmentOptions
     ): Promise<EnrichmentResult<T>> {
         const {

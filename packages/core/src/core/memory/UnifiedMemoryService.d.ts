@@ -1,7 +1,7 @@
 import { MemoryLifecycleConfig } from './lifecycle/config/types.js';
 import { RecallOptions, RememberOptions } from '../../shared/types/memoryLifecycle.js';
-import { ThoughtEntry, DecisionEntry, WorkingMemoryBackend } from '@callagent/types';
-import { MemoryQueryOptions, MemoryQueryResult, GetManyInput, GetManyOptions } from '@callagent/types';
+import { ThoughtEntry, DecisionEntry, WorkingMemoryBackend } from '@a2arium/callagent-types';
+import { MemoryQueryOptions, MemoryQueryResult, GetManyInput, GetManyOptions } from '@a2arium/callagent-types';
 /**
  * Semantic Memory Adapter Interface
  * Represents the existing semantic memory adapter interface

@@ -76,7 +76,7 @@ graph TB
 ### 1. Basic Agent Creation
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 // Agent with explicit tenant ID
 const customerAgent = createAgent({
@@ -124,7 +124,7 @@ yarn core:run agent.js '{}'  # Uses 'default' tenant
 ### 3. Programmatic Usage
 
 ```typescript
-import { StreamingRunner } from '@callagent/core';
+import { StreamingRunner } from '@a2arium/core';
 
 const runner = new StreamingRunner();
 
@@ -260,7 +260,7 @@ await ctx.memory.semantic.set('meeting:1', {
 The framework provides advanced tenant context management for complex scenarios:
 
 ```typescript
-import { withTenant, withSystemPrivileges, getCurrentTenant } from '@callagent/core';
+import { withTenant, withSystemPrivileges, getCurrentTenant } from '@a2arium/core';
 
 async function advancedTenantOperations(ctx: TaskContext) {
     const currentTenant = getCurrentTenant(); // Get current tenant
@@ -311,7 +311,7 @@ async function systemOperations(ctx: TaskContext) {
 Track tenant-specific usage and performance:
 
 ```typescript
-import { tenantMetricsManager, trackTenantOperation } from '@callagent/core';
+import { tenantMetricsManager, trackTenantOperation } from '@a2arium/core';
 
 async function monitoredOperations(ctx: TaskContext) {
     // Automatic operation tracking
@@ -339,7 +339,7 @@ async function monitoredOperations(ctx: TaskContext) {
 Built-in validation ensures tenant ID integrity:
 
 ```typescript
-import { validateTenantId, isSystemTenant } from '@callagent/core';
+import { validateTenantId, isSystemTenant } from '@a2arium/core';
 
 async function secureOperations(tenantId: string) {
     // Validate tenant ID format and permissions
@@ -641,7 +641,7 @@ await ctx.memory.semantic.get('test-key');
 #### Check Tenant Resolution
 
 ```typescript
-import { resolveTenantId } from '@callagent/core';
+import { resolveTenantId } from '@a2arium/core';
 
 // Test tenant resolution manually
 console.log('Explicit:', resolveTenantId('explicit-tenant'));

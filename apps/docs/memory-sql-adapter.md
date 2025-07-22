@@ -11,8 +11,8 @@ The MemorySQL adapter provides durable, SQL-backed memory for agents using Postg
 ## Setup
 1. **Install dependencies:**
    ```bash
-   yarn workspace @callagent/memory-sql add @prisma/client
-   yarn workspace @callagent/memory-sql add prisma --dev
+   yarn workspace @a2arium/memory-sql add @prisma/client
+   yarn workspace @a2arium/memory-sql add prisma --dev
    ```
 2. **Configure your database:**
    Set `MEMORY_DATABASE_URL` in your `.env`:
@@ -21,7 +21,7 @@ The MemorySQL adapter provides durable, SQL-backed memory for agents using Postg
    ```
 3. **Run migrations:**
    ```bash
-   yarn workspace @callagent/memory-sql prisma migrate dev --name init
+   yarn workspace @a2arium/memory-sql prisma migrate dev --name init
    ```
 
 ## Usage Example

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { MemorySQLAdapter } from '../src/MemorySQLAdapter.js';
-import { MemoryError } from '@callagent/types';
+import { MemoryError } from '@a2arium/types';
 import { prismaMock } from './__mocks__/prisma.js';
 
 describe('MemorySQLAdapter', () => {

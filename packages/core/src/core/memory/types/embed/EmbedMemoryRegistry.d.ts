@@ -1,4 +1,4 @@
-import { EmbedMemoryBackend, MemoryRegistry } from '@callagent/types';
+import { EmbedMemoryBackend, MemoryRegistry } from '@a2arium/callagent-types';
 /**
  * Registry/facade for embed memory backends.
  * Routes calls to the default or named backend as specified.

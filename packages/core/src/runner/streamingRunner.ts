@@ -5,7 +5,7 @@ import { PluginManager } from '../core/plugin/pluginManager.js';
 import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus, Artifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
-import { logger, type LoggerConfig } from '@callagent/utils';
+import { logger, type LoggerConfig } from '@a2arium/callagent-utils';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';

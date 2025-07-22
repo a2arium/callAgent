@@ -59,7 +59,7 @@ export type GetManyOptions = {
 };
 export type GetManyQuery = {
     tag?: string;
-    filters?: import('@callagent/types').MemoryFilter[];
+    filters?: import('@a2arium/types').MemoryFilter[];
     limit?: number;
     orderBy?: {
         path: string;

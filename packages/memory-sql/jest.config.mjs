@@ -6,12 +6,12 @@ export default {
   },
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
-    '^@callagent/types$': '<rootDir>/../../packages/types/src/index.ts'
+    '^@a2arium/types$': '<rootDir>/../../packages/types/src/index.ts'
   },
   testEnvironment: 'node',
   roots: ['<rootDir>/tests'],
   moduleFileExtensions: ['ts', 'js', 'json'],
   transformIgnorePatterns: [
-    'node_modules/(?!(@callagent)/)'
+    'node_modules/(?!(@a2arium)/)'
   ]
 }; 

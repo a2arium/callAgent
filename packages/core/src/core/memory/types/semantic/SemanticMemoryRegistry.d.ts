@@ -1,4 +1,4 @@
-import { SemanticMemoryBackend, MemoryRegistry, GetManyInput, GetManyOptions, MemoryQueryResult, MemorySetOptions, RecognitionOptions, RecognitionResult, EnrichmentOptions, EnrichmentResult } from '@callagent/types';
+import { SemanticMemoryBackend, MemoryRegistry, GetManyInput, GetManyOptions, MemoryQueryResult, MemorySetOptions, RecognitionOptions, RecognitionResult, EnrichmentOptions, EnrichmentResult } from '@a2arium/callagent-types';
 /**
  * Registry/facade for semantic memory backends.
  * Routes calls to the default or named backend as specified.

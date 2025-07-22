@@ -12,7 +12,7 @@ import {
     RecognitionResult,
     EnrichmentOptions,
     EnrichmentResult
-} from '@callagent/types';
+} from '@a2arium/callagent-types';
 
 /**
  * MLO-backed Semantic Memory Backend

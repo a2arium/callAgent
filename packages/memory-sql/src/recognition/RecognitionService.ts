@@ -4,7 +4,7 @@ import { EntityFinder } from './EntityFinder.js';
 import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { LLMDisambiguator } from './LLMDisambiguator.js';
 // Import types from the types package - these were defined in IMemory.ts
-import type { MemoryQueryResult } from '@callagent/types';
+import type { MemoryQueryResult } from '@a2arium/callagent-types';
 
 // Define recognition types locally for now
 type RecognitionOptions = {
@@ -52,7 +52,7 @@ export class RecognitionService {
      */
     async recognize<T>(
         candidateData: T,
-        taskContext: any, // TaskContext from @callagent/core
+        taskContext: any, // TaskContext from @a2arium/core
         options: RecognitionOptions = {}
     ): Promise<RecognitionResult<T>> {
         const {

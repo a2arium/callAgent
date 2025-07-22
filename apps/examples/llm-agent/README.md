@@ -7,7 +7,7 @@ This example demonstrates how to use an LLM (e.g., OpenAI, Anthropic) in a CallA
 From the repository root:
 
 ```bash
-yarn workspace @callagent/llm-agent build
+yarn workspace @a2arium/llm-agent build
 yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{"prompt": "Tell me a joke about AI."}'
 ```
 

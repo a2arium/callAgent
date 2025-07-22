@@ -42,16 +42,16 @@ Currently, the framework implements a SQL-based memory adapter (`MemorySQLAdapte
 
 The memory system is designed to be used as a library. This means:
 - **You, the application developer, are responsible for managing the database schema and migrations.**
-- **You must run the required migrations from the `@callagent/memory-sql` package.**
+- **You must run the required migrations from the `@a2arium/memory-sql` package.**
 - **You generate and manage your own Prisma Client instance.**
 - **You pass your PrismaClient instance to the memory adapter provided by the package.**
 
 ### 1. Add the Required Model to Your Database
 
-The required Prisma model is included in the `@callagent/memory-sql` package. Run the migration from the package root:
+The required Prisma model is included in the `@a2arium/memory-sql` package. Run the migration from the package root:
 
 ```bash
-yarn workspace @callagent/memory-sql prisma migrate dev --name init
+yarn workspace @a2arium/memory-sql prisma migrate dev --name init
 ```
 
 ### 2. Set Up Your Database and Environment
@@ -70,7 +70,7 @@ In your application, install Prisma and the memory adapter package:
 ```bash
 yarn add @prisma/client
 # (and the memory adapter)
-yarn add @callagent/memory-sql
+yarn add @a2arium/memory-sql
 ```
 
 ### 4. Configure and Use the Memory Adapter
@@ -79,7 +79,7 @@ In your application startup code:
 
 ```typescript
 import { PrismaClient } from '@prisma/client';
-import { MemorySQLAdapter } from '@callagent/memory-sql';
+import { MemorySQLAdapter } from '@a2arium/memory-sql';
 
 // Create a singleton PrismaClient for memory operations
 const prisma = new PrismaClient({
@@ -102,7 +102,7 @@ const memory = new MemorySQLAdapter(prisma);
 ### 5. Example: Using Memory in an Agent
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   manifest: './agent.json',
@@ -129,7 +129,7 @@ export default createAgent({
 Agents created with the `createAgent` factory function have access to the memory system through the context object:
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   manifest: './agent.json',
@@ -185,7 +185,7 @@ psql -c "CREATE DATABASE database_name;"
 3. Run Prisma migrations to create the necessary tables:
 
 ```bash
-yarn workspace @callagent/memory-sql prisma migrate dev --name init
+yarn workspace @a2arium/memory-sql prisma migrate dev --name init
 ```
 
 This will create the `agent_memory_store` table with the correct schema in your PostgreSQL database.
@@ -198,8 +198,8 @@ To configure your application to use the `MemorySQLAdapter`:
 
 ```typescript
 import { PrismaClient } from '@prisma/client';
-import { MemorySQLAdapter } from '@callagent/memory-sql';
-import { IMemory } from '@callagent/types';
+import { MemorySQLAdapter } from '@a2arium/memory-sql';
+import { IMemory } from '@a2arium/types';
 
 // Create a singleton PrismaClient for memory operations
 const memoryPrisma = new PrismaClient({
@@ -536,7 +536,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 2. **Entity Alignment Schema**: Run the entity alignment migration:
 ```bash
-yarn workspace @callagent/memory-sql prisma migrate dev --name add_entity_alignment
+yarn workspace @a2arium/memory-sql prisma migrate dev --name add_entity_alignment
 ```
 
 3. **Embedding Function**: Configure an embedding provider (OpenAI, etc.) in your environment:
@@ -552,8 +552,8 @@ OPENAI_API_KEY=your_api_key_here
 
 ```typescript
 import { PrismaClient } from '@prisma/client';
-import { MemorySQLAdapter } from '@callagent/memory-sql';
-import { createEmbeddingFunction } from '@callagent/core';
+import { MemorySQLAdapter } from '@a2arium/memory-sql';
+import { createEmbeddingFunction } from '@a2arium/core';
 
 const prisma = new PrismaClient({
   datasources: { db: { url: process.env.MEMORY_DATABASE_URL } }
@@ -2232,8 +2232,8 @@ To use recognition and enrichment features:
 3. **Entity Configuration** - Must specify entity types for recognition to work effectively
 
 ```typescript
-import { MemorySQLAdapter } from '@callagent/memory-sql';
-import { createEmbeddingFunction } from '@callagent/core';
+import { MemorySQLAdapter } from '@a2arium/memory-sql';
+import { createEmbeddingFunction } from '@a2arium/core';
 
 // Create embedding function (requires API key)
 const embedFunction = createEmbeddingFunction({
@@ -2492,7 +2492,7 @@ await ctx.memory.semantic.queryByKeyPattern('user:*');
 > Yes! Just add your own models to your `schema.prisma` alongside the required `AgentMemoryStore` model.
 
 **Q: What if the library updates its schema?**
-> Update your `schema.prisma` to match, then run `yarn workspace @callagent/memory-sql prisma migrate dev` again.
+> Update your `schema.prisma` to match, then run `yarn workspace @a2arium/memory-sql prisma migrate dev` again.
 
 **Q: Can I use a different database?**
 > The SQL adapter requires PostgreSQL. Other adapters may support different databases in the future.
@@ -2501,7 +2501,7 @@ await ctx.memory.semantic.queryByKeyPattern('user:*');
 > No. You must create and manage your own PrismaClient instance.
 
 **Q: Can I run migrations from the library?**
-> Yes. Run migrations from the `@callagent/memory-sql` package using Yarn workspaces.
+> Yes. Run migrations from the `@a2arium/memory-sql` package using Yarn workspaces.
 
 **Q: How do I enable entity alignment?**
 > Install the pgvector extension, run the entity alignment migration, configure an embedding provider, and pass an embedding function to the MemorySQLAdapter constructor.

@@ -7,7 +7,7 @@ import type {
 } from '../../shared/types/A2ATypes.js';
 import type { DecisionEntry } from '../../shared/types/workingMemory.js';
 import type { TaskContext } from '../../shared/types/index.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const serializerLogger = logger.createLogger({ prefix: 'ContextSerializer' });
 

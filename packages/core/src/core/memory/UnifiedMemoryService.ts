@@ -1,4 +1,4 @@
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 import { MemoryLifecycleOrchestrator } from './lifecycle/orchestrator/MemoryLifecycleOrchestrator.js';
 
 import { MemoryLifecycleConfig } from './lifecycle/config/types.js';
@@ -9,14 +9,14 @@ import {
     RecallOptions,
     RememberOptions
 } from '../../shared/types/memoryLifecycle.js';
-import { ThoughtEntry, DecisionEntry, WorkingMemoryBackend } from '@callagent/types';
+import { ThoughtEntry, DecisionEntry, WorkingMemoryBackend } from '@a2arium/callagent-types';
 import {
     MemoryQueryOptions,
     MemoryQueryResult,
     MemorySetOptions,
     GetManyInput,
     GetManyOptions
-} from '@callagent/types';
+} from '@a2arium/callagent-types';
 
 /**
  * Semantic Memory Adapter Interface

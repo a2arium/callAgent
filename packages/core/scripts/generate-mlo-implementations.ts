@@ -14,7 +14,7 @@ import { join, dirname } from 'path';
 const IMPLEMENTATION_TEMPLATE = `import { {INTERFACE_NAME} } from '../../interfaces/{INTERFACE_FILE}.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/utils';
 
 export class {CLASS_NAME} implements {INTERFACE_NAME} {
   readonly stageName = '{STAGE_NAME}' as const;

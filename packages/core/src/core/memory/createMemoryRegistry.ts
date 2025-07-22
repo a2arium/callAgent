@@ -11,8 +11,8 @@ import {
     RecognitionResult,
     EnrichmentOptions,
     EnrichmentResult
-} from '@callagent/types';
-import { logger } from '@callagent/utils';
+} from '@a2arium/callagent-types';
+import { logger } from '@a2arium/callagent-utils';
 import { createEmbeddingFunction, isEmbeddingAvailable } from '../llm/LLMFactory.js';
 import { SemanticMemoryRegistry } from './types/semantic/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from './types/episodic/EpisodicMemoryRegistry.js';
@@ -46,7 +46,7 @@ export async function createMemoryRegistry(tenantId?: string, agentId?: string, 
     if (adapterType === 'sql') {
         // Import SQL adapters
         const { PrismaClient } = await import('@prisma/client');
-        const { MemorySQLAdapter } = await import('@callagent/memory-sql');
+        const { MemorySQLAdapter } = await import('@a2arium/callagent-memory-sql');
 
         const prisma = new PrismaClient();
 

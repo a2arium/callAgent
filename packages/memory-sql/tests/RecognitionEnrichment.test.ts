@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { MemorySQLAdapter } from '../src/MemorySQLAdapter.js';
 import { prismaMock } from './__mocks__/prisma.js';
-import type { RecognitionOptions, EnrichmentOptions } from '@callagent/types';
+import type { RecognitionOptions, EnrichmentOptions } from '@a2arium/types';
 import { testEventSchema } from './testSchema.js';
 
 describe('MemorySQLAdapter - Recognition and Enrichment', () => {

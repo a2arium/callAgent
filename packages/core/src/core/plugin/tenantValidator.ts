@@ -1,4 +1,4 @@
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 // Create component-specific logger
 const validatorLogger = logger.createLogger({ prefix: 'TenantValidator' });

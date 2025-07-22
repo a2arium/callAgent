@@ -15,9 +15,9 @@
     "isolatedModules": true,
     "baseUrl": ".",
     "paths": {
-      "@callagent/core": ["packages/core/src"],
-      "@callagent/types": ["packages/types/src"],
-      "@callagent/memory-sql": ["packages/memory-sql/src"]
+      "@a2arium/core": ["packages/core/src"],
+      "@a2arium/types": ["packages/types/src"],
+      "@a2arium/memory-sql": ["packages/memory-sql/src"]
     }
   },
   "exclude": ["node_modules", "dist"]

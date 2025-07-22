@@ -2,7 +2,7 @@ import { globalAgentRegistry } from './AgentRegistry.js';
 import { AgentPlugin } from './types.js';
 import { AgentDependencyResolver, DependencyResolutionError } from './dependencies/index.js';
 import { SmartAgentDiscoveryService } from './dependencies/SmartAgentDiscoveryService.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const pluginLogger = logger.createLogger({ prefix: 'PluginManager' });
 

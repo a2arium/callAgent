@@ -1,7 +1,7 @@
 import { AgentDependencyResolver, DependencyResolutionError } from '../src/core/plugin/dependencies/AgentDependencyResolver.js';
 import { SmartAgentDiscoveryService } from './__mocks__/SmartAgentDiscoveryService.js';
 import { ManifestValidator } from './__mocks__/ManifestValidator.js';
-import { AgentManifest } from '@callagent/types';
+import { AgentManifest } from '@a2arium/types';
 // Mock the dependencies
 jest.mock('node:fs/promises', () => ({
     readFile: jest.fn()

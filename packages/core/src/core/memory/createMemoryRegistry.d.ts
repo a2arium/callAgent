@@ -1,4 +1,4 @@
-import { IMemory, MemoryRegistry, WorkingMemoryBackend } from '@callagent/types';
+import { IMemory, MemoryRegistry, WorkingMemoryBackend } from '@a2arium/callagent-types';
 /**
  * Extended IMemory interface that includes working memory
  */

@@ -10,7 +10,7 @@ export class LLMDisambiguator {
         candidateData: T,
         existingData: T,
         confidence: number,
-        taskContext: any, // TaskContext from @callagent/core
+        taskContext: any, // TaskContext from @a2arium/core
         options: {
             customPrompt?: string;
             agentGoal?: string;

@@ -70,7 +70,7 @@ Stores information that persists across sessions. Developers primarily integrate
 
 This section details how to implement and register backend adapters for Semantic, Episodic, and Embed LTM.
 
-### 3.1. Required Interfaces (from `@callagent/types`)
+### 3.1. Required Interfaces (from `@a2arium/types`)
 
 *   **`SemanticMemoryBackend`**:
     ```typescript
@@ -98,7 +98,7 @@ This section details how to implement and register backend adapters for Semantic
       delete(key: string, opts?: { backend?: string }): Promise<void>;
     };
     ```
-    *(Refer to `@callagent/types/IMemory.ts` for full type definitions of `GetManyInput`, `MemorySetOptions`, etc.)*
+    *(Refer to `@a2arium/types/IMemory.ts` for full type definitions of `GetManyInput`, `MemorySetOptions`, etc.)*
 
 ### 3.2. Package Structure for `memory-[backend-name]`
 
@@ -126,7 +126,7 @@ packages/memory-[backend-name]/
 
 *   **`YourSemanticAdapter.ts`**:
     ```typescript
-    import { SemanticMemoryBackend, /* other types */ } from '@callagent/types';
+    import { SemanticMemoryBackend, /* other types */ } from '@a2arium/types';
     // ... other imports ...
     export class YourSemanticAdapter implements SemanticMemoryBackend {
       constructor(
@@ -151,7 +151,7 @@ packages/memory-[backend-name]/
 
 *   **`YourEpisodicAdapter.ts`**:
     ```typescript
-    import { EpisodicMemoryBackend, /* other types */ } from '@callagent/types';
+    import { EpisodicMemoryBackend, /* other types */ } from '@a2arium/types';
     export class YourEpisodicAdapter implements EpisodicMemoryBackend {
       constructor(private client: YourClient, private config: YourBackendConfig = {}) {}
       async append<T>(event: T, opts?: { backend?: string, tags?: string[] }): Promise<void> { /* ... tenant-aware logic ... */ }
@@ -162,7 +162,7 @@ packages/memory-[backend-name]/
 
 *   **`YourEmbedAdapter.ts`**:
     ```typescript
-    import { EmbedMemoryBackend, /* other types */ } from '@callagent/types';
+    import { EmbedMemoryBackend, /* other types */ } from '@a2arium/types';
     export class YourEmbedAdapter implements EmbedMemoryBackend {
       constructor(private client: YourVectorClient, private config: YourBackendConfig = {}) {}
       async upsert<T>(key: string, embedding: number[], value: T, opts?: { backend?: string }): Promise<void> { /* ... tenant-aware logic ... */ }
@@ -176,7 +176,7 @@ packages/memory-[backend-name]/
 Register your adapters so the system can instantiate them based on configuration.
 
 ```typescript
-import { IMemory, SemanticMemoryRegistry, EpisodicMemoryRegistry, EmbedMemoryRegistry, WorkingMemoryRegistry } from '@callagent/types';
+import { IMemory, SemanticMemoryRegistry, EpisodicMemoryRegistry, EmbedMemoryRegistry, WorkingMemoryRegistry } from '@a2arium/types';
 // ... other imports ...
 
 export async function getMemoryAdapter(tenantId?: string, embedFunction?: (text: string) => Promise<number[]>): Promise<IMemory> {
@@ -188,7 +188,7 @@ export async function getMemoryAdapter(tenantId?: string, embedFunction?: (text:
             YourSemanticAdapter, 
             YourEpisodicAdapter, 
             YourEmbedAdapter 
-        } = await import('@callagent/memory-your-backend'); // Your adapter package
+        } = await import('@a2arium/memory-your-backend'); // Your adapter package
 
         const client = new YourClient(/* connectionString, config */);
         const vectorClient = new YourVectorClient(/* connectionString, config */);
@@ -209,11 +209,11 @@ export async function getMemoryAdapter(tenantId?: string, embedFunction?: (text:
     throw new Error(`Unsupported memory adapter type: ${adapterType}`);
 }
 ```
-*Note: The `MemoryRegistry` types (e.g., `SemanticMemoryRegistry`) are provided by `@callagent/types` or `@callagent/core` and typically take a map of named backend instances and a default backend name.*
+*Note: The `MemoryRegistry` types (e.g., `SemanticMemoryRegistry`) are provided by `@a2arium/types` or `@a2arium/core` and typically take a map of named backend instances and a default backend name.*
 
 ### 3.5. MLO Backend Wrapper Integration
 
-The MLO system uses wrappers (`MLOSemanticBackend`, `MLOEpisodicBackend`, `MLOEmbedBackend` from `@callagent/core`) to route operations through the `UnifiedMemoryService` and its MLO pipeline. These wrappers are instantiated in `extendContextWithMemory` in `@callagent/core`.
+The MLO system uses wrappers (`MLOSemanticBackend`, `MLOEpisodicBackend`, `MLOEmbedBackend` from `@a2arium/core`) to route operations through the `UnifiedMemoryService` and its MLO pipeline. These wrappers are instantiated in `extendContextWithMemory` in `@a2arium/core`.
 
 ```typescript
 // In packages/core/src/core/memory/types/working/context/workingMemoryContext.ts
@@ -267,7 +267,7 @@ You can provide custom implementations for components within each of the 6 MLO s
 
 ### 4.2. Stage-by-Stage Extensibility
 
-(Interfaces are in `@callagent/core/src/core/memory/lifecycle/interfaces`)
+(Interfaces are in `@a2arium/core/src/core/memory/lifecycle/interfaces`)
 
 *   **4.2.1. Acquisition Stage (`IAcquisitionStage`)**
     *   **Purpose**: Ingests raw items, filters, compresses, and consolidates.
@@ -278,7 +278,7 @@ You can provide custom implementations for components within each of the 6 MLO s
     *   **Example Custom Filter**:
         ```typescript
         // YourCustomFilter.ts
-        import { IFilter, MemoryItem } from '@callagent/core';
+        import { IFilter, MemoryItem } from '@a2arium/core';
         export class YourCustomFilter implements IFilter {
             readonly stageName = 'acquisition';
             readonly componentName = 'filter';
@@ -336,7 +336,7 @@ You can provide custom implementations for components within each of the 6 MLO s
 
 Working memory is crucial for an agent's active reasoning and task execution.
 
-*   **MLO-Managed**: Handled by `UnifiedMemoryService` and `WorkingMemoryRegistry` within `@callagent/core`. **Working memory is now externalized through backend adapters following the same pattern as other memory types.**
+*   **MLO-Managed**: Handled by `UnifiedMemoryService` and `WorkingMemoryRegistry` within `@a2arium/core`. **Working memory is now externalized through backend adapters following the same pattern as other memory types.**
 *   **`TaskContext` API**: Agents interact with working memory via methods on the `ctx` object:
     *   `ctx.setGoal(goal: string)`
     *   `ctx.getGoal(): Promise<string | null>`
@@ -375,6 +375,6 @@ Working memory is crucial for an agent's active reasoning and task execution.
 *   **Error Handling**: Implement robust error handling in adapters and custom components.
 *   **Performance**: Consider caching, batch operations, and efficient querying within your backend adapters.
 *   **Idempotency**: Design operations to be idempotent where possible.
-*   **Observability**: Utilize the shared `logger` from `@callagent/utils` within your custom components and adapters for consistent logging. The MLO pipeline also has built-in metrics.
+*   **Observability**: Utilize the shared `logger` from `@a2arium/utils` within your custom components and adapters for consistent logging. The MLO pipeline also has built-in metrics.
 
 This guide provides a foundational understanding. Refer to the source code in `packages/core/src/core/memory/` and `packages/types/` for precise interface definitions and existing implementations.

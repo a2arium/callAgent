@@ -28,7 +28,7 @@ yarn run-agent apps/examples/hello-to-llm-demo/dist/AgentModule.js '{}' --no-res
 }
 
 // AgentModule.ts
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   async handleTask(ctx) {
@@ -214,7 +214,7 @@ apps/examples/business-workflow/
 
 ```typescript
 // BusinessWorkflowAgent.ts
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   // Uses business-workflow.json OR can use inline manifest
@@ -246,7 +246,7 @@ export default createAgent({
 
 ```typescript
 // DataAnalysisAgent.ts
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   manifest: {
@@ -275,7 +275,7 @@ export default createAgent({
 }, import.meta.url);
 
 // ReportingAgent.ts
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   manifest: {
@@ -730,7 +730,7 @@ For multi-agent folders, use clear naming patterns:
 
 ```typescript
 // Test agent with dependencies
-import { createTestContext } from '@callagent/core/test-utils';
+import { createTestContext } from '@a2arium/core/test-utils';
 
 it('should call dependent agent', async () => {
   // Register dependency first

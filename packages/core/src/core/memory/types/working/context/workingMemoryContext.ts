@@ -3,12 +3,12 @@ import { MemoryLifecycleConfig } from '../../../lifecycle/config/types.js';
 import { getMemoryProfile } from '../../../lifecycle/config/MemoryProfiles.js';
 import { WorkingVariables } from '../../../../../shared/types/workingMemory.js';
 import { TaskContext } from '../../../../../shared/types/index.js';
-import { WorkingMemoryBackend } from '@callagent/types';
+import { WorkingMemoryBackend } from '@a2arium/callagent-types';
 import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../../MLOBackends.js';
 import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../../episodic/EpisodicMemoryRegistry.js';
 import { EmbedMemoryRegistry } from '../../embed/EmbedMemoryRegistry.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const contextLogger = logger.createLogger({ prefix: 'WorkingMemoryContext' });
 
@@ -164,7 +164,7 @@ export async function extendContextWithMemory(
     let workingMemoryAdapter: WorkingMemoryBackend | undefined;
     try {
         const { PrismaClient } = await import('@prisma/client');
-        const { WorkingMemorySQLAdapter } = await import('@callagent/memory-sql') as any;
+        const { WorkingMemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
 
         const prisma = new PrismaClient();
         workingMemoryAdapter = new WorkingMemorySQLAdapter(prisma, {
@@ -202,7 +202,7 @@ export async function extendContextWithMemory(
     context.addThought = async (thought: string) => unifiedMemory.addThought(thought, agentId);
     context.getThoughts = async () => {
         const thoughts = await unifiedMemory.getThoughts(agentId);
-        // Convert from @callagent/types ThoughtEntry to core ThoughtEntry
+        // Convert from @a2arium/callagent-types ThoughtEntry to core ThoughtEntry
         return thoughts.map(thought => ({
             timestamp: thought.timestamp,
             content: thought.content,

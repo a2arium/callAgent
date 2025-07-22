@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { SemanticMemoryBackend, MemoryQueryResult } from '@callagent/types';
+import { SemanticMemoryBackend, MemoryQueryResult } from '@a2arium/callagent-types';
 import { MemorySetOptions, GetManyInput, GetManyOptions } from './types.js';
 export declare class MemorySQLAdapter implements SemanticMemoryBackend {
     private prisma;

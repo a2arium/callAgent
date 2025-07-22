@@ -72,7 +72,7 @@ export type GetManyOptions = {
 
 export type GetManyQuery = {
     tag?: string;
-    filters?: import('@callagent/types').MemoryFilter[];  // Use core MemoryFilter type
+    filters?: import('@a2arium/callagent-types').MemoryFilter[];  // Use core MemoryFilter type
     limit?: number;
     orderBy?: {
         path: string;

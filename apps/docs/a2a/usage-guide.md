@@ -9,7 +9,7 @@ Agent-to-Agent (A2A) communication allows agents to delegate tasks to other spec
 ### Simple Agent Call
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 export default createAgent({
   manifest: { name: 'orchestrator', version: '1.0.0' },
@@ -389,7 +389,7 @@ await ctx.sendTaskToAgent('dataanalysis', input);
 ### Checking Available Agents
 
 ```typescript
-import { PluginManager } from '@callagent/core';
+import { PluginManager } from '@a2arium/core';
 
 // List all available agents
 const availableAgents = PluginManager.listAgents();

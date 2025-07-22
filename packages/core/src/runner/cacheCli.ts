@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import 'dotenv/config';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 import { AgentResultCache, CacheCleanupService } from '../core/cache/index.js';
 
 // Create CLI logger

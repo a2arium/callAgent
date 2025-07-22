@@ -7,7 +7,7 @@ alwaysApply: false
 
 ## Core Principles
 
-1.  **Use the Centralized Logger:** Always use the provided logger instance from `@callagent/utils`.
+1.  **Use the Centralized Logger:** Always use the provided logger instance from `@a2arium/utils`.
 2.  **Avoid `console.log`:** Use logger methods (`debug`, `info`, `warn`, `error`) for structured and controllable output.
 3.  **Use Appropriate Levels:** Choose the level that best reflects the message's importance.
 4.  **Include Context:** Log relevant variables and error objects.
@@ -15,11 +15,11 @@ alwaysApply: false
 
 ## Logger Structure
 
-The framework uses a singleton `logger` factory from `@callagent/utils` to create `ComponentLogger` instances. These instances support nested creation for clear component/sub-component identification.
+The framework uses a singleton `logger` factory from `@a2arium/utils` to create `ComponentLogger` instances. These instances support nested creation for clear component/sub-component identification.
 
 -   **Import the Logger:**
     ```typescript
-    import { logger } from '@callagent/utils';
+    import { logger } from '@a2arium/utils';
     ```
 
 -   **Base Loggers:** Components create a base logger:
@@ -85,7 +85,7 @@ async handleTask(ctx: TaskContext) {
 ## Best Practices
 
 1.  **Use `ctx.logger` in Agents:** Always prefer the context logger.
-2.  **Import from Utils:** For non-agent code, import from `@callagent/utils`.
+2.  **Import from Utils:** For non-agent code, import from `@a2arium/utils`.
 3.  **Structured Logging:** Pass objects/errors as separate arguments, not stringified.
     ```typescript
     // Good
@@ -115,8 +115,8 @@ LOG_LEVEL=debug
 ## Architecture
 
 The logging system follows proper layering:
-- **Foundation Layer**: `@callagent/utils` (contains logger)
-- **Infrastructure Layer**: `@callagent/memory-sql`, adapters
-- **Application Layer**: `@callagent/core`, business logic
+- **Foundation Layer**: `@a2arium/utils` (contains logger)
+- **Infrastructure Layer**: `@a2arium/memory-sql`, adapters
+- **Application Layer**: `@a2arium/core`, business logic
 
 This ensures all packages can use consistent logging without circular dependencies.

@@ -1,4 +1,4 @@
-import { EpisodicMemoryBackend, MemoryRegistry } from '@callagent/types';
+import { EpisodicMemoryBackend, MemoryRegistry } from '@a2arium/callagent-types';
 
 /**
  * Registry/facade for episodic memory backends.

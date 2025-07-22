@@ -738,7 +738,7 @@ try {
 Find a registered agent by name.
 
 ```typescript
-import { PluginManager } from '@callagent/core';
+import { PluginManager } from '@a2arium/core';
 
 const agent = PluginManager.findAgent('data-analyzer');
 if (agent) {
@@ -762,7 +762,7 @@ agents.forEach(agent => {
 Register a new agent (typically done automatically).
 
 ```typescript
-import { createAgent } from '@callagent/core';
+import { createAgent } from '@a2arium/core';
 
 const myAgent = createAgent({
   manifest: { name: 'my-agent', version: '1.0.0' },

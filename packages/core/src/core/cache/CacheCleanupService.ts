@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 /**
  * Cache Cleanup Service

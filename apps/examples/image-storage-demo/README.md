@@ -20,10 +20,10 @@ The blob storage functionality requires new database fields. Run the migration:
 
 ```bash
 # Apply the migration
-yarn workspace @callagent/memory-sql prisma migrate dev --name add-blob-storage
+yarn workspace @a2arium/memory-sql prisma migrate dev --name add-blob-storage
 
 # Regenerate the Prisma client to include new fields
-yarn workspace @callagent/memory-sql prisma generate
+yarn workspace @a2arium/memory-sql prisma generate
 ```
 
 ### 2. Build the Example
@@ -158,7 +158,7 @@ await ctx.memory.semantic.set(key, {
 ### Using the Helper Functions
 
 ```typescript
-import { storeImage, getImage, listImages } from '@callagent/memory-sql/BlobStorageHelpers';
+import { storeImage, getImage, listImages } from '@a2arium/memory-sql/BlobStorageHelpers';
 
 // In your agent
 export default createAgent({
@@ -244,7 +244,7 @@ This implementation provides the foundation for:
 If you see TypeScript errors about `blobData` not existing, you need to regenerate the Prisma client:
 
 ```bash
-yarn workspace @callagent/memory-sql prisma generate
+yarn workspace @a2arium/memory-sql prisma generate
 ```
 
 ### Database errors
@@ -252,7 +252,7 @@ yarn workspace @callagent/memory-sql prisma generate
 Make sure you've run the migration:
 
 ```bash
-yarn workspace @callagent/memory-sql prisma migrate dev --name add-blob-storage
+yarn workspace @a2arium/memory-sql prisma migrate dev --name add-blob-storage
 ```
 
 ### Performance considerations

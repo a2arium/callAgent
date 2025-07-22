@@ -88,8 +88,8 @@ All operations are logged with detailed information about the MLO processing pip
 
 ## Dependencies
 
-- `@callagent/core` - Core framework with working memory support
-- `@callagent/utils` - Shared utilities including logger
+- `@a2arium/core` - Core framework with working memory support
+- `@a2arium/utils` - Shared utilities including logger
 
 ## Related Documentation
 

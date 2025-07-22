@@ -1,5 +1,5 @@
-import { AgentManifest, isAgentManifest } from '@callagent/types';
-import { logger } from '@callagent/utils';
+import { AgentManifest, isAgentManifest } from '@a2arium/callagent-types';
+import { logger } from '@a2arium/callagent-utils';
 
 const validatorLogger = logger.createLogger({ prefix: 'ManifestValidator' });
 

@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
-import { AgentManifest, isAgentManifest } from '@callagent/types';
+import { AgentManifest, isAgentManifest } from '@a2arium/callagent-types';
 import { ManifestValidator } from '../ManifestValidator.js';
 import { SmartAgentDiscoveryService } from './SmartAgentDiscoveryService.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const resolverLogger = logger.createLogger({ prefix: 'DependencyResolver' });
 

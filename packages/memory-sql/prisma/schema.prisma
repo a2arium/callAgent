@@ -1,4 +1,4 @@
-// Prisma schema for @callagent/memory-sql
+// Prisma schema for @a2arium/memory-sql
 
 datasource db {
     provider = "postgresql"

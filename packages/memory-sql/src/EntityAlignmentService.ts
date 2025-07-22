@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { EntityMatch, EntityAlignment, ParsedEntityField, EntityAlignmentOptions, VectorEmbedding } from './types.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 const alignmentLogger = logger.createLogger({ prefix: 'EntityAlignment' });
 

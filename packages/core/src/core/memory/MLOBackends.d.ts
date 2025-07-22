@@ -1,5 +1,5 @@
 import { UnifiedMemoryService } from './UnifiedMemoryService.js';
-import { SemanticMemoryBackend, EpisodicMemoryBackend, EmbedMemoryBackend, MemoryQueryResult, MemorySetOptions, GetManyInput, GetManyOptions, MemoryQueryOptions, RecognitionOptions, RecognitionResult, EnrichmentOptions, EnrichmentResult } from '@callagent/types';
+import { SemanticMemoryBackend, EpisodicMemoryBackend, EmbedMemoryBackend, MemoryQueryResult, MemorySetOptions, GetManyInput, GetManyOptions, MemoryQueryOptions, RecognitionOptions, RecognitionResult, EnrichmentOptions, EnrichmentResult } from '@a2arium/callagent-types';
 /**
  * MLO-backed Semantic Memory Backend
  *

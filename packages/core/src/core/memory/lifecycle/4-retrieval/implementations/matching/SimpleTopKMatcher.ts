@@ -1,7 +1,7 @@
 import { IMatchingStrategy } from '../../interfaces/IMatchingStrategy.js';
 import { MemoryItem } from '../../../../../../shared/types/memoryLifecycle.js';
 import { ProcessorMetrics } from '../../../interfaces/IStageProcessor.js';
-import { logger } from '@callagent/utils';
+import { logger } from '@a2arium/callagent-utils';
 
 export class SimpleTopKMatcher implements IMatchingStrategy {
     readonly stageName = 'retrieval' as const;
