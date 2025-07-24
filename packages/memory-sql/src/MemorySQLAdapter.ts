@@ -7,21 +7,22 @@ import { addAlignedProxies } from './AlignedValueProxy.js';
 import { FilterParser } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
 import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
+import { TagNormalizer } from '@a2arium/callagent-core';
 
 /**
  * Configuration options for MemorySQLAdapter
  */
 export interface MemorySQLConfig {
-  /** Pre-configured Prisma client instance */
-  prismaClient?: PrismaClient;
-  /** Database connection URL (used if prismaClient not provided) */
-  databaseUrl?: string;
-  /** Default tenant ID for operations */
-  defaultTenantId?: string;
-  /** Embedding function for vector operations */
-  embedFunction?: (text: string) => Promise<number[]>;
-  /** Default query result limit */
-  defaultQueryLimit?: number;
+    /** Pre-configured Prisma client instance */
+    prismaClient?: PrismaClient;
+    /** Database connection URL (used if prismaClient not provided) */
+    databaseUrl?: string;
+    /** Default tenant ID for operations */
+    defaultTenantId?: string;
+    /** Embedding function for vector operations */
+    embedFunction?: (text: string) => Promise<number[]>;
+    /** Default query result limit */
+    defaultQueryLimit?: number;
 }
 
 // Define system tenant constants locally for this adapter
@@ -158,10 +159,13 @@ new MemorySQLAdapter({
         const tenantId = options.tenantId || this.defaultTenantId;
         const { originalValue, processedData, shouldUseBlob } = processedBinary;
 
+        // Normalize tags before storage
+        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+
         if (shouldUseBlob) {
             // Store large binary data in BYTEA fields
             await this.setBlob(key, processedData.buffer, processedData.metadata, {
-                tags: options.tags || [],
+                tags: normalizedTags,
                 tenantId: tenantId
             });
         } else {
@@ -182,14 +186,14 @@ new MemorySQLAdapter({
                 },
                 update: {
                     value: valueWithBase64,
-                    tags: options.tags || [],
+                    tags: normalizedTags,
                     updatedAt: new Date()
                 },
                 create: {
                     tenantId: tenantId,
                     key: key,
                     value: valueWithBase64,
-                    tags: options.tags || [],
+                    tags: normalizedTags,
                     createdAt: new Date(),
                     updatedAt: new Date()
                 }
@@ -220,12 +224,15 @@ new MemorySQLAdapter({
     private async setRegular(key: string, value: any, options: MemorySetOptions): Promise<void> {
         const tenantId = options.tenantId || this.defaultTenantId;
 
+        // Normalize tags before storage
+        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+
         // Check if the value contains binary data that needs processing
         const processedBinary = await this.processBinaryDataIfNeeded(value, options);
 
         if (processedBinary) {
             // Store binary data using blob storage
-            await this.storeBinaryData(key, processedBinary, options);
+            await this.storeBinaryData(key, processedBinary, { ...options, tags: normalizedTags });
         } else {
             // Regular JSON storage for non-binary data
             await this.prisma.agentMemoryStore.upsert({
@@ -237,14 +244,14 @@ new MemorySQLAdapter({
                 },
                 update: {
                     value: value,
-                    tags: options.tags || [],
+                    tags: normalizedTags,
                     updatedAt: new Date()
                 },
                 create: {
                     tenantId: tenantId,
                     key: key,
                     value: value,
-                    tags: options.tags || [],
+                    tags: normalizedTags,
                     createdAt: new Date(),
                     updatedAt: new Date()
                 }
@@ -259,12 +266,15 @@ new MemorySQLAdapter({
 
         const tenantId = options.tenantId || this.defaultTenantId;
 
+        // Normalize tags before storage
+        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+
         // Check if the value contains binary data that needs processing
         const processedBinary = await this.processBinaryDataIfNeeded(value, options);
 
         if (processedBinary) {
             // Store binary data using blob storage (entity alignment not applied to binary data)
-            await this.storeBinaryData(key, processedBinary, options);
+            await this.storeBinaryData(key, processedBinary, { ...options, tags: normalizedTags });
         } else {
             // Regular entity alignment flow for non-binary data
 
@@ -290,14 +300,14 @@ new MemorySQLAdapter({
                 },
                 update: {
                     value: value,
-                    tags: options.tags || [],
+                    tags: normalizedTags,
                     updatedAt: new Date()
                 },
                 create: {
                     tenantId: tenantId,
                     key: key,
                     value: value,
-                    tags: options.tags || [],
+                    tags: normalizedTags,
                     createdAt: new Date(),
                     updatedAt: new Date()
                 }
@@ -734,8 +744,10 @@ new MemorySQLAdapter({
         const queryParams: any[] = [tenantId];
 
         if (tag) {
+            // Normalize tag for lookup
+            const normalizedTag = TagNormalizer.normalize(tag);
             query += ' AND $2 = ANY(tags)';
-            queryParams.push(tag);
+            queryParams.push(normalizedTag);
         }
 
         query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
@@ -784,9 +796,10 @@ new MemorySQLAdapter({
             tenantId: tenantId  // Always filter by tenant
         };
 
-        // Handle tag filtering
+        // Handle tag filtering with normalization
         if (tag) {
-            whereConditions.tags = { has: tag };
+            const normalizedTag = TagNormalizer.normalize(tag);
+            whereConditions.tags = { has: normalizedTag };
         }
 
         // Handle advanced JSON filtering
@@ -908,8 +921,9 @@ new MemorySQLAdapter({
 
         // Add tag filter if specified
         if (tag) {
+            const normalizedTag = TagNormalizer.normalize(tag);
             query += ' AND $3 = ANY(tags)';
-            queryParams.push(tag);
+            queryParams.push(normalizedTag);
         }
 
         // Add regular JSON filters if any
@@ -1405,10 +1419,14 @@ new MemorySQLAdapter({
 
         // If not a dry run, save the enriched data back to memory
         if (!dryRun) {
+            // Normalize existing tags when preserving them
+            const existingTags = originalMetadata?.tags || [];
+            const normalizedTags = TagNormalizer.normalizeTags(existingTags);
+
             await this.set(key, enrichmentResult.enrichedData, {
                 tenantId: taskContext.tenantId,
                 // Preserve existing tags from the original memory entry
-                tags: originalMetadata?.tags || []
+                tags: normalizedTags
             });
         }
 
@@ -1433,6 +1451,9 @@ new MemorySQLAdapter({
     async setBlob(key: string, buffer: Buffer, metadata: any = {}, options: MemorySetOptions = {}): Promise<void> {
         const tenantId = options.tenantId || this.defaultTenantId;
 
+        // Normalize tags before storage
+        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+
         // Prepare blob metadata with standard fields
         const blobMetadata = {
             size: buffer.length,
@@ -1449,7 +1470,7 @@ new MemorySQLAdapter({
                 value: { type: 'blob', message: 'Binary data stored in blobData field' },
                 blobData: buffer,
                 blobMetadata: blobMetadata,
-                tags: options.tags || [],
+                tags: normalizedTags,
                 updatedAt: new Date()
             },
             create: {
@@ -1458,7 +1479,7 @@ new MemorySQLAdapter({
                 value: { type: 'blob', message: 'Binary data stored in blobData field' },
                 blobData: buffer,
                 blobMetadata: blobMetadata,
-                tags: options.tags || []
+                tags: normalizedTags
             }
         });
     }

@@ -13,6 +13,9 @@ export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse } from '
 // Add other exports as needed for the public API 
 export { createEmbeddingFunction, createEmbeddingFunctionWithTracking, isEmbeddingAvailable, getEmbeddingModel } from './core/llm/LLMFactory.js';
 
+// Utility exports
+export { TagNormalizer } from './utils/tagNormalization.js';
+
 // Memory system exports
 export { createMemoryRegistry } from './core/memory/createMemoryRegistry.js';
 export type { ExtendedIMemory } from './core/memory/createMemoryRegistry.js';

@@ -72,6 +72,16 @@ class MemoryAgent {
 const agent = createAgent(manifest, new MemoryAgent(workingMemory));
 ```
 
+### Tag Normalization
+
+All tags are automatically normalized to lowercase for consistent searching:
+
+```typescript
+// These all work the same way:
+await memory.remember('key', data, { tags: ['RIGA', 'Events'] });
+await memory.recall('events'); // Finds items tagged with 'Events', 'EVENTS', 'events', etc.
+```
+
 ### A2A Communication
 
 ```typescript

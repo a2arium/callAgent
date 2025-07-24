@@ -5,6 +5,7 @@ import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { LLMDisambiguator } from './LLMDisambiguator.js';
 // Import types from the types package - these were defined in IMemory.ts
 import type { MemoryQueryResult } from '@a2arium/callagent-types';
+import { TagNormalizer } from '@a2arium/callagent-core';
 
 // Define recognition types locally for now
 type RecognitionOptions = {
@@ -434,7 +435,10 @@ export class RecognitionService {
     ): Promise<Array<{ key: string; data: T }>> {
         const matches: Array<{ key: string; data: T }> = [];
 
-        for (const tag of tags) {
+        // Normalize tags before searching
+        const normalizedTags = TagNormalizer.normalizeTags(tags);
+
+        for (const tag of normalizedTags) {
             // Use Prisma ORM instead of raw SQL
             const results = await this.prisma.agentMemoryStore.findMany({
                 where: {
