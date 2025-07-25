@@ -44,7 +44,8 @@ describe('TagNormalizer', () => {
         });
 
         test('filters out non-string values', () => {
-            const result = TagNormalizer.normalizeTags(['riga', null as any, undefined as any, 123 as any, 'latvia']);
+            // @ts-ignore - Testing with mixed types intentionally
+            const result = TagNormalizer.normalizeTags(['riga', null, undefined, 123, 'latvia']);
             expect(result).toEqual(['riga', 'latvia']);
         });
 

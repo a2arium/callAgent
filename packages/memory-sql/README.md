@@ -263,6 +263,127 @@ const results = await memory.getMany({
 
 **Note**: This normalization applies to all memory operations including regular storage, blob storage, and semantic search.
 
+## Array Filtering
+
+CallAgent supports powerful array filtering using the `[]` syntax to query elements within JSON arrays:
+
+### Basic Array Filtering
+
+```typescript
+// Store events with array data
+await memory.set('event:001', {
+  title: 'Tech Conference 2025',
+  eventOccurences: [
+    { date: '2025-07-24', time: '09:00', priority: 9, status: 'confirmed' },
+    { date: '2025-07-25', time: '10:00', priority: 7, status: 'pending' }
+  ],
+  speakers: [
+    { name: 'Dr. John Smith', expertise: 'AI', rating: 9.2 },
+    { name: 'Jane Doe', expertise: 'Machine Learning', rating: 8.8 }
+  ]
+});
+
+// Find events happening on a specific date
+const todayEvents = await memory.getMany({
+  filters: ['eventOccurences[].date = "2025-07-24"']
+});
+
+// Find high-priority events
+const highPriority = await memory.getMany({
+  filters: ['eventOccurences[].priority >= 8']
+});
+
+// String operations on array elements
+const morningEvents = await memory.getMany({
+  filters: ['eventOccurences[].time starts_with "09"']
+});
+```
+
+### Nested Object Array Filtering
+
+Array filtering works with nested objects within arrays:
+
+```typescript
+// Filter by nested properties in arrays
+const aiExperts = await memory.getMany({
+  filters: ['speakers[].expertise contains "AI"']
+});
+
+// Filter by nested numeric values
+const topRatedSpeakers = await memory.getMany({
+  filters: ['speakers[].rating >= 9.0']
+});
+
+// Multiple levels of nesting
+const venueEvents = await memory.getMany({
+  filters: ['eventOccurences[].venue.name = "Conference Center"']
+});
+```
+
+### Supported Operators
+
+All standard operators work with array filtering:
+
+| Operator | Example | Description |
+|----------|---------|-------------|
+| `=` | `eventOccurences[].date = "2025-07-24"` | Exact equality |
+| `!=` | `eventOccurences[].status != "cancelled"` | Not equal |
+| `>`, `>=` | `eventOccurences[].priority >= 8` | Numeric comparison |
+| `<`, `<=` | `speakers[].rating < 7.0` | Numeric comparison |
+| `contains` | `speakers[].expertise contains "Music"` | String substring |
+| `starts_with` | `eventOccurences[].time starts_with "09"` | String prefix |
+| `ends_with` | `eventOccurences[].status ends_with "ed"` | String suffix |
+
+### Combined Filtering
+
+Array filters work seamlessly with regular filters and tags:
+
+```typescript
+// Combine array filter with regular filter
+const results = await memory.getMany({
+  filters: [
+    'eventOccurences[].date = "2025-07-24"',  // Array filter
+    'city = "Riga"'                           // Regular filter
+  ]
+});
+
+// Combine with tag filtering
+const techEvents = await memory.getMany({
+  tag: 'tech',
+  filters: ['eventOccurences[].priority >= 8']
+});
+
+// Multiple array filters
+const complexQuery = await memory.getMany({
+  filters: [
+    'eventOccurences[].date = "2025-07-24"',
+    'speakers[].rating >= 9.0',
+    'venue.capacity > 400'
+  ]
+});
+```
+
+### Performance Notes
+
+- Array filtering uses optimized PostgreSQL JSONB operators
+- Queries are executed at the database level for maximum performance
+- Supports complex nested paths like `events[].sessions[].speakers[].name`
+- Efficiently handles large datasets with proper indexing
+
+### Error Handling
+
+```typescript
+// ❌ Invalid: Array path must specify nested field
+await memory.getMany({
+  filters: ['eventOccurences[] = "invalid"']
+}); // Throws: Array path must specify a field within array elements
+
+// ✅ Valid: Specify the field within array elements
+await memory.getMany({
+  filters: ['eventOccurences[].date = "2025-07-24"']
+});
+```
+
 ## Features
 
 - ✅ **Multi-tenant Support**: Complete data isolation per tenant

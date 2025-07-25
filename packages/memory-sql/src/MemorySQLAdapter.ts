@@ -4,7 +4,7 @@ import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetMa
 import { EntityFieldParser } from './EntityFieldParser.js';
 import { EntityAlignmentService } from './EntityAlignmentService.js';
 import { addAlignedProxies } from './AlignedValueProxy.js';
-import { FilterParser } from './FilterParser.js';
+import { FilterParser, ParsedFilter } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
 import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
 import { TagNormalizer } from '@a2arium/callagent-core';
@@ -424,18 +424,193 @@ new MemorySQLAdapter({
 
 
     /**
-     * Builds a Prisma query condition for filtering on JSON fields
-     * @param filter The filter to apply on a JSON field
+     * Builds a Prisma query condition for filtering on JSON fields with array support
+     * @param filter The parsed filter to apply on a JSON field
      * @returns A Prisma-compatible query condition
      * @private
      */
-    private buildJsonFilterCondition(filter: { path: string; operator: FilterOperator; value: any }): any {
-        const { path, operator, value } = filter;
+    private buildJsonFilterCondition(filter: ParsedFilter): any {
+        const { path, operator, value, isArrayPath, arrayPathInfo } = filter;
 
         // Validate path - must be a non-empty string
         if (!path || typeof path !== 'string') {
             throw new Error('Filter path must be a non-empty string');
         }
+
+        // Validate array filter if applicable
+        if (isArrayPath) {
+            this.validateArrayFilter(filter);
+            return this.buildArrayFilterCondition(filter);
+        }
+
+        // Handle regular (non-array) paths
+        return this.buildRegularFilterCondition(filter);
+    }
+
+    /**
+     * Validates array filter syntax and compatibility
+     * @param filter The array filter to validate
+     * @private
+     */
+    private validateArrayFilter(filter: ParsedFilter): void {
+        if (!filter.arrayPathInfo) {
+            throw new MemoryError('Array path info missing for array filter', {
+                code: 'INVALID_ARRAY_FILTER',
+                filter: filter.path
+            });
+        }
+
+        const { arrayField, nestedPath } = filter.arrayPathInfo;
+
+        if (!arrayField.trim()) {
+            throw new MemoryError('Array field name cannot be empty', {
+                code: 'INVALID_ARRAY_FIELD',
+                filter: filter.path
+            });
+        }
+
+        if (!nestedPath.trim()) {
+            throw new MemoryError('Nested path in array filter cannot be empty', {
+                code: 'INVALID_NESTED_PATH',
+                filter: filter.path
+            });
+        }
+
+        // Validate operator compatibility with array filtering
+        const unsupportedOps: FilterOperator[] = ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'];
+        if (unsupportedOps.includes(filter.operator)) {
+            throw new MemoryError(
+                `Operator ${filter.operator} not supported for array filtering. Use regular entity filtering instead.`,
+                {
+                    code: 'UNSUPPORTED_ARRAY_OPERATOR',
+                    operator: filter.operator,
+                    filter: filter.path
+                }
+            );
+        }
+    }
+
+    /**
+ * Builds raw SQL condition for array filtering using PostgreSQL JSONB operators
+ * @param filter The array filter to build condition for
+ * @returns Raw SQL fragment that can be used in WHERE clauses
+ * @private
+ */
+    private buildArrayFilterCondition(filter: ParsedFilter): { sql: string; params: any[] } {
+        const { arrayPathInfo, operator, value } = filter;
+
+        if (!arrayPathInfo) {
+            throw new MemoryError('Array path info missing for array filter', { code: 'INVALID_ARRAY_FILTER' });
+        }
+
+        const { arrayField, nestedPath } = arrayPathInfo;
+
+        // Build the JSONB path for the array field and nested property
+        const jsonPath = nestedPath.includes('.')
+            ? `{${arrayField},"*",${nestedPath.split('.').join(',')}}`
+            : `{${arrayField},"*","${nestedPath}"}`;
+
+        let sqlOperator: string;
+        let paramValue = value;
+
+        switch (operator) {
+            case '=':
+                sqlOperator = '=';
+                break;
+            case '!=':
+                sqlOperator = '!=';
+                break;
+            case '>':
+                sqlOperator = '>';
+                break;
+            case '>=':
+                sqlOperator = '>=';
+                break;
+            case '<':
+                sqlOperator = '<';
+                break;
+            case '<=':
+                sqlOperator = '<=';
+                break;
+            case 'CONTAINS':
+                if (typeof value !== 'string') {
+                    throw new MemoryError('CONTAINS operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                paramValue = `%${value}%`;
+                break;
+            case 'STARTS_WITH':
+                if (typeof value !== 'string') {
+                    throw new MemoryError('STARTS_WITH operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                paramValue = `${value}%`;
+                break;
+            case 'ENDS_WITH':
+                if (typeof value !== 'string') {
+                    throw new MemoryError('ENDS_WITH operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                paramValue = `%${value}`;
+                break;
+            default:
+                throw new MemoryError(`Operator "${operator}" is not supported for array filtering`, {
+                    code: 'UNSUPPORTED_OPERATOR',
+                    operator
+                });
+        }
+
+        // Build SQL with properly escaped field names and type casting
+        // For nested paths like 'speakers[].expertise', we use elem->>'expertise' 
+        // For deeper nested paths like 'events[].person.name', we use elem->'person'->>'name'
+        let fieldAccessor: string;
+        if (nestedPath.includes('.')) {
+            const pathParts = nestedPath.split('.');
+            const intermediateParts = pathParts.slice(0, -1).map(part => `'${part}'`).join('->');
+            const finalPart = pathParts[pathParts.length - 1];
+            fieldAccessor = `elem->${intermediateParts}->>'${finalPart}'`;
+        } else {
+            fieldAccessor = `elem->>'${nestedPath}'`;
+        }
+
+        // Add type casting for numeric comparisons
+        // PostgreSQL JSONB extraction always returns text, so we need to cast for numeric operators
+        const needsNumericCast = ['>', '>=', '<', '<='].includes(operator) && typeof value === 'number';
+        if (needsNumericCast) {
+            fieldAccessor = `(${fieldAccessor})::numeric`;
+        }
+
+        // Use JSONB array elements extraction with proper field access
+        const sql = `EXISTS (
+            SELECT 1 FROM jsonb_array_elements(value->'${arrayField}') AS elem 
+            WHERE ${fieldAccessor} ${sqlOperator} $1
+        )`;
+
+        const params = [paramValue];
+
+        return { sql, params };
+    }
+
+    /**
+     * Builds regular (non-array) filter condition
+     * @param filter The regular filter to build condition for
+     * @returns Prisma query condition
+     * @private
+     */
+    private buildRegularFilterCondition(filter: ParsedFilter): any {
+        const { path, operator, value } = filter;
 
         // Split dot notation path into array for nested JSON fields
         const pathParts = path.split('.');
@@ -488,7 +663,11 @@ new MemorySQLAdapter({
                 };
             case 'CONTAINS':
                 if (typeof value !== 'string') {
-                    throw new Error('CONTAINS operator requires a string value');
+                    throw new MemoryError('CONTAINS operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
                 }
                 return {
                     value: {
@@ -498,7 +677,11 @@ new MemorySQLAdapter({
                 };
             case 'STARTS_WITH':
                 if (typeof value !== 'string') {
-                    throw new Error('STARTS_WITH operator requires a string value');
+                    throw new MemoryError('STARTS_WITH operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
                 }
                 return {
                     value: {
@@ -508,7 +691,11 @@ new MemorySQLAdapter({
                 };
             case 'ENDS_WITH':
                 if (typeof value !== 'string') {
-                    throw new Error('ENDS_WITH operator requires a string value');
+                    throw new MemoryError('ENDS_WITH operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
                 }
                 return {
                     value: {
@@ -519,9 +706,15 @@ new MemorySQLAdapter({
             case 'ENTITY_FUZZY':
             case 'ENTITY_EXACT':
             case 'ENTITY_ALIAS':
-                throw new Error(`Entity operator ${operator} should be handled by entity-aware query path, not regular JSON filtering`);
+                throw new MemoryError(`Entity operator ${operator} should be handled by entity-aware query path, not regular JSON filtering`, {
+                    code: 'INVALID_ENTITY_OPERATOR',
+                    operator
+                });
             default:
-                throw new Error(`Unsupported operator: ${operator}`);
+                throw new MemoryError(`Unsupported operator: ${operator}`, {
+                    code: 'UNSUPPORTED_OPERATOR',
+                    operator
+                });
         }
     }
 
@@ -791,7 +984,24 @@ new MemorySQLAdapter({
             return await this.queryWithEntityFilters<T>(options);
         }
 
-        // Build Prisma query conditions
+        // Check if we have array filters - if so, use raw SQL approach
+        if (filters && filters.length > 0) {
+            try {
+                const parsedFilters = FilterParser.parseFilters(filters);
+                const hasArrayFilters = parsedFilters.some(filter => filter.isArrayPath);
+
+                if (hasArrayFilters) {
+                    return await this.queryWithRawArrayFilters<T>(options);
+                }
+            } catch (error: any) {
+                throw new MemoryError(`Invalid filter: ${error.message}`, {
+                    code: 'INVALID_FILTER',
+                    filters: filters
+                });
+            }
+        }
+
+        // Build Prisma query conditions for regular filters only
         const whereConditions: any = {
             tenantId: tenantId  // Always filter by tenant
         };
@@ -808,7 +1018,8 @@ new MemorySQLAdapter({
                 // Parse string filters to object format
                 const parsedFilters = FilterParser.parseFilters(filters);
 
-                parsedFilters.forEach((filter: Exclude<MemoryFilter, string>) => {
+                // Regular filters only - use Prisma ORM
+                parsedFilters.forEach((filter: ParsedFilter) => {
                     const jsonCondition = this.buildJsonFilterCondition(filter);
                     whereConditions.AND = whereConditions.AND || [];
                     whereConditions.AND.push(jsonCondition);
@@ -852,6 +1063,177 @@ new MemorySQLAdapter({
         }
 
         return processedResults;
+    }
+
+    /**
+     * Handle queries with array filters using raw SQL
+     */
+    private async queryWithRawArrayFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
+        const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
+        const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+
+        // Parse all filters
+        const parsedFilters = FilterParser.parseFilters(filters || []);
+
+        // Build base query
+        let query = `
+            SELECT key, value, tags
+            FROM agent_memory_store 
+            WHERE tenant_id = $1
+        `;
+        let queryParams: any[] = [tenantId];
+        let paramIndex = 2;
+
+        // Add tag filter if specified
+        if (tag) {
+            const normalizedTag = TagNormalizer.normalize(tag);
+            query += ` AND $${paramIndex} = ANY(tags)`;
+            queryParams.push(normalizedTag);
+            paramIndex++;
+        }
+
+        // Add filters (both regular and array)
+        for (const filter of parsedFilters) {
+            if (filter.isArrayPath) {
+                // Handle array filters with raw SQL
+                const arrayCondition = this.buildArrayFilterCondition(filter);
+
+                // Replace parameter placeholders with actual parameter numbers
+                let adjustedSql = arrayCondition.sql;
+                for (let i = 0; i < arrayCondition.params.length; i++) {
+                    adjustedSql = adjustedSql.replace(`$${i + 1}`, `$${paramIndex + i}`);
+                }
+
+                query += ` AND (${adjustedSql})`;
+                queryParams.push(...arrayCondition.params);
+                paramIndex += arrayCondition.params.length;
+            } else {
+                // Handle regular filters - convert to raw SQL
+                const regularCondition = this.buildRegularFilterRawSQL(filter, paramIndex);
+                query += ` AND (${regularCondition.sql})`;
+                queryParams.push(...regularCondition.params);
+                paramIndex += regularCondition.params.length;
+            }
+        }
+
+        // Add ordering and limit
+        query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
+
+        // Execute raw SQL query
+        const results = await this.prisma.$queryRawUnsafe<Array<{
+            key: string;
+            value: any;
+            tags: string[];
+        }>>(query, ...queryParams);
+
+        // Add aligned proxies to results if entity service is available
+        const processedResults: MemoryQueryResult<T>[] = [];
+        for (const result of results) {
+            let value = result.value;
+
+            if (this.entityService) {
+                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
+                if (Object.keys(alignments).length > 0) {
+                    value = addAlignedProxies(value, alignments);
+                }
+            }
+
+            processedResults.push({
+                key: result.key,
+                value: value as T
+            });
+        }
+
+        return processedResults;
+    }
+
+    /**
+     * Builds raw SQL condition for regular (non-array) filters
+     * @param filter The regular filter
+     * @param startParamIndex Starting parameter index for SQL placeholders
+     * @returns Raw SQL condition with parameters
+     * @private
+     */
+    private buildRegularFilterRawSQL(filter: ParsedFilter, startParamIndex: number): { sql: string; params: any[] } {
+        const { path, operator, value } = filter;
+        const pathParts = path.split('.');
+
+        // Build JSONB path for the field
+        const jsonPath = pathParts.length === 1
+            ? `value->>'${pathParts[0]}'`
+            : `value${pathParts.map(part => `->>'${part}'`).join('')}`;
+
+        let sqlOperator: string;
+        let paramValue = value;
+        let params: any[];
+
+        switch (operator) {
+            case '=':
+                sqlOperator = '=';
+                params = [value];
+                break;
+            case '!=':
+                sqlOperator = '!=';
+                params = [value];
+                break;
+            case '>':
+                sqlOperator = '>';
+                params = [value];
+                break;
+            case '>=':
+                sqlOperator = '>=';
+                params = [value];
+                break;
+            case '<':
+                sqlOperator = '<';
+                params = [value];
+                break;
+            case '<=':
+                sqlOperator = '<=';
+                params = [value];
+                break;
+            case 'CONTAINS':
+                if (typeof value !== 'string') {
+                    throw new MemoryError('CONTAINS operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                params = [`%${value}%`];
+                break;
+            case 'STARTS_WITH':
+                if (typeof value !== 'string') {
+                    throw new MemoryError('STARTS_WITH operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                params = [`${value}%`];
+                break;
+            case 'ENDS_WITH':
+                if (typeof value !== 'string') {
+                    throw new MemoryError('ENDS_WITH operator requires a string value', {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                params = [`%${value}`];
+                break;
+            default:
+                throw new MemoryError(`Operator "${operator}" is not supported`, {
+                    code: 'UNSUPPORTED_OPERATOR',
+                    operator
+                });
+        }
+
+        const sql = `${jsonPath} ${sqlOperator} $${startParamIndex}`;
+        return { sql, params };
     }
 
     /**
