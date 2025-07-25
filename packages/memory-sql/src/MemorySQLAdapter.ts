@@ -7,7 +7,7 @@ import { addAlignedProxies } from './AlignedValueProxy.js';
 import { FilterParser, ParsedFilter } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
 import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
-import { TagNormalizer } from '@a2arium/callagent-core';
+import { TagNormalizer } from '@a2arium/callagent-utils';
 
 /**
  * Configuration options for MemorySQLAdapter

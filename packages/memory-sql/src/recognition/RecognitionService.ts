@@ -1,3 +1,5 @@
+import { logger } from '@a2arium/callagent-utils';
+import { MemoryError } from '@a2arium/callagent-types';
 import { PrismaClient } from '@prisma/client';
 import { EntityAlignmentService } from '../EntityAlignmentService.js';
 import { EntityFinder } from './EntityFinder.js';
@@ -5,7 +7,7 @@ import { ConfidenceScorer } from './ConfidenceScorer.js';
 import { LLMDisambiguator } from './LLMDisambiguator.js';
 // Import types from the types package - these were defined in IMemory.ts
 import type { MemoryQueryResult } from '@a2arium/callagent-types';
-import { TagNormalizer } from '@a2arium/callagent-core';
+import { TagNormalizer } from '@a2arium/callagent-utils';
 
 // Define recognition types locally for now
 type RecognitionOptions = {
