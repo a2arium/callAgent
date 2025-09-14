@@ -5,4 +5,5 @@ export { EntityFieldParser } from './EntityFieldParser.js';
 export { createAlignedValue, addAlignedProxies } from './AlignedValueProxy.js';
 export { storeImage, getImage, listImages, deleteImage, storeFile, getFile } from './BlobStorageHelpers.js';
 export { processDataForStorage, detectDataType } from './BinaryDataProcessor.js';
-export * from './types.js'; 
+export * from './types.js';
+export { WorkingMemorySessionStore } from './WorkingMemorySessionStore.js';

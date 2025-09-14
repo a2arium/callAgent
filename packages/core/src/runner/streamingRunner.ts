@@ -14,6 +14,10 @@ import { extendContextWithStreaming } from '../core/context/StreamingContext.js'
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
 import { createLLMForTask } from '../core/llm/LLMFactory.js';
+import { TaskEngine, type TaskEntity } from '../core/orchestration/taskEngine.js';
+import { EngineLocator } from '../core/orchestration/EngineLocator.js';
+import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
+import { registerHandler } from '../core/orchestration/HandlerRegistry.js';
 import { createMemoryRegistry } from '../core/memory/createMemoryRegistry.js';
 import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
@@ -41,7 +45,7 @@ type StreamingOptions = {
 type PartialTaskContext = Omit<TaskContext,
     'fail' | 'setGoal' | 'getGoal' | 'addThought' | 'getThoughts' |
     'makeDecision' | 'getDecision' | 'getAllDecisions' | 'vars' |
-    'recall' | 'remember' | 'sendTaskToAgent'
+    'recall' | 'remember' | 'sendTaskToAgent' | 'requestInput'
 >;
 
 /**
@@ -417,71 +421,40 @@ export async function runAgentWithStreaming(
         }
     }
 
-    // --- Execute Agent ---
-    // Use agentLogger here (agentLogger.info goes to stdout, which is fine as agent logs will use debug)
-    agentLogger.info(`Starting Agent Execution for Task ${taskCtx.task.id}`);
+    // --- Execute via Task Engine ---
+    agentLogger.info(`Starting Engine Execution for Task ${taskCtx.task.id}`);
     try {
-        const handleAndCache = async () => {
-            const agentResult = await plugin.handleTask(taskCtx);
-
-            // Cache the result if caching is enabled (for both streaming and non-streaming)
-            if (agentResultCache) {
-                try {
-                    await agentResultCache.setCachedResult(
-                        plugin.manifest.name,
-                        input,
-                        agentResult,
-                        plugin.manifest.cache?.ttlSeconds || 300,
-                        plugin.manifest.cache?.excludePaths || [],
-                        finalTenantId
-                    );
-                    agentLogger.info(`Result cached for agent ${plugin.manifest.name} in ${options.isStreaming ? 'streaming' : 'non-streaming'} mode`);
-                } catch (error) {
-                    agentLogger.error('Failed to cache agent result', error);
+        // Register durable handlers from the module
+        try {
+            const moduleUrl = pathToFileURL(agentFilePath).href;
+            const mod: Record<string, unknown> = await import(moduleUrl);
+            // Always register default handleTask from the loaded plugin
+            registerHandler('handleTask', async (ctx: any) => {
+                runnerLogger.info(`Invoking durable handler: handleTask`, { taskId: ctx?.task?.id });
+                await plugin.handleTask(ctx);
+            });
+            for (const [name, fn] of Object.entries(mod)) {
+                if (name === 'default') continue;
+                if (typeof fn === 'function') {
+                    runnerLogger.info(`Registering durable handler: ${name}`);
+                    registerHandler(name, async (ctx: any, ev: any) => (fn as any)(ctx, ev));
                 }
             }
-            return agentResult;
-        };
-
-        // For streaming mode, we don't await completion
-        if (options.isStreaming) {
-            // We'll start the agent execution but not await its completion
-            handleAndCache().catch(error => {
-                // Let's log the raw error *first* to see what it is
-                console.error(">>> Raw error caught in streamingRunner:", error);
-
-                const errorToHandle = error instanceof Error ? error : new Error(String(error)); // Wrap non-errors
-                agentLogger.error(`Unhandled error in streaming agent execution`, errorToHandle, {
-                    taskId: taskCtx.task.id
-                });
-
-                // Try to mark as failed through the streaming context
-                try {
-                    taskCtx.fail(errorToHandle);
-                } catch (failError) {
-                    agentLogger.error(`Failed to mark streaming task as failed`, failError);
-                }
-                // For debugging, let's forcefully exit here to prevent further propagation
-                console.error(">>> Exiting due to unhandled stream error.");
-                process.exit(1);
-            });
-
-            // Return immediately for streaming mode
-            agentLogger.info(`Started streaming agent execution, returning control to client`);
-            return;
+            runnerLogger.info(`Handler registration completed`);
+        } catch (e) {
+            agentLogger.warn('Handler auto-registration failed', e as any);
         }
 
-        // For non-streaming mode, await completion
-        await handleAndCache();
-
-        // Get buffered results if available
-        if (!options.isStreaming && (taskCtx as any).getBufferedResults) {
-            const results = (taskCtx as any).getBufferedResults();
-            outputResults(results, options);
+        const sessionStore = new WorkingMemorySessionStore();
+        const engine = new TaskEngine({ sessionStore });
+        try { EngineLocator.setEngine(engine as any); } catch { }
+        const entity: TaskEntity = { id: taskCtx.task.id, input };
+        runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
+        await engine.startTask({ task: entity, isStreaming: options.isStreaming });
+        logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
+        if (!options.isStreaming) {
+            logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
         }
-
-        // Use base runner logger here for final success message
-        logInfoMethod.call(runnerLogger, `Agent Execution Finished Successfully for Task ${taskCtx.task.id}`);
     } catch (error: unknown) {
         // Use agentLogger here for error
         agentLogger.error(`Unhandled Agent Execution Error`, error, {

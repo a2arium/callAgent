@@ -24,7 +24,7 @@ sendTaskToAgent(
 
 `Promise<unknown>` - The result returned by the target agent
 
-#### Example
+#### Example (non-blocking with handlers)
 
 ```typescript
 const result = await ctx.sendTaskToAgent('data-processor', {
@@ -365,7 +365,7 @@ class A2AError extends Error {
 
 ## Usage Examples
 
-### Basic Agent Call
+### Basic Agent Call (blocking)
 
 ```typescript
 export default createAgent({
@@ -574,8 +574,8 @@ Enable streaming updates from the target agent.
 
 ### Return Types
 
-#### Synchronous Execution (default)
-Returns the direct result from the target agent's `handleTask()` method.
+#### Blocking Execution (default)
+When you omit `onCompleted`, the call awaits child completion and returns the result.
 
 ```typescript
 const result = await ctx.sendTaskToAgent('calculator', { 
@@ -640,9 +640,9 @@ task.onArtifactUpdate((artifact: Artifact) => {
 Handle input-required scenarios.
 
 ```typescript
-task.onInputRequired(async (prompt: string) => {
-  const response = await getUserInput(prompt);
-  return response;
+// Use options-based handlers when dispatching instead
+await ctx.sendTaskToAgent('agent', input, {
+  onInputRequired: 'onAgentNeedsInput'
 });
 ```
 
@@ -756,166 +756,3 @@ agents.forEach(agent => {
   console.log(`${agent.name} v${agent.version}`);
 });
 ```
-
-### PluginManager.registerAgent()
-
-Register a new agent (typically done automatically).
-
-```typescript
-import { createAgent } from '@a2arium/core';
-
-const myAgent = createAgent({
-  manifest: { name: 'my-agent', version: '1.0.0' },
-  async handleTask(ctx) { /* ... */ }
-}, import.meta.url);
-
-PluginManager.registerAgent(myAgent);
-```
-
-## Memory Context APIs
-
-### Working Memory Transfer
-
-When `inheritWorkingMemory: true`, the following context is transferred:
-
-#### Goals
-```typescript
-// Source agent
-await ctx.setGoal('Analyze customer data');
-
-// Target agent receives
-const goal = await ctx.getGoal(); // 'Analyze customer data'
-```
-
-#### Thoughts
-```typescript
-// Source agent
-await ctx.addThought('Starting analysis');
-await ctx.addThought('Data validation complete');
-
-// Target agent receives
-const thoughts = await ctx.getThoughts();
-// [{ content: 'Starting analysis', ... }, { content: 'Data validation complete', ... }]
-```
-
-#### Decisions
-```typescript
-// Source agent
-await ctx.makeDecision('approach', 'comprehensive', 'Full analysis needed');
-
-// Target agent receives
-const decision = await ctx.getDecision('approach');
-// { decision: 'comprehensive', reasoning: 'Full analysis needed', ... }
-```
-
-#### Variables
-```typescript
-// Source agent
-ctx.vars!.customerId = '12345';
-ctx.vars!.priority = 'high';
-
-// Target agent receives
-console.log(ctx.vars!.customerId); // '12345'
-console.log(ctx.vars!.priority);   // 'high'
-```
-
-### Long-Term Memory Transfer
-
-When `inheritMemory: true`, relevant memory context is transferred through the MLO pipeline.
-
-#### Semantic Memory
-Recent and relevant semantic memory entries are included.
-
-#### Episodic Memory
-Recent events and interactions are included for context.
-
-## Configuration
-
-### Agent Manifest Configuration
-
-Agents can specify A2A-related configuration in their manifest:
-
-```typescript
-export default createAgent({
-  manifest: {
-    name: 'my-agent',
-    version: '1.0.0',
-    a2a: {
-      maxConcurrentCalls: 5,        // Future: limit concurrent A2A calls
-      defaultTimeout: 30000,        // Future: default timeout
-      allowedTargets: ['*'],        // Future: restrict callable agents
-      memoryInheritance: {          // Future: default inheritance options
-        working: true,
-        semantic: false,
-        episodic: false
-      }
-    }
-  },
-  async handleTask(ctx) { /* ... */ }
-}, import.meta.url);
-```
-
-### Environment Configuration
-
-```bash
-# Future: A2A-specific configuration
-A2A_DEFAULT_TIMEOUT=30000
-A2A_MAX_CONTEXT_SIZE=1048576
-A2A_ENABLE_METRICS=true
-```
-
-## Performance Metrics
-
-### Timing Breakdown
-
-Typical A2A call performance:
-
-1. **Agent Discovery**: 1-5ms
-2. **Context Serialization**: 10-50ms
-3. **Context Transfer**: 5-20ms
-4. **Agent Execution**: Variable (depends on agent)
-5. **Response Processing**: 5-15ms
-
-**Total Overhead**: 20-90ms + agent execution time
-
-### Memory Usage
-
-Context transfer memory usage:
-
-- **Working Memory**: ~1-10KB per agent
-- **Semantic Memory**: ~5-50KB (depends on relevance)
-- **Episodic Memory**: ~2-20KB (recent events)
-
-### Optimization Tips
-
-1. **Selective Inheritance**: Only inherit needed context
-2. **Agent Caching**: Keep frequently used agents warm
-3. **Memory Pruning**: Limit transferred context size
-4. **Parallel Execution**: Use `Promise.all()` for independent calls
-
-## Version Compatibility
-
-### Current Version: 1.0.0
-
-- ✅ Local agent communication
-- ✅ Working memory inheritance
-- ✅ Semantic memory inheritance
-- ✅ Basic error handling
-- ✅ Agent discovery and registry
-
-### Planned Features
-
-#### Version 1.1.0
-- 🔄 Interactive/streaming communication
-- 🔄 Timeout management
-- 🔄 Enhanced error types
-
-#### Version 1.2.0
-- 🔄 External HTTP A2A communication
-- 🔄 A2A protocol compliance
-- 🔄 Agent discovery via HTTP
-
-#### Version 2.0.0
-- 🔄 Advanced workflow orchestration
-- 🔄 Resource management
-- 🔄 Performance optimizations 

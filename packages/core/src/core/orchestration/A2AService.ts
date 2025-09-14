@@ -14,6 +14,8 @@ import { InteractiveTaskHandler } from './InteractiveTaskResult.js';
 import { logger } from '@a2arium/callagent-utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '../cache/index.js';
+import { taskEngine } from './taskEngine.js';
+import { EngineLocator } from './EngineLocator.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -54,7 +56,7 @@ export class A2AService implements IA2AService {
         sourceCtx: MinimalSourceTaskContext, // Use MinimalSourceTaskContext
         targetAgent: string,
         taskInput: TaskInput,
-        options: A2ACallOptions = {}
+        options: A2ACallOptions & { parentTenantId?: string; parentTaskId?: string; parentChildToken?: string } = {}
     ): Promise<InteractiveTaskResult | unknown> {
         const startTime = Date.now();
         const operationId = `a2a_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -72,7 +74,12 @@ export class A2AService implements IA2AService {
             // 1. Discover target agent
             const targetPlugin = await this.findLocalAgent(targetAgent);
             if (!targetPlugin) {
-                throw new Error(`Agent '${targetAgent}' not found`);
+                const available = PluginManager.listAgents().map(a => a.name);
+                const hint = `Local agent not found: '${targetAgent}'. ` +
+                    `Agent discovery tries: (1) registry (loaded via inline manifest), (2) same-folder using the calling agent's path, ` +
+                    `(3) workspaces from package.json, (4) smart filesystem scan for '*Agent.(ts|js)' or agent.json. ` +
+                    `Currently loaded agents: ${available.length ? available.join(', ') : '(none)'}`;
+                throw new Error(hint);
             }
 
             // 2. Serialize source context
@@ -121,12 +128,43 @@ export class A2AService implements IA2AService {
                 // 5. Execute target agent synchronously
                 const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId);
 
+                // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
+                if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
+                    const eng = EngineLocator.getEngine() || taskEngine;
+                    const { prompt, schema } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown };
+                    await eng.handleChildInputRequired({
+                        tenantId: options.parentTenantId,
+                        parentTaskId: options.parentTaskId,
+                        childToken: options.parentChildToken,
+                        prompt,
+                        schema
+                    });
+                    return { status: 'input_required' } as any;
+                }
+
                 const duration = Date.now() - startTime;
                 a2aLogger.info('A2A task completed', {
                     operationId,
                     duration,
                     success: true // Consider deriving success from result or targetCtx state
                 });
+
+                // Notify parent engine on completion when correlation is provided
+                if (options.parentTenantId && options.parentTaskId && options.parentChildToken) {
+                    try {
+                        const eng = EngineLocator.getEngine() || taskEngine;
+                        await eng.handleChildCompleted({
+                            tenantId: options.parentTenantId,
+                            parentTaskId: options.parentTaskId,
+                            childToken: options.parentChildToken,
+                            result
+                        });
+                    } catch (notifyError) {
+                        a2aLogger.warn('Failed to notify parent on child completion', notifyError as any, {
+                            parentTaskId: options.parentTaskId
+                        });
+                    }
+                }
 
                 return result;
             }
@@ -267,6 +305,45 @@ export class A2AService implements IA2AService {
         // Add A2A capability to target context for nested agent calls
         targetCtx.sendTaskToAgent = async (nestedTargetAgent, nestedTaskInput, nestedOptions) => {
             return this.sendTaskToAgent(targetCtx as any, nestedTargetAgent, nestedTaskInput, nestedOptions);
+        };
+
+        // Override requestInput to notify parent (if correlation provided)
+        const parentTenantId = (options as any).parentTenantId as string | undefined;
+        const parentTaskId = (options as any).parentTaskId as string | undefined;
+        const parentChildToken = (options as any).parentChildToken as string | undefined;
+        // Override requestInput to only notify parent and avoid mutating parent's WM via inherited method
+        (targetCtx as any).requestInput = async (prompt: string, riOpts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }) => {
+            if (parentTenantId && parentTaskId && parentChildToken) {
+                try {
+                    const eng = EngineLocator.getEngine() || taskEngine;
+                    // Persist minimal child context (vars) so onProvided can restore them
+                    try {
+                        await (eng as any).persistChildContext?.({
+                            tenantId: targetCtx.tenantId,
+                            sessionId: targetCtx.task.id,
+                            agentId: targetPlugin.manifest.name,
+                            vars: (targetCtx as any).vars || {}
+                        });
+                    } catch { /* best-effort */ }
+                    await eng.handleChildInputRequired({
+                        tenantId: parentTenantId,
+                        parentTaskId,
+                        childToken: parentChildToken,
+                        childTaskId: targetCtx.task.id,
+                        prompt,
+                        schema: riOpts?.schema,
+                        childOnProvided: riOpts?.onProvided
+                    });
+                    (targetCtx as any).__inputRequired = { prompt, schema: riOpts?.schema };
+                } catch (err) {
+                    a2aLogger.warn('Failed to notify parent on child input_required', err as any, { parentTaskId });
+                }
+            }
+            // Return a minimal InputHandle-like object for chaining
+            return {
+                async onProvided() { return this; },
+                async onExpired() { return this; }
+            } as any;
         };
 
         a2aLogger.debug('Target context created with inheritance', {

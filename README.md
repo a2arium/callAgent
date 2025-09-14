@@ -409,7 +409,7 @@ const coordinator = createAgent({
     });
     
     const report = await ctx.sendTaskToAgent('report-generator', { 
-      data: data.processed 
+      data: (data as any).processed 
     });
     
     return { report: report.content };

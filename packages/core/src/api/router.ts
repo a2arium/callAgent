@@ -3,7 +3,8 @@ import { Router } from 'express';
 import {
     handleTasksSend,
     handleTasksSubscribe,
-    handleTasksResubscribe
+    handleTasksResubscribe,
+    handleTasksInput
 } from './rpc/index.js';
 
 /**
@@ -28,6 +29,10 @@ export function createApiRouter(): Router {
 
             case 'tasks/resubscribe':
                 await handleTasksResubscribe(req, res);
+                break;
+
+            case 'tasks/input':
+                await handleTasksInput(req, res);
                 break;
 
             default:

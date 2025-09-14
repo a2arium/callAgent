@@ -1,0 +1,12 @@
+{
+  "name": "@examples/interactive-a2a-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@types/node": "^20.11.30"
+  }
+}

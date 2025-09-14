@@ -1,4 +1,5 @@
 import { createAgent } from '@a2arium/callagent-core';
+type ChildTaskHandle = { run: (opts?: { awaitCompletion?: boolean; streaming?: boolean }) => Promise<unknown> };
 
 /**
  * Coordinator Agent - Orchestrates the workflow
@@ -39,15 +40,16 @@ export default createAgent({
             await ctx.reply('📊 Step 1: Delegating data analysis...');
 
             // Call Data Analysis Agent with full context inheritance
-            const analysisResult = await ctx.sendTaskToAgent('data-analysis-agent', {
+            const analysisTask = await ctx.sendTaskToAgent('data-analysis-agent', {
                 dataSource: 'quarterly-reports',
                 metrics: ['revenue', 'costs', 'profit', 'growth'],
                 timeframe: 'Q4-2024'
             }, {
-                inheritWorkingMemory: true,    // Share goals, thoughts, decisions
-                inheritMemory: true,           // Share semantic/episodic memory
-                timeout: 30000                 // 30 second timeout
-            });
+                inheritWorkingMemory: true,
+                inheritMemory: true,
+                timeout: 30000
+            }) as unknown as ChildTaskHandle;
+            const analysisResult = await (analysisTask as any)?.run?.() ?? analysisTask;
 
             await ctx.addThought('Data analysis completed successfully');
             await ctx.makeDecision(
@@ -63,15 +65,16 @@ export default createAgent({
             await ctx.reply('📝 Step 2: Delegating report generation...');
 
             // Call Reporting Agent with analysis results
-            const reportResult = await ctx.sendTaskToAgent('reporting-agent', {
+            const reportTask = await ctx.sendTaskToAgent('reporting-agent', {
                 analysisData: analysisResult,
                 reportType: 'executive-summary',
                 audience: 'senior-leadership'
             }, {
-                inheritWorkingMemory: true,    // Inherit the full workflow context
-                inheritMemory: true,           // Include all gathered data
-                timeout: 45000                 // Longer timeout for report generation
-            });
+                inheritWorkingMemory: true,
+                inheritMemory: true,
+                timeout: 45000
+            }) as unknown as ChildTaskHandle;
+            const reportResult = await (reportTask as any)?.run?.() ?? reportTask;
 
             await ctx.addThought('Report generation completed successfully');
             await ctx.makeDecision(

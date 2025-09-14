@@ -150,6 +150,22 @@ export type TaskContext = {
     getEnv: (key: string, defaultValue?: string) => string | undefined;
     throw: (code: string, message: string, details?: unknown) => never; // Structured error throw
 
+    /**
+     * Request human or external input. Returns an InputHandle for durable handler chaining.
+     */
+    requestInput: (
+        prompt: string,
+        opts: { schema?: unknown; ttlMs?: number; onProvided: string; onExpired?: string }
+    ) => Promise<import('../../core/orchestration/Handles.js').InputHandle>;
+
+    /**
+     * Group orchestration for running multiple child tasks and joining their results.
+     */
+    allTasks?: (
+        children: Array<{ agent: string; input: unknown }>,
+        opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
+    ) => Promise<import('../../core/orchestration/Handles.js').GroupHandle>;
+
     /** 
      * A2A: Send task to another agent with context inheritance
      * This method enables agent-to-agent communication with memory context transfer
@@ -161,7 +177,7 @@ export type TaskContext = {
     sendTaskToAgent: (
         targetAgent: string,
         taskInput: TaskInput,
-        options?: import('./A2ATypes.js').A2ACallOptions
+        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string; streaming?: boolean }
     ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
 }
 

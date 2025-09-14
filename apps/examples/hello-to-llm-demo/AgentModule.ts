@@ -8,11 +8,12 @@ export default createAgent({
             ctx.progress(20, 'Calling hello-agent via A2A');
 
             // Call hello-agent via A2A with timeout and proper options
-            const result = await ctx.sendTaskToAgent('hello-agent', {
+            const task: any = await ctx.sendTaskToAgent('hello-agent', {
                 name: 'A2A Demo User'
             }, {
-                timeout: 30000  // 30 second timeout
+                timeout: 30000
             });
+            const result = await task.run();
 
             ctx.progress(80, 'Hello-agent response received');
 

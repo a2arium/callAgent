@@ -6,7 +6,7 @@ Agent-to-Agent (A2A) communication allows agents to delegate tasks to other spec
 
 ## Basic Usage
 
-### Simple Agent Call
+### Simple Agent Call (non-blocking with durable handlers)
 
 ```typescript
 import { createAgent } from '@a2arium/core';
@@ -15,15 +15,51 @@ export default createAgent({
   manifest: { name: 'orchestrator', version: '1.0.0' },
   
   async handleTask(ctx) {
-    // Call another agent
-    const result = await ctx.sendTaskToAgent('specialist-agent', {
-      task: 'analyze',
-      data: ctx.task.input
+    await ctx.sendTaskToAgent('specialist-agent', { task: 'analyze', data: ctx.task.input }, {
+      onInputRequired: 'onSpecialistNeedsInput',
+      onCompleted: 'onSpecialistDone'
     });
-    
-    return result;
+    return; // non-blocking
   }
 }, import.meta.url);
+export async function onSpecialistNeedsInput(ctx, ev: { prompt: string; schema?: unknown; token: string }) {
+  await ctx.requestInput(ev.prompt, { schema: ev.schema, onProvided: 'handleSpecialistAnswer' });
+}
+
+export async function onSpecialistDone(ctx, ev: { input: unknown }) {
+  await ctx.reply([{ type: 'text', text: `Done: ${JSON.stringify(ev.input)}` }]);
+  ctx.complete(100, 'completed');
+}
+
+### Blocking Tool-like Call
+
+```typescript
+const result = await ctx.sendTaskToAgent('calculator', { op: 'sum', values: [1,2,3] });
+await ctx.reply([{ type: 'text', text: `Sum: ${result.sum}` }]);
+ctx.complete(100, 'completed');
+```
+
+### Requesting Human Input (InputHandle)
+
+```typescript
+await ctx.requestInput('Which region?', { ttlMs: 900_000, schema: { type: 'string' }, onProvided: 'handleRegion', onExpired: 'handleRegionExpired' });
+return;
+```
+
+### Idempotency for tasks/input
+
+When replying to an input-required task, include an `Idempotency-Key` header to safely retry without duplicating state transitions.
+
+```
+POST /a2a/rpc
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tasks/input",
+  "params": { "id": "<taskId>", "token": "<inputToken>", "input": "EU" }
+}
+Idempotency-Key: 2f0e1a...
+```
 ```
 
 ### With Memory Context Transfer

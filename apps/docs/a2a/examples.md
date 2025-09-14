@@ -969,3 +969,25 @@ export default createAgent({
 ```
 
 These examples demonstrate the power and flexibility of the A2A system for building complex, multi-agent workflows that maintain context and memory across agent boundaries. 
+
+## Interactive A2A (non-blocking) demo
+
+See `apps/examples/interactive-a2a-demo/` for a minimal flow that uses:
+- `requestInput(...).onProvided/.onExpired` for human input
+- `sendTaskToAgent(..., { onInputRequired, onCompleted })` for agent chaining
+- `ctx.allTasks([...]).onAllCompleted/.onAnyFailed` for group orchestration
+
+How to run (API sketch):
+```http
+POST /a2a/rpc
+{ "jsonrpc":"2.0", "id":1, "method":"tasks/sendSubscribe", "params": { "id": "demo-1", "agent": "orchestrator" } }
+
+// When input is required
+POST /a2a/rpc
+{ "jsonrpc":"2.0", "id":2, "method":"tasks/input", "params": { "id":"demo-1", "token":"<token>", "input":"EU" } }
+Idempotency-Key: abc123
+
+// To resume SSE after disconnect
+GET /a2a/sse?taskId=demo-1
+Last-Event-ID: <last-seq>
+```

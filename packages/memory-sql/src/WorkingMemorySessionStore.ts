@@ -1,0 +1,124 @@
+import { PrismaClient, Prisma } from '@prisma/client';
+import { logger } from '@a2arium/callagent-utils';
+
+export type SessionSnapshot = {
+    wmVersion: bigint;
+    snapshot: Record<string, unknown>;
+    agentId: string;
+    updatedAt: string;
+};
+
+export class WorkingMemorySessionStore {
+    private readonly prisma: PrismaClient;
+    private readonly ownsPrisma: boolean;
+    private readonly log = logger.createLogger({ prefix: 'WMSessionStore' });
+
+    constructor(prisma?: PrismaClient) {
+        if (prisma) {
+            this.prisma = prisma;
+            this.ownsPrisma = false;
+        } else {
+            this.prisma = new PrismaClient();
+            this.ownsPrisma = true;
+        }
+    }
+
+    async disconnect(): Promise<void> {
+        if (this.ownsPrisma) await this.prisma.$disconnect();
+    }
+
+    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<SessionSnapshot | null> {
+        const rec = await this.prisma.wMSession.findUnique({
+            where: { tenantId_sessionId: { tenantId, sessionId } }
+        });
+        if (!rec) return null;
+        return {
+            wmVersion: rec.wmVersion,
+            snapshot: (rec.snapshot as unknown) as Record<string, unknown>,
+            agentId: rec.agentId,
+            updatedAt: rec.updatedAt.toISOString()
+        };
+    }
+
+    /**
+     * Atomic compare-and-set snapshot.
+     * Throws Error('CAS_MISMATCH') if expected != current.
+     */
+    async writeSnapshotCAS(params: {
+        tenantId: string;
+        sessionId: string;
+        agentId: string;
+        expectedWmVersion: bigint;
+        snapshot: Record<string, unknown>;
+    }): Promise<{ newVersion: bigint }> {
+        const { tenantId, sessionId, agentId, expectedWmVersion, snapshot } = params;
+
+        return await this.prisma.$transaction(async (tx) => {
+            const existing = await tx.wMSession.findUnique({
+                where: { tenantId_sessionId: { tenantId, sessionId } },
+                select: { wmVersion: true }
+            });
+
+            const currentVersion = existing?.wmVersion ?? BigInt(0);
+            if (currentVersion !== expectedWmVersion) {
+                this.log.warn('CAS mismatch on writeSnapshotCAS', { tenantId, sessionId, expectedWmVersion: expectedWmVersion.toString(), currentVersion: currentVersion.toString() });
+                throw new Error('CAS_MISMATCH');
+            }
+
+            const newVersion = currentVersion + BigInt(1);
+            await tx.wMSession.upsert({
+                where: { tenantId_sessionId: { tenantId, sessionId } },
+                update: { snapshot: snapshot as unknown as Prisma.InputJsonValue, wmVersion: newVersion },
+                create: { tenantId, sessionId, agentId, snapshot: snapshot as unknown as Prisma.InputJsonValue, wmVersion: newVersion }
+            });
+
+            return { newVersion };
+        });
+    }
+
+    /**
+     * Append an event with sequential seq per (tenantId, sessionId).
+     */
+    async appendEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        type: string;
+        payload: Record<string, unknown>;
+    }): Promise<{ eventId: string; seq: number }> {
+        const { tenantId, sessionId, type, payload } = params;
+
+        return await this.prisma.$transaction(async (tx) => {
+            const last = await tx.wMEvent.findFirst({
+                where: { tenantId, sessionId },
+                orderBy: { seq: 'desc' },
+                select: { seq: true }
+            });
+            const nextSeq = (last?.seq ?? 0) + 1;
+            const ev = await tx.wMEvent.create({
+                data: { tenantId, sessionId, seq: nextSeq, type, payload: payload as unknown as Prisma.InputJsonValue }
+            });
+            return { eventId: ev.eventId, seq: ev.seq };
+        });
+    }
+
+    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>> {
+        const { tenantId, sessionId, sinceSeq } = params;
+        const rows = await this.prisma.wMEvent.findMany({
+            where: { tenantId, sessionId, seq: { gt: sinceSeq } },
+            orderBy: { seq: 'asc' }
+        });
+        return rows.map((r: any) => ({ eventId: r.eventId, seq: r.seq, type: r.type, payload: r.payload as any, createdAt: r.createdAt.toISOString() }));
+    }
+
+    async enqueueOutbox(params: {
+        tenantId: string;
+        topic: string;
+        key: string;
+        payload: Record<string, unknown>;
+    }): Promise<void> {
+        const { tenantId, topic, key, payload } = params;
+        await this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as Prisma.InputJsonValue } });
+    }
+}
+
+

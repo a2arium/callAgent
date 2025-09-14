@@ -139,3 +139,47 @@ model AgentResultCache {
     @@index([expiresAt])
     @@map("agent_result_cache")
 }
+
+// ========================================
+// Session-scoped Working Memory (v2)
+// ========================================
+
+model WMSession {
+    tenantId  String   @map("tenant_id")
+    sessionId String   @map("session_id")
+    agentId   String   @map("agent_id")
+    wmVersion BigInt   @default(0) @map("wm_version")
+    snapshot  Json
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@id([tenantId, sessionId])
+    @@index([tenantId])
+    @@index([tenantId, agentId])
+    @@map("wm_sessions")
+}
+
+model WMEvent {
+    eventId   String   @id @default(cuid()) @map("event_id")
+    tenantId  String   @map("tenant_id")
+    sessionId String   @map("session_id")
+    seq       Int
+    type      String
+    payload   Json
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@index([tenantId, sessionId, seq])
+    @@map("wm_events")
+}
+
+model Outbox {
+    id        String   @id @default(cuid())
+    tenantId  String   @map("tenant_id")
+    topic     String
+    key       String
+    payload   Json
+    createdAt DateTime @default(now()) @map("created_at")
+
+    @@index([tenantId, topic])
+    @@map("outbox")
+}

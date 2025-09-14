@@ -1,4 +1,5 @@
 import { globalAgentRegistry } from './AgentRegistry.js';
+import { registerHandler } from '../orchestration/HandlerRegistry.js';
 import { AgentPlugin } from './types.js';
 import { AgentDependencyResolver, DependencyResolutionError } from './dependencies/index.js';
 import { SmartAgentDiscoveryService } from './dependencies/SmartAgentDiscoveryService.js';
@@ -203,6 +204,15 @@ export class PluginManager {
             }
 
             if (loadedAgent) {
+                // Auto-register exported durable handlers from this module (excluding default)
+                try {
+                    for (const [exportName, exported] of Object.entries(agentModule as Record<string, unknown>)) {
+                        if (exportName === 'default') continue;
+                        if (typeof exported === 'function') {
+                            registerHandler(exportName, async (ctx: any, ev: any) => (exported as any)(ctx, ev));
+                        }
+                    }
+                } catch { /* best-effort */ }
                 // Auto-register the agent in SmartAgentDiscoveryService for faster future lookups
                 SmartAgentDiscoveryService.registerAgent(loadedAgent.manifest.name, {
                     path: agentPath,

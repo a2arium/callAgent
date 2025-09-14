@@ -2,6 +2,7 @@
 import type { Request, Response } from 'express';
 import { taskEngine, TaskEntity } from '../../core/orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
+import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 
 /**
  * Handler for the tasks/sendSubscribe method
@@ -29,7 +30,8 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
         });
 
         // Hand off to SSE handler (never returns - response is managed by SSE)
-        handleSSE(req, res, task.id);
+        const tenantId = (req as any).tenantId || 'default';
+        await handleSSE(req, res, task.id, new (WorkingMemorySessionStore as any)(), tenantId);
     } catch (error) {
         console.error('Error handling tasks/sendSubscribe:', error);
         sendError(

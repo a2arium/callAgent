@@ -536,6 +536,7 @@ export default createAgent({
     const config = ctx.task.input as any;
     
     if (config.needsAnalysis) {
+      const analysisTask = await ctx.sendTaskToAgent('analysis-agent', config);
       const analysis = await ctx.sendTaskToAgent('analysis-agent', config);
       return { analysis };
     }

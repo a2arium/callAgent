@@ -182,19 +182,11 @@ export class SmartAgentDiscoveryService {
             contextAgentName
         });
 
-        // 1. Same directory search - but skip if looking for a different agent in the same directory
-        // This prevents finding AgentModule.ts when looking for a different agent
-        if (name !== contextAgentName) {
-            discoveryLogger.debug('Skipping same directory search - different agent', {
-                searchingFor: name,
-                contextAgent: contextAgentName
-            });
-        } else {
-            const sameDir = await this.searchInDirectory(name, contextDir);
-            if (sameDir) {
-                discoveryLogger.debug('Found in same directory', { name, path: sameDir });
-                return sameDir;
-            }
+        // 1. Same directory search - allow multiple agents in same folder (e.g., demo apps)
+        const sameDir = await this.searchInDirectory(name, contextDir);
+        if (sameDir) {
+            discoveryLogger.debug('Found in same directory', { name, path: sameDir });
+            return sameDir;
         }
 
         // 2. Sibling directories - search more broadly
