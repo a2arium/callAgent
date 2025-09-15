@@ -6,12 +6,12 @@ import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState }
  * Configuration options for WorkingMemorySQLAdapter
  */
 export interface WorkingMemorySQLConfig {
-  /** Pre-configured Prisma client instance */
-  prismaClient?: PrismaClient;
-  /** Database connection URL (used if prismaClient not provided) */
-  databaseUrl?: string;
-  /** Default tenant ID for operations */
-  defaultTenantId?: string;
+    /** Pre-configured Prisma client instance */
+    prismaClient?: PrismaClient;
+    /** Database connection URL (used if prismaClient not provided) */
+    databaseUrl?: string;
+    /** Default tenant ID for operations */
+    defaultTenantId?: string;
 }
 
 /**
@@ -216,7 +216,7 @@ new WorkingMemorySQLAdapter({
                 }
             });
 
-            return thoughts.map(thought => ({
+            return thoughts.map((thought: { timestamp: Date; content: string; type: string; processingMetadata: unknown }) => ({
                 timestamp: thought.timestamp.toISOString(),
                 content: thought.content,
                 type: thought.type as ThoughtEntry['type'],
@@ -327,7 +327,7 @@ new WorkingMemorySQLAdapter({
             });
 
             const decisionsMap: Record<string, DecisionEntry> = {};
-            decisions.forEach(d => {
+            decisions.forEach((d: { decisionKey: string; decision: string; reasoning: string | null; timestamp: Date }) => {
                 decisionsMap[d.decisionKey] = {
                     decision: d.decision,
                     reasoning: d.reasoning || undefined,
@@ -497,7 +497,7 @@ new WorkingMemorySQLAdapter({
 
             // Build decisions map
             const decisionsMap: Record<string, DecisionEntry> = {};
-            decisions.forEach(d => {
+            decisions.forEach((d: { decisionKey: string; decision: string; reasoning: string | null; timestamp: Date }) => {
                 decisionsMap[d.decisionKey] = {
                     decision: d.decision,
                     reasoning: d.reasoning || undefined,
@@ -507,7 +507,7 @@ new WorkingMemorySQLAdapter({
 
             // Build variables map
             const variablesMap: Record<string, unknown> = {};
-            variables.forEach(v => {
+            variables.forEach((v: { variableKey: string; variableValue: unknown }) => {
                 variablesMap[v.variableKey] = v.variableValue;
             });
 

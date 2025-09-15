@@ -65,6 +65,74 @@ export class TaskEngine {
             // best-effort; a later write will win
         }
     }
+
+    // Attach working memory var proxy to an existing context so that writes are CAS-persisted
+    public attachWorkingMemory(ctx: TaskContext, tenantId: string, sessionId: string, agentId: string): void {
+        if (!this.sessionManager) return;
+        const varCache = new Map<string, unknown>();
+        (ctx as any).vars = new Proxy({} as Record<string, unknown>, {
+            get: (_t, prop: string) => varCache.get(prop),
+            set: (_t, prop: string, value: unknown) => {
+                varCache.set(prop, value);
+                (async () => {
+                    try {
+                        const snapNow = await this.sessionManager!.load(tenantId, sessionId);
+                        const base = (snapNow?.snapshot as Record<string, unknown>) || {};
+                        const vars = ((base as any).vars ? { ...(base as any).vars } : {}) as Record<string, unknown>;
+                        (vars as any)[prop] = value;
+                        const next = { ...base, vars } as Record<string, unknown>;
+                        const expected = snapNow?.wmVersion ?? BigInt(0);
+                        await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot: next });
+                        await this.sessionManager!.appendEvent(tenantId, sessionId, 'wm.vars_updated', { key: String(prop) });
+                    } catch { /* best-effort */ }
+                })();
+                return true;
+            },
+            has: (_t, prop: string) => varCache.has(prop),
+            ownKeys: () => Array.from(varCache.keys()),
+            getOwnPropertyDescriptor: (_t, prop: string) =>
+                varCache.has(prop as string) ? { enumerable: true, configurable: true } : undefined
+        });
+    }
+
+    // Flush current ctx vars and llm state into snapshot
+    public async flushContextSnapshot(tenantId: string, sessionId: string, agentId: string, ctx: TaskContext): Promise<void> {
+        if (!this.sessionManager) return;
+        let plainVars: Record<string, unknown> = {};
+        try {
+            plainVars = JSON.parse(JSON.stringify((ctx as any).vars || {}));
+        } catch {
+            try { plainVars = { ...(ctx as any).vars } as Record<string, unknown>; } catch { plainVars = {}; }
+        }
+        const snapshot: Record<string, unknown> = { vars: plainVars };
+        try {
+            const llmAny = (ctx as any).llm as any;
+            if (llmAny?.getMessages) {
+                const messages = llmAny.getMessages(true);
+                (snapshot as any).llm = { messages };
+                try { console.log(`[TaskEngine] flushContextSnapshot messages count: ${Array.isArray(messages) ? messages.length : 'n/a'}`); } catch { }
+            } else if (llmAny?.exportState) {
+                const llmState = llmAny.exportState();
+                if (typeof llmState !== 'undefined') (snapshot as any).llm = llmState;
+            }
+        } catch { /* ignore */ }
+        try {
+            const snap = await this.sessionManager.load(tenantId, sessionId);
+            const expected = snap?.wmVersion ?? BigInt(0);
+            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot });
+            try { /* saved */ } catch { /* noop */ }
+            try { console.log(`[TaskEngine] flushContextSnapshot saved`); } catch { }
+        } catch (e) {
+            if ((e as Error).message === 'CAS_MISMATCH') {
+                try {
+                    const snap2 = await this.sessionManager.load(tenantId, sessionId);
+                    const expected2 = snap2?.wmVersion ?? BigInt(0);
+                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot });
+                    try { console.log(`[TaskEngine] flushContextSnapshot saved after retry`); } catch { }
+                } catch { /* ignore */ }
+            }
+        }
+    }
     /**
      * Start a task with either streaming or buffered mode
      * @returns The final task entity for buffered mode, or void for streaming mode
@@ -135,7 +203,11 @@ export class TaskEngine {
                     } catch { /* ignore */ }
                 })();
                 return true;
-            }
+            },
+            has: (_t, prop: string) => varCache.has(prop),
+            ownKeys: () => Array.from(varCache.keys()),
+            getOwnPropertyDescriptor: (_t, prop: string) =>
+                varCache.has(prop as string) ? { enumerable: true, configurable: true } : undefined
         });
 
         // Provide requestInput implementation (non-blocking; persists pending handler and emits input_required)
@@ -221,6 +293,7 @@ export class TaskEngine {
             const minimalCtx = ctx as any; // current task context as source
             // Inject dispatcher to be executed on handle.run()
             const dispatch = async (runOpts?: { awaitCompletion?: boolean; streaming?: boolean }) => {
+                (ctx as any).logger?.info?.('Child dispatch', { parentTaskId: sessionId, childAgent: agent, token });
                 const a2aOptions = { tenantId, streaming: (runOpts?.streaming ?? options?.streaming) === true } as any;
                 try {
                     const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
@@ -232,6 +305,7 @@ export class TaskEngine {
                     } as any);
                     // If child requested input, do not synthesize completion
                     if (result && typeof result === 'object' && (result as any).status === 'input_required') {
+                        (ctx as any).logger?.info?.('Child input_required', { parentTaskId: sessionId, childAgent: agent, token });
                         return;
                     }
                     // Determine await behavior: default to true when no completed handler is registered
@@ -247,6 +321,7 @@ export class TaskEngine {
                     }
                     return;
                 } catch (e) {
+                    (ctx as any).logger?.error?.('Child dispatch failed', e, { parentTaskId: sessionId, childAgent: agent, token });
                     await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
                         taskId: sessionId,
                         childAgent: agent,
@@ -351,9 +426,22 @@ export class TaskEngine {
             // For buffered mode, await the task handler completion
             await this.executeTaskHandler(ctx);
 
-            // After handler: snapshot minimal WM (vars) with CAS
+            // After handler: snapshot WM and optional LLM state with CAS
             if (this.sessionManager) {
-                const newSnapshot = { vars: (ctx as any).vars || {} } as Record<string, unknown>;
+                const newSnapshot: Record<string, unknown> = { vars: (ctx as any).vars || {} };
+                try {
+                    const llmAny = (ctx as any).llm as any;
+                    if (llmAny?.getMessages) {
+                        const messages = llmAny.getMessages(true);
+                        (newSnapshot as any).llm = { messages };
+                        try { console.log(`[TaskEngine] finalSave messages count: ${Array.isArray(messages) ? messages.length : 'n/a'}`); } catch { }
+                    } else if (llmAny?.exportState) {
+                        const llmState = llmAny.exportState();
+                        if (typeof llmState !== 'undefined') {
+                            (newSnapshot as any).llm = llmState;
+                        }
+                    }
+                } catch { /* ignore llm state issues */ }
                 const expected = (ctx as any).__wmVersion ?? BigInt(0);
                 try {
                     await this.sessionManager.saveSnapshot({
@@ -365,10 +453,39 @@ export class TaskEngine {
                     });
                 } catch (e) {
                     if ((e as Error).message === 'CAS_MISMATCH') {
-                        // concurrent turn detected; surface as conflict in buffered mode
-                        throw new Error('SESSION_CONFLICT');
+                        // Retry once with the latest wmVersion
+                        try {
+                            const snapNow = await this.sessionManager.load(tenantId, sessionId);
+                            const expected2 = snapNow?.wmVersion ?? BigInt(0);
+                            await this.sessionManager.saveSnapshot({
+                                tenantId,
+                                sessionId,
+                                agentId: (ctx as any).agentId || 'default',
+                                expectedWmVersion: expected2,
+                                snapshot: newSnapshot
+                            });
+                            // Log and emit recovery event
+                            try { (ctx as any).logger?.info?.('WM snapshot CAS recovered on final save', { taskId: sessionId }); } catch { }
+                            await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_conflict_recovered', { when: 'final_save' });
+                            try { console.log(`[TaskEngine] WM snapshot CAS recovered on final save for task ${sessionId}`); } catch { }
+                        } catch (e2) {
+                            if ((e2 as Error).message === 'CAS_MISMATCH') {
+                                // Benign end-of-turn conflict; record and proceed
+                                await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_conflict_ignored', { when: 'final_save' });
+                                try { (ctx as any).logger?.warn?.('WM snapshot CAS ignored on final save (benign)', { taskId: sessionId }); } catch { }
+                                try { console.log(`[TaskEngine] WM snapshot CAS ignored on final save (benign) for task ${sessionId}`); } catch { }
+                            } else if ((e2 as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                                await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: JSON.stringify(newSnapshot).length });
+                            } else {
+                                throw e2;
+                            }
+                        }
+                    } else if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        // emit limit event and continue without saving snapshot
+                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: JSON.stringify(newSnapshot).length });
+                    } else {
+                        throw e;
                     }
-                    throw e;
                 }
             }
 
@@ -563,14 +680,18 @@ export class TaskEngine {
                 // Parent provided immediate answer; first try to invoke child's onProvided if available
                 let finalChildResult: unknown = maybe;
                 try {
-                    if (childOnProvided && childTaskId && this.handlerInvoker) {
-                        const childResult = await this.handlerInvoker.invoke({ tenantId, taskId: childTaskId, handlerName: childOnProvided, input: maybe });
+                    const effectiveChildOnProvided = childOnProvided || (entry?.pendingInput?.childOnProvided as string | undefined);
+                    if (effectiveChildOnProvided && childTaskId && this.handlerInvoker) {
+                        try { console.log(`[TaskEngine] Invoking child onProvided='${effectiveChildOnProvided}' for childTaskId=${childTaskId} with value=${JSON.stringify(maybe)}`); } catch { }
+                        const childResult = await this.handlerInvoker.invoke({ tenantId, taskId: childTaskId, handlerName: effectiveChildOnProvided, input: maybe });
+                        try { console.log(`[TaskEngine] Child onProvided result for childTaskId=${childTaskId}: ${JSON.stringify(childResult)}`); } catch { }
                         if (typeof childResult !== 'undefined') {
                             finalChildResult = childResult;
                         }
                     }
                 } catch (e) {
                     // If invoking child's handler fails, fall back to using parent's value
+                    try { console.log(`[TaskEngine] Child onProvided invocation failed; using parent value. Error: ${(e as Error).message}`); } catch { }
                 }
                 await this.handleChildCompleted({ tenantId, parentTaskId, childToken: token, result: finalChildResult });
             }
@@ -789,8 +910,42 @@ export class TaskEngine {
         const ctx = this.createContext(task);
         (ctx as any).tenantId = tenantId;
         const snap = await this.sessionManager?.load(tenantId, taskId);
+        // Reattach LLM for this agent if available
+        try {
+            const agentName = snap?.agentId;
+            if (agentName) {
+                const { PluginManager } = await import('../plugin/pluginManager.js');
+                const plugin = PluginManager.findAgent(agentName);
+                if (plugin?.llmAdapter) {
+                    (ctx as any).llm = plugin.llmAdapter;
+                } else if (plugin?.llmConfig) {
+                    const { createLLMForTask } = await import('../llm/LLMFactory.js');
+                    (ctx as any).llm = createLLMForTask(plugin.llmConfig, ctx as any);
+                }
+            }
+            try { console.log('[TaskEngine] restoreCtx LLM type', (ctx as any).llm?.constructor?.name); } catch { }
+        } catch { /* ignore LLM reattach failures */ }
         const vars = (snap?.snapshot as any)?.vars || {};
-        (ctx as any).vars = { ...(ctx as any).vars, ...vars };
+        try {
+            (ctx as any).vars = { ...(ctx as any).vars, ...vars };
+        } catch {
+            (ctx as any).vars = vars;
+        }
+        // Restore LLM state if present
+        try {
+            const llmState = (snap?.snapshot as any)?.llm;
+            const llmAny = (ctx as any).llm as any;
+            try {
+                const savedCount = llmState && Array.isArray((llmState as any).messages) ? (llmState as any).messages.length : 'n/a';
+                const importAvail = typeof llmAny?.importState;
+                console.log(`[TaskEngine] restoreCtx snapshot llmState present=${!!llmState} savedCount=${savedCount} importStateType=${importAvail}`);
+            } catch { /* noop */ }
+            try { /* before import */ } catch { /* noop */ }
+            if (typeof llmState !== 'undefined' && llmAny?.importState) {
+                llmAny.importState(llmState);
+            }
+            try { /* after import */ } catch { /* noop */ }
+        } catch { /* ignore */ }
         // Ensure restored context can emit streaming events to the same task channel
         try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
         // Enable A2A from durable handler context

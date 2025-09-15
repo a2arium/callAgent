@@ -450,6 +450,10 @@ export async function runAgentWithStreaming(
         try { EngineLocator.setEngine(engine as any); } catch { }
         const entity: TaskEntity = { id: taskCtx.task.id, input };
         runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
+        const wmCap = process.env.WM_SNAPSHOT_MAX_BYTES;
+        if (wmCap) {
+            runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
+        }
         await engine.startTask({ task: entity, isStreaming: options.isStreaming });
         logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
         if (!options.isStreaming) {

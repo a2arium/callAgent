@@ -68,8 +68,8 @@ export class WorkingMemorySessionStore {
             const newVersion = currentVersion + BigInt(1);
             await tx.wMSession.upsert({
                 where: { tenantId_sessionId: { tenantId, sessionId } },
-                update: { snapshot: snapshot as unknown as Prisma.InputJsonValue, wmVersion: newVersion },
-                create: { tenantId, sessionId, agentId, snapshot: snapshot as unknown as Prisma.InputJsonValue, wmVersion: newVersion }
+                update: { snapshot: snapshot as unknown as any, wmVersion: newVersion },
+                create: { tenantId, sessionId, agentId, snapshot: snapshot as unknown as any, wmVersion: newVersion }
             });
 
             return { newVersion };
@@ -95,7 +95,7 @@ export class WorkingMemorySessionStore {
             });
             const nextSeq = (last?.seq ?? 0) + 1;
             const ev = await tx.wMEvent.create({
-                data: { tenantId, sessionId, seq: nextSeq, type, payload: payload as unknown as Prisma.InputJsonValue }
+                data: { tenantId, sessionId, seq: nextSeq, type, payload: payload as unknown as any }
             });
             return { eventId: ev.eventId, seq: ev.seq };
         });
@@ -117,7 +117,7 @@ export class WorkingMemorySessionStore {
         payload: Record<string, unknown>;
     }): Promise<void> {
         const { tenantId, topic, key, payload } = params;
-        await this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as Prisma.InputJsonValue } });
+        await this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as any } });
     }
 }
 

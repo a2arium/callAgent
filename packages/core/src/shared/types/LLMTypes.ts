@@ -21,6 +21,10 @@ export interface ILLMCaller {
     stream<T = unknown>(message: string, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>>;
     addToolResult(id: string, result: string, name: string): void;
     updateSettings(settings: Record<string, any>): void;
+    /** Optional: return current conversation messages; includeSystem=true to include system message */
+    getMessages?: (includeSystem?: boolean) => unknown;
+    /** Optional: set conversation messages (used on restore) */
+    setMessages?: (messages: unknown) => void;
 }
 
 // Configuration for LLM integration

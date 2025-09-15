@@ -361,20 +361,20 @@ export class EntityAlignmentService {
             LIMIT 10
         `;
 
-        alignmentLogger.debug(`All entities of type "${entityType}":`, allResults.map(r => ({
+        alignmentLogger.debug(`All entities of type "${entityType}":`, allResults.map((r: { canonical_name: string; similarity: number }) => ({
             name: r.canonical_name,
             similarity: r.similarity ? r.similarity.toFixed(3) : 'undefined'
         })));
 
         // Filter by threshold
-        const results = allResults.filter(r => r.similarity && r.similarity > threshold);
+        const results = allResults.filter((r: { similarity: number }) => r.similarity && r.similarity > threshold);
 
-        alignmentLogger.debug(`Found ${results.length} similar entities above threshold ${threshold}:`, results.map(r => ({
+        alignmentLogger.debug(`Found ${results.length} similar entities above threshold ${threshold}:`, results.map((r: { canonical_name: string; similarity: number }) => ({
             name: r.canonical_name,
             similarity: r.similarity.toFixed(3)
         })));
 
-        return results.map(r => ({
+        return results.map((r: { id: string; canonical_name: string; similarity: number }) => ({
             entityId: r.id,
             canonicalName: r.canonical_name,
             similarity: r.similarity,
@@ -483,9 +483,13 @@ export class EntityAlignmentService {
             : `WHERE tenant_id = '${tenantId}'`;
 
         const [totalEntitiesResult, totalAlignmentsResult, entitiesByTypeResult] = await Promise.all([
-            this.prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
-                `SELECT COUNT(*) as count FROM entity_store ${whereClause}`
-            ),
+            entityType
+                ? this.prisma.$queryRaw<Array<{ count: bigint }>>`
+                    SELECT COUNT(*) as count FROM entity_store WHERE entity_type = ${entityType} AND tenant_id = ${tenantId}
+                  `
+                : this.prisma.$queryRaw<Array<{ count: bigint }>>`
+                    SELECT COUNT(*) as count FROM entity_store WHERE tenant_id = ${tenantId}
+                  `,
             this.prisma.$queryRaw<Array<{ count: bigint }>>`
                 SELECT COUNT(*) as count FROM entity_alignment WHERE tenant_id = ${tenantId}
             `,
@@ -497,7 +501,7 @@ export class EntityAlignmentService {
             `
         ]);
 
-        const typeStats = entitiesByTypeResult.reduce((acc, item) => {
+        const typeStats = entitiesByTypeResult.reduce((acc: Record<string, number>, item: { entity_type: string; count: bigint }) => {
             acc[item.entity_type] = Number(item.count);
             return acc;
         }, {} as Record<string, number>);

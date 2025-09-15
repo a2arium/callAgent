@@ -26,7 +26,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "private": false,
   "description": "Core framework for the CallAgent AI agent system.",
   "license": "MIT",
   "keywords": [
@@ -39,6 +38,7 @@
     "@a2arium/callagent-types": "0.2.0",
     "@a2arium/callagent-utils": "0.2.0",
     "@prisma/client": "^6.7.0",
+    "callllm": "portal:/Users/maximantonov/Work/_lab/callllm",
     "dotenv": "^16.4.5",
     "uuid": "^11.1.0"
   },

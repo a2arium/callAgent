@@ -860,11 +860,11 @@ new MemorySQLAdapter({
 
         query += ` LIMIT ${limit}`;
 
-        const results = await this.prisma.$queryRawUnsafe<Array<{
+        const results = await this.prisma.$queryRawUnsafe(query, sqlPattern, tenantId) as Array<{
             key: string;
-            value: any;
+            value: unknown;
             tags: string[];
-        }>>(query, sqlPattern, tenantId);
+        }>;
 
         // Add aligned proxies to results if entity service is available
         if (this.entityService) {
@@ -876,7 +876,7 @@ new MemorySQLAdapter({
             }
         }
 
-        return results.map(r => ({
+        return results.map((r: { key: string; value: any }) => ({
             key: r.key,
             value: r.value as T
         }));
@@ -945,11 +945,11 @@ new MemorySQLAdapter({
 
         query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
 
-        const results = await this.prisma.$queryRawUnsafe<Array<{
+        const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;
-            value: any;
+            value: unknown;
             tags: string[];
-        }>>(query, ...queryParams);
+        }>;
 
         // Add aligned proxies to results if entity service is available
         if (this.entityService) {
@@ -961,7 +961,7 @@ new MemorySQLAdapter({
             }
         }
 
-        return results.map(r => ({
+        return results.map((r: { key: string; value: any }) => ({
             key: r.key,
             value: r.value as T
         }));
@@ -1120,11 +1120,11 @@ new MemorySQLAdapter({
         query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
 
         // Execute raw SQL query
-        const results = await this.prisma.$queryRawUnsafe<Array<{
+        const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;
-            value: any;
+            value: unknown;
             tags: string[];
-        }>>(query, ...queryParams);
+        }>;
 
         // Add aligned proxies to results if entity service is available
         const processedResults: MemoryQueryResult<T>[] = [];
@@ -1317,17 +1317,17 @@ new MemorySQLAdapter({
 
         query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
 
-        const results = await this.prisma.$queryRawUnsafe<Array<{
+        const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;
-            value: any;
+            value: unknown;
             tags: string[];
-        }>>(query, ...queryParams);
+        }>;
 
         // Apply regular filters in memory if needed
-        let filteredResults = results;
+        let filteredResults: Array<{ key: string; value: unknown; tags: string[] }> = results;
         if (regularFilters.length > 0) {
-            filteredResults = results.filter(result => {
-                return regularFilters.every(filter => {
+            filteredResults = results.filter((result: { key: string; value: unknown; tags: string[] }) => {
+                return regularFilters.every((filter: ParsedFilter) => {
                     try {
                         return this.evaluateFilterInMemory(result.value, filter);
                     } catch {
@@ -1340,7 +1340,7 @@ new MemorySQLAdapter({
         // Add aligned proxies to results
         const processedResults: MemoryQueryResult<T>[] = [];
         for (const result of filteredResults) {
-            let value = result.value;
+            let value: unknown = result.value;
 
             const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
             if (Object.keys(alignments).length > 0) {
@@ -1395,7 +1395,7 @@ new MemorySQLAdapter({
                         FROM entity_alignment
                         WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                     `;
-                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
             }
 
             // Strategy 2: Alias match
@@ -1417,7 +1417,7 @@ new MemorySQLAdapter({
                         FROM entity_alignment
                         WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                     `;
-                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
             }
 
             // Strategy 3: Text similarity (normalized comparison)
@@ -1443,7 +1443,7 @@ new MemorySQLAdapter({
                             FROM entity_alignment
                             WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                         `;
-                    alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                    alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
                 }
 
                 // Check aliases
@@ -1461,7 +1461,7 @@ new MemorySQLAdapter({
                                 FROM entity_alignment
                                 WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                             `;
-                        alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                        alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
                         break; // Avoid duplicates
                     }
                 }
@@ -1491,7 +1491,7 @@ new MemorySQLAdapter({
 
                     // Use a lower threshold for embedding similarity as a fallback
                     const threshold = 0.4;
-                    const matchingEntities = similarEntities.filter(e => e.similarity > threshold);
+                    const matchingEntities = similarEntities.filter((e: { similarity: number }) => e.similarity > threshold);
 
                     for (const entity of matchingEntities) {
                         const alignedMemories = isArrayPattern ?
@@ -1505,7 +1505,7 @@ new MemorySQLAdapter({
                                 FROM entity_alignment
                                 WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                             `;
-                        alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                        alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
                     }
                 } catch (error) {
                     console.warn('Embedding similarity search failed:', error);
@@ -1534,7 +1534,7 @@ new MemorySQLAdapter({
                         WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                     `;
 
-                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
             }
 
         } else if (operator === 'ENTITY_ALIAS') {
@@ -1559,7 +1559,7 @@ new MemorySQLAdapter({
                         WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
                     `;
 
-                alignedMemories.forEach(record => matchedKeys.add(record.memory_key));
+                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
             }
         }
 
@@ -2007,7 +2007,7 @@ new MemorySQLAdapter({
             orderBy: { updatedAt: 'desc' }
         });
 
-        return results.map(result => ({
+        return results.map((result: { key: string; blobMetadata: unknown; tags: string[]; createdAt: Date; updatedAt: Date }) => ({
             key: result.key,
             metadata: result.blobMetadata as any,
             tags: result.tags,

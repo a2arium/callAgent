@@ -973,9 +973,9 @@ These examples demonstrate the power and flexibility of the A2A system for build
 ## Interactive A2A (non-blocking) demo
 
 See `apps/examples/interactive-a2a-demo/` for a minimal flow that uses:
-- `requestInput(...).onProvided/.onExpired` for human input
-- `sendTaskToAgent(..., { onInputRequired, onCompleted })` for agent chaining
-- `ctx.allTasks([...]).onAllCompleted/.onAnyFailed` for group orchestration
+- `requestInput(prompt, { onProvided, onExpired })` for human input (handler names)
+- `sendTaskToAgent(target, input, { onInputRequired, onCompleted })` for agent chaining (auto-dispatch)
+- `ctx.allTasks([...], { onAllCompleted, onAnyFailed })` for group orchestration
 
 How to run (API sketch):
 ```http

@@ -80,10 +80,13 @@ export class CacheCleanupService {
                 activeEntries: totalCount - expiredCount,
                 oldestEntry: oldestEntry?.createdAt || null,
                 newestEntry: newestEntry?.createdAt || null,
-                agentBreakdown: agentStats.reduce((acc, stat) => {
-                    acc[stat.agentName] = stat._count.id;
-                    return acc;
-                }, {} as Record<string, number>)
+                agentBreakdown: agentStats.reduce(
+                    (acc: Record<string, number>, stat: { agentName: string; _count: { id: number } }) => {
+                        acc[stat.agentName] = stat._count.id;
+                        return acc;
+                    },
+                    {} as Record<string, number>
+                )
             };
 
             return stats;

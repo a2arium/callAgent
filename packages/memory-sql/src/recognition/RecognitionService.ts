@@ -271,7 +271,7 @@ export class RecognitionService {
                         select: { memoryKey: true },
                     });
 
-                    alignments.forEach(alignment => allMatchingMemoryKeys.add(alignment.memoryKey));
+                    alignments.forEach((alignment: { memoryKey: string }) => allMatchingMemoryKeys.add(alignment.memoryKey));
                     console.log(`DEBUG: Found ${alignments.length} alignments for matching entities`);
                 }
             }
@@ -293,7 +293,7 @@ export class RecognitionService {
 
         console.log(`DEBUG: Loaded ${memoryEntries.length} memory entries from ${allMatchingMemoryKeys.size} unique keys`);
 
-        return memoryEntries.map(entry => ({
+        return memoryEntries.map((entry: { key: string; value: unknown }) => ({
             key: entry.key,
             data: (typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value) as T
         }));
@@ -341,7 +341,7 @@ export class RecognitionService {
                         select: { memoryKey: true }
                     });
 
-                    patternAlignments.forEach(alignment => matchingMemoryKeys.add(alignment.memoryKey));
+                    patternAlignments.forEach((alignment: { memoryKey: string }) => matchingMemoryKeys.add(alignment.memoryKey));
                 }
             } catch (error) {
                 console.warn(`Failed to find matches for array value ${candidateValue}:`, error);
@@ -358,7 +358,7 @@ export class RecognitionService {
                 take: limit
             });
 
-            matches.push(...memoryEntries.map(entry => ({
+            matches.push(...memoryEntries.map((entry: { key: string; value: unknown }) => ({
                 key: entry.key,
                 data: (typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value) as T
             })));
@@ -416,7 +416,7 @@ export class RecognitionService {
             AND ea.field_path LIKE ${sqlPattern.replace('%', '%')}
         `;
 
-        return alignments.map(a => ({
+        return alignments.map((a: { memory_key: string; canonical_name: string; aliases: string[] }) => ({
             memoryKey: a.memory_key,
             entity: {
                 canonicalName: a.canonical_name,
@@ -454,13 +454,13 @@ export class RecognitionService {
 
             for (const result of results) {
                 try {
-                    const data = typeof result.value === 'string' ? JSON.parse(result.value) : result.value;
+                    const data = typeof (result as any).value === 'string' ? JSON.parse((result as any).value) : (result as any).value;
                     matches.push({
-                        key: result.key,
+                        key: (result as any).key,
                         data: data as T
                     });
                 } catch (error) {
-                    console.warn(`Failed to parse memory data for key ${result.key}:`, error);
+                    console.warn(`Failed to parse memory data for key ${(result as any).key}:`, error);
                 }
             }
         }
@@ -490,13 +490,13 @@ export class RecognitionService {
         const matches: Array<{ key: string; data: T }> = [];
         for (const result of results) {
             try {
-                const data = typeof result.value === 'string' ? JSON.parse(result.value) : result.value;
+                const data = typeof (result as any).value === 'string' ? JSON.parse((result as any).value) : (result as any).value;
                 matches.push({
-                    key: result.key,
+                    key: (result as any).key,
                     data: data as T
                 });
             } catch (error) {
-                console.warn(`Failed to parse memory data for key ${result.key}:`, error);
+                console.warn(`Failed to parse memory data for key ${(result as any).key}:`, error);
             }
         }
 
@@ -511,7 +511,7 @@ export class RecognitionService {
         potentialMatches: Array<{ key: string; data: T }>,
         entities: Record<string, string>
     ): Promise<Array<{ key: string; data: T; confidence: number }>> {
-        const scoredMatches = [];
+        const scoredMatches: Array<{ key: string; data: T; confidence: number }> = [];
 
         for (const match of potentialMatches) {
             const confidence = await this.confidenceScorer.calculateConfidence(

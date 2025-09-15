@@ -16,6 +16,8 @@ import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '../cache/index.js';
 import { taskEngine } from './taskEngine.js';
 import { EngineLocator } from './EngineLocator.js';
+import { eventBus } from '../../eventbus/inMemoryEventBus.js';
+import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -97,77 +99,54 @@ export class A2AService implements IA2AService {
             // 4. Deserialize context into target
             await ContextSerializer.deserializeContext(targetCtx, serializedContext);
 
-            // 5. Check if streaming/interactive mode is requested
-            if (options.streaming) {
-                // Return InteractiveTaskHandler for future streaming support
-                const interactiveHandler = new InteractiveTaskHandler(targetCtx.task.id, targetAgent);
+            // 5. Execute target agent via TaskEngine for WM/LLM persistence
+            const eng = EngineLocator.getEngine() || taskEngine;
+            // Attach WM proxy so child ctx.vars writes persist
+            try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
 
-                // Execute target agent asynchronously and mark completion
-                this.executeTargetAgent(targetPlugin, targetCtx, operationId)
-                    .then(result => {
-                        interactiveHandler.markCompleted(result);
-                        const duration = Date.now() - startTime;
-                        a2aLogger.info('A2A interactive task completed', {
-                            operationId,
-                            duration,
-                            success: true
-                        });
-                    })
-                    .catch(error => {
-                        interactiveHandler.markCompleted(error);
-                        const duration = Date.now() - startTime;
-                        a2aLogger.error('A2A interactive task failed', error, {
-                            operationId,
-                            duration,
-                            targetAgent
-                        });
-                    });
+            const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId);
 
-                return interactiveHandler;
-            } else {
-                // 5. Execute target agent synchronously
-                const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId);
+            // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
+            if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
+                const eng = EngineLocator.getEngine() || taskEngine;
+                const { prompt, schema } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown };
+                await eng.handleChildInputRequired({
+                    tenantId: options.parentTenantId,
+                    parentTaskId: options.parentTaskId,
+                    childToken: options.parentChildToken,
+                    prompt,
+                    schema
+                });
+                return { status: 'input_required' } as any;
+            }
 
-                // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
-                if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
-                    const eng = EngineLocator.getEngine() || taskEngine;
-                    const { prompt, schema } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown };
-                    await eng.handleChildInputRequired({
+            const duration = Date.now() - startTime;
+            a2aLogger.info('A2A task completed', {
+                operationId,
+                duration,
+                success: true
+            });
+
+            // Notify parent engine on completion when correlation is provided
+            if (options.parentTenantId && options.parentTaskId && options.parentChildToken) {
+                try {
+                    await eng.handleChildCompleted({
                         tenantId: options.parentTenantId,
                         parentTaskId: options.parentTaskId,
                         childToken: options.parentChildToken,
-                        prompt,
-                        schema
+                        result
                     });
-                    return { status: 'input_required' } as any;
+                } catch (notifyError) {
+                    a2aLogger.warn('Failed to notify parent on child completion', notifyError as any, {
+                        parentTaskId: options.parentTaskId
+                    });
                 }
-
-                const duration = Date.now() - startTime;
-                a2aLogger.info('A2A task completed', {
-                    operationId,
-                    duration,
-                    success: true // Consider deriving success from result or targetCtx state
-                });
-
-                // Notify parent engine on completion when correlation is provided
-                if (options.parentTenantId && options.parentTaskId && options.parentChildToken) {
-                    try {
-                        const eng = EngineLocator.getEngine() || taskEngine;
-                        await eng.handleChildCompleted({
-                            tenantId: options.parentTenantId,
-                            parentTaskId: options.parentTaskId,
-                            childToken: options.parentChildToken,
-                            result
-                        });
-                    } catch (notifyError) {
-                        a2aLogger.warn('Failed to notify parent on child completion', notifyError as any, {
-                            parentTaskId: options.parentTaskId
-                        });
-                    }
-                }
-
-                return result;
             }
+
+            // Flush child snapshot (vars + llm) after turn
+            try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
+
+            return result;
 
         } catch (error) {
             const duration = Date.now() - startTime;
@@ -230,7 +209,7 @@ export class A2AService implements IA2AService {
             },
 
             // Override I/O methods to add target-agent prefixing and logging
-            reply: this.createTargetReply(targetPlugin),
+            reply: this.createTargetReply(targetPlugin, (options as any).parentTenantId && (options as any).parentTaskId ? { tenantId: (options as any).parentTenantId, parentTaskId: (options as any).parentTaskId } : undefined),
             progress: this.createTargetProgress(targetPlugin),
             complete: this.createTargetComplete(targetPlugin),
             fail: this.createTargetFail(targetPlugin),
@@ -316,15 +295,11 @@ export class A2AService implements IA2AService {
             if (parentTenantId && parentTaskId && parentChildToken) {
                 try {
                     const eng = EngineLocator.getEngine() || taskEngine;
-                    // Persist minimal child context (vars) so onProvided can restore them
-                    try {
-                        await (eng as any).persistChildContext?.({
-                            tenantId: targetCtx.tenantId,
-                            sessionId: targetCtx.task.id,
-                            agentId: targetPlugin.manifest.name,
-                            vars: (targetCtx as any).vars || {}
-                        });
-                    } catch { /* best-effort */ }
+                    // Persist child's current WM + LLM state BEFORE notifying parent so child resume sees full history
+                    try { /* pre-notify flush */ } catch { /* noop */ }
+                    try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
+
+                    // Now notify parent about input_required
                     await eng.handleChildInputRequired({
                         tenantId: parentTenantId,
                         parentTaskId,
@@ -362,7 +337,7 @@ export class A2AService implements IA2AService {
     /**
      * Create target-specific reply function
      */
-    private createTargetReply(targetPlugin: AgentPlugin) {
+    private createTargetReply(targetPlugin: AgentPlugin, parent?: { tenantId: string; parentTaskId: string }) {
         return async (parts: any) => {
             const prefix = `[${targetPlugin.manifest.name}]`;
 
@@ -384,6 +359,25 @@ export class A2AService implements IA2AService {
                 targetAgent: targetPlugin.manifest.name,
                 parts: typeof parts === 'string' ? parts.substring(0, 100) : 'complex'
             });
+
+            // Mirror child replies to parent task stream if correlated
+            if (parent?.parentTaskId) {
+                try {
+                    const text = typeof parts === 'string'
+                        ? `${prefix} ${parts}`
+                        : Array.isArray(parts)
+                            ? parts.map(p => (typeof p === 'string' ? `${prefix} ${p}` : p?.text ? `${prefix} ${p.text}` : '')).filter(Boolean).join('\n')
+                            : parts?.text ? `${prefix} ${parts.text}` : '';
+                    if (text) {
+                        eventBus.publish(taskChannel(parent.parentTaskId), {
+                            artifact: {
+                                name: 'response', index: 0, append: false, lastChunk: false,
+                                parts: [{ type: 'text', text }]
+                            }
+                        } as any);
+                    }
+                } catch { /* noop */ }
+            }
         };
     }
 

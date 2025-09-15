@@ -39,6 +39,26 @@ await ctx.reply([{ type: 'text', text: `Sum: ${result.sum}` }]);
 ctx.complete(100, 'completed');
 ```
 
+## Execution Model and Persistence
+
+- **sendTaskToAgent (auto-dispatch)**: If `onCompleted` is provided in options, the call returns immediately and completion is delivered to the durable handler. If no `onCompleted` is provided, the call resolves with the child's result (blocking tool-like behavior).
+- **requestInput (non-blocking, required handler)**: Always provide `onProvided` in options. The agent exits for the turn; the engine persists working memory and LLM state, and resumes when input arrives via `tasks/input`.
+- **Engine-based child execution**: All child agents are executed through the `TaskEngine`. Working Memory (goal, thoughts, decisions, `ctx.vars`) and LLM conversation state are snapshotted every turn and restored before invoking any durable handler.
+- **Group orchestration**: Use `ctx.allTasks([...], { onAllCompleted: '...', onAnyFailed: '...' })` to coordinate multiple child tasks durably.
+
+### Group Orchestration (options-based handlers)
+
+```typescript
+await ctx.allTasks([
+  { agent: 'extractor', input: { source: 'db' } },
+  { agent: 'analyzer', input: { method: 'basic' } }
+], {
+  onAllCompleted: 'handleAllDone',
+  onAnyFailed: 'handleAnyFailed'
+});
+return; // non-blocking; handlers will be invoked on completion
+```
+
 ### Requesting Human Input (InputHandle)
 
 ```typescript

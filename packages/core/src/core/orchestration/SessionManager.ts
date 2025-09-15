@@ -24,7 +24,8 @@ export class SessionManager {
         // Enforce WM snapshot size cap (bytes)
         try {
             const serialized = JSON.stringify(params.snapshot);
-            const maxBytes = 512 * 1024; // 512KB default cap
+            const envCap = Number(process.env.WM_SNAPSHOT_MAX_BYTES);
+            const maxBytes = Number.isFinite(envCap) && envCap > 0 ? envCap : 512 * 1024; // 512KB default cap
             if (serialized.length > maxBytes) {
                 throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
             }
@@ -33,6 +34,7 @@ export class SessionManager {
             // If snapshot isn't serializable, surface error
             throw new Error('WM_SNAPSHOT_SERIALIZE_FAILED');
         }
+        try { /* minimal */ } catch { /* noop */ }
         return this.store.writeSnapshotCAS(params);
     }
 

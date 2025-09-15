@@ -81,7 +81,7 @@ export class EntityFinder {
             where: { entityType, tenantId, canonicalName: { equals: value, mode: 'insensitive' } },
             select: { id: true },
         });
-        return entities.map(e => e.id);
+        return entities.map((e: { id: string }) => e.id);
     }
 
     private async findAliasMatch(value: string, entityType: string, tenantId: string): Promise<string[]> {
@@ -89,7 +89,7 @@ export class EntityFinder {
             where: { entityType, tenantId, aliases: { has: value } },
             select: { id: true },
         });
-        return entities.map(e => e.id);
+        return entities.map((e: { id: string }) => e.id);
     }
 
     private async findTextSimilarityMatch(value: string, entityType: string, tenantId: string): Promise<string[]> {
@@ -116,7 +116,7 @@ export class EntityFinder {
                 WHERE entity_type = ${entityType} AND tenant_id = ${tenantId}
                 ORDER BY similarity DESC
             `;
-            return results.filter(r => r.similarity > threshold).map(r => r.id);
+            return results.filter((r: { similarity: number }) => r.similarity > threshold).map((r: { id: string }) => r.id);
         } catch (error) {
             console.warn(`Embedding search failed for '${value}':`, error);
             return [];
@@ -130,7 +130,7 @@ export class EntityFinder {
             where: { entityType, tenantId, canonicalName: { equals: value, mode: 'insensitive' } },
             select: { id: true, canonicalName: true },
         });
-        return entities.map(e => ({
+        return entities.map((e: { id: string; canonicalName: string }) => ({
             entityId: e.id,
             canonicalName: e.canonicalName,
             matchType: 'exact'
@@ -142,7 +142,7 @@ export class EntityFinder {
             where: { entityType, tenantId, aliases: { has: value } },
             select: { id: true, canonicalName: true },
         });
-        return entities.map(e => ({
+        return entities.map((e: { id: string; canonicalName: string }) => ({
             entityId: e.id,
             canonicalName: e.canonicalName,
             matchType: 'alias'
@@ -155,9 +155,9 @@ export class EntityFinder {
             select: { id: true, canonicalName: true },
         });
 
-        const results = [];
+        const results: Array<{ entityId: string; canonicalName: string; matchType: string; similarity?: number }> = [];
         for (const entity of allEntities) {
-            const similarity = this.calculateTextSimilarityScore(value, entity.canonicalName);
+            const similarity: number = this.calculateTextSimilarityScore(value, entity.canonicalName);
             if (similarity >= 0.5) { // Only include if similarity meets threshold
                 results.push({
                     entityId: entity.id,
@@ -180,8 +180,8 @@ export class EntityFinder {
                 ORDER BY similarity DESC
             `;
             return results
-                .filter(r => r.similarity > threshold)
-                .map(r => ({
+                .filter((r: { similarity: number }) => r.similarity > threshold)
+                .map((r: { id: string; canonical_name: string; similarity: number }) => ({
                     entityId: r.id,
                     canonicalName: r.canonical_name,
                     matchType: 'embedding',

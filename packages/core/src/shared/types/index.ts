@@ -110,8 +110,8 @@ export type TaskContext = {
     // Add usage recording method that accepts multiple formats for backward compatibility
     recordUsage: (cost: number | { cost: number } | Usage) => void;
 
-    // Use the ILLMCaller interface for llm
-    llm: ILLMCaller;
+    // Use the ILLMCaller interface for llm, allow optional state (de)serialization
+    llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 
     // Working Memory Operations - REQUIRED for all agents
     setGoal: (goal: string) => Promise<void>;
