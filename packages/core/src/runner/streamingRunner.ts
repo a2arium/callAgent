@@ -10,6 +10,7 @@ import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import { outboxPublisher } from '../eventbus/outboxPublisher.js';
 import { extendContextWithStreaming } from '../core/context/StreamingContext.js';
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
@@ -458,6 +459,9 @@ export async function runAgentWithStreaming(
         logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
         if (!options.isStreaming) {
             logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
+            try { await sessionStore.close(); } catch { }
+            try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
+            try { (outboxPublisher as any)?.stop?.(); } catch { }
         }
     } catch (error: unknown) {
         // Use agentLogger here for error
@@ -543,7 +547,19 @@ function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: Stream
         }
     } else {
         // Default console output
-        if (isFinal) {
+        if (status.state === 'input-required' || (status.state as any) === 'waiting_input') {
+            console.log(`Status: waiting_input`);
+            const promptText = status.message?.parts
+                ?.filter(part => part.type === 'text')
+                .map(part => (part as { text?: string }).text)
+                .filter(Boolean)
+                .join(' ');
+            if (promptText) console.log(`Prompt: ${promptText}`);
+            const token = (status as any).metadata?.token;
+            if (token) console.log(`Token: ${token}`);
+            // Session id is not passed into this function, so print a hint
+            console.log(`Session: (see earlier log: Starting TaskEngine.startTask { taskId: ... })`);
+        } else if (isFinal) {
             console.log(`Status: ${status.state} (FINAL)`);
         } else if (status.state === 'working') {
             // Display progress messages for working states
@@ -742,27 +758,40 @@ function setupProgressListeners(taskId: string): void {
 
     // Add event listener for this task channel
     eventBus.subscribe(channel, (event: A2AEvent) => {
-        if ('status' in event && event.status.state === 'working') {
-            // Check for progress percentage first
-            const progressPercentage = event.status.metadata?.progress;
-
-            if (event.status.message?.parts) {
-                // Display progress messages for working states
-                const textParts = event.status.message.parts
-                    .filter(part => part.type === 'text')
+        if ('status' in event) {
+            const s = event.status;
+            if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
+                console.log(`Status: waiting_input`);
+                const promptText = s.message?.parts
+                    ?.filter(part => part.type === 'text')
                     .map(part => (part as { text?: string }).text)
-                    .filter(Boolean);
-
-                if (textParts.length > 0) {
-                    if (typeof progressPercentage === 'number') {
-                        console.log(`Progress: ${progressPercentage}% - ${textParts.join(' ')}`);
-                    } else {
-                        console.log(`Progress: ${textParts.join(' ')}`);
+                    .filter(Boolean)
+                    .join(' ');
+                if (promptText) console.log(`Prompt: ${promptText}`);
+                const token = (s as any).metadata?.token;
+                if (token) console.log(`Token: ${token}`);
+                // Also display session id for convenience
+                console.log(`Session: ${event.id}`);
+            } else if (s.state === 'working') {
+                // Check for progress percentage first
+                const progressPercentage = s.metadata?.progress;
+                if (s.message?.parts) {
+                    // Display progress messages for working states
+                    const textParts = s.message.parts
+                        .filter(part => part.type === 'text')
+                        .map(part => (part as { text?: string }).text)
+                        .filter(Boolean);
+                    if (textParts.length > 0) {
+                        if (typeof progressPercentage === 'number') {
+                            console.log(`Progress: ${progressPercentage}% - ${textParts.join(' ')}`);
+                        } else {
+                            console.log(`Progress: ${textParts.join(' ')}`);
+                        }
                     }
+                } else if (typeof progressPercentage === 'number') {
+                    // Just show percentage if no message
+                    console.log(`Progress: ${progressPercentage}%`);
                 }
-            } else if (typeof progressPercentage === 'number') {
-                // Just show percentage if no message
-                console.log(`Progress: ${progressPercentage}%`);
             }
         }
 

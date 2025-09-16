@@ -1,5 +1,15 @@
 import 'dotenv/config';
 import { runAgentWithStreaming } from './streamingRunner.js';
+import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
+import { TaskEngine } from '../core/orchestration/taskEngine.js';
+import { registerHandler } from '../core/orchestration/HandlerRegistry.js';
+import { PluginManager } from '../core/plugin/pluginManager.js';
+import { EngineLocator } from '../core/orchestration/EngineLocator.js';
+import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import type { A2AEvent } from '../shared/types/StreamingEvents.js';
+import { outboxPublisher } from '../eventbus/outboxPublisher.js';
+import path from 'node:path';
 import { logger } from '@a2arium/callagent-utils';
 
 // Log uncaught exceptions and unhandled rejections early
@@ -144,6 +154,120 @@ function parseArgs(): {
  * Supports both streaming and non-streaming modes with various output formats
  */
 async function main(): Promise<void> {
+    // Subcommand: input --session <id> --token <t> --value <v> [--tenant <tenant>]
+    if (process.argv[2] === 'input') {
+        const args = process.argv.slice(3);
+        let sessionId = '';
+        let token = '';
+        let value: unknown = '';
+        let tenantId = 'default';
+        let handlersFile: string | undefined;
+        for (let i = 0; i < args.length; i++) {
+            const a = args[i];
+            if (a.startsWith('--session=')) sessionId = a.split('=')[1];
+            else if (a === '--session' && args[i + 1]) { sessionId = args[++i]; }
+            else if (a.startsWith('--token=')) token = a.split('=')[1];
+            else if (a === '--token' && args[i + 1]) { token = args[++i]; }
+            else if (a.startsWith('--value=')) {
+                const raw = a.split('=')[1];
+                try { value = JSON.parse(raw); } catch { value = raw; }
+            } else if (a === '--value' && args[i + 1]) {
+                const raw = args[++i];
+                try { value = JSON.parse(raw); } catch { value = raw; }
+            } else if (a.startsWith('--tenant=')) tenantId = a.split('=')[1];
+            else if (a === '--tenant' && args[i + 1]) { tenantId = args[++i]; }
+            else if (a.startsWith('--handlers=')) handlersFile = a.split('=')[1];
+            else if (a === '--handlers' && args[i + 1]) { handlersFile = args[++i]; }
+        }
+        if (!sessionId || !token) {
+            console.error('Usage: runner input --session <SESSION_ID> --token <TOKEN> --value <VALUE> [--tenant <TENANT>] [--handlers <path-to-agent-module.js>]');
+            process.exit(1);
+        }
+        // Optionally auto-register durable handlers from an agent module file
+        if (handlersFile) {
+            try {
+                const { pathToFileURL } = await import('node:url');
+                const modUrl = pathToFileURL(handlersFile).href;
+                const mod: Record<string, unknown> = await import(modUrl);
+                for (const [name, fn] of Object.entries(mod)) {
+                    if (name === 'default') continue;
+                    if (typeof fn === 'function') {
+                        registerHandler(name, async (ctx: any, ev: any) => (fn as any)(ctx, ev));
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load handlers from file', handlersFile, e);
+            }
+        }
+        const store = new WorkingMemorySessionStore();
+        const engine = new TaskEngine({ sessionStore: store });
+        try { EngineLocator.setEngine(engine as any); } catch { }
+        // If handlersFile provided, also load agent and its dependencies so ctx.sendTaskToAgent can find children
+        if (handlersFile) {
+            try {
+                await PluginManager.loadAgentWithDependencies(handlersFile);
+                // Best-effort: load common sibling agents (Extractor/Analyzer) if present
+                const dir = path.dirname(handlersFile);
+                try {
+                    const ex = path.join(dir, 'ExtractorAgent.js');
+                    const { pathToFileURL } = await import('node:url');
+                    await import(pathToFileURL(ex).href);
+                } catch { }
+                try {
+                    const an = path.join(dir, 'AnalyzerAgent.js');
+                    const { pathToFileURL } = await import('node:url');
+                    await import(pathToFileURL(an).href);
+                } catch { }
+            } catch (e) {
+                console.error('Failed to load agent dependencies for handlers file', handlersFile, e);
+            }
+        }
+        // Subscribe to this session's events so we can show output and detect completion
+        const channel = taskChannel(sessionId);
+        let completed = false;
+        const onEvent = (ev: A2AEvent) => {
+            if ('artifact' in ev) {
+                const text = ev.artifact.parts?.filter(p => (p as any).type === 'text')
+                    .map(p => (p as any).text)
+                    .filter(Boolean)
+                    .join('');
+                if (text) console.log(text);
+            } else if ('status' in ev) {
+                const s = ev.status;
+                if (s.state === 'working' && s.message?.parts) {
+                    const text = s.message.parts.filter(p => (p as any).type === 'text').map(p => (p as any).text).filter(Boolean).join(' ');
+                    if (text) console.log(text);
+                }
+                if (ev.final && (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')) {
+                    completed = true;
+                }
+            }
+        };
+        eventBus.subscribe(channel, onEvent);
+
+        try {
+            console.log(`Submitting input... sessionId=${sessionId} token=${token}`);
+            await engine.resumeInput({ tenantId, taskId: sessionId, token, input: value });
+            console.log(`Input provided. sessionId=${sessionId} token=${token}`);
+        } catch (e) {
+            console.error('Resume failed:', (e as Error).message);
+            await store.close?.();
+            process.exit(1);
+        }
+
+        // Wait briefly for downstream handlers/children to complete, or until terminal status
+        const waitUntil = Date.now() + 15000; // 15s max
+        while (!completed && Date.now() < waitUntil) {
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        // Cleanup
+        eventBus.unsubscribe(channel, onEvent as any);
+        try { outboxPublisher.stop(); } catch { }
+        await store.close?.();
+        return;
+    }
+
     const { agentFilePath, input, options } = parseArgs();
 
     try {

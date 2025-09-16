@@ -258,7 +258,7 @@ export class TaskEngine {
             // Emit a streaming status so local runner shows the prompt
             try {
                 ctx.progress({
-                    state: 'waiting_input',
+                    state: 'input-required',
                     message: {
                         role: 'agent',
                         parts: [{ type: 'text', text: `Input required: ${prompt}` }]
@@ -267,6 +267,8 @@ export class TaskEngine {
                     metadata: { token }
                 } as any);
             } catch { /* noop */ }
+            // Mark that we've persisted WM this turn to avoid duplicate final snapshot
+            (ctx as any).__wmSavedThisTurn = true;
             const handle = new InputHandle(this.sessionManager, tenantId, sessionId, token);
             // Auto-register handlers if provided
             if (opts?.onProvided) { try { await handle.onProvided(opts.onProvided); } catch { } }
@@ -295,6 +297,7 @@ export class TaskEngine {
             const dispatch = async (runOpts?: { awaitCompletion?: boolean; streaming?: boolean }) => {
                 (ctx as any).logger?.info?.('Child dispatch', { parentTaskId: sessionId, childAgent: agent, token });
                 const a2aOptions = { tenantId, streaming: (runOpts?.streaming ?? options?.streaming) === true } as any;
+                try { console.log(`[TaskEngine] sendTaskToAgent dispatch: tenantId=${tenantId} sessionId=${sessionId} token=${token} agent=${agent}`); } catch { }
                 try {
                     const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
                         ...(options || {}),
@@ -380,6 +383,14 @@ export class TaskEngine {
         const traceparent = createTraceparent();
         await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.started', { taskId: sessionId, traceparent });
         await this.sessionManager?.enqueueOutbox(tenantId, 'task.status', sessionId, { taskId: sessionId, status: { state: 'working', timestamp: new Date().toISOString() }, traceparent });
+        // Emit initial working status locally too so CLI can see the taskId
+        try {
+            eventBus.publish(taskChannel(sessionId), {
+                id: sessionId,
+                status: { state: 'working', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Task started: ${sessionId}` }] } },
+                final: false
+            } as any);
+        } catch { }
         const initialWm = (session?.snapshot as Record<string, unknown>) || {};
         const { wm: wmAfterStart } = decide(initialWm, { t: 'task.started' });
 
@@ -426,8 +437,8 @@ export class TaskEngine {
             // For buffered mode, await the task handler completion
             await this.executeTaskHandler(ctx);
 
-            // After handler: snapshot WM and optional LLM state with CAS
-            if (this.sessionManager) {
+            // After handler: snapshot WM and optional LLM state with CAS (skip if already saved in requestInput)
+            if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
                 const newSnapshot: Record<string, unknown> = { vars: (ctx as any).vars || {} };
                 try {
                     const llmAny = (ctx as any).llm as any;
@@ -498,6 +509,11 @@ export class TaskEngine {
                 timestamp: new Date().toISOString()
             };
             task.artifacts = results.artifacts;
+
+            // If this turn requested input, do NOT mark completed; just return current status
+            if (task.status?.state === 'input-required' || (ctx as any).__wmSavedThisTurn) {
+                return task;
+            }
 
             // Append completed event and publish status via outbox
             await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.completed', {
@@ -575,7 +591,19 @@ export class TaskEngine {
         const { tenantId, taskId, token, input } = params;
         // load snapshot
         const snap = await this.sessionManager?.load(tenantId, taskId);
-        const base = (snap?.snapshot as Record<string, unknown>) || {};
+        if (!snap) {
+            throw new Error('SESSION_NOT_FOUND');
+        }
+        const base = (snap.snapshot as Record<string, unknown>) || {};
+        // Validate token existence/expiry
+        try {
+            const pend = getPendingInputs(base) as any;
+            const entry = pend[token];
+            if (!entry) throw new Error('INPUT_TOKEN_NOT_FOUND');
+            if (entry.expiresAt && Date.parse(entry.expiresAt) < Date.now()) throw new Error('INPUT_TOKEN_EXPIRED');
+        } catch (e) {
+            throw e instanceof Error ? e : new Error('INPUT_TOKEN_INVALID');
+        }
         const { next, handlerName } = applyInputProvided(base, token, input);
         const expected = snap?.wmVersion ?? BigInt(0);
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.input_provided', { token });
@@ -605,6 +633,7 @@ export class TaskEngine {
         const entry = tasks[token] as any;
         const handlerName = entry?.handlers?.completed;
         if (handlerName && this.handlerInvoker) {
+            try { console.log(`[TaskEngine] handleChildCompleted invoking parent handler='${handlerName}' token=${token}`); } catch { }
             // Deliver immediately and remove mapping
             delete tasks[token];
             const next = setPendingTasks(base, tasks);
@@ -674,6 +703,7 @@ export class TaskEngine {
         const alreadyDelivered = !!entry?.deliveredInput;
         const handlerName = entry?.handlers?.inputRequired;
         await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_input_required', { token, childTaskId, prompt, schema, childOnProvided });
+        try { console.log(`[TaskEngine] child input_required -> parent handler='${handlerName}' token=${token} childOnProvided='${childOnProvided}' childTaskId=${childTaskId}`); } catch { }
         if (!alreadyDelivered && handlerName && this.handlerInvoker) {
             const maybe = await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: { prompt, schema, token, childTaskId } });
             if (typeof maybe !== 'undefined') {
@@ -683,10 +713,14 @@ export class TaskEngine {
                     const effectiveChildOnProvided = childOnProvided || (entry?.pendingInput?.childOnProvided as string | undefined);
                     if (effectiveChildOnProvided && childTaskId && this.handlerInvoker) {
                         try { console.log(`[TaskEngine] Invoking child onProvided='${effectiveChildOnProvided}' for childTaskId=${childTaskId} with value=${JSON.stringify(maybe)}`); } catch { }
-                        const childResult = await this.handlerInvoker.invoke({ tenantId, taskId: childTaskId, handlerName: effectiveChildOnProvided, input: maybe });
-                        try { console.log(`[TaskEngine] Child onProvided result for childTaskId=${childTaskId}: ${JSON.stringify(childResult)}`); } catch { }
-                        if (typeof childResult !== 'undefined') {
-                            finalChildResult = childResult;
+                        try {
+                            const _childResult = await this.handlerInvoker.invoke({ tenantId, taskId: childTaskId, handlerName: effectiveChildOnProvided, input: maybe });
+                            try { console.log(`[TaskEngine] Child onProvided result for childTaskId=${childTaskId}: ${JSON.stringify(_childResult)}`); } catch { }
+                            if (typeof _childResult !== 'undefined') {
+                                finalChildResult = _childResult;
+                            }
+                        } catch (err) {
+                            try { console.warn(`[TaskEngine] HANDLER_NOT_FOUND or error invoking child onProvided='${effectiveChildOnProvided}'`, err instanceof Error ? err.message : String(err)); } catch { }
                         }
                     }
                 } catch (e) {
@@ -948,10 +982,52 @@ export class TaskEngine {
         } catch { /* ignore */ }
         // Ensure restored context can emit streaming events to the same task channel
         try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
-        // Enable A2A from durable handler context
+        // Enable A2A from durable handler context - use the proper TaskEngine sendTaskToAgent implementation
         try {
-            (ctx as any).sendTaskToAgent = async (targetAgent: string, taskInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean }) => {
-                return globalA2AService.sendTaskToAgent(ctx as any, targetAgent, taskInput as any, options as any);
+            const engine = this;
+            (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string }) => {
+                if (!engine.sessionManager) throw new Error('Session manager not configured');
+                const tenantId = (ctx as any).tenantId;
+                const sessionId = taskId;
+
+                // Use the same logic as the main TaskEngine implementation
+                const { handle, token } = await createTaskHandle(engine.sessionManager, tenantId, sessionId, agent, childInput);
+                // If handler names provided, register them atomically before dispatch
+                if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
+                if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
+                if (options?.onFailed) { try { await (handle as any).onFailed(options.onFailed); } catch { } }
+
+                const minimalCtx = ctx as any;
+                const a2aOptions = { tenantId, streaming: (options?.streaming) === true } as any;
+                try {
+                    const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
+                        ...(options || {}),
+                        ...a2aOptions,
+                        parentTenantId: tenantId,
+                        parentTaskId: sessionId,
+                        parentChildToken: token
+                    } as any);
+
+                    // If child requested input, do not synthesize completion
+                    if (result && typeof result === 'object' && (result as any).status === 'input_required') {
+                        return;
+                    }
+
+                    // For durable handlers, default to awaiting completion
+                    const awaitCompletion = options?.awaitCompletion !== false;
+                    if (awaitCompletion) {
+                        await engine.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
+                        return result;
+                    }
+                    return result;
+                } catch (e) {
+                    await engine.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
+                        taskId: sessionId,
+                        childAgent: agent,
+                        error: e instanceof Error ? e.message : String(e)
+                    });
+                    throw e;
+                }
             };
         } catch { /* noop */ }
         return ctx;

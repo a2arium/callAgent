@@ -16,7 +16,9 @@ export default createAgent({
         const history = ctx.llm.getMessages();
         console.log('Analyzer: history', history);
         await ctx.reply([{ type: 'text', text: 'Analyzer: ready' }]);
+        console.log('Analyzer: about to call requestInput...');
         await ctx.requestInput('Provide threshold (0-100):', { onProvided: 'onThreshold' });
+        console.log('Analyzer: requestInput returned');
         return; // non-blocking path
     }
 }, import.meta.url);
@@ -30,5 +32,3 @@ export async function onThreshold(ctx: Ctx, ev: { input: number }) {
     await ctx.reply([{ type: 'text', text: `Analyzer: threshold=${threshold}` }]);
     return { threshold };
 }
-
-

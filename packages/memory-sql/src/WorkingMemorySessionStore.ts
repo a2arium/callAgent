@@ -27,6 +27,11 @@ export class WorkingMemorySessionStore {
         if (this.ownsPrisma) await this.prisma.$disconnect();
     }
 
+    // Back-compat alias for runner clean shutdown
+    async close(): Promise<void> {
+        await this.disconnect();
+    }
+
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<SessionSnapshot | null> {
         const rec = await this.prisma.wMSession.findUnique({
             where: { tenantId_sessionId: { tenantId, sessionId } }

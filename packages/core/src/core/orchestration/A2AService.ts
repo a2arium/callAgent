@@ -109,13 +109,16 @@ export class A2AService implements IA2AService {
             // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
             if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
                 const eng = EngineLocator.getEngine() || taskEngine;
-                const { prompt, schema } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown };
+                const { prompt, schema, childOnProvided, childTaskId } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown; childOnProvided?: string; childTaskId?: string };
+                try { console.log(`[A2AService] Post-turn child input_required routing -> parent (childOnProvided='${childOnProvided}', childTaskId='${childTaskId}') prompt='${prompt}'`); } catch { }
                 await eng.handleChildInputRequired({
                     tenantId: options.parentTenantId,
                     parentTaskId: options.parentTaskId,
                     childToken: options.parentChildToken,
+                    childTaskId,
                     prompt,
-                    schema
+                    schema,
+                    childOnProvided
                 });
                 return { status: 'input_required' } as any;
             }
@@ -143,8 +146,12 @@ export class A2AService implements IA2AService {
                 }
             }
 
-            // Flush child snapshot (vars + llm) after turn
-            try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
+            // Flush child snapshot (vars + llm) after turn (avoid duplicate if already saved during requestInput turn)
+            try {
+                if (!(targetCtx as any).__wmSavedThisTurn) {
+                    await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any);
+                }
+            } catch { }
 
             return result;
 
@@ -292,6 +299,7 @@ export class A2AService implements IA2AService {
         const parentChildToken = (options as any).parentChildToken as string | undefined;
         // Override requestInput to only notify parent and avoid mutating parent's WM via inherited method
         (targetCtx as any).requestInput = async (prompt: string, riOpts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }) => {
+            try { console.log(`[A2AService] Child requestInput called: prompt='${prompt}' onProvided='${riOpts?.onProvided}' parentTenantId=${parentTenantId} parentTaskId=${parentTaskId} parentChildToken=${parentChildToken}`); } catch { }
             if (parentTenantId && parentTaskId && parentChildToken) {
                 try {
                     const eng = EngineLocator.getEngine() || taskEngine;
@@ -300,6 +308,8 @@ export class A2AService implements IA2AService {
                     try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
 
                     // Now notify parent about input_required
+                    const childOnProvided = riOpts?.onProvided;
+                    try { console.log(`[A2AService] Child '${targetPlugin.manifest.name}' requestInput -> parent onInputRequired (childOnProvided='${childOnProvided}') prompt='${prompt}'`); } catch { }
                     await eng.handleChildInputRequired({
                         tenantId: parentTenantId,
                         parentTaskId,
@@ -307,9 +317,9 @@ export class A2AService implements IA2AService {
                         childTaskId: targetCtx.task.id,
                         prompt,
                         schema: riOpts?.schema,
-                        childOnProvided: riOpts?.onProvided
+                        childOnProvided
                     });
-                    (targetCtx as any).__inputRequired = { prompt, schema: riOpts?.schema };
+                    (targetCtx as any).__inputRequired = { prompt, schema: riOpts?.schema, childOnProvided, childTaskId: targetCtx.task.id };
                 } catch (err) {
                     a2aLogger.warn('Failed to notify parent on child input_required', err as any, { parentTaskId });
                 }

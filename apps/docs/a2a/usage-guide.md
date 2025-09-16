@@ -513,10 +513,35 @@ const result = await ctx.sendTaskToAgent('target-agent', input, {
 });
 ```
 
+## Advanced Topics
+
+For detailed technical information, see:
+
+- **[Child Input Required Flow](../a2a/child-input-required-flow.md)** - Deep dive into parent-child input handling, database persistence, and troubleshooting
+- **[Durable Handlers and Persistence](../durable-handlers-and-persistence.md)** - Working memory persistence, context restoration, and handler lifecycle management  
+- **[TaskEngine A2A Integration](../task-engine-a2a-integration.md)** - Technical architecture of TaskEngine and A2AService coordination
+
+### Replies vs Returns (A2A Mapping)
+
+- **ctx.reply() → Artifacts (user-facing output)**: Use `ctx.reply` to emit responses intended for the end-user. In A2A terms these are emitted as artifacts on the parent task stream.
+- **return value → Internal data (parent-handled result)**: The value you `return` from an agent handler is delivered to the parent via a blocking call result or the `onCompleted` handler.
+
+Both methods are supported and complementary:
+- Use `ctx.reply` for content users should see during execution or as final output.
+- Use `return` for structured results the parent agent will consume.
+
 ## Examples
 
 See the complete working example in `apps/examples/a2a-local-demo/` which demonstrates:
 - Multi-agent workflows
 - Memory context inheritance
 - Error handling
-- Performance patterns 
+- Performance patterns
+
+## See Also
+
+Additional documentation:
+- [A2A Architecture](./architecture.md) - System architecture overview
+- [A2A API Reference](./api-reference.md) - Complete API documentation
+- [Working Memory](../memory/working-memory.md) - Working memory system
+- [Memory SQL Adapter](../memory-sql-adapter.md) - Database persistence layer 

@@ -12,12 +12,6 @@ export default createAgent({
         // Request human input, durable
         await ctx.requestInput('Which region to analyze?', { onProvided: 'onRegionProvided', onExpired: 'onRegionExpired' });
 
-        // Sequential flow
-        const extract = await ctx.sendTaskToAgent('extractor', { source: 'db', limit: 100 });
-        await ctx.sendTaskToAgent('analyzer', { method: 'basic' }, {
-            onInputRequired: 'onAnalyzerInputRequired',
-            onCompleted: 'onAnalyzerCompleted'
-        });
 
         // Parallel example (optional):
         // await ctx.allTasks([
@@ -31,6 +25,16 @@ export default createAgent({
 
 export async function onRegionProvided(ctx: Ctx, ev: { input: string }) {
     ctx.vars.region = ev.input;
+
+    console.log(`[Orchestrator] onRegionProvided ctx.tenantId=${ctx.tenantId} ctx.task.id=${ctx.task?.id}`);
+
+    // Sequential flow
+    const extract = await ctx.sendTaskToAgent('extractor', { source: 'db', limit: 100 });
+    await ctx.sendTaskToAgent('analyzer', { method: 'basic' }, {
+        onInputRequired: 'onAnalyzerInputRequired',
+        onCompleted: 'onAnalyzerCompleted'
+    });
+
     await ctx.reply([{ type: 'text', text: `Orchestrator: region=${ev.input}` }]);
 }
 
@@ -54,6 +58,7 @@ export async function onAnalyzerInputRequired(ctx: Ctx, ev: { input: { prompt: s
     // 1) Ask a human via ctx.requestInput('question', { onProvided: 'onAnalyzerInputProvided' })
     // 2) Or immediately provide a default answer by calling tasks/input (RPC) for the analyzer task using ev.token
     await ctx.reply([{ type: 'text', text: `Orchestrator received analyzer prompt: ${ev.input?.prompt}` }]);
+    console.log('Orchestrator: onAnalyzerInputRequired', ev);
     // For demo, return the value; the framework will resume the child automatically
     return 60;
 }

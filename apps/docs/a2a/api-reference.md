@@ -90,6 +90,19 @@ Executes an agent-to-agent communication.
 - `Error` if context serialization fails
 - Re-throws any error from target agent execution
 
+## TaskContext.reply
+
+Emits user-facing output as Artifacts on the task stream. In parent→child A2A, child replies are mirrored to the parent task stream with the child agent name prefix.
+
+```typescript
+await ctx.reply('Starting analysis...');
+await ctx.reply([{ type: 'text', text: 'Final summary' }]);
+```
+
+Notes:
+- Replies are not delivered to parent handler parameters.
+- For parent consumption, return a value from the handler; it will be delivered as the blocking call result or to `onCompleted`.
+
 ## Context Serialization
 
 ### ContextSerializer Class

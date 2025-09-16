@@ -99,8 +99,8 @@ export function extendContextWithStreaming(
                     streaming: isStreaming
                 });
 
-                // Always emit progress events for 'working' state so they can be shown in real-time
-                const shouldEmitStatusEvent = isStreaming || event.status.state === 'working';
+                // Emit in non-streaming for working and input-required so CLI can show prompts
+                const shouldEmitStatusEvent = isStreaming || event.status.state === 'working' || (event.status.state as any) === 'input-required';
 
                 if (shouldEmitStatusEvent) {
                     // Emit directly to the event bus for streaming or progress events
