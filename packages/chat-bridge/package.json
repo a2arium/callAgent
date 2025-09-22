@@ -1,0 +1,32 @@
+{
+  "name": "@a2arium/callagent-chat-bridge",
+  "version": "0.1.0",
+  "description": "Multi-network chat bridge for callagent: routing, session mapping, and replies",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "keywords": [
+    "chat",
+    "telegram",
+    "slack",
+    "websocket",
+    "serverless",
+    "agent"
+  ],
+  "author": "",
+  "license": "ISC"
+}

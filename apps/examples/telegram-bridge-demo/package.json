@@ -1,0 +1,19 @@
+{
+  "name": "@examples/telegram-bridge-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx --env-file=.env index.ts",
+    "build": "tsc index.ts --outDir ../../../dist/apps/examples/telegram-bridge-demo --module esnext --target es2020 --moduleResolution node"
+  },
+  "devDependencies": {
+    "@types/ws": "^8",
+    "tsx": "^4.19.0"
+  },
+  "dependencies": {
+    "@a2arium/callagent-chat-bridge": "workspace:*",
+    "@callmessenger/adapter-telegram": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram",
+    "@callmessenger/adapter-web": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web",
+    "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core"
+  }
+}

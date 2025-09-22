@@ -32,6 +32,8 @@ export type TaskEntity = {
 export type StartTaskParams = {
     task: TaskEntity;
     isStreaming: boolean;
+    agentId?: string;
+    tenantId?: string;
 };
 
 /**
@@ -138,13 +140,20 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
-        const { task, isStreaming } = params;
+        const { task, isStreaming, agentId, tenantId: startTenantId } = params;
 
         // Create a basic context for the task
         const ctx = this.createContext(task);
+        // Attach agentId/tenantId to context for downstream persistence/restore
+        if (agentId) {
+            (ctx as any).agentId = agentId;
+        }
+        if (startTenantId) {
+            (ctx as any).tenantId = startTenantId;
+        }
 
         // Load session-scoped WM snapshot if available (tenantId/sessionId assumed on ctx for now)
-        const tenantId = (ctx as any).tenantId || 'default';
+        const tenantId = (ctx as any).tenantId || startTenantId || 'default';
         const sessionId = task.id;
         const session = await this.sessionManager?.load(tenantId, sessionId);
         // Restore and thread session-scoped working variables with CAS persistence

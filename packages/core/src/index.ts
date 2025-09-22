@@ -4,6 +4,7 @@ export { AgentRegistry, globalAgentRegistry } from './core/plugin/AgentRegistry.
 export { PluginManager } from './core/plugin/pluginManager.js';
 export { ContextSerializer } from './core/orchestration/ContextSerializer.js';
 export { A2AService, globalA2AService } from './core/orchestration/A2AService.js';
+export { TaskEngine } from './core/orchestration/taskEngine.js';
 export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
 export { ensureAgentContext } from './shared/types/index.js';
@@ -50,4 +51,7 @@ export {
     tenantMetricsManager,
     trackTenantOperation,
     type TenantMetrics
-} from './core/plugin/TenantMetrics.js'; 
+} from './core/plugin/TenantMetrics.js';
+// Event bus and task channel helpers
+export { eventBus } from './eventbus/inMemoryEventBus.js';
+export { taskChannel } from './eventbus/taskEventEmitter.js';

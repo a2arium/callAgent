@@ -1,0 +1,6 @@
+{
+  "name": "telegram-bridge-demo-agent",
+  "version": "0.0.1",
+  "title": "Telegram Bridge Demo Agent",
+  "description": "Echoes user text and completes."
+}
