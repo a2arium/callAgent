@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx --env-file=.env index.ts",
-    "build": "tsc index.ts --outDir ../../../dist/apps/examples/telegram-bridge-demo --module esnext --target es2020 --moduleResolution node"
+    "build": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/ws": "^8",

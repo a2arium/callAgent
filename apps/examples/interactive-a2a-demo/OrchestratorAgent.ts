@@ -10,8 +10,13 @@ export default createAgent({
         ctx.vars.workflow = `wf_${Date.now()}`;
 
         // Request human input, durable
-        await ctx.requestInput('Which region to analyze?', { onProvided: 'onRegionProvided', onExpired: 'onRegionExpired' });
-
+        // await ctx.requestInput('Which region to analyze?', { onProvided: 'onRegionProvided', onExpired: 'onRegionExpired' });
+        // Sequential flow
+        const extract = await ctx.sendTaskToAgent('extractor', { source: 'db', limit: 100 });
+        await ctx.sendTaskToAgent('analyzer', { method: 'basic' }, {
+            onInputRequired: 'onAnalyzerInputRequired',
+            onCompleted: 'onAnalyzerCompleted'
+        });
 
         // Parallel example (optional):
         // await ctx.allTasks([
@@ -28,12 +33,7 @@ export async function onRegionProvided(ctx: Ctx, ev: { input: string }) {
 
     console.log(`[Orchestrator] onRegionProvided ctx.tenantId=${ctx.tenantId} ctx.task.id=${ctx.task?.id}`);
 
-    // Sequential flow
-    const extract = await ctx.sendTaskToAgent('extractor', { source: 'db', limit: 100 });
-    await ctx.sendTaskToAgent('analyzer', { method: 'basic' }, {
-        onInputRequired: 'onAnalyzerInputRequired',
-        onCompleted: 'onAnalyzerCompleted'
-    });
+
 
     await ctx.reply([{ type: 'text', text: `Orchestrator: region=${ev.input}` }]);
 }

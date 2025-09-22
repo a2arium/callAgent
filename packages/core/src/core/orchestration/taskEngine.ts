@@ -15,6 +15,9 @@ import { globalA2AService } from './A2AService.js';
 import { v4 as uuidv4 } from 'uuid';
 import { outboxPublisher } from '../../eventbus/outboxPublisher.js';
 import { createTraceparent } from '../tracing/Tracing.js';
+import type { MentalState } from '../../loop/types.js';
+import { initialM } from '../../loop/init.js';
+import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 
 /**
  * Task entity with the necessary properties for the task engine
@@ -60,7 +63,12 @@ export class TaskEngine {
     public async persistChildContext(params: { tenantId: string; sessionId: string; agentId: string; vars?: Record<string, unknown> }): Promise<void> {
         if (!this.sessionManager) return;
         const { tenantId, sessionId, agentId, vars } = params;
-        const snapshot = { vars: vars || {} } as Record<string, unknown>;
+        const snap = await this.sessionManager.load(tenantId, sessionId);
+        const base = (snap?.snapshot as Record<string, unknown>) || {};
+        const M = ((base as any).M || { memory: { shortTerm: { vars: {} } } }) as any;
+        const currentVars = ((M.memory?.shortTerm?.vars) || {}) as Record<string, unknown>;
+        const nextM = { ...M, memory: { ...(M.memory || {}), shortTerm: { ...(M.memory?.shortTerm || {}), vars: { ...currentVars, ...(vars || {}) } } } };
+        const snapshot = { ...base, M: nextM } as Record<string, unknown>;
         try {
             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId, expectedWmVersion: BigInt(0), snapshot });
         } catch {
@@ -97,7 +105,7 @@ export class TaskEngine {
         });
     }
 
-    // Flush current ctx vars and llm state into snapshot
+    // Flush current MentalState (preferred) or fallback vars/llm state into snapshot
     public async flushContextSnapshot(tenantId: string, sessionId: string, agentId: string, ctx: TaskContext): Promise<void> {
         if (!this.sessionManager) return;
         let plainVars: Record<string, unknown> = {};
@@ -106,22 +114,32 @@ export class TaskEngine {
         } catch {
             try { plainVars = { ...(ctx as any).vars } as Record<string, unknown>; } catch { plainVars = {}; }
         }
-        const snapshot: Record<string, unknown> = { vars: plainVars };
+        // Prepare MentalState if available or compose one minimally
+        const baseSnap = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
+        let M: any = (baseSnap as any).M;
+        if (!M) { try { M = (ctx as any).__mental; } catch { /* noop */ } }
+        if (!M) { try { const { initialM } = await import('../../loop/init.js'); M = initialM(ctx); } catch { M = { memory: { shortTerm: { vars: {} }, sensory: {} }, goalState: { hierarchy: { nodes: {}, roots: [] } } }; } }
+        // Merge vars
+        try { M.memory = M.memory || {}; M.memory.shortTerm = { ...(M.memory.shortTerm || {}), vars: plainVars }; } catch { /* noop */ }
+        // Attach LLM state into sensory
         try {
             const llmAny = (ctx as any).llm as any;
+            let llmState: unknown = undefined;
             if (llmAny?.getMessages) {
                 const messages = llmAny.getMessages(true);
-                (snapshot as any).llm = { messages };
+                llmState = { messages } as unknown;
                 try { console.log(`[TaskEngine] flushContextSnapshot messages count: ${Array.isArray(messages) ? messages.length : 'n/a'}`); } catch { }
             } else if (llmAny?.exportState) {
-                const llmState = llmAny.exportState();
-                if (typeof llmState !== 'undefined') (snapshot as any).llm = llmState;
+                llmState = llmAny.exportState();
             }
+            const sensory = (M.memory as any).sensory || {};
+            (M.memory as any).sensory = { ...sensory, llmState };
         } catch { /* ignore */ }
         try {
             const snap = await this.sessionManager.load(tenantId, sessionId);
             const expected = snap?.wmVersion ?? BigInt(0);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot });
+            const next = { ...(baseSnap as any), M } as Record<string, unknown>;
+            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot: next });
             try { /* saved */ } catch { /* noop */ }
             try { console.log(`[TaskEngine] flushContextSnapshot saved`); } catch { }
         } catch (e) {
@@ -129,7 +147,8 @@ export class TaskEngine {
                 try {
                     const snap2 = await this.sessionManager.load(tenantId, sessionId);
                     const expected2 = snap2?.wmVersion ?? BigInt(0);
-                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot });
+                    const next2 = { ...(((await this.sessionManager.load(tenantId, sessionId))?.snapshot as any) || {}), M } as Record<string, unknown>;
+                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot: next2 });
                     try { console.log(`[TaskEngine] flushContextSnapshot saved after retry`); } catch { }
                 } catch { /* ignore */ }
             }
@@ -152,65 +171,83 @@ export class TaskEngine {
             (ctx as any).tenantId = startTenantId;
         }
 
-        // Load session-scoped WM snapshot if available (tenantId/sessionId assumed on ctx for now)
+        // Load session-scoped snapshot if available (tenantId/sessionId assumed on ctx for now)
         const tenantId = (ctx as any).tenantId || startTenantId || 'default';
         const sessionId = task.id;
         const session = await this.sessionManager?.load(tenantId, sessionId);
-        // Restore and thread session-scoped working variables with CAS persistence
-        const initialVars = (session?.snapshot?.vars as Record<string, unknown>) || {};
-        const varCache = new Map<string, unknown>(Object.entries(initialVars));
+        // MentalState load (single source of truth)
+        const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
+        let M: MentalState = (baseSnap as any).M as MentalState || initialM(ctx);
+        // One-time migration from legacy snapshot.vars
+        try {
+            const legacyVars = (baseSnap as any).vars as Record<string, unknown> | undefined;
+            const hasVars = M?.memory && (M.memory as any).shortTerm && Object.keys(((M.memory as any).shortTerm as any).vars || {}).length > 0;
+            if (legacyVars && !hasVars) {
+                (M.memory as any).shortTerm = { ...((M.memory as any).shortTerm || {}), vars: { ...(legacyVars as Record<string, unknown>) } };
+            }
+        } catch { /* ignore migration errors */ }
+        // Expose MentalState on context for in-turn cognitive operations (e.g., goals API)
+        (ctx as any).__mental = M;
+        // Build ctx.vars proxy over M.memory.shortTerm.vars with turn-level flush
+        const currentVars = ((M.memory as any).shortTerm?.vars || {}) as Record<string, unknown>;
+        const varCache = new Map<string, unknown>(Object.entries(currentVars));
         (ctx as any).__wmVersion = session?.wmVersion;
+        (ctx as any).__varsDirty = false;
+        const assignVarsIntoMental = () => {
+            (M.memory as any).shortTerm = { ...((M.memory as any).shortTerm || {}), vars: Object.fromEntries(varCache) };
+        };
+        const updateLlmInMental = () => {
+            try {
+                const llmAny = (ctx as any).llm as any;
+                let llmState: unknown = undefined;
+                if (llmAny?.getMessages) {
+                    const messages = llmAny.getMessages(true);
+                    llmState = { messages } as unknown;
+                } else if (llmAny?.exportState) {
+                    llmState = llmAny.exportState();
+                }
+                const sensory = (M.memory as any).sensory || {};
+                (M.memory as any).sensory = { ...sensory, llmState };
+            } catch { /* ignore */ }
+        };
+        const flushMentalState = async () => {
+            if (!this.sessionManager) return;
+            try {
+                assignVarsIntoMental();
+                updateLlmInMental();
+                const snapNow = await this.sessionManager.load(tenantId, sessionId);
+                const base = (snapNow?.snapshot as Record<string, unknown>) || {};
+                const next = { ...base, M } as Record<string, unknown>;
+                const expected = snapNow?.wmVersion ?? BigInt(0);
+                await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+                (ctx as any).__varsDirty = false;
+            } catch (e) {
+                if ((e as Error).message === 'CAS_MISMATCH') {
+                    try {
+                        const snapNow2 = await this.sessionManager.load(tenantId, sessionId);
+                        const base2 = (snapNow2?.snapshot as Record<string, unknown>) || {};
+                        const next2 = { ...base2, M } as Record<string, unknown>;
+                        const expected2 = snapNow2?.wmVersion ?? BigInt(0);
+                        await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
+                        (ctx as any).__varsDirty = false;
+                    } catch { /* ignore second failure */ }
+                } else {
+                    throw e;
+                }
+            }
+        };
         (ctx as any).vars = new Proxy({} as Record<string, unknown>, {
             get: (_target, prop: string) => varCache.get(prop),
             set: (_target, prop: string, value: unknown) => {
                 varCache.set(prop, value);
-                // Persist in background using CAS and append an event
-                (async () => {
-                    if (!this.sessionManager) return;
-                    try {
-                        const snapNow = await this.sessionManager.load(tenantId, sessionId);
-                        const base = (snapNow?.snapshot as Record<string, unknown>) || {};
-                        const vars = ((base as any).vars ? { ...(base as any).vars } : {}) as Record<string, unknown>;
-                        (vars as any)[prop] = value;
-                        const next = { ...base, vars } as Record<string, unknown>;
-                        const expected = snapNow?.wmVersion ?? BigInt(0);
-                        await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
-                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.vars_updated', { key: String(prop) });
-                    } catch (e) {
-                        // Retry once on CAS mismatch
-                        if ((e as Error).message === 'CAS_MISMATCH') {
-                            try {
-                                const snapNow2 = await this.sessionManager.load(tenantId, sessionId);
-                                const base2 = (snapNow2?.snapshot as Record<string, unknown>) || {};
-                                const vars2 = ((base2 as any).vars ? { ...(base2 as any).vars } : {}) as Record<string, unknown>;
-                                (vars2 as any)[prop] = value;
-                                const next2 = { ...base2, vars: vars2 } as Record<string, unknown>;
-                                const expected2 = snapNow2?.wmVersion ?? BigInt(0);
-                                await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
-                                await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.vars_updated', { key: String(prop) });
-                            } catch {
-                                // swallow; eventual consistency acceptable for vars
-                            }
-                        }
-                    }
-                })();
+                (ctx as any).__varsDirty = true;
+                assignVarsIntoMental();
                 return true;
             },
             deleteProperty: (_target, prop: string) => {
                 varCache.delete(prop);
-                (async () => {
-                    if (!this.sessionManager) return;
-                    try {
-                        const snapNow = await this.sessionManager.load(tenantId, sessionId);
-                        const base = (snapNow?.snapshot as Record<string, unknown>) || {};
-                        const vars = ((base as any).vars ? { ...(base as any).vars } : {}) as Record<string, unknown>;
-                        delete (vars as any)[prop];
-                        const next = { ...base, vars } as Record<string, unknown>;
-                        const expected = snapNow?.wmVersion ?? BigInt(0);
-                        await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
-                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.vars_deleted', { key: String(prop) });
-                    } catch { /* ignore */ }
-                })();
+                (ctx as any).__varsDirty = true;
+                assignVarsIntoMental();
                 return true;
             },
             has: (_t, prop: string) => varCache.has(prop),
@@ -218,6 +255,17 @@ export class TaskEngine {
             getOwnPropertyDescriptor: (_t, prop: string) =>
                 varCache.has(prop as string) ? { enumerable: true, configurable: true } : undefined
         });
+
+        // Wire Goals API to operate on __mental.goalState
+        try {
+            const goals = await import('../../loop/goals.js');
+            (ctx as any).addGoal = (node: any) => goals.addGoal(ctx as any, node);
+            (ctx as any).updateGoal = (id: any, patch: any) => goals.updateGoal(ctx as any, id, patch);
+            (ctx as any).moveGoal = (id: any, parentId?: any, order?: any) => goals.moveGoal(ctx as any, id, parentId, order);
+            (ctx as any).completeGoal = (id: any, opts?: any) => goals.completeGoal(ctx as any, id, opts);
+            (ctx as any).failGoal = (id: any) => goals.failGoal(ctx as any, id);
+            (ctx as any).listGoals = (filter?: any) => goals.listGoals(ctx as any, filter);
+        } catch { /* noop */ }
 
         // Provide requestInput implementation (non-blocking; persists pending handler and emits input_required)
         (ctx as any).requestInput = async (prompt: string, opts: { handlerName?: string; ttlMs?: number; schema?: unknown; onProvided: string; onExpired?: string }) => {
@@ -238,6 +286,7 @@ export class TaskEngine {
             const pending = { ...getPendingInputs(base) };
             pending[token] = { handlerName: opts.onProvided, schema: opts?.schema, expiresAt };
             const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
+                try { await flushMentalState(); } catch { /* best-effort */ }
                 const nextSnapshot = setPendingInputs(baseSnap, pending);
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedVer, snapshot: nextSnapshot });
                 await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
@@ -305,6 +354,7 @@ export class TaskEngine {
             // Inject dispatcher to be executed on handle.run()
             const dispatch = async (runOpts?: { awaitCompletion?: boolean; streaming?: boolean }) => {
                 (ctx as any).logger?.info?.('Child dispatch', { parentTaskId: sessionId, childAgent: agent, token });
+                try { await flushMentalState(); } catch { /* best-effort */ }
                 const a2aOptions = { tenantId, streaming: (runOpts?.streaming ?? options?.streaming) === true } as any;
                 try { console.log(`[TaskEngine] sendTaskToAgent dispatch: tenantId=${tenantId} sessionId=${sessionId} token=${token} agent=${agent}`); } catch { }
                 try {
@@ -446,66 +496,12 @@ export class TaskEngine {
             // For buffered mode, await the task handler completion
             await this.executeTaskHandler(ctx);
 
-            // After handler: snapshot WM and optional LLM state with CAS (skip if already saved in requestInput)
+            // After handler: flush MentalState once (skip if already flushed earlier in this turn)
             if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
-                const newSnapshot: Record<string, unknown> = { vars: (ctx as any).vars || {} };
-                try {
-                    const llmAny = (ctx as any).llm as any;
-                    if (llmAny?.getMessages) {
-                        const messages = llmAny.getMessages(true);
-                        (newSnapshot as any).llm = { messages };
-                        try { console.log(`[TaskEngine] finalSave messages count: ${Array.isArray(messages) ? messages.length : 'n/a'}`); } catch { }
-                    } else if (llmAny?.exportState) {
-                        const llmState = llmAny.exportState();
-                        if (typeof llmState !== 'undefined') {
-                            (newSnapshot as any).llm = llmState;
-                        }
-                    }
-                } catch { /* ignore llm state issues */ }
-                const expected = (ctx as any).__wmVersion ?? BigInt(0);
-                try {
-                    await this.sessionManager.saveSnapshot({
-                        tenantId,
-                        sessionId,
-                        agentId: (ctx as any).agentId || 'default',
-                        expectedWmVersion: expected,
-                        snapshot: newSnapshot
-                    });
-                } catch (e) {
-                    if ((e as Error).message === 'CAS_MISMATCH') {
-                        // Retry once with the latest wmVersion
-                        try {
-                            const snapNow = await this.sessionManager.load(tenantId, sessionId);
-                            const expected2 = snapNow?.wmVersion ?? BigInt(0);
-                            await this.sessionManager.saveSnapshot({
-                                tenantId,
-                                sessionId,
-                                agentId: (ctx as any).agentId || 'default',
-                                expectedWmVersion: expected2,
-                                snapshot: newSnapshot
-                            });
-                            // Log and emit recovery event
-                            try { (ctx as any).logger?.info?.('WM snapshot CAS recovered on final save', { taskId: sessionId }); } catch { }
-                            await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_conflict_recovered', { when: 'final_save' });
-                            try { console.log(`[TaskEngine] WM snapshot CAS recovered on final save for task ${sessionId}`); } catch { }
-                        } catch (e2) {
-                            if ((e2 as Error).message === 'CAS_MISMATCH') {
-                                // Benign end-of-turn conflict; record and proceed
-                                await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_conflict_ignored', { when: 'final_save' });
-                                try { (ctx as any).logger?.warn?.('WM snapshot CAS ignored on final save (benign)', { taskId: sessionId }); } catch { }
-                                try { console.log(`[TaskEngine] WM snapshot CAS ignored on final save (benign) for task ${sessionId}`); } catch { }
-                            } else if ((e2 as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                                await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: JSON.stringify(newSnapshot).length });
-                            } else {
-                                throw e2;
-                            }
-                        }
-                    } else if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        // emit limit event and continue without saving snapshot
-                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: JSON.stringify(newSnapshot).length });
-                    } else {
-                        throw e;
-                    }
+                try { await flushMentalState(); } catch (e) {
+                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: 'unknown' });
+                    } else { throw e; }
                 }
             }
 
@@ -624,6 +620,27 @@ export class TaskEngine {
             await this.handlerInvoker.invoke({ tenantId, taskId, handlerName, input });
         }
         return { acknowledged: true };
+    }
+
+    /**
+     * Handle tool completion (placeholder): removes pending tool token and invokes durable handler if present.
+     */
+    async handleToolCompleted(params: { tenantId: string; taskId: string; token: string; result: unknown }): Promise<void> {
+        const { tenantId, taskId, token, result } = params;
+        const snap = await this.sessionManager?.load(tenantId, taskId);
+        if (!snap) return;
+        const base = (snap.snapshot as Record<string, unknown>) || {};
+        const tools = getPendingTools(base) as any;
+        const entry = tools[token];
+        if (!entry) return;
+        const handlerName = entry?.handlers?.completed;
+        delete tools[token];
+        const next = setPendingTools(base, tools);
+        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+        await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', { token });
+        if (handlerName && this.handlerInvoker) {
+            await this.handlerInvoker.invoke({ tenantId, taskId, handlerName, input: result });
+        }
     }
 
     /**
@@ -934,7 +951,7 @@ export class TaskEngine {
             sendTaskToAgent: async () => { throw new Error('A2A not available in basic task engine'); },
             requestInput: async () => { throw new Error('requestInput not available in basic task engine'); },
 
-            // Required working memory operations
+            // Required working memory operations (legacy)
             setGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
             getGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
             addThought: async () => { throw new Error('Working memory not available in basic task engine'); },
@@ -943,6 +960,13 @@ export class TaskEngine {
             getDecision: async () => { throw new Error('Working memory not available in basic task engine'); },
             getAllDecisions: async () => { throw new Error('Working memory not available in basic task engine'); },
             vars: {},
+            // Goals API (new)
+            addGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            updateGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            moveGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            completeGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            failGoal: async () => { throw new Error('Working memory not available in basic task engine'); },
+            listGoals: async () => { throw new Error('Working memory not available in basic task engine'); },
             recall: async () => { throw new Error('Memory not available in basic task engine'); },
             remember: async () => { throw new Error('Memory not available in basic task engine'); }
         };
@@ -953,6 +977,12 @@ export class TaskEngine {
         const ctx = this.createContext(task);
         (ctx as any).tenantId = tenantId;
         const snap = await this.sessionManager?.load(tenantId, taskId);
+        const baseSnap = (snap?.snapshot as Record<string, unknown>) || {};
+        // Expose MentalState on durable handler context
+        try {
+            const M = (baseSnap as any).M as MentalState | undefined;
+            (ctx as any).__mental = M || initialM(ctx);
+        } catch { /* noop */ }
         // Reattach LLM for this agent if available
         try {
             const agentName = snap?.agentId;
@@ -968,29 +998,37 @@ export class TaskEngine {
             }
             try { console.log('[TaskEngine] restoreCtx LLM type', (ctx as any).llm?.constructor?.name); } catch { }
         } catch { /* ignore LLM reattach failures */ }
-        const vars = (snap?.snapshot as any)?.vars || {};
+        // Rehydrate vars from MentalState if present; fallback to legacy vars
         try {
+            const M = (baseSnap as any).M as MentalState | undefined;
+            const vars = M ? (((M.memory as any)?.shortTerm?.vars) || {}) : ((baseSnap as any)?.vars || {});
             (ctx as any).vars = { ...(ctx as any).vars, ...vars };
         } catch {
-            (ctx as any).vars = vars;
+            (ctx as any).vars = ((baseSnap as any)?.vars || {}) as Record<string, unknown>;
         }
-        // Restore LLM state if present
+        // Restore LLM state from MentalState if present; fallback to legacy snapshot.llm
         try {
-            const llmState = (snap?.snapshot as any)?.llm;
+            const M = (baseSnap as any).M as MentalState | undefined;
+            const llmStateFromM = M ? (((M.memory as any)?.sensory as any)?.llmState) : undefined;
+            const legacyLlm = (baseSnap as any)?.llm;
+            const llmState = typeof llmStateFromM !== 'undefined' ? llmStateFromM : legacyLlm;
             const llmAny = (ctx as any).llm as any;
-            try {
-                const savedCount = llmState && Array.isArray((llmState as any).messages) ? (llmState as any).messages.length : 'n/a';
-                const importAvail = typeof llmAny?.importState;
-                console.log(`[TaskEngine] restoreCtx snapshot llmState present=${!!llmState} savedCount=${savedCount} importStateType=${importAvail}`);
-            } catch { /* noop */ }
-            try { /* before import */ } catch { /* noop */ }
             if (typeof llmState !== 'undefined' && llmAny?.importState) {
                 llmAny.importState(llmState);
             }
-            try { /* after import */ } catch { /* noop */ }
         } catch { /* ignore */ }
         // Ensure restored context can emit streaming events to the same task channel
         try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
+        // Wire Goals API on durable handler context
+        try {
+            const goals = await import('../../loop/goals.js');
+            (ctx as any).addGoal = (node: any) => goals.addGoal(ctx as any, node);
+            (ctx as any).updateGoal = (id: any, patch: any) => goals.updateGoal(ctx as any, id, patch);
+            (ctx as any).moveGoal = (id: any, parentId?: any, order?: any) => goals.moveGoal(ctx as any, id, parentId, order);
+            (ctx as any).completeGoal = (id: any, opts?: any) => goals.completeGoal(ctx as any, id, opts);
+            (ctx as any).failGoal = (id: any) => goals.failGoal(ctx as any, id);
+            (ctx as any).listGoals = (filter?: any) => goals.listGoals(ctx as any, filter);
+        } catch { /* noop */ }
         // Enable A2A from durable handler context - use the proper TaskEngine sendTaskToAgent implementation
         try {
             const engine = this;

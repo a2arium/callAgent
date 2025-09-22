@@ -1,8 +1,8 @@
-# Working Memory & Cognitive Context API
+# Working Memory & MentalState
 
 ## Overview
 
-The Working Memory system provides agents with a cognitive workspace for managing:
+Working Memory now lives inside a single MentalState snapshot (persisted as `snapshot.M`). It provides agents with a cognitive workspace for managing:
 - Current goals and objectives
 - Active thoughts and observations  
 - Decisions made during task execution
@@ -32,19 +32,17 @@ Every memory operation flows through 6 sequential stages:
 | **Lifecycle** | Created/destroyed with task | Persists across tasks |
 | **Access** | Direct API methods | Memory adapter interface |
 
-## Working Memory API
+## Working Memory API (backed by MentalState)
 
-### Goal Management
+### Goal Management (new hierarchy model)
 
 Track the current objective or goal of the agent:
 
 ```typescript
-// Set the current goal
-await ctx.setGoal("Help user with their question");
-
-// Retrieve the current goal
-const goal = await ctx.getGoal();
-console.log(goal); // "Help user with their question"
+const id = await ctx.addGoal({ title: 'Help user', type: 'short', priority: 1 });
+await ctx.updateGoal(id, { priority: 0.9 });
+await ctx.completeGoal(id);
+const activeGoals = await ctx.listGoals({ status: 'active' });
 ```
 
 ### Thought Tracking
@@ -82,12 +80,12 @@ console.log(decision);
 // }
 ```
 
-### Working Variables
+### Working Variables (turn-level flush)
 
 Store temporary data and context during task execution:
 
 ```typescript
-// Store working variables
+// Store working variables (cached in-memory; flushed at turn end or await exit)
 ctx.vars.userQuery = "How do I reset my password?";
 ctx.vars.searchResults = [
     { title: "Password Reset Guide", relevance: 0.9 },
@@ -193,7 +191,7 @@ The working memory system integrates seamlessly with the existing semantic and e
 
 ```typescript
 // Working memory operations (new)
-await ctx.setGoal("Process user request");
+const gid = await ctx.addGoal({ title: 'Process user request', type: 'short', priority: 1 });
 await ctx.addThought("Analyzing user input");
 ctx.vars.processingStage = "analysis";
 

@@ -29,7 +29,7 @@ graph TD
 
 ### 1. Working Memory Persistence
 
-The framework automatically persists working memory state when an agent calls `requestInput`:
+The engine persists MentalState when an agent calls `requestInput` (await-exit flush):
 
 ```typescript
 // Automatically persisted:
@@ -45,16 +45,16 @@ await ctx.requestInput("Which option do you prefer?", {
 // Agent execution ends, context is persisted
 ```
 
-**Persisted Working Memory Components:**
-- Current goal (`ctx.getGoal()`)
-- Complete thought chain (`ctx.getThoughts()`)
-- All decisions made (`ctx.getAllDecisions()`)
-- Working variables (`ctx.vars`)
-- Task metadata (ID, tenant, timestamps)
+**Persisted MentalState Components (snapshot.M):**
+- `memory.sensory` (LLM state, last observation)
+- `memory.shortTerm.vars` (exposed as `ctx.vars`)
+- `memory.shortTerm.thoughts` and `memory.shortTerm.decisions`
+- `memory.longTerm` (episodic/semantic/procedural)
+- `goalState` (normalized hierarchy with priorities 0..1; statuses include failed)
 
 ### 2. LLM Conversation State
 
-The complete LLM conversation history is preserved:
+LLM state is stored under `M.memory.sensory.llmState`:
 
 ```typescript
 // Before requestInput - conversation is active
@@ -129,7 +129,7 @@ CREATE TABLE handler_registrations (
 
 ### Restoration Flow
 
-When `tasks/input` is called, the TaskEngine performs these steps:
+When `tasks/input` is called, the TaskEngine performs these steps (simplified):
 
 ```typescript
 async function restoreContextForHandler(taskId: string, handlerName: string) {
@@ -163,17 +163,17 @@ async function restoreContextForHandler(taskId: string, handlerName: string) {
 
 ## Working Memory Integration
 
-### Automatic Persistence Triggers
+### Turn-level flush and await exits
 
-Working memory is automatically persisted when:
+MentalState is persisted:
 
-1. **`requestInput()` is called**:
+1. **`requestInput()` is called (await exit)**:
    ```typescript
    await ctx.requestInput("Choose option:", { onProvided: 'handleChoice' });
    // → Triggers working memory persistence
    ```
 
-2. **`sendTaskToAgent()` with handlers**:
+2. **`sendTaskToAgent()` with handlers (await exit if non-blocking)**:
    ```typescript
    await ctx.sendTaskToAgent('child', input, { 
        onCompleted: 'onChildDone' 
@@ -181,14 +181,11 @@ Working memory is automatically persisted when:
    // → Triggers working memory persistence for parent context
    ```
 
-3. **Manual persistence** (future):
-   ```typescript
-   await ctx.persistState(); // Explicit persistence
-   ```
+3. **Turn completion**: when the handler completes without awaiting.
 
 ### Working Memory Restoration
 
-When a handler is invoked, working memory is fully restored:
+When a handler is invoked, MentalState is fully restored and `ctx.vars` is rehydrated from `M.memory.shortTerm.vars`:
 
 ```typescript
 export async function handleUserInput(ctx: Ctx, ev: { input: string }) {

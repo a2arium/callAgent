@@ -8,6 +8,7 @@ import type { IMemory } from '@a2arium/callagent-types';
 // Import working memory types for TaskContext
 import type { ThoughtEntry, DecisionEntry, WorkingVariables } from './workingMemory.js';
 import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';
+import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js';
 
 // Re-export only specific streaming event types needed externally
 export type { A2AEvent, TaskStatus, Artifact };
@@ -113,14 +114,22 @@ export type TaskContext = {
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 
-    // Working Memory Operations - REQUIRED for all agents
-    setGoal: (goal: string) => Promise<void>;
-    getGoal: () => Promise<string | null>;
+    // Working Memory Operations
+    setGoal: (goal: string) => Promise<void>; // legacy; will be removed after migration
+    getGoal: () => Promise<string | null>;    // legacy; will be removed after migration
     addThought: (thought: string) => Promise<void>;
     getThoughts: () => Promise<ThoughtEntry[]>;
     makeDecision: (key: string, decision: string, reasoning?: string) => Promise<void>;
     getDecision: (key: string) => Promise<DecisionEntry | null>;
     getAllDecisions: () => Promise<Record<string, DecisionEntry>>; // A2A: Required for context serialization
+
+    // Goals API (new)
+    addGoal: (node: { id?: GoalId; title: string; type?: GoalType; priority?: number; parentId?: GoalId; context?: GoalNode['context'] }) => Promise<GoalId>;
+    updateGoal: (id: GoalId, patch: Partial<Omit<GoalNode, 'id' | 'createdAt'>>) => Promise<void>;
+    moveGoal: (id: GoalId, parentId?: GoalId, order?: number) => Promise<void>;
+    completeGoal: (id: GoalId, opts?: { cascadeChildren?: boolean; requireNoActiveChildren?: boolean }) => Promise<void>;
+    failGoal: (id: GoalId) => Promise<void>;
+    listGoals: (filter?: { status?: GoalStatus; parentId?: GoalId; type?: GoalType }) => Promise<GoalNode[]>;
 
     // Working memory variables - REQUIRED
     vars: WorkingVariables;

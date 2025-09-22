@@ -46,7 +46,8 @@ type StreamingOptions = {
 type PartialTaskContext = Omit<TaskContext,
     'fail' | 'setGoal' | 'getGoal' | 'addThought' | 'getThoughts' |
     'makeDecision' | 'getDecision' | 'getAllDecisions' | 'vars' |
-    'recall' | 'remember' | 'sendTaskToAgent' | 'requestInput'
+    'recall' | 'remember' | 'sendTaskToAgent' | 'requestInput' |
+    'addGoal' | 'updateGoal' | 'moveGoal' | 'completeGoal' | 'failGoal' | 'listGoals'
 >;
 
 /**

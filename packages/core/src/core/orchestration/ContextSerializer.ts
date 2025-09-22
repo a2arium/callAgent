@@ -124,7 +124,7 @@ export class ContextSerializer {
         try {
             // Use existing TaskContext APIs
             if (ctx.getGoal) {
-                const goal = await ctx.getGoal() || undefined;
+                const goal = await ctx.getGoal() || undefined; // TODO: migrate to listGoals/addGoal
                 workingMemory.goal = goal;
 
                 serializerLogger.debug('Serializing goal', {
@@ -244,17 +244,17 @@ export class ContextSerializer {
                 const unifiedMemory = (ctx.memory as any)?.unified;
                 if (unifiedMemory?.workingMemoryAdapter?.setGoal) {
                     try {
-                        await unifiedMemory.workingMemoryAdapter.setGoal(goalString, ctx.agentId, ctx.tenantId);
+                        await unifiedMemory.workingMemoryAdapter.setGoal(goalString, ctx.agentId, ctx.tenantId); // TODO: migrate to goals API
                         serializerLogger.debug('Goal set directly in adapter for A2A transfer', {
                             agentId: ctx.agentId,
                             goalLength: goalString.length
                         });
                     } catch (error) {
                         serializerLogger.warn('Failed to set goal directly in adapter, falling back to MLO', error);
-                        await ctx.setGoal(goalString);
+                        await ctx.setGoal(goalString); // TODO: migrate to goals API
                     }
                 } else {
-                    await ctx.setGoal(goalString);
+                    await ctx.setGoal(goalString); // TODO: migrate to goals API
                 }
             }
 
