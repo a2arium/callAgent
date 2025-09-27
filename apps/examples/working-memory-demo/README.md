@@ -15,9 +15,9 @@ This agent demonstrates the complete working memory functionality in callAgent, 
 
 The agent uses the standard TaskContext API to interact with working memory:
 
-- `ctx.setGoal()` / `ctx.getGoal()` - Goal management
-- `ctx.addThought()` / `ctx.getThoughts()` - Thought tracking
-- `ctx.makeDecision()` / `ctx.getDecision()` - Decision management
+- `ctx.goals.add()` / `ctx.goals.read()` - Goal management
+- `ctx.thoughts.add()` - Thought tracking (append-only)
+- `ctx.decisions.add()` / `ctx.decisions.get()` / `ctx.decisions.read()` - Decision management
 - `ctx.vars.*` - Working variables proxy
 - `ctx.remember()` / `ctx.recall()` - Unified memory operations
 

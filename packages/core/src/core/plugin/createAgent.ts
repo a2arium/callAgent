@@ -120,12 +120,29 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
         throw new ManifestError('Invalid agent manifest: missing name or version', { manifest });
     }
 
+    // Build loop.modules from either explicit loop or top-level sugar
+    const sugarModules: Record<string, unknown> = {};
+    const moduleKeys: Array<keyof NonNullable<NonNullable<CreateAgentPluginOptions['loop']>['modules']>> = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
+    for (const k of moduleKeys) {
+        const v = (options as any)[k];
+        if (typeof v === 'function') sugarModules[k as string] = v;
+    }
+    const hasSugar = Object.keys(sugarModules).length > 0;
+    const loop = hasSugar ? { modules: { ...(options.loop?.modules || {}), ...(sugarModules as any) } } : options.loop;
+
     const plugin: AgentPlugin = {
         manifest,
         handleTask: options.handleTask,
         tenantId: tenantId,
+        loop,
         // Future hooks (initialize, etc.) would be stored here
     };
+
+    try {
+        console.log('[createAgent] registering', manifest.name, 'from', metaUrl);
+        const lk = Object.keys(((plugin as any).loop?.modules || {}) as Record<string, unknown>);
+        console.log('[createAgent] loop present:', !!(plugin as any).loop, 'module keys:', lk.length ? lk : '(none)');
+    } catch { /* noop */ }
 
     // If llmConfig is provided, create an LLM adapter and store it on the plugin
     if (options.llmConfig) {

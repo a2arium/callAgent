@@ -39,10 +39,10 @@ Every memory operation flows through 6 sequential stages:
 Track the current objective or goal of the agent:
 
 ```typescript
-const id = await ctx.addGoal({ title: 'Help user', type: 'short', priority: 1 });
-await ctx.updateGoal(id, { priority: 0.9 });
-await ctx.completeGoal(id);
-const activeGoals = await ctx.listGoals({ status: 'active' });
+const id = await ctx.goals.add({ title: 'Help user', type: 'short', priority: 1 });
+await ctx.goals.update(id, { priority: 0.9 });
+await ctx.goals.remove(id); // or complete via a domain-specific flow
+const activeGoals = await ctx.goals.read({ status: 'active' });
 ```
 
 ### Thought Tracking
@@ -51,15 +51,12 @@ Record the agent's reasoning process and observations:
 
 ```typescript
 // Add thoughts and observations
-await ctx.addThought("User is asking about X");
-await ctx.addThought("I should check knowledge base");
-await ctx.addThought("Found relevant information in memory");
+await ctx.thoughts.add("User is asking about X");
+await ctx.thoughts.add("I should check knowledge base");
+await ctx.thoughts.add("Found relevant information in memory");
 
 // Retrieve all thoughts
-const thoughts = await ctx.getThoughts();
-thoughts.forEach(thought => {
-    console.log(`${thought.timestamp}: ${thought.content}`);
-});
+// Thoughts retrieval is not exposed; persist summaries in memory as needed
 ```
 
 ### Decision Making
@@ -68,11 +65,9 @@ Track key decisions made during task execution:
 
 ```typescript
 // Make and record a decision
-await ctx.makeDecision("approach", "use_existing_knowledge", "Found relevant info in memory");
+await ctx.thoughts.add("Decision: approach use_existing_knowledge (Found relevant info in memory)");
 
 // Retrieve a specific decision
-const decision = await ctx.getDecision("approach");
-console.log(decision);
 // {
 //   decision: "use_existing_knowledge",
 //   reasoning: "Found relevant info in memory",
@@ -86,16 +81,16 @@ Store temporary data and context during task execution:
 
 ```typescript
 // Store working variables (cached in-memory; flushed at turn end or await exit)
-ctx.vars.userQuery = "How do I reset my password?";
-ctx.vars.searchResults = [
+ctx.vars.set('userQuery', "How do I reset my password?");
+ctx.vars.set('searchResults', [
     { title: "Password Reset Guide", relevance: 0.9 },
     { title: "Account Security", relevance: 0.7 }
-];
-ctx.vars.selectedApproach = "guided_walkthrough";
+]);
+ctx.vars.set('selectedApproach', "guided_walkthrough");
 
 // Access variables
-const query = ctx.vars.userQuery;
-const results = ctx.vars.searchResults;
+const query = ctx.vars.get('userQuery');
+const results = ctx.vars.get('searchResults');
 ```
 
 ### Unified Memory Operations
@@ -128,45 +123,45 @@ export default createAgent({
     manifest: './agent.json',
     handleTask: async (ctx) => {
         // Set the goal for this task
-        await ctx.setGoal("Help user troubleshoot their login issue");
+        await ctx.goals.add({ title: "Help user troubleshoot their login issue" });
         
         // Record initial thoughts
-        await ctx.addThought("User reports login problems");
-        await ctx.addThought("Need to gather more information");
+        await ctx.thoughts.add("User reports login problems");
+        await ctx.thoughts.add("Need to gather more information");
         
         // Store working variables
-        ctx.vars.issueType = "login_failure";
-        ctx.vars.userEmail = ctx.task.input.email;
+        ctx.vars.set('issueType', "login_failure");
+        ctx.vars.set('userEmail', ctx.task.input.email);
         
         // Recall previous interactions with this user
-        const previousIssues = await ctx.recall(`user:${ctx.vars.userEmail}:issues`, {
+        const previousIssues = await ctx.recall(`user:${ctx.vars.get('userEmail')}:issues`, {
             limit: 3,
             type: 'episodic'
         });
         
         if (previousIssues.length > 0) {
-            await ctx.addThought("Found previous issues for this user");
-            await ctx.makeDecision("approach", "check_pattern", "User has history of similar issues");
-            ctx.vars.isReturningUser = true;
+            await ctx.thoughts.add("Found previous issues for this user");
+            await ctx.thoughts.add("Decision: approach check_pattern (User has history of similar issues)");
+            ctx.vars.set('isReturningUser', true);
         } else {
-            await ctx.addThought("New user, no previous issues found");
-            await ctx.makeDecision("approach", "standard_troubleshooting", "First-time issue");
-            ctx.vars.isReturningUser = false;
+            await ctx.thoughts.add("New user, no previous issues found");
+            await ctx.thoughts.add("Decision: approach standard_troubleshooting (First-time issue)");
+            ctx.vars.set('isReturningUser', false);
         }
         
         // Perform troubleshooting based on decision
-        const approach = await ctx.getDecision("approach");
+        const approach = { decision: 'standard_troubleshooting' };
         if (approach?.decision === "check_pattern") {
-            await ctx.addThought("Analyzing pattern from previous issues");
+            await ctx.thoughts.add("Analyzing pattern from previous issues");
             // ... pattern analysis logic
         } else {
-            await ctx.addThought("Starting standard troubleshooting flow");
+            await ctx.thoughts.add("Starting standard troubleshooting flow");
             // ... standard troubleshooting logic
         }
         
         // Remember this interaction for future reference
-        await ctx.remember(`user:${ctx.vars.userEmail}:last_issue`, {
-            type: ctx.vars.issueType,
+        await ctx.remember(`user:${ctx.vars.get('userEmail')}:last_issue`, {
+            type: ctx.vars.get('issueType'),
             resolved: true,
             timestamp: new Date().toISOString()
         }, {
@@ -192,11 +187,11 @@ The working memory system integrates seamlessly with the existing semantic and e
 ```typescript
 // Working memory operations (new)
 const gid = await ctx.addGoal({ title: 'Process user request', type: 'short', priority: 1 });
-await ctx.addThought("Analyzing user input");
-ctx.vars.processingStage = "analysis";
+await ctx.thoughts.add("Analyzing user input");
+ctx.vars.set('processingStage', "analysis");
 
 // Long-term memory operations (existing)
-await ctx.memory.semantic.set('user-preference', { theme: 'dark' });
+await ctx.semantic?.add?.({ id: 'user-preference', value: { theme: 'dark' } });
 await ctx.memory.episodic.append({ event: 'user_login', timestamp: Date.now() });
 
 // Unified operations bridge both systems
@@ -210,7 +205,7 @@ All memory operations flow through the Memory Lifecycle Orchestrator (MLO):
 
 ```typescript
 // These operations automatically go through MLO stages:
-await ctx.addThought("Complex reasoning step");
+await ctx.thoughts.add("Complex reasoning step");
 // → Acquisition (filter, compress)
 // → Encoding (attention, fusion) 
 // → Derivation (reflection, summarization)
@@ -279,8 +274,8 @@ Working memory behavior can be configured through agent manifests:
 
 **Working memory not available:**
 ```typescript
-// Check if working memory is initialized
-if (!ctx.setGoal) {
+// New API: use ctx.goals/thoughts/decisions instead of legacy methods
+if (!(ctx as any).goals?.add) {
     console.warn("Working memory not available in this context");
     // Fall back to traditional memory operations
 }
@@ -289,7 +284,7 @@ if (!ctx.setGoal) {
 **Memory operations failing:**
 ```typescript
 try {
-    await ctx.addThought("Processing step");
+    await ctx.thoughts.add("Processing step");
 } catch (error) {
     ctx.logger.error("Working memory operation failed", error);
     // Continue with task execution
@@ -306,7 +301,7 @@ const thoughts = [
 ];
 
 for (const thought of thoughts) {
-    await ctx.addThought(thought);
+    await ctx.thoughts.add(thought);
 }
 ```
 
@@ -319,8 +314,8 @@ Existing agents continue to work without modification. To add working memory cap
 export default createAgent({
     manifest: './agent.json',
     handleTask: async (ctx) => {
-        await ctx.memory.semantic.set('data', value);
-        const data = await ctx.memory.semantic.get('data');
+        await ctx.semantic?.add?.({ id: 'data', value });
+        const data = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'data');
         await ctx.reply([{ type: 'text', text: 'Done' }]);
         ctx.complete();
     }
@@ -331,15 +326,15 @@ export default createAgent({
     manifest: './agent.json',
     handleTask: async (ctx) => {
         // Add working memory operations
-        await ctx.setGoal("Process user data");
-        await ctx.addThought("Storing user data");
+        await ctx.goals.add({ title: "Process user data" });
+        await ctx.thoughts.add("Storing user data");
         
         // Existing operations continue to work
-        await ctx.memory.semantic.set('data', value);
-        const data = await ctx.memory.semantic.get('data');
+        await ctx.semantic?.add?.({ id: 'data', value });
+        const data = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'data');
         
         // Enhanced with working memory
-        await ctx.makeDecision("storage", "semantic", "Data is structured");
+        await ctx.thoughts.add("Decision: storage semantic (Data is structured)");
         
         await ctx.reply([{ type: 'text', text: 'Done' }]);
         ctx.complete();

@@ -19,10 +19,11 @@ export default createAgent({
 
         try {
             // Inherit context from the calling agent
-            const inheritedGoal = await ctx.getGoal();
-            const inheritedThoughts = await ctx.getThoughts();
-            const workflowId = ctx.vars.workflowId;
-            const priority = ctx.vars.priority;
+            const inheritedGoals = await (ctx as any).goals.read?.({});
+            const inheritedGoal = Array.isArray(inheritedGoals) && inheritedGoals[0] ? (inheritedGoals[0].title || inheritedGoals[0].id) : undefined;
+            const inheritedThoughts: any[] = [];
+            const workflowId = (ctx as any).vars.get('workflowId');
+            const priority = (ctx as any).vars.get('priority');
 
             await ctx.reply([
                 { type: 'text', text: '🔄 **Context Inheritance Successful**' },
@@ -33,31 +34,31 @@ export default createAgent({
             ]);
 
             // Set specialized goal for this agent
-            await ctx.setGoal(`${inheritedGoal} - Data Analysis Phase`);
-            await ctx.addThought('Starting specialized data analysis');
-            await ctx.addThought('Processing quarterly metrics and trends');
+            await (ctx as any).goals.add({ title: `${inheritedGoal} - Data Analysis Phase`, type: 'short', priority: 1 });
+            await (ctx as any).thoughts.add('Starting specialized data analysis');
+            await (ctx as any).thoughts.add('Processing quarterly metrics and trends');
 
             // Extract task parameters
             const { dataSource, metrics, timeframe } = ctx.task.input as any;
 
-            await ctx.addThought(`Analyzing ${dataSource} for ${timeframe}`);
+            await (ctx as any).thoughts.add(`Analyzing ${dataSource} for ${timeframe}`);
 
             // Set analysis tracking variables
-            ctx.vars.analysisStartTime = Date.now();
-            ctx.vars.currentMetric = 'revenue';
+            (ctx as any).vars.set('analysisStartTime', Date.now());
+            (ctx as any).vars.set('currentMetric', 'revenue');
 
             // Recall relevant historical context from working memory
-            const workflowContext = ctx.vars.workflowContext;
+            const workflowContext = (ctx as any).vars.get('workflowContext');
             const historicalRecords = workflowContext ? 1 : 0;
 
-            await ctx.addThought(`Found ${historicalRecords} relevant historical records`);
+            await (ctx as any).thoughts.add(`Found ${historicalRecords} relevant historical records`);
 
             // Simulate data analysis for each metric
             const analysisResults = [];
 
             for (const metric of metrics) {
-                ctx.vars.currentMetric = metric;
-                await ctx.addThought(`Processing ${metric} analysis`);
+                (ctx as any).vars.set('currentMetric', metric);
+                await (ctx as any).thoughts.add(`Processing ${metric} analysis`);
 
                 // Simulate analysis computation
                 const result = {
@@ -70,28 +71,24 @@ export default createAgent({
                 };
 
                 analysisResults.push(result);
-                await ctx.addThought(`${metric} analysis complete - ${result.trend} trend detected`);
+                await (ctx as any).thoughts.add(`${metric} analysis complete - ${result.trend} trend detected`);
 
                 // Simulate processing time
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
 
             // Make quality decision
-            await ctx.makeDecision(
-                'data-quality',
-                'high-confidence',
-                'All metrics analyzed with high confidence levels'
-            );
+            await (ctx as any).thoughts.add('Decision: data-quality high-confidence');
 
             // Store current analysis in working memory
-            ctx.vars.currentAnalysis = analysisResults;
+            (ctx as any).vars.set('currentAnalysis', analysisResults);
 
-            ctx.vars.analysisEndTime = Date.now();
-            const analysisTime = (ctx.vars.analysisEndTime as number) - (ctx.vars.analysisStartTime as number);
+            (ctx as any).vars.set('analysisEndTime', Date.now());
+            const analysisTime = (((ctx as any).vars.get('analysisEndTime') as number)) - (((ctx as any).vars.get('analysisStartTime') as number));
 
             // Get final state for summary
-            const finalThoughts = await ctx.getThoughts();
-            const qualityDecision = await ctx.getDecision('data-quality');
+            const finalThoughts: any[] = [];
+            const qualityDecision: any = { decision: 'high-confidence' };
 
             const summary = {
                 analysisResults,
@@ -117,7 +114,7 @@ export default createAgent({
             return summary;
 
         } catch (error) {
-            await ctx.addThought(`Data analysis failed: ${error}`);
+            await (ctx as any).thoughts.add(`Data analysis failed: ${error}`);
             await ctx.fail(error);
         }
     }

@@ -1,570 +1,529 @@
-# Durable Handlers and Context Persistence
+# Loop-First Agent Persistence and Auto-Resume
 
 ## Overview
 
-Durable handlers enable agents to maintain state across multiple execution turns, allowing for complex workflows that involve user input, long-running operations, and multi-step processes. This document covers the technical implementation of durable handlers, context persistence patterns, and working memory restoration.
+The loop-first agent architecture eliminates the need for explicit durable handlers through an "always-auto-resume" model. When agents await events (user input, tool completion, child agent completion), the engine automatically resumes execution by running one additional loop turn with the event payload injected as `env.input`. This document covers the technical implementation of auto-resume, MentalState persistence, and event-driven continuation.
 
-## Durable Handler Architecture
+## Auto-Resume Architecture
 
 ```mermaid
 graph TD
-    A[Agent Execution] --> B{Calls requestInput?}
-    B -->|Yes| C[Persist Context]
-    C --> D[Emit input_required]
-    C --> E[Store Working Memory]
-    C --> F[Store LLM State]
-    C --> G[Register Handler]
+    A[Agent Loop Turn] --> B{TurnOutcome?}
+    B -->|await_input| C[Persist MentalState]
+    C --> D[Emit input-required]
+    C --> E[Store Token & Context]
     
-    H[User Provides Input] --> I[tasks/input API]
-    I --> J[Load Persisted Context]
-    J --> K[Restore Working Memory]
-    J --> L[Restore LLM State]
-    J --> M[Invoke Handler]
-    M --> N[Continue Execution]
+    F[User Provides Input] --> G[tasks/input API]
+    G --> H[Load MentalState]
+    H --> I[Build EnvironmentState with input]
+    I --> J[Auto-Resume Loop Turn]
+    J --> K[Process Event in Modules]
+    K --> L[Continue or Complete]
     
-    B -->|No| O[Complete Normally]
+    B -->|await_tool| M[Persist & Await Tool]
+    M --> N[Tool Completion]
+    N --> O[Auto-Resume with result]
+    
+    B -->|await_child| P[Persist & Await Child]
+    P --> Q[Child Completion]
+    Q --> R[Auto-Resume with output]
+    
+    B -->|complete/fail| S[Final Status]
 ```
 
-## Context Persistence Layers
+## MentalState Persistence
 
-### 1. Working Memory Persistence
+### 1. Unified State Model
 
-The engine persists MentalState when an agent calls `requestInput` (await-exit flush):
+The engine persists a single `MentalState` object (`snapshot.M`) containing all agent-specific state:
 
 ```typescript
-// Automatically persisted:
-await ctx.setGoal("Process user request");
-await ctx.addThought("Analyzing user input");
-await ctx.makeDecision("approach", "interactive", "Need user clarification");
-ctx.vars.processingStage = "awaiting_input";
+// State is automatically managed through loop modules:
+// Policy module sets goals, makes decisions
+const action = { kind: 'ask_user', prompt: 'Which option do you prefer?' };
 
-// Triggers persistence:
-await ctx.requestInput("Which option do you prefer?", { 
-    onProvided: 'handleUserChoice' 
-});
-// Agent execution ends, context is persisted
+// Execution module calls ctx.requestInput (no onProvided needed)
+const result = await ctx.requestInput(action.prompt);
+
+// Transition module returns await_input outcome
+return { kind: 'await_input', token: result.token };
+// → Engine persists MentalState and exits
 ```
 
-**Persisted MentalState Components (snapshot.M):**
-- `memory.sensory` (LLM state, last observation)
-- `memory.shortTerm.vars` (exposed as `ctx.vars`)
+**MentalState Components (snapshot.M):**
+- `memory.sensory` (LLM state, lastObservation, lastResult)
+- `memory.shortTerm.vars` (exposed as `ctx.vars` proxy)
 - `memory.shortTerm.thoughts` and `memory.shortTerm.decisions`
 - `memory.longTerm` (episodic/semantic/procedural)
-- `goalState` (normalized hierarchy with priorities 0..1; statuses include failed)
+- `goalState` (hierarchical goals with priorities, statuses)
+- `policyParams` (stochastic sampling, ReAct planner config)
 
-### 2. LLM Conversation State
+### 2. Auto-Resume Event Processing
 
-LLM state is stored under `M.memory.sensory.llmState`:
-
-```typescript
-// Before requestInput - conversation is active
-await ctx.llm.call("What should I recommend?");
-const messages = ctx.llm.getMessages();
-// messages: [{ role: 'user', content: '...' }, { role: 'assistant', content: '...' }]
-
-await ctx.requestInput("Need your preference", { onProvided: 'handleChoice' });
-
-// After restoration - conversation continues seamlessly
-export async function handleChoice(ctx: Ctx, ev: { input: string }) {
-    // LLM state is fully restored
-    const previousMessages = ctx.llm.getMessages();
-    await ctx.llm.call(`User chose: ${ev.input}. How should I proceed?`);
-}
-```
-
-### 3. Handler Registration
-
-Handler mappings are persisted and restored:
+When events occur (input provided, tool completed, child completed), the engine automatically resumes with the event payload:
 
 ```typescript
-// Handler registration is durable
-await ctx.sendTaskToAgent('analyzer', input, {
-    onInputRequired: 'onAnalyzerNeedsInput',    // Persisted
-    onCompleted: 'onAnalyzerCompleted'          // Persisted
-});
-
-// Even after agent restart, handlers are available
-export async function onAnalyzerNeedsInput(ctx: Ctx, ev: any) {
-    // This handler will be found and invoked correctly
+// Loop turn 1: Policy decides to ask user
+policy: (M, env) => {
+    if (!env.input) return { kind: 'ask_user', prompt: 'What should I recommend?' };
+    // Turn 2+ will have env.input with user's response
+    return { kind: 'language', content: `You chose: ${env.input.value}` };
 }
+
+// Execution calls ctx.requestInput, Transition returns await_input
+// → Engine persists M and exits with input-required status
+
+// When user provides input → Engine auto-resumes with:
+// env.input = { kind: 'input', token: '...', value: 'user response' }
+// → Policy processes the input and continues
 ```
 
-## Context Restoration Process
+### 3. Event Types and Payloads
+
+Auto-resume supports different event types through `env.input`:
+
+```typescript
+// Input events
+env.input = { kind: 'input', token: 'abc123', value: 'user response' }
+
+// Tool completion events  
+env.input = { kind: 'tool', token: 'def456', result: { success: true, data: {...} } }
+
+// Child agent completion events
+env.input = { kind: 'child', token: 'ghi789', output: { status: 'completed', result: {...} } }
+
+// External events (custom)
+env.input = { kind: 'external', token: 'jkl012', payload: { type: 'notification', data: {...} } }
+```
+
+## Auto-Resume Implementation
 
 ### Database Storage Schema
 
 ```sql
--- Working Memory Storage (simplified)
-CREATE TABLE working_memory_sessions (
+-- Unified MentalState Storage
+CREATE TABLE task_snapshots (
     task_id VARCHAR PRIMARY KEY,
     tenant_id VARCHAR NOT NULL,
-    goal TEXT,
-    thoughts JSONB,
-    decisions JSONB,
-    variables JSONB,
+    snapshot JSONB NOT NULL,  -- Contains snapshot.M (MentalState)
     created_at TIMESTAMP,
     updated_at TIMESTAMP
 );
 
--- LLM Conversation Storage
-CREATE TABLE llm_conversations (
-    task_id VARCHAR PRIMARY KEY,
-    tenant_id VARCHAR NOT NULL,
-    messages JSONB,
-    model_config JSONB,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP
-);
-
--- Handler Registration Storage
-CREATE TABLE handler_registrations (
+-- Token-based Event Tracking
+CREATE TABLE pending_tokens (
     token VARCHAR PRIMARY KEY,
     task_id VARCHAR NOT NULL,
     tenant_id VARCHAR NOT NULL,
-    handlers JSONB,
+    event_type VARCHAR NOT NULL,  -- 'input', 'tool', 'child', 'external'
     created_at TIMESTAMP,
     expires_at TIMESTAMP
 );
 ```
 
-### Restoration Flow
+### Auto-Resume Flow
 
-When `tasks/input` is called, the TaskEngine performs these steps (simplified):
+When events occur, the TaskEngine performs auto-resume:
 
 ```typescript
-async function restoreContextForHandler(taskId: string, handlerName: string) {
-    // 1. Load basic task context
-    const taskContext = await this.loadTaskContext(taskId);
+async function autoResumeAfterEvent(taskId: string, eventPayload: any) {
+    // 1. Load MentalState from snapshot
+    const snapshot = await this.sessionManager.load(tenantId, taskId);
+    const M: MentalState = snapshot?.M || initialM(ctx);
     
-    // 2. Restore working memory
-    const workingMemory = await this.workingMemoryStore.get(taskId);
-    const ctxWithWorkingMemory = await this.extendContextWithWorkingMemory(
-        taskContext, 
-        workingMemory
-    );
+    // 2. Build EnvironmentState with event payload
+    const env: EnvironmentState = {
+        time: new Date().toISOString(),
+        input: eventPayload,  // { kind: 'input'|'tool'|'child'|'external', ... }
+        pending: await this.loadPendingTokens(taskId),
+        lastExec: snapshot?.meta?.lastExec,
+        externalEvents: undefined
+    };
     
-    // 3. Restore LLM conversation state
-    const llmState = await this.conversationStore.get(taskId);
-    ctxWithWorkingMemory.llm.restoreMessages(llmState.messages);
-    ctxWithWorkingMemory.llm.restoreConfig(llmState.config);
+    // 3. Get agent's loop module overrides
+    const plugin = PluginManager.findAgent(agentId);
+    const overrides = plugin?.loop?.modules || {};
     
-    // 4. Restore semantic/episodic memory context
-    const ctxWithMemory = await this.extendContextWithMemory(
-        ctxWithWorkingMemory, 
-        taskContext.tenantId
-    );
+    // 4. Run one loop turn with event payload
+    const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
     
-    // 5. Restore agent-specific capabilities (sendTaskToAgent, etc.)
-    const fullContext = await this.extendContextWithCapabilities(ctxWithMemory);
-    
-    return fullContext;
+    // 5. Persist updated MentalState and process outcome
+    await this.sessionManager.save(tenantId, taskId, { M: mNext, meta: {...} });
+    await this.processOutcome(outcome, mNext, metrics);
 }
 ```
 
-## Working Memory Integration
+## Loop Module Integration
 
-### Turn-level flush and await exits
+### MentalState Persistence Triggers
 
-MentalState is persisted:
+MentalState is persisted when loop turns produce await outcomes:
 
-1. **`requestInput()` is called (await exit)**:
+1. **Transition returns `await_input`**:
    ```typescript
-   await ctx.requestInput("Choose option:", { onProvided: 'handleChoice' });
-   // → Triggers working memory persistence
+   transition: (env, exec, M) => {
+       if (exec.kind === 'ask_user') {
+           return { kind: 'await_input', token: exec.token };
+       }
+       // → Engine persists M and exits
+   }
    ```
 
-2. **`sendTaskToAgent()` with handlers (await exit if non-blocking)**:
+2. **Transition returns `await_tool` or `await_child`**:
    ```typescript
-   await ctx.sendTaskToAgent('child', input, { 
-       onCompleted: 'onChildDone' 
-   });
-   // → Triggers working memory persistence for parent context
+   transition: (env, exec, M) => {
+       if (exec.kind === 'tool' && exec.token) {
+           return { kind: 'await_tool', token: exec.token };
+       }
+       // → Engine persists M and waits for tool completion
+   }
    ```
 
-3. **Turn completion**: when the handler completes without awaiting.
+### MentalState Restoration in Modules
 
-### Working Memory Restoration
-
-When a handler is invoked, MentalState is fully restored and `ctx.vars` is rehydrated from `M.memory.shortTerm.vars`:
+When auto-resumed, modules have access to full MentalState:
 
 ```typescript
-export async function handleUserInput(ctx: Ctx, ev: { input: string }) {
-    // All working memory is available:
-    
-    const currentGoal = await ctx.getGoal();
-    // → Returns the goal set before requestInput
-    
-    const thoughts = await ctx.getThoughts();
-    // → Returns complete thought chain
-    
-    const previousDecision = await ctx.getDecision('approach');
-    // → Returns decisions made before requestInput
-    
-    const processingStage = ctx.vars.processingStage;
-    // → Returns variables set before requestInput
-    
-    // Continue processing with full context
-    await ctx.addThought(`User provided: ${ev.input}`);
-    await ctx.makeDecision('user_choice', ev.input, 'User selected option');
+// Policy module processes resumed input
+policy: (M, env) => {
+    if (env.input?.kind === 'input') {
+        // Access previous state
+        const previousGoals = M.goalState?.hierarchy?.roots || [];
+        const thoughts = M.memory.shortTerm.thoughts || [];
+        const vars = M.memory.shortTerm.vars || {};
+        
+        // Process the input event
+        return { kind: 'language', content: `Received: ${env.input.value}` };
+    }
+    return { kind: 'ask_user', prompt: 'What should I do?' };
+}
+
+// Learning module updates episodic memory
+learning: (prev, prevAction, obs) => {
+    const episodic = (prev.memory.longTerm.episodic || []) as any[];
+    episodic.push({ t: Date.now(), obs, act: prevAction });
+    return { ...prev, memory: { ...prev.memory, longTerm: { ...prev.memory.longTerm, episodic } } };
 }
 ```
 
-## Handler Context Extension
+## Loop-First Agent Definition
 
-### Core Context Methods Available
+### Agent with Loop Modules
 
-All durable handlers receive a fully-extended context with:
+Loop-first agents declare their modules directly in `createAgent`:
 
 ```typescript
-export async function myDurableHandler(ctx: Ctx, eventData: any) {
-    // Working Memory API
-    await ctx.setGoal("Updated goal");
-    await ctx.addThought("Handler executing");
-    await ctx.makeDecision("next_step", "continue", "Handler logic");
-    ctx.vars.handlerExecuted = true;
+export default createAgent({
+    manifest: { 
+        name: 'my-agent', 
+        version: '1.0.0', 
+        runMode: 'loop',
+        hitl: 'consent' 
+    },
+    loop: {
+        modules: {
+            policy: (M, env) => {
+                // Process auto-resumed events
+                if (env.input?.kind === 'input') {
+                    return { kind: 'language', content: `Received: ${env.input.value}` };
+                }
+                if (env.input?.kind === 'tool') {
+                    return { kind: 'language', content: `Tool result: ${JSON.stringify(env.input.result)}` };
+                }
+                
+                // Initial turn logic
+                return { kind: 'ask_user', prompt: 'What would you like to do?' };
+            },
+            
+            execution: async (action, ctx, M) => {
+                if (action.kind === 'ask_user') {
+                    const handle = await ctx.requestInput(action.prompt);
+                    return { kind: 'ask_user', token: handle.token };
+                }
+                if (action.kind === 'language') {
+                    await ctx.reply(action.content);
+                    return { kind: 'language', echoed: true };
+                }
+                return { kind: 'internal', done: true };
+            },
+            
+            transition: (env, exec, M) => {
+                if (exec.kind === 'ask_user') {
+                    return { kind: 'await_input', token: exec.token };
+                }
+                if (exec.kind === 'language') {
+                    return { kind: 'complete' };
+                }
+                return { kind: 'continue' };
+            }
+        }
+    },
     
-    // LLM API (with restored conversation)
-    await ctx.llm.call("Continue the conversation");
-    const messages = ctx.llm.getMessages(); // Full history available
-    
-    // Memory API
-    await ctx.memory.semantic.set('key', 'value');
-    const memories = await ctx.recall('previous interactions');
-    
-    // A2A API (with proper parent-child correlation)
-    await ctx.sendTaskToAgent('child', input, { 
-        onCompleted: 'onChildComplete' 
-    });
-    
-    // Input API
-    await ctx.requestInput('Follow-up question?', { 
-        onProvided: 'handleFollowUp' 
-    });
-    
-    // Response API
-    await ctx.reply([{ type: 'text', text: 'Handler response' }]);
-    ctx.complete();
-}
+    async handleTask(ctx) {
+        // Loop-first: modules drive execution, handleTask is minimal
+        return;
+    }
+}, import.meta.url);
 ```
 
-### Context Extension Implementation
+### Context and MentalState Integration
 
-The TaskEngine extends contexts through multiple layers:
+The TaskEngine provides a unified context with MentalState integration:
 
 ```typescript
-// Base context (minimal task info)
-let ctx = await this.createBaseContext(taskId, tenantId);
-
-// Layer 1: Working Memory
-ctx = await this.extendContextWithWorkingMemory(ctx, taskId);
-// Adds: setGoal, getGoal, addThought, getThoughts, makeDecision, etc.
-
-// Layer 2: Memory Systems  
-ctx = await this.extendContextWithMemory(ctx, tenantId);
-// Adds: ctx.memory.semantic, ctx.memory.episodic, ctx.recall, ctx.remember
-
-// Layer 3: LLM Capabilities
-ctx = await this.extendContextWithLLM(ctx);
-// Adds: ctx.llm with restored conversation state
-
-// Layer 4: A2A Capabilities
-ctx = await this.extendContextWithA2A(ctx);
-// Adds: ctx.sendTaskToAgent with proper parent-child correlation
-
-// Layer 5: Input/Output Capabilities
-ctx = await this.extendContextWithIO(ctx);
-// Adds: ctx.requestInput, ctx.reply, ctx.complete, ctx.fail
+// Context creation for loop turns
+async function createLoopContext(taskId: string, tenantId: string, M: MentalState) {
+    const ctx = await this.createBaseContext(taskId, tenantId);
+    
+    // Integrate MentalState with context
+    ctx.vars = new Proxy(M.memory.shortTerm.vars || {}, {
+        set: (target, key, value) => {
+            target[key] = value;
+            // vars changes are reflected in MentalState immediately
+            return true;
+        }
+    });
+    
+    // Context methods access/modify MentalState
+    ctx.requestInput = async (prompt) => {
+        const token = generateToken();
+        await this.durableHandlerRegistry.registerInput(token, taskId, tenantId);
+        return { token };
+    };
+    
+    ctx.sendTaskToAgent = async (agentId, input) => {
+        const token = generateToken();
+        await this.durableHandlerRegistry.registerChild(token, taskId, tenantId, agentId);
+        // Start child task...
+        return { token };
+    };
+    
+    return ctx;
+}
 ```
 
 ## Advanced Patterns
 
-### Nested Handler Chains
+### Multi-Step Workflows
 
-Durable handlers can create complex nested flows:
+Loop modules can implement complex multi-step flows through state tracking:
 
 ```typescript
 export default createAgent({
-    async handleTask(ctx) {
-        await ctx.setGoal("Complete multi-step workflow");
-        await ctx.requestInput("Step 1: Choose category", { 
-            onProvided: 'handleCategoryChoice' 
-        });
-        return;
-    }
+    manifest: { name: 'workflow-agent', runMode: 'loop' },
+    loop: {
+        modules: {
+            policy: (M, env) => {
+                const step = M.memory.shortTerm.vars?.step || 'category';
+                
+                // Process resumed input
+                if (env.input?.kind === 'input') {
+                    switch (step) {
+                        case 'category':
+                            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, category: env.input.value, step: 'subcategory' };
+                            return { kind: 'ask_user', prompt: 'Step 2: Choose subcategory' };
+                        case 'subcategory':
+                            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, subcategory: env.input.value, step: 'processing' };
+                            return { kind: 'subagent', target: 'processor', input: { 
+                                category: M.memory.shortTerm.vars.category, 
+                                subcategory: env.input.value 
+                            }};
+                    }
+                }
+                
+                // Process child completion
+                if (env.input?.kind === 'child') {
+                    return { kind: 'language', content: `Workflow completed: ${JSON.stringify(env.input.output)}` };
+                }
+                
+                // Initial step
+                return { kind: 'ask_user', prompt: 'Step 1: Choose category' };
+            },
+            
+            transition: (env, exec, M) => {
+                if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
+                if (exec.kind === 'subagent' && exec.token) return { kind: 'await_child', token: exec.token };
+                if (exec.kind === 'language') return { kind: 'complete' };
+                return { kind: 'continue' };
+            }
+        }
+    },
+    async handleTask(ctx) { return; }
 }, import.meta.url);
-
-export async function handleCategoryChoice(ctx: Ctx, ev: { input: string }) {
-    ctx.vars.category = ev.input;
-    await ctx.addThought(`User selected category: ${ev.input}`);
-    
-    // Chain to next step
-    await ctx.requestInput("Step 2: Choose subcategory", { 
-        onProvided: 'handleSubcategoryChoice' 
-    });
-}
-
-export async function handleSubcategoryChoice(ctx: Ctx, ev: { input: string }) {
-    ctx.vars.subcategory = ev.input;
-    await ctx.addThought(`User selected subcategory: ${ev.input}`);
-    
-    // Final processing
-    const category = ctx.vars.category;
-    const subcategory = ctx.vars.subcategory;
-    
-    await ctx.sendTaskToAgent('processor', { category, subcategory }, {
-        onCompleted: 'handleProcessingComplete'
-    });
-}
-
-export async function handleProcessingComplete(ctx: Ctx, ev: { input: any }) {
-    await ctx.reply([{ 
-        type: 'text', 
-        text: `Workflow completed: ${JSON.stringify(ev.input)}` 
-    }]);
-    ctx.complete();
-}
 ```
 
-### Conditional Handler Flows
+### Error Recovery and Retry Logic
 
-Handlers can implement branching logic:
+Loop modules can implement error recovery through state management:
 
 ```typescript
-export async function handleUserChoice(ctx: Ctx, ev: { input: string }) {
-    const choice = ev.input.toLowerCase();
-    await ctx.makeDecision('user_choice', choice, `User selected: ${choice}`);
+policy: (M, env) => {
+    const retryCount = M.memory.shortTerm.vars?.retryCount || 0;
     
-    switch (choice) {
-        case 'analyze':
-            await ctx.sendTaskToAgent('analyzer', ctx.vars.data, {
-                onCompleted: 'handleAnalysisComplete'
-            });
-            break;
-            
-        case 'summarize':
-            await ctx.sendTaskToAgent('summarizer', ctx.vars.data, {
-                onCompleted: 'handleSummaryComplete'  
-            });
-            break;
-            
-        case 'export':
-            await ctx.requestInput("Choose format (pdf/csv/json):", {
-                onProvided: 'handleFormatChoice'
-            });
-            break;
-            
-        default:
-            await ctx.reply([{ 
-                type: 'text', 
-                text: 'Invalid choice. Please try again.' 
-            }]);
-            await ctx.requestInput("Choose: analyze, summarize, or export", {
-                onProvided: 'handleUserChoice' // Retry
-            });
+    if (env.input?.kind === 'tool' && env.input.result?.error) {
+        if (retryCount < 3) {
+            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, retryCount: retryCount + 1 };
+            return { kind: 'ask_user', prompt: `Processing failed (attempt ${retryCount + 1}). Retry? (yes/no)` };
+        }
+        return { kind: 'language', content: 'Maximum retries exceeded. Operation failed.' };
     }
-}
-```
-
-### Error Recovery in Handlers
-
-Implement robust error handling:
-
-```typescript
-export async function handleProcessingStep(ctx: Ctx, ev: { input: any }) {
-    try {
-        await ctx.addThought("Starting processing step");
-        
-        const result = await ctx.sendTaskToAgent('processor', ev.input);
-        
-        await ctx.addThought("Processing completed successfully");
-        await ctx.reply([{ type: 'text', text: 'Step completed!' }]);
-        
-    } catch (error) {
-        await ctx.addThought(`Processing failed: ${error.message}`);
-        await ctx.makeDecision('error_recovery', 'retry', 'Processing failed, offering retry');
-        
-        await ctx.requestInput("Processing failed. Retry? (yes/no)", {
-            onProvided: 'handleRetryChoice'
-        });
+    
+    if (env.input?.kind === 'input' && env.input.value.toLowerCase() === 'yes') {
+        return { kind: 'tool', name: 'processor', args: M.memory.shortTerm.vars?.lastArgs || {} };
     }
-}
-
-export async function handleRetryChoice(ctx: Ctx, ev: { input: string }) {
-    if (ev.input.toLowerCase() === 'yes') {
-        // Retry the original operation
-        const originalInput = ctx.vars.lastProcessingInput;
-        await handleProcessingStep(ctx, { input: originalInput });
-    } else {
-        await ctx.reply([{ type: 'text', text: 'Operation cancelled.' }]);
-        ctx.complete();
-    }
+    
+    return { kind: 'tool', name: 'processor', args: { data: 'initial' } };
 }
 ```
 
 ## Performance Considerations
 
-### Context Restoration Costs
+### Auto-Resume Costs
 
-| Component | Typical Restoration Time | Size Impact |
-|-----------|-------------------------|-------------|
-| Working Memory | 5-15ms | ~1-10KB |
-| LLM Conversation | 10-50ms | ~1-100KB |
-| Semantic Memory | 20-100ms | ~10KB-1MB |
-| Handler Registry | 1-5ms | ~1KB |
-| **Total** | **35-170ms** | **~15KB-1MB** |
+| Component | Typical Cost | Size Impact |
+|-----------|--------------|-------------|
+| MentalState Load | 5-20ms | ~1-50KB |
+| Loop Turn Execution | 10-100ms | Variable |
+| MentalState Save | 5-15ms | ~1-50KB |
+| **Total per Resume** | **20-135ms** | **~3-150KB** |
 
 ### Optimization Strategies
 
-1. **Selective Context Restoration**:
+1. **MentalState Pruning**:
    ```typescript
-   // Only restore what's needed for the handler
-   const ctx = await this.restoreMinimalContext(taskId, ['working_memory', 'llm']);
+   // Automatic pruning in Learning module
+   learning: (prev, prevAction, obs) => {
+       const episodic = (prev.memory.longTerm.episodic || []) as any[];
+       // Keep only last 100 episodes
+       if (episodic.length > 100) episodic.splice(0, episodic.length - 100);
+       return { ...prev, memory: { ...prev.memory, longTerm: { ...prev.memory.longTerm, episodic } } };
+   }
    ```
 
-2. **Lazy Memory Loading**:
+2. **Efficient State Updates**:
    ```typescript
-   // Load memory on-demand
-   const memories = await ctx.recall('relevant_context', { lazy: true });
-   ```
-
-3. **Context Caching**:
-   ```typescript
-   // Cache frequently-accessed contexts
-   const cachedCtx = await this.contextCache.get(taskId);
+   // Minimize MentalState mutations
+   policy: (M, env) => {
+       // Read-only access preferred, mutations only when necessary
+       const currentVars = M.memory.shortTerm.vars || {};
+       return { kind: 'language', content: `Current step: ${currentVars.step}` };
+   }
    ```
 
 ## Debugging and Troubleshooting
 
 ### Common Issues
 
-#### 1. Handler Not Found
+#### 1. Auto-Resume Not Triggering
 ```bash
-Error: Handler 'myHandler' not found for task abc123
+Agent stuck after await_input, no resumed turn
 ```
 
-**Cause**: Handler not properly registered or registration expired.
+**Cause**: Token not found or event payload malformed.
 
-**Fix**: Ensure handler is exported and registration is valid:
+**Debug**: Check token registration and event structure:
 ```typescript
-// ✅ Correct: Handler properly exported
-export async function myHandler(ctx: Ctx, ev: any) { ... }
+// In execution module
+console.log('Registered token:', token, 'for task:', ctx.task.id);
 
-// ❌ Wrong: Handler not exported
-async function myHandler(ctx: Ctx, ev: any) { ... }
+// In auto-resume flow
+console.log('Event payload:', env.input);
 ```
 
-#### 2. Context Not Restored
+#### 2. MentalState Not Persisted
 ```bash
-Error: Cannot read property 'vars' of undefined
+Error: MentalState lost after resume
 ```
 
-**Cause**: Working memory not properly restored.
+**Cause**: MentalState not properly saved before await exit.
 
-**Debug**: Check working memory persistence:
+**Debug**: Check MentalState before/after persistence:
 ```typescript
-export async function myHandler(ctx: Ctx, ev: any) {
-    console.log('Context available:', {
-        hasVars: !!ctx.vars,
-        hasGoal: typeof ctx.getGoal === 'function',
-        hasThoughts: typeof ctx.getThoughts === 'function'
-    });
+transition: (env, exec, M) => {
+    console.log('MentalState before await:', JSON.stringify(M, null, 2));
+    if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
 }
 ```
 
-#### 3. LLM State Lost
+#### 3. Infinite Loop on Resume
 ```bash
-Error: No conversation history available
+Agent keeps asking same question after input provided
 ```
 
-**Cause**: LLM conversation not persisted or restored.
+**Cause**: Policy module not handling env.input correctly.
 
-**Debug**: Check LLM state:
+**Debug**: Check input processing logic:
 ```typescript
-export async function myHandler(ctx: Ctx, ev: any) {
-    const messages = ctx.llm.getMessages();
-    console.log('LLM messages restored:', messages.length);
+policy: (M, env) => {
+    console.log('Policy input:', env.input);
+    if (env.input?.kind === 'input') {
+        console.log('Processing input:', env.input.value);
+        // Ensure different action than initial turn
+    }
 }
 ```
 
 ### Debug Logging
 
-Enable detailed logging for handler debugging:
+Enable loop debugging:
 
 ```bash
 export LOG_LEVEL=debug
-export DEBUG_HANDLERS=true
-export DEBUG_WORKING_MEMORY=true
-export DEBUG_CONTEXT_RESTORATION=true
+export DEBUG_LOOP=true
+export DEBUG_MENTAL_STATE=true
+export DEBUG_AUTO_RESUME=true
 ```
 
-Key log messages to look for:
+Key log messages:
 ```
-[TaskEngine] Restoring context for handler 'myHandler' task 'abc123'
-[WorkingMemory] Loaded working memory: goal='...', thoughts=5, decisions=3
-[LLMContext] Restored conversation: 8 messages
-[HandlerRegistry] Found handler 'myHandler' for token 'xyz789'
-[TaskEngine] Handler 'myHandler' completed successfully
+[LoopRunner] Starting turn with env.input: {...}
+[TaskEngine] Auto-resuming task abc123 with payload: {...}
+[TaskEngine] MentalState persisted: {...}
+[TaskEngine] Loop outcome: await_input, token: xyz789
 ```
 
 ## Migration Guide
 
-### From Synchronous to Durable Handlers
+### From Handler-Based to Loop-First
 
 ```typescript
-// ❌ Before: Synchronous processing (blocks)
+// ❌ Before: Handler-based with onProvided
 export default createAgent({
     async handleTask(ctx) {
-        const userChoice = await promptUser("Choose option:");
-        const result = await processChoice(userChoice);
-        await ctx.reply([{ type: 'text', text: result }]);
-        ctx.complete();
+        await ctx.requestInput("Choose option:", { onProvided: 'handleChoice' });
     }
 });
 
-// ✅ After: Durable handler pattern
-export default createAgent({
-    async handleTask(ctx) {
-        await ctx.setGoal("Process user choice");
-        await ctx.requestInput("Choose option:", { 
-            onProvided: 'handleUserChoice' 
-        });
-        return;
-    }
-});
-
-export async function handleUserChoice(ctx: Ctx, ev: { input: string }) {
-    const result = await processChoice(ev.input);
-    await ctx.reply([{ type: 'text', text: result }]);
+export async function handleChoice(ctx: Ctx, ev: { input: string }) {
+    await ctx.reply(`You chose: ${ev.input}`);
     ctx.complete();
 }
-```
 
-### From Manual State Management
-
-```typescript
-// ❌ Before: Manual state management
-let globalState = {};
-
-export async function myHandler(ctx: Ctx, ev: any) {
-    const state = globalState[ctx.task.id] || {};
-    // ... process with state
-    globalState[ctx.task.id] = updatedState;
-}
-
-// ✅ After: Working memory
-export async function myHandler(ctx: Ctx, ev: any) {
-    // State is automatically persisted and restored
-    const currentGoal = await ctx.getGoal();
-    const previousThoughts = await ctx.getThoughts();
-    ctx.vars.processingStep = 'handler_executed';
-    
-    // State persists automatically across handler calls
-}
+// ✅ After: Loop-first with auto-resume
+export default createAgent({
+    manifest: { name: 'my-agent', runMode: 'loop' },
+    loop: {
+        modules: {
+            policy: (M, env) => {
+                if (env.input?.kind === 'input') {
+                    return { kind: 'language', content: `You chose: ${env.input.value}` };
+                }
+                return { kind: 'ask_user', prompt: 'Choose option:' };
+            },
+            transition: (env, exec, M) => {
+                if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
+                if (exec.kind === 'language') return { kind: 'complete' };
+                return { kind: 'continue' };
+            }
+        }
+    },
+    async handleTask(ctx) { return; }
+});
 ```
 
 ## See Also
 
-- [Working Memory](./memory/working-memory.md) - Working memory API details
-- [Child Input Required Flow](./a2a/child-input-required-flow.md) - Parent-child input handling
-- [A2A Usage Guide](./a2a/usage-guide.md) - Agent-to-agent communication patterns
-- [Memory SQL Adapter](./memory-sql-adapter.md) - Database persistence implementation
+- [Loop Modules](./loop/modules.md) - Loop module contracts and examples
+- [Loop Overview](./loop/overview.md) - High-level loop architecture
+- [A2A Integration](./task-engine-a2a-integration.md) - Child agent auto-resume
+- [Memory Systems](./memory/working-memory.md) - MentalState components

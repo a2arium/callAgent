@@ -539,7 +539,16 @@ export class A2AService implements IA2AService {
                 taskId: targetCtx.task.id
             });
 
-            const result = await targetPlugin.handleTask(targetCtx);
+            const result = targetPlugin.handleTask
+                ? await targetPlugin.handleTask(targetCtx)
+                : await (async () => {
+                    // Fallback to engine for loop-first agents without handleTask
+                    const eng = EngineLocator.getEngine() || taskEngine;
+                    try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                    const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
+                    await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId });
+                    return { status: 'started' } as any;
+                })();
 
             // Cache the result if caching is enabled
             if (this.agentResultCache && targetPlugin.manifest.cache?.enabled) {

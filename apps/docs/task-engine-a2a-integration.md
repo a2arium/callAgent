@@ -4,20 +4,21 @@
 
 The TaskEngine and A2AService work together to provide seamless agent-to-agent communication with proper parent-child correlation, handler registration, and context management. This document covers the technical architecture, integration patterns, and implementation details of how these systems coordinate.
 
-## Architecture Overview
+## Auto-Resume A2A Architecture
 
 ```mermaid
 graph TD
-    subgraph "Parent Agent Context"
-        PA[Parent Agent]
-        PH[Parent Handlers]
+    subgraph "Parent Agent Loop"
+        PP[Parent Policy]
+        PE[Parent Execution]
+        PT[Parent Transition]
+        PM[Parent MentalState]
     end
     
     subgraph "TaskEngine Core"
         TE[TaskEngine]
-        HR[HandlerRegistry]
-        WM[WorkingMemoryStore]
-        CS[ConversationStore]
+        TR[Token Registry]
+        SM[SessionManager]
     end
     
     subgraph "A2A Communication Layer"
@@ -26,75 +27,122 @@ graph TD
         AR[AgentRegistry]
     end
     
-    subgraph "Child Agent Context"
-        CA[Child Agent]
-        CH[Child Handlers]
+    subgraph "Child Agent Loop"
+        CP[Child Policy]
+        CE[Child Execution]
+        CT[Child Transition]
+        CM[Child MentalState]
     end
     
-    PA -->|sendTaskToAgent| TE
-    TE -->|register handlers| HR
-    TE -->|create token| TE
+    PP -->|subagent action| PE
+    PE -->|sendTaskToAgent| TE
+    TE -->|create token| TR
     TE -->|delegate execution| A2A
     A2A -->|serialize context| CSer
     A2A -->|find agent| AR
-    A2A -->|override requestInput| CA
-    CA -->|requestInput call| A2A
+    A2A -->|start child loop| CP
+    
+    CT -->|complete/fail| A2A
+    A2A -->|handleChildCompleted| TE
+    TE -->|auto-resume parent| PP
+    PP -->|env.input.kind='child'| PE
+    
+    CE -->|requestInput| A2A
     A2A -->|handleChildInputRequired| TE
-    TE -->|lookup handler| HR
-    TE -->|invoke parent| PH
-    TE -->|persist state| WM
-    TE -->|persist conversation| CS
+    TE -->|auto-resume parent| PP
+    PP -->|env.input.kind='child'| PE
 ```
 
 ## Component Responsibilities
 
 ### TaskEngine
-- **Handler Registration**: Maps tokens to handler functions
-- **Context Management**: Creates and extends agent contexts
+- **Token Management**: Creates and tracks tokens for async operations
+- **Auto-Resume**: Automatically resumes parent loops after child events
+- **MentalState Persistence**: Saves and restores agent state across turns
 - **Parent-Child Correlation**: Maintains relationships between parent and child tasks
-- **Persistence Orchestration**: Coordinates working memory and conversation state storage
-- **Handler Invocation**: Executes durable handlers with restored context
+- **Event Payload Injection**: Provides child results via `env.input` for parent processing
 
 ### A2AService
 - **Agent Discovery**: Locates target agents via AgentRegistry
 - **Context Serialization**: Packages source context for transfer
 - **Child Context Creation**: Creates isolated context for target agent
 - **Input Override**: Intercepts child `requestInput` calls for parent routing
-- **Execution Management**: Handles child agent lifecycle
+- **Event Routing**: Routes child completion/input events back to parent TaskEngine
 
-### HandlerRegistry
-- **Token Management**: Associates unique tokens with handler configurations
-- **Handler Storage**: Maintains mappings of handler names to functions
-- **Lookup Services**: Resolves handlers by token and event type
-- **Expiration Management**: Cleans up expired handler registrations
+### Token Registry
+- **Token Tracking**: Associates unique tokens with parent task IDs
+- **Event Type Mapping**: Maps tokens to event types (input, child, tool, external)
+- **Expiration Management**: Cleans up expired token registrations
 
-## Integration Flow Details
+## Auto-Resume Integration Flow
 
 ### 1. Parent Agent Initiates Child Task
 
 ```typescript
-// Parent agent calls sendTaskToAgent
-await ctx.sendTaskToAgent('analyzer', { data: 'sample' }, {
-    onInputRequired: 'onAnalyzerNeedsInput',
-    onCompleted: 'onAnalyzerCompleted'
-});
+// Parent Policy module returns subagent action
+policy: (M, env) => {
+    if (env.input?.kind === 'child') {
+        return { kind: 'language', content: `Child result: ${JSON.stringify(env.input.output)}` };
+    }
+    return { kind: 'subagent', target: 'analyzer', input: { data: 'sample' } };
+}
+
+// Parent Execution calls sendTaskToAgent
+execution: async (action, ctx, M) => {
+    if (action.kind === 'subagent') {
+        const handle = await ctx.sendTaskToAgent(action.target, action.input);
+        return { kind: 'subagent', token: handle.token };
+    }
+    // ...
+}
 ```
 
 **TaskEngine Processing**:
 ```typescript
-async sendTaskToAgent(ctx, targetAgent, taskInput, options) {
+async sendTaskToAgent(ctx, targetAgent, taskInput) {
     // 1. Create unique correlation token
     const token = crypto.randomUUID();
     
-    // 2. Register handlers with token
-    this.handlerRegistry.register(token, {
-        onInputRequired: options?.onInputRequired,
-        onCompleted: options?.onCompleted,
-        onFailed: options?.onFailed
-    });
+    // 2. Register token for auto-resume
+    await this.durableHandlerRegistry.registerChild(token, ctx.task.id, ctx.tenantId, targetAgent);
     
-    // 3. Create child task handle
-    const childTaskHandle = this.createTaskHandle(ctx.task.id, token);
+    // 3. Delegate to A2AService
+    const childResult = await this.a2aService.executeChildTask(targetAgent, taskInput, ctx);
+    
+    return { token };
+}
+
+// Parent Transition returns await_child
+transition: (env, exec, M) => {
+    if (exec.kind === 'subagent' && exec.token) {
+        return { kind: 'await_child', token: exec.token };
+    }
+    // ...
+}
+```
+
+### 2. Child Completion Auto-Resume
+
+When the child agent completes, A2AService triggers auto-resume:
+
+```typescript
+// In A2AService.handleChildCompleted
+async handleChildCompleted(childTaskId: string, result: unknown) {
+    const token = await this.getTokenForChildTask(childTaskId);
+    const parentTaskId = await this.getParentTaskId(token);
+    
+    // Auto-resume parent with child result
+    await this.taskEngine.handleChildCompleted({
+        tenantId: parentTenantId,
+        taskId: parentTaskId,
+        token,
+        output: result
+    });
+}
+
+// TaskEngine automatically runs one loop turn with:
+// env.input = { kind: 'child', token, output: result }
+```
     
     // 4. Delegate to A2A Service
     return await globalA2AService.sendTaskToAgent(ctx, targetAgent, taskInput, {
@@ -300,9 +348,8 @@ class ContextSerializer {
         
         if (options.inheritWorkingMemory) {
             serialized.workingMemory = {
-                goal: await sourceCtx.getGoal(),
-                thoughts: await sourceCtx.getThoughts(),
-                decisions: await sourceCtx.getAllDecisions(),
+                goals: await (sourceCtx as any).goals.read?.({}),
+                decisions: await (sourceCtx as any).decisions.read?.(),
                 variables: { ...sourceCtx.vars }
             };
         }
@@ -326,14 +373,14 @@ class ContextSerializer {
     async deserialize(serializedContext, targetCtx) {
         if (serializedContext.workingMemory) {
             const wm = serializedContext.workingMemory;
-            await targetCtx.setGoal(wm.goal);
+            await (targetCtx as any).goals.add?.({ title: wm.goal });
             
             for (const thought of wm.thoughts) {
-                await targetCtx.addThought(thought.content);
+                await (targetCtx as any).thoughts.add?.(thought.content);
             }
             
             for (const [key, decision] of Object.entries(wm.decisions)) {
-                await targetCtx.makeDecision(key, decision.decision, decision.reasoning);
+                await (targetCtx as any).thoughts.add?.(`Decision: ${key} ${decision.decision} (${decision.reasoning || ''})`);
             }
             
             targetCtx.vars = { ...wm.variables };
@@ -695,10 +742,3 @@ const result = await ctx.sendTaskToAgent('target', input, {
     onCompleted: 'handleResult'
 });
 ```
-
-## See Also
-
-- [Child Input Required Flow](./a2a/child-input-required-flow.md) - Detailed child input handling
-- [Durable Handlers and Persistence](./durable-handlers-and-persistence.md) - Handler persistence patterns
-- [A2A Architecture](./a2a/architecture.md) - High-level A2A system design
-- [Working Memory](./memory/working-memory.md) - Working memory integration

@@ -28,6 +28,8 @@
     "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream --tenant=customer-123",
     "run:hello": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}'",
     "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}' --no-resolve-deps",
+    "run:loop-mini": "yarn run-agent apps/examples/loop-agent-mini/AgentModule.ts '{\"name\": \"World\"}' --stream --format=console --no-resolve-deps",
+    "run:loop-mini:dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts apps/examples/loop-agent-mini/AgentModule.ts '{\"name\": \"search for cat cafes\"}' --stream --format=console --no-resolve-deps",
     "run:interactive-a2a": "yarn run-agent apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js '{}' --stream --format=console",
     "input": "node packages/core/dist/runner/runnerCli.js input",
     "run:calc": "run-agent apps/examples/calculator-workflow/dist/CoordinatorAgent.js '{\"expression\": \"5 * 2 + 3 - 1\"}'",
@@ -80,9 +82,9 @@
     "apps/examples/business-logic/*"
   ],
   "resolutions": {
-    "@callmessenger/core": "file:.local-vendor/callmessenger/callmessenger-core.tgz",
-    "@callmessenger/adapter-telegram": "file:.local-vendor/callmessenger/callmessenger-adapter-telegram.tgz",
-    "@callmessenger/adapter-web": "file:.local-vendor/callmessenger/callmessenger-adapter-web.tgz",
+    "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core",
+    "@callmessenger/adapter-telegram": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram",
+    "@callmessenger/adapter-web": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web",
     "uuid": "10.0.0"
   },
   "private": true,

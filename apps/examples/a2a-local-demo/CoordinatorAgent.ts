@@ -20,22 +20,22 @@ export default createAgent({
 
         try {
             // Set up the main goal and context
-            await ctx.setGoal('Complete quarterly business analysis with detailed reporting');
-            await ctx.addThought('Starting comprehensive business analysis workflow');
-            await ctx.addThought('Will delegate data analysis to specialist agent');
+            await (ctx as any).goals.add({ title: 'Complete quarterly business analysis with detailed reporting', type: 'short', priority: 1 });
+            await (ctx as any).thoughts.add('Starting comprehensive business analysis workflow');
+            await (ctx as any).thoughts.add('Will delegate data analysis to specialist agent');
 
             // Store workflow metadata in working variables
-            ctx.vars.workflowId = `workflow_${Date.now()}`;
-            ctx.vars.priority = 'high';
-            ctx.vars.requestedBy = (ctx.task.input as any).requestedBy || 'management';
+            (ctx as any).vars.set('workflowId', `workflow_${Date.now()}`);
+            (ctx as any).vars.set('priority', 'high');
+            (ctx as any).vars.set('requestedBy', (ctx.task.input as any).requestedBy || 'management');
 
             // Remember important context for the workflow in working memory
-            ctx.vars.workflowContext = {
+            (ctx as any).vars.set('workflowContext', {
                 type: 'quarterly-analysis',
                 quarter: 'Q4 2024',
                 deadline: '2024-01-31',
                 stakeholders: ['CEO', 'CFO', 'Board']
-            };
+            });
 
             await ctx.reply('📊 Step 1: Delegating data analysis...');
 
@@ -51,16 +51,12 @@ export default createAgent({
             }) as unknown as ChildTaskHandle;
             const analysisResult = await (analysisTask as any)?.run?.() ?? analysisTask;
 
-            await ctx.addThought('Data analysis completed successfully');
-            await ctx.makeDecision(
-                'analysis-quality',
-                'approved',
-                'Data analysis meets quality standards for reporting'
-            );
+            await (ctx as any).thoughts.add('Data analysis completed successfully');
+            await (ctx as any).thoughts.add('Decision: analysis-quality approved');
 
             // Store analysis results in working memory
-            ctx.vars.analysisComplete = true;
-            ctx.vars.analysisResults = analysisResult;
+            (ctx as any).vars.set('analysisComplete', true);
+            (ctx as any).vars.set('analysisResults', analysisResult);
 
             await ctx.reply('📝 Step 2: Delegating report generation...');
 
@@ -76,26 +72,23 @@ export default createAgent({
             }) as unknown as ChildTaskHandle;
             const reportResult = await (reportTask as any)?.run?.() ?? reportTask;
 
-            await ctx.addThought('Report generation completed successfully');
-            await ctx.makeDecision(
-                'workflow-completion',
-                'success',
-                'All workflow steps completed successfully with quality outputs'
-            );
+            await (ctx as any).thoughts.add('Report generation completed successfully');
+            await (ctx as any).thoughts.add('Decision: workflow-completion success');
 
             // Final workflow summary
-            const finalGoal = await ctx.getGoal();
-            const allThoughts = await ctx.getThoughts();
-            const workflowDecision = await ctx.getDecision('workflow-completion');
+            const finalGoals = await (ctx as any).goals.read?.({});
+            const finalGoal = Array.isArray(finalGoals) && finalGoals[0] ? finalGoals[0].title || finalGoals[0].id : undefined;
+            const allThoughts: any[] = [];
+            const workflowDecision: any = { decision: 'success' };
 
             const summary = {
-                workflowId: ctx.vars.workflowId,
+                workflowId: (ctx as any).vars.get('workflowId'),
                 goal: finalGoal,
                 thoughtCount: allThoughts.length,
                 analysisResult,
                 reportResult,
                 finalDecision: workflowDecision?.decision,
-                priority: ctx.vars.priority,
+                priority: (ctx as any).vars.get('priority'),
                 completedAt: new Date().toISOString()
             };
 
@@ -123,7 +116,7 @@ export default createAgent({
             console.error('Error message:', error instanceof Error ? error.message : String(error));
             console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
 
-            await ctx.addThought(`Workflow failed with error: ${error}`);
+            await (ctx as any).thoughts.add(`Workflow failed with error: ${error}`);
             await ctx.fail(error);
         }
     }

@@ -8,8 +8,13 @@ This document provides an index of all documentation in the CallAgent framework,
 
 ### Getting Started
 - [Monorepo Overview](./monorepo-overview.md) - Project structure and setup
-- [Agent Runner](./runner.md) - CLI tool for running agents
+- [Agent Runner](./runner.md) - CLI tool for running agents (with auto-resume support)
 - [Usage Tracking](./usage-tracking.md) - Usage metrics and monitoring
+
+### Loop-First Architecture
+- [Loop Overview](./loop/overview.md) - Loop execution model with auto-resume
+- [Loop Modules](./loop/modules.md) - Module contracts and agent-local declarations
+- [Loop-First Persistence](./durable-handlers-and-persistence.md) - MentalState persistence and auto-resume
 
 ### Memory System
 - [Memory SQL Adapter](./memory-sql-adapter.md) - Database persistence layer
@@ -29,25 +34,24 @@ This document provides an index of all documentation in the CallAgent framework,
 ### Architecture and Implementation
 - [A2A Architecture](./a2a/architecture.md) - System design overview
 - [Child Input Required Flow](./a2a/child-input-required-flow.md) - Parent-child input handling
-- [Durable Handlers and Persistence](./durable-handlers-and-persistence.md) - Handler lifecycle management
-- [TaskEngine A2A Integration](./task-engine-a2a-integration.md) - Core system coordination
+- [TaskEngine A2A Integration](./task-engine-a2a-integration.md) - Auto-resume A2A coordination
 
 ## Advanced Topics
 
-### Persistence and Database
-- **Database Persistence Patterns**: Covered in [Child Input Required Flow](./a2a/child-input-required-flow.md)
-- **Working Memory Storage**: Detailed in [Durable Handlers and Persistence](./durable-handlers-and-persistence.md)
-- **Context Restoration**: Technical details in [TaskEngine A2A Integration](./task-engine-a2a-integration.md)
+### Loop Architecture
+- **Module Contracts**: Detailed in [Loop Modules](./loop/modules.md)
+- **Auto-Resume Flow**: Covered in [Loop Overview](./loop/overview.md)
+- **MentalState Management**: Technical details in [Loop-First Persistence](./durable-handlers-and-persistence.md)
 
-### Handler Management
-- **Durable Handler Lifecycle**: [Durable Handlers and Persistence](./durable-handlers-and-persistence.md)
-- **Token-Based Correlation**: [TaskEngine A2A Integration](./task-engine-a2a-integration.md)
-- **Error Recovery**: Covered across multiple A2A documents
+### Persistence and Database
+- **MentalState Persistence**: [Loop-First Persistence](./durable-handlers-and-persistence.md)
+- **Token-Based Auto-Resume**: [TaskEngine A2A Integration](./task-engine-a2a-integration.md)
+- **Event Payload Injection**: Covered in loop architecture documents
 
 ### Debugging and Troubleshooting
-- **Child Input Flow Issues**: [Child Input Required Flow](./a2a/child-input-required-flow.md#common-issues-and-troubleshooting)
-- **Context Restoration Problems**: [Durable Handlers and Persistence](./durable-handlers-and-persistence.md#debugging-and-troubleshooting)
-- **Handler Registration Issues**: [TaskEngine A2A Integration](./task-engine-a2a-integration.md#debugging-and-monitoring)
+- **Auto-Resume Issues**: [Loop-First Persistence](./durable-handlers-and-persistence.md#debugging-and-troubleshooting)
+- **Loop Module Problems**: [Loop Modules](./loop/modules.md#troubleshooting)
+- **A2A Auto-Resume**: [TaskEngine A2A Integration](./task-engine-a2a-integration.md)
 
 ## Documentation by Complexity Level
 

@@ -120,8 +120,8 @@ export default createAgent({
     const input = ctx.task.input as { projectId: string; phase: string };
     
     // Set up project context
-    await ctx.setGoal?.(`Complete ${input.phase} phase for project ${input.projectId}`);
-    await ctx.addThought?.('Initializing project workflow');
+    await (ctx as any).goals.add({ title: `Complete ${input.phase} phase for project ${input.projectId}` });
+    await (ctx as any).thoughts.add('Initializing project workflow');
     
     // Store project metadata in variables
     ctx.vars!.projectId = input.projectId;
@@ -136,7 +136,7 @@ export default createAgent({
       inheritWorkingMemory: true  // Team inherits goal, thoughts, and variables
     });
 
-    await ctx.addThought?.('Development phase completed');
+    await (ctx as any).thoughts.add('Development phase completed');
 
     // Delegate to QA team with updated context
     const qaResult = await ctx.sendTaskToAgent?.('qa-team', {
@@ -165,13 +165,14 @@ export default createAgent({
 
   async handleTask(ctx) {
     // Access inherited context
-    const inheritedGoal = await ctx.getGoal?.();
+    const goals = await (ctx as any).goals.read?.({});
+    const inheritedGoal = Array.isArray(goals) && goals[0] ? (goals[0].title || goals[0].id) : undefined;
     const projectId = ctx.vars?.projectId;
     const priority = ctx.vars?.priority;
     
-    await ctx.addThought?.(`Development team activated for project ${projectId}`);
-    await ctx.addThought?.(`Working on goal: ${inheritedGoal}`);
-    await ctx.addThought?.(`Priority level: ${priority}`);
+    await (ctx as any).thoughts.add(`Development team activated for project ${projectId}`);
+    await (ctx as any).thoughts.add(`Working on goal: ${inheritedGoal}`);
+    await (ctx as any).thoughts.add(`Priority level: ${priority}`);
 
     const input = ctx.task.input as { requirements: string[] };
     
@@ -325,40 +326,40 @@ export default createAgent({
   async handleTask(ctx) {
     const input = ctx.task.input as { dataSource: string; outputFormat: string };
     
-    await ctx.setGoal?.(`Process data from ${input.dataSource} to ${input.outputFormat}`);
+    await (ctx as any).goals.add({ title: `Process data from ${input.dataSource} to ${input.outputFormat}` });
     ctx.vars!.pipelineId = `pipeline-${Date.now()}`;
     ctx.vars!.startTime = new Date().toISOString();
 
     // Stage 1: Data Extraction
-    await ctx.addThought?.('Starting data extraction phase');
+    await (ctx as any).thoughts.add('Starting data extraction phase');
     const extractedData = await ctx.sendTaskToAgent?.('data-extractor', {
       source: input.dataSource,
       format: 'raw'
     }, { inheritWorkingMemory: true });
 
     // Stage 2: Data Cleaning
-    await ctx.addThought?.('Starting data cleaning phase');
+    await (ctx as any).thoughts.add('Starting data cleaning phase');
     const cleanedData = await ctx.sendTaskToAgent?.('data-cleaner', {
       rawData: extractedData.data,
       cleaningRules: ['remove-nulls', 'normalize-dates', 'validate-types']
     }, { inheritWorkingMemory: true });
 
     // Stage 3: Data Transformation
-    await ctx.addThought?.('Starting data transformation phase');
+    await (ctx as any).thoughts.add('Starting data transformation phase');
     const transformedData = await ctx.sendTaskToAgent?.('data-transformer', {
       cleanData: cleanedData.data,
       targetSchema: input.outputFormat
     }, { inheritWorkingMemory: true });
 
     // Stage 4: Data Validation
-    await ctx.addThought?.('Starting data validation phase');
+    await (ctx as any).thoughts.add('Starting data validation phase');
     const validationResult = await ctx.sendTaskToAgent?.('data-validator', {
       transformedData: transformedData.data,
       validationRules: ['schema-compliance', 'data-integrity']
     }, { inheritWorkingMemory: true });
 
     ctx.vars!.endTime = new Date().toISOString();
-    await ctx.addThought?.('Pipeline completed successfully');
+    await (ctx as any).thoughts.add('Pipeline completed successfully');
 
     return {
       pipelineId: ctx.vars!.pipelineId,
@@ -394,7 +395,7 @@ export default createAgent({
   async handleTask(ctx) {
     const input = ctx.task.input as { dataset: unknown[]; operations: string[] };
     
-    await ctx.setGoal?.('Process dataset with multiple parallel operations');
+    await (ctx as any).goals.add({ title: 'Process dataset with multiple parallel operations' });
     ctx.vars!.batchId = `batch-${Date.now()}`;
     ctx.vars!.totalOperations = input.operations.length;
 
@@ -447,7 +448,7 @@ export default createAgent({
       data: unknown;
     };
     
-    await ctx.setGoal?.(`Route ${input.taskType} task to appropriate specialist`);
+    await (ctx as any).goals.add({ title: `Route ${input.taskType} task to appropriate specialist` });
     ctx.vars!.routingDecision = 'pending';
     ctx.vars!.taskMetadata = {
       type: input.taskType,
@@ -480,7 +481,7 @@ export default createAgent({
     }
 
     ctx.vars!.routingDecision = targetAgent;
-    await ctx.addThought?.(`Routing to ${targetAgent} based on ${input.taskType}/${input.complexity}/${input.priority}`);
+    await (ctx as any).thoughts.add(`Routing to ${targetAgent} based on ${input.taskType}/${input.complexity}/${input.priority}`);
 
     const result = await ctx.sendTaskToAgent?.(targetAgent, input.data, options);
 
@@ -516,14 +517,14 @@ export default createAgent({
   async handleTask(ctx) {
     const input = ctx.task.input as { task: string; data: unknown };
     
-    await ctx.setGoal?.(`Complete ${input.task} with resilience`);
+    await (ctx as any).goals.add({ title: `Complete ${input.task} with resilience` });
     ctx.vars!.attemptCount = 0;
     ctx.vars!.fallbackStrategy = 'multi-tier';
 
     // Primary attempt
     try {
       ctx.vars!.attemptCount = 1;
-      await ctx.addThought?.('Attempting primary agent');
+      await (ctx as any).thoughts.add('Attempting primary agent');
       
       const result = await ctx.sendTaskToAgent?.('primary-agent', input.data, {
         inheritWorkingMemory: true
@@ -537,12 +538,12 @@ export default createAgent({
       };
       
     } catch (primaryError) {
-      await ctx.addThought?.(`Primary agent failed: ${primaryError.message}`);
+      await (ctx as any).thoughts.add(`Primary agent failed: ${primaryError.message}`);
       
       // Secondary attempt
       try {
         ctx.vars!.attemptCount = 2;
-        await ctx.addThought?.('Attempting secondary agent');
+        await (ctx as any).thoughts.add('Attempting secondary agent');
         
         const result = await ctx.sendTaskToAgent?.('secondary-agent', input.data, {
           inheritWorkingMemory: true
@@ -557,12 +558,12 @@ export default createAgent({
         };
         
       } catch (secondaryError) {
-        await ctx.addThought?.(`Secondary agent failed: ${secondaryError.message}`);
+        await (ctx as any).thoughts.add(`Secondary agent failed: ${secondaryError.message}`);
         
         // Tertiary attempt with simplified processing
         try {
           ctx.vars!.attemptCount = 3;
-          await ctx.addThought?.('Attempting fallback agent with simplified processing');
+          await (ctx as any).thoughts.add('Attempting fallback agent with simplified processing');
           
           const result = await ctx.sendTaskToAgent?.('fallback-agent', {
             originalData: input.data,
@@ -581,7 +582,7 @@ export default createAgent({
           };
           
         } catch (fallbackError) {
-          await ctx.addThought?.(`All agents failed, using local processing`);
+          await (ctx as any).thoughts.add(`All agents failed, using local processing`);
           
           // Final fallback - local processing
           const localResult = await this.processLocally(input.data);
@@ -642,7 +643,7 @@ export default createAgent({
     while (ctx.vars!.retryCount < ctx.vars!.maxRetries) {
       try {
         ctx.vars!.retryCount++;
-        await ctx.addThought?.(`Attempt ${ctx.vars!.retryCount} of ${ctx.vars!.maxRetries}`);
+        await (ctx as any).thoughts.add(`Attempt ${ctx.vars!.retryCount} of ${ctx.vars!.maxRetries}`);
         
         const startTime = Date.now();
         
@@ -659,7 +660,7 @@ export default createAgent({
         const result = await Promise.race([agentPromise, timeoutPromise]);
         const duration = Date.now() - startTime;
         
-        await ctx.addThought?.(`Agent call succeeded in ${duration}ms`);
+        await (ctx as any).thoughts.add(`Agent call succeeded in ${duration}ms`);
         
         return {
           success: true,
@@ -670,7 +671,7 @@ export default createAgent({
         
       } catch (error) {
         const isTimeout = error.message.includes('timeout');
-        await ctx.addThought?.(`Attempt ${ctx.vars!.retryCount} failed: ${error.message}`);
+        await (ctx as any).thoughts.add(`Attempt ${ctx.vars!.retryCount} failed: ${error.message}`);
         
         if (ctx.vars!.retryCount >= ctx.vars!.maxRetries) {
           return {
@@ -683,7 +684,7 @@ export default createAgent({
         
         // Wait before retry (exponential backoff)
         const backoffMs = Math.pow(2, ctx.vars!.retryCount) * 1000;
-        await ctx.addThought?.(`Waiting ${backoffMs}ms before retry`);
+        await (ctx as any).thoughts.add(`Waiting ${backoffMs}ms before retry`);
         await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
@@ -715,7 +716,7 @@ export default createAgent({
       paymentMethod: unknown;
     };
     
-    await ctx.setGoal?.(`Process order ${order.orderId} for customer ${order.customerId}`);
+    await (ctx as any).goals.add({ title: `Process order ${order.orderId} for customer ${order.customerId}` });
     ctx.vars!.orderId = order.orderId;
     ctx.vars!.customerId = order.customerId;
     ctx.vars!.orderValue = order.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
@@ -723,7 +724,7 @@ export default createAgent({
 
     try {
       // Step 1: Validate order
-      await ctx.addThought?.('Validating order details');
+      await (ctx as any).thoughts.add('Validating order details');
       const validation = await ctx.sendTaskToAgent?.('order-validator', {
         order: order
       }, { inheritWorkingMemory: true });
@@ -733,7 +734,7 @@ export default createAgent({
       }
 
       // Step 2: Process payment
-      await ctx.addThought?.('Processing payment');
+      await (ctx as any).thoughts.add('Processing payment');
       const payment = await ctx.sendTaskToAgent?.('payment-processor', {
         orderId: order.orderId,
         amount: ctx.vars!.orderValue,
@@ -741,13 +742,13 @@ export default createAgent({
       }, { inheritWorkingMemory: true });
 
       // Step 3: Check inventory
-      await ctx.addThought?.('Checking inventory availability');
+      await (ctx as any).thoughts.add('Checking inventory availability');
       const inventory = await ctx.sendTaskToAgent?.('inventory-manager', {
         items: order.items
       }, { inheritWorkingMemory: true });
 
       // Step 4: Reserve items
-      await ctx.addThought?.('Reserving inventory items');
+      await (ctx as any).thoughts.add('Reserving inventory items');
       const reservation = await ctx.sendTaskToAgent?.('inventory-manager', {
         action: 'reserve',
         items: order.items,
@@ -755,7 +756,7 @@ export default createAgent({
       }, { inheritWorkingMemory: true });
 
       // Step 5: Create shipment
-      await ctx.addThought?.('Creating shipment');
+      await (ctx as any).thoughts.add('Creating shipment');
       const shipment = await ctx.sendTaskToAgent?.('shipping-coordinator', {
         orderId: order.orderId,
         items: order.items,
@@ -764,7 +765,7 @@ export default createAgent({
       }, { inheritWorkingMemory: true });
 
       // Step 6: Send confirmation
-      await ctx.addThought?.('Sending order confirmation');
+      await (ctx as any).thoughts.add('Sending order confirmation');
       const notification = await ctx.sendTaskToAgent?.('notification-service', {
         type: 'order-confirmation',
         customerId: order.customerId,
@@ -773,7 +774,7 @@ export default createAgent({
       }, { inheritWorkingMemory: true });
 
       ctx.vars!.processingCompleted = new Date().toISOString();
-      await ctx.addThought?.('Order processing completed successfully');
+      await (ctx as any).thoughts.add('Order processing completed successfully');
 
       return {
         orderId: order.orderId,
@@ -793,7 +794,7 @@ export default createAgent({
       };
 
     } catch (error) {
-      await ctx.addThought?.(`Order processing failed: ${error.message}`);
+      await (ctx as any).thoughts.add(`Order processing failed: ${error.message}`);
       
       // Initiate rollback
       const rollback = await ctx.sendTaskToAgent?.('order-rollback-service', {
@@ -835,7 +836,7 @@ export default createAgent({
       platform: string;
     };
     
-    await ctx.setGoal?.(`Moderate ${content.type} content ${content.contentId}`);
+    await (ctx as any).goals.add({ title: `Moderate ${content.type} content ${content.contentId}` });
     ctx.vars!.contentId = content.contentId;
     ctx.vars!.contentType = content.type;
     ctx.vars!.userId = content.userId;
@@ -854,7 +855,7 @@ export default createAgent({
 
     try {
       // Stage 1: Automated content analysis
-      await ctx.addThought?.('Starting automated content analysis');
+      await (ctx as any).thoughts.add('Starting automated content analysis');
       analysisResults.automated = await ctx.sendTaskToAgent?.('automated-content-analyzer', {
         content: content.content,
         type: content.type
@@ -864,7 +865,7 @@ export default createAgent({
       });
 
       // Stage 2: Toxicity detection
-      await ctx.addThought?.('Analyzing content toxicity');
+      await (ctx as any).thoughts.add('Analyzing content toxicity');
       analysisResults.toxicity = await ctx.sendTaskToAgent?.('toxicity-detector', {
         content: content.content,
         type: content.type
@@ -874,7 +875,7 @@ export default createAgent({
       });
 
       // Stage 3: Spam detection
-      await ctx.addThought?.('Checking for spam indicators');
+      await (ctx as any).thoughts.add('Checking for spam indicators');
       analysisResults.spam = await ctx.sendTaskToAgent?.('spam-detector', {
         content: content.content,
         userId: content.userId,
@@ -885,7 +886,7 @@ export default createAgent({
       });
 
       // Stage 4: Policy compliance check
-      await ctx.addThought?.('Checking policy compliance');
+      await (ctx as any).thoughts.add('Checking policy compliance');
       analysisResults.policy = await ctx.sendTaskToAgent?.('policy-checker', {
         content: content.content,
         type: content.type,
@@ -896,7 +897,7 @@ export default createAgent({
       });
 
       // Stage 5: Risk assessment
-      await ctx.addThought?.('Performing risk assessment');
+      await (ctx as any).thoughts.add('Performing risk assessment');
       const riskAssessment = await ctx.sendTaskToAgent?.('risk-assessor', {
         contentId: content.contentId,
         analysisResults: analysisResults
@@ -906,7 +907,7 @@ export default createAgent({
       });
 
       // Stage 6: Moderation decision
-      await ctx.addThought?.('Making moderation decision');
+      await (ctx as any).thoughts.add('Making moderation decision');
       const decision = await ctx.sendTaskToAgent?.('moderation-decision-maker', {
         contentId: content.contentId,
         riskAssessment: riskAssessment,
@@ -918,7 +919,7 @@ export default createAgent({
 
       // Stage 7: Action execution (if needed)
       if (decision.action !== 'approve') {
-        await ctx.addThought?.(`Executing moderation action: ${decision.action}`);
+        await (ctx as any).thoughts.add(`Executing moderation action: ${decision.action}`);
         const actionResult = await ctx.sendTaskToAgent?.('moderation-action-executor', {
           contentId: content.contentId,
           action: decision.action,
@@ -933,7 +934,7 @@ export default createAgent({
       }
 
       ctx.vars!.moderationCompleted = new Date().toISOString();
-      await ctx.addThought?.('Content moderation completed');
+      await (ctx as any).thoughts.add('Content moderation completed');
 
       return {
         contentId: content.contentId,
@@ -948,7 +949,7 @@ export default createAgent({
       };
 
     } catch (error) {
-      await ctx.addThought?.(`Moderation failed: ${error.message}`);
+      await (ctx as any).thoughts.add(`Moderation failed: ${error.message}`);
       
       // Fallback to human review
       const humanReview = await ctx.sendTaskToAgent?.('human-review-queue', {

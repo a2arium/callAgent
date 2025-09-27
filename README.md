@@ -286,7 +286,7 @@ export default createAgent(manifest, {
     const { message } = ctx.input;
     
     // Use memory
-    await ctx.memory.semantic.set('last_message', message);
+    await ctx.semantic?.add({ id: 'last_message', value: message });
     
     // Use LLM
     const response = await ctx.llm.call({

@@ -12,7 +12,7 @@ export default createAgent({
     llmConfig,
     async handleTask(ctx: Ctx) {
         // Demonstrate MentalState-backed vars and goals
-        ctx.vars.debugString = 'Analyzer: ready';
+        ctx.vars.set('debugString', 'Analyzer: ready');
         const goalId = await (ctx as any).addGoal({ title: 'Analyze threshold', type: 'short', priority: 1 });
         await ctx.llm.call('Hello, how are you?');
         const history = ctx.llm.getMessages();
@@ -29,10 +29,10 @@ export async function onThreshold(ctx: Ctx, ev: { input: number }) {
     const history = ctx.llm.getMessages();
     console.log('Analyzer: history', history);
     console.log('Analyzer: onThreshold history', history);
-    console.log('Analyzer: debugString', ctx.vars.debugString);
+    console.log('Analyzer: debugString', (ctx as any).vars.get('debugString'));
     const goals = await (ctx as any).listGoals();
     console.log('Analyzer: goals on resume', goals);
     const threshold = Number(ev.input) * 2 || 50;
-    await ctx.reply([{ type: 'text', text: `Analyzer: threshold=${threshold}; vars.debugString=${ctx.vars.debugString}; goals=${goals?.length || 0}` }]);
+    await ctx.reply([{ type: 'text', text: `Analyzer: threshold=${threshold}; vars.debugString=${(ctx as any).vars.get('debugString')}; goals=${goals?.length || 0}` }]);
     return { threshold };
 }

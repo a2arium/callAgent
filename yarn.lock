@@ -532,38 +532,23 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@callmessenger/adapter-telegram@file:.local-vendor/callmessenger/callmessenger-adapter-telegram.tgz::locator=callagent%40workspace%3A.":
-  version: 0.1.1
-  resolution: "@callmessenger/adapter-telegram@file:.local-vendor/callmessenger/callmessenger-adapter-telegram.tgz#.local-vendor/callmessenger/callmessenger-adapter-telegram.tgz::hash=f01cbb&locator=callagent%40workspace%3A."
-  dependencies:
-    "@callmessenger/core": "npm:0.1.2"
-    zod: "npm:^3.23.8"
-  checksum: 10c0/d1d1d29a5a161146884a6054496641503b4ece6ca913ee965554758f15f5b81ac048c83e537ccd35f71b05d9f8230c7cb43aca8ad779a319f405476270aabf88
+"@callmessenger/adapter-telegram@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram::locator=callagent%40workspace%3A.":
+  version: 0.0.0-use.local
+  resolution: "@callmessenger/adapter-telegram@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram::locator=callagent%40workspace%3A."
   languageName: node
-  linkType: hard
+  linkType: soft
 
-"@callmessenger/adapter-web@file:.local-vendor/callmessenger/callmessenger-adapter-web.tgz::locator=callagent%40workspace%3A.":
-  version: 0.1.0
-  resolution: "@callmessenger/adapter-web@file:.local-vendor/callmessenger/callmessenger-adapter-web.tgz#.local-vendor/callmessenger/callmessenger-adapter-web.tgz::hash=0f586e&locator=callagent%40workspace%3A."
-  dependencies:
-    ws: "npm:^8.18.0"
-  checksum: 10c0/c73eb7d390b20cd9c912f9f239d82ef9ce07a2163f2fb998542c92299407ecf4e68538bb18a2a835011344c9299e7061d5ddb50ae077f449151a0c4e7b9bb318
+"@callmessenger/adapter-web@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web::locator=callagent%40workspace%3A.":
+  version: 0.0.0-use.local
+  resolution: "@callmessenger/adapter-web@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web::locator=callagent%40workspace%3A."
   languageName: node
-  linkType: hard
+  linkType: soft
 
-"@callmessenger/core@file:.local-vendor/callmessenger/callmessenger-core.tgz::locator=callagent%40workspace%3A.":
-  version: 0.1.2
-  resolution: "@callmessenger/core@file:.local-vendor/callmessenger/callmessenger-core.tgz#.local-vendor/callmessenger/callmessenger-core.tgz::hash=925728&locator=callagent%40workspace%3A."
-  dependencies:
-    "@callmessenger/adapter-telegram": "npm:0.1.1"
-    ngrok: "npm:5.0.0-beta.2"
-    selfsigned: "npm:^2.4.1"
-    undici: "npm:^6.19.8"
-    ws: "npm:^8.18.0"
-    zod: "npm:^3.23.8"
-  checksum: 10c0/576dd6f9a37e3cc5e3438bfeddd724667023e1ad3e123b5646ae0eaef2fa50fc383ca22cc57dfb5c2423d423bfe6f280eefebf7905c64aefa74a2bceece5a56a
+"@callmessenger/core@link:/Users/maximantonov/Work/_lab/callMessenger/packages/core::locator=callagent%40workspace%3A.":
+  version: 0.0.0-use.local
+  resolution: "@callmessenger/core@link:/Users/maximantonov/Work/_lab/callMessenger/packages/core::locator=callagent%40workspace%3A."
   languageName: node
-  linkType: hard
+  linkType: soft
 
 "@cspotcode/source-map-support@npm:^0.8.0":
   version: 0.8.1
@@ -785,9 +770,9 @@ __metadata:
   resolution: "@examples/telegram-bridge-demo@workspace:apps/examples/telegram-bridge-demo"
   dependencies:
     "@a2arium/callagent-chat-bridge": "workspace:*"
-    "@callmessenger/adapter-telegram": "file:.local-vendor/callmessenger/callmessenger-adapter-telegram.tgz"
-    "@callmessenger/adapter-web": "file:.local-vendor/callmessenger/callmessenger-adapter-web.tgz"
-    "@callmessenger/core": "file:.local-vendor/callmessenger/callmessenger-core.tgz"
+    "@callmessenger/adapter-telegram": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram"
+    "@callmessenger/adapter-web": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web"
+    "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core"
     "@types/ws": "npm:^8"
     tsx: "npm:^4.19.0"
   languageName: unknown
@@ -1747,15 +1732,6 @@ __metadata:
     "@types/node": "npm:*"
     form-data: "npm:^4.0.4"
   checksum: 10c0/6313c89f62c50bd0513a6839cdff0a06727ac5495ccbb2eeda51bb2bbbc4f3c0a76c0393a491b7610af703d3d2deb6cf60e37e59c81ceeca803ffde745dbf309
-  languageName: node
-  linkType: hard
-
-"@types/node-forge@npm:^1.3.0":
-  version: 1.3.14
-  resolution: "@types/node-forge@npm:1.3.14"
-  dependencies:
-    "@types/node": "npm:*"
-  checksum: 10c0/da6158fd34fa7652aa7f8164508f97a76b558724ab292f13c257e39d54d95d4d77604e8fb14dc454a867f1aeec7af70118294889195ec4400cecbb8a5c77a212
   languageName: node
   linkType: hard
 
@@ -4746,6 +4722,12 @@ __metadata:
   languageName: node
   linkType: hard
 
+"loop-agent-mini@workspace:apps/examples/loop-agent-mini":
+  version: 0.0.0-use.local
+  resolution: "loop-agent-mini@workspace:apps/examples/loop-agent-mini"
+  languageName: unknown
+  linkType: soft
+
 "lowercase-keys@npm:^2.0.0":
   version: 2.0.0
   resolution: "lowercase-keys@npm:2.0.0"
@@ -5065,7 +5047,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ngrok@npm:5.0.0-beta.2, ngrok@npm:^5.0.0-beta.2":
+"ngrok@npm:^5.0.0-beta.2":
   version: 5.0.0-beta.2
   resolution: "ngrok@npm:5.0.0-beta.2"
   dependencies:
@@ -5120,13 +5102,6 @@ __metadata:
     fetch-blob: "npm:^3.1.4"
     formdata-polyfill: "npm:^4.0.10"
   checksum: 10c0/f3d5e56190562221398c9f5750198b34cf6113aa304e34ee97c94fd300ec578b25b2c2906edba922050fce983338fde0d5d34fcb0fc3336ade5bd0e429ad7538
-  languageName: node
-  linkType: hard
-
-"node-forge@npm:^1":
-  version: 1.3.1
-  resolution: "node-forge@npm:1.3.1"
-  checksum: 10c0/e882819b251a4321f9fc1d67c85d1501d3004b4ee889af822fd07f64de3d1a8e272ff00b689570af0465d65d6bf5074df9c76e900e0aff23e60b847f2a46fbe8
   languageName: node
   linkType: hard
 
@@ -5903,16 +5878,6 @@ __metadata:
   version: 2.1.2
   resolution: "safer-buffer@npm:2.1.2"
   checksum: 10c0/7e3c8b2e88a1841c9671094bbaeebd94448111dd90a81a1f606f3f67708a6ec57763b3b47f06da09fc6054193e0e6709e77325415dc8422b04497a8070fa02d4
-  languageName: node
-  linkType: hard
-
-"selfsigned@npm:^2.4.1":
-  version: 2.4.1
-  resolution: "selfsigned@npm:2.4.1"
-  dependencies:
-    "@types/node-forge": "npm:^1.3.0"
-    node-forge: "npm:^1"
-  checksum: 10c0/521829ec36ea042f7e9963bf1da2ed040a815cf774422544b112ec53b7edc0bc50a0f8cc2ae7aa6cc19afa967c641fd96a15de0fc650c68651e41277d2e1df09
   languageName: node
   linkType: hard
 
@@ -6739,13 +6704,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"undici@npm:^6.19.8":
-  version: 6.21.3
-  resolution: "undici@npm:6.21.3"
-  checksum: 10c0/294da109853fad7a6ef5a172ad0ca3fb3f1f60cf34703d062a5ec967daf69ad8c03b52e6d536c5cba3bb65615769bf08e5b30798915cbccdddaca01045173dda
-  languageName: node
-  linkType: hard
-
 "unique-filename@npm:^4.0.0":
   version: 4.0.0
   resolution: "unique-filename@npm:4.0.0"
@@ -6974,21 +6932,6 @@ __metadata:
     imurmurhash: "npm:^0.1.4"
     signal-exit: "npm:^3.0.7"
   checksum: 10c0/a2c282c95ef5d8e1c27b335ae897b5eca00e85590d92a3fd69a437919b7b93ff36a69ea04145da55829d2164e724bc62202cdb5f4b208b425aba0807889375c7
-  languageName: node
-  linkType: hard
-
-"ws@npm:^8.18.0":
-  version: 8.18.3
-  resolution: "ws@npm:8.18.3"
-  peerDependencies:
-    bufferutil: ^4.0.1
-    utf-8-validate: ">=5.0.2"
-  peerDependenciesMeta:
-    bufferutil:
-      optional: true
-    utf-8-validate:
-      optional: true
-  checksum: 10c0/eac918213de265ef7cb3d4ca348b891a51a520d839aa51cdb8ca93d4fa7ff9f6ccb339ccee89e4075324097f0a55157c89fa3f7147bde9d8d7e90335dc087b53
   languageName: node
   linkType: hard
 

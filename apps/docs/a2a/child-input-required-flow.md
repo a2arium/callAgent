@@ -54,9 +54,9 @@ sequenceDiagram
 When an agent calls `requestInput`, the framework automatically persists:
 
 1. **Working Memory State**:
-   - Current goal (`ctx.getGoal()`)
-   - Thought chain (`ctx.getThoughts()`)
-   - Decision history (`ctx.getAllDecisions()`)
+   - Current goals (`ctx.goals.read()`)
+   - Thought chain (recorded via `ctx.thoughts.add`)
+   - Decision history (`ctx.decisions.read()`)
    - Working variables (`ctx.vars`)
 
 2. **LLM Conversation State**:
@@ -76,9 +76,9 @@ When resuming from `tasks/input`:
 ```typescript
 // 1. Load persisted working memory
 const workingMemory = await workingMemoryStore.get(taskId);
-await ctx.setGoal(workingMemory.goal);
+await ctx.goals.add({ title: workingMemory.goal });
 for (const thought of workingMemory.thoughts) {
-    await ctx.addThought(thought.content);
+    await ctx.thoughts.add(thought.content);
 }
 
 // 2. Restore LLM conversation state
@@ -257,7 +257,7 @@ await globalA2AService.sendTaskToAgent(ctx, targetAgent, taskInput, {
 ### Issue: Context Not Restored Properly
 
 **Symptoms**:
-- Handler executes but `ctx.vars`, `ctx.getGoal()`, or LLM state is missing
+- Handler executes but `ctx.vars`, `ctx.goals.read()`, or LLM state is missing
 - "Working memory not available" errors
 
 **Root Cause**: Working memory not persisted or restored correctly
@@ -310,7 +310,7 @@ await ctx.sendTaskToAgent('data-analyzer', input, {
 ```typescript
 export async function onAnalyzerNeedsInput(ctx: Ctx, ev: { prompt: string; schema?: unknown; token: string }) {
     // Check if we can provide the value immediately
-    const threshold = ctx.vars.defaultThreshold;
+    const threshold = ctx.vars.get('defaultThreshold');
     if (threshold !== undefined) {
         return threshold; // Child onProvided will be called immediately
     }
@@ -330,7 +330,8 @@ export async function onAnalyzerNeedsInput(ctx: Ctx, ev: { prompt: string; schem
 export async function onAnalyzerNeedsInput(ctx: Ctx, ev: { prompt: string; token: string }) {
     try {
         // Attempt to get cached value
-        const cachedValue = await ctx.memory.semantic.get('analyzer:threshold');
+        const cached = await (ctx as any).semantic?.read?.({}); // facade read
+        const cachedValue = Array.isArray(cached) ? cached.find((x: any) => x?.id === 'analyzer:threshold') : undefined;
         if (cachedValue) {
             return cachedValue;
         }

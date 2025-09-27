@@ -63,17 +63,16 @@ When `inheritWorkingMemory: true` is specified:
 // Source agent context is serialized
 const serializedContext = {
   workingMemory: {
-    goal: await sourceCtx.getGoal(),
-    thoughts: await sourceCtx.getThoughts(),
-    decisions: await sourceCtx.getAllDecisions(),
+    goals: await (sourceCtx as any).goals.read?.({}),
+    decisions: await (sourceCtx as any).decisions.read?.(),
     variables: { ...sourceCtx.vars }
   }
 };
 
 // Target agent receives the context
-await targetCtx.setGoal(serializedContext.workingMemory.goal);
+await (targetCtx as any).goals.add?.({ title: serializedContext.workingMemory.goal });
 for (const thought of serializedContext.workingMemory.thoughts) {
-  await targetCtx.addThought(thought.content);
+  await (targetCtx as any).thoughts.add?.(thought.content);
 }
 ```
 

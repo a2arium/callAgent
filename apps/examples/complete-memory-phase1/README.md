@@ -104,8 +104,8 @@ This example showcases the complete Phase 1-B architecture:
 ### Working Variables Proxy
 ```typescript
 // Async access to working variables
-ctx.vars.userName = "Alice";
-const turn = await ctx.vars.conversationTurn;
+ctx.vars.set('userName', "Alice");
+const turn = ctx.vars.get('conversationTurn');
 ```
 
 ### Unified Operations
@@ -127,11 +127,11 @@ const memories = await ctx.recall("user preferences", {
 ### MLO Integration
 ```typescript
 // All operations flow through MLO pipeline
-await ctx.setGoal("Demonstrate complete memory system");
-await ctx.addThought("This thought will be processed through 6 stages");
+await ctx.goals?.add?.({ title: "Demonstrate complete memory system" });
+await ctx.thoughts?.add?.("This thought will be processed through 6 stages");
+// Thoughts are append-only; use logs or downstream processing to verify
 
 // Access processing metadata
-const thoughts = await ctx.getThoughts();
 const processingHistory = thoughts[0]?.processingMetadata?.processingHistory;
 ```
 

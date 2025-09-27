@@ -196,27 +196,21 @@ export async function extendContextWithMemory(
 
     const context = baseContext as TaskContext;
 
-    // Add working memory operations
-    context.setGoal = async (goal: string) => unifiedMemory.setGoal(goal, agentId);
-    context.getGoal = async () => unifiedMemory.getGoal(agentId);
-    context.addThought = async (thought: string) => unifiedMemory.addThought(thought, agentId);
-    context.getThoughts = async () => {
-        const thoughts = await unifiedMemory.getThoughts(agentId);
-        // Convert from @a2arium/callagent-types ThoughtEntry to core ThoughtEntry
-        return thoughts.map(thought => ({
-            timestamp: thought.timestamp,
-            content: thought.content,
-            type: thought.type === 'thought' || thought.type === 'observation' ? thought.type : undefined,
-            processingMetadata: thought.processingMetadata
-        }));
+    // Add new namespaced helpers
+    (context as any).goals = {
+        add: async (g: any) => unifiedMemory.setGoal(String(g?.title || g), agentId),
+        update: async (_id: string, _patch: any) => { /* no-op for now */ },
+        remove: async (_id: string) => { /* no-op for now */ },
+        clear: async () => { /* no-op for now */ },
+        read: async () => {
+            const g = await unifiedMemory.getGoal(agentId);
+            return g ? [{ id: 'current', title: g }] : [];
+        }
     };
-    context.makeDecision = async (key: string, decision: string, reasoning?: string) =>
-        unifiedMemory.makeDecision(key, decision, reasoning, agentId);
-    context.getDecision = async (key: string) => unifiedMemory.getDecision(key, agentId);
-    context.getAllDecisions = async () => unifiedMemory.getAllDecisions(agentId);
+    (context as any).thoughts = { add: async (t: any) => unifiedMemory.addThought(String(t?.text ?? t), agentId) };
 
     // Add simple working variables for synchronous access
-    context.vars = createSimpleWorkingVariablesProxy(unifiedMemory, agentId);
+    context.vars = createSimpleWorkingVariablesProxy(unifiedMemory, agentId) as any;
 
     // Add unified operations
     context.recall = async (query: string, options?: any) => unifiedMemory.recall(query, options);

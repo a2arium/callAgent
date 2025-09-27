@@ -115,26 +115,14 @@ export default createAgent({
             // Step 1: Store test events with entity alignment (exactly like your code)
             ctx.logger.info("📝 Storing test events...");
             for (const testEvent of testEvents) {
-                await ctx.memory.semantic.set(testEvent.key, testEvent.data, {
-                    tags: ['event', 'Riga', testEvent.data.titleAndDescription[0].language || 'unknown'],
-                    entities: {
-                        "titleAndDescription.title": "event",
-                        "venue.name": "location"
-                    }
-                });
+                await ctx.semantic?.add({ id: testEvent.key, value: testEvent.data, tags: ['event', 'Riga', testEvent.data.titleAndDescription[0].language || 'unknown'], entities: { "titleAndDescription.title": "event", "venue.name": "location" } });
                 ctx.logger.info(`✅ Stored event: ${testEvent.key}`);
             }
 
             // Step 2: Store test venues with entity alignment (exactly like your code)  
             ctx.logger.info("🏢 Storing test venues...");
             for (const testVenue of testVenues) {
-                await ctx.memory.semantic.set(testVenue.key, testVenue.data, {
-                    tags: ['venue', 'Riga', 'Latvia'],
-                    entities: {
-                        venueName: 'location',
-                        address: 'location'
-                    }
-                });
+                await ctx.semantic?.add({ id: testVenue.key, value: testVenue.data, tags: ['venue', 'Riga', 'Latvia'], entities: { venueName: 'location', address: 'location' } });
                 ctx.logger.info(`✅ Stored venue: ${testVenue.key}`);
             }
 
@@ -209,13 +197,13 @@ export default createAgent({
 
             // Delete test events
             for (const testEvent of testEvents) {
-                await ctx.memory.semantic.delete(testEvent.key);
+                await ctx.semantic?.remove?.(testEvent.key);
                 ctx.logger.info(`🗑️ Deleted event: ${testEvent.key}`);
             }
 
             // Delete test venues
             for (const testVenue of testVenues) {
-                await ctx.memory.semantic.delete(testVenue.key);
+                await ctx.semantic?.remove?.(testVenue.key);
                 ctx.logger.info(`🗑️ Deleted venue: ${testVenue.key}`);
             }
 

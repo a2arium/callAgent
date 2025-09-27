@@ -280,10 +280,7 @@ async function setupSampleData(ctx: any) {
     ctx.logger.info(`📋 Setting up sample data...`);
 
     for (const sample of sampleEvents) {
-        await ctx.memory.semantic.set(sample.key, sample.data, {
-            tags: sample.tags,
-            entities: sample.entities
-        });
+        await ctx.semantic?.add({ id: sample.key, value: sample.data, tags: sample.tags, entities: sample.entities });
         ctx.logger.info(`   ✓ Stored: ${sample.key}`);
     }
 
@@ -351,7 +348,8 @@ async function demonstrateEnrichment(ctx: any) {
         ctx.logger.info(`🧪 Testing: "${testCase.name}"`);
 
         // Show original data
-        const originalData = await ctx.memory.semantic.get(testCase.baseKey);
+        const originalArr = await ctx.semantic?.read?.({ id: testCase.baseKey, limit: 1 });
+        const originalData = Array.isArray(originalArr) && originalArr[0] ? (originalArr[0] as any).value : undefined;
         ctx.logger.info(`📝 Original data (${testCase.baseKey}):`);
         ctx.logger.info(`${JSON.stringify(originalData, null, 2)}\n`);
 
@@ -408,7 +406,7 @@ async function cleanupDemoData(ctx: any) {
 
     for (const sample of sampleEvents) {
         try {
-            await ctx.memory.semantic.delete(sample.key);
+            await ctx.semantic?.remove?.(sample.key);
             ctx.logger.info(`   ✓ Deleted: ${sample.key}`);
         } catch (error) {
             ctx.logger.warn(`   ⚠️ Failed to delete ${sample.key}:`, error);
@@ -449,9 +447,8 @@ async function demonstrateArraySupport(ctx: any) {
     ctx.logger.info(`   Occurrences: ${arrayTestData.eventOccurrences.map(o => o.date).join(', ')}`);
 
     // Store with array expansion
-    await ctx.memory.semantic.set('demo:array:multi-event', arrayTestData, {
-        tags: ['demo', 'array', 'conference'],
-        entities: {
+    await ctx.semantic?.add({
+        id: 'demo:array:multi-event', value: arrayTestData, tags: ['demo', 'array', 'conference'], entities: {
             "titleAndDescription[].title": "event",
             "speakers[].name": "person",
             "speakers[].affiliation": "organization",
@@ -533,6 +530,6 @@ async function demonstrateArraySupport(ctx: any) {
     ctx.logger.info(`   Confidence: ${enrichmentResult.confidence?.toFixed(3) || 'unknown'}`);
 
     // Cleanup
-    await ctx.memory.semantic.delete('demo:array:multi-event');
+    await ctx.semantic?.remove?.('demo:array:multi-event');
     ctx.logger.info(`\n🧹 Array demo cleanup completed!\n`);
 }

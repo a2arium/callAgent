@@ -38,8 +38,8 @@ export class TenantContextManager {
      * ```typescript
      * const result = await tenantManager.withTenant('customer-123', async () => {
      *   // All operations here are scoped to customer-123
-     *   await ctx.memory.semantic.set('key', 'value');
-     *   return await ctx.memory.semantic.get('key');
+     *   await ctx.semantic?.add({ id: 'key', value: 'value' });
+     *   return (await ctx.semantic?.read?.({ id: 'key', limit: 1 }))?.[0]?.value;
      * });
      * ```
      */

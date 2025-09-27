@@ -18,42 +18,42 @@ export default createAgent({
 
                     // Demo 1: URL Auto-Download
                     await ctx.reply('📥 **1. URL Auto-Download**\\n');
-                    await ctx.memory.semantic.set(`image:url-demo-${Date.now()}`, {
-                        data: 'https://httpbin.org/image/png', // Framework auto-downloads!
-                        description: 'Image downloaded automatically from URL'
-                    }, {
-                        tags: ['image', 'demo', 'url-download']
+                    await ctx.semantic?.add({
+                        id: `image:url-demo-${Date.now()}`, value: {
+                            data: 'https://httpbin.org/image/png', // Framework auto-downloads!
+                            description: 'Image downloaded automatically from URL'
+                        }, tags: ['image', 'demo', 'url-download']
                     });
                     await ctx.reply('✅ URL detected and downloaded automatically\\n\\n');
 
                     // Demo 2: Base64 Processing
                     await ctx.reply('📝 **2. Base64 Auto-Processing**\\n');
                     const sampleImageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='; // 1x1 pixel PNG
-                    await ctx.memory.semantic.set(`image:base64-demo-${Date.now()}`, {
-                        data: sampleImageData, // Framework auto-detects base64
-                        filename: 'pixel.png',
-                        description: 'Base64 image processed automatically'
-                    }, {
-                        tags: ['image', 'demo', 'base64']
+                    await ctx.semantic?.add({
+                        id: `image:base64-demo-${Date.now()}`, value: {
+                            data: sampleImageData, // Framework auto-detects base64
+                            filename: 'pixel.png',
+                            description: 'Base64 image processed automatically'
+                        }, tags: ['image', 'demo', 'base64']
                     });
                     await ctx.reply('✅ Base64 detected and processed automatically\\n\\n');
 
                     // Demo 3: Data URL
                     await ctx.reply('🔗 **3. Data URL Parsing**\\n');
                     const dataUrl = `data:image/png;base64,${sampleImageData}`;
-                    await ctx.memory.semantic.set(`image:dataurl-demo-${Date.now()}`, {
-                        data: dataUrl, // Framework auto-parses data URL
-                        description: 'Data URL parsed automatically'
-                    }, {
-                        tags: ['image', 'demo', 'data-url']
+                    await ctx.semantic?.add({
+                        id: `image:dataurl-demo-${Date.now()}`, value: {
+                            data: dataUrl, // Framework auto-parses data URL
+                            description: 'Data URL parsed automatically'
+                        }, tags: ['image', 'demo', 'data-url']
                     });
                     await ctx.reply('✅ Data URL detected and parsed automatically\\n\\n');
 
                     // List stored images
-                    const storedImages = await ctx.memory.semantic.getMany({
-                        tag: 'image',
-                        limit: 10
-                    });
+                    const storedImages = await (async () => {
+                        const items = await ctx.semantic?.read?.({ tag: 'image', limit: 10 });
+                        return Array.isArray(items) ? items.map((it: any) => ({ key: it.id, value: it.value })) : [];
+                    })();
 
                     await ctx.reply(`📋 Found ${storedImages.length} images in memory:\\n`);
 
@@ -83,10 +83,10 @@ export default createAgent({
                     };
 
                 case 'listImages':
-                    const images = await ctx.memory.semantic.getMany({
-                        tag: 'image',
-                        limit: 50
-                    });
+                    const images = await (async () => {
+                        const items = await ctx.semantic?.read?.({ tag: 'image', limit: 50 });
+                        return Array.isArray(items) ? items.map((it: any) => ({ key: it.id, value: it.value })) : [];
+                    })();
 
                     return {
                         status: 'success',
@@ -108,13 +108,13 @@ export default createAgent({
                     await ctx.reply(`📥 Downloading: ${input.url}\\n\\n`);
 
                     // Framework automatically detects URL and downloads it!
-                    await ctx.memory.semantic.set(`image:url:${Date.now()}`, {
-                        data: input.url, // Just pass the URL - framework handles the rest!
-                        description: input.description || `Downloaded from ${input.url}`,
-                        source: 'url',
-                        userRequested: true
-                    }, {
-                        tags: ['image', 'url-download', 'user-requested']
+                    await ctx.semantic?.add({
+                        id: `image:url:${Date.now()}`, value: {
+                            data: input.url, // Just pass the URL - framework handles the rest!
+                            description: input.description || `Downloaded from ${input.url}`,
+                            source: 'url',
+                            userRequested: true
+                        }, tags: ['image', 'url-download', 'user-requested']
                     });
 
                     await ctx.reply('✅ **Image stored successfully!**\\n');
@@ -135,12 +135,12 @@ export default createAgent({
                     const textData = input.text || 'Sample text data';
                     const textBuffer = Buffer.from(textData, 'utf-8'); // Create Buffer directly
 
-                    await ctx.memory.semantic.set(`text:${input.filename || 'sample.txt'}`, {
-                        data: textBuffer, // Framework detects Buffer and optimizes storage
-                        filename: input.filename || 'sample.txt',
-                        description: input.description || 'Text file storage demo'
-                    }, {
-                        tags: ['file', 'text', 'demo']
+                    await ctx.semantic?.add({
+                        id: `text:${input.filename || 'sample.txt'}`, value: {
+                            data: textBuffer, // Framework detects Buffer and optimizes storage
+                            filename: input.filename || 'sample.txt',
+                            description: input.description || 'Text file storage demo'
+                        }, tags: ['file', 'text', 'demo']
                     });
 
                     return {

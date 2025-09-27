@@ -337,15 +337,14 @@ You can provide custom implementations for components within each of the 6 MLO s
 Working memory is crucial for an agent's active reasoning and task execution.
 
 *   **MLO-Managed**: Handled by `UnifiedMemoryService` and `WorkingMemoryRegistry` within `@a2arium/core`. **Working memory is now externalized through backend adapters following the same pattern as other memory types.**
-*   **`TaskContext` API**: Agents interact with working memory via methods on the `ctx` object:
-    *   `ctx.setGoal(goal: string)`
-    *   `ctx.getGoal(): Promise<string | null>`
-    *   `ctx.addThought(thought: string)`
-    *   `ctx.getThoughts(): Promise<ThoughtEntry[]>`
-    *   `ctx.makeDecision(key: string, decision: string, reasoning?: string)`
-    *   `ctx.getDecision(key: string): Promise<DecisionEntry | null>`
-    *   `ctx.vars.<your_var_name> = value` (via `setWorkingVariable`)
-    *   `ctx.vars.<your_var_name>` (via `getWorkingVariable`)
+*   **`TaskContext` API**: Agents interact with working memory via the new namespaced helpers on `ctx`:
+    *   `ctx.goals.add({ title: string, type?: string, priority?: number })`
+    *   `ctx.goals.read(filter?)`
+    *   `ctx.thoughts.add(text: string | { text: string })`
+    *   `ctx.decisions.add(key: string, value: unknown, reasoning?: string)`
+    *   `ctx.decisions.get(key: string)` / `ctx.decisions.read(filter?)`
+    *   `ctx.vars.set(key: string, value: unknown)` / `ctx.vars.get<T>(key: string): T | undefined`
+    *   `ctx.semantic.add({ id, value, tags?, entities? })` / `ctx.semantic.read({ id?, tag?/tags?, limit? })` / `ctx.semantic.remove(id | predicate)`
 *   **MLO Pipeline Flow**: All these operations create `MemoryItem` instances that are processed through the MLO pipeline, configured by the active `MEMORY_PROFILE`. This allows for compression, reflection, etc., on working memory elements too.
 *   **Persistence**: Working memory is now externalized and persisted through dedicated backend adapters (e.g., `WorkingMemorySQLAdapter`). The `WorkingMemoryRegistry` routes operations to the appropriate backend, following the same pattern as semantic, episodic, and embed memory types.
 

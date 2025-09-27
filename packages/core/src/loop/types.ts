@@ -70,6 +70,8 @@ export type GoalState = {
 };
 
 export type MentalState = {
+    // Shortcut alias (read-mostly) to short-term vars; points to memory.shortTerm.vars
+    vars?: Record<string, unknown>;
     memory: {
         sensory: unknown;        // e.g., { llmState, lastObservation }
         shortTerm: {
@@ -93,7 +95,7 @@ export type MentalState = {
         intrinsic: { curiosity: number; novelty: number; competence: number; exploration: number };
         discountGamma: number;
     };
-    policyParams: { theta: unknown; stochastic: boolean; temperature?: number; explorationEpsilon?: number };
+    policyParams: { theta: unknown; stochastic: boolean; temperature?: number; explorationEpsilon?: number; reactPlanner?: { enabled?: boolean; patterns?: Array<{ regex: string; tool: string; argKey: string }> } };
 };
 
 export type Snapshot = {
@@ -105,6 +107,21 @@ export type Snapshot = {
         groups?: Record<string, unknown>;
     };
     meta?: { agentId?: string; traceparent?: string };
+};
+
+// Environment state visible to the loop per turn
+export type EnvironmentState = {
+    time: string; // ISO timestamp
+    input: unknown; // current task input or event payload
+    pending: {
+        inputs: Record<string, unknown>;
+        children: Record<string, unknown>;
+        tools: Record<string, unknown>;
+        groups: Record<string, unknown>;
+    };
+    lastExec?: unknown; // optional description of last execution result
+    externalEvents?: unknown[]; // future: bus events since last turn
+    goalStats?: { doneCount: number };
 };
 
 

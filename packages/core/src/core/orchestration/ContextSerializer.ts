@@ -123,8 +123,9 @@ export class ContextSerializer {
 
         try {
             // Use existing TaskContext APIs
-            if (ctx.getGoal) {
-                const goal = await ctx.getGoal() || undefined; // TODO: migrate to listGoals/addGoal
+            if ((ctx as any).goals?.read) {
+                const goals = await (ctx as any).goals.read({});
+                const goal = Array.isArray(goals) && goals[0] ? (goals[0].title || goals[0].id) : undefined;
                 workingMemory.goal = goal;
 
                 serializerLogger.debug('Serializing goal', {
@@ -134,9 +135,7 @@ export class ContextSerializer {
                 });
             }
 
-            if (ctx.getThoughts) {
-                workingMemory.thoughts = await ctx.getThoughts();
-            }
+            // Thoughts are not retrievable via new API; keep empty
 
             // Extract decisions - use MLO method if available
             if (ctx.memory?.mlo?.getAllDecisions) {
@@ -146,9 +145,10 @@ export class ContextSerializer {
             }
 
             // Extract variables
-            if (ctx.vars) {
-                // Convert proxy to plain object if necessary
-                workingMemory.variables = { ...ctx.vars };
+            if (ctx.vars && (ctx.vars as any).keys) {
+                const kv: Record<string, unknown> = {};
+                for (const k of (ctx.vars as any).keys()) kv[k] = (ctx.vars as any).get(k);
+                workingMemory.variables = kv;
             }
 
             serializerLogger.debug('Working memory serialized', {
@@ -221,7 +221,7 @@ export class ContextSerializer {
     ): Promise<void> {
         try {
             // Restore goal
-            if (workingMemory.goal && ctx.setGoal) {
+            if (workingMemory.goal && (ctx as any).goals?.add) {
                 // Ensure goal is a string - handle complex objects from MLO processing
                 let goalString: string;
                 if (typeof workingMemory.goal === 'string') {
@@ -241,36 +241,14 @@ export class ContextSerializer {
 
                 // For A2A context transfer, bypass MLO processing and set goal directly in adapter
                 // This avoids the MLO pipeline size limits and complex object transformations
-                const unifiedMemory = (ctx.memory as any)?.unified;
-                if (unifiedMemory?.workingMemoryAdapter?.setGoal) {
-                    try {
-                        await unifiedMemory.workingMemoryAdapter.setGoal(goalString, ctx.agentId, ctx.tenantId); // TODO: migrate to goals API
-                        serializerLogger.debug('Goal set directly in adapter for A2A transfer', {
-                            agentId: ctx.agentId,
-                            goalLength: goalString.length
-                        });
-                    } catch (error) {
-                        serializerLogger.warn('Failed to set goal directly in adapter, falling back to MLO', error);
-                        await ctx.setGoal(goalString); // TODO: migrate to goals API
-                    }
-                } else {
-                    await ctx.setGoal(goalString); // TODO: migrate to goals API
-                }
+                await (ctx as any).goals.add({ title: goalString });
             }
 
             // Restore thoughts
-            if (ctx.addThought && workingMemory.thoughts) {
-                for (const thought of workingMemory.thoughts) {
-                    await ctx.addThought(thought.content);
-                }
-            }
+            // Thoughts restore skipped (no read API)
 
             // Restore decisions
-            if (ctx.makeDecision && workingMemory.decisions) {
-                for (const [key, decision] of Object.entries(workingMemory.decisions)) {
-                    await ctx.makeDecision(key, decision.decision, decision.reasoning);
-                }
-            }
+            // Decisions restore skipped (loggable via thoughts if needed)
 
             // Restore variables
             if (ctx.vars && workingMemory.variables) {

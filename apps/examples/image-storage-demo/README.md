@@ -1,6 +1,6 @@
 # Image Storage Demo Agent
 
-This agent demonstrates the **smart binary storage** in CallAgent Phase 2A, where binary data is handled transparently through the standard `ctx.memory.semantic.set()` interface. The framework automatically detects data types and optimizes storage!
+This agent demonstrates the **smart binary storage** in CallAgent Phase 2A, where binary data is handled transparently through the `ctx.semantic.add()` facade. The framework automatically detects data types and optimizes storage!
 
 ## Features Demonstrated
 
@@ -147,10 +147,10 @@ The framework automatically detects and processes:
 
 All data types use the same simple interface:
 ```typescript
-await ctx.memory.semantic.set(key, { 
+await ctx.semantic?.add({ id: key, value: { 
     data: anyDataType,  // URL, base64, Buffer, data URL, or JSON
     description: 'optional'
-}, { tags: ['optional'] });
+}, tags: ['optional'] });
 ```
 
 ## Code Integration

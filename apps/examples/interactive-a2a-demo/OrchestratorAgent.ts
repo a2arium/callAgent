@@ -7,7 +7,7 @@ export default createAgent({
 
     async handleTask(ctx: Ctx) {
         await ctx.reply([{ type: 'text', text: 'Orchestrator: starting flow' }]);
-        ctx.vars.workflow = `wf_${Date.now()}`;
+        ctx.vars.set('workflow', `wf_${Date.now()}`);
 
         // Request human input, durable
         // await ctx.requestInput('Which region to analyze?', { onProvided: 'onRegionProvided', onExpired: 'onRegionExpired' });
@@ -29,7 +29,7 @@ export default createAgent({
 }, import.meta.url);
 
 export async function onRegionProvided(ctx: Ctx, ev: { input: string }) {
-    ctx.vars.region = ev.input;
+    ctx.vars.set('region', ev.input);
 
     console.log(`[Orchestrator] onRegionProvided ctx.tenantId=${ctx.tenantId} ctx.task.id=${ctx.task?.id}`);
 
@@ -40,7 +40,7 @@ export async function onRegionProvided(ctx: Ctx, ev: { input: string }) {
 
 export async function onRegionExpired(ctx: Ctx) {
     await ctx.reply([{ type: 'text', text: 'Orchestrator: input expired, defaulting to EU' }]);
-    ctx.vars.region = 'EU';
+    ctx.vars.set('region', 'EU');
 }
 
 export async function onChildrenCompleted(ctx: Ctx, ev: Record<string, unknown>) {

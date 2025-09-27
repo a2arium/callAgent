@@ -8,7 +8,8 @@ The Agent Runner is a versatile CLI tool that supports both streaming and non-st
 - Multiple output formats: console, JSON, and SSE (Server-Sent Events)
 - File output capabilities for logging or debugging
 - Built-in event listening for streaming events
-- Compatible with existing agents
+- Compatible with loop-first agents and auto-resume
+- **Auto-resume support**: Handles `input-required` status and resumed turns
 - **Adapter-agnostic memory system** (see [Memory System](./memory-system.md))
 - **ESM-first, TypeScript-native** codebase
 - **Environment management via dotenv**
@@ -58,6 +59,53 @@ yarn run-agent-demo-json
 
 # Run the demo agent with SSE output
 yarn run-agent-demo-sse
+```
+
+## Auto-Resume Behavior
+
+The runner supports loop-first agents with auto-resume capabilities:
+
+### Non-Streaming Mode
+- Agent runs until `input-required` status, then **exits cleanly**
+- Prints session ID and token for manual input provision
+- To continue: use `/tasks/{taskId}/input` API endpoint
+
+```bash
+yarn run-agent apps/examples/loop-agent-mini/dist/AgentModule.js '{}'
+# Output:
+# Status: input-required
+# Session: task_abc123
+# Token: input_xyz789
+# (process exits)
+```
+
+### Streaming Mode  
+- Agent runs until `input-required` status
+- Emits status events in real-time
+- **Process continues listening** for input events
+- Auto-resumes when input is provided via API
+
+```bash
+yarn run-agent apps/examples/loop-agent-mini/dist/AgentModule.js '{}' --stream
+# Output:
+# Status: input-required, token: input_xyz789
+# (process waits for input)
+# 
+# # After providing input via API:
+# Status: working
+# Status: completed
+# (process exits)
+```
+
+### Providing Input to Resumed Agents
+
+Use the `/tasks/{taskId}/input` endpoint:
+
+```bash
+# Get session/token from non-streaming run
+curl -X POST http://localhost:3000/tasks/task_abc123/input \
+  -H "Content-Type: application/json" \
+  -d '{"token": "input_xyz789", "input": "user response"}'
 ```
 
 ## Environment Management

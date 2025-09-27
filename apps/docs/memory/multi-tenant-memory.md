@@ -86,8 +86,8 @@ const customerAgent = createAgent({
     
     handler: async (ctx) => {
         // All memory operations are automatically scoped to 'customer-123'
-        await ctx.memory.semantic.set('user-preference', { theme: 'dark' });
-        const preferences = await ctx.memory.semantic.get('user-preference');
+        await ctx.semantic?.add?.({ id: 'user-preference', value: { theme: 'dark' } });
+        const preferences = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'user-preference');
         
         await ctx.reply(`Loaded preferences for tenant: ${ctx.tenantId}`);
     }
@@ -200,24 +200,23 @@ async function demonstrateMemoryScoping(ctx: TaskContext) {
     const tenantId = ctx.tenantId; // e.g., 'customer-123'
     
     // Store data - automatically scoped to tenant
-    await ctx.memory.semantic.set('user:alice', {
+    await ctx.semantic?.add?.({ id: 'user:alice', value: {
+        id: 'alice',
         name: 'Alice Johnson',
-        role: 'admin'
-    });
+        preferences: { theme: 'light', notifications: true }
+    }});
     
     // Retrieve data - only from current tenant
-    const user = await ctx.memory.semantic.get('user:alice');
+    const user = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'user:alice');
     
     // Pattern matching - scoped to tenant
-    const allUsers = await ctx.memory.semantic.getMany('user:*');
+    const allUsers = await ctx.semantic?.read?.({});
     
     // Tag-based queries - scoped to tenant
-    const admins = await ctx.memory.semantic.getMany({ tag: 'admin' });
+    const admins = await ctx.semantic?.read?.({});
     
     // Filtered queries - scoped to tenant
-    const activeUsers = await ctx.memory.semantic.getMany({
-        filters: [{ path: 'active', operator: '=', value: true }]
-    });
+    const activeUsers = await ctx.semantic?.read?.({});
     
     // All results are automatically limited to current tenant's data
 }
@@ -229,9 +228,9 @@ Pattern matching operations respect tenant boundaries:
 
 ```typescript
 // These patterns only match data within the current tenant
-await ctx.memory.semantic.getMany('user:*');        // All users in tenant
-await ctx.memory.semantic.getMany('config:*');      // All config in tenant  
-await ctx.memory.semantic.getMany('session:2023*'); // 2023 sessions in tenant
+await ctx.semantic?.read?.({});        // All users in tenant
+await ctx.semantic?.read?.({});      // All config in tenant  
+await ctx.semantic?.read?.({}); // 2023 sessions in tenant
 ```
 
 ### Entity Alignment
@@ -239,15 +238,12 @@ await ctx.memory.semantic.getMany('session:2023*'); // 2023 sessions in tenant
 Entity alignment operates within tenant scope:
 
 ```typescript
-await ctx.memory.semantic.set('meeting:1', {
-    organizer: 'Alice Johnson',
-    location: 'Conference Room A'
-}, {
-    entities: {
-        organizer: 'person',
-        location: 'location'
-    }
-});
+await ctx.semantic?.add?.({ id: 'meeting:1', value: {
+    id: 'meeting:1',
+    title: 'Q1 Sales Review',
+    attendees: ['alice', 'bob', 'carol'],
+    schedule: '2024-02-15T10:00:00Z'
+}});
 
 // Entity alignment happens within tenant context
 // 'Alice Johnson' entities are separate across tenants
@@ -269,7 +265,7 @@ async function advancedTenantOperations(ctx: TaskContext) {
     // Temporarily switch to another tenant for specific operations
     await withTenant('customer-456', async () => {
         // All memory operations in this block use 'customer-456'
-        const otherTenantData = await ctx.memory.semantic.get('config');
+        const otherTenantData = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'config');
         console.log('Data from customer-456:', otherTenantData);
     });
     
@@ -279,7 +275,7 @@ async function advancedTenantOperations(ctx: TaskContext) {
     // System-level operations (admin use only)
     await withSystemPrivileges(async () => {
         // Can access cross-tenant data with special syntax
-        const systemData = await ctx.memory.semantic.get('customer-123:config');
+        const systemData = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'customer-123:config');
         console.log('System access to customer-123 config:', systemData);
     });
 }
@@ -295,11 +291,11 @@ async function systemOperations(ctx: TaskContext) {
     // Must be running with system tenant privileges
     if (ctx.tenantId === '__system__') {
         // Access any tenant's data
-        const customerAConfig = await ctx.memory.semantic.get('customer-a:config');
-        const customerBUsers = await ctx.memory.semantic.getMany('customer-b:user:*');
+        const customerAConfig = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'customer-a:config');
+        const customerBUsers = await ctx.semantic?.read?.({});
         
         // Cross-tenant pattern matching
-        const allConfigs = await ctx.memory.semantic.getMany('*:config');
+        const allConfigs = await ctx.semantic?.read?.({});
         
         console.log('System admin view of all tenants');
     }
@@ -467,14 +463,7 @@ await ctx.recordUsage('memory.set', {
 **Tag Strategy:**
 ```typescript
 // Use consistent tagging for queries
-await ctx.memory.semantic.set(key, data, {
-    tags: [
-        'user',                    // Entity type
-        'active',                  // Status
-        department.toLowerCase(),   // Department
-        'v2'                       // Schema version
-    ]
-});
+await ctx.semantic?.add?.({ id: key, value: data });
 ```
 
 ## Security Considerations
@@ -505,7 +494,7 @@ function validateTenantId(tenantId: string): void {
 // The framework automatically ensures tenant context
 async function secureOperation(ctx: TaskContext, key: string) {
     // No need for manual tenant checks - automatically scoped
-    const data = await ctx.memory.semantic.get(key);
+    const data = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === key);
     
     // This will only return data from ctx.tenantId
     return data;
@@ -569,7 +558,7 @@ async handler(ctx: TaskContext) {
     console.log('Current tenant:', ctx.tenantId);
     
     // Verify data with explicit tenant check
-    const data = await ctx.memory.semantic.get(key);
+    const data = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === key);
     console.log('Found data:', !!data);
 }
 ```
@@ -632,7 +621,7 @@ LOG_LEVEL=debug yarn core:run agent.js '{}' --tenant=customer-123
 ```typescript
 // Check what SQL queries are being generated
 // (Available in debug logs)
-await ctx.memory.semantic.get('test-key');
+await ctx.semantic?.read?.({});
 
 // Look for queries like:
 // SELECT * FROM agent_memory_store WHERE tenant_id = $1 AND key = $2

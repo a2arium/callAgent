@@ -17,6 +17,25 @@ export interface AgentManifest {
     /** Optional agent description */
     description?: string;
 
+    /** Execution mode: 'loop' (default) or 'legacy' */
+    runMode?: 'loop' | 'legacy';
+
+    /** Optional default loop budgets */
+    budgets?: {
+        maxTurns?: number;
+        latencyMs?: number;
+    };
+
+    /** Human-in-the-loop level */
+    hitl?: 'advise' | 'consent' | 'guardrails';
+
+    /** Safety configuration */
+    safety?: {
+        sanitize?: boolean; // enable default perception sanitization
+        costLimit?: number; // simple numeric cost threshold
+        piiPatterns?: string[]; // regex strings to detect sensitive data
+    };
+
     /** Agent dependencies for A2A communication */
     dependencies?: {
         /** Array of agent names that this agent depends on (no versions for now) */

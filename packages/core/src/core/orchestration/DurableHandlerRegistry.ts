@@ -1,5 +1,4 @@
 export type PendingInputHandler = {
-    handlerName: string;
     // optional metadata like schema, expiresAt, etc.
     schema?: unknown;
     expiresAt?: string;
@@ -36,10 +35,9 @@ export function applyInputProvided(
     snapshot: Record<string, unknown>,
     token: string,
     input: unknown
-): { next: Record<string, unknown>; handlerName?: string } {
+): { next: Record<string, unknown> } {
     const pending = { ...getPendingInputs(snapshot) };
-    const entry = pending[token];
-    if (entry) {
+    if (pending[token]) {
         delete pending[token];
     }
     const s = snapshot as SnapshotShape;
@@ -48,7 +46,7 @@ export function applyInputProvided(
     inputs[token] = input as unknown;
     vars.__inputs = inputs;
     const next = setPendingInputs({ ...snapshot, vars }, pending);
-    return { next, handlerName: entry?.handlerName };
+    return { next };
 }
 
 

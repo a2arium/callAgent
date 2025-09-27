@@ -26,9 +26,13 @@ The MemorySQL adapter provides durable, SQL-backed memory for agents using Postg
 
 ## Usage Example
 ```typescript
-// In your agent's handleTask function
-await ctx.memory.semantic.set('user:123:profile', { name: 'John Doe' }, { tags: ['user', 'profile'] });
-const value = await ctx.memory.semantic.get('user:123:profile');
+// High-level (recommended): use ctx.semantic facade in agents
+await ctx.semantic?.add?.({ id: 'user:123:profile', value: { name: 'John Doe' } });
+const profile = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'user:123:profile');
+
+// Adapter-level (advanced): direct semantic adapter
+await ctx.semantic?.add({ id: 'user:123:profile', value: { name: 'John Doe' }, tags: ['user', 'profile'] });
+const value = (await ctx.semantic?.read?.({ id: 'user:123:profile', limit: 1 }))?.[0]?.value;
 const results = await ctx.memory.semantic.query({ tag: 'profile' });
 ```
 

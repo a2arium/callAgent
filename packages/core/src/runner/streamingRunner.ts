@@ -181,6 +181,7 @@ export async function runAgentWithStreaming(
     // Plugin is already registered in the unified registry via createAgent()
 
     const agentName = plugin.manifest.name;
+    const runMode = (plugin.manifest as any).runMode || 'loop';
 
     // Resolve final tenant ID using hierarchy: CLI override → agent tenantId → env → default
     const explicitTenantId = options.tenantId || plugin.tenantId;
@@ -343,6 +344,8 @@ export async function runAgentWithStreaming(
     // The context is now complete - no need for type assertion
     const taskCtx: TaskContext = {
         ...contextWithMemory,
+        // propagate runMode for TaskEngine
+        ...(runMode ? { runMode } as any : {}),
         fail: async (error: unknown): Promise<void> => {
             const errorMessage = error instanceof Error ? error.message : String(error);
             // Use agentLogger here
@@ -431,10 +434,12 @@ export async function runAgentWithStreaming(
             const moduleUrl = pathToFileURL(agentFilePath).href;
             const mod: Record<string, unknown> = await import(moduleUrl);
             // Always register default handleTask from the loaded plugin
-            registerHandler('handleTask', async (ctx: any) => {
-                runnerLogger.info(`Invoking durable handler: handleTask`, { taskId: ctx?.task?.id });
-                await plugin.handleTask(ctx);
-            });
+            if (plugin.handleTask) {
+                registerHandler('handleTask', async (ctx: any) => {
+                    runnerLogger.info(`Invoking durable handler: handleTask`, { taskId: ctx?.task?.id });
+                    await plugin.handleTask!(ctx);
+                });
+            }
             for (const [name, fn] of Object.entries(mod)) {
                 if (name === 'default') continue;
                 if (typeof fn === 'function') {
@@ -456,7 +461,7 @@ export async function runAgentWithStreaming(
         if (wmCap) {
             runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
         }
-        await engine.startTask({ task: entity, isStreaming: options.isStreaming });
+        await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId });
         logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
         if (!options.isStreaming) {
             logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
@@ -562,6 +567,23 @@ function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: Stream
             console.log(`Session: (see earlier log: Starting TaskEngine.startTask { taskId: ... })`);
         } else if (isFinal) {
             console.log(`Status: ${status.state} (FINAL)`);
+            const md: any = status.metadata || {};
+            const agg: any = md.timingsAgg || {};
+            const rewAgg: any = md.rewardsAgg || {};
+            const hasAgg = Object.keys(agg || {}).length > 0 || (rewAgg && (typeof rewAgg.sum === 'number'));
+            if (hasAgg) {
+                console.log('Aggregates:');
+                if (agg && Object.keys(agg).length > 0) {
+                    console.log('  Timings:');
+                    for (const [k, v] of Object.entries(agg)) {
+                        const vv: any = v;
+                        console.log(`    ${k}: sum=${vv.sum}ms avg=${vv.avg.toFixed(2)}ms`);
+                    }
+                }
+                if (rewAgg && typeof rewAgg.sum === 'number') {
+                    console.log(`  Rewards: sum=${rewAgg.sum.toFixed(3)} avg=${rewAgg.avg.toFixed(3)}`);
+                }
+            }
         } else if (status.state === 'working') {
             // Display progress messages for working states
             if (status.message?.parts) {

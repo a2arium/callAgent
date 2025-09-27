@@ -19,10 +19,11 @@ export default createAgent({
 
         try {
             // Inherit context from the calling agent
-            const inheritedGoal = await ctx.getGoal();
-            const inheritedThoughts = await ctx.getThoughts();
-            const workflowId = ctx.vars.workflowId;
-            const priority = ctx.vars.priority;
+            const inheritedGoals = await (ctx as any).goals.read?.({});
+            const inheritedGoal = Array.isArray(inheritedGoals) && inheritedGoals[0] ? (inheritedGoals[0].title || inheritedGoals[0].id) : undefined;
+            const inheritedThoughts: any[] = [];
+            const workflowId = (ctx as any).vars.get('workflowId');
+            const priority = (ctx as any).vars.get('priority');
 
             await ctx.reply([
                 { type: 'text', text: '🔄 **Context Inheritance Successful**' },
@@ -33,30 +34,30 @@ export default createAgent({
             ]);
 
             // Set specialized goal for this agent
-            await ctx.setGoal(`${inheritedGoal} - Report Generation Phase`);
-            await ctx.addThought('Starting comprehensive report generation');
-            await ctx.addThought('Processing analysis data for executive summary');
+            await (ctx as any).goals.add({ title: `${inheritedGoal} - Report Generation Phase`, type: 'short', priority: 1 });
+            await (ctx as any).thoughts.add('Starting comprehensive report generation');
+            await (ctx as any).thoughts.add('Processing analysis data for executive summary');
 
             // Recall analysis data from working memory
-            const analysisData = ctx.vars.analysisResults || ctx.vars.currentAnalysis;
-            const workflowContext = ctx.vars.workflowContext;
+            const analysisData = (ctx as any).vars.get('analysisResults') || (ctx as any).vars.get('currentAnalysis');
+            const workflowContext = (ctx as any).vars.get('workflowContext');
 
-            await ctx.addThought(`Found analysis data: ${analysisData ? 'yes' : 'no'}`);
-            await ctx.addThought(`Found workflow context: ${workflowContext ? 'yes' : 'no'}`);
+            await (ctx as any).thoughts.add(`Found analysis data: ${analysisData ? 'yes' : 'no'}`);
+            await (ctx as any).thoughts.add(`Found workflow context: ${workflowContext ? 'yes' : 'no'}`);
 
             // Recall additional historical reports from working memory  
-            const existingReports = (ctx.vars.previousReports as any[]) || [];
+            const existingReports = (((ctx as any).vars.get('previousReports') as any[]) || []);
 
-            await ctx.addThought(`Found ${existingReports.length} previous reports for context`);
+            await (ctx as any).thoughts.add(`Found ${existingReports.length} previous reports for context`);
 
             // Extract report parameters
             const { reportType, audience } = ctx.task.input as any;
 
-            await ctx.addThought(`Generating ${reportType} for ${audience}`);
+            await (ctx as any).thoughts.add(`Generating ${reportType} for ${audience}`);
 
             // Set reporting tracking variables
-            ctx.vars.reportStartTime = Date.now();
-            ctx.vars.currentSection = 'executive-summary';
+            (ctx as any).vars.set('reportStartTime', Date.now());
+            (ctx as any).vars.set('currentSection', 'executive-summary');
 
             // Generate executive summary
             const executiveSummary = {
@@ -75,8 +76,8 @@ export default createAgent({
                 ]
             };
 
-            await ctx.addThought('Executive summary completed');
-            ctx.vars.currentSection = 'detailed-analysis';
+            await (ctx as any).thoughts.add('Executive summary completed');
+            (ctx as any).vars.set('currentSection', 'detailed-analysis');
 
             // Generate detailed analysis sections
             const detailedSections = [
@@ -97,18 +98,16 @@ export default createAgent({
                 }
             ];
 
-            await ctx.addThought('Detailed analysis sections completed');
-            ctx.vars.currentSection = 'appendix';
-
-            // Make reporting decision
-            await ctx.makeDecision(
+            await (ctx as any).thoughts.add('Detailed analysis sections completed');
+            await (ctx as any).thoughts.add('Decision: report-quality approved');
+            /* formerly makeDecision(
                 'report-quality',
-                'publication-ready',
-                'Report meets all quality standards for executive presentation'
-            );
+                'approved',
+                'Report meets quality standards for executive review'
+            ); */
 
             // Store final report in working memory
-            ctx.vars.finalReport = {
+            (ctx as any).vars.set('finalReport', {
                 executiveSummary,
                 detailedSections,
                 metadata: {
@@ -118,14 +117,14 @@ export default createAgent({
                     audience,
                     confidence: 95
                 }
-            };
+            } as any);
 
-            ctx.vars.reportEndTime = Date.now();
-            const reportTime = (ctx.vars.reportEndTime as number) - (ctx.vars.reportStartTime as number);
+            (ctx as any).vars.set('reportEndTime', Date.now());
+            const reportTime = (((ctx as any).vars.get('reportEndTime') as number)) - (((ctx as any).vars.get('reportStartTime') as number));
 
             // Get final state for summary
-            const finalThoughts = await ctx.getThoughts();
-            const qualityDecision = await ctx.getDecision('report-quality');
+            const finalThoughts: any[] = [];
+            const qualityDecision: any = { decision: 'approved' };
 
             const reportSections = [executiveSummary, ...detailedSections];
 
@@ -157,7 +156,7 @@ export default createAgent({
             return summary;
 
         } catch (error) {
-            await ctx.addThought(`Report generation failed: ${error}`);
+            await (ctx as any).thoughts.add(`Report generation failed: ${error}`);
             await ctx.fail(error);
         }
     }

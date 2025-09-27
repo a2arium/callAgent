@@ -16,13 +16,14 @@ export type AgentPlugin = {
      * @param ctx - Guaranteed agent task context with all working memory and A2A capabilities
      * @returns Promise resolving to task result
      */
-    handleTask: (ctx: AgentTaskContext) => Promise<unknown>;
+    handleTask?: (ctx: AgentTaskContext) => Promise<unknown>;
     /** LLM configuration specific to this agent */
     llmConfig?: LLMConfig;
     /** LLM adapter instance for this plugin */
     llmAdapter?: ILLMCaller;
     /** Tenant context for multi-tenant isolation */
     tenantId: string;
+    loop?: { modules?: Partial<import('../../loop/oneTurn.js').Modules> };
     // Future hooks: initialize?: () => Promise<void>; shutdown?: () => Promise<void>;
 }
 
@@ -39,8 +40,17 @@ export type CreateAgentPluginOptions = {
      * @param ctx - Guaranteed agent task context with all working memory and A2A capabilities
      * @returns Promise resolving to task result
      */
-    handleTask: (ctx: AgentTaskContext) => Promise<unknown>;
+    handleTask?: (ctx: AgentTaskContext) => Promise<unknown>;
     /** Tenant context for multi-tenant isolation */
     tenantId?: string;
+    loop?: { modules?: Partial<import('../../loop/oneTurn.js').Modules> };
+    // Sugar: allow defining loop modules at the top level
+    attention?: import('../../loop/oneTurn.js').Modules['attention'];
+    perception?: import('../../loop/oneTurn.js').Modules['perception'];
+    learning?: import('../../loop/oneTurn.js').Modules['learning'];
+    policy?: import('../../loop/oneTurn.js').Modules['policy'];
+    shield?: import('../../loop/oneTurn.js').Modules['shield'];
+    execution?: import('../../loop/oneTurn.js').Modules['execution'];
+    transition?: import('../../loop/oneTurn.js').Modules['transition'];
     // Future hooks: initialize?, shutdown?, etc.
 } 

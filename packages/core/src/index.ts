@@ -1,5 +1,7 @@
+export * from './config/index.js';
+export * from './core/plugin/types.js';
 export * from './core/plugin/createAgent.js';
-export type { AgentPlugin, CreateAgentPluginOptions } from './core/plugin/types.js';
+export * from './runner/streamingRunner.js';
 export { AgentRegistry, globalAgentRegistry } from './core/plugin/AgentRegistry.js';
 export { PluginManager } from './core/plugin/pluginManager.js';
 export { ContextSerializer } from './core/orchestration/ContextSerializer.js';

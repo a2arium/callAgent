@@ -29,7 +29,7 @@ graph LR
     I --> J[Memory Store]
     
     subgraph "Memory Type Routing"
-        B1[ctx.setGoal] --> C1
+        B1[ctx.goals.add] --> C1
         B2[ctx.memory.semantic.set] --> C2
         B3[ctx.memory.episodic.append] --> C3
         B4[ctx.recall] --> C4
@@ -97,7 +97,7 @@ class MemoryLifecycleOrchestrator {
 
 #### 1. Working Memory Flow
 ```typescript
-// User API: ctx.setGoal("Complete the research project")
+// User API: ctx.goals.add({ title: "Complete the research project" })
 // ↓
 // Creates MemoryItem with intent: 'workingMemory'
 // ↓
@@ -112,7 +112,7 @@ class MemoryLifecycleOrchestrator {
 
 #### 2. Semantic Memory Flow
 ```typescript
-// User API: ctx.memory.semantic.set("project-status", "in-progress")
+// User API: ctx.semantic.add({ id: "project-status", value: "in-progress" })
 // ↓
 // Creates MemoryItem with intent: 'semanticLTM'
 // ↓
@@ -686,8 +686,8 @@ export default createAgent({
     async handleTask(ctx) {
         // Agent implementation
         // Memory operations will use the configured pipeline
-        await ctx.setGoal("Process customer inquiry");
-        await ctx.addThought("Customer seems frustrated");
+        await ctx.goals.add({ title: "Process customer inquiry" });
+        await ctx.thoughts.add("Customer seems frustrated");
     }
 }, import.meta.url);
 ```
@@ -994,7 +994,7 @@ export default createAgent({
         }
         
         // Continue with task processing
-        await ctx.setGoal("Handle high-priority request");
+        await ctx.goals.add({ title: "Handle high-priority request" });
     }
 });
 ```
@@ -1237,16 +1237,16 @@ Based on performance testing, the MLO pipeline provides:
 
 ```typescript
 // Working memory operations go through MLO with workingMemory intent
-await ctx.setGoal("Complete the research project");
+await ctx.goals.add({ title: "Complete the research project" });
 // ↓ Creates MemoryItem with intent: 'workingMemory'
 // ↓ Routes to workingMemory pipeline processors
 // ↓ Stores in WorkingMemorySQLAdapter
 
-await ctx.addThought("Need to gather more data sources");
+await ctx.thoughts.add("Need to gather more data sources");
 // ↓ Same workingMemory pipeline, different operation type
 
 // Semantic memory operations use semanticLTM intent
-await ctx.memory.semantic.set("project-status", "in-progress");
+await ctx.semantic.add({ id: "project-status", value: "in-progress" });
 // ↓ Creates MemoryItem with intent: 'semanticLTM'
 // ↓ Routes to semanticLTM pipeline processors
 // ↓ Stores in semantic memory backend

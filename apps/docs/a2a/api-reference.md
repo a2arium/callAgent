@@ -398,7 +398,7 @@ export default createAgent({
   manifest: { name: 'parent', version: '1.0.0' },
   
   async handleTask(ctx) {
-    await ctx.setGoal?.('Process data');
+    await ctx.goals?.add?.({ title: 'Process data' });
     ctx.vars!.priority = 'high';
     
     const result = await ctx.sendTaskToAgent('child', { data: 'test' }, {

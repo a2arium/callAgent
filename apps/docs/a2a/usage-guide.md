@@ -90,8 +90,8 @@ export default createAgent({
   
   async handleTask(ctx) {
     // Set up context
-    await ctx.setGoal('Complete multi-step analysis');
-    await ctx.addThought('Starting complex workflow');
+    await ctx.goals.add({ title: 'Complete multi-step analysis' });
+    await ctx.thoughts.add('Starting complex workflow');
     ctx.vars!.workflowId = 'workflow-123';
     
     // Call with full context inheritance
@@ -121,9 +121,9 @@ When `inheritWorkingMemory: true`:
 
 ```typescript
 // Parent agent
-await ctx.setGoal('Analyze customer data');
-await ctx.addThought('Customer satisfaction metrics needed');
-await ctx.makeDecision('analysis-type', 'comprehensive', 'Full analysis required');
+await ctx.goals.add({ title: 'Analyze customer data' });
+await ctx.thoughts.add('Customer satisfaction metrics needed');
+await ctx.thoughts.add('Decision: analysis-type comprehensive (Full analysis required)');
 ctx.vars!.customerId = '12345';
 
 // Child agent will receive all of this context
@@ -163,7 +163,7 @@ export default createAgent({
   manifest: { name: 'workflow-orchestrator', version: '1.0.0' },
   
   async handleTask(ctx) {
-    await ctx.setGoal('Complete end-to-end data processing');
+    await ctx.goals.add({ title: 'Complete end-to-end data processing' });
     
     // Step 1: Data extraction
     const extractedData = await ctx.sendTaskToAgent('data-extractor', {
@@ -201,7 +201,7 @@ export default createAgent({
   manifest: { name: 'parallel-coordinator', version: '1.0.0' },
   
   async handleTask(ctx) {
-    await ctx.setGoal('Run parallel analysis tasks');
+    await ctx.goals.add({ title: 'Run parallel analysis tasks' });
     
     // Execute multiple agents in parallel
     const [
@@ -240,8 +240,8 @@ export default createAgent({
   async handleTask(ctx) {
     const requestType = (ctx.task.input as any).type;
     
-    await ctx.setGoal(`Process ${requestType} request`);
-    await ctx.addThought(`Routing to appropriate specialist for ${requestType}`);
+    await ctx.goals.add({ title: `Process ${requestType} request` });
+    await ctx.thoughts.add(`Routing to appropriate specialist for ${requestType}`);
     
     let result;
     switch (requestType) {
@@ -271,7 +271,7 @@ export default createAgent({
         });
     }
     
-    await ctx.addThought(`${requestType} processing completed`);
+    await ctx.thoughts.add(`${requestType} processing completed`);
     return result;
   }
 }, import.meta.url);
@@ -286,7 +286,7 @@ try {
   const result = await ctx.sendTaskToAgent('non-existent-agent', input);
 } catch (error) {
   if (error.message.includes('not found')) {
-    await ctx.addThought('Specialist agent unavailable, using fallback');
+    await ctx.thoughts.add('Specialist agent unavailable, using fallback');
     const result = await ctx.sendTaskToAgent('general-agent', input);
     return result;
   }
@@ -303,7 +303,7 @@ try {
   });
 } catch (error) {
   if (error.message.includes('timeout')) {
-    await ctx.addThought('Agent call timed out, proceeding with partial results');
+    await ctx.thoughts.add('Agent call timed out, proceeding with partial results');
     return { status: 'timeout', partialData: null };
   }
   throw error;
@@ -326,11 +326,11 @@ export default createAgent({
           timeout: 15000
         });
         
-        await ctx.addThought(`Successfully processed with ${agentName}`);
+        await ctx.thoughts.add(`Successfully processed with ${agentName}`);
         return result;
         
       } catch (error) {
-        await ctx.addThought(`${agentName} failed: ${error.message}`);
+        await ctx.thoughts.add(`${agentName} failed: ${error.message}`);
         
         if (agentName === 'fallback-agent') {
           throw error; // Last resort failed
@@ -403,8 +403,8 @@ Add context to errors for better debugging:
 try {
   const result = await ctx.sendTaskToAgent('analyzer', input);
 } catch (error) {
-  await ctx.addThought(`Analysis failed: ${error.message}`);
-  await ctx.makeDecision('error-handling', 'fallback', 'Primary analysis failed');
+  await ctx.thoughts.add(`Analysis failed: ${error.message}`);
+  await (ctx as any).decisions.add('error-handling', 'fallback', 'Primary analysis failed');
   throw new Error(`Analysis workflow failed: ${error.message}`);
 }
 ```

@@ -6,7 +6,7 @@ import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
 import type { Usage } from './LLMTypes.js'; // Import Usage type
 import type { IMemory } from '@a2arium/callagent-types';
 // Import working memory types for TaskContext
-import type { ThoughtEntry, DecisionEntry, WorkingVariables } from './workingMemory.js';
+import type { ThoughtEntry, DecisionEntry } from './workingMemory.js';
 import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';
 import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js';
 
@@ -38,6 +38,14 @@ export type AgentManifest = {
     version: string;
     /** Optional agent description */
     description?: string;
+    /** Execution mode: 'loop' (default) or 'legacy' */
+    runMode?: 'loop' | 'legacy';
+    /** Optional default loop budgets */
+    budgets?: { maxTurns?: number; latencyMs?: number };
+    /** Human-in-the-loop level */
+    hitl?: 'advise' | 'consent' | 'guardrails';
+    /** Safety configuration */
+    safety?: { sanitize?: boolean; costLimit?: number; piiPatterns?: string[] };
     /** Memory configuration for A2A context inheritance */
     memory?: {
         /** Memory profile (e.g., 'basic', 'advanced', 'custom') */
@@ -93,6 +101,8 @@ export type TaskLogger = {
 
 // --- Task Context (Interface for agent task handling) ---
 export type TaskContext = {
+    // Readonly mental state view for queries
+    M?: Readonly<import('../../loop/types.js').MentalState>;
     // Tenant context for multi-tenant operations
     tenantId: string;
     // Agent identifier for the current agent
@@ -114,25 +124,43 @@ export type TaskContext = {
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 
-    // Working Memory Operations
-    setGoal: (goal: string) => Promise<void>; // legacy; will be removed after migration
-    getGoal: () => Promise<string | null>;    // legacy; will be removed after migration
-    addThought: (thought: string) => Promise<void>;
-    getThoughts: () => Promise<ThoughtEntry[]>;
-    makeDecision: (key: string, decision: string, reasoning?: string) => Promise<void>;
-    getDecision: (key: string) => Promise<DecisionEntry | null>;
-    getAllDecisions: () => Promise<Record<string, DecisionEntry>>; // A2A: Required for context serialization
+    // Working Memory Operations (replaced by namespaced helpers below)
 
-    // Goals API (new)
-    addGoal: (node: { id?: GoalId; title: string; type?: GoalType; priority?: number; parentId?: GoalId; context?: GoalNode['context'] }) => Promise<GoalId>;
-    updateGoal: (id: GoalId, patch: Partial<Omit<GoalNode, 'id' | 'createdAt'>>) => Promise<void>;
-    moveGoal: (id: GoalId, parentId?: GoalId, order?: number) => Promise<void>;
-    completeGoal: (id: GoalId, opts?: { cascadeChildren?: boolean; requireNoActiveChildren?: boolean }) => Promise<void>;
-    failGoal: (id: GoalId) => Promise<void>;
-    listGoals: (filter?: { status?: GoalStatus; parentId?: GoalId; type?: GoalType }) => Promise<GoalNode[]>;
+    // Working memory variables - facade (writes via methods only)
+    vars: {
+        get<T = unknown>(key: string): T | undefined;
+        set<T = unknown>(key: string, value: T): void;
+        merge(patch: Record<string, unknown>): void;
+        update<T = unknown>(key: string, fn: (prev: T | undefined) => T): void;
+        delete(key: string): void;
+        keys(): string[];
+        has(key: string): boolean;
+    };
 
-    // Working memory variables - REQUIRED
-    vars: WorkingVariables;
+    // Namespaced helpers (minimal, ergonomic)
+    goals?: {
+        add: (g: any) => Promise<string> | string;
+        update: (id: string, patch: any) => Promise<void> | void;
+        remove: (id: string) => Promise<void> | void;
+        clear: (predicate?: (g: any) => boolean) => Promise<void> | void;
+        read: (filter?: any) => Promise<any[]> | any[];
+    };
+    episodic?: { add: (e: any) => void };
+    thoughts?: { add: (t: { text: string } | string) => Promise<void> | void };
+    // Semantic memory facade (hybrid): prefer add/read/remove over legacy set/get/delete
+    semantic?: {
+        add: (item: SemanticAddInput) => Promise<void> | void;
+        read: (filter?: SemanticReadFilter) => Promise<SemanticItem[]> | SemanticItem[];
+        remove: (idOrPredicate: string | ((item: SemanticItem) => boolean)) => Promise<void> | void;
+    };
+    world?: { update: (fn: (wm: any) => void) => void; patch: (p: Record<string, unknown>) => void };
+    decisions?: {
+        add: (key: string, value: unknown, reasoning?: string) => void | Promise<void>;
+        get: (key: string) => unknown | Promise<unknown>;
+        read: (filter?: { prefix?: string }) => Array<{ key: string; value: unknown; reasoning?: string; ts: string }> | Promise<Array<{ key: string; value: unknown; reasoning?: string; ts: string }>>;
+        remove: (key: string) => void | Promise<void>;
+        clear: () => void | Promise<void>;
+    };
 
     // Unified memory operations - REQUIRED
     recall: (query: string, options?: RecallOptions) => Promise<unknown[]>;
@@ -190,15 +218,37 @@ export type TaskContext = {
     ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
 }
 
+// --- Semantic facade types ---
+export type SemanticAddInput = {
+    id: string;
+    value: unknown;
+    tags?: string[];
+    entities?: Record<string, unknown>;
+    backend?: string;
+};
+
+export type SemanticReadFilter = {
+    id?: string | string[];
+    tag?: string;
+    tags?: string[];
+    backend?: string;
+    limit?: number;
+};
+
+export type SemanticItem = {
+    id: string;
+    value: unknown;
+    tags?: string[];
+    entities?: Record<string, unknown>;
+};
+
 /**
  * Guaranteed Agent Task Context
  * This type ensures that all working memory and A2A methods are definitely available
  * Use this type for agent implementations to avoid "possibly undefined" errors
  */
 export type AgentTaskContext = Required<Pick<TaskContext,
-    'setGoal' | 'getGoal' | 'addThought' | 'getThoughts' |
-    'makeDecision' | 'getDecision' | 'getAllDecisions' | 'vars' |
-    'recall' | 'remember' | 'sendTaskToAgent'
+    'vars' | 'recall' | 'remember' | 'sendTaskToAgent'
 >> & TaskContext;
 
 /**
@@ -220,8 +270,6 @@ export type AgentTaskContext = Required<Pick<TaskContext,
 export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
     // Runtime validation to ensure all required methods are present
     const requiredMethods = [
-        'setGoal', 'getGoal', 'addThought', 'getThoughts',
-        'makeDecision', 'getDecision', 'getAllDecisions',
         'recall', 'remember', 'sendTaskToAgent'
     ];
 

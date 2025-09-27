@@ -8,7 +8,7 @@ This document explains how to use the agent framework's memory system to provide
 
 The memory system provides a standardized interface (`IMemory`) for agents to store, retrieve, and query data persistently across different executions. It's accessible through the context object passed to agents:
 
-> **New:** The framework now also includes a **Working Memory & Cognitive Context API** for managing active cognitive state during task execution. See [Working Memory API](./working-memory-api.md) for details on goal tracking, thought management, and decision making.
+> **New:** The framework now also includes a **Working Memory & Cognitive Context API** for managing active cognitive state during task execution. See [Working Memory API](./working-memory.md) for details on goal tracking, thought management, and decision making.
 
 > **New:** The framework now supports **Entity-Aware Search** that allows querying memory using entity alignment. You can search for memories by entity names, aliases, and similar entities using fuzzy matching. See [Entity-Aware Search](#entity-aware-search) for details.
 
@@ -16,8 +16,8 @@ The memory system provides a standardized interface (`IMemory`) for agents to st
 // Inside the handleTask function of an agent
 async handleTask(ctx: TaskContext) {
   // Access memory through the context
-  await ctx.memory.semantic.set('conversation-123', { lastMessage: 'Hello' });
-  const conversation = await ctx.memory.semantic.get('conversation-123');
+  await ctx.semantic?.add({ id: 'conversation-123', value: { lastMessage: 'Hello' } });
+  const conversation = (await ctx.semantic?.read?.({ id: 'conversation-123', limit: 1 }))?.[0]?.value;
   
   // NEW: Search using entity alignment
   const johnMemories = await ctx.memory.semantic.getMany({
@@ -108,16 +108,15 @@ export default createAgent({
   manifest: './agent.json',
   handleTask: async (ctx) => {
     // Store information in memory
-    await ctx.memory.semantic.set('user-preference', {
+  await ctx.semantic?.add?.({ id: 'user-preference', value: {
       theme: 'dark',
       language: 'en-US'
-    }, {
-      tags: ['preference', 'user-settings']
-    });
+    }});
 
-    // Retrieve information from memory
-    const preference = await ctx.memory.semantic.get('user-preference');
-    ctx.logger.info(`User prefers ${preference.theme} theme`);
+    // Retrieve information from memory (via facade)
+    const prefArr = await ctx.semantic?.read?.({});
+    const preference = Array.isArray(prefArr) ? (prefArr as any[]).find(x => (x as any)?.id === 'user-preference')?.value : undefined;
+    if (preference) ctx.logger.info(`User prefers ${preference.theme} theme`);
     await ctx.reply([{ type: 'text', text: 'Preferences saved!' }]);
     ctx.complete();
   }
@@ -135,15 +134,13 @@ export default createAgent({
   manifest: './agent.json',
   handleTask: async (ctx) => {
     // Store information in memory
-    await ctx.memory.semantic.set('user-preference', { 
+    await ctx.semantic?.add({ id: 'user-preference', value: { 
       theme: 'dark',
       language: 'en-US' 
-    }, { 
-      tags: ['preference', 'user-settings'] 
-    });
+    }, tags: ['preference', 'user-settings'] }); 
     
     // Retrieve information from memory
-    const preference = await ctx.memory.semantic.get('user-preference');
+    const preference = (await ctx.semantic?.read?.({ id: 'user-preference', limit: 1 }))?.[0]?.value;
     
     // Use the retrieved data
     ctx.logger.info(`User prefers ${preference.theme} theme`);
@@ -222,28 +219,26 @@ function createMemoryAdapter(): IMemory {
 
 ```typescript
 // Store simple data
-await ctx.memory.semantic.set('user-123-settings', { 
+await ctx.semantic?.add({ id: 'user-123-settings', value: { 
   theme: 'dark', 
   fontSize: 'medium' 
-});
+} });
 
 // Store data with tags for organization
-await ctx.memory.semantic.set('conversation-456', { 
+await ctx.semantic?.add({ id: 'conversation-456', value: { 
   messages: [{ role: 'user', content: 'Hello' }]
-}, { 
-  tags: ['conversation', 'active'] 
-});
+}, tags: ['conversation', 'active'] });
 ```
 
 ### Retrieving Data
 
 ```typescript
 // Get a specific value by key
-const settings = await ctx.memory.semantic.get('user-123-settings');
+const settings = (await ctx.semantic?.read?.({ id: 'user-123-settings', limit: 1 }))?.[0]?.value;
 console.log(settings.theme); // 'dark'
 
 // The value maintains its structure
-const conversation = await ctx.memory.semantic.get('conversation-456');
+const conversation = (await ctx.semantic?.read?.({ id: 'conversation-456', limit: 1 }))?.[0]?.value;
 console.log(conversation.messages[0].content); // 'Hello'
 ```
 
@@ -278,7 +273,7 @@ const limitedUserData = await ctx.memory.semantic.getMany('user:*', { limit: 10 
 
 ```typescript
 // Delete a specific key
-await ctx.memory.semantic.delete('old-conversation-123');
+await ctx.semantic?.remove('old-conversation-123');
 
 // Delete multiple entries using pattern matching
 const deletedCount = await ctx.memory.semantic.deleteMany('user:123:*');
@@ -570,39 +565,27 @@ const memory = new MemorySQLAdapter(prisma, embedFunction);
 
 ```typescript
 // Store event data with entity alignment
-await ctx.memory.semantic.set('event-001', {
+await ctx.semantic?.add({ id: 'event-001', value: {
   title: 'AI Conference 2024',
   venue: 'Main Auditorium',        // Will be aligned as 'location' entity
   speaker: 'Dr. Jane Smith',       // Will be aligned as 'person' entity
   date: '2024-03-15'
-}, {
-  tags: ['event', 'conference'],
-  entities: {
-    venue: 'location',    // Map 'venue' field to 'location' entity type
-    speaker: 'person'     // Map 'speaker' field to 'person' entity type
-  }
-});
+}, tags: ['event', 'conference'], entities: { venue: 'location', speaker: 'person' } });
 
 // Store another event - similar entities will be aligned
-await ctx.memory.semantic.set('event-002', {
+await ctx.semantic?.add({ id: 'event-002', value: {
   title: 'Tech Workshop',
   venue: 'Main Hall',              // Will align to 'Main Auditorium' if similar enough
   speaker: 'Jane Smith',           // Will align to 'Dr. Jane Smith' if similar enough
   date: '2024-03-16'
-}, {
-  tags: ['event', 'workshop'],
-  entities: {
-    venue: 'location',
-    speaker: 'person'
-  }
-});
+}, tags: ['event', 'workshop'], entities: { venue: 'location', speaker: 'person' } });
 ```
 
 #### Retrieving Aligned Data
 
 ```typescript
 // Retrieve data - aligned fields return proxy objects
-const event = await ctx.memory.semantic.get('event-002');
+const event = (await ctx.semantic?.read?.({ id: 'event-002', limit: 1 }))?.[0]?.value;
 
 // Use aligned values like normal strings
 console.log(`Event at ${event.venue}`);                    // "Event at Main Hall"
@@ -651,7 +634,7 @@ entities: {
 
 ```typescript
 // Store complex event data with nested arrays
-await ctx.memory.semantic.set('conference-2024', {
+await ctx.semantic?.add({ id: 'conference-2024', value: {
   titleAndDescription: [
     { title: "AI Summit 2024", description: "Annual AI conference", language: "en" },
     { title: "Tech Conference Extraordinaire", description: "Alternative title", language: "en" }
@@ -668,19 +651,13 @@ await ctx.memory.semantic.set('conference-2024', {
     { name: "Dr. Alice Johnson", affiliation: "MIT" },
     { name: "Prof. Bob Wilson", affiliation: "Stanford" }
   ]
-}, {
-  tags: ['conference', 'ai'],
-  entities: {
-    // ✅ Array expansion - creates entity alignment for each element
-    "titleAndDescription[].title": "event:0.8",       // Aligns both "AI Summit 2024" and "Tech Conference Extraordinaire"
-    "eventOccurences[].date": "date",                  // Aligns both "2024-01-15" and "2024-01-16"
-    "speakers[].name": "person:0.75",                  // Aligns both "Dr. Alice Johnson" and "Prof. Bob Wilson"
-    "speakers[].affiliation": "organization:0.8",     // Aligns both "MIT" and "Stanford"
-    
-    // ✅ Still works for nested objects
-    "venue.name": "location:0.65"                     // Aligns "Convention Center"
-  }
-});
+}, tags: ['conference', 'ai'], entities: {
+  "titleAndDescription[].title": "event:0.8",
+  "eventOccurences[].date": "date",
+  "speakers[].name": "person:0.75",
+  "speakers[].affiliation": "organization:0.8",
+  "venue.name": "location:0.65"
+} });
 ```
 
 #### Array Expansion Syntax
@@ -715,13 +692,13 @@ const conferenceData = {
   ]
 };
 
-await ctx.memory.semantic.set('multi-session-event', conferenceData, {
+await ctx.semantic?.add({ id: 'multi-session-event', value: conferenceData, {
   entities: {
     "sessions[].title": "topic",                      // Aligns "Session 1" and "Session 2"
     "sessions[].presenters[].name": "person",         // Aligns all presenter names
     "sessions[].presenters[].company": "organization" // Aligns all presenter companies
   }
-});
+} });
 ```
 
 ##### Mixed Objects and Arrays
@@ -736,12 +713,12 @@ const mixedData = {
   }
 };
 
-await ctx.memory.semantic.set('mixed-structure', mixedData, {
+await ctx.semantic?.add({ id: 'mixed-structure', value: mixedData, {
   entities: {
     "event.details.speakers[].name": "person",    // object.object.array[].field
     "event.details.venue.name": "location"       // object.object.object.field
   }
-});
+} });
 ```
 
 #### How Array Expansion Works
@@ -822,7 +799,7 @@ entities: {
 
 ```typescript
 // Configure field-specific thresholds using 'type:threshold' syntax
-await ctx.memory.semantic.set('conference-session', {
+await ctx.semantic?.add({ id: 'conference-session', value: {
   session: {
     title: 'Machine Learning Basics',
     presenter: {
@@ -834,43 +811,29 @@ await ctx.memory.semantic.set('conference-session', {
       room: 'Room 101'
     }
   }
-}, {
-  entities: {
-    'session.presenter.name': 'person:0.75',        // Field-specific threshold
-    'session.presenter.affiliation': 'organization:0.8',
-    'session.location.building': 'location:0.65'    // Field-specific threshold
-  }
-});
+}, entities: {
+  'session.presenter.name': 'person:0.75',
+  'session.presenter.affiliation': 'organization:0.8',
+  'session.location.building': 'location:0.65'
+} });
 ```
 
 #### Field-Specific Thresholds
 
 ```typescript
 // Use different thresholds for different fields
-await ctx.memory.semantic.set('event-data', {
+await ctx.semantic?.add({ id: 'event-data', value: {
   venue: 'Main Auditorium',
   speaker: 'Dr. Jane Smith',
   organizer: 'Tech Corp Inc'
-}, {
-  entities: {
-    venue: 'location:0.6',         // Lower threshold for locations (more variation)
-    speaker: 'person:0.8',         // Higher threshold for people (avoid false positives)
-    organizer: 'organization:0.75'  // Medium threshold for organizations
-  }
-});
+}, entities: { venue: 'location:0.6', speaker: 'person:0.8', organizer: 'organization:0.75' } });
 
 // Mix of fields with and without thresholds
-await ctx.memory.semantic.set('meeting-info', {
+await ctx.semantic?.add({ id: 'meeting-info', value: {
   location: 'Conference Room A',
   attendee: 'John Smith',
   topic: 'AI Discussion'
-}, {
-  entities: {
-    location: 'location:0.65',     // Custom threshold
-    attendee: 'person',            // Uses default threshold
-    topic: 'topic:0.9'             // Very high threshold for topics
-  }
-});
+}, entities: { location: 'location:0.65', attendee: 'person', topic: 'topic:0.9' } });
 ```
 
 #### Manual Entity Management
@@ -990,15 +953,15 @@ if (stats.totalAlignments / stats.totalEntities < 0.3) {
 
 ```typescript
 try {
-  await ctx.memory.semantic.set('event-data', eventData, {
+  await ctx.semantic?.add({ id: 'event-data', value: eventData, {
     entities: { venue: 'location', speaker: 'person' }
-  });
+  } });
 } catch (error) {
   // Fall back to storing without entity alignment
   console.warn('Entity alignment failed, storing without alignment:', error);
-  await ctx.memory.semantic.set('event-data', eventData, {
+  await ctx.semantic?.add({ id: 'event-data', value: eventData, {
     tags: ['event', 'no-alignment']
-  });
+  } });
 }
 ```
 
@@ -1293,7 +1256,7 @@ const debugSearch = async (searchTerm: string) => {
 };
 
 // Check entity alignment for a specific memory
-const memory = await ctx.memory.semantic.get('meeting:123');
+const memory = (await ctx.semantic?.read?.({ id: 'meeting:123', limit: 1 }))?.[0]?.value;
 console.log('Aligned entities:', memory._alignments); // If available
 ```
 
@@ -1320,67 +1283,43 @@ First, let's store related memories that share entities:
 // Store related memories that will be automatically cross-referenced
 async function setupRelatedMemories(ctx) {
   // Meeting 1 - Dr. Jane Smith at Main Auditorium
-  await ctx.memory.semantic.set('meeting:2024-001', {
+  await ctx.semantic?.add({ id: 'meeting:2024-001', value: {
     title: 'AI Research Review',
     date: '2024-03-15',
     speaker: 'Dr. Jane Smith',        // Entity: person
     venue: 'Main Auditorium',        // Entity: location
     attendees: 45,
     topics: ['machine learning', 'neural networks']
-  }, {
-    tags: ['meeting', 'research'],
-    entities: {
-      speaker: 'person',
-      venue: 'location'
-    }
-  });
+  }, tags: ['meeting', 'research'], entities: { speaker: 'person', venue: 'location' } });
 
   // Workshop - Same speaker, different venue
-  await ctx.memory.semantic.set('workshop:2024-003', {
+  await ctx.semantic?.add({ id: 'workshop:2024-003', value: {
     title: 'Deep Learning Workshop',
     date: '2024-03-20',
     speaker: 'Jane Smith',           // Same entity (will align to Dr. Jane Smith)
     venue: 'Conference Room A',      // Different location entity
     attendees: 12,
     format: 'hands-on'
-  }, {
-    tags: ['workshop', 'training'],
-    entities: {
-      speaker: 'person',
-      venue: 'location'
-    }
-  });
+  }, tags: ['workshop', 'training'], entities: { speaker: 'person', venue: 'location' } });
 
   // Lecture - Same venue, different speaker
-  await ctx.memory.semantic.set('lecture:2024-007', {
+  await ctx.semantic?.add({ id: 'lecture:2024-007', value: {
     title: 'Ethics in AI',
     date: '2024-03-22',
     speaker: 'Prof. Robert Chen',    // Different person entity
     venue: 'Main Hall',              // Similar to Main Auditorium (might align)
     attendees: 200,
     department: 'Philosophy'
-  }, {
-    tags: ['lecture', 'ethics'],
-    entities: {
-      speaker: 'person',
-      venue: 'location'
-    }
-  });
+  }, tags: ['lecture', 'ethics'], entities: { speaker: 'person', venue: 'location' } });
 
   // Project record - mentions same speaker
-  await ctx.memory.semantic.set('project:ai-ethics-2024', {
+  await ctx.semantic?.add({ id: 'project:ai-ethics-2024', value: {
     title: 'AI Ethics Research Project',
     lead: 'Dr. Jane Smith',          // Same person entity
     collaborators: ['Prof. Robert Chen', 'Dr. Sarah Wilson'],
     status: 'active',
     budget: 250000
-  }, {
-    tags: ['project', 'research'],
-    entities: {
-      lead: 'person',
-      collaborators: 'person'  // Arrays get processed individually
-    }
-  });
+  }, tags: ['project', 'research'], entities: { lead: 'person', collaborators: 'person' } });
 }
 ```
 
@@ -1545,7 +1484,7 @@ Use cross-referencing to build intelligent recommendations:
 ```typescript
 async function findRecommendations(memoryKey: string) {
   // Get the source memory
-  const sourceMemory = await ctx.memory.semantic.get(memoryKey);
+  const sourceMemory = (await ctx.semantic?.read?.({ id: memoryKey, limit: 1 }))?.[0]?.value;
   if (!sourceMemory) return [];
 
   const recommendations = [];
@@ -2198,7 +2137,7 @@ async function smartMemoryStorage(ctx: TaskContext, newData: any, entityConfig: 
   } else {
     // No match found, store as new memory
     const newKey = `memory-${Date.now()}`;
-    await ctx.memory.semantic.set(newKey, newData, { entities: entityConfig });
+    await ctx.semantic?.add({ id: newKey, value: newData, entities: entityConfig });
     
     console.log(`Stored new memory: ${newKey}`);
     
@@ -2399,7 +2338,7 @@ All memory operations should be wrapped in try/catch blocks to handle potential 
 
 ```typescript
 try {
-  await ctx.memory.semantic.set('important-data', { value: 'critical' });
+  await ctx.semantic?.add({ id: 'important-data', value: { value: 'critical' } });
 } catch (error) {
   // Log the error and handle gracefully
   ctx.logger.error('Failed to store memory', error);
