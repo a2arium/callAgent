@@ -76,9 +76,10 @@ This section details how to implement and register backend adapters for Semantic
     ```typescript
     type SemanticMemoryBackend = {
       get<T>(key: string, opts?: { backend?: string }): Promise<T | null>;
-      getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
+      read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
       set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
       delete(key: string, opts?: { backend?: string }): Promise<void>;
+      remove(input: GetManyInput, options?: GetManyOptions): Promise<number>;
       entities?: { /* ... entity alignment methods ... */ };
     };
     ```
@@ -135,12 +136,13 @@ packages/memory-[backend-name]/
         private config: YourBackendConfig = {}
       ) {}
       async get<T>(key: string, opts?: { backend?: string }): Promise<T | null> { /* ... tenant-aware logic ... */ }
-      async getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> { /* ... tenant-aware logic ... */ }
+      async read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> { /* ... tenant-aware logic ... */ }
       async set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void> {
         if (opts?.entities && this.embedFunction) { /* ... handle entity alignment ... */ }
         else { /* ... regular set ... */ }
       }
       async delete(key: string, opts?: { backend?: string }): Promise<void> { /* ... tenant-aware logic ... */ }
+      async remove(input: GetManyInput, options?: GetManyOptions): Promise<number> { /* ... tenant-aware logic ... */ }
       get entities() {
         if (!this.embedFunction) throw new Error('Embedding function required for entities');
         return { /* ... unlink, realign, stats implementations ... */ };
@@ -247,7 +249,7 @@ Ensure your `SemanticMemoryBackend` instance (if it supports entity alignment) i
 ### 3.6. Flow of Operations Through MLO vs. Direct Adapter Access
 
 *   **Operations Processed Through MLO Pipeline**:
-    *   Semantic: `set` (non-entity), `getMany`
+    *   Semantic: `set` (non-entity), `read`
     *   Episodic: `append`
     *   Embed: `upsert`
     *   Working Memory: All operations (`setGoal`, `addThought`, etc.) via `UnifiedMemoryService`.
@@ -344,7 +346,8 @@ Working memory is crucial for an agent's active reasoning and task execution.
     *   `ctx.decisions.add(key: string, value: unknown, reasoning?: string)`
     *   `ctx.decisions.get(key: string)` / `ctx.decisions.read(filter?)`
     *   `ctx.vars.set(key: string, value: unknown)` / `ctx.vars.get<T>(key: string): T | undefined`
-    *   `ctx.semantic.add({ id, value, tags?, entities? })` / `ctx.semantic.read({ id?, tag?/tags?, limit? })` / `ctx.semantic.remove(id | predicate)`
+    *   `ctx.semantic.add({ id, value, tags?, entities? })` / `ctx.semantic.read({ id?, tag?/tags?, filters?, limit? })` / `ctx.semantic.remove(id | filter)`
+    *   Note: `ctx.semantic.read` supports string filters and array-aware paths like `speakers[].name contains "John"`.
 *   **MLO Pipeline Flow**: All these operations create `MemoryItem` instances that are processed through the MLO pipeline, configured by the active `MEMORY_PROFILE`. This allows for compression, reflection, etc., on working memory elements too.
 *   **Persistence**: Working memory is now externalized and persisted through dedicated backend adapters (e.g., `WorkingMemorySQLAdapter`). The `WorkingMemoryRegistry` routes operations to the appropriate backend, following the same pattern as semantic, episodic, and embed memory types.
 

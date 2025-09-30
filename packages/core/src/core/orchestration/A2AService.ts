@@ -17,6 +17,8 @@ import { AgentResultCache } from '../cache/index.js';
 import { taskEngine } from './taskEngine.js';
 import { EngineLocator } from './EngineLocator.js';
 import { eventBus } from '../../eventbus/inMemoryEventBus.js';
+import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
+import { v4 as uuidv4 } from 'uuid';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
@@ -108,6 +110,15 @@ export class A2AService implements IA2AService {
 
             // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
             if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
+                // Guard: blocking await with non-terminal (input_required) is unsupported
+                if ((options as any)?.awaitCompletion === true) {
+                    const childName = targetPlugin.manifest.name;
+                    throw new Error(
+                        `Child agent '${childName}' requested await_input while parent awaited completion. ` +
+                        `This is not supported for awaitCompletion=true. Fix by either: ` +
+                        `make the child complete in one turn for this path, or call with awaitCompletion=false and propagate await_child from the parent.`
+                    );
+                }
                 const eng = EngineLocator.getEngine() || taskEngine;
                 const { prompt, schema, childOnProvided, childTaskId } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown; childOnProvided?: string; childTaskId?: string };
                 try { console.log(`[A2AService] Post-turn child input_required routing -> parent (childOnProvided='${childOnProvided}', childTaskId='${childTaskId}') prompt='${prompt}'`); } catch { }
@@ -121,6 +132,20 @@ export class A2AService implements IA2AService {
                     childOnProvided
                 });
                 return { status: 'input_required' } as any;
+            }
+
+            // Guard: blocking await with non-terminal (input_required) is unsupported
+            const resultStatus = (result as any)?.status;
+            const isInputRequired = resultStatus === 'input_required' || (resultStatus && (resultStatus as any).state === 'input-required');
+            if (isInputRequired && (options as any)?.awaitCompletion === true) {
+                const msg = [
+                    `Child agent '${targetPlugin.manifest.name}' returned await_input while parent awaited completion.`,
+                    `This is not supported for awaitCompletion=true.`,
+                    `Fix by either:`,
+                    `- Making the child return 'complete' in one turn for this path (blocking).`,
+                    `- Or call with awaitCompletion=false and propagate await_child from the parent.`,
+                ].join(' ');
+                throw new Error(msg);
             }
 
             const duration = Date.now() - startTime;
@@ -137,7 +162,8 @@ export class A2AService implements IA2AService {
                         tenantId: options.parentTenantId,
                         parentTaskId: options.parentTaskId,
                         childToken: options.parentChildToken,
-                        result
+                        result,
+                        childAgentId: targetPlugin.manifest.name
                     });
                 } catch (notifyError) {
                     a2aLogger.warn('Failed to notify parent on child completion', notifyError as any, {
@@ -298,14 +324,29 @@ export class A2AService implements IA2AService {
         const parentTaskId = (options as any).parentTaskId as string | undefined;
         const parentChildToken = (options as any).parentChildToken as string | undefined;
         // Override requestInput to only notify parent and avoid mutating parent's WM via inherited method
+        // Mark this context so the engine preserves this override
+        (targetCtx as any).__preserveRequestInput = true;
+        (targetCtx as any).__a2aParent = { parentTenantId, parentTaskId, parentChildToken };
         (targetCtx as any).requestInput = async (prompt: string, riOpts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }) => {
             try { console.log(`[A2AService] Child requestInput called: prompt='${prompt}' onProvided='${riOpts?.onProvided}' parentTenantId=${parentTenantId} parentTaskId=${parentTaskId} parentChildToken=${parentChildToken}`); } catch { }
             if (parentTenantId && parentTaskId && parentChildToken) {
                 try {
                     const eng = EngineLocator.getEngine() || taskEngine;
-                    // Persist child's current WM + LLM state BEFORE notifying parent so child resume sees full history
-                    try { /* pre-notify flush */ } catch { /* noop */ }
+                    // Persist child's current WM + LLM state BEFORE writing pending input
                     try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
+
+                    // Create a real pending input entry in the child's session so resumeInput can work
+                    const childToken = uuidv4();
+                    const snap = await (eng as any).sessionManager?.load(targetCtx.tenantId, targetCtx.task.id);
+                    const base = (snap?.snapshot as Record<string, unknown>) || {};
+                    const inputs = getPendingInputs(base);
+                    const expiresAt = riOpts?.ttlMs ? new Date(Date.now() + riOpts.ttlMs).toISOString() : undefined;
+                    inputs[childToken] = { schema: riOpts?.schema, expiresAt } as any;
+                    const next = setPendingInputs(base, inputs);
+                    const expected = snap?.wmVersion ?? BigInt(0);
+                    await (eng as any).sessionManager?.saveSnapshot({ tenantId: targetCtx.tenantId, sessionId: targetCtx.task.id, agentId: targetPlugin.manifest.name, expectedWmVersion: expected, snapshot: next });
+                    await (eng as any).sessionManager?.appendEvent(targetCtx.tenantId, targetCtx.task.id, 'task.input_required', { token: childToken, prompt, schema: riOpts?.schema, expiresAt });
+                    await (eng as any).sessionManager?.enqueueOutbox(targetCtx.tenantId, 'task.input_required', targetCtx.task.id, { taskId: targetCtx.task.id, prompt, token: childToken, schema: riOpts?.schema, expiresAt });
 
                     // Now notify parent about input_required
                     const childOnProvided = riOpts?.onProvided;
@@ -315,19 +356,21 @@ export class A2AService implements IA2AService {
                         parentTaskId,
                         childToken: parentChildToken,
                         childTaskId: targetCtx.task.id,
+                        childInputToken: childToken,
                         prompt,
                         schema: riOpts?.schema,
                         childOnProvided
                     });
-                    (targetCtx as any).__inputRequired = { prompt, schema: riOpts?.schema, childOnProvided, childTaskId: targetCtx.task.id };
+                    (targetCtx as any).__inputRequired = { prompt, schema: riOpts?.schema, childOnProvided, childTaskId: targetCtx.task.id, childInputToken: childToken };
                 } catch (err) {
                     a2aLogger.warn('Failed to notify parent on child input_required', err as any, { parentTaskId });
                 }
             }
-            // Return a minimal InputHandle-like object for chaining
+            // Return a minimal InputHandle-like object for chaining (include child input token)
             return {
                 async onProvided() { return this; },
                 async onExpired() { return this; }
+                , token: undefined
             } as any;
         };
 
@@ -539,16 +582,26 @@ export class A2AService implements IA2AService {
                 taskId: targetCtx.task.id
             });
 
-            const result = targetPlugin.handleTask
-                ? await targetPlugin.handleTask(targetCtx)
-                : await (async () => {
-                    // Fallback to engine for loop-first agents without handleTask
+            const hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
+            const result = hasLoopModules
+                ? await (async () => {
+                    // Always route loop-first agents through the engine so A2A overrides are respected
                     const eng = EngineLocator.getEngine() || taskEngine;
                     try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
                     const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                    await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId });
-                    return { status: 'started' } as any;
-                })();
+                    const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
+                    return started ?? { status: 'started' } as any;
+                })()
+                : (targetPlugin.handleTask
+                    ? await targetPlugin.handleTask(targetCtx)
+                    : await (async () => {
+                        // Fallback: engine path
+                        const eng = EngineLocator.getEngine() || taskEngine;
+                        try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                        const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
+                        const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
+                        return started ?? { status: 'started' } as any;
+                    })());
 
             // Cache the result if caching is enabled
             if (this.agentResultCache && targetPlugin.manifest.cache?.enabled) {

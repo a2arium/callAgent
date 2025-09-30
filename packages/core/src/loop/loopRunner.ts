@@ -15,7 +15,7 @@ export async function runLoop(
     opts: LoopRunnerOptions = {}
 ): Promise<{ M: MentalState; outcome: TurnOutcome; metrics?: { timings: Record<string, number>[]; rewards: number[] } }> {
     const start = Date.now();
-    const maxTurns = opts.maxTurns ?? 1; // default to single turn for parity
+    const maxTurns = opts.maxTurns ?? Infinity; // unlimited by default unless configured
 
     // Provide minimal defaults (prefer agent overrides when present)
     const defaults: Modules = {
@@ -211,7 +211,12 @@ export async function runLoop(
     const timings: Record<string, number>[] = [];
     const rewards: number[] = [];
 
+    // env.turn is already set correctly by taskEngine for the first turn
     for (let turn = 0; turn < maxTurns; turn++) {
+        // For subsequent iterations in the same runLoop call, increment turn
+        if (turn > 0) {
+            try { (env as any).turn += 1; } catch { }
+        }
         if (opts.latencyMs && Date.now() - start > opts.latencyMs) {
             outcome = { kind: 'fail', reason: 'budget_latency_exceeded' };
             break;
@@ -227,6 +232,7 @@ export async function runLoop(
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }
+        // no-op
     }
 
     return { M: m, outcome, metrics: timings.length ? { timings, rewards } : undefined };

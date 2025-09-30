@@ -72,9 +72,9 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 datasources: { db: { url: config.databaseUrl } }
             });
             this.ownsPrisma = true;
-        } else if (process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL) {
-            // Fallback to environment variables
-            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+        } else if (process.env.MEMORY_DATABASE_URL) {
+            // Fallback to MEMORY_DATABASE_URL only
+            const dbUrl = process.env.MEMORY_DATABASE_URL;
             this.prisma = new PrismaClient({
                 datasources: { db: { url: dbUrl } }
             });
@@ -84,7 +84,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 MemorySQLAdapter requires database configuration. Provide either:
 1. config.prismaClient: Pre-configured PrismaClient
 2. config.databaseUrl: Database connection string  
-3. Environment variable: MEMORY_DATABASE_URL or DATABASE_URL
+3. Environment variable: MEMORY_DATABASE_URL
 
 Example:
 new MemorySQLAdapter({ 
@@ -226,6 +226,8 @@ new MemorySQLAdapter({
 
         // Normalize tags before storage
         const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+        // Debug log
+        // upsert
 
         // Check if the value contains binary data that needs processing
         const processedBinary = await this.processBinaryDataIfNeeded(value, options);
@@ -256,6 +258,13 @@ new MemorySQLAdapter({
                     updatedAt: new Date()
                 }
             });
+            // Verify write landed; throw if not found
+            const verify = await this.prisma.$queryRaw<Array<{ key: string }>>`
+                SELECT key FROM agent_memory_store WHERE key = ${key} AND tenant_id = ${tenantId}
+            `;
+            if (!verify || verify.length === 0) {
+                throw new Error(`[MemorySQLAdapter.setRegular] Verification failed: row not found after upsert for key=${key}, tenant=${tenantId}`);
+            }
         }
     }
 
@@ -317,6 +326,7 @@ new MemorySQLAdapter({
 
     async get(key: string, opts?: { backend?: string; tenantId?: string }): Promise<any> {
         const tenantId = opts?.tenantId || this.defaultTenantId;
+        // select by key
 
         // System tenant can query across all tenants by prefixing key with tenant:
         if (isSystemTenant(tenantId) && key.includes(':')) {
@@ -769,6 +779,15 @@ new MemorySQLAdapter({
         return deletedCount;
     }
 
+    // Facade-compatible method names
+    async read<T>(input: GetManyInput, options?: GetManyOptions): Promise<MemoryQueryResult<T>[]> {
+        return this.getMany<T>(input, options);
+    }
+
+    async remove(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        return this.deleteMany(input, options);
+    }
+
     async clear(): Promise<void> {
         await this.prisma.$transaction(async (tx) => {
             await tx.$executeRaw`DELETE FROM entity_alignment`;
@@ -824,6 +843,7 @@ new MemorySQLAdapter({
     private async queryByPattern<T>(pattern: string, options?: GetManyOptions): Promise<MemoryQueryResult<T>[]> {
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
         const limit = options?.limit ?? this.DEFAULT_QUERY_LIMIT;
+        // pattern query
 
         // System tenant can query across all tenants by prefixing pattern with tenant:
         if (isSystemTenant(tenantId) && pattern.includes(':')) {
@@ -928,6 +948,7 @@ new MemorySQLAdapter({
     private async querySimple<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
         const { tag, limit = this.DEFAULT_QUERY_LIMIT } = options;
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+        // simple query
 
         let query = `
             SELECT key, value, tags
@@ -970,6 +991,7 @@ new MemorySQLAdapter({
     private async queryWithFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
         const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+        // filter query
 
         // Check if we have entity-aware filters that require special handling
         const hasEntityFilters = filters?.some(filter => {

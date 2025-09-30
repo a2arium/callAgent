@@ -8,10 +8,22 @@ export type MinimalCallMessenger = {
 /** Create a ChatSender backed by callMessenger */
 export function createCallMessengerChatSender(cm: MinimalCallMessenger): ChatSender {
     return {
-        async sendMessage(route: ChatRoute, text: string, _opts?: { parseMode?: 'plain' | 'markdown' }) {
-            // Prefer HTML; consumers can adjust parsing rules inside callMessenger
-            const markup: Markup = { kind: 'text', html: text };
-            await cm.send(`${route.network}:${route.conversationId}`, markup);
+        async sendMessage(route: ChatRoute, text: string, _opts?: { parseMode?: 'plain' | 'markdown' | 'html' }) {
+            // Prefer HTML/Markdown based on parseMode
+            const mode = _opts?.parseMode || 'markdown';
+            let markup: Markup;
+            if (mode === 'markdown') {
+                markup = { kind: 'text', markdown: text } as Markup;
+            } else if (mode === 'html') {
+                markup = { kind: 'text', html: text } as Markup;
+            } else {
+                // plain → send as markdown with basic escaping (TODO: make some escaping)
+                markup = { kind: 'text', markdown: text } as Markup;
+            }
+            const dest = `${route.network}:${route.conversationId}`;
+            try { console.info('[chat-sender] sendMessage', markup); } catch { }
+            try { await cm.send(dest, markup); }
+            catch (e) { try { console.error('[chat-sender] sendMessage error', e); } catch { } }
         },
         async sendTyping(_route: ChatRoute) {
             // No-op for now; callMessenger can simulate typing per channel in the future
@@ -25,7 +37,9 @@ export function createCallMessengerChatSender(cm: MinimalCallMessenger): ChatSen
                     base64: media.bytesBase64,
                     caption: media.caption
                 };
-                await cm.send(`${route.network}:${route.conversationId}`, markup);
+                const dest = `${route.network}:${route.conversationId}`;
+                try { console.info('[chat-sender] sendMedia:image', { dest, url: media.url }); } catch { }
+                await cm.send(dest, markup);
                 return;
             }
             // Basic mappings for file/audio/video: send a button/link fallback or a notice
@@ -35,24 +49,34 @@ export function createCallMessengerChatSender(cm: MinimalCallMessenger): ChatSen
                     prompt: media.caption || 'File available:',
                     buttons: [{ title: media.filename || 'Download file', payload: { action: 'open_url', url: media.url } }]
                 };
-                await cm.send(`${route.network}:${route.conversationId}`, markup);
+                const dest = `${route.network}:${route.conversationId}`;
+                try { console.info('[chat-sender] sendMedia:file', { dest, url: media.url }); } catch { }
+                await cm.send(dest, markup);
                 return;
             }
             if ((media?.type === 'audio' || media?.type === 'video') && media.url) {
                 const markup: Markup = { kind: 'text', html: `${media.type === 'audio' ? 'Audio' : 'Video'}: <a href="${media.url}">${media.filename || 'Open'}</a>` };
-                await cm.send(`${route.network}:${route.conversationId}`, markup);
+                const dest = `${route.network}:${route.conversationId}`;
+                try { console.info('[chat-sender] sendMedia:av', { dest, url: media.url }); } catch { }
+                await cm.send(dest, markup);
                 return;
             }
             const notice: Markup = { kind: 'text', html: 'Unsupported media type in this channel.' };
-            await cm.send(`${route.network}:${route.conversationId}`, notice);
+            const dest = `${route.network}:${route.conversationId}`;
+            try { console.info('[chat-sender] sendMedia:unsupported', { dest }); } catch { }
+            await cm.send(dest, notice);
         },
         async sendMarkup(route: ChatRoute, markup: Markup) {
             // Minimal runtime validation of markup
             if (!markup || typeof markup !== 'object' || !('kind' in markup)) {
-                await cm.send(`${route.network}:${route.conversationId}`, { kind: 'text', html: 'Unsupported content.' });
+                const dest = `${route.network}:${route.conversationId}`;
+                try { console.info('[chat-sender] sendMarkup:invalid', { dest }); } catch { }
+                await cm.send(dest, { kind: 'text', html: 'Unsupported content.' });
                 return;
             }
-            await cm.send(`${route.network}:${route.conversationId}`, markup);
+            const dest = `${route.network}:${route.conversationId}`;
+            try { console.info('[chat-sender] sendMarkup', { dest, kind: (markup as any).kind }); } catch { }
+            await cm.send(dest, markup);
         }
     };
 }

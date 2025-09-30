@@ -170,10 +170,10 @@ export type GetManyInput = string | GetManyQuery;
  */
 export type SemanticMemoryBackend = {
     get<T>(key: string, opts?: { backend?: string }): Promise<T | null>;
-    getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
+    read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
     set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
     delete(key: string, opts?: { backend?: string }): Promise<void>;
-    deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number>;
+    remove(input: GetManyInput, options?: GetManyOptions): Promise<number>;
 
     // Recognition and enrichment methods
     recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>>;

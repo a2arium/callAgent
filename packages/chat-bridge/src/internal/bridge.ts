@@ -32,7 +32,7 @@ export function createBridge(options: BridgeOptions): Bridge {
         const key = keyOf(msg);
         const route = { network: msg.network, conversationId: msg.conversationId, userId: msg.userId };
         const prev = await sessionStore.get(key);
-        logger?.debug('incoming_message', { key, messageId: msg.messageId, hasPrev: !!prev });
+        logger?.debug('incoming_message', { key, messageId: msg.messageId, hasPrev: !!prev, prevState: prev?.state, prevTaskId: prev?.taskId, prevToken: prev?.token });
         metrics?.incr?.('chat_bridge.inbound', 1, { network: msg.network });
 
         // Input wait timeout
@@ -67,6 +67,7 @@ export function createBridge(options: BridgeOptions): Bridge {
 
         // If waiting for input, treat next message as input reply
         if (prev && prev.state === 'waitingInput' && prev.token) {
+            logger?.info('resuming_waiting_input', { key, taskId: prev.taskId, token: prev.token });
             try {
                 const res = await invoker.resume({
                     id: prev.taskId,
@@ -75,6 +76,7 @@ export function createBridge(options: BridgeOptions): Bridge {
                     tenantId: (tenantIdResolver ? tenantIdResolver(msg) : msg.network) || 'default',
                     route
                 });
+                logger?.info('resume_result', { key, status: (res as any)?.status });
                 await onResult(key, prev.agentId, res, route);
                 return;
             } catch (e) {
@@ -91,6 +93,7 @@ export function createBridge(options: BridgeOptions): Bridge {
         try {
             await sessionStore.upsert({ key, agentId, taskId, state: 'running', lastActivityAt: now() });
         } catch { }
+        logger?.info('starting_new_task', { key, agentId, taskId });
         const res = await invoker.start({
             id: taskId,
             input: toInput(msg),
@@ -98,6 +101,7 @@ export function createBridge(options: BridgeOptions): Bridge {
             tenantId: (tenantIdResolver ? tenantIdResolver(msg) : msg.network) || 'default',
             route
         });
+        logger?.info('start_result', { key, status: (res as any)?.status });
         await onResult(key, agentId, res, route);
         if (msg.messageId && sessionStore.markProcessed) {
             await sessionStore.markProcessed(key, msg.messageId).catch(() => { });
@@ -123,7 +127,7 @@ export function createBridge(options: BridgeOptions): Bridge {
                 lastEventSeq: nextSeq
             };
             await sessionStore.upsert(record);
-            logger?.info('input_required', { key, taskId: res.id });
+            logger?.info('input_required', { key, taskId: res.id, token: res.token });
             metrics?.incr?.('chat_bridge.input_required', 1);
             await chatSender.sendMessage(route, 'Please provide additional information.');
             // Realtime publish
@@ -143,6 +147,7 @@ export function createBridge(options: BridgeOptions): Bridge {
             if (typeof res.output === 'string' && res.output.trim().length > 0) {
                 await chatSender.sendMessage(route, res.output);
             }
+            try { logger?.info('completed', { key }); } catch { }
             logger?.info('completed', { key });
             metrics?.incr?.('chat_bridge.completed', 1);
             if (realtime) {

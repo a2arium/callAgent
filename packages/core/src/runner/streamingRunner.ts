@@ -336,6 +336,8 @@ export async function runAgentWithStreaming(
         semanticAdapter // Existing semantic adapter for backward compatibility
     );
 
+    // memory registry constructed
+
     // Add A2A capability - contextWithMemory is already a complete TaskContext
     contextWithMemory.sendTaskToAgent = async (targetAgent, taskInput, options) => {
         return globalA2AService.sendTaskToAgent(contextWithMemory as any, targetAgent, taskInput, options);
@@ -461,7 +463,7 @@ export async function runAgentWithStreaming(
         if (wmCap) {
             runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
         }
-        await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId });
+        await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx });
         logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
         if (!options.isStreaming) {
             logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
@@ -566,6 +568,11 @@ function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: Stream
             // Session id is not passed into this function, so print a hint
             console.log(`Session: (see earlier log: Starting TaskEngine.startTask { taskId: ... })`);
         } else if (isFinal) {
+            // Suppress noisy terminal budget messages not relevant to the current session flow
+            const reason = (status as any)?.metadata?.reason;
+            if (status.state === 'failed' && reason === 'budget_turns_exceeded') {
+                return; // don't print this case
+            }
             console.log(`Status: ${status.state} (FINAL)`);
             const md: any = status.metadata || {};
             const agg: any = md.timingsAgg || {};
@@ -621,8 +628,13 @@ function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: Stream
         }
     }
 
-    // If there's a message in the status, print it too (for non-console output types)
-    if (status.message && status.message.parts && status.message.parts.length > 0 && options.outputType && options.outputType !== 'console') {
+    // If there's a message in the status, print it too (for all output types)
+    if (status.message && status.message.parts && status.message.parts.length > 0) {
+        // Skip printing the failure message for budget_turns_exceeded to avoid confusion
+        const reason = (status as any)?.metadata?.reason;
+        if (status.state === 'failed' && reason === 'budget_turns_exceeded') {
+            return;
+        }
         const textParts = status.message.parts
             .filter(part => part.type === 'text')
             .map(part => (part as { text?: string }).text)

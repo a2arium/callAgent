@@ -20,8 +20,8 @@ async handleTask(ctx: TaskContext) {
   const conversation = (await ctx.semantic?.read?.({ id: 'conversation-123', limit: 1 }))?.[0]?.value;
   
   // NEW: Search using entity alignment
-  const johnMemories = await ctx.memory.semantic.getMany({
-    filters: ['speaker ~ "Johnny"']  // Finds memories where speaker is similar to "Johnny"
+  const johnMemories = await ctx.semantic.read({
+    filters: ['speaker ~ "Johnny"'] as any
   });
   
   // NEW: Recognize if data matches existing memories
@@ -244,29 +244,27 @@ console.log(conversation.messages[0].content); // 'Hello'
 
 ### Querying Data
 
-The memory system provides a unified `getMany()` method that supports both pattern matching and query objects:
+Use the `ctx.semantic.read()` facade for querying by tags and filters:
 
 ```typescript
 // Pattern matching - find all user data
-const allUserData = await ctx.memory.semantic.getMany('user:*');
+const allUserData = await ctx.semantic.read({ tag: 'user' } as any);
 
 // Pattern matching - specific user's data
-const user123Data = await ctx.memory.semantic.getMany('user:123:*');
+const user123Data = await ctx.semantic.read({ filters: ['id starts_with "user:123:"'] as any });
 
 // Query object - find entries by tag
-const activeConversations = await ctx.memory.semantic.getMany({ 
-  tag: 'active' 
-});
+const activeConversations = await ctx.semantic.read({ tag: 'active' } as any);
 
 // Query object - with filters and limit (string syntax)
-const recentSettings = await ctx.memory.semantic.getMany({ 
+const recentSettings = await ctx.semantic.read({ 
   tag: 'settings',
-  filters: ['status = "active"'],
+  filters: ['status = "active"'] as any,
   limit: 5 
-});
+} as any);
 
 // Pattern with options - combine pattern matching with limits (default limit is 1000)
-const limitedUserData = await ctx.memory.semantic.getMany('user:*', { limit: 10 });
+const limitedUserData = await ctx.semantic.read({ tag: 'user', limit: 10 } as any);
 ```
 
 ### Deleting Data
@@ -275,42 +273,31 @@ const limitedUserData = await ctx.memory.semantic.getMany('user:*', { limit: 10 
 // Delete a specific key
 await ctx.semantic?.remove('old-conversation-123');
 
-// Delete multiple entries using pattern matching
-const deletedCount = await ctx.memory.semantic.deleteMany('user:123:*');
-console.log(`Deleted ${deletedCount} entries`);
-
-// Delete multiple entries using query object
-const deletedCount = await ctx.memory.semantic.deleteMany({ 
-  tag: 'temporary' 
-});
-
-// Delete with filters - remove all inactive users
-const deletedCount = await ctx.memory.semantic.deleteMany({
-  tag: 'user',
-  filters: ['status = "inactive"']
-});
+// Delete a set of entries using filters or tags via facade
+await ctx.semantic.remove({ tag: 'temporary' } as any);
+await ctx.semantic.remove({ filters: ['status = "inactive"'] } as any);
 
 // Delete with pattern and limit (deletes first 10 matching entries)
-const deletedCount = await ctx.memory.semantic.deleteMany('session:*', { 
+const deletedCount = await ctx.semantic.remove('session:*' as any, { 
   limit: 10 
-});
+} as any);
 ```
 
-## Bulk Deletion with deleteMany
+## Bulk Deletion
 
-The `deleteMany()` method provides efficient bulk deletion capabilities, supporting the same query patterns as `getMany()`:
+Use `ctx.semantic.remove()` with tags and filters for bulk deletions.
 
 ### Basic Usage
 
 ```typescript
 // Delete by pattern - all user data
-const deletedCount = await ctx.memory.semantic.deleteMany('user:*');
+const deletedCount = await ctx.semantic.remove('user:*' as any);
 
 // Delete by tag - all temporary entries
-const deletedCount = await ctx.memory.semantic.deleteMany({ tag: 'temporary' });
+const deletedCount = await ctx.semantic.remove({ tag: 'temporary' } as any);
 
 // Delete with filters - inactive users only
-const deletedCount = await ctx.memory.semantic.deleteMany({
+const deletedCount = await ctx.semantic.remove({
   tag: 'user',
   filters: ['status = "inactive"']
 });
@@ -319,69 +306,46 @@ const deletedCount = await ctx.memory.semantic.deleteMany({
 ### Advanced Deletion Patterns
 
 ```typescript
-// Delete specific user's data
-await ctx.memory.semantic.deleteMany('user:123:*');
-
 // Delete old sessions (with date filter)
-await ctx.memory.semantic.deleteMany({
+await ctx.semantic.remove({
   tag: 'session',
-  filters: [`lastAccessed < "${thirtyDaysAgo.toISOString()}"`]
-});
-
-// Delete all matching entries (limit is ignored for deleteMany - all matches are deleted)
-await ctx.memory.semantic.deleteMany('cache:*', { 
-  orderBy: { path: 'createdAt', direction: 'asc' }
-});
+  filters: [`lastAccessed < "${thirtyDaysAgo.toISOString()}"`] as any
+} as any);
 
 // Delete by multiple criteria
-await ctx.memory.semantic.deleteMany({
+await ctx.semantic.remove({
   filters: [
     'type = "temporary"',
-    'expiresAt < "2024-01-01T00:00:00Z"',
-    'priority < 5'
-  ]
+    'status = "inactive"'
+  ] as any
 });
 ```
 
 ### Return Value
 
-The `deleteMany()` method returns the number of entries actually deleted:
+`ctx.semantic.remove()` resolves when deletions are completed.
 
 ```typescript
-const deletedCount = await ctx.memory.semantic.deleteMany('old-data:*');
-if (deletedCount > 0) {
-  console.log(`Successfully cleaned up ${deletedCount} old entries`);
-} else {
-  console.log('No entries found to delete');
-}
+await ctx.semantic.remove({ filters: ['id starts_with "old-data:"'] as any });
+console.log('Cleanup completed');
 ```
-
-### Performance Considerations
-
-- **Bulk Operations**: `deleteMany()` is optimized for bulk deletions and performs better than multiple individual `delete()` calls
-- **Transaction Safety**: All deletions are performed within a database transaction to ensure consistency
-- **Entity Alignment**: When entity alignment is enabled, associated entity alignments are automatically cleaned up
-- **Filtering**: Complex filters are processed efficiently at the database level
 
 ## Pattern Matching
 
-The `getMany()` method supports powerful pattern matching using wildcards:
+The `read()` method supports powerful pattern matching using wildcards:
 
 ```typescript
 // Wildcard patterns
-const allUsers = await ctx.memory.semantic.getMany('user:*');           // All user keys
-const user123 = await ctx.memory.semantic.getMany('user:123:*');       // All data for user 123
-const profiles = await ctx.memory.semantic.getMany('user:*:profile');  // All user profiles
-const sessions = await ctx.memory.semantic.getMany('session:*');       // All sessions
+const allUsers = await ctx.semantic.read({ tag: 'user' } as any);
+const user123 = await ctx.semantic.read({ filters: ['id starts_with "user:123:"'] as any });
+const profiles = await ctx.semantic.read({ tags: ['profile'] } as any);
+const sessions = await ctx.semantic.read({ tag: 'session' } as any);
 
 // Single character wildcard
-const items = await ctx.memory.semantic.getMany('item:?');             // item:a, item:b, etc.
+const items = await ctx.semantic.read({ filters: ['id matches "^item:.{1}$"'] as any });
 
 // Combine with options
-const recentUsers = await ctx.memory.semantic.getMany('user:*', { 
-  limit: 10,
-  orderBy: { path: 'createdAt', direction: 'desc' }
-});
+const recentUsers = await ctx.semantic.read({ tag: 'user', limit: 10 } as any);
 ```
 
 ### Pattern Syntax
@@ -394,7 +358,7 @@ const recentUsers = await ctx.memory.semantic.getMany('user:*', {
 
 ## Advanced Filtering
 
-The `getMany()` method supports powerful filtering capabilities with both **string-based syntax** (recommended) and **object-based syntax** (for programmatic use). You can search for data based on field values inside the stored JSON objects:
+`ctx.semantic.read()` supports powerful filtering with both string-based and object-based syntax:
 
 ### String-Based Filter Syntax (Recommended)
 
@@ -402,36 +366,31 @@ The intuitive string syntax makes filters much more readable and concise:
 
 ```typescript
 // Find active users with high priority
-const highPriorityUsers = await ctx.memory.semantic.getMany({
+const highPriorityUsers = await ctx.semantic.read({
   tag: 'user',
-  filters: [
-    'status = "active"',
-    'priority >= 8'
-  ]
-});
+  filters: ['status = "active"', 'priority >= 8'] as any
+} as any);
 
 // Search by nested properties
-const premiumCustomers = await ctx.memory.semantic.getMany({
+const premiumCustomers = await ctx.semantic.read({
   filters: [
     'subscription.tier = "premium"',
     `subscription.expiresAt > "${new Date().toISOString()}"`
-  ]
-});
+  ] as any
+} as any);
 
 // Text search
-const smithCustomers = await ctx.memory.semantic.getMany({
-  filters: ['name contains "Smith"']
-});
+const smithCustomers = await ctx.semantic.read({ filters: ['name contains "Smith"'] as any });
 
 // Multiple filter types
-const engineeringManagers = await ctx.memory.semantic.getMany({
+const engineeringManagers = await ctx.semantic.read({
   filters: [
     'department = "Engineering"',
     'isManager = true',
     'salary > 70000',
     'email ends_with "@company.com"'
-  ]
-});
+  ] as any
+} as any);
 ```
 
 ### Object-Based Filter Syntax (Legacy)
@@ -440,7 +399,7 @@ The explicit object syntax is still supported for programmatic use:
 
 ```typescript
 // Find active users with high priority
-const highPriorityUsers = await ctx.memory.semantic.getMany({
+const highPriorityUsers = await ctx.semantic.read({
   tag: 'user',
   filters: [
     { path: 'status', operator: '=', value: 'active' },
@@ -449,7 +408,7 @@ const highPriorityUsers = await ctx.memory.semantic.getMany({
 });
 
 // Search by nested properties
-const premiumCustomers = await ctx.memory.semantic.getMany({
+const premiumCustomers = await ctx.semantic.read({
   filters: [
     { path: 'subscription.tier', operator: '=', value: 'premium' },
     { path: 'subscription.expiresAt', operator: '>', value: new Date().toISOString() }
@@ -457,7 +416,7 @@ const premiumCustomers = await ctx.memory.semantic.getMany({
 });
 
 // Text search
-const smithCustomers = await ctx.memory.semantic.getMany({
+const smithCustomers = await ctx.semantic.read({
   filters: [
     { path: 'name', operator: 'CONTAINS', value: 'Smith' }
   ]
@@ -469,13 +428,13 @@ const smithCustomers = await ctx.memory.semantic.getMany({
 You can combine both syntaxes in the same query:
 
 ```typescript
-const results = await ctx.memory.semantic.getMany({
+const results = await ctx.semantic.read({
   filters: [
     'status = "active"',                                    // String syntax
     { path: 'profile.salary', operator: '>', value: 70000 }, // Object syntax
     'department contains "Engineering"'                      // String syntax
-  ]
-});
+  ] as any
+} as any);
 ```
 
 ### Available Filter Operators
@@ -740,12 +699,12 @@ Array expansion also works with filter queries:
 
 ```typescript
 // Search using array expansion syntax
-const results = await ctx.memory.semantic.getMany({
+const results = await ctx.semantic.read({
   filters: [
     'titleAndDescription[].title contains "AI"',    // Searches all title elements
     'speakers[].name ~ "John"',                     // Entity-aware search across all speakers
     'eventOccurences[].date >= "2024-01-01"'       // Date filtering across all occurrences
-  ]
+  ] as any
 });
 ```
 
@@ -1035,14 +994,14 @@ Three new filter operators enable entity-aware search:
 Find memories where the speaker is similar to "Johnny" (might match "John Smith", "John", "J. Smith", etc.):
 
 ```typescript
-const johnMemories = await ctx.memory.semantic.getMany({
-  filters: ['speaker ~ "Johnny"']
+const johnMemories = await ctx.semantic.read({
+  filters: ['speaker ~ "Johnny"'] as any
 });
 
 // Also works with other entity types
-const nycMemories = await ctx.memory.semantic.getMany({
+const nycMemories = await ctx.semantic.read({
   filters: ['location ~ "NYC"']  // Might match "New York City", "New York", etc.
-});
+} as any);
 ```
 
 #### Exact Entity Search (`entity_is`)
@@ -1050,7 +1009,7 @@ const nycMemories = await ctx.memory.semantic.getMany({
 Find memories aligned to the exact canonical entity "John Smith":
 
 ```typescript
-const exactMatches = await ctx.memory.semantic.getMany({
+const exactMatches = await ctx.semantic.read({
   filters: ['speaker entity_is "John Smith"']
 });
 ```
@@ -1060,9 +1019,9 @@ const exactMatches = await ctx.memory.semantic.getMany({
 Find memories where the speaker field contains any alias of an entity:
 
 ```typescript
-const aliasMatches = await ctx.memory.semantic.getMany({
+const aliasMatches = await ctx.semantic.read({
   filters: ['speaker entity_like "Johnny"']  // Matches if "Johnny" is an alias
-});
+} as any);
 ```
 
 ### Advanced Usage Examples
@@ -1071,12 +1030,12 @@ const aliasMatches = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find high-priority memories about John from the last month
-const results = await ctx.memory.semantic.getMany({
+const results = await ctx.semantic.read({
   filters: [
     'speaker ~ "John"',           // Entity-aware: similar to John
     'priority >= 8',              // Regular filter: high priority
     'date >= "2024-01-01"'        // Regular filter: recent
-  ]
+  ] as any
 });
 ```
 
@@ -1084,11 +1043,11 @@ const results = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find memories where speaker is like "John" AND location is like "NYC"
-const results = await ctx.memory.semantic.getMany({
+const results = await ctx.semantic.read({
   filters: [
     'speaker ~ "John"',
     'location ~ "NYC"'
-  ]
+  ] as any
 });
 ```
 
@@ -1096,9 +1055,9 @@ const results = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Search for memories about "Jean" (French) that might match "John" (English)
-const crossLingualResults = await ctx.memory.semantic.getMany({
+const crossLingualResults = await ctx.semantic.read({
   filters: ['speaker ~ "Jean"']  // Might find "John Smith" if embeddings are multilingual
-});
+} as any);
 ```
 
 ### Real-World Use Cases
@@ -1107,18 +1066,19 @@ const crossLingualResults = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find all support tickets for a customer, handling name variations
-const customerTickets = await ctx.memory.semantic.getMany({
+const customerTickets = await ctx.semantic.read({
   filters: [
     'customer ~ "J. Smith"',      // Fuzzy match for name variations
     'status = "open"'             // Only open tickets
-  ],
+  ] as any,
   tag: 'support-ticket'
 });
 
 // Find tickets about a specific product using aliases
-const productIssues = await ctx.memory.semantic.getMany({
-  filters: ['product entity_like "iPhone"'],  // Matches "iPhone", "iPhone 15", "Apple iPhone", etc.
-  tag: 'support-ticket'
+const productIssues = await ctx.semantic.read({
+  filters: ['product entity_like "iPhone"']  // Matches "iPhone", "iPhone 15", "Apple iPhone", etc.
+} as any,
+tag: 'support-ticket'
 });
 ```
 
@@ -1126,18 +1086,19 @@ const productIssues = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find all meetings where a person participated (handling name variations)
-const personMeetings = await ctx.memory.semantic.getMany({
+const personMeetings = await ctx.semantic.read({
   filters: [
     'attendees ~ "Sarah"',        // Fuzzy match for "Sarah", "Sara", "Sarah Johnson", etc.
     'date >= "2024-01-01"'        // This year only
-  ],
+  ] as any,
   tag: 'meeting-notes'
 });
 
 // Find meetings at similar locations
-const locationMeetings = await ctx.memory.semantic.getMany({
-  filters: ['venue ~ "Main Conference Room"'],  // Matches similar room names
-  tag: 'meeting-notes'
+const locationMeetings = await ctx.semantic.read({
+  filters: ['venue ~ "Main Conference Room"']  // Matches similar room names
+} as any,
+tag: 'meeting-notes'
 });
 ```
 
@@ -1145,11 +1106,11 @@ const locationMeetings = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find documents about similar topics/entities
-const relatedDocs = await ctx.memory.semantic.getMany({
+const relatedDocs = await ctx.semantic.read({
   filters: [
     'topic ~ "machine learning"', // Finds "ML", "AI", "artificial intelligence", etc.
     'status = "published"'
-  ],
+  ] as any,
   tag: 'knowledge-base'
 });
 ```
@@ -1166,22 +1127,22 @@ const relatedDocs = await ctx.memory.semantic.getMany({
 
 ```typescript
 // ✅ Efficient: Entity filters first, then regular filters
-const efficient = await ctx.memory.semantic.getMany({
+const efficient = await ctx.semantic.read({
   filters: [
     'speaker ~ "John"',           // Entity filter (uses indexes)
     'priority >= 8'               // Regular filter (applied to subset)
-  ]
+  ] as any
 });
 
 // ⚠️ Less efficient: Many regular filters with entity filters
-const lessEfficient = await ctx.memory.semantic.getMany({
+const lessEfficient = await ctx.semantic.read({
   filters: [
     'speaker ~ "John"',
     'priority >= 8',
     'status = "active"',
     'category contains "important"',
     'date >= "2024-01-01"'        // Many regular filters applied in memory
-  ]
+  ] as any
 });
 ```
 
@@ -1200,18 +1161,18 @@ const adapter = new MemorySQLAdapter(prisma, embedFunction, {
 
 ```typescript
 try {
-  const results = await ctx.memory.semantic.getMany({
+  const results = await ctx.semantic.read({
     filters: ['speaker ~ "John"']
   });
 } catch (error) {
   if (error.code === 'ENTITY_SERVICE_UNAVAILABLE') {
     // Entity alignment not configured - fall back to regular search
-    const fallback = await ctx.memory.semantic.getMany({
+    const fallback = await ctx.semantic.read({
       filters: ['speaker contains "John"']  // Regular text search
     });
   } else if (error.code === 'EMBEDDING_UNAVAILABLE') {
     // Embedding function not available - use exact/alias search instead
-    const fallback = await ctx.memory.semantic.getMany({
+    const fallback = await ctx.semantic.read({
       filters: ['speaker entity_like "John"']  // Alias search
     });
   }
@@ -1224,11 +1185,11 @@ try {
 
 ```typescript
 // Old approach: literal text matching only
-const results = await ctx.memory.semantic.getMany({
+const results = await ctx.semantic.read({
   filters: [
     'speaker contains "John"',    // Only finds exact substring matches
     'location = "New York"'       // Only finds exact matches
-  ]
+  ] as any
 });
 ```
 
@@ -1236,11 +1197,11 @@ const results = await ctx.memory.semantic.getMany({
 
 ```typescript
 // New approach: intelligent entity matching
-const results = await ctx.memory.semantic.getMany({
+const results = await ctx.semantic.read({
   filters: [
     'speaker ~ "John"',           // Finds "John Smith", "Johnny", "J. Smith", etc.
     'location ~ "New York"'       // Finds "NYC", "New York City", "Manhattan", etc.
-  ]
+  ] as any
 });
 ```
 
@@ -1331,9 +1292,9 @@ Once memories with shared entities are stored, you can discover relationships in
 
 ```typescript
 // Find everything related to Jane Smith (matches name variations)
-const janeActivities = await ctx.memory.semantic.getMany({
+const janeActivities = await ctx.semantic.read({
   filters: ['speaker ~ "Jane Smith" OR lead ~ "Jane Smith" OR collaborators ~ "Jane Smith"']
-});
+} as any);
 
 console.log('Jane Smith activities:', janeActivities.map(r => ({
   key: r.key,
@@ -1353,9 +1314,9 @@ console.log('Jane Smith activities:', janeActivities.map(r => ({
 
 ```typescript
 // Find all events at venues similar to "Main Auditorium"
-const mainVenueEvents = await ctx.memory.semantic.getMany({
+const mainVenueEvents = await ctx.semantic.read({
   filters: ['venue ~ "Main Auditorium"']
-});
+} as any);
 
 console.log('Main venue events:', mainVenueEvents.map(r => ({
   key: r.key,
@@ -1371,11 +1332,11 @@ console.log('Main venue events:', mainVenueEvents.map(r => ({
 
 ```typescript
 // Find all activities involving both Jane Smith and Robert Chen
-const collaborations = await ctx.memory.semantic.getMany({
+const collaborations = await ctx.semantic.read({
   filters: [
     'speaker ~ "Jane Smith" OR lead ~ "Jane Smith" OR collaborators ~ "Jane Smith"',
     'speaker ~ "Robert Chen" OR lead ~ "Robert Chen" OR collaborators ~ "Robert Chen"'
-  ]
+  ] as any
 });
 
 console.log('Jane-Robert collaborations:', collaborations.map(r => r.value.title));
@@ -1389,9 +1350,9 @@ Here's a comprehensive function that discovers all related memories for any enti
 ```typescript
 async function findRelatedMemories(entityName: string, entityType: string = 'person') {
   // Step 1: Find all memories directly involving this entity
-  const directMemories = await ctx.memory.semantic.getMany({
+  const directMemories = await ctx.semantic.read({
     filters: [`speaker ~ "${entityName}" OR lead ~ "${entityName}" OR collaborators ~ "${entityName}" OR venue ~ "${entityName}"`]
-  });
+  } as any);
 
   // Step 2: Extract other entities from those memories
   const relatedEntities = new Set<string>();
@@ -1431,9 +1392,9 @@ async function findRelatedMemories(entityName: string, entityType: string = 'per
   const indirectMemories = new Map<string, any[]>();
   
   for (const entity of relatedEntities) {
-    const entityMemories = await ctx.memory.semantic.getMany({
+    const entityMemories = await ctx.semantic.read({
       filters: [`speaker ~ "${entity}" OR venue ~ "${entity}" OR lead ~ "${entity}" OR collaborators ~ "${entity}"`]
-    });
+    } as any);
     
     // Filter out memories we already found
     const newMemories = entityMemories.filter(m => 
@@ -1491,7 +1452,7 @@ async function findRecommendations(memoryKey: string) {
 
   // Find memories with same speaker
   if (sourceMemory.speaker) {
-    const sameSpeaker = await ctx.memory.semantic.getMany({
+    const sameSpeaker = await ctx.semantic.read({
       filters: [`speaker ~ "${sourceMemory.speaker}"`]
     });
     
@@ -1505,7 +1466,7 @@ async function findRecommendations(memoryKey: string) {
 
   // Find memories at same venue
   if (sourceMemory.venue) {
-    const sameVenue = await ctx.memory.semantic.getMany({
+    const sameVenue = await ctx.semantic.read({
       filters: [`venue ~ "${sourceMemory.venue}"`]
     });
     
@@ -1520,7 +1481,7 @@ async function findRecommendations(memoryKey: string) {
   // Find memories with similar topics/tags
   if (sourceMemory.topics) {
     for (const topic of sourceMemory.topics) {
-      const topicMemories = await ctx.memory.semantic.getMany({
+      const topicMemories = await ctx.semantic.read({
         filters: [`topics contains "${topic}"`]
       });
       
@@ -1536,7 +1497,7 @@ async function findRecommendations(memoryKey: string) {
   // Find collaborator networks
   if (sourceMemory.collaborators) {
     for (const collaborator of sourceMemory.collaborators) {
-      const collabMemories = await ctx.memory.semantic.getMany({
+      const collabMemories = await ctx.semantic.read({
         filters: [`speaker ~ "${collaborator}" OR lead ~ "${collaborator}"`]
       });
       
@@ -1579,17 +1540,17 @@ recs.forEach(r => {
 
 ```typescript
 // Find all papers by an author
-const authorPapers = await ctx.memory.semantic.getMany({
+const authorPapers = await ctx.semantic.read({
   filters: ['author ~ "Dr. Smith" OR presenter ~ "Dr. Smith"']
 });
 
 // Find papers from same institution
-const institutionPapers = await ctx.memory.semantic.getMany({
+const institutionPapers = await ctx.semantic.read({
   filters: ['affiliation ~ "MIT"']
 });
 
 // Find papers in same session/track
-const sessionPapers = await ctx.memory.semantic.getMany({
+const sessionPapers = await ctx.semantic.read({
   filters: ['session ~ "Machine Learning Track"']
 });
 ```
@@ -1598,17 +1559,17 @@ const sessionPapers = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find all issues reported by a customer
-const customerIssues = await ctx.memory.semantic.getMany({
+const customerIssues = await ctx.semantic.read({
   filters: ['reporter ~ "John Doe" OR customer ~ "John Doe"']
 });
 
 // Find similar issues by product
-const productIssues = await ctx.memory.semantic.getMany({
+const productIssues = await ctx.semantic.read({
   filters: ['product ~ "iPhone 15"']
 });
 
 // Find issues handled by same support agent
-const agentIssues = await ctx.memory.semantic.getMany({
+const agentIssues = await ctx.semantic.read({
   filters: ['assignee ~ "Sarah Wilson"']
 });
 ```
@@ -1617,17 +1578,17 @@ const agentIssues = await ctx.memory.semantic.getMany({
 
 ```typescript
 // Find all projects involving a team member
-const memberProjects = await ctx.memory.semantic.getMany({
+const memberProjects = await ctx.semantic.read({
   filters: ['lead ~ "Alice Johnson" OR members ~ "Alice Johnson"']
 });
 
 // Find projects using same technology
-const techProjects = await ctx.memory.semantic.getMany({
+const techProjects = await ctx.semantic.read({
   filters: ['technologies ~ "React"']
 });
 
 // Find projects for same client
-const clientProjects = await ctx.memory.semantic.getMany({
+const clientProjects = await ctx.semantic.read({
   filters: ['client ~ "ACME Corp"']
 });
 ```
@@ -1656,21 +1617,21 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_store_embedding
 
 ```typescript
 // ✅ Efficient: Use specific entity types when possible
-const speakers = await ctx.memory.semantic.getMany({
+const speakers = await ctx.semantic.read({
   filters: ['speaker ~ "John"']  // Scoped to speaker field
 });
 
 // ⚠️ Less efficient: Broad searches across all fields
-const everything = await ctx.memory.semantic.getMany({
+const everything = await ctx.semantic.read({
   filters: ['speaker ~ "John" OR lead ~ "John" OR collaborators ~ "John" OR venue ~ "John"']
 });
 
 // ✅ Efficient: Combine entity filters with regular filters
-const recentSpeakers = await ctx.memory.semantic.getMany({
+const recentSpeakers = await ctx.semantic.read({
   filters: [
     'speaker ~ "John"',           // Entity filter (uses indexes)
     'date >= "2024-01-01"'        // Regular filter (applied to subset)
-  ]
+  ] as any
 });
 ```
 
@@ -2357,20 +2318,20 @@ try {
 
 ## API Migration
 
-The memory system has been simplified with a unified `getMany()` method that replaces the previous fragmented API, and now supports intuitive string-based filter syntax:
+The memory system has been simplified with a unified `read()` facade that replaces the previous fragmented API, and now supports intuitive string-based filter syntax:
 
 ### New Unified API
 
 ```typescript
 // Single method for all bulk retrieval operations
-await ctx.memory.semantic.getMany('user:*');                    // Pattern matching
-await ctx.memory.semantic.getMany({ tag: 'user' });             // Query object
-await ctx.memory.semantic.getMany('user:*', { limit: 5 });      // Pattern + options
+await ctx.semantic.read({ tag: 'user' } as any);                    // Tag query
+await ctx.semantic.read({ filters: ['status = "active"'] as any }); // Filter query
+await ctx.semantic.read({ tag: 'user', limit: 5 } as any);      // With limit
 
 // Single method for all bulk deletion operations
-await ctx.memory.semantic.deleteMany('user:*');                 // Pattern matching
-await ctx.memory.semantic.deleteMany({ tag: 'user' });          // Query object
-await ctx.memory.semantic.deleteMany('user:*', { limit: 5 });   // Pattern + options
+await ctx.semantic.remove('user:*' as any);                    // Pattern matching
+await ctx.semantic.read({ tag: 'user' } as any);               // Query object
+await ctx.semantic.read({ tag: 'user', limit: 5 } as any);   // Pattern + options
 ```
 
 ### New String-Based Filter Syntax
@@ -2379,30 +2340,30 @@ The filter syntax has been greatly improved with intuitive string-based filters:
 
 ```typescript
 // ✅ New string syntax (recommended)
-await ctx.memory.semantic.getMany({
+await ctx.semantic.read({
   filters: [
     'priority >= 8',
     'status = "active"',
     'name contains "John"'
-  ]
+  ] as any
 });
 
 // ✅ Object syntax (still supported)
-await ctx.memory.semantic.getMany({
+await ctx.semantic.read({
   filters: [
     { path: 'priority', operator: '>=', value: 8 },
     { path: 'status', operator: '=', value: 'active' },
     { path: 'name', operator: 'CONTAINS', value: 'John' }
-  ]
+  ] as any
 });
 
 // ✅ Mixed syntax (best of both worlds)
-await ctx.memory.semantic.getMany({
+await ctx.semantic.read({
   filters: [
     'priority >= 8',                                    // String syntax
     { path: 'status', operator: '=', value: 'active' }, // Object syntax
     'name contains "John"'                              // String syntax
-  ]
+  ] as any
 });
 ```
 
@@ -2411,7 +2372,7 @@ await ctx.memory.semantic.getMany({
 The following methods are deprecated and will be removed in a future version:
 
 ```typescript
-// ❌ Deprecated - use getMany() instead
+// ❌ Deprecated - use read() instead
 await ctx.memory.semantic.query({ tag: 'user' });
 await ctx.memory.semantic.queryByKeyPattern('user:*');
 ```
@@ -2420,9 +2381,9 @@ await ctx.memory.semantic.queryByKeyPattern('user:*');
 
 | Old API | New API |
 |---------|---------|
-| `query({ tag: 'user' })` | `getMany({ tag: 'user' })` |
-| `queryByKeyPattern('user:*')` | `getMany('user:*')` |
-| `query({ tag: 'user', limit: 5 })` | `getMany({ tag: 'user', limit: 5 })` |
+| `query({ tag: 'user' })` | `read({ tag: 'user' })` |
+| `queryByKeyPattern('user:*')` | `read('user:*')` |
+| `query({ tag: 'user', limit: 5 })` | `read({ tag: 'user', limit: 5 })` |
 | `filters: [{ path: 'priority', operator: '>=', value: 8 }]` | `filters: ['priority >= 8']` |
 
 ## FAQ
@@ -2464,7 +2425,7 @@ await ctx.memory.semantic.queryByKeyPattern('user:*');
 > The `recognize()` method uses entity alignment to determine if incoming data matches existing memories, returning a confidence score and matching details. The `enrich()` method consolidates data from multiple sources to enhance existing memories. Both methods leverage the universal entity alignment framework and work with any domain or entity types without hardcoded logic.
 
 **Q: What's the difference between recognition and entity-aware search?**
-> Entity-aware search (`getMany()` with entity operators like `~`) finds memories containing similar entities. Recognition (`recognize()`) determines if entire data objects represent the same real-world entity or event. Recognition is for deduplication and consolidation, while entity-aware search is for discovery and querying.
+> Entity-aware search (`read()` with entity operators like `~`) finds memories containing similar entities. Recognition (`recognize()`) determines if entire data objects represent the same real-world entity or event. Recognition is for deduplication and consolidation, while entity-aware search is for discovery and querying.
 
 **Q: Can I use recognition without enrichment?**
 > Yes! The methods are independent. Use `recognize()` for duplicate detection, data validation, or conflict prevention. Use `enrich()` for data consolidation from multiple sources. They work great together but each provides value on its own.

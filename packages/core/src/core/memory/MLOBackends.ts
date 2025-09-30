@@ -32,20 +32,17 @@ export class MLOSemanticBackend implements SemanticMemoryBackend {
         return result as T | null;
     }
 
-    async getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> {
+    async read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> {
         return this.unifiedMemory.getManySemanticMemory<T>(input, options);
     }
 
     async set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void> {
-        // If entities are provided, use the underlying adapter directly to preserve entity alignment
-        if (opts?.entities && this.underlyingAdapter?.set) {
+        // Prefer direct adapter write to preserve full options (tags, entities, tenant)
+        if (this.underlyingAdapter?.set) {
             await this.underlyingAdapter.set(key, value, opts);
             return;
         }
-
-        // Otherwise, go through MLO pipeline
-        // Convert MemorySetOptions to namespace for backward compatibility
-        // In the future, we can enhance UnifiedMemoryService to support full MemorySetOptions
+        // Fallback to MLO path if no underlying adapter provided
         await this.unifiedMemory.setSemanticMemory(key, value, opts?.tags?.[0]);
     }
 
@@ -53,7 +50,7 @@ export class MLOSemanticBackend implements SemanticMemoryBackend {
         await this.unifiedMemory.deleteSemanticMemory(key);
     }
 
-    async deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+    async remove(input: GetManyInput, options?: GetManyOptions): Promise<number> {
         return this.unifiedMemory.deleteManySemanticMemory(input, options);
     }
 

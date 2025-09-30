@@ -64,7 +64,8 @@ export class InputHandle {
         inputs[this.token] = { ...(inputs[this.token] || {}), handlerName };
         const next = setPendingInputs(base, inputs);
         const expected = snap?.wmVersion ?? BigInt(0);
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
         return this;
     }
 
@@ -75,7 +76,8 @@ export class InputHandle {
         inputs[this.token] = { ...(inputs[this.token] || {}), expiredHandlerName: handlerName };
         const next = setPendingInputs(base, inputs);
         const expected = snap?.wmVersion ?? BigInt(0);
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
         return this;
     }
 }
@@ -110,12 +112,15 @@ export class TaskHandle {
         tasks[this.childToken] = existing;
         const next = setPendingTasks(base, tasks);
         const expected = snap?.wmVersion ?? BigInt(0);
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
         // If an inputRequired handler is being set after a pending input was recorded, trigger routing now
         if (kind === 'inputRequired' && pendingInput) {
+            try { console.log(`[Handles] inputRequired handler '${handlerName}' registered with pending input; routing now (token=${this.childToken})`); } catch { }
             try {
                 const { taskEngine } = await import('./taskEngine.js');
                 await taskEngine.handleChildInputRequired({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, prompt: pendingInput.prompt, schema: pendingInput.schema });
+                try { console.log(`[Handles] routed pending input to parent handler '${handlerName}' (token=${this.childToken})`); } catch { }
             } catch { /* noop */ }
         }
         // If a completed handler is set after a pending completion was recorded, deliver it now
@@ -182,7 +187,8 @@ export async function createTaskHandle(
     tasks[childToken] = { target, input, handlers: {} } as any;
     const next = setPendingTasks(base, tasks);
     const expected = snap?.wmVersion ?? BigInt(0);
-    await session.saveSnapshot({ tenantId, sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+    const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+    await session.saveSnapshot({ tenantId, sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
     return { handle: new TaskHandle(session, tenantId, sessionId, childToken), token: childToken };
 }
 
@@ -205,7 +211,8 @@ export class GroupHandle {
         groups[this.groupToken] = existing;
         const next = setPendingGroups(base, groups);
         const expected = snap?.wmVersion ?? BigInt(0);
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
         return this;
     }
 
@@ -239,7 +246,8 @@ export async function createGroupHandle(
     groups[groupToken] = { childTokens, results: {}, handlers: {} };
     const next = setPendingGroups(base, groups);
     const expected = snap?.wmVersion ?? BigInt(0);
-    await session.saveSnapshot({ tenantId, sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+    const parentAgentId2 = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+    await session.saveSnapshot({ tenantId, sessionId, agentId: parentAgentId2, expectedWmVersion: expected, snapshot: next });
     return { handle: new GroupHandle(session, tenantId, sessionId, groupToken), groupToken };
 }
 

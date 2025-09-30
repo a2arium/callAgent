@@ -113,6 +113,8 @@ export type Snapshot = {
 export type EnvironmentState = {
     time: string; // ISO timestamp
     input: unknown; // current task input or event payload
+    sessionId?: string; // current session id (task id)
+    turn?: number; // cumulative loop turn (persisted per session)
     pending: {
         inputs: Record<string, unknown>;
         children: Record<string, unknown>;

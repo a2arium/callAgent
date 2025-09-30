@@ -237,6 +237,55 @@ export async function extendContextWithMemory(
         mlo: unifiedMemory,
     };
 
+    // registry constructed
+
+    // Semantic facade wired to memory.semantic, supporting tags/entities
+    (context as any).semantic = {
+        add: async (item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
+            await (context.memory as any)?.semantic?.set?.(item.id, item.value, { tags: item.tags, entities: item.entities });
+        },
+        read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number; filters?: unknown[] }) => {
+            // Delegate complex queries directly
+            if (filter && (filter.filters || filter.tag || filter.tags)) {
+                const res = await (context.memory as any)?.semantic?.read?.(filter);
+                return Array.isArray(res)
+                    ? res.map((r: any) => ({ id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities }))
+                    : [];
+            }
+            // Prefer direct pattern when id is a string or array of strings
+            if (filter?.id) {
+                const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
+                const results: any[] = [];
+                for (const id of ids) {
+                    const res = await (context.memory as any)?.semantic?.read?.(id);
+                    if (Array.isArray(res)) results.push(...res);
+                }
+                const mapped = results.map((r: any) => ({ id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities }));
+                return typeof filter.limit === 'number' ? mapped.slice(0, Math.max(0, filter.limit)) : mapped;
+            }
+
+            // Fallback: read all then filter client-side
+            const res = await (context.memory as any)?.semantic?.read?.('*');
+            const mapped = Array.isArray(res)
+                ? res.map((r: any) => ({ id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities }))
+                : [];
+            return typeof filter?.limit === 'number' ? mapped.slice(0, Math.max(0, filter.limit!)) : mapped;
+        },
+        remove: async (idOrPredicate: string | ((item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
+            if (typeof idOrPredicate === 'string') {
+                await (context.memory as any)?.semantic?.delete?.(idOrPredicate);
+                return;
+            }
+            const all = await (context.memory as any)?.semantic?.read?.('*');
+            if (Array.isArray(all)) {
+                for (const item of all) {
+                    const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities } as any;
+                    if ((idOrPredicate as any)(mapped)) await (context.memory as any)?.semantic?.delete?.(mapped.id);
+                }
+            }
+        }
+    };
+
     return context;
 }
 

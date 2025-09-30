@@ -68,13 +68,7 @@ export interface IMemory {
      */
     get<T>(key: string): Promise<T | null>;
 
-    /**
-     * Retrieves multiple values using pattern matching or query objects
-     * @param input Pattern string (e.g., 'user:*') or query object
-     * @param options Optional settings like limit and ordering
-     * @returns Array of matching key/value entries
-     */
-    getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
+    // Bulk retrieval is provided via semantic.read facade on the registry
 
     /**
      * Stores a value with an associated key

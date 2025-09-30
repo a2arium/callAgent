@@ -30,65 +30,34 @@ The MemorySQL adapter provides durable, SQL-backed memory for agents using Postg
 await ctx.semantic?.add?.({ id: 'user:123:profile', value: { name: 'John Doe' } });
 const profile = (await ctx.semantic?.read?.({}))?.find?.((x: any) => x?.id === 'user:123:profile');
 
-// Adapter-level (advanced): direct semantic adapter
+// Adapter-level (advanced): direct semantic adapter via facade
 await ctx.semantic?.add({ id: 'user:123:profile', value: { name: 'John Doe' }, tags: ['user', 'profile'] });
 const value = (await ctx.semantic?.read?.({ id: 'user:123:profile', limit: 1 }))?.[0]?.value;
-const results = await ctx.memory.semantic.query({ tag: 'profile' });
+const results = await ctx.semantic.read({ tag: 'profile' } as any);
 ```
 
 ## Querying Memory
 
 ### Basic Queries
-- Query by tag: `ctx.memory.semantic.query({ tag: 'demo' })`
-- Query by filter: `ctx.memory.semantic.query({ filters: [{ path: 'status', operator: '=', value: 'active' }] })`
+- Query by tag: `ctx.semantic.read({ tag: 'demo' } as any)`
+- Query by filter: `ctx.semantic.read({ filters: [{ path: 'status', operator: '=', value: 'active' }] } as any)`
 
-### Pattern Matching (Advanced)
+### Querying and Filtering
 
-The MemorySQL adapter supports pattern matching for efficient bulk operations using structured keys. This functionality is available by accessing the underlying SQL adapter directly:
+Use the facade for tags and filters instead of direct key patterns:
 
 ```typescript
-// Access the SQL backend for pattern matching
-const sqlBackend = (ctx.memory.semantic as any).backends?.sql;
+// By tag
+const profiles = await ctx.semantic.read({ tag: 'profile', limit: 50 } as any);
 
-if (sqlBackend && typeof sqlBackend.queryByKeyPattern === 'function') {
-    // Basic pattern matching with * wildcard
-    const userProfiles = await sqlBackend.queryByKeyPattern('user:*:profile');
-    const user123Data = await sqlBackend.queryByKeyPattern('user:123:*');
-    const configEntries = await sqlBackend.queryByKeyPattern('config:*');
-    
-    // Advanced pattern matching with * and ? wildcards
-    const specificUsers = await sqlBackend.queryByKeyPatternAdvanced('user:???:*');
-}
+// By filters
+const activeUsers = await ctx.semantic.read({ filters: ['status = "active"'] as any });
+
+// Array-aware filters
+const speakers = await ctx.semantic.read({ filters: ['speakers[].name contains "John"'] as any });
 ```
 
-#### Pattern Matching Methods
-
-**`queryByKeyPattern(keyPattern: string)`**
-- Uses `*` as a wildcard to match any sequence of characters
-- Efficient for finding related data with structured keys
-- Falls back to exact match when no wildcards are present
-
-**`queryByKeyPatternAdvanced(keyPattern: string)`** 
-- Uses `*` to match any sequence of characters
-- Uses `?` to match exactly one character
-- Provides more precise pattern control
-
-#### Pattern Examples
-
-| Pattern | Description | Matches |
-|---------|-------------|---------|
-| `user:*:profile` | All user profiles | `user:123:profile`, `user:456:profile` |
-| `user:123:*` | All data for user 123 | `user:123:profile`, `user:123:preferences` |
-| `config:*` | All configuration entries | `config:app:database`, `config:api:settings` |
-| `user:???:*` | Users with 3-character IDs | `user:123:profile`, `user:abc:preferences` |
-| `file:*.txt` | All text files | `file:document.txt`, `file:readme.txt` |
-
 ### When to Use Each Approach
-
-**Pattern Matching**: Best for
-- Structured key hierarchies (e.g., `user:id:type`)
-- Bulk operations on related data
-- Efficient queries when you control key naming conventions
 
 **Tags**: Best for
 - Cross-cutting categorization
@@ -100,8 +69,10 @@ if (sqlBackend && typeof sqlBackend.queryByKeyPattern === 'function') {
 - Complex conditional logic
 - Dynamic field-based searches
 
+For low-level, backend-specific operations, use the backend directly only if absolutely necessary.
+
 ## See Also
-- [Memory Usage Example](../examples/memory-usage/) - Comprehensive demonstration including pattern matching
+- [Memory Usage Example](../examples/memory-usage/)
 - [Binary Data Storage](./memory/binary-data-storage.md) - Store images, files, and other binary content
 - [Monorepo Overview](./monorepo-overview.md)
 - [Full Memory System Guide](./docs/memory-system.md) 

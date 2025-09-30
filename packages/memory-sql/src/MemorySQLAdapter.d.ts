@@ -34,6 +34,8 @@ export declare class MemorySQLAdapter implements SemanticMemoryBackend {
         tenantId?: string;
     }): Promise<void>;
     deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number>;
+    read<T>(input: GetManyInput, options?: GetManyOptions): Promise<MemoryQueryResult<T>[]>;
+    remove(input: GetManyInput, options?: GetManyOptions): Promise<number>;
     clear(): Promise<void>;
     get entities(): {
         unlink: (memoryKey: string, fieldPath: string) => Promise<void>;

@@ -72,7 +72,10 @@ export type MessagePart = {
     // Content depends on type. Focus on text for minimal.
     text?: string; // for type === 'text'
     data?: unknown;    // for type === 'data'
+    // Payload for rich parts (e.g., markup passthrough)
+    value?: unknown;
     // Future: uri, bytes, etc.
+    format?: 'plain' | 'markdown' | 'html';
 }
 
 export type Message = {
@@ -284,4 +287,41 @@ export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
     }
 
     return ctx as AgentTaskContext;
-} 
+}
+
+// --- Canonical Input Discriminators & Guards ---
+export type ChildCompletionInput = {
+    kind: 'child';
+    token: string;
+    childTaskId?: string;
+    agentId?: string;
+    result: unknown;
+};
+
+export type ToolCompletionInput = {
+    kind: 'tool';
+    token: string;
+    toolId?: string;
+    result: unknown;
+};
+
+export type DirectInput = { kind: 'input'; value: unknown };
+export type ExternalEventInput = { kind: 'external'; event: unknown };
+
+export type InputKind = ChildCompletionInput | ToolCompletionInput | DirectInput | ExternalEventInput;
+
+export function isChildCompletionInput(x: unknown): x is ChildCompletionInput {
+    return !!x && typeof x === 'object' && (x as any).kind === 'child' && typeof (x as any).token === 'string';
+}
+
+export function isToolCompletionInput(x: unknown): x is ToolCompletionInput {
+    return !!x && typeof x === 'object' && (x as any).kind === 'tool' && typeof (x as any).token === 'string';
+}
+
+export function isDirectInput(x: unknown): x is DirectInput {
+    return !!x && typeof x === 'object' && (x as any).kind === 'input' && 'value' in (x as any);
+}
+
+export function isExternalEventInput(x: unknown): x is ExternalEventInput {
+    return !!x && typeof x === 'object' && (x as any).kind === 'external' && 'event' in (x as any);
+}

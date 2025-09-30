@@ -160,7 +160,7 @@ The system resolves tenant IDs using the following priority order:
 CALLAGENT_TENANT_ID=production-tenant-123
 
 # Database configuration (shared across tenants)
-DATABASE_URL=postgresql://user:pass@localhost:5432/callagent
+MEMORY_DATABASE_URL=postgresql://user:pass@localhost:5432/callagent
 
 # Memory configuration
 MEMORY_BACKEND=sql

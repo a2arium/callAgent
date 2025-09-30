@@ -1,7 +1,8 @@
 {
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "../../../dist/apps/examples/telegram-bridge-demo",
+    "outDir": "dist",
+    "rootDir": ".",
     "module": "esnext",
     "target": "es2020",
     "moduleResolution": "node",

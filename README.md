@@ -246,10 +246,10 @@ npm install @a2arium/callagent-memory-sql
 #### 2. Set Up Your Database (if using SQL memory)
 ```bash
 # Option A: Create a .env file in your project root (recommended)
-# DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
+# MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
 
 # Option B: Export as environment variable
-export DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
+export MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
 
 # Set up the database schema
 npx @a2arium/callagent-memory-sql setup
@@ -318,10 +318,10 @@ The library supports multiple database configuration approaches:
 
 #### Option 1: Environment Variables (Recommended)
 ```bash
-export DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
+export MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
 ```
 ```typescript
-// The library automatically uses DATABASE_URL or MEMORY_DATABASE_URL
+// The library uses MEMORY_DATABASE_URL
 const agent = createAgent(manifest, handler);
 ```
 
@@ -380,7 +380,7 @@ import { PrismaClient } from '@prisma/client';
 const agent = createAgent(manifest, handler, {
   memory: {
     database: {
-      url: process.env.DATABASE_URL,
+      url: process.env.MEMORY_DATABASE_URL,
       // OR prismaClient: customPrismaClient
     },
     // Custom adapters override database config
@@ -433,7 +433,7 @@ const agent = createAgent(manifest, handler, {
   memory: {
     database: {
       // Read from your secret manager, env vars, config service, etc.
-      url: await getSecretValue('DATABASE_URL')
+      url: await getSecretValue('MEMORY_DATABASE_URL')
     }
   }
 });

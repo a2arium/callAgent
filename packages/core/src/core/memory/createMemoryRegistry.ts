@@ -53,8 +53,8 @@ export interface MemoryRegistryConfig {
 }
 
 export async function createMemoryRegistry(
-    tenantId?: string, 
-    agentId?: string, 
+    tenantId?: string,
+    agentId?: string,
     taskContext?: any,
     config?: MemoryRegistryConfig
 ): Promise<ExtendedIMemory> {
@@ -71,7 +71,7 @@ export async function createMemoryRegistry(
     if (adapterType === 'sql') {
         let semanticAdapter: SemanticMemoryBackend;
         let embedFunction: ((text: string) => Promise<number[]>) | undefined;
-        
+
         if (config?.adapters?.semantic) {
             // Use provided semantic adapter
             semanticAdapter = config.adapters.semantic;
@@ -121,11 +121,11 @@ Error: ${error}
             get: <T>(key: string, opts?: { backend?: string }) => semanticAdapter.get(key),
             set: <T>(key: string, value: T, opts?: { backend?: string; tags?: string[] }) =>
                 semanticAdapter.set(key, value, opts),
-            getMany: <T>(input: GetManyInput, options?: GetManyOptions) =>
-                semanticAdapter.getMany(input, options),
+            read: <T>(input: GetManyInput, options?: GetManyOptions) =>
+                (semanticAdapter as any).read?.(input, options) ?? (semanticAdapter as any).getMany?.(input, options),
             delete: (key: string, opts?: { backend?: string }) => semanticAdapter.delete(key),
-            deleteMany: (input: GetManyInput, options?: GetManyOptions) =>
-                semanticAdapter.deleteMany(input, options),
+            remove: (input: GetManyInput, options?: GetManyOptions) =>
+                (semanticAdapter as any).remove?.(input, options) ?? (semanticAdapter as any).deleteMany?.(input, options),
             entities: semanticAdapter.entities,
             recognize: <T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>> =>
                 semanticAdapter.recognize(candidateData, {

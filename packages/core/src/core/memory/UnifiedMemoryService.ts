@@ -25,9 +25,9 @@ import {
 export type SemanticMemoryAdapter = {
     set(key: string, value: unknown, namespace?: string, tenantId?: string): Promise<void>;
     get(key: string, namespace?: string, tenantId?: string): Promise<unknown>;
-    getMany?(input: GetManyInput, options?: GetManyOptions, tenantId?: string): Promise<Array<MemoryQueryResult<unknown>>>;
+    read?(input: GetManyInput, options?: GetManyOptions, tenantId?: string): Promise<Array<MemoryQueryResult<unknown>>>;
     delete?(key: string, namespace?: string, tenantId?: string): Promise<void>;
-    deleteMany?(input: GetManyInput, options?: GetManyOptions, tenantId?: string): Promise<number>;
+    remove?(input: GetManyInput, options?: GetManyOptions, tenantId?: string): Promise<number>;
     clear?(namespace?: string, tenantId?: string): Promise<void>;
     // Entity alignment methods (optional)
     entities?: {
@@ -782,8 +782,8 @@ export class UnifiedMemoryService {
         );
         const result = await this.mlo.processMemoryItem(item, 'retrieval');
 
-        if (!this.semanticMemoryAdapter?.getMany) {
-            throw new Error('No semantic memory adapter configured or getMany not supported');
+        if (!this.semanticMemoryAdapter?.read) {
+            throw new Error('No semantic memory adapter configured or read not supported');
         }
 
         // Use existing adapter for actual query execution
@@ -792,7 +792,7 @@ export class UnifiedMemoryService {
             ? (result.processedItems[0].data as { input: GetManyInput }).input
             : input;
 
-        return this.semanticMemoryAdapter.getMany(processedInput, options, this.tenantId) as Promise<Array<MemoryQueryResult<T>>>;
+        return this.semanticMemoryAdapter.read(processedInput, options, this.tenantId) as Promise<Array<MemoryQueryResult<T>>>;
     }
 
     /**
@@ -863,8 +863,8 @@ export class UnifiedMemoryService {
         }
 
         // If the adapter supports deleteMany, use it directly for better performance
-        if (this.semanticMemoryAdapter.deleteMany) {
-            this.logger.debug('Using adapter deleteMany for bulk deletion');
+        if (this.semanticMemoryAdapter.remove) {
+            this.logger.debug('Using adapter remove for bulk deletion');
 
             // Process the query through MLO pipeline for potential transformation
             const item = createMemoryItem(
@@ -893,7 +893,7 @@ export class UnifiedMemoryService {
                 processedOptions = options;
             }
 
-            const deletedCount = await this.semanticMemoryAdapter.deleteMany(processedInput, processedOptions, this.tenantId);
+            const deletedCount = await this.semanticMemoryAdapter.remove(processedInput, processedOptions, this.tenantId);
 
             this.logger.debug(`Bulk deleted ${deletedCount} entries via adapter`);
             return deletedCount;
@@ -1243,11 +1243,11 @@ export class UnifiedMemoryService {
 
         // Phase 1: Simple implementation using existing adapters
         if (options?.type === 'semantic') {
-            if (!this.semanticMemoryAdapter?.getMany) {
+            if (!this.semanticMemoryAdapter?.read) {
                 this.logger.warn('Semantic recall requested but no adapter configured');
                 return [];
             }
-            const results = await this.semanticMemoryAdapter.getMany(query, options as GetManyOptions, this.tenantId);
+            const results = await this.semanticMemoryAdapter.read(query, options as GetManyOptions, this.tenantId);
             return results.map(r => r.value);
         }
 

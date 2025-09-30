@@ -22,7 +22,7 @@ department: 'Engineering' ← 'Engineering Dept'
 ### Pattern Matching
 ```typescript
 // Find all users with wildcard
-await ctx.memory.semantic.getMany('user:*');
+await ctx.semantic.read({ tag: 'user' } as any);
 ```
 
 ### String-Based Filters

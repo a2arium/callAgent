@@ -55,7 +55,7 @@ export type MessageNormalized = {
 export type ChatRoute = { network: Network; conversationId: string; userId?: string };
 
 export type ChatSender = {
-    sendMessage(route: ChatRoute, text: string, options?: { parseMode?: 'plain' | 'markdown' }): Promise<void>;
+    sendMessage(route: ChatRoute, text: string, options?: { parseMode?: 'plain' | 'markdown' | 'html' }): Promise<void>;
     sendTyping?(route: ChatRoute): Promise<void>;
     sendMedia?(route: ChatRoute, media: Attachment & { caption?: string }): Promise<void>;
     sendMarkup?(route: ChatRoute, markup: Markup): Promise<void>;

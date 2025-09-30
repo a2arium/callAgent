@@ -233,45 +233,49 @@ const enrichmentTestData = [
 export default createAgent({
     manifest: './agent.json',
     llmConfig,
-    handleTask: handleMemoryRecognitionTask,
+    /**
+     * execution
+     * Purpose: Run the full demo workflow in a single loop turn.
+     * args: (action from policy, ctx helpers, current mentalState)
+     * returns: ExecutableAction for the loop transition
+     */
+    execution: async (action: any, ctx: any, mentalState: any) => {
+        const mode = (ctx.task.input as any)?.mode || 'both';
+
+        await ctx.progress(0.01, `Memory Recognition Demo Agent Started (mode: ${mode})`);
+        await ctx.reply([{ type: 'text', text: '📊 Goal: Test semantic memory recognition and enrichment' }]);
+
+        try {
+            // Setup: Store sample data
+            await setupSampleData(ctx);
+
+            if (mode === 'recognize' || mode === 'both') {
+                await demonstrateRecognition(ctx);
+            }
+
+            // Demonstrate array functionality
+            if (mode === 'array' || mode === 'both') {
+                await demonstrateArraySupport(ctx);
+            }
+
+            if (mode === 'enrich' || mode === 'both') {
+                await demonstrateEnrichment(ctx);
+            }
+
+            // Cleanup
+            await cleanupDemoData(ctx);
+
+            await ctx.reply([{ type: 'text', text: '✅ Demo completed successfully!' }]);
+            ctx.complete(1, 'completed');
+            return { kind: 'internal', done: true } as any;
+        } catch (error) {
+            await ctx.reply([{ type: 'text', text: `❌ Demo failed: ${error instanceof Error ? error.message : String(error)}` }]);
+            throw error;
+        }
+    }
 }, import.meta.url);
 
-/**
- * Main task handler for memory recognition demonstration
- */
-async function handleMemoryRecognitionTask(ctx: any) {
-    const mode = (ctx.task.input as any)?.mode || 'both';
-
-    ctx.logger.info(`🧠 Memory Recognition Demo Agent Started (mode: ${mode})`);
-    ctx.logger.info(`📊 Goal: Test and demonstrate semantic memory recognition and enrichment capabilities`);
-
-    try {
-        // Setup: Store sample data
-        await setupSampleData(ctx);
-
-        if (mode === 'recognize' || mode === 'both') {
-            await demonstrateRecognition(ctx);
-        }
-
-        // NEW: Demonstrate array functionality
-        if (mode === 'array' || mode === 'both') {
-            await demonstrateArraySupport(ctx);
-        }
-
-        if (mode === 'enrich' || mode === 'both') {
-            await demonstrateEnrichment(ctx);
-        }
-
-        // Cleanup
-        await cleanupDemoData(ctx);
-
-        ctx.logger.info(`✅ Demo completed successfully!`);
-
-    } catch (error) {
-        ctx.logger.error('❌ Demo failed:', error);
-        throw error;
-    }
-}
+// helpers below remain unchanged and are used by execution
 
 /**
  * Setup sample data for demonstration
@@ -494,8 +498,8 @@ async function demonstrateArraySupport(ctx: any) {
     // Test queries with array patterns
     ctx.logger.info(`\n🔎 Testing array-aware queries...`);
 
-    const queryResults = await ctx.memory.semantic.getMany({
-        filters: ['titleAndDescription[].title ~ "AI"'],
+    const queryResults = await ctx.semantic.read({
+        filters: ['titleAndDescription[].title ~ "AI"'] as any,
         tag: 'demo'
     });
 

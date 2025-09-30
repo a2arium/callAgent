@@ -63,8 +63,8 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
                 datasources: { db: { url: config.databaseUrl } }
             });
             this.ownsPrisma = true;
-        } else if (process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL) {
-            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+        } else if (process.env.MEMORY_DATABASE_URL) {
+            const dbUrl = process.env.MEMORY_DATABASE_URL;
             this.prisma = new PrismaClient({
                 datasources: { db: { url: dbUrl } }
             });
@@ -74,7 +74,7 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
 WorkingMemorySQLAdapter requires database configuration. Provide either:
 1. config.prismaClient: Pre-configured PrismaClient
 2. config.databaseUrl: Database connection string  
-3. Environment variable: MEMORY_DATABASE_URL or DATABASE_URL
+3. Environment variable: MEMORY_DATABASE_URL
 
 Example:
 new WorkingMemorySQLAdapter({ 

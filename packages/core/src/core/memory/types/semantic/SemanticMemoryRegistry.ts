@@ -15,7 +15,7 @@ import {
  * Registry/facade for semantic memory backends.
  * Routes calls to the default or named backend as specified.
  */
-export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBackend> {
+export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemoryBackend>, 'getMany' | 'deleteMany'> {
     /** Map of backend names to backend implementations */
     public backends: Record<string, SemanticMemoryBackend>;
     /** Name of the default backend */
@@ -74,11 +74,19 @@ export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBack
      * @param input Pattern string or query object
      * @param options Optional query options including backend override
      */
-    async getMany<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> {
+    // Legacy getMany removed in favor of read
+
+    /**
+     * Read many memory entries from the selected backend using facade semantics
+     * @param input Tag/filters/limit-style query object or pattern string (temporary support)
+     * @param options Optional query options including backend override
+     */
+    async read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> {
         const backendName = options?.backend ?? this.defaultBackend;
         const backend = this.backends[backendName];
-        return backend.getMany<T>(input, options);
+        return (backend as any).read?.(input, options) ?? [] as Array<MemoryQueryResult<T>>;
     }
+
 
     /**
      * Delete a memory entry by key in the selected backend
@@ -96,11 +104,20 @@ export class SemanticMemoryRegistry implements MemoryRegistry<SemanticMemoryBack
      * @param options Optional query options including backend override
      * @returns Number of entries deleted
      */
-    async deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+    // Legacy deleteMany removed in favor of remove
+
+    /**
+     * Remove multiple memory entries from the selected backend using facade semantics
+     * @param input Tag/filters/limit-style query object or pattern string (temporary support)
+     * @param options Optional query options including backend override
+     * @returns Number of entries removed
+     */
+    async remove(input: GetManyInput, options?: GetManyOptions): Promise<number> {
         const backendName = options?.backend ?? this.defaultBackend;
         const backend = this.backends[backendName];
-        return backend.deleteMany(input, options);
+        return (backend as any).remove?.(input, options) ?? 0;
     }
+
 
     /**
      * Get entity management interface from the default backend

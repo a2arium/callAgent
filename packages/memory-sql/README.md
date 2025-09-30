@@ -56,12 +56,12 @@ EOF
 **Option A: Create `.env` file (Recommended)**
 ```bash
 # Create .env file in your project root
-DATABASE_URL="postgresql://agent:YourSecurePassword2024!@localhost:5432/agent"
+MEMORY_DATABASE_URL="postgresql://agent:YourSecurePassword2024!@localhost:5432/agent"
 ```
 
 **Option B: Environment Variable**
 ```bash
-export DATABASE_URL="postgresql://agent:YourSecurePassword2024!@localhost:5432/agent"
+export MEMORY_DATABASE_URL="postgresql://agent:YourSecurePassword2024!@localhost:5432/agent"
 # OR
 export MEMORY_DATABASE_URL="postgresql://agent:YourSecurePassword2024!@localhost:5432/agent"
 ```
@@ -145,7 +145,7 @@ import { createAgent } from '@a2arium/callagent-core';
 const agent = createAgent(manifest, handler, {
   memory: {
     database: {
-      url: process.env.DATABASE_URL
+      url: process.env.MEMORY_DATABASE_URL
     }
   }
 });
@@ -157,7 +157,7 @@ const agent = createAgent(manifest, handler, {
 import { WorkingMemorySQLAdapter } from '@a2arium/callagent-memory-sql';
 
 const workingMemory = new WorkingMemorySQLAdapter({
-  databaseUrl: process.env.DATABASE_URL,
+  databaseUrl: process.env.MEMORY_DATABASE_URL,
   defaultTenantId: 'user-123'
 });
 

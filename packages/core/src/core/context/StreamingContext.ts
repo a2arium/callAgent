@@ -69,6 +69,8 @@ export function extendContextWithStreaming(
 
                 if (isStreaming) {
                     // Emit directly to the event bus for streaming
+                    try { (eventBus as any).__dbgId = (eventBus as any).__dbgId || Math.random().toString(36).slice(2); } catch { }
+                    try { logger.debug('Streaming artifact publish', { channel: taskChannel(event.taskId), busId: (eventBus as any).__dbgId }); } catch { }
                     eventBus.publish(taskChannel(event.taskId), {
                         id: event.taskId,
                         artifact,
@@ -108,6 +110,8 @@ export function extendContextWithStreaming(
                         event.status.state === 'failed' ||
                         event.status.state === 'canceled';
 
+                    try { (eventBus as any).__dbgId = (eventBus as any).__dbgId || Math.random().toString(36).slice(2); } catch { }
+                    try { logger.debug('Streaming status publish', { channel: taskChannel(event.taskId), busId: (eventBus as any).__dbgId, state: event.status.state }); } catch { }
                     eventBus.publish(taskChannel(event.taskId), {
                         id: event.taskId,
                         status: event.status,
@@ -182,13 +186,14 @@ export function extendContextWithStreaming(
         ): Promise<void> => {
             let arrayParts: MessagePart[];
             if (typeof parts === 'string') {
-                arrayParts = [{ type: 'text', text: parts }];
+                arrayParts = [{ type: 'text', text: parts, format: 'markdown' } as MessagePart];
             } else if (Array.isArray(parts) && typeof parts[0] === 'string') {
-                arrayParts = (parts as string[]).map(text => ({ type: 'text', text }));
+                arrayParts = (parts as string[]).map(text => ({ type: 'text', text, format: 'markdown' } as MessagePart));
             } else if (Array.isArray(parts)) {
-                arrayParts = parts as MessagePart[];
+                arrayParts = (parts as MessagePart[]).map(p => (p.type === 'text' && !p.format ? { ...p, format: 'markdown' as const } : p));
             } else {
-                arrayParts = [parts as MessagePart];
+                const p = parts as MessagePart;
+                arrayParts = [p.type === 'text' && !p.format ? { ...p, format: 'markdown' as const } : p];
             }
             emitEvent({
                 kind: 'REPLY',

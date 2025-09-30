@@ -138,11 +138,14 @@ export default createAgent({
 
                 try {
                     // Use entity-aware search with ~ operator
-                    const searchResults = await ctx.memory.semantic.getMany({
+                    if (!ctx.semantic?.read) {
+                        throw new Error('Semantic memory is not available (ctx.semantic.read is undefined)');
+                    }
+                    const searchResults = await ctx.semantic.read({
                         filters: [`${test.field} ~ "${test.query}"`],
                         tag: test.type,
                         limit: 10
-                    });
+                    } as any);
 
                     ctx.logger.info(`   📊 Found ${searchResults.length} matches`);
 
@@ -153,7 +156,7 @@ export default createAgent({
                             const title = value.titleAndDescription?.[0]?.title ||
                                 value.venueName ||
                                 'Unknown';
-                            ctx.logger.info(`   ${i + 1}. ${result.key} - "${title}"`);
+                            ctx.logger.info(`   ${i + 1}. ${result.id} - "${title}"`);
                         }
                     } else {
                         ctx.logger.info(`   ❌ No matches found`);
@@ -165,7 +168,7 @@ export default createAgent({
                         field: test.field,
                         type: test.type,
                         matches: searchResults.length,
-                        keys: searchResults.map((r: { key: string; value: unknown }) => r.key)
+                        keys: searchResults.map((r: any) => r.id)
                     });
 
                 } catch (error) {

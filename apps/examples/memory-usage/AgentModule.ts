@@ -1,7 +1,36 @@
 import { createAgent } from '@a2arium/callagent-core';
 
+// Loop-first implementation using top-level module sugar
 export default createAgent({
-    async handleTask(ctx) {
+    manifest: { name: 'memory-usage', version: '0.1.0', runMode: 'loop' },
+    // Selects focus for this turn.
+    // args: mentalState (agent state from previous turn), env (runtime input)
+    // returns: attention signal consumed by perception
+    attention: (_M: any, _env: any) => { console.log('[memory-usage] attention'); return { focus: 'memory-demo' }; },
+    // Converts environment into an observation for this turn.
+    // args: env (runner-provided input), attention (from attention)
+    // returns: observation consumed by learning and policy
+    perception: (env: any, attention: any) => ({ input: env.input, time: env.time, attention }),
+    // Updates long-term memory with the latest observation.
+    // args: prevMentalState (previous agent state), prevAction (action chosen last turn), obs (from perception)
+    // returns: updated agent state
+    learning: (prevMentalState: any) => prevMentalState,
+    // Chooses the next action based on observation and state.
+    // args: mentalState (current state after learning), prevMentalState (prior state), obs (from perception)
+    // returns: action (e.g., ask_user | language | internal)
+    policy: () => { console.log('[memory-usage] policy -> run_demo'); return { kind: 'run_demo' } as any; },
+    // Optional policy-guard/safety layer to adjust or veto actions.
+    // args: mentalState (current state), action (from policy)
+    // returns: final action passed to execution
+    shield: (_M: any, action: any) => action,
+    // Performs side effects for the chosen action.
+    // args: action (from shield), ctx (runner exec context with helpers)
+    // returns: execution result consumed by transition
+    execution: async (action: any, ctx: any) => {
+        console.log('[memory-usage] execution start', action);
+        if (action?.kind !== 'run_demo') return { kind: 'noop' } as any;
+        await ctx.progress({ state: 'working', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: 'Running memory demo…' }] } } as any);
+
         await ctx.reply('🧠 Memory System Demo\n');
 
         try {
@@ -96,88 +125,71 @@ export default createAgent({
 
             // 2. Pattern matching with wildcards
             await ctx.reply('🔍 Pattern matching with wildcards...');
-            const allUsers = await ctx.memory.semantic.getMany('user:*');
+            const allUsers = await ctx.semantic!.read({ id: 'user:*' } as any);
             await ctx.reply(`Found ${allUsers.length} users with pattern 'user:*'`);
 
             // 3. String-based filter operators
             await ctx.reply('🎯 Using string-based filters...');
 
             // High salary employees
-            const highEarners = await ctx.memory.semantic.getMany({
-                filters: ['salary > 70000']
-            });
+            const highEarners = await ctx.semantic.read({ filters: ['salary > 70000'] as any });
             await ctx.reply(`High earners (>70k): ${highEarners.length} users`);
 
             // Active engineering employees
-            const activeEngineers = await ctx.memory.semantic.getMany({
+            const activeEngineers = await ctx.semantic.read({
                 filters: [
                     'active = true',
                     'department contains "Engineering"'
-                ]
+                ] as any
             });
             await ctx.reply(`Active engineers: ${activeEngineers.length} users`);
 
             // Email domain search
-            const exampleEmails = await ctx.memory.semantic.getMany({
-                filters: ['email ends_with "@example.com"']
-            });
+            const exampleEmails = await ctx.semantic.read({ filters: ['email ends_with "@example.com"'] as any });
             await ctx.reply(`@example.com emails: ${exampleEmails.length} users`);
 
             // 4. Array filtering demonstrations
             await ctx.reply('🎯 Array filtering examples...');
 
             // ✅ Array filtering with equality
-            const todayEvents = await ctx.memory.semantic.getMany({
-                filters: ['eventOccurences[].date = "2025-07-24"']
-            });
+            const todayEvents = await ctx.semantic.read({ filters: ['eventOccurences[].date = "2025-07-24"'] as any });
             await ctx.reply(`Events on 2025-07-24: ${todayEvents.length} events`);
 
             // ✅ Array filtering with comparison
-            const highPriorityEvents = await ctx.memory.semantic.getMany({
-                filters: ['eventOccurences[].priority >= 8']
-            });
+            const highPriorityEvents = await ctx.semantic.read({ filters: ['eventOccurences[].priority >= 8'] as any });
             await ctx.reply(`High priority events (>=8): ${highPriorityEvents.length} events`);
 
             // ✅ Array filtering with string operations
-            const morningEvents = await ctx.memory.semantic.getMany({
-                filters: ['eventOccurences[].time starts_with "09"']
-            });
+            const morningEvents = await ctx.semantic.read({ filters: ['eventOccurences[].time starts_with "09"'] as any });
             await ctx.reply(`Morning events (starting at 09): ${morningEvents.length} events`);
 
             // ✅ Nested object array filtering
-            const aiExperts = await ctx.memory.semantic.getMany({
-                filters: ['speakers[].expertise contains "AI"']
-            });
+            const aiExperts = await ctx.semantic.read({ filters: ['speakers[].expertise contains "AI"'] as any });
             await ctx.reply(`Events with AI experts: ${aiExperts.length} events`);
 
             // ✅ Array filtering with rating comparison
-            const topRatedSpeakers = await ctx.memory.semantic.getMany({
-                filters: ['speakers[].rating >= 9.0']
-            });
+            const topRatedSpeakers = await ctx.semantic.read({ filters: ['speakers[].rating >= 9.0'] as any });
             await ctx.reply(`Events with top-rated speakers (>=9.0): ${topRatedSpeakers.length} events`);
 
             // ✅ Combined array and regular filtering
-            const rigaTodayEvents = await ctx.memory.semantic.getMany({
+            const rigaTodayEvents = await ctx.semantic.read({
                 filters: [
                     'eventOccurences[].date = "2025-07-24"',
                     'city = "Riga"'
-                ]
+                ] as any
             });
             await ctx.reply(`Riga events on 2025-07-24: ${rigaTodayEvents.length} events`);
 
             // ✅ Combined array and tag filtering
-            const techTodayEvents = await ctx.memory.semantic.getMany({
-                tag: 'tech',
-                filters: ['eventOccurences[].date = "2025-07-24"']
-            });
+            const techTodayEvents = await ctx.semantic.read({ tag: 'tech', filters: ['eventOccurences[].date = "2025-07-24"'] as any });
             await ctx.reply(`Tech events on 2025-07-24: ${techTodayEvents.length} events`);
 
             // ✅ Multiple array filters
-            const complexEvents = await ctx.memory.semantic.getMany({
+            const complexEvents = await ctx.semantic.read({
                 filters: [
                     'eventOccurences[].priority >= 8',
                     'speakers[].rating >= 9.0'
-                ]
+                ] as any
             });
             await ctx.reply(`High priority events with top speakers: ${complexEvents.length} events`);
 
@@ -215,11 +227,20 @@ export default createAgent({
                 `• Tech events today: ${techTodayEvents.length} events`,
                 `• Complex filtered events: ${complexEvents.length} events`
             ].join('\n'));
-
+            console.log('[memory-usage] execution done');
+            return { kind: 'done' } as any;
         } catch (error: any) {
             await ctx.reply(`❌ Error: ${error.message}`);
+            console.log('[memory-usage] execution fail', error?.message);
+            return { kind: 'fail', reason: error?.message || 'unknown' } as any;
         }
-
-        ctx.complete();
     },
-}, import.meta.url); 
+    // Decides the loop control state for the next step/turn.
+    // args: env (runner-provided input), executionResult (from execution)
+    // returns: loop state (await_input | complete | continue)
+    transition: (_env: any, exec: any) => {
+        if (exec?.kind === 'fail') return { kind: 'fail', reason: exec.reason } as any;
+        if (exec?.kind === 'done') return { kind: 'complete', result: 'ok' } as any;
+        return { kind: 'continue' } as any;
+    }
+}, import.meta.url);

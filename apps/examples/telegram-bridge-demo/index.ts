@@ -40,7 +40,13 @@ async function main() {
         chatSender,
         invoker: new ProgrammaticInvoker({ chatSender }),
         timeouts: { inputWaitMs: 15 * 60 * 1000 },
-        tenantIdResolver: () => 'default'
+        tenantIdResolver: () => 'default',
+        logger: {
+            debug: (msg: string, meta?: Record<string, unknown>) => console.debug(`[bridge] ${msg}`, meta || {}),
+            info: (msg: string, meta?: Record<string, unknown>) => console.info(`[bridge] ${msg}`, meta || {}),
+            warn: (msg: string, meta?: Record<string, unknown>) => console.warn(`[bridge] ${msg}`, meta || {}),
+            error: (msg: string, meta?: Record<string, unknown>) => console.error(`[bridge] ${msg}`, meta || {})
+        }
     });
 
     cm.on('message.received', async (e) => {

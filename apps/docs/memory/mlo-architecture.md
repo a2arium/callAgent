@@ -30,7 +30,7 @@ graph LR
     
     subgraph "Memory Type Routing"
         B1[ctx.goals.add] --> C1
-        B2[ctx.memory.semantic.set] --> C2
+        B2[ctx.semantic.add] --> C2
         B3[ctx.memory.episodic.append] --> C3
         B4[ctx.recall] --> C4
     end
@@ -1252,7 +1252,7 @@ await ctx.semantic.add({ id: "project-status", value: "in-progress" });
 // ↓ Stores in semantic memory backend
 
 // Episodic memory operations use episodicLTM intent
-await ctx.memory.episodic.append({
+await ctx.episodic?.append?.({
     type: 'conversation',
     speaker: 'user',
     content: 'How is the project going?',
