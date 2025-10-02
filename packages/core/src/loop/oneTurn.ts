@@ -22,6 +22,12 @@ export type ExecutableAction =
     | { kind: 'language'; echoed: boolean }
     | { kind: 'internal'; done: boolean };
 
+export type ShieldOutcome =
+    | { action: 'pass'; intent: ProposedAction }
+    | { action: 'transform'; intent: ProposedAction }
+    | { action: 'veto'; reason: string }
+    | { action: 'defer'; askUser: string };
+
 export type TurnOutcome =
     | { kind: 'continue' }
     | { kind: 'await_input'; token: string }
@@ -40,7 +46,7 @@ export type Modules = {
     perception: (env: EnvironmentState, alpha: AttentionSignal) => Observation;
     learning: (prev: MentalState, prevAction: ProposedAction | undefined, o: Observation, rPrev?: number) => MentalState;
     policy: PolicyFn;
-    shield: (m: MentalState, a: ProposedAction) => ProposedAction | null;
+    shield: (m: MentalState, a: ProposedAction) => ShieldOutcome;
     execution: (a: ProposedAction, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>;
     transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState) => TurnOutcome;
     extrinsicReward?: (m: MentalState, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
@@ -119,9 +125,24 @@ export async function oneTurn(
             }
         }
     }
-    const safe = mods.shield(m1, chosen) ?? { kind: 'internal', intent: 'noop' };
+    const sh = mods.shield(m1, chosen);
+    let toExecute: ProposedAction | null = null;
+    switch (sh.action) {
+        case 'pass':
+        case 'transform':
+            toExecute = sh.intent;
+            break;
+        case 'veto':
+            toExecute = { kind: 'internal', intent: 'vetoed' } as ProposedAction;
+            break;
+        case 'defer':
+            toExecute = { kind: 'ask_user', prompt: sh.askUser } as ProposedAction;
+            break;
+        default:
+            toExecute = { kind: 'internal', intent: 'noop' } as ProposedAction;
+    }
     const tE0 = Date.now();
-    const exec = await mods.execution(safe, ctx, m1);
+    const exec = await mods.execution(toExecute!, ctx, m1);
     timings.executionMs = Date.now() - tE0;
 
     const tT0 = Date.now();

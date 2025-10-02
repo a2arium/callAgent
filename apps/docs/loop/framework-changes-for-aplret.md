@@ -3,17 +3,27 @@
 **Status**: Implementation Plan  
 **Related**: [A-P-L-R-E-T Stage Dispatcher Architecture](./aplret-stage-dispatcher.md)
 
+---
+
+> **👷 Audience**: Framework maintainers and contributors  
+> **🎯 Purpose**: Track implementation plan for A-P-L-R-E-T framework support  
+> **👥 For agent developers**: See [A-P-L-R-E-T Guide](./aplret-stage-dispatcher.md)  
+
+> **📦 Target Framework Version**: 2.0
+
+---
+
 ## Overview
 
 This document outlines the framework changes needed to fully support the production-ready A-P-L-R-E-T Stage Dispatcher architecture. Most patterns are **already possible** with the current framework, but some enhancements would make them easier and more standardized.
 
-**Note**: This version has **minimal breaking changes** (only 2 breaking changes for Shield and Trace).
+**Note**: This version has **minimal breaking changes** (only 1 breaking change for Shield; logging is non-breaking).
 
 ### Summary
 
 - ✅ **80% Already Supported**: Core A-P-L-R-E-T loop, typed actions, ctx.vars, shield, rewards
-- 🔧 **2 Breaking Changes**: Shield outcome types, trace always-on
-- ✅ **Non-breaking Enhancements**: Effect safety (two-tier approach), stage invariants
+- 🔧 **1 Breaking Change**: Shield outcome types
+- ✅ **Non-breaking Enhancements**: Effect safety (three-tier approach), stage invariants
 
 ---
 
@@ -75,7 +85,7 @@ Both `extrinsicReward` and `intrinsicReward` are already implemented. **No chang
 
 ## What Needs Enhancement 🔧
 
-### 1. Effect Safety (Two-Tier Approach)
+### 1. Effect Safety (Three-Tier Approach)
 
 **Status**: ✅ Non-breaking enhancement
 
@@ -84,6 +94,8 @@ Both `extrinsicReward` and `intrinsicReward` are already implemented. **No chang
 1. **LLM calls** (`ctx.llm.call`) → **Already safe** (calllm library handles timeouts/retries internally)
 2. **Framework methods** (`ctx.reply`, `ctx.tools`) → **Safe by default** (internal `withSafety` wrapper)
 3. **Agent external calls** (fetch, database, custom APIs) → **Opt-in safety** via `runEffect()`
+
+See developer guide for usage examples: [Effect Safety and Budgets](./aplret-stage-dispatcher.md#7-effect-safety-and-budgets).
 
 ---
 
@@ -116,7 +128,7 @@ async function withSafety<T>(
   const {
     timeoutMs = 30000,
     maxRetries = 2,
-    retryDelayMs = 1000
+      retryDelayMs = 1000 // consider adding jitter to avoid thundering herds
   } = opts;
   
   let lastError: Error;
@@ -200,10 +212,12 @@ execution: async (a, ctx, m) => {
 
 #### Tier 2: External Calls (Explicit Safety via runEffect)
 
-**For agent's own external calls, expose `runEffect()`:**
+**For agent's own external calls, expose `runEffect()` (same as internal `withSafety`):**
 
 ```typescript
 // Add to packages/core/src/loop/effects.ts (PUBLIC API)
+// Note: Same implementation as withSafety, just exported for agent use
+
 export type EffectOptions = {
   timeoutMs?: number;       // Default: 30000
   maxRetries?: number;      // Default: 2
@@ -212,15 +226,34 @@ export type EffectOptions = {
 };
 
 /**
- * Wrap external async calls with timeout/retry protection.
- * Use this for fetch(), database calls, external APIs, etc.
+ * Wrap any external async call with timeout/retry protection.
+ * Use this for fetch(), database calls, external APIs, third-party SDKs, etc.
  * 
- * Framework methods (ctx.llm, ctx.reply, ctx.tools) are already safe.
+ * Framework methods (ctx.llm, ctx.reply, ctx.tools) are already safe - don't wrap them.
  * 
  * @example
+ * // ✅ External HTTP call
  * const data = await runEffect(
  *   () => fetch('https://api.example.com').then(r => r.json()),
  *   { timeoutMs: 10000, maxRetries: 3 }
+ * );
+ * 
+ * @example
+ * // ✅ Third-party SDK
+ * const result = await runEffect(
+ *   () => stripe.charges.create({ amount: 1000, currency: 'usd' }),
+ *   { timeoutMs: 15000 }
+ * );
+ * 
+ * @example
+ * // ✅ Custom async logic
+ * const combined = await runEffect(
+ *   async () => {
+ *     const a = await externalAPI.getA();
+ *     const b = await externalAPI.getB();
+ *     return processData(a, b);
+ *   },
+ *   { timeoutMs: 20000, maxRetries: 2 }
  * );
  */
 export async function runEffect<T>(
@@ -272,24 +305,28 @@ execution: async (a, ctx, m) => {
   // ✅ Framework methods - use directly (already safe)
   await ctx.reply('Fetching external data...');
   
-  // ✅ External API - wrap with runEffect()
+  // ✅ External HTTP API - wrap with runEffect()
   const apiData = await runEffect(
     () => fetch('https://api.example.com/data').then(r => r.json()),
     { timeoutMs: 10000, maxRetries: 3 }
   );
   
-  // ✅ Database query - wrap with runEffect()
-  const dbRecord = await runEffect(
-    () => database.query('SELECT * FROM users WHERE id = ?', [userId]),
-    { timeoutMs: 5000, maxRetries: 1 }
+  // ✅ Third-party SDK (Stripe, Twilio, etc.) - wrap with runEffect()
+  const payment = await runEffect(
+    () => stripe.charges.create({ amount: 1000, currency: 'usd', source: token }),
+    { timeoutMs: 15000, maxRetries: 2 }
   );
   
-  // ✅ Custom service - wrap with runEffect()
+  // ✅ Custom async logic - wrap with runEffect()
   const processed = await runEffect(
-    () => externalService.process(apiData),
+    async () => {
+      const result1 = await externalAPI.step1(apiData);
+      const result2 = await externalAPI.step2(result1);
+      return combineResults(result1, result2);
+    },
     { 
       timeoutMs: 60000,
-      retryableErrors: ['SERVICE_UNAVAILABLE', 'RATE_LIMIT']
+      retryableErrors: ['SERVICE_UNAVAILABLE', 'RATE_LIMIT', 'TEMPORARY_ERROR']
     }
   );
   
@@ -300,11 +337,14 @@ execution: async (a, ctx, m) => {
 }
 ```
 
+**Note**: Database queries through memory/MLO are framework methods, so you typically won't need `runEffect()` for those.
+
 **Impact**: 
 - ✅ **Non-breaking**: Framework methods unchanged
 - ✅ **Opt-in**: Agents wrap external calls when needed
-- ✅ **Simple API**: Just wrap your async function
+- ✅ **Simple API**: Just wrap any async function (no Effect envelope needed)
 - ✅ **Flexible**: Custom timeout/retry per call
+- ✅ **Same as withSafety**: One implementation, two exports (internal vs public)
 - ✅ **Trust framework**: ctx.llm, ctx.reply, etc. are safe by default
 
 ---
@@ -397,110 +437,35 @@ shield: (m, a): ShieldOutcome => {
 
 ---
 
-### 3. Event Tracing (Always On)
+### 3. Structured Logging (Always On)
 
-**Status**: 🔧 Breaking change - trace always present
+**Status**: ✅ Non-breaking - `ctx.log` always present
 
-**Current:** `ctx.trace` is optional, needs null checks
-
-**Breaking Change:** Make `ctx.trace` always present
+Provide a structured logger on `TaskContext`. Recommended fields: `turn`, `module`, `event|action`, `data`, `latencyMs`, `success`.
 
 ```typescript
-// Add to packages/core/src/loop/traceability.ts
-export type TraceEvent = {
-  timestamp: number;
-  turn: number;
-  module: 'attention' | 'perception' | 'learning' | 'policy' | 'shield' | 'execution' | 'transition';
-  event: string;
-  data?: Record<string, unknown>;
-  latencyMs?: number;
-  success?: boolean;
-  error?: Error;
-};
-
-export class TraceLog {
-  private events: TraceEvent[] = [];
-  private maxSize: number;
-  
-  constructor(maxSize = 1000) {
-    this.maxSize = maxSize;
-  }
-  
-  append(event: Omit<TraceEvent, 'timestamp'>): void {
-    this.events.push({ ...event, timestamp: Date.now() });
-    if (this.events.length > this.maxSize) this.events.shift();
-  }
-  
-  getEvents(): TraceEvent[] {
-    return [...this.events];
-  }
-  
-  query(filter: Partial<TraceEvent>): TraceEvent[] {
-    return this.events.filter(e =>
-      Object.entries(filter).every(([k, v]) => (e as any)[k] === v)
-    );
-  }
-  
-  export(): string {
-    return JSON.stringify(this.events, null, 2);
-  }
-}
-
-// Update TaskContext
-declare module '../shared/types/index.js' {
-  interface TaskContext {
-    trace: TraceLog;  // Always present
-  }
+// TaskContext
+interface TaskContext {
+  log: {
+    debug: (event: string, data?: Record<string, unknown>) => void;
+    info: (event: string, data?: Record<string, unknown>) => void;
+    warn: (event: string, data?: Record<string, unknown>) => void;
+    error: (event: string, data?: Record<string, unknown>) => void;
+  };
 }
 ```
 
-**Update `TaskEngine.createContext()`:**
+**Integration examples:**
 
 ```typescript
-const ctx = {
-  // ... existing properties ...
-  trace: new TraceLog(1000)  // Always initialized
-};
+ctx.log.info('shield_decision', { action: outcome.action, reason: outcome.reason });
+ctx.log.debug('effect_complete', { name: 'fetch_context', latencyMs });
 ```
 
-**Integrate into `oneTurn()` - log all modules:**
-
-```typescript
-export async function oneTurn(ctx, env, mPrev, mods, prevAction, rPrev) {
-  const trace = ctx.trace;  // No null check
-  const turn = env.turn || 0;
-  
-  // Log each module automatically
-  const tA = Date.now();
-  const alpha = mods.attention(mPrev, env);
-  trace.append({ turn, module: 'attention', event: 'signal', latencyMs: Date.now() - tA });
-  
-  const tP = Date.now();
-  const o = mods.perception(env, alpha);
-  trace.append({ turn, module: 'perception', event: 'observed', latencyMs: Date.now() - tP });
-  
-  // ... same for learning, policy, shield, execution, transition
-}
-```
-
-**Required agent updates:**
-
-```typescript
-// Remove null checks
-execution: async (a, ctx, m) => {
-  // ❌ Old
-  // if (ctx.trace) { ctx.trace.append(...); }
-  
-  // ✅ New (always safe)
-  ctx.trace.append({ turn: 0, module: 'execution', event: 'custom' });
-}
-```
-
-**Impact**: 
-- ⚠️ **BREAKING**: Remove all `if (ctx.trace)` checks
-- ✅ All turns automatically logged
-- ✅ Better observability
-- ⚠️ Small performance overhead (~1-2%)
+**Impact**:
+- ✅ Non-breaking, simpler API surface
+- ✅ Works with existing logging backends
+- ✅ Agents do not manage buffers; aggregation belongs to infra
 
 ---
 
@@ -607,12 +572,12 @@ export type ExecutableAction =
 6. Add to `ctx.tools.invoke()`
 7. Implement `runEffect()` (public API for external calls)
 
-### Phase 3: Tracing Infrastructure (2-3 days)
+### Phase 3: Structured Logging (1 day)
 
-9. Implement `TraceLog` class
-10. Add `trace` to TaskContext (required)
-11. Integrate tracing into `oneTurn()`
-12. Update `createContext()`
+9. Ensure `ctx.log` is present on `TaskContext` (debug/info/warn/error)
+10. Wire module logs in loop (shield decisions, effect timings)
+11. Add minimal fields guidance (turn, module, action, latencyMs)
+12. Plumb logger in `taskEngine.createContext()`
 
 ### Phase 4: Stage Validation (1 day, optional)
 
@@ -633,7 +598,7 @@ export type ExecutableAction =
 
 ### Breaking Changes Summary
 
-⚠️ **Only 2 breaking changes**:
+⚠️ **Only 1 breaking change**:
 
 1. **Shield signature change**:
    ```typescript
@@ -642,15 +607,6 @@ export type ExecutableAction =
    
    // ✅ New (required)
    shield: (m, a): ShieldOutcome => ({ action: 'pass', intent: a })
-   ```
-
-2. **Trace is always present**:
-   ```typescript
-   // ❌ Old
-   if (ctx.trace) { ctx.trace.append(...); }
-   
-   // ✅ New (required)
-   ctx.trace.append(...);  // Always safe
    ```
 
 **Effect safety is non-breaking:**
@@ -668,11 +624,11 @@ shield: (m, a): ShieldOutcome => {
 }
 ```
 
-#### Step 2: Remove Trace Null Checks (Required)
+#### Step 2: (Optional) Adopt structured logging
 
 ```typescript
-// Just remove the if statement
-ctx.trace.append({ ... });
+// Use ctx.log (always present)
+ctx.log.info('shield_decision', { action: 'pass' });
 ```
 
 #### Step 3: Wrap External Calls (Optional)
@@ -680,10 +636,16 @@ ctx.trace.append({ ... });
 ```typescript
 import { runEffect } from '@a2arium/callagent-core/loop/effects';
 
-// Wrap external APIs, database calls, etc.
+// Wrap any external async call
 const data = await runEffect(
   () => fetch('https://api.example.com').then(r => r.json()),
   { timeoutMs: 10000 }
+);
+
+// Third-party SDKs
+const result = await runEffect(
+  () => externalSDK.doSomething(params),
+  { timeoutMs: 30000, maxRetries: 2 }
 );
 ```
 
@@ -695,7 +657,6 @@ npx @a2arium/callagent-migrate --version 2.0 --path ./apps/examples
 
 Handles:
 - ✅ Shield signature conversion
-- ✅ Trace null check removal
 
 ---
 
@@ -705,17 +666,14 @@ Handles:
 - `runEffect()` timeout/retry logic
 - `ShieldOutcome` exhaustive matching
 - `assertStageInvariants()` validation
-- `TraceLog` query/export
 
 ### Integration Tests
 - Framework method safety (internal)
 - External call safety via `runEffect()`
 - Shield veto with reason logging
-- Trace events across full turn
 
 ### Breaking Changes Validation
 - ❌ Old shield signature fails TypeScript
-- ✅ `ctx.trace` never undefined
 - ✅ All example agents compile
 
 ---
@@ -726,11 +684,11 @@ Handles:
 - [ ] `packages/core/src/loop/effectSafety.ts` - withSafety helper (internal)
 - [ ] `packages/core/src/loop/effects.ts` - runEffect (public API)
 - [ ] `packages/core/src/loop/stageInvariants.ts` - Stage validation
-- [ ] `packages/core/src/loop/traceability.ts` - TraceLog
 
 ### Modified Files
-- [ ] `packages/core/src/loop/oneTurn.ts` - ShieldOutcome, tracing
-- [ ] `packages/core/src/core/orchestration/taskEngine.ts` - Initialize trace, add withSafety to reply/tools
+- [ ] `packages/core/src/loop/oneTurn.ts` - ShieldOutcome
+- [ ] `packages/core/src/core/orchestration/taskEngine.ts` - add withSafety to reply/tools; plumb ctx.log
+- [ ] `packages/core/src/shared/types/index.ts` - add `log` to TaskContext
 - [ ] `packages/core/src/index.ts` - Export runEffect
 
 ---
@@ -748,39 +706,42 @@ Handles:
 
 ### What's Changing (20%)
 
-#### Breaking Changes (2)
+#### Breaking Changes (1)
 🔧 Shield → `ShieldOutcome` (required)  
-🔧 Trace always present (required)  
 
 #### Non-Breaking Enhancements
-✅ Effect safety (two-tier: internal + runEffect)  
+✅ Effect safety (three-tier: llm inherent + internal + runEffect)  
 ✅ Stage invariants (optional)  
 ✅ ExecutableAction fix  
 
 ### Migration Impact
 
-**Estimated effort per agent**: 15-20 minutes
+**Estimated effort per agent**: 10-15 minutes
 - Shield update: 10-15 minutes
-- Trace cleanup: 5 minutes
 
-**Total migration**: ~5-7 hours for 20 agents
+**Total migration**: ~3-5 hours for 20 agents
 
-**Framework implementation**: 7-9 days
+**Framework implementation**: 6-8 days
 
 ### Benefits
 
 ✅ **Clean API**: Framework methods stay unchanged  
 ✅ **Safety by default**: ctx.llm (via calllm), ctx.reply, ctx.tools are safe  
 ✅ **Opt-in external safety**: runEffect() for custom calls  
-✅ **Better observability**: Always-on tracing  
 ✅ **Explicit decisions**: Shield reasons tracked  
-✅ **Minimal breaking changes**: Only 2 required updates  
+✅ **Minimal breaking changes**: Only 1 required update  
 
-### Key Design Decision
+### Key Design Decisions
 
 **Three-tier effect safety** gives us the best of both worlds:
 1. **LLM calls** → Already safe (calllm library handles it)
 2. **Framework methods** → Safe by default (internal withSafety)
 3. **Agent external calls** → Opt-in safety (runEffect)
+
+**Simple function wrapper** instead of Effect envelope:
+- `runEffect()` === `withSafety()` (same implementation, one internal, one public)
+- No discriminated unions with `kind` and `payload` needed
+- Just wrap any `() => Promise<T>` function
+- Simpler API, less ceremony, more flexible
 
 This avoids the complexity of wrapping everything while still providing safety where it matters, and respects that calllm already has robust safety built-in!

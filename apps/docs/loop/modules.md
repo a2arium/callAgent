@@ -1,365 +1,330 @@
-## Loop Modules: Contracts and Examples
+# Loop Modules: Contracts & Rules (A-P-L-R-E-T)
 
-This page defines the core loop modules and shows how to override them. The default loop executes:
+This page defines the **contracts, purity rules, and data responsibilities** for each loop module:
 
-Attention → Perception → Learning → Policy → Shield → Execution → Transition (with Reward hooks)
+**Attention → Perception → Learning → Policy → Shield → Execution → Transition**
 
-All state lives in `snapshot.M` (MentalState). Agents can override any module and delegate back to defaults via `ctx.defaults.*`.
+* **MentalState (`M`)** is the cognitive state. It’s **immutable** during a turn and **may only be updated by Learning**.
+* **`ctx.vars`** holds **ephemeral control state** (stage, tokens, flags) and may be updated by Execution/Transition.
+* **Policy emits typed `Intent`** (what to do), **Execution performs effects** (how to do it).
+* Use the **Stage Dispatcher** (see that doc) to map `(stage, intent)` → handler, with runtime typestate checks.
 
-### High-level flow (sequence)
+---
+
+## High-level flow
+
 ```mermaid
 sequenceDiagram
-  participant A as Attention
-  participant P as Perception
-  participant L as Learning
-  participant Pi as Policy
-  participant S as Shield
-  participant E as Execution
-  participant T as Transition
+  participant A as Attention (A)
+  participant P as Perception (P)
+  participant L as Learning (L)
+  participant R as Policy/Reasoning (R)
+  participant S as Shield (S)
+  participant E as Execution (E)
+  participant T as Transition (T)
   A->>P: alpha
   P->>L: observation
-  L->>Pi: updated M
-  Pi->>S: proposed action
-  S->>E: safe action (or ask_user)
-  E->>T: exec result
-  T-->>A: outcome (continue | await_* | complete | fail)
+  L->>R: next M
+  R->>S: Intent
+  S->>E: Safe Intent (pass/transform/veto/defer)
+  E->>T: ExecutableAction
+  T-->>A: Outcome (continue | await_* | complete | fail)
 ```
 
-### Data flow (modules and state)
+---
+
+## Data flow
+
 ```mermaid
 flowchart TD
-  subgraph M[MentalState]
-    ST[shortTerm]
-    LT[longTerm.episodic]
-    GS[goalState]
+  subgraph M[MentalState (M_t)]
+    WM[worldModel]
+    MEMS[memory.shortTerm]
+    MEML[memory.longTerm]
+    GOALS[goalState]
+    EMO[emotion]
+    REW[reward]
   end
+
   ENV[EnvironmentState]
   A[Attention] --> P[Perception]
   P --> L[Learning]
-  L --> Pi[Policy]
-  Pi --> S[Shield]
+  L --> R[Policy]
+  R --> S[Shield]
   S --> E[Execution]
   E --> T[Transition]
-  P -->|obs| LT
-  L -->|append episodic| LT
-  T -->|update env.goalStats| ENV
   M --> A
-  M --> Pi
-  S -->|HITL & Safety| E
+  M --> R
 ```
 
-### Module Contracts (TypeScript)
+---
+
+## Type contracts (TypeScript)
+
+### Core types
 
 ```ts
-type AttentionSignal = unknown;
-type Observation = unknown;
+// Observation normalized by Perception (shape is app-specific, keep it compact)
+type Observation = {
+  text?: string;
+  eventType?: 'user' | 'input' | 'tool' | 'child' | 'internal';
+  meta?: unknown;
+};
 
-type ProposedAction =
-  | { kind: 'ask_user'; prompt: string; schema?: unknown }
-  | { kind: 'subagent'; target: string; input: unknown; awaitCompletion?: boolean }
-  | { kind: 'tool'; name: string; args: unknown; awaitCallback?: boolean }
-  | { kind: 'language'; content: string }
-  | { kind: 'internal'; intent: string; data?: unknown };
+// WHAT to do (pure decision)
+type Intent =
+  | { kind: 'prompt_user' }
+  | { kind: 'answer_with_llm'; query: string; context?: string }
+  | { kind: 'plan_and_execute'; goal: string }
+  | { kind: 'call_tool'; toolName: string; args: Record<string, unknown> }
+  | { kind: 'delegate_to_child'; childAgentId: string; input: unknown }
+  | { kind: 'wait' }
+  | { kind: 'complete'; result?: unknown };
 
+// Result of doing (side effects performed)
 type ExecutableAction =
   | { kind: 'ask_user'; token: string }
-  | { kind: 'subagent'; token?: string; result?: unknown }
   | { kind: 'tool'; token?: string; result?: unknown }
-  | { kind: 'language'; echoed: boolean }
+  | { kind: 'subagent'; token?: string; result?: unknown }
   | { kind: 'internal'; done: boolean };
 
+// Loop outcome
 type TurnOutcome =
   | { kind: 'continue' }
   | { kind: 'await_input'; token: string }
-  | { kind: 'await_child'; token: string }
   | { kind: 'await_tool'; token: string }
+  | { kind: 'await_child'; token: string }
   | { kind: 'complete'; result?: unknown }
   | { kind: 'fail'; reason: string };
+```
 
+### Modules interface
+
+```ts
 type Modules = {
-  attention: (prev: MentalState, env: EnvironmentState) => AttentionSignal;
-  perception: (env: EnvironmentState, alpha: AttentionSignal) => Observation;
-  learning: (prev: MentalState, prevAction: ProposedAction | undefined, o: Observation, rPrev?: number) => MentalState;
-  policy: (m: MentalState) => ProposedAction | Array<{ action: ProposedAction; prob: number }>;
-  shield: (m: MentalState, a: ProposedAction) => ProposedAction | null;
-  execution: (a: ProposedAction, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>;
-  transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState) => TurnOutcome;
-  // Reward hooks (optional)
-  extrinsicReward?: (m: MentalState, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
-  intrinsicReward?: (m: MentalState, o: Observation) => number;
-}
+  attention:  (prev: MentalState, env: EnvironmentState) => unknown;            // "alpha"
+  perception: (env: EnvironmentState, alpha: unknown) => Observation;           // normalize env
+  learning:   (prev: MentalState, prevExec: ExecutableAction | undefined,
+               obs: Observation, rPrev?: number) => MentalState;                // ONLY writer of M
+  policy:     (m: MentalState) => Intent;                                       // pure
+  shield:     (m: MentalState, intent: Intent) =>
+                | { action: 'pass'; intent: Intent }
+                | { action: 'transform'; intent: Intent }
+                | { action: 'veto'; reason: string }
+                | { action: 'defer'; askUser: string };
+  execution:  (intent: Intent, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>;
+  transition: (env: EnvironmentState, exec: ExecutableAction, ctx: TaskContext) => TurnOutcome;
+
+  // Optional reward hooks: compute scalars; Learning appends them onto last episode.
+  extrinsicReward?: (m: MentalState, exec: ExecutableAction, outcome: TurnOutcome) => number;
+  intrinsicReward?: (m: MentalState, obs: Observation) => number;
+};
 ```
 
-### Default Behaviors (summary)
-- attention: pass-through signal
-- perception: `{ input, time, pending }`; can sanitize input (configurable via `manifest.safety.sanitize`)
-- learning: appends an episodic event `{ t, obs, act?, rew? }`
-- policy: chooses a `ProposedAction`; supports distributions (stochastic, temperature, epsilon)
-- shield: HITL (advise/consent/guardrails), cost/PII checks; may convert to `ask_user`
-- execution: maps Proposed → Engine APIs (requestInput, sendTaskToAgent, tools.invoke, reply)
-- transition: maps to `await_*`/`continue`/terminal outcomes
-- rewards: `extrinsicReward` + `intrinsicReward` combined per turn; stored on last episodic event as `rew`
+---
 
-### Declaring Loop Modules
+## Rules of engagement (per module)
 
-Agents declare their modules directly in `createAgent` using the `loop.modules` property:
+### Attention (A)
+
+* **Purpose:** lightweight signal that can bias Perception (e.g., focus, urgency).
+* **Must not:** mutate `M` or perform effects.
+* **May:** pass-through or compute tiny hints from `M` + `env`.
+
+### Perception (P)
+
+* **Purpose:** normalize `env` into a compact `Observation` (text, type, meta).
+* **Must not:** perform effects or write to `M`.
+* **May:** sanitize/validate input (respect manifest safety flags).
+* **Tip:** keep `Observation` small; heavy parsing belongs in tools or Execution.
+
+### Learning (L)
+
+* **Purpose:** **the only place** that updates `M`. Treat prior `M` as immutable; always **return a new `M`**.
+* **Must:** write cognitive facts (lastUserText, derived intent, entities, beliefs, reward tallies, episodic events).
+* **Must not:** touch `ctx.vars` or do side effects.
+* **Pattern:** `next = { ...prev, worldModel: {...}, memory: {...}, reward: {...} }`.
+
+> This “pure learning, effectful execution” split mirrors the functional-core / imperative-shell approach and makes tests trivial.
+
+### Policy / Reasoning (R)
+
+* **Purpose:** choose **Intent** (WHAT), a pure function of `M`.
+* **Must:** be deterministic given `M` (stochasticity allowed if driven by `m.policyParams`).
+* **Must not:** read `env` directly or use `ctx.vars`. All inputs must reach Policy via **Perception→Learning→M**.
+* **Why:** keeps reasoning predictable and testable (and aligns with exhaustive intent matching). For complex intent matching, prefer ts-pattern with `.exhaustive()` to guarantee coverage. ([GitHub][1])
+
+### Shield (S)
+
+* **Purpose:** enforce safety, cost, PII, and HITL. Runs **between** Policy and Execution.
+* **Outcomes:** `pass` | `transform` | `veto` | `defer` (ask the user).
+* **Must:** log decisions; combine multiple checks deterministically (veto > defer > transform > pass).
+* **Why:** this follows “shielding” ideas in safe RL: constrain actions before execution. ([incompleteideas.net][2])
+
+### Execution (E)
+
+* **Purpose:** perform effects and update **control state** via `ctx.vars` (stage, tokens, flags).
+* **Must:** never mutate `M` (that’s Learning’s job).
+* **May:** call `ctx.llm`, `ctx.reply`, `ctx.tools`, `ctx.requestInput`, external APIs (wrap customs with `runEffect` for timeouts/retries).
+* **Pattern:** use the **Stage Dispatcher** to map `(stage, intent)` → handler; keep handlers tiny and idempotent.
+
+### Transition (T)
+
+* **Purpose:** map `ExecutableAction` → `{continue | await_* | complete | fail}` and advance the control loop.
+* **Must:** emit `await_*` with tokens for resumable effects; set completion only after terminal handler runs.
+* **Must:** treat `ctx.vars` as the source of truth for control-flow flags (e.g., `completeCalled`).
+
+---
+
+## Immutability & state separation
+
+| Concern                      | Store in…                        | Who writes           | Lifetime   |
+| ---------------------------- | -------------------------------- | -------------------- | ---------- |
+| User text/intent/sentiment   | `M.worldModel`                   | Learning             | Persistent |
+| Episodic events & rewards    | `M.memory.longTerm` / `M.reward` | Learning             | Persistent |
+| Current stage, tokens, flags | `ctx.vars`                       | Execution/Transition | Ephemeral  |
+| Plans / temporary steps      | `ctx.vars`                       | Execution            | Ephemeral  |
+
+**Golden rule:** **Only Learning writes `M`**. Everything else reads `M` and, if needed, writes `ctx.vars`.
+
+---
+
+## Defaults & delegation
+
+If the framework exposes defaults (e.g., `ctx.defaults.execution`), you may **override minimally** and delegate back for common cases. Keep overrides thin and observable (log inputs/outputs, respect budgets).
+
+---
+
+## Resume contract (await_*)
+
+* `Execution` returns `ask_user/tool/subagent` with a `token`.
+* `Transition` converts that into `await_input/await_tool/await_child`.
+* The engine persists `M` + durable control state, and on resume, Perception normalizes the resume event; Learning records it; then Policy decides next **Intent** purely from `M`.
+
+---
+
+## Rewards (optional)
+
+* `intrinsicReward(M, obs)` and `extrinsicReward(M, exec, outcome)` return scalars.
+* Learning appends/rolls them up on the next write (e.g., attach `rew` to last episodic event).
+* Keep shaping sparse and interpretable; don’t bake business logic into rewards.
+
+---
+
+## Examples (minimal)
+
+### Perception (resume-aware)
 
 ```ts
-export default createAgent({
-  manifest: { name: 'my-agent', runMode: 'loop' },
-  loop: {
-    modules: {
-      policy: (M, env) => {
-        // Process auto-resumed events
-        if (env.input?.kind === 'input') {
-          return { kind: 'language', content: `Received: ${env.input.value}` };
-        }
-        
-        // Stochastic policy example
-        return [
-          { action: { kind: 'tool', name: 'search', args: { q: 'hello' } }, prob: 0.7 },
-          { action: { kind: 'language', content: 'Ok.' }, prob: 0.3 }
-        ];
-      },
-      
-      // Use default execution with small augmentation
-      execution: async (a, ctx, M) => {
-        if (a.kind === 'language') {
-          const augmented = { ...a, content: a.content + ' [via override]' };
-          await ctx.reply(augmented.content);
-          return { kind: 'language', echoed: true };
-        }
-        // Delegate to built-in execution for other actions
-        return await ctx.defaults.execution(a, ctx, M);
-      }
-    }
-  },
-  async handleTask(ctx) { return; }
-}, import.meta.url);
-```
+perception: (env) => {
+  const i = env.input;
+  if (!i) return {};
+  if (typeof i === 'string') return { text: i, eventType: 'user' };
 
-### Deeper examples
-
-#### Attention with goal gating
-```ts
-loop: {
-  modules: {
-    attention: (M, env) => {
-      const roots = (M.goalState?.hierarchy?.roots || []) as string[];
-      return { focus: roots[0] ?? null, time: env.time };
-    }
+  // Resume events
+  if (typeof i === 'object' && 'kind' in i) {
+    const k = (i as any).kind;
+    return {
+      text: k === 'input' ? (i as any).value : undefined,
+      eventType: k,
+      meta: i
+    };
   }
+  return {};
 }
 ```
 
-#### Perception with custom parsing and sanitization off
-```ts
-// In manifest: safety: { sanitize: false }
-loop: {
-  modules: {
-    perception: (env, alpha) => {
-      const input = typeof env.input === 'string' ? JSON.parse(env.input) : env.input;
-      return { input, focus: (alpha as any)?.focus };
-    }
-  }
-}
-```
+### Learning (pure, immutable)
 
-#### Learning: append compact episodic event
 ```ts
-loop: {
-  modules: {
-    learning: (prev, prevAction, obs) => {
-      const e = (prev.memory.longTerm.episodic || []) as any[];
-      e.push({ t: Date.now(), obs: { k: 'summary' }, act: prevAction });
-      (prev.memory.longTerm as any).episodic = e;
-      return prev;
-    }
-  }
-}
-```
+learning: (prev, _prevExec, obs) => {
+  if (!obs || (!obs.text && !obs.eventType)) return prev;
 
-#### Policy with ReAct patterns and auto-resume
-```ts
-loop: {
-  modules: {
-    policy: (M, env) => {
-      // Handle resumed events first
-      if (env.input?.kind === 'input') {
-        return { kind: 'language', content: `Processing: ${env.input.value}` };
-      }
-      if (env.input?.kind === 'tool') {
-        return { kind: 'language', content: `Tool result: ${JSON.stringify(env.input.result)}` };
-      }
-      
-      // ReAct pattern for initial turns
-      const last = (M.memory.sensory as any)?.lastObservation as string | undefined;
-      if (last?.match(/search for (.+)/i)) {
-        const q = last.match(/search for (.+)/i)![1];
-        return { kind: 'tool', name: 'search', args: { q } };
-      }
-      return { kind: 'language', content: 'What should I do next?' };
-    }
-  }
-}
-```
-
-#### Shield: cost and PII checks
-```ts
-// manifest.safety = { costLimit: 20, piiPatterns: ['\\b\d{3}-\d{2}-\d{4}\\b'] }
-```
-
-#### Execution and Transition overrides
-```ts
-loop: {
-  modules: {
-    execution: async (a, ctx, M) => {
-      if (a.kind === 'tool' && a.name === 'expensive') {
-        // retry with backoff or route differently
-        console.log('Handling expensive tool call...');
-      }
-      return ctx.defaults.execution(a, ctx, M);
+  const next: MentalState = {
+    ...prev,
+    worldModel: {
+      ...prev.worldModel,
+      lastUserText: obs.text ?? prev.worldModel?.lastUserText,
+      lastEventType: obs.eventType ?? prev.worldModel?.lastEventType
     },
-    
-    transition: (env, exec, M) => {
-      // Complete when goals are done
-      if (exec.kind === 'language' && (env.goalStats?.doneCount ?? 0) > 0) {
-        return { kind: 'complete', result: 'goals done' };
+    memory: {
+      ...prev.memory,
+      longTerm: {
+        ...prev.memory.longTerm,
+        episodic: [
+          ...(prev.memory.longTerm.episodic ?? []),
+          { t: Date.now(), obs }
+        ]
       }
-      
-      // Auto-resume handling
-      if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
-      if (exec.kind === 'tool' && exec.token) return { kind: 'await_tool', token: exec.token };
-      if (exec.kind === 'subagent' && exec.token) return { kind: 'await_child', token: exec.token };
-      
-      return { kind: 'continue' };
     }
-  }
+  };
+  return next;
 }
 ```
 
-### HITL and Safety in Shield
-- `manifest.hitl`: `'advise' | 'consent' | 'guardrails'`
-  - consent/guardrails: convert tool/subagent actions to `ask_user` prompts
-  - advise: pass-through with tagging for observability
-- Safety checks (configurable via `manifest.safety`):
-  - `costLimit`: if `args.cost` exceeds limit → `ask_user`
-  - `piiPatterns`: regex strings to flag PII in action args → `ask_user`
+### Policy (pure Intent)
 
-### Perception Sanitization
-- Controlled by `manifest.safety.sanitize` (default true). Defaults scrub basic script/style tags, data URLs and control characters.
-- Override `perception` for domain-specific parsing/validation.
-
-### Rewards and Metrics
-- `extrinsicReward` and `intrinsicReward` hooks can be overridden. Defaults: 0 + a minimal novelty intrinsic.
-- Status metadata (buffered mode): per-turn arrays `timings`/`rewards` and aggregates `timingsAgg`/`rewardsAgg`.
-
-#### Goal-progress reward (default)
-- Default `extrinsicReward` grants +1 when the number of goals with `status: 'done'` increases between turns.
-- You can override `extrinsicReward` to implement a different shaping (e.g., partial credit on status changes).
-
-### Outcomes and Interrupts
-- `await_input`/`await_child`/`await_tool` return tokens; engine persists `M` and durable maps.
-- Resume paths validate tokens and invoke durable handlers (`resumeInput`, child completion, tool completion) and may re-enter the loop.
-- External events: `ctx.registerExternalEvent(type, data, { onOccurred })` stores a durable token; acknowledge via `taskEngine.handleExternalEventOccurred`.
-
-### Examples
-- Consent prompt: set `manifest.hitl = 'consent'` and propose a tool action; Shield converts to `ask_user` with tool metadata.
-- Temperature-aware policy: set `M.policyParams = { stochastic: true, temperature: 0.7, explorationEpsilon: 0.05 }` before the loop.
-
-#### ReAct-style planner (feature flag)
-- Enable simple pattern-based tool selection:
 ```ts
-M.policyParams = {
-  ...M.policyParams,
-  reactPlanner: { enabled: true, patterns: [{ regex: 'search for (.+)', tool: 'search', argKey: 'q' }] }
+policy: (m) => {
+  const t = m.worldModel?.lastUserText;
+  if (!t) return { kind: 'prompt_user' };
+  if (t.includes('?')) return { kind: 'answer_with_llm', query: t };
+  return { kind: 'plan_and_execute', goal: t };
 }
 ```
-- The default policy inspects `M.memory.sensory.lastObservation` and, on match, proposes the configured tool with extracted args.
 
-#### Multi-step ReAct with retrieval and tool result context
-- The default Learning stores lastObservation; Execution stores `shortTerm.scratch.react.lastResult`.
-- With `reactPlanner.enabled`, Policy merges `lastResult` into tool args as `context` for the next step.
+> For complex branching, prefer exhaustive pattern matching; libraries like **ts-pattern** provide compile-time guarantees via `.exhaustive()`. ([GitHub][1])
+
+### Shield (budget/PII/HITL sketch)
+
 ```ts
-// Step 1: observation matches → tool('search', { q })
-// Step 2: Policy sees react.lastResult and calls tool again with refined args { q, context }
+shield: (m, intent) => {
+  // budget check, pii detection, hitl level...
+  // order: if any veto → veto; else if any defer → defer; else if any transforms → apply; else pass
+  return { action: 'pass', intent };
+}
 ```
 
-### Troubleshooting
-- No consent prompt? Ensure `manifest.hitl = 'consent'` and your proposed action is a tool or subagent.
-- No rewards? Verify goal `status` transitions and that `extrinsicReward` is not overridden.
-- Metrics missing? Use buffered mode and check `status.metadata.timings` / `rewards`.
-- Sanitization issues? Set `manifest.safety.sanitize = false` or override `perception`.
+### Execution + Transition (dispatcher hooks)
 
-### End-to-end example (compact)
-```ts
-export default createAgent({
-  // 1) Configure manifest
-  manifest: { 
-    name: 'search-agent', 
-    runMode: 'loop', 
-    hitl: 'consent', 
-    safety: { sanitize: true } 
-  },
-  
-  loop: {
-    modules: {
-      // 2) Policy with ReAct planner and auto-resume
-      policy: (M, env) => {
-        // Handle auto-resumed events
-        if (env.input?.kind === 'input') {
-          return { kind: 'language', content: `User approved: ${env.input.value}` };
-        }
-        if (env.input?.kind === 'tool') {
-          return { kind: 'language', content: `Search results: ${JSON.stringify(env.input.result)}` };
-        }
-        
-        // Initial ReAct pattern
-        const lastObs = M.memory.sensory?.lastObservation;
-        if (typeof lastObs === 'string' && lastObs.match(/search for (.+)/i)) {
-          const q = lastObs.match(/search for (.+)/i)![1];
-          return { kind: 'tool', name: 'search', args: { q } };
-        }
-        
-        return { kind: 'ask_user', prompt: 'What would you like to search for?' };
-      },
-      
-      // 3) Standard execution and transition with auto-resume
-      execution: async (a, ctx, M) => ctx.defaults.execution(a, ctx, M),
-      
-      transition: (env, exec, M) => {
-        if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
-        if (exec.kind === 'tool' && exec.token) return { kind: 'await_tool', token: exec.token };
-        if (exec.kind === 'language') return { kind: 'complete' };
-        return { kind: 'continue' };
-      }
-    }
-  },
-  
-  async handleTask(ctx) {
-    // 4) Set initial state
-    const M = ctx.mentalState;
-    M.policyParams = { 
-      stochastic: true, 
-      temperature: 0.7, 
-      explorationEpsilon: 0.05,
-      reactPlanner: { 
-        enabled: true, 
-        patterns: [{ regex: 'search for (.+)', tool: 'search', argKey: 'q' }] 
-      } 
-    };
-    M.memory.sensory = { 
-      ...(M.memory.sensory || {}), 
-      lastObservation: 'search for cat cafes' 
-    };
-    
-    // Loop handles the rest with auto-resume
-    return;
-  }
-}, import.meta.url);
+* Execution uses **handlers per stage** and updates `ctx.vars` (e.g., `token`, `completeCalled`).
+* Transition maps `ask_user/tool/subagent` → `await_*` and ends with `complete` when `completed` stage is reached.
+* For complex flows, consider statecharts (e.g., **XState**) to model timers/parallelism/guards when the dispatcher becomes unwieldy. ([incompleteideas.net][3])
 
-// Flow: Policy picks search → Shield (consent) converts to ask_user → await_input
-// → User provides input → Auto-resume with env.input → Policy processes approval
-```
+---
 
+## Testing checklist
+
+* **Unit tests:** Learning (immutability), Policy (pure mapping M→Intent), Shield decisions.
+* **Integration:** prompt → await_input → respond → complete (golden path).
+* **Typestate:** assert `(intent, stage)` pairs are allowed; fail fast on invalid combos.
+* **Idempotency:** re-running Execution after a crash should be safe (use idempotency keys on critical effects).
+
+---
+
+## Compatibility note (legacy ProposedAction)
+
+If you have legacy code where **Policy emits `ProposedAction`** (an already-executable shape), migrate in two steps:
+
+1. **Introduce `Intent`** and map **Intent→ProposedAction** in Execution behind the dispatcher.
+2. Replace direct `ProposedAction` emissions with `Intent` emissions, and remove the mapper.
+
+This restores the clean separation (WHAT vs. HOW) and enables **exhaustive Intent handling** and **typestate** checks with minimal churn. ([GitHub][1])
+
+---
+
+## Why this aligns
+
+* **Purity & immutability:** Only Learning writes `M`; Policy is pure; Execution is effectful & uses `ctx.vars`.
+* **Dispatcher-first Execution:** `(stage, intent)` routing stays explicit, visible, and testable.
+* **Safety before effects:** Shield mediates all Intents pre-Execution, consistent with safe RL “shielding.” ([incompleteideas.net][2])
+* **Scalable branching:** Prefer exhaustive match for small/medium complexity; move to statecharts when concurrency/timeout/parallel states appear. ([incompleteideas.net][3])
+
+---
+
+### Pointers
+
+* **ts-pattern** for exhaustive, type-safe pattern matching in TypeScript. ([GitHub][1])
+* **XState** for statecharts when flows outgrow the dispatcher. ([incompleteideas.net][3])
+* **Shielding in RL** for the conceptual grounding of pre-execution safety constraints. ([incompleteideas.net][2])
 

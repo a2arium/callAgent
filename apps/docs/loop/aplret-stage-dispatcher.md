@@ -1,6 +1,14 @@
 # A-P-L-R-E-T Architecture with Stage Dispatcher Pattern
 
-**Production-Ready Agent Architecture for CallagAgent Framework**
+**Production-Ready Agent Architecture for callagent Framework**
+
+---
+
+> **👥 Audience**: Agent developers using callagent  
+> **🎯 Purpose**: Learn how to build production-ready agents with A-P-L-R-E-T architecture  
+> **🔧 For framework maintainers**: See [Framework Changes](./framework-changes-for-aplret.md)  
+
+---
 
 ## Overview
 
@@ -24,6 +32,220 @@ This document describes a **reusable, production-ready agent architecture** that
 
 ---
 
+## Design Checklist
+
+Before implementing an A-P-L-R-E-T agent, ensure:
+
+- [ ] **Intents defined**: Closed discriminated union with exhaustive handling (via switch/handlers now; consider `.exhaustive()` later)
+- [ ] **Stage invariants**: Runtime validation for required/forbidden `ctx.vars` keys
+- [ ] **Shield active**: Budget checks, PII detection, policy constraints implemented
+- [ ] **Budgets configured**: Cost caps in `m.reward.budget`, tracked per effect
+- [ ] **Resume tokens**: Stored in `ctx.vars` for `await_input`, `await_tool`, `await_child`
+- [ ] **Idempotency keys**: Attached to critical effects to prevent double-execution
+- [ ] **Policy pure**: `policy(m)` reads only from M, env events routed through Learning
+- [ ] **Trace logging**: Shield decisions, effect costs, stage transitions logged
+- [ ] **Golden path test**: End-to-end test covering prompt → await → respond → complete
+
+---
+
+## Quick Start
+
+**New to A-P-L-R-E-T?** Start here with a minimal but production-ready agent:
+
+```typescript
+import { createAgent } from '@a2arium/callagent-core';
+import type { TaskContext, MentalState, ExecutableAction } from '@a2arium/callagent-core';
+
+// 1. Define typed stages for explicit control flow
+type Stage = 'idle' | 'awaiting_input' | 'completed';
+
+// 2. Define typed intents (Policy decides WHAT to do)
+type Intent =
+  | { kind: 'prompt_user' }
+  | { kind: 'answer_with_llm'; query: string };
+
+// 3. Typed façade for ctx.vars (Best Practice: type-safe access)
+// Minimal invariant check for demo purposes
+const assertStageInvariants = (ctx: TaskContext, s: Stage) => {
+  if (s === 'awaiting_input' && !ctx.vars.get('token')) {
+    throw new Error('[invariant] awaiting_input requires token');
+  }
+  if (s === 'completed' && !ctx.vars.get('completeCalled')) {
+    throw new Error('[invariant] completed requires completeCalled');
+  }
+};
+
+const V = {
+  stage: (ctx: TaskContext): Stage => 
+    (ctx.vars.get('stage') as Stage) ?? 'idle',
+  setStage: (ctx: TaskContext, s: Stage) => 
+    (assertStageInvariants(ctx, s), ctx.vars.set('stage', s)),
+  
+  token: (ctx: TaskContext) => 
+    ctx.vars.get('token') as string | undefined,
+  setToken: (ctx: TaskContext, t?: string) => 
+    ctx.vars.set('token', t),
+  
+  completeCalled: (ctx: TaskContext) => 
+    Boolean(ctx.vars.get('completeCalled')),
+  setCompleteCalled: (ctx: TaskContext, v: boolean) => 
+    ctx.vars.set('completeCalled', v)
+};
+
+// 4. Stage dispatcher (Execution decides HOW to do it)
+const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>> = {
+  idle: async (ctx, m) => {
+    await ctx.reply('How can I help you today?');
+    const handle = await ctx.requestInput('Your message');
+    
+    // Update control state
+    V.setToken(ctx, handle.token);
+    V.setStage(ctx, 'awaiting_input');
+    
+    return { kind: 'ask_user', token: handle.token };
+  },
+  
+  awaiting_input: async (ctx, m) => {
+    // Read cognitive state from M (not from env!)
+    const userText = m.worldModel?.lastUserText;
+    if (!userText) return { kind: 'internal', done: true };
+    
+    // Call LLM (framework method - already safe)
+    const result = await ctx.llm.call(userText);
+    await ctx.reply(result[0].content);
+    
+    // Mark complete
+    ctx.complete(100, 'completed');
+    V.setCompleteCalled(ctx, true);
+    V.setStage(ctx, 'completed');
+    
+    return { kind: 'internal', done: true };
+  },
+  
+  completed: async () => {
+    return { kind: 'internal', done: true };
+  }
+};
+
+// 5. Create agent with all modules
+export const agent = createAgent({
+  manifest: 'agent.json',
+  llmConfig: { provider: 'openai', modelAliasOrName: 'fast' },
+
+  // A - Attention: What to focus on
+  attention: (m, env) => ({ 
+    wantPrompt: !env.input 
+  }),
+
+  // P - Perception: Normalize input
+  perception: (env) => ({ 
+    text: env.input as string,
+    eventType: env.input ? 'user_message' : 'idle'
+  }),
+
+  // L - Learning: Update M (immutable, pure)
+  learning: (prev, _action, obs) => ({
+    ...prev,
+    worldModel: {
+      ...prev.worldModel,
+      lastUserText: obs.text || prev.worldModel?.lastUserText
+    }
+  }),
+
+  // R - Policy: Decide WHAT to do (pure function of M - NO control state!)
+  policy: (m): Intent => {
+    // Policy reads ONLY cognitive state, not control state (stage)
+    const userText = m.worldModel?.lastUserText;
+    
+    // Decision based on cognition
+    if (userText) {
+      return { kind: 'answer_with_llm', query: userText };
+    }
+    
+    return { kind: 'prompt_user' };
+  },
+
+  // S - Shield: Safety checks (required)
+  shield: (m, intent) => {
+    // Basic pass-through (add budget/PII checks in production)
+    return { action: 'pass', intent };
+  },
+
+  // E - Execution: Dispatch to stage handlers (respect stage AND intent)
+  execution: async (intent, ctx, m) => {
+    const stage = V.stage(ctx);
+    
+    if (stage === 'idle' && intent.kind === 'prompt_user') {
+      return handlers.idle(ctx, m);
+    }
+    if (stage === 'awaiting_input' && intent.kind === 'answer_with_llm') {
+      return handlers.awaiting_input(ctx, m);
+    }
+    if (stage === 'completed') {
+      return handlers.completed(ctx, m as any);
+    }
+    
+    // Fallback: do nothing
+    return { kind: 'internal', done: true };
+  },
+
+  // T - Transition: Control loop flow (based on control state)
+  transition: (_env, exec, ctx) => {
+    if (exec.kind === 'ask_user') {
+      return { kind: 'await_input', token: exec.token } as TurnOutcome;
+    }
+    if (V.completeCalled(ctx as TaskContext)) {
+      return { kind: 'complete', result: { ok: true } } as TurnOutcome;
+    }
+    return { kind: 'continue' } as TurnOutcome;
+  }
+}, import.meta.url);
+```
+
+**Best Practices Included:**
+
+✅ **Typed stages** - Explicit control flow states  
+✅ **Typed intents** - Policy outputs are type-safe  
+✅ **Typed façade (V)** - Type-safe access to `ctx.vars`  
+✅ **Stage dispatcher** - Clean separation: Policy → Intent → Handler  
+✅ **Pure Policy** - Reads only from M, not from env  
+✅ **Immutable Learning** - Uses spread operators, no mutation  
+✅ **State separation** - M for cognition, ctx.vars for control  
+
+**What's happening:**
+
+1. **Policy** (R) reads M and decides to `prompt_user` or `answer`
+2. **Execution** (E) uses dispatcher to delegate to stage handlers
+3. **Handlers** perform effects and update control state (V.setStage, V.setToken)
+4. **Learning** (L) keeps M immutable - only updates worldModel
+5. **Transition** (T) manages async flow (await_input) and completion
+
+**Next steps:**
+
+- Add stage invariants ([Section 5](#5-stage-dispatcher-pattern))
+- Add exhaustive intent matching with ts-pattern ([Section 3](#3-typed-intent-system))
+- Wrap external calls with `runEffect()` ([Section 7](#7-effect-safety-and-budgets))
+- Write golden path test ([Section 9](#9-testing-strategy))
+
+**Budget wiring (example):**
+
+```typescript
+// During execution after an effect completes
+const effectCost = 120; // from the platform/tooling
+ctx.vars.set('turnCost', (ctx.vars.get('turnCost') as number ?? 0) + effectCost);
+
+// In Learning on the next turn, roll up spent
+learning: (prev, _prevAction, obs) => ({
+  ...prev,
+  reward: {
+    ...prev.reward,
+    spent: (prev.reward?.spent ?? 0) + (prev.memory?.shortTerm?.vars?.turnCost ?? 0)
+  }
+})
+```
+
+---
+
 ## Table of Contents
 
 - [1. Architecture Philosophy](#1-architecture-philosophy)
@@ -34,12 +256,13 @@ This document describes a **reusable, production-ready agent architecture** that
 - [6. State Management Strategy](#6-state-management-strategy)
 - [7. Effect Safety and Budgets](#7-effect-safety-and-budgets)
 - [8. Resume Contract](#8-resume-contract)
-- [9. Complete Implementation Example](#9-complete-implementation-example)
-- [10. Testing Strategy](#10-testing-strategy)
-- [11. Upgrade Path](#11-upgrade-path)
-- [12. Common Patterns](#12-common-patterns)
-- [13. Best Practices](#13-best-practices)
+- [9. Testing Strategy](#9-testing-strategy)
+- [10. Upgrade Path](#10-upgrade-path)
+- [11. Common Patterns](#11-common-patterns)
+- [12. Best Practices](#12-best-practices)
+- [13. Troubleshooting](#13-troubleshooting)
 - [14. See Also](#14-see-also)
+- [Appendix A: Complete Implementation Example](#appendix-a-complete-implementation-example)
 
 ---
 
@@ -47,7 +270,7 @@ This document describes a **reusable, production-ready agent architecture** that
 
 ### Brain-Inspired Loop (A-P-L-R-E-T)
 
-The architecture mirrors cognitive science research on brain-inspired intelligence, maintaining six explicit stages:
+The architecture mirrors cognitive science research on brain-inspired intelligence, with **six cognitive modules** plus **Shield** as a pre-execution guard:
 
 ```mermaid
 flowchart LR
@@ -67,13 +290,18 @@ flowchart LR
 
 **Why this matters:**
 
+**Six cognitive modules (A-P-L-R-E-T):**
 - **Attention (α_t)**: Goal and affect-guided focus (what matters now?)
 - **Perception (o_t)**: Normalize multimodal environment into compact observation
 - **Learning (M_t)**: Pure, immutable updates to mental state (memory, world model, goals, emotion, reward)
-- **Reasoning/Policy**: Decide what Intent to emit based on current mental state
-- **Shield**: Safety checks, budget enforcement, HITL consent
+- **Reasoning/Policy (π)**: Decide what Intent to emit based on current mental state (pure function of M)
 - **Execution (E)**: Perform effects (reply, requestInput, LLM calls, tool invocations) with safety
 - **Transition (T)**: Control loop flow (continue | await_input | await_tool | await_child | complete | fail)
+
+**Shield (S): Pre-execution guard (not a cognitive module):**
+- Safety checks, budget enforcement, PII detection, HITL consent
+- Runs between Policy and Execution: `intent ← policy(M) → intent' ← shield(intent') → execution(intent')`
+- Can pass, transform, veto, or defer to user
 
 ### Typed Intent System
 
@@ -225,7 +453,7 @@ policy: (m: MentalState): Intent => {
 
 ### Dispatcher Handles Intent Exhaustively
 
-Use **ts-pattern** for exhaustive matching (compile-time safety):
+Use **ts-pattern** for exhaustive matching (compile-time safety) — optional upgrade when branching grows:
 
 ```typescript
 import { match } from 'ts-pattern';
@@ -243,13 +471,10 @@ execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<Exe
       return { kind: 'ask_user', token: handle.token };
     })
     .with({ kind: 'answer_with_llm' }, async ({ query }) => {
-      const result = await runEffect({
-        kind: 'CallLLM',
-        payload: { query }
-      }, ctx, { timeoutMs: 30000, costCap: 1000 });
-      
-      await ctx.reply(result);
+      const result = await ctx.llm.call(query);
+      await ctx.reply(result[0]?.content);
       ctx.complete(100, 'completed');
+      V.setCompleteCalled(ctx, true);
       V.setStage(ctx, 'completed');
       return { kind: 'internal', done: true };
     })
@@ -505,6 +730,40 @@ shield: (m, intent) => {
 }
 ```
 
+**Shield Semantics (Constrained MDP + Shielding):**
+
+Note: Examples below assume the upcoming `ShieldOutcome` API (pass/transform/veto/defer). Current API is pass-through: `shield(m, intent) => intent | null`.
+
+1. **Order**: `intent ← policy(M) → intent' ← shield(M, intent) → execution(intent')`
+   - Shield runs **after** Policy, **before** Execution
+   - Shield receives the original intent and mental state
+   
+2. **Outcomes**: Four mutually exclusive actions
+   - `pass`: Allow intent unchanged
+   - `transform`: Modify intent (e.g., sanitize, add context)
+   - `veto`: Block intent entirely (log reason)
+   - `defer`: Escalate to user for approval
+   
+3. **Logging**: Always log shield decisions (orchestrator logs the outcome)
+  ```typescript
+  // In the loop, after calling shield(m, intent)
+  const outcome = shield(m, intent);
+  ctx.log.info('shield_decision', {
+    module: 'shield',
+    action: outcome.action,
+    originalIntent: intent.kind,
+    reason: outcome.action === 'veto' ? outcome.reason : undefined,
+    transformed: outcome.action === 'transform'
+  });
+  ```
+
+4. **Transform Precedence**: If multiple checks apply, run all and combine:
+   - If any veto → veto wins
+   - If any defer → defer wins
+   - If multiple transforms → apply in sequence
+
+**References**: Constrained MDP (Altman 1999), Shielding (Alshiekh et al. 2018)
+
 ### Execution
 
 ```typescript
@@ -513,7 +772,7 @@ execution: (intent: Intent, ctx: TaskContext, m: MentalState) => Promise<Executa
 
 **Purpose**: Map intents to effects using the **stage dispatcher** and **runEffect()** for safety.
 
-See [Complete Implementation Example](#9-complete-implementation-example) for full code.
+See [Appendix A: Complete Implementation Example](#appendix-a-complete-implementation-example) for full code.
 
 ### Transition
 
@@ -558,11 +817,13 @@ Define explicit stages for your agent's workflow:
 
 ```typescript
 type Stage = 
-  | 'idle'           // Initial state, decide what to do
-  | 'awaiting_input' // Waiting for user input
-  | 'planning'       // Planning multi-step action
-  | 'executing'      // Running tool chain
-  | 'completed';     // Terminal state
+  | 'idle'            // Initial state, decide what to do
+  | 'awaiting_input'  // Waiting for user input
+  | 'planning'        // Planning multi-step action
+  | 'executing'       // Running tool chain
+  | 'awaiting_tool'   // Waiting on tool callback
+  | 'awaiting_child'  // Waiting on child agent
+  | 'completed';      // Terminal state
 ```
 
 ### Stage Invariants (Enforce at Runtime)
@@ -575,24 +836,76 @@ Each stage has **invariants** that must hold:
 | `awaiting_input` | `token: string` | `completeCalled` | Waiting for user |
 | `planning` | `planSteps?: string[]` | `completeCalled` | Optional plan |
 | `executing` | `planSteps?: string[]` | - | Running tasks |
+| `awaiting_tool` | `token: string` | `completeCalled` | Waiting for tool callback |
+| `awaiting_child` | `token: string` | `completeCalled` | Waiting for child agent |
 | `completed` | `completeCalled: true` | - | Terminal |
 
-**Enforce with runtime asserts:**
+**Enforce with runtime asserts (implement all rows):**
 
 ```typescript
 function assertStageInvariants(ctx: TaskContext, stage: Stage): void {
   switch (stage) {
+    case 'idle':
+      // Forbidden: token, completeCalled
+      if (V.token(ctx)) {
+        throw new Error('[invariant] idle forbids token (must be cleared)');
+      }
+      if (V.completeCalled(ctx)) {
+        throw new Error('[invariant] idle forbids completeCalled (must be fresh)');
+      }
+      break;
+      
     case 'awaiting_input':
+      // Required: token
       if (!V.token(ctx)) {
         throw new Error('[invariant] awaiting_input requires token');
       }
+      // Forbidden: completeCalled
+      if (V.completeCalled(ctx)) {
+        throw new Error('[invariant] awaiting_input forbids completeCalled');
+      }
       break;
+      
+    case 'planning':
+      // Optional: planSteps (allowed but not required)
+      // Forbidden: completeCalled
+      if (V.completeCalled(ctx)) {
+        throw new Error('[invariant] planning forbids completeCalled');
+      }
+      break;
+      
+    case 'executing':
+      // Optional: planSteps (allowed but not required)
+      // No forbidden keys
+      break;
+    
+    case 'awaiting_tool':
+      if (!V.token(ctx)) {
+        throw new Error('[invariant] awaiting_tool requires token');
+      }
+      if (V.completeCalled(ctx)) {
+        throw new Error('[invariant] awaiting_tool forbids completeCalled');
+      }
+      break;
+    
+    case 'awaiting_child':
+      if (!V.token(ctx)) {
+        throw new Error('[invariant] awaiting_child requires token');
+      }
+      if (V.completeCalled(ctx)) {
+        throw new Error('[invariant] awaiting_child forbids completeCalled');
+      }
+      break;
+      
     case 'completed':
+      // Required: completeCalled
       if (!V.completeCalled(ctx)) {
         throw new Error('[invariant] completed requires ctx.complete() called');
       }
       break;
-    // ... other stages
+      
+    default:
+      throw new Error(`[invariant] Unknown stage: ${stage}`);
   }
 }
 ```
@@ -644,6 +957,12 @@ const V = {
   setPlanSteps: (ctx: TaskContext, steps?: string[]) => 
     ctx.vars.set('planSteps', steps),
   
+  // Current subtask index (used in child coordination pattern)
+  currentSubtaskIndex: (ctx: TaskContext) => 
+    ctx.vars.get('currentSubtaskIndex') as number | undefined,
+  setCurrentSubtaskIndex: (ctx: TaskContext, i?: number) => 
+    ctx.vars.set('currentSubtaskIndex', i),
+  
   // Complete tracking
   completeCalled: (ctx: TaskContext) => 
     Boolean(ctx.vars.get('completeCalled')),
@@ -651,6 +970,70 @@ const V = {
     ctx.vars.set('completeCalled', v)
 };
 ```
+
+### Intent→Stage Typestate (Prevent Drift)
+
+To enforce that **Policy decides WHAT, Dispatcher decides HOW**, add compile-time and runtime checks:
+
+**1. Closed Intent Union (exhaustive handling recommended; ts-pattern `.exhaustive()` optional):**
+
+```typescript
+type Intent =
+  | { kind: 'prompt_user' }
+  | { kind: 'answer_with_llm'; query: string }
+  | { kind: 'plan_and_execute'; goal: string }
+  | { kind: 'wait' }
+  | { kind: 'complete'; result: unknown };
+```
+
+**2. Intent→Allowed Stages Map (typestate):**
+
+```typescript
+const INTENT_ALLOWED_STAGES: Record<Intent['kind'], Stage[]> = {
+  prompt_user: ['idle'],
+  answer_with_llm: ['awaiting_input', 'executing'],
+  plan_and_execute: ['awaiting_input', 'planning'],
+  delegate_to_child: ['planning', 'executing'],
+  call_tool: ['executing'],
+  wait: ['idle', 'executing', 'awaiting_tool', 'awaiting_child'],
+  complete: ['executing', 'completed']
+};
+
+function assertIntentAllowedInStage(intent: Intent, stage: Stage): void {
+  const allowed = INTENT_ALLOWED_STAGES[intent.kind];
+  if (!allowed.includes(stage)) {
+    throw new Error(
+      `[typestate] Intent '${intent.kind}' not allowed in stage '${stage}'. ` +
+      `Allowed stages: ${allowed.join(', ')}`
+    );
+  }
+}
+```
+
+**3. Use in Execution Dispatcher:**
+
+```typescript
+execution: async (intent, ctx, m) => {
+  const stage = V.stage(ctx);
+  
+  // Runtime typestate check
+  assertIntentAllowedInStage(intent, stage);
+  
+  // Now dispatch safely
+  return match(intent)
+    .with({ kind: 'prompt_user' }, async () => {
+      // Only runs if stage === 'idle'
+      // ...
+    })
+    .exhaustive();
+}
+```
+
+**Benefits:**
+- Catches intent/stage mismatches early (fail-fast)
+- Documents allowed state transitions
+- Prevents "prompt_user inside executing" bugs
+- Makes policy→execution contract explicit
 
 ---
 
@@ -735,192 +1118,45 @@ execution: async (intent, ctx, m) => {
   await ctx.reply(llmResult[0]?.content);
   await ctx.tools.invoke('calculator', { expr: '2+2' });
   
-  // ✅ Tier 3: External calls - wrap with runEffect()
-  const apiData = await runEffect({
-    kind: 'FetchExternal',
-    payload: { url: 'https://api.example.com/data' }
-  }, ctx, { timeoutMs: 10000, maxRetries: 3 });
+  // ✅ Tier 3: External calls - wrap any async function
+  const apiData = await runEffect(
+    () => fetch('https://api.example.com/data').then(r => r.json()),
+    { timeoutMs: 10000, maxRetries: 3 }
+  );
   
-  const dbRecord = await runEffect({
-    kind: 'QueryDatabase',
-    payload: { query: 'SELECT * FROM users WHERE id = ?', params: [userId] }
-  }, ctx, { timeoutMs: 5000 });
+  const processed = await runEffect(
+    () => externalService.process(apiData),
+    { timeoutMs: 30000, maxRetries: 2 }
+  );
   
   return { kind: 'internal', done: true };
 }
 ```
 
-### Effect Envelope
+### runEffect() - Simple Function Wrapper
 
-**For agent's own external calls**, use `runEffect()` with the Effect envelope:
+**For agent's own external calls**, use `runEffect()` to wrap any async function:
 
 ```typescript
-type EffectKind = 
-  | 'FetchExternal'     // External HTTP calls
-  | 'QueryDatabase'     // Database queries
-  | 'CallExternalAPI'   // Third-party APIs
-  | 'ProcessFile';      // File operations
-
-type Effect<T = unknown> = {
-  kind: EffectKind;
-  payload?: T;
-  timeoutMs?: number;
-  maxRetries?: number;
-  costCap?: number;
-  idempotencyKey?: string;
-};
-
-type EffectOptions = {
-  timeoutMs?: number;
-  maxRetries?: number;
-  costCap?: number;
-  idempotencyKey?: string;
-};
-
-type EffectResult<T = unknown> = {
-  success: boolean;
-  value?: T;
-  error?: Error;
-  cost: number;
-  latencyMs: number;
-  retries: number;
+export type EffectOptions = {
+  timeoutMs?: number;       // Default: 30000
+  maxRetries?: number;      // Default: 2
+  retryDelayMs?: number;    // Default: 1000
+  retryableErrors?: string[];  // Custom patterns
 };
 ```
 
-### runEffect() Implementation
+**Key insight**: No Effect envelope needed! Just wrap your async function.
+
+### runEffect() Import
+
+Use the provided helper from the framework:
 
 ```typescript
-async function runEffect<T>(
-  effect: Effect<T>,
-  ctx: TaskContext,
-  opts: EffectOptions = {}
-): Promise<EffectResult<T>> {
-  const startTime = Date.now();
-  const timeoutMs = opts.timeoutMs ?? effect.timeoutMs ?? 30000;
-  const maxRetries = opts.maxRetries ?? effect.maxRetries ?? 2;
-  const costCap = opts.costCap ?? effect.costCap ?? Infinity;
-  
-  let lastError: Error | undefined;
-  let totalCost = 0;
-  
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      // Timeout wrapper
-      const result = await Promise.race([
-        executeEffect(effect, ctx),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Effect timeout')), timeoutMs)
-        )
-      ]);
-      
-      // Cost check
-      const cost = estimateEffectCost(effect);
-      totalCost += cost;
-      
-      if (totalCost > costCap) {
-        throw new Error(`Effect cost ${totalCost} exceeds cap ${costCap}`);
-      }
-      
-      // Log for traceability
-      logEffect({
-        kind: effect.kind,
-        success: true,
-        cost,
-        latencyMs: Date.now() - startTime,
-        attempt
-      });
-      
-      return {
-        success: true,
-        value: result as T,
-        cost: totalCost,
-        latencyMs: Date.now() - startTime,
-        retries: attempt
-      };
-      
-    } catch (error) {
-      lastError = error as Error;
-      
-      // Don't retry on certain errors
-      if (error instanceof Error && !isRetryable(error)) {
-        break;
-      }
-      
-      // Exponential backoff
-      if (attempt < maxRetries) {
-        await sleep(Math.pow(2, attempt) * 1000);
-      }
-    }
-  }
-  
-  // All retries failed
-  logEffect({
-    kind: effect.kind,
-    success: false,
-    error: lastError,
-    latencyMs: Date.now() - startTime,
-    retries: maxRetries
-  });
-  
-  return {
-    success: false,
-    error: lastError,
-    cost: totalCost,
-    latencyMs: Date.now() - startTime,
-    retries: maxRetries
-  };
-}
-
-async function executeEffect<T>(effect: Effect<T>, ctx: TaskContext): Promise<unknown> {
-  switch (effect.kind) {
-    case 'FetchExternal':
-      const { url, options } = effect.payload as { url: string; options?: RequestInit };
-      return fetch(url, options).then(r => r.json());
-    
-    case 'QueryDatabase':
-      const { query, params } = effect.payload as { query: string; params?: unknown[] };
-      return database.query(query, params);
-    
-    case 'CallExternalAPI':
-      const { apiName, method, data } = effect.payload as { apiName: string; method: string; data: unknown };
-      return externalAPI[apiName][method](data);
-    
-    case 'ProcessFile':
-      const { filePath, operation } = effect.payload as { filePath: string; operation: string };
-      return fileSystem[operation](filePath);
-    
-    default:
-      throw new Error(`Unknown effect kind: ${(effect as Effect).kind}`);
-  }
-}
-
-function isRetryable(error: Error): boolean {
-  // Network errors, rate limits, timeouts are retryable
-  const retryablePatterns = ['ECONNRESET', 'ETIMEDOUT', 'RATE_LIMIT', '429', '503'];
-  return retryablePatterns.some(pattern => error.message.includes(pattern));
-}
-
-function estimateEffectCost(effect: Effect): number {
-  switch (effect.kind) {
-    case 'FetchExternal': return 5;
-    case 'QueryDatabase': return 10;
-    case 'CallExternalAPI': return 20;
-    case 'ProcessFile': return 3;
-    default: return 1;
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function logEffect(event: { kind: EffectKind; success: boolean; cost?: number; latencyMs: number; attempt?: number; error?: Error }): void {
-  // Append to event log for traceability
-  console.log('[effect]', event);
-}
+import { runEffect } from '@a2arium/callagent-core/loop/effects';
 ```
 
-### Using runEffect for External Calls
+### Using runEffect for External Calls (with jittered backoff)
 
 ```typescript
 execution: async (intent, ctx, m) => {
@@ -935,25 +1171,51 @@ execution: async (intent, ctx, m) => {
       V.setStage(ctx, 'completed');
       return { kind: 'internal', done: true };
     })
+    
     .with({ kind: 'fetch_external_data' }, async ({ apiUrl }) => {
-      // ✅ External API - wrap with runEffect()
-      const result = await runEffect({
-        kind: 'FetchExternal',
-        payload: { url: apiUrl }
-      }, ctx, {
-        timeoutMs: 10000,
-        costCap: 100,
-        maxRetries: 3
-      });
-      
-      if (result.success) {
-        await ctx.reply(`Data fetched: ${JSON.stringify(result.value)}`);
+      try {
+        // ✅ External API - wrap any async function
+        const data = await runEffect(
+          () => fetch(apiUrl).then(r => r.json()),
+          { timeoutMs: 10000, maxRetries: 3 }
+        );
+        
+        await ctx.reply(`Data fetched: ${JSON.stringify(data)}`);
         return { kind: 'internal', done: true };
-      } else {
-        await ctx.reply(`Fetch error: ${result.error?.message}`);
-        return { kind: 'internal', done: true, error: result.error };
+        
+      } catch (error) {
+        await ctx.reply(`Fetch error: ${(error as Error).message}`);
+        return { kind: 'internal', done: true, error };
       }
     })
+    
+    .with({ kind: 'process_with_external_service' }, async ({ data }) => {
+      try {
+        // ✅ Third-party SDK - wrap the call
+        const result = await runEffect(
+          () => externalService.process(data),
+          { timeoutMs: 30000, maxRetries: 2 }
+        );
+        
+        // ✅ Multiple steps in one runEffect
+        const enriched = await runEffect(
+          async () => {
+            const step1 = await externalAPI.enrich(result);
+            const step2 = await externalAPI.validate(step1);
+            return step2;
+          },
+          { timeoutMs: 45000 }
+        );
+        
+        await ctx.reply(`Processed: ${enriched}`);
+        return { kind: 'internal', done: true };
+        
+      } catch (error) {
+        await ctx.reply(`Processing error: ${(error as Error).message}`);
+        return { kind: 'internal', done: true, error };
+      }
+    })
+    
     .exhaustive();
 }
 ```
@@ -1006,38 +1268,137 @@ type ResumeEvent =
   | { kind: 'external'; token: string; payload: unknown };
 ```
 
-### Handling Resume in Policy
+### Environment Input Helper Guards (Recommended)
+
+To reliably interpret `env.input` in Perception and Execution, use the framework-provided type guards. They help you branch on canonical resume/input events safely without ad‑hoc checks.
 
 ```typescript
-policy: (m, env) => {
-  const resumeEvent = env?.input as ResumeEvent | undefined;
+import { isDirectInput, isToolCompletionInput, isChildCompletionInput, isExternalEventInput } from '@a2arium/callagent-core';
+
+perception: (env) => {
+  const input = env.input;
+  if (isDirectInput(input)) {
+    // Human input resumed via token
+    const v = input.value;
+    const text = typeof v === 'string' ? v : (v && typeof v === 'object' ? (v as any).text : undefined);
+    return { text, eventType: 'input', resumeToken: input.token };
+  }
+
+  if (isToolCompletionInput(input)) {
+    return { meta: { result: input.result }, eventType: 'tool', resumeToken: input.token };
+  }
+
+  if (isChildCompletionInput(input)) {
+    return { meta: { output: input.output }, eventType: 'child', resumeToken: input.token } as any;
+  }
+
+  if (isExternalEventInput(input)) {
+    return { meta: { event: input.event }, eventType: 'external' };
+  }
+
+  return {};
+}
+```
+
+Helper guard cheatsheet:
+- `isDirectInput(x)`: true for `{ kind: 'input'; value; token }`
+- `isToolCompletionInput(x)`: true for `{ kind: 'tool'; result; token }`
+- `isChildCompletionInput(x)`: true for `{ kind: 'child'; output; token }`
+- `isExternalEventInput(x)`: true for `{ kind: 'external'; event }`
+
+Using these ensures Perception remains small and consistent, and keeps Policy pure by routing all environment changes through Learning → M.
+
+### Handling Resume in Policy (Pure Approach)
+
+**Policy is pure: `policy(m)` reads only from M.** Resume events flow through **Perception → Learning → M** first.
+
+**Step 1: Perception normalizes resume event**
+
+```typescript
+perception: (env, alpha) => {
+  const input = env.input;
   
-  // Handle resumed events
-  if (resumeEvent?.kind === 'input') {
+  if (input && typeof input === 'object') {
+    const event = input as ResumeEvent;
+    return {
+      eventType: event.kind,  // 'input', 'tool', 'child'
+      text: event.kind === 'input' ? event.value : undefined,
+      meta: event,
+      resumeToken: event.token
+    };
+  }
+  
+  return {};
+}
+```
+
+**Step 2: Learning updates M with resume data**
+
+```typescript
+learning: (prev, prevAction, obs) => {
+  if (obs.eventType === 'input' && obs.text) {
+    return {
+      ...prev,
+      worldModel: {
+        ...prev.worldModel,
+        lastUserText: obs.text,
+        lastUserIntent: extractIntent(obs.text),
+        resumedFrom: 'input'
+      }
+    };
+  }
+  
+  if (obs.eventType === 'tool' && obs.meta) {
+    return {
+      ...prev,
+      worldModel: {
+        ...prev.worldModel,
+        lastToolResult: (obs.meta as any).result,
+        resumedFrom: 'tool'
+      }
+    };
+  }
+  
+  return prev;
+}
+```
+
+**Step 3: Policy reads from M (pure)**
+
+```typescript
+policy: (m) => {  // Pure - only reads M
+  const resumedFrom = m.worldModel.resumedFrom;
+  
+  // Handle resumed input
+  if (resumedFrom === 'input' && m.worldModel.lastUserText) {
     return {
       kind: 'answer_with_llm',
-      query: resumeEvent.value
+      query: m.worldModel.lastUserText
     };
   }
   
-  if (resumeEvent?.kind === 'tool') {
+  // Handle resumed tool result
+  if (resumedFrom === 'tool' && m.worldModel.lastToolResult) {
     return {
       kind: 'process_tool_result',
-      result: resumeEvent.result
-    };
-  }
-  
-  if (resumeEvent?.kind === 'child') {
-    return {
-      kind: 'aggregate_child_results',
-      output: resumeEvent.output
+      result: m.worldModel.lastToolResult
     };
   }
   
   // Normal flow
-  // ...
+  if (!m.worldModel.lastUserIntent) {
+    return { kind: 'prompt_user' };
+  }
+  
+  return { kind: 'wait' };
 }
 ```
+
+**Benefits of pure policy:**
+- Easier to test (no env dependency)
+- All state flows through M
+- Clear separation: env → Perception → Learning → M → Policy
+- No bypassing the cognitive loop
 
 ### Resume Guarantees
 
@@ -1048,9 +1409,7 @@ policy: (m, env) => {
 
 ---
 
-## 9. Complete Implementation Example
-
-Here's a full production-ready agent using all patterns:
+## 9. Testing Strategy
 
 ```typescript
 import { createAgent, isDirectInput } from '@a2arium/callagent-core';
@@ -1314,7 +1673,7 @@ export const agent = createAgent({
 
 ---
 
-## 10. Testing Strategy
+## 10. Upgrade Path
 
 ### Golden Path Test
 
@@ -1351,7 +1710,7 @@ describe('Agent Golden Path', () => {
 });
 ```
 
-### Tool Await Test
+### Tool Await Test (advanced)
 
 Test asynchronous tool invocation:
 
@@ -1363,7 +1722,7 @@ describe('Tool Await Flow', () => {
     // Turn 1: Agent calls tool
     await runAgent(ctx);
     
-    expect(V.stage(ctx)).toBe('awaiting_tool');
+    expect(V.stage(ctx)).toBe('awaiting_tool');  // requires Stage to include 'awaiting_tool'
     expect(V.token(ctx)).toBeDefined();
     
     // Turn 2: Tool completes
@@ -1462,7 +1821,6 @@ describe('Execution handlers', () => {
 
 ---
 
-## 11. Upgrade Path
 
 ### Stage 1: Simple Dispatcher (Start Here)
 
@@ -1696,13 +2054,14 @@ const handlers: Record<Stage, Handler> = {
 };
 ```
 
-### Pattern 2: Multi-Step Tool Chain
+### Pattern 2: Multi-Step Tool Chain (pseudocode helpers)
 
 ```typescript
 const handlers: Record<Stage, Handler> = {
   planning: async (ctx, m) => {
     const userText = m.worldModel?.lastUserText;
-    const tools = selectTools(userText);
+    // Pseudocode helper - select tools for the plan
+    const tools = selectTools(userText); // implement per project
     V.setPlanSteps(ctx, tools.map(t => t.name));
     V.setStage(ctx, 'executing');
     return { kind: 'internal', done: true };
@@ -1796,6 +2155,125 @@ const handlers: Record<Stage, Handler> = {
 
 ---
 
+## 13. Troubleshooting
+
+### Problem: "Stage invariant violation"
+
+**Symptom**: Error like `[invariant] awaiting_input requires token`
+
+**Cause**: Transitioning to a stage without satisfying its requirements
+
+**Fix**:
+```typescript
+// ❌ Wrong: Set stage before setting token
+V.setStage(ctx, 'awaiting_input');
+V.setToken(ctx, handle.token);
+
+// ✅ Right: Set requirements first, then stage
+V.setToken(ctx, handle.token);
+V.setStage(ctx, 'awaiting_input');
+```
+
+### Problem: "Policy returning different intents in same situation"
+
+**Symptom**: Inconsistent behavior, hard to debug
+
+**Cause**: Policy reading from `env` instead of `M`
+
+**Fix**:
+```typescript
+// ❌ Wrong: Policy depends on env (not pure)
+policy: (m, env) => {
+  if (env.input) return { kind: 'answer' };
+}
+
+// ✅ Right: Route env through Perception → Learning → M
+perception: (env) => ({ text: env.input }),
+learning: (prev, _, obs) => ({
+  ...prev,
+  worldModel: { ...prev.worldModel, lastUserText: obs.text }
+}),
+policy: (m) => {
+  if (m.worldModel.lastUserText) return { kind: 'answer_with_llm', query: m.worldModel.lastUserText };
+}
+```
+
+### Problem: "State not persisting across turns"
+
+**Symptom**: Agent "forgets" previous interactions
+
+**Cause**: Storing state in `ctx.vars` instead of `M`
+
+**Fix**:
+```typescript
+// ❌ Wrong: Cognitive data in ctx.vars (ephemeral)
+execution: async (intent, ctx) => {
+  ctx.vars.set('userIntent', 'question');  // Lost on next turn!
+}
+
+// ✅ Right: Cognitive data in M (persisted)
+learning: (prev, _, obs) => ({
+  ...prev,
+  worldModel: {
+    ...prev.worldModel,
+    lastUserIntent: extractIntent(obs.text)  // Persisted!
+  }
+})
+```
+
+### Problem: "Intent not allowed in stage" typestate error
+
+**Symptom**: `[typestate] Intent 'answer_with_llm' not allowed in stage 'idle'`
+
+**Cause**: Policy emitting wrong intent for current stage
+
+**Fix**: Check the `INTENT_ALLOWED_STAGES` map and ensure Policy only emits valid intents:
+```typescript
+// Enforce typestate at execution time (not in policy)
+execution: async (intent, ctx, m) => {
+  assertIntentAllowedInStage(intent, V.stage(ctx));
+  // ... dispatch
+}
+```
+
+### Problem: "Effect timeout" or "Effect failed"
+
+**Symptom**: External calls failing intermittently
+
+**Cause**: Not wrapping external calls with `runEffect()`
+
+**Fix**:
+```typescript
+// ❌ Wrong: No timeout/retry protection
+const data = await fetch('https://api.example.com/data').then(r => r.json());
+
+// ✅ Right: Wrapped with runEffect()
+const data = await runEffect(
+  () => fetch('https://api.example.com/data').then(r => r.json()),
+  { timeoutMs: 10000, maxRetries: 3, retryDelayMs: 1000 }
+); // recommend adding jitter in framework
+```
+
+### Problem: "Memory leaks" or "vars growing unbounded"
+
+**Symptom**: `ctx.vars` accumulating keys, performance degrading
+
+**Cause**: Not cleaning up ephemeral state
+
+**Fix**:
+```typescript
+execution: async (intent, ctx) => {
+  // Clean up when done
+  if (intent.kind === 'complete') {
+    V.setToken(ctx, undefined);  // Clear token
+    V.setPlanSteps(ctx, undefined);  // Clear plan
+    V.setStage(ctx, 'completed');
+  }
+}
+```
+
+---
+
 ## 13. Best Practices
 
 ### DO ✅
@@ -1838,11 +2316,17 @@ const handlers: Record<Stage, Handler> = {
    await ctx.reply(text);
    await ctx.tools.invoke(toolName, args);
    
-   // ✅ External calls - wrap with runEffect()
-   const data = await runEffect({
-     kind: 'FetchExternal',
-     payload: { url: 'https://api.example.com/data' }
-   }, ctx, { timeoutMs: 10000 });
+   // ✅ External calls - wrap any async function
+   const data = await runEffect(
+     () => fetch('https://api.example.com/data').then(r => r.json()),
+     { timeoutMs: 10000, maxRetries: 3 }
+   );
+   
+   // ✅ Third-party SDKs
+   const result = await runEffect(
+     () => stripe.charges.create({ amount: 1000, currency: 'usd' }),
+     { timeoutMs: 15000 }
+   );
    ```
 
 7. **Enforce stage invariants** with runtime asserts
@@ -1902,16 +2386,25 @@ const handlers: Record<Stage, Handler> = {
 6. **Don't wrap framework methods in runEffect**
    ```typescript
    // ❌ Unnecessary - ctx.llm is already safe
-   const result = await runEffect({ kind: 'CallLLM', payload: { query } }, ctx, opts);
+   const result = await runEffect(
+     () => ctx.llm.call(query),  // Don't do this!
+     opts
+   );
    
    // ✅ Use directly - calllm handles safety
    const result = await ctx.llm.call(query);
    
    // ✅ Only wrap external calls
-   const data = await runEffect({
-     kind: 'FetchExternal',
-     payload: { url }
-   }, ctx, opts);
+   const data = await runEffect(
+     () => fetch(url).then(r => r.json()),
+     { timeoutMs: 10000 }
+   );
+   
+   // ✅ Third-party SDKs
+   const payment = await runEffect(
+     () => stripe.charges.create(params),
+     { timeoutMs: 15000 }
+   );
    ```
 
 7. **Don't ignore Shield**
@@ -1929,7 +2422,11 @@ const handlers: Record<Stage, Handler> = {
 
 ---
 
-## 14. See Also
+## Appendix A: Complete Implementation Example
+
+Here's a full production-ready agent using all patterns:
+
+**Note**: This is a complete reference implementation. Start with simpler patterns from sections 1-13, then consult this appendix for integration details.
 
 ### Related Documentation
 

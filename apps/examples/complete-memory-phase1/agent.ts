@@ -66,7 +66,7 @@ export default createAgent({
             ctx.complete();
 
         } catch (error) {
-            ctx.logger?.error?.('Memory demo failed', error);
+            ctx.logger?.error?.('Memory demo failed', error as Record<string, unknown>);
             await ctx.reply(`❌ Memory demo failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             await ctx.fail?.(error);
         }

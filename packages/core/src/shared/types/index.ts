@@ -95,11 +95,10 @@ export type TaskInput = {
 // Define a type for the logger expected by TaskContext
 // This could eventually just be ComponentLogger directly
 export type TaskLogger = {
-    debug: (msg: string, ...args: unknown[]) => void;
-    info: (msg: string, ...args: unknown[]) => void;
-    warn: (msg: string, ...args: unknown[]) => void;
-    // Match the ComponentLogger signature for error
-    error: (msg: string, error?: unknown, context?: Record<string, unknown>) => void;
+    debug: (event: string, data?: Record<string, unknown>) => void;
+    info: (event: string, data?: Record<string, unknown>) => void;
+    warn: (event: string, data?: Record<string, unknown>) => void;
+    error: (event: string, data?: Record<string, unknown>) => void;
 };
 
 // --- Task Context (Interface for agent task handling) ---
@@ -179,7 +178,7 @@ export type TaskContext = {
         embed?: unknown; // Placeholder for embed adapter access
     };
     cognitive: { loadWorkingMemory: (e: unknown) => void; plan: (prompt: string, options?: unknown) => Promise<unknown>; record: (state: unknown) => void; flush: () => Promise<void>; };
-    logger: TaskLogger; // Use the defined TaskLogger type
+    logger: TaskLogger; // Structured logger
     config: unknown; // Minimal config object
     validate: (schema: unknown, data: unknown) => void; // Basic validation, will throw
     retry: <T = unknown>(fn: () => Promise<T>, opts: unknown) => Promise<T>;
@@ -290,6 +289,10 @@ export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
 }
 
 // --- Canonical Input Discriminators & Guards ---
+/**
+ * Child task completion resume event payload.
+ * Emitted when a delegated child agent completes and returns a result.
+ */
 export type ChildCompletionInput = {
     kind: 'child';
     token: string;
@@ -298,6 +301,10 @@ export type ChildCompletionInput = {
     result: unknown;
 };
 
+/**
+ * Tool invocation completion resume event payload.
+ * Emitted when a long-running tool callback completes and returns a result.
+ */
 export type ToolCompletionInput = {
     kind: 'tool';
     token: string;
@@ -305,23 +312,35 @@ export type ToolCompletionInput = {
     result: unknown;
 };
 
-export type DirectInput = { kind: 'input'; value: unknown };
+/**
+ * Direct human input resume event payload.
+ * Carries the user-provided value and the durable token.
+ */
+export type DirectInput = { kind: 'input'; token?: string; value: unknown };
+
+/**
+ * External event payload forwarded into the loop.
+ */
 export type ExternalEventInput = { kind: 'external'; event: unknown };
 
 export type InputKind = ChildCompletionInput | ToolCompletionInput | DirectInput | ExternalEventInput;
 
+/** True if value is a child agent completion payload. */
 export function isChildCompletionInput(x: unknown): x is ChildCompletionInput {
     return !!x && typeof x === 'object' && (x as any).kind === 'child' && typeof (x as any).token === 'string';
 }
 
+/** True if value is a tool completion payload. */
 export function isToolCompletionInput(x: unknown): x is ToolCompletionInput {
     return !!x && typeof x === 'object' && (x as any).kind === 'tool' && typeof (x as any).token === 'string';
 }
 
+/** True if value is a direct human input payload. */
 export function isDirectInput(x: unknown): x is DirectInput {
     return !!x && typeof x === 'object' && (x as any).kind === 'input' && 'value' in (x as any);
 }
 
+/** True if value is an external event payload. */
 export function isExternalEventInput(x: unknown): x is ExternalEventInput {
     return !!x && typeof x === 'object' && (x as any).kind === 'external' && 'event' in (x as any);
 }

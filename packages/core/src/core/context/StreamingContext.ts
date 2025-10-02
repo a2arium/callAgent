@@ -382,7 +382,9 @@ export function extendContextWithStreaming(
                 }
             })() : undefined;
 
-            logger.error(`Agent threw structured error: [${code}] ${message}`, errorToThrow, { details: safeDetails });
+            logger.error(`Agent threw structured error: [${code}] ${message}`,
+                { error: (errorToThrow as any)?.message ?? String(errorToThrow), code, message, details: safeDetails }
+            );
             throw errorToThrow;
         },
     });

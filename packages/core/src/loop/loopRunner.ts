@@ -15,7 +15,8 @@ export async function runLoop(
     opts: LoopRunnerOptions = {}
 ): Promise<{ M: MentalState; outcome: TurnOutcome; metrics?: { timings: Record<string, number>[]; rewards: number[] } }> {
     const start = Date.now();
-    const maxTurns = opts.maxTurns ?? Infinity; // unlimited by default unless configured
+    const maxTurns = opts.maxTurns ?? 10; // default safety budget
+    try { console.info('[loopRunner] start', { maxTurns }); } catch { }
 
     // Provide minimal defaults (prefer agent overrides when present)
     const defaults: Modules = {
@@ -72,23 +73,23 @@ export async function runLoop(
             try {
                 const level = (m as any)?.hitl || (m as any)?.policyParams?.hitl;
                 const safety = (m as any)?.safety || {};
-                if (!level) return a;
+                if (!level) return { action: 'pass', intent: a } as any;
                 // guardrails: block tools/subagents without explicit consent
                 if (level === 'guardrails' && (a as any)?.kind && ((a as any).kind === 'tool' || (a as any).kind === 'subagent')) {
                     (m as any).lastAdvise = { kind: (a as any).kind, policy: 'guardrails' };
-                    return { kind: 'ask_user', prompt: 'Approve action?', schema: { kind: (a as any).kind } } as any;
+                    return { action: 'defer', askUser: 'Approve action?' } as any;
                 }
                 // consent: ask user before tools
                 if (level === 'consent' && (a as any)?.kind === 'tool') {
                     (m as any).lastAdvise = { kind: (a as any).kind, tool: (a as any).name, toolArgs: (a as any).args, policy: 'consent' };
-                    return { kind: 'ask_user', prompt: `Run tool ${(a as any).name}?`, schema: { tool: (a as any).name } } as any;
+                    return { action: 'defer', askUser: `Run tool ${(a as any).name}?` } as any;
                 }
                 // cost limit: if action declares cost in args, block if above threshold
                 try {
                     const cost = Number(((a as any)?.args?.cost) ?? 0);
                     if (Number.isFinite(cost) && typeof safety.costLimit === 'number' && cost > safety.costLimit) {
                         (m as any).lastAdvise = { blocked: 'cost', cost, limit: safety.costLimit };
-                        return { kind: 'ask_user', prompt: `Action cost ${cost} exceeds limit ${safety.costLimit}. Proceed?` } as any;
+                        return { action: 'defer', askUser: `Action cost ${cost} exceeds limit ${safety.costLimit}. Proceed?` } as any;
                     }
                 } catch { /* noop */ }
                 // PII patterns: if args contain strings matching any configured pattern, prompt
@@ -99,7 +100,7 @@ export async function runLoop(
                         const containsPII = scanForPII((a as any)?.args, regexes);
                         if (containsPII) {
                             (m as any).lastAdvise = { flagged: 'pii' };
-                            return { kind: 'ask_user', prompt: `Action contains potential PII. Proceed?` } as any;
+                            return { action: 'defer', askUser: `Action contains potential PII. Proceed?` } as any;
                         }
                     }
                 } catch { /* noop */ }
@@ -107,8 +108,8 @@ export async function runLoop(
                 if (level === 'advise') {
                     (m as any).lastAdvise = { kind: (a as any).kind, policy: 'advise' };
                 }
-                return a;
-            } catch { return a; }
+                return { action: 'pass', intent: a } as any;
+            } catch { return { action: 'pass', intent: a } as any; }
         }),
         execution: modules.execution ?? (async (a, ctx) => {
             const kind = (a as any).kind;
@@ -152,6 +153,14 @@ export async function runLoop(
                 try { console.log(`[LoopRunner] transition await_input token=${t}`); } catch { }
                 return { kind: 'await_input', token: t } as any;
             }
+            // Safety: if an ask_user ProposedAction was executed but transition is not await_*, log and fail
+            try {
+                const lastIntent = (env as any)?.lastIntentKind;
+                if (lastIntent === 'ask_user' && k !== 'ask_user') {
+                    console.warn('[LoopRunner] Transition did not return await_* after ask_user; failing turn');
+                    return { kind: 'fail', reason: 'transition_missing_await_after_ask_user' } as any;
+                }
+            } catch { /* noop */ }
             if (k === 'subagent' && (exec as any).token) return { kind: 'await_child', token: (exec as any).token } as any;
             if (k === 'tool' && (exec as any).token) return { kind: 'await_tool', token: (exec as any).token } as any;
             // Enrich env goal stats (best-effort)

@@ -10,7 +10,9 @@ export { TaskEngine } from './core/orchestration/taskEngine.js';
 export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
 export type { MentalState, EnvironmentState } from './loop/types.js';
-export type { ProposedAction, ExecutableAction, TurnOutcome } from './loop/oneTurn.js';
+export type { ProposedAction, ExecutableAction, TurnOutcome, ShieldOutcome } from './loop/oneTurn.js';
+export { runEffect } from './loop/effects.js';
+export { assertStageInvariants } from './loop/stageInvariants.js';
 export type {
     ChildCompletionInput,
     ToolCompletionInput,

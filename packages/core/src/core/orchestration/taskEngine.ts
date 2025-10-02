@@ -1432,7 +1432,10 @@ export class TaskEngine {
                 input: task.input as TaskInput
             },
             // These will be replaced by the streaming context
-            reply: async () => { },
+            reply: async (parts) => {
+                const { withSafety } = await import('../../loop/effectSafety.js');
+                await withSafety(async () => { /* real reply implementation is injected by streaming runner */ }, { timeoutMs: 5000, maxRetries: 1 });
+            },
             progress: () => { },
             complete: () => { },
             fail: async () => { },
@@ -1440,7 +1443,12 @@ export class TaskEngine {
             recordUsage: () => { console.warn('recordUsage called on base context'); },
             // Stub implementations for other required properties
             llm: {} as any,
-            tools: { invoke: async <T>() => ({} as unknown as T) },
+            tools: {
+                invoke: async <T>(toolName: string, args: unknown) => {
+                    const { withSafety } = await import('../../loop/effectSafety.js');
+                    return withSafety(async () => ({} as unknown as T), { timeoutMs: 60000, maxRetries: 2 });
+                }
+            },
             memory: {
                 semantic: {
                     getDefaultBackend: () => 'none',
@@ -1478,10 +1486,10 @@ export class TaskEngine {
                 flush: async () => { }
             },
             logger: {
-                debug: () => { },
-                info: () => { },
-                warn: () => { },
-                error: () => { }
+                debug: (_event: string, _data?: Record<string, unknown>) => { },
+                info: (_event: string, _data?: Record<string, unknown>) => { },
+                warn: (_event: string, _data?: Record<string, unknown>) => { },
+                error: (_event: string, _data?: Record<string, unknown>) => { }
             },
             config: {},
             validate: () => { },
