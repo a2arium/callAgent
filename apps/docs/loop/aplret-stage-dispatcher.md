@@ -64,33 +64,20 @@ type Intent =
   | { kind: 'prompt_user' }
   | { kind: 'answer_with_llm'; query: string };
 
-// 3. Typed façade for ctx.vars (Best Practice: type-safe access)
-// Minimal invariant check for demo purposes
-const assertStageInvariants = (ctx: TaskContext, s: Stage) => {
-  if (s === 'awaiting_input' && !ctx.vars.get('token')) {
-    throw new Error('[invariant] awaiting_input requires token');
-  }
-  if (s === 'completed' && !ctx.vars.get('completeCalled')) {
-    throw new Error('[invariant] completed requires completeCalled');
-  }
-};
+// 3. Minimal, reusable stage helpers
+import { createStageFacade } from '@a2arium/callagent-core';
 
-const V = {
-  stage: (ctx: TaskContext): Stage => 
-    (ctx.vars.get('stage') as Stage) ?? 'idle',
-  setStage: (ctx: TaskContext, s: Stage) => 
-    (assertStageInvariants(ctx, s), ctx.vars.set('stage', s)),
-  
-  token: (ctx: TaskContext) => 
-    ctx.vars.get('token') as string | undefined,
-  setToken: (ctx: TaskContext, t?: string) => 
-    ctx.vars.set('token', t),
-  
-  completeCalled: (ctx: TaskContext) => 
-    Boolean(ctx.vars.get('completeCalled')),
-  setCompleteCalled: (ctx: TaskContext, v: boolean) => 
-    ctx.vars.set('completeCalled', v)
-};
+const Stage = createStageFacade<Stage>({
+  initial: 'idle',
+  invariants: {
+    awaiting_input: { require: ['token'], forbid: ['completed.called'] },
+    completed: { require: ['completed.called'] }
+  },
+  // Optional: automatically mark flags when entering a stage
+  autoMarks: {
+    completed: { 'completed.called': true }
+  }
+});
 
 // 4. Stage dispatcher (Execution decides HOW to do it)
 const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>> = {
@@ -99,15 +86,15 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
     const handle = await ctx.requestInput('Your message');
     
     // Update control state
-    V.setToken(ctx, handle.token);
-    V.setStage(ctx, 'awaiting_input');
+    ctx.vars.set('token', handle.token);
+    Stage.setStage(ctx, 'awaiting_input');
     
     return { kind: 'ask_user', token: handle.token };
   },
   
   awaiting_input: async (ctx, m) => {
     // Read cognitive state from M (not from env!)
-    const userText = m.worldModel?.lastUserText;
+    const userText = m.memory?.sensory?.current;
     if (!userText) return { kind: 'internal', done: true };
     
     // Call LLM (framework method - already safe)
@@ -116,8 +103,7 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
     
     // Mark complete
     ctx.complete(100, 'completed');
-    V.setCompleteCalled(ctx, true);
-    V.setStage(ctx, 'completed');
+    Stage.setStage(ctx, 'completed'); // autoMarks sets 'completed.called'
     
     return { kind: 'internal', done: true };
   },
@@ -146,16 +132,16 @@ export const agent = createAgent({
   // L - Learning: Update M (immutable, pure)
   learning: (prev, _action, obs) => ({
     ...prev,
-    worldModel: {
-      ...prev.worldModel,
-      lastUserText: obs.text || prev.worldModel?.lastUserText
+    memory: {
+      ...prev.memory,
+      sensory: { current: obs.text ?? prev.memory?.sensory?.current }
     }
   }),
 
   // R - Policy: Decide WHAT to do (pure function of M - NO control state!)
   policy: (m): Intent => {
     // Policy reads ONLY cognitive state, not control state (stage)
-    const userText = m.worldModel?.lastUserText;
+    const userText = m.memory?.sensory?.current;
     
     // Decision based on cognition
     if (userText) {
@@ -429,7 +415,7 @@ type Intent =
 ```typescript
 policy: (m: MentalState): Intent => {
   const userIntent = m.worldModel.lastUserIntent;
-  const userText = m.worldModel.lastUserText;
+  const userText = m.memory.sensory.current;
   const sentiment = m.worldModel.userSentiment;
   
   // Reasoning based on cognition
@@ -491,6 +477,44 @@ execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<Exe
 ---
 
 ## 4. Module Contracts
+
+### Per‑Agent Typing (Sensory, Obs)
+
+Define explicit `Sensory` and `Obs` types and pass them to `createAgent<Sensory, Obs>`. This is the only acceptable pattern.
+
+```typescript
+type Sensory = { current?: string };
+type Obs = { text?: string };
+
+export const agent = createAgent<Sensory, Obs>({
+  // perception returns Obs
+  perception: (env): Obs => {
+    const input = env?.input;
+    const text = typeof input === 'string' ? input : (input && typeof input === 'object' ? (input as any).text : undefined);
+    return { text };
+  },
+
+  // learning updates M<Sensory> immutably
+  learning: (prev, _prevAction, obs): MentalState<Sensory> => ({
+    ...prev,
+    memory: {
+      ...prev.memory,
+      sensory: { current: obs.text }
+    }
+  }),
+
+  // policy reads only M, emits Intent/ProposedAction
+  policy: (m) => {
+    const q = m.memory.sensory.current?.trim();
+    return q
+      ? { kind: 'internal', intent: 'answer_with_llm', data: { query: q } }
+      : { kind: 'ask_user', prompt: 'Please type your message' };
+  },
+  // ...shield/execution/transition
+}, import.meta.url);
+```
+
+Do not omit generics or rely on implicit `unknown`—define `Sensory` and `Obs` per agent to keep Perception/Learning/Policy contracts explicit and testable.
 
 ### Attention
 
@@ -585,9 +609,24 @@ learning: (prev, prevAction, obs, rPrev) => {
     
     return {
       ...prev,
+      memory: {
+        ...prev.memory,
+        sensory: { current: obs.text },
+        longTerm: {
+          ...prev.memory.longTerm,
+          episodic: [
+            ...prev.memory.longTerm.episodic,
+            {
+              t: Date.now(),
+              obs,
+              act: prevAction,
+              rew: rPrev
+            }
+          ]
+        }
+      },
       worldModel: {
         ...prev.worldModel,
-        lastUserText: obs.text,
         lastUserIntent: intent,
         userSentiment: sentiment,
         entities: [...prev.worldModel.entities, ...entities]
@@ -634,7 +673,7 @@ policy: (m: MentalState) => Intent
 ```typescript
 policy: (m) => {
   const userIntent = m.worldModel.lastUserIntent;
-  const userText = m.worldModel.lastUserText;
+  const userText = m.memory.sensory.current;
   const sentiment = m.worldModel.userSentiment;
   const goals = m.goalState.priority;
   const budget = m.reward.budget;
@@ -841,71 +880,38 @@ Each stage has **invariants** that must hold:
 **Enforce with runtime asserts (implement all rows):**
 
 ```typescript
-function assertStageInvariants(ctx: TaskContext, stage: Stage): void {
-  switch (stage) {
-    case 'idle':
-      // Forbidden: token, completeCalled
-      if (V.token(ctx)) {
-        throw new Error('[invariant] idle forbids token (must be cleared)');
-      }
-      if (V.completeCalled(ctx)) {
-        throw new Error('[invariant] idle forbids completeCalled (must be fresh)');
-      }
-      break;
-      
-    case 'awaiting_input':
-      // Required: token
-      if (!V.token(ctx)) {
-        throw new Error('[invariant] awaiting_input requires token');
-      }
-      // Forbidden: completeCalled
-      if (V.completeCalled(ctx)) {
-        throw new Error('[invariant] awaiting_input forbids completeCalled');
-      }
-      break;
-      
-    case 'planning':
-      // Optional: planSteps (allowed but not required)
-      // Forbidden: completeCalled
-      if (V.completeCalled(ctx)) {
-        throw new Error('[invariant] planning forbids completeCalled');
-      }
-      break;
-      
-    case 'executing':
-      // Optional: planSteps (allowed but not required)
-      // No forbidden keys
-      break;
-    
-    case 'awaiting_tool':
-      if (!V.token(ctx)) {
-        throw new Error('[invariant] awaiting_tool requires token');
-      }
-      if (V.completeCalled(ctx)) {
-        throw new Error('[invariant] awaiting_tool forbids completeCalled');
-      }
-      break;
-    
-    case 'awaiting_child':
-      if (!V.token(ctx)) {
-        throw new Error('[invariant] awaiting_child requires token');
-      }
-      if (V.completeCalled(ctx)) {
-        throw new Error('[invariant] awaiting_child forbids completeCalled');
-      }
-      break;
-      
-    case 'completed':
-      // Required: completeCalled
-      if (!V.completeCalled(ctx)) {
-        throw new Error('[invariant] completed requires ctx.complete() called');
-      }
-      break;
-      
-    default:
-      throw new Error(`[invariant] Unknown stage: ${stage}`);
+// Prefer the framework helper for stage invariants and entry marks
+import { createStageFacade } from '@a2arium/callagent-core';
+
+type Stage =
+  | 'idle'
+  | 'awaiting_input'
+  | 'planning'
+  | 'executing'
+  | 'awaiting_tool'
+  | 'awaiting_child'
+  | 'completed';
+
+const Stage = createStageFacade<Stage>({
+  initial: 'idle',
+  invariants: {
+    idle: { forbid: ['token', 'completeCalled'] },
+    awaiting_input: { require: ['token'], forbid: ['completeCalled'] },
+    planning: { forbid: ['completeCalled'] },
+    executing: {},
+    awaiting_tool: { require: ['token'], forbid: ['completeCalled'] },
+    awaiting_child: { require: ['token'], forbid: ['completeCalled'] },
+    completed: { require: ['completeCalled'] }
+  },
+  // Optional: auto-mark flags on entry
+  autoMarks: {
+    completed: { completeCalled: true }
   }
-}
+});
+
+// Usage
+// Stage.setStage(ctx, 'awaiting_input');
+// const s = Stage.getStage(ctx);
 ```
 
 ### Typed Façade for ctx.vars
@@ -922,15 +928,9 @@ type Vars = {
   completeCalled?: boolean;
 };
 
+// Use createStageFacade for stage get/set and invariant checks.
+// This façade focuses on non-stage convenience accessors.
 const V = {
-  // Stage management
-  stage: (ctx: TaskContext): Stage => 
-    (ctx.vars.get('stage') as Stage) ?? 'idle',
-  setStage: (ctx: TaskContext, s: Stage) => {
-    assertStageInvariants(ctx, s);
-    ctx.vars.set('stage', s);
-  },
-  
   // Flags
   prompted: (ctx: TaskContext) => 
     Boolean(ctx.vars.get('prompted')),
@@ -987,6 +987,7 @@ type Intent =
 **2. Intent→Allowed Stages Map (typestate):**
 
 ```typescript
+// 1) Declare allowed (intent → stages) typestate map
 const INTENT_ALLOWED_STAGES: Record<Intent['kind'], Stage[]> = {
   prompt_user: ['idle'],
   answer_with_llm: ['awaiting_input', 'executing'],
@@ -997,6 +998,7 @@ const INTENT_ALLOWED_STAGES: Record<Intent['kind'], Stage[]> = {
   complete: ['executing', 'completed']
 };
 
+// 2) Assertion function
 function assertIntentAllowedInStage(intent: Intent, stage: Stage): void {
   const allowed = INTENT_ALLOWED_STAGES[intent.kind];
   if (!allowed.includes(stage)) {
@@ -1006,26 +1008,34 @@ function assertIntentAllowedInStage(intent: Intent, stage: Stage): void {
     );
   }
 }
+
+// 3) Helper composed with createStageFacade
+function assertIntentAllowedHere(ctx: TaskContext, intent: Intent): void {
+  const stage = Stage.getStage(ctx);  // from createStageFacade
+  assertIntentAllowedInStage(intent, stage);
+}
 ```
 
 **3. Use in Execution Dispatcher:**
 
 ```typescript
 execution: async (intent, ctx, m) => {
-  const stage = V.stage(ctx);
-  
-  // Runtime typestate check
-  assertIntentAllowedInStage(intent, stage);
+  // Runtime typestate check using Stage facade
+  assertIntentAllowedHere(ctx, intent);
   
   // Now dispatch safely
   return match(intent)
     .with({ kind: 'prompt_user' }, async () => {
-      // Only runs if stage === 'idle'
+      // Only runs if current stage ∈ INTENT_ALLOWED_STAGES['prompt_user']
       // ...
     })
     .exhaustive();
 }
 ```
+
+Note: `createStageFacade` enforces per-stage invariants and auto-marks; typestate (intent → allowed stages) is a separate concern. The recommended pattern is to compose both: use the facade to read/validate the current stage and a small assertion to enforce intent-stage compatibility.
+
+> Prefer exhaustive matching: When feasible, use `ts-pattern` on `{ stage, intent }` with `.exhaustive()` to get compile-time guarantees that all combinations you care about are handled. Keep the typestate assertion as a lightweight runtime guard and documentation aid for medium/large flows or when handler reachability could drift.
 
 **Benefits:**
 - Catches intent/stage mismatches early (fail-fast)
@@ -1337,12 +1347,8 @@ learning: (prev, prevAction, obs) => {
   if (obs.eventType === 'input' && obs.text) {
     return {
       ...prev,
-      worldModel: {
-        ...prev.worldModel,
-        lastUserText: obs.text,
-        lastUserIntent: extractIntent(obs.text),
-        resumedFrom: 'input'
-      }
+      memory: { ...prev.memory, sensory: { current: obs.text } },
+      worldModel: { ...prev.worldModel, lastUserIntent: extractIntent(obs.text), resumedFrom: 'input' }
     };
   }
   
@@ -1368,10 +1374,10 @@ policy: (m) => {  // Pure - only reads M
   const resumedFrom = m.worldModel.resumedFrom;
   
   // Handle resumed input
-  if (resumedFrom === 'input' && m.worldModel.lastUserText) {
+  if (resumedFrom === 'input' && m.memory.sensory.current) {
     return {
       kind: 'answer_with_llm',
-      query: m.worldModel.lastUserText
+      query: m.memory.sensory.current
     };
   }
   
@@ -1553,14 +1559,11 @@ export const agent = createAgent({
         const text = event.value;
         const intent = extractIntent(text);
         
-        return {
-          ...prev,
-          worldModel: {
-            ...prev.worldModel,
-            lastUserText: text,
-            lastUserIntent: intent
-          }
-        };
+    return {
+      ...prev,
+      memory: { ...prev.memory, sensory: { current: text } },
+      worldModel: { ...prev.worldModel, lastUserIntent: intent }
+    };
       }
     }
     
@@ -1746,7 +1749,7 @@ describe('Learning module', () => {
     const next = agent.learning(prev, undefined, obs);
     
     expect(next.worldModel.lastUserIntent).toBe('question');
-    expect(next.worldModel.lastUserText).toBe('What is the weather?');
+    expect(next.memory.sensory.current).toBe('What is the weather?');
   });
   
   it('does not mutate previous state', () => {
@@ -1764,10 +1767,8 @@ describe('Policy module', () => {
   it('emits answer_with_llm intent for questions', () => {
     const m = {
       ...createEmptyMentalState(),
-      worldModel: {
-        lastUserIntent: 'question',
-        lastUserText: 'What is AI?'
-      }
+      worldModel: { lastUserIntent: 'question' },
+      memory: { sensory: { current: 'What is AI?' } }
     };
     
     const intent = agent.policy(m);
@@ -2278,7 +2279,7 @@ execution: async (intent, ctx) => {
 
 1. **Policy emits typed Intent, Execution handles exhaustively**
    ```typescript
-   policy: (m): Intent => ({ kind: 'answer_with_llm', query: m.worldModel.lastUserText })
+   policy: (m): Intent => ({ kind: 'answer_with_llm', query: m.memory.sensory.current })
    execution: async (intent, ctx, m) => match(intent).with(...).exhaustive()
    ```
 

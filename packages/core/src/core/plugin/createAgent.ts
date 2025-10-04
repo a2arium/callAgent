@@ -28,7 +28,7 @@ const getDirname = (metaUrl: string): string => path.dirname(fileURLToPath(metaU
  * @throws {ManifestError} If the manifest cannot be loaded or is invalid
  * @throws {PluginError} If agent creation fails for other reasons
  */
-export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string): AgentPlugin => {
+export const createAgent = <Sensory = unknown, Obs = unknown>(options: CreateAgentPluginOptions<Sensory, Obs>, metaUrl: string): AgentPlugin => {
     // Get caller directory directly from required metaUrl
     const callerDir = getDirname(metaUrl);
 
@@ -134,7 +134,8 @@ export const createAgent = (options: CreateAgentPluginOptions, metaUrl: string):
         manifest,
         handleTask: options.handleTask,
         tenantId: tenantId,
-        loop,
+        // Erase generics at the boundary; runner treats modules as unknown-typed
+        loop: loop as any,
         // Future hooks (initialize, etc.) would be stored here
     };
 

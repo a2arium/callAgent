@@ -1,19 +1,47 @@
 import { PrismaClient } from '@prisma/client';
 import { SemanticMemoryBackend, MemoryQueryResult } from '@a2arium/callagent-types';
 import { MemorySetOptions, GetManyInput, GetManyOptions } from './types.js';
+/**
+ * Configuration options for MemorySQLAdapter
+ */
+export interface MemorySQLConfig {
+    /** Pre-configured Prisma client instance */
+    prismaClient?: PrismaClient;
+    /** Database connection URL (used if prismaClient not provided) */
+    databaseUrl?: string;
+    /** Default tenant ID for operations */
+    defaultTenantId?: string;
+    /** Embedding function for vector operations */
+    embedFunction?: (text: string) => Promise<number[]>;
+    /** Default query result limit */
+    defaultQueryLimit?: number;
+}
 export declare class MemorySQLAdapter implements SemanticMemoryBackend {
     private prisma;
+    private ownsPrisma;
     private embedFunction?;
-    private options;
     private entityService?;
     private recognitionService?;
     private enrichmentService?;
     private defaultTenantId;
     private readonly DEFAULT_QUERY_LIMIT;
-    constructor(prisma: PrismaClient, embedFunction?: ((text: string) => Promise<number[]>) | undefined, options?: {
+    constructor(configOrPrisma?: MemorySQLConfig | PrismaClient, embedFunction?: (text: string) => Promise<number[]>, options?: {
         defaultTenantId?: string;
         defaultQueryLimit?: number;
     });
+    /**
+     * Disconnect from the database (only if we created the Prisma client)
+     */
+    disconnect(): Promise<void>;
+    /**
+     * Processes value to detect and handle binary data automatically
+     * Returns processed binary data or null if no binary data detected
+     */
+    private processBinaryDataIfNeeded;
+    /**
+     * Stores binary data using the appropriate storage method (JSON or BLOB)
+     */
+    private storeBinaryData;
     set(key: string, value: any, options?: MemorySetOptions): Promise<void>;
     private setRegular;
     private setWithEntityAlignment;
@@ -23,12 +51,32 @@ export declare class MemorySQLAdapter implements SemanticMemoryBackend {
     }): Promise<any>;
     private getAlignmentsForMemory;
     /**
-     * Builds a Prisma query condition for filtering on JSON fields
-     * @param filter The filter to apply on a JSON field
+     * Builds a Prisma query condition for filtering on JSON fields with array support
+     * @param filter The parsed filter to apply on a JSON field
      * @returns A Prisma-compatible query condition
      * @private
      */
     private buildJsonFilterCondition;
+    /**
+     * Validates array filter syntax and compatibility
+     * @param filter The array filter to validate
+     * @private
+     */
+    private validateArrayFilter;
+    /**
+ * Builds raw SQL condition for array filtering using PostgreSQL JSONB operators
+ * @param filter The array filter to build condition for
+ * @returns Raw SQL fragment that can be used in WHERE clauses
+ * @private
+ */
+    private buildArrayFilterCondition;
+    /**
+     * Builds regular (non-array) filter condition
+     * @param filter The regular filter to build condition for
+     * @returns Prisma query condition
+     * @private
+     */
+    private buildRegularFilterCondition;
     delete(key: string, opts?: {
         backend?: string;
         tenantId?: string;
@@ -65,6 +113,18 @@ export declare class MemorySQLAdapter implements SemanticMemoryBackend {
     private queryByObject;
     private querySimple;
     private queryWithFilters;
+    /**
+     * Handle queries with array filters using raw SQL
+     */
+    private queryWithRawArrayFilters;
+    /**
+     * Builds raw SQL condition for regular (non-array) filters
+     * @param filter The regular filter
+     * @param startParamIndex Starting parameter index for SQL placeholders
+     * @returns Raw SQL condition with parameters
+     * @private
+     */
+    private buildRegularFilterRawSQL;
     /**
      * Handle queries with entity-aware filters
      */

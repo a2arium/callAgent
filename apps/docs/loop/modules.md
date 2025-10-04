@@ -98,27 +98,86 @@ type TurnOutcome =
   | { kind: 'fail'; reason: string };
 ```
 
-### Modules interface
+### Generic MentalState and Modules
 
 ```ts
-type Modules = {
-  attention:  (prev: MentalState, env: EnvironmentState) => unknown;            // "alpha"
-  perception: (env: EnvironmentState, alpha: unknown) => Observation;           // normalize env
-  learning:   (prev: MentalState, prevExec: ExecutableAction | undefined,
-               obs: Observation, rPrev?: number) => MentalState;                // ONLY writer of M
-  policy:     (m: MentalState) => Intent;                                       // pure
-  shield:     (m: MentalState, intent: Intent) =>
-                | { action: 'pass'; intent: Intent }
-                | { action: 'transform'; intent: Intent }
+// Core generics 
+// - MentalState<Sensory>
+// - Modules<Sensory, Obs>
+// - oneTurn<Sensory, Obs>
+
+type Modules<Sensory = unknown, Obs = unknown> = {
+  attention:  (prev: MentalState<Sensory>, env: EnvironmentState) => unknown;   // "alpha"
+  perception: (env: EnvironmentState, alpha: unknown) => Obs;                   // normalize env
+  learning:   (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined,
+               obs: Obs, rPrev?: number) => MentalState<Sensory>;               // ONLY writer of M
+  policy:     (m: MentalState<Sensory>) => ProposedAction;                      // pure
+  shield:     (m: MentalState<Sensory>, intent: ProposedAction) =>
+                | { action: 'pass'; intent: ProposedAction }
+                | { action: 'transform'; intent: ProposedAction }
                 | { action: 'veto'; reason: string }
                 | { action: 'defer'; askUser: string };
-  execution:  (intent: Intent, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>;
-  transition: (env: EnvironmentState, exec: ExecutableAction, ctx: TaskContext) => TurnOutcome;
+  execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>;
+  transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>) => TurnOutcome;
 
-  // Optional reward hooks: compute scalars; Learning appends them onto last episode.
-  extrinsicReward?: (m: MentalState, exec: ExecutableAction, outcome: TurnOutcome) => number;
-  intrinsicReward?: (m: MentalState, obs: Observation) => number;
+  // Optional reward hooks
+  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
+  intrinsicReward?: (m: MentalState<Sensory>, obs: Obs) => number;
 };
+```
+
+#### Per‑agent typing pattern (Mandatory)
+```ts
+// Always define explicit Sensory and Obs and pass them to createAgent
+type Sensory = { current?: string };
+type Obs = { text?: string };
+
+createAgent<Sensory, Obs>({
+  perception: (env): Obs => {
+    // ... return { text }
+  },
+  learning: (prev: MentalState<Sensory>, _prev, obs: Obs): MentalState<Sensory> => ({
+    ...prev,
+    memory: { ...prev.memory, sensory: { current: obs.text } }
+  }),
+  policy: (m: MentalState<Sensory>): ProposedAction => {
+    const q = m.memory.sensory.current?.trim();
+    return q ? { kind: 'internal', intent: 'answer_with_llm', data: { query: q } }
+             : { kind: 'ask_user', prompt: 'Please type your message' };
+  },
+  // ... shield/execution/transition
+});
+```
+
+This per‑agent typing is mandatory. Do not omit the generics or leave them implicit; it keeps module contracts explicit and prevents accidental `unknown`.
+
+### Stage management helper
+
+Use the provided minimal helper to manage control stages consistently without reimplementing per agent:
+
+```ts
+import { createStageFacade } from '@a2arium/callagent-core';
+
+type Stage = 'idle' | 'awaiting_input' | 'completed';
+const Stage = createStageFacade<Stage>({
+  initial: 'idle',
+  invariants: {
+    awaiting_input: { require: ['token'], forbid: ['completed.called'] },
+    completed: { require: ['completed.called'] }
+  },
+  autoMarks: {
+    completed: { 'completed.called': true }
+  }
+});
+
+// set on ask
+ctx.vars.set('token', token);
+Stage.setStage(ctx, 'awaiting_input');
+
+// set on complete (autoMarks will set 'completed.called')
+ctx.complete(100, 'completed');
+Stage.setStage(ctx, 'completed');
+```
 ```
 
 ---
@@ -141,7 +200,8 @@ type Modules = {
 ### Learning (L)
 
 * **Purpose:** **the only place** that updates `M`. Treat prior `M` as immutable; always **return a new `M`**.
-* **Must:** write cognitive facts (lastUserText, derived intent, entities, beliefs, reward tallies, episodic events).
+* **Must:** write cognitive facts (derived intent, entities, beliefs, reward tallies, episodic events) into appropriate cognitive sections (`worldModel`, `goalState`, `reward`, `memory.longTerm`).
+* **Sensory rule:** only store raw observations (e.g., latest raw user text for this turn) under `memory.sensory`. Do not place cognitive derivations there.
 * **Must not:** touch `ctx.vars` or do side effects.
 * **Pattern:** `next = { ...prev, worldModel: {...}, memory: {...}, reward: {...} }`.
 
@@ -178,12 +238,13 @@ type Modules = {
 
 ## Immutability & state separation
 
-| Concern                      | Store in…                        | Who writes           | Lifetime   |
-| ---------------------------- | -------------------------------- | -------------------- | ---------- |
-| User text/intent/sentiment   | `M.worldModel`                   | Learning             | Persistent |
-| Episodic events & rewards    | `M.memory.longTerm` / `M.reward` | Learning             | Persistent |
-| Current stage, tokens, flags | `ctx.vars`                       | Execution/Transition | Ephemeral  |
-| Plans / temporary steps      | `ctx.vars`                       | Execution            | Ephemeral  |
+| Concern                       | Store in…                        | Who writes           | Lifetime   |
+| ----------------------------- | -------------------------------- | -------------------- | ---------- |
+| Raw user text (snapshot)      | `M.memory.sensory`               | Learning             | Persistent |
+| User intent/sentiment/beliefs | `M.worldModel`                   | Learning             | Persistent |
+| Episodic events & rewards     | `M.memory.longTerm` / `M.reward` | Learning             | Persistent |
+| Current stage, tokens, flags  | `ctx.vars`                       | Execution/Transition | Ephemeral  |
+| Plans / temporary steps       | `ctx.vars`                       | Execution            | Ephemeral  |
 
 **Golden rule:** **Only Learning writes `M`**. Everything else reads `M` and, if needed, writes `ctx.vars`.
 
@@ -244,11 +305,11 @@ learning: (prev, _prevExec, obs) => {
     ...prev,
     worldModel: {
       ...prev.worldModel,
-      lastUserText: obs.text ?? prev.worldModel?.lastUserText,
       lastEventType: obs.eventType ?? prev.worldModel?.lastEventType
     },
     memory: {
       ...prev.memory,
+      sensory: { current: obs.text ?? prev.memory?.sensory?.current },
       longTerm: {
         ...prev.memory.longTerm,
         episodic: [
@@ -266,7 +327,7 @@ learning: (prev, _prevExec, obs) => {
 
 ```ts
 policy: (m) => {
-  const t = m.worldModel?.lastUserText;
+  const t = m.memory?.sensory?.current;
   if (!t) return { kind: 'prompt_user' };
   if (t.includes('?')) return { kind: 'answer_with_llm', query: t };
   return { kind: 'plan_and_execute', goal: t };

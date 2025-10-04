@@ -1,14 +1,12 @@
 import { MemoryFilter, FilterOperator } from '@a2arium/callagent-types';
-
 /**
  * Information about an array path like "eventOccurences[].date"
  */
 interface ArrayPathInfo {
-    arrayField: string;     // "eventOccurences" 
-    nestedPath: string;     // "date"
-    hasNestedArrays: boolean; // For future "sessions[].speakers[].name" support
+    arrayField: string;
+    nestedPath: string;
+    hasNestedArrays: boolean;
 }
-
 /**
  * Enhanced filter result interface with array path detection
  */
@@ -19,7 +17,6 @@ interface ParsedFilter {
     isArrayPath: boolean;
     arrayPathInfo?: ArrayPathInfo;
 }
-
 /**
  * Parser for string-based filter syntax
  * Converts strings like 'priority >= 8' to { path: 'priority', operator: '>=', value: 8 }
@@ -61,6 +58,4 @@ export declare class FilterParser {
         value: any;
     }>;
 }
-
-// Export the interfaces for use in other files
 export type { ParsedFilter, ArrayPathInfo };

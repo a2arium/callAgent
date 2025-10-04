@@ -1,6 +1,17 @@
 import { PrismaClient } from '@prisma/client';
 import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
 /**
+ * Configuration options for WorkingMemorySQLAdapter
+ */
+export interface WorkingMemorySQLConfig {
+    /** Pre-configured Prisma client instance */
+    prismaClient?: PrismaClient;
+    /** Database connection URL (used if prismaClient not provided) */
+    databaseUrl?: string;
+    /** Default tenant ID for operations */
+    defaultTenantId?: string;
+}
+/**
  * SQL-based Working Memory Adapter using PostgreSQL and Prisma
  *
  * Provides persistent storage for agent working memory including:
@@ -16,13 +27,17 @@ import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState }
  * - Transaction support for data consistency
  */
 export declare class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
-    private prisma;
-    private options;
     private logger;
+    private prisma;
+    private ownsPrisma;
     private defaultTenantId;
-    constructor(prisma: PrismaClient, options?: {
+    constructor(configOrPrisma?: WorkingMemorySQLConfig | PrismaClient, options?: {
         defaultTenantId?: string;
     });
+    /**
+     * Disconnect from the database (only if we created the Prisma client)
+     */
+    disconnect(): Promise<void>;
     setGoal(goal: string, agentId: string, tenantId: string): Promise<void>;
     getGoal(agentId: string, tenantId: string): Promise<string | null>;
     addThought(thought: ThoughtEntry, agentId: string, tenantId: string): Promise<void>;

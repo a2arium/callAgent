@@ -6,6 +6,7 @@ import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState } from './types.js';
 
 export type AttentionSignal = unknown;
+// Keep Observation as alias for backward compatibility in this module.
 export type Observation = unknown;
 
 export type ProposedAction =
@@ -36,31 +37,31 @@ export type TurnOutcome =
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; reason: string };
 
-export type PolicyFn =
-    | ((m: MentalState) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState, o: Observation) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState, prev: MentalState | undefined, o: Observation) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
+export type PolicyFn<Sensory = unknown, Obs = unknown> =
+    | ((m: MentalState<Sensory>) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
+    | ((m: MentalState<Sensory>, o: Obs) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
+    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
 
-export type Modules = {
-    attention: (prev: MentalState, env: EnvironmentState) => AttentionSignal;
-    perception: (env: EnvironmentState, alpha: AttentionSignal) => Observation;
-    learning: (prev: MentalState, prevAction: ProposedAction | undefined, o: Observation, rPrev?: number) => MentalState;
-    policy: PolicyFn;
-    shield: (m: MentalState, a: ProposedAction) => ShieldOutcome;
-    execution: (a: ProposedAction, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>;
-    transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState) => TurnOutcome;
-    extrinsicReward?: (m: MentalState, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
-    intrinsicReward?: (m: MentalState, o: Observation) => number;
+export type Modules<Sensory = unknown, Obs = unknown> = {
+    attention: (prev: MentalState<Sensory>, env: EnvironmentState) => AttentionSignal;
+    perception: (env: EnvironmentState, alpha: AttentionSignal) => Obs;
+    learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number) => MentalState<Sensory>;
+    policy: PolicyFn<Sensory, Obs>;
+    shield: (m: MentalState<Sensory>, a: ProposedAction) => ShieldOutcome;
+    execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>;
+    transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>) => TurnOutcome;
+    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
+    intrinsicReward?: (m: MentalState<Sensory>, o: Obs) => number;
 };
 
-export async function oneTurn(
+export async function oneTurn<Sensory = unknown, Obs = unknown>(
     ctx: TaskContext,
     env: EnvironmentState,
-    mPrev: MentalState,
-    mods: Modules,
+    mPrev: MentalState<Sensory>,
+    mods: Modules<Sensory, Obs>,
     prevAction?: ProposedAction,
     rPrev?: number
-): Promise<{ m: MentalState; outcome: TurnOutcome; exec: ExecutableAction; timings: Record<string, number>; reward: number }> {
+): Promise<{ m: MentalState<Sensory>; outcome: TurnOutcome; exec: ExecutableAction; timings: Record<string, number>; reward: number }> {
     const timings: Record<string, number> = {};
 
     const tA0 = Date.now();

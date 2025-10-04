@@ -1,4 +1,4 @@
-import { createAgent, isDirectInput } from '@a2arium/callagent-core';
+import { createAgent, isDirectInput, createStageFacade } from '@a2arium/callagent-core';
 import type {
     EnvironmentState,
     MentalState,
@@ -15,28 +15,17 @@ import { match, P } from 'ts-pattern';
 // 1) Stages (explicit control flow)
 type Stage = 'idle' | 'awaiting_input' | 'completed';
 
-type Observation = { text?: string };
-
-// 2) Stage façade + invariants
-const V = {
-    stage: (ctx: TaskContext): Stage =>
-        (ctx.vars.get('stage') as Stage) ?? 'idle',
-    setStage: (ctx: TaskContext, s: Stage) => {
-        if (s === 'awaiting_input' && !V.token(ctx)) {
-            throw new Error('[invariant] awaiting_input requires token');
-        }
-        if (s === 'completed' && !V.completeCalled(ctx)) {
-            throw new Error('[invariant] completed requires completeCalled');
-        }
-        ctx.vars.set('stage', s);
+// 2) Stage helpers (minimal, configurable)
+const Stage = createStageFacade<Stage>({
+    initial: 'idle',
+    invariants: {
+        awaiting_input: { require: ['token'], forbid: ['completed.called'] },
+        completed: { require: ['completed.called'] }
     },
-    token: (ctx: TaskContext) => ctx.vars.get('token') as string | undefined,
-    setToken: (ctx: TaskContext, t?: string) => ctx.vars.set('token', t),
-    completeCalled: (ctx: TaskContext) => Boolean(ctx.vars.get('completeCalled')),
-    setCompleteCalled: (ctx: TaskContext, v: boolean) => ctx.vars.set('completeCalled', v)
-};
-
-// 3) Intent mapping is embedded directly in policy
+    autoMarks: {
+        completed: { 'completed.called': true }
+    }
+});
 
 const llmConfig = {
     provider: 'openai',
@@ -44,7 +33,10 @@ const llmConfig = {
     systemPrompt: 'You are a helpful AI assistant. You reply heavily using markdown formatting.'
 };
 
-createAgent({
+type Sensory = { current?: string };
+type Obs = { text?: string };
+
+createAgent<Sensory, Obs>({
     manifest: 'agent.json',
     llmConfig,
 
@@ -62,9 +54,8 @@ createAgent({
     },
 
     // L — Learning 
-    learning: (prev: MentalState, _prevAction: ProposedAction | undefined, obs: unknown): MentalState => {
-        const o = obs as Partial<Observation>;
-        const text = o.text || undefined;
+    learning: (prev: MentalState<Sensory>, _prevAction: ProposedAction | undefined, obs: Obs): MentalState<Sensory> => {
+        const text = obs.text || undefined;
 
         return {
             ...prev,
@@ -78,54 +69,52 @@ createAgent({
     },
 
     // R — Policy (pure): map state to ProposedAction
-    policy: (m: MentalState): ProposedAction => {
-        const currentInputText =
-            (m.memory?.sensory?.current as string | undefined);
+    policy: (m: MentalState<Sensory>): ProposedAction => {
+        const currentInputText = m.memory.sensory.current?.trim();
 
-        const trimmed = currentInputText?.trim();
-        return trimmed && trimmed.length > 0
-            ? ({ kind: 'internal', intent: 'answer_with_llm', data: { query: trimmed } } as const)
+        return currentInputText && currentInputText.length > 0
+            ? ({ kind: 'internal', intent: 'answer_with_llm', data: { query: currentInputText } } as const)
             : ({ kind: 'ask_user', prompt: 'Please type your message' } as const);
     },
 
     // S — Shield: receives ProposedAction, returns ShieldOutcome
-    shield: (_m: MentalState, a: ProposedAction): ShieldOutcome =>
+    shield: (_m: MentalState<Sensory>, a: ProposedAction): ShieldOutcome =>
         ({ action: 'pass', intent: a } as const),
 
     // E — Execution: perform action by kind/intent (no policy decisions here)
-    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState): Promise<ExecutableAction> => {
+    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState<Sensory>): Promise<ExecutableAction> => {
         return await match(a)
             .with({ kind: 'ask_user' }, async (a) => {
                 await ctx.reply('How can I help you today?');
-                const handle = await ctx.requestInput(a.prompt, { onProvided: '__onUserAnswer' });
+                const handle = await ctx.requestInput(a.prompt);
                 const token = (handle as unknown as { token?: string }).token ?? 'unknown';
-                V.setToken(ctx, token);
-                V.setStage(ctx, 'awaiting_input');
-                return { kind: 'ask_user', token } as const satisfies ExecutableAction;
+                ctx.vars.set('token', token);
+                Stage.setStage(ctx, 'awaiting_input');
+                return { kind: 'ask_user', token } as ExecutableAction;
             })
             .with({ kind: 'internal', intent: 'answer_with_llm', data: P.select('data') }, async ({ data }) => {
                 const query = (data as { query?: string } | undefined)?.query ?? '';
                 const res = await ctx.llm.call(query);
                 await ctx.reply(`You said: ${query}`);
-                await ctx.reply({ type: 'text', text: (res as Array<{ content?: string }>)[0]?.content ?? 'Ok.' });
-                ctx.complete(100, 'completed');
-                V.setCompleteCalled(ctx, true);
-                V.setStage(ctx, 'completed');
-                return { kind: 'internal', done: true } as const satisfies ExecutableAction;
+                await ctx.reply({ type: 'text', text: res[0]?.content ?? 'Ok.' });
+                ctx.progress(100, 'completed');
+                Stage.setStage(ctx, 'completed');
+                return { kind: 'internal', done: true } as ExecutableAction;
             })
             .otherwise(async () => {
-                return { kind: 'internal', done: true } as const satisfies ExecutableAction;
+                return { kind: 'internal', done: true } as ExecutableAction;
             });
     },
 
     // T — Transition
-    transition: (_env: EnvironmentState, exec: ExecutableAction, _m: MentalState): TurnOutcome => {
-        if (exec.kind === 'ask_user') {
-            return { kind: 'await_input', token: exec.token } as const;
-        }
-        if (exec.kind === 'internal' && exec.done === true) {
-            return { kind: 'complete', result: { ok: true } } as const;
-        }
-        return { kind: 'continue' } as const;
+    transition: (_env: EnvironmentState, exec: ExecutableAction, _m: MentalState<Sensory>): TurnOutcome => {
+        return match(exec)
+            .with({ kind: 'ask_user' }, (e) => (
+                { kind: 'await_input', token: e.token } as TurnOutcome
+            ))
+            .with({ kind: 'internal', done: true }, () => (
+                { kind: 'complete', result: { ok: true } } as TurnOutcome
+            ))
+            .otherwise(() => ({ kind: 'continue' } as TurnOutcome));
     }
 }, import.meta.url);

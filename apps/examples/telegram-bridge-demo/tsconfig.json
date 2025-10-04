@@ -2,11 +2,16 @@
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": ".",
     "module": "esnext",
     "target": "es2020",
     "moduleResolution": "node",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@a2arium/callagent-core": ["../../../packages/core/src"],
+      "@a2arium/callagent-types": ["../../../packages/types/src"],
+      "@a2arium/callagent-memory-sql": ["../../../packages/memory-sql/src"]
+    }
   },
   "include": ["index.ts", "AgentModule.ts"],
   "exclude": []

@@ -194,7 +194,7 @@ export type TaskContext = {
      */
     requestInput: (
         prompt: string,
-        opts: { schema?: unknown; ttlMs?: number; onProvided: string; onExpired?: string }
+        opts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }
     ) => Promise<import('../../core/orchestration/Handles.js').InputHandle>;
 
     /**

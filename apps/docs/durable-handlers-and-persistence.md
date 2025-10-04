@@ -51,7 +51,7 @@ return { kind: 'await_input', token: result.token };
 ```
 
 **MentalState Components (snapshot.M):**
-- `memory.sensory` (LLM state, lastObservation, lastResult)
+- `memory.sensory` (typed per agent via `MentalState<Sensory>`, e.g., `{ current?: string }`)
 - `memory.vars` (exposed as `ctx.vars` proxy)
 - `memory.thoughts` and `memory.decisions`
 - `memory.longTerm` (episodic/semantic/procedural)

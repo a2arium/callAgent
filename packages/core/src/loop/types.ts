@@ -69,11 +69,11 @@ export type GoalState = {
     _index?: { byStatus?: Record<GoalStatus, GoalId[]> }; // optional, computed at load
 };
 
-export type MentalState = {
+export type MentalState<Sensory = unknown> = {
     // Shortcut alias (read-mostly) to short-term vars; points to memory.vars
     vars?: Record<string, unknown>;
     memory: {
-        sensory: unknown;        // e.g., { llmState, lastObservation }
+        sensory: Sensory;        // e.g., { llmState, lastObservation }
         vars: Record<string, unknown>;
         thoughts?: import('../shared/types/workingMemory.js').ThoughtEntry[];
         decisions?: Record<string, import('../shared/types/workingMemory.js').DecisionEntry>;

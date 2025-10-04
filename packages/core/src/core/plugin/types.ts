@@ -30,7 +30,7 @@ export type AgentPlugin = {
 /**
  * Options for creating A2A-compatible agent plugins
  */
-export type CreateAgentPluginOptions = {
+export type CreateAgentPluginOptions<Sensory = unknown, Obs = unknown> = {
     /** Agent manifest - path to JSON file or direct object, defaults to './agent.json' */
     manifest?: string | AgentManifest;
     /** LLM configuration specific to this agent */
@@ -43,14 +43,14 @@ export type CreateAgentPluginOptions = {
     handleTask?: (ctx: AgentTaskContext) => Promise<unknown>;
     /** Tenant context for multi-tenant isolation */
     tenantId?: string;
-    loop?: { modules?: Partial<import('../../loop/oneTurn.js').Modules> };
+    loop?: { modules?: Partial<import('../../loop/oneTurn.js').Modules<Sensory, Obs>> };
     // Sugar: allow defining loop modules at the top level
-    attention?: import('../../loop/oneTurn.js').Modules['attention'];
-    perception?: import('../../loop/oneTurn.js').Modules['perception'];
-    learning?: import('../../loop/oneTurn.js').Modules['learning'];
-    policy?: import('../../loop/oneTurn.js').Modules['policy'];
-    shield?: import('../../loop/oneTurn.js').Modules['shield'];
-    execution?: import('../../loop/oneTurn.js').Modules['execution'];
-    transition?: import('../../loop/oneTurn.js').Modules['transition'];
+    attention?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['attention'];
+    perception?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['perception'];
+    learning?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['learning'];
+    policy?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['policy'];
+    shield?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['shield'];
+    execution?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['execution'];
+    transition?: import('../../loop/oneTurn.js').Modules<Sensory, Obs>['transition'];
     // Future hooks: initialize?, shutdown?, etc.
 } 

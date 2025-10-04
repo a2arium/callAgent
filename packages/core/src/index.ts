@@ -12,6 +12,7 @@ export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/type
 export type { MentalState, EnvironmentState } from './loop/types.js';
 export type { ProposedAction, ExecutableAction, TurnOutcome, ShieldOutcome } from './loop/oneTurn.js';
 export { runEffect } from './loop/effects.js';
+export { createStageFacade } from './loop/stageHelpers.js';
 export { assertStageInvariants } from './loop/stageInvariants.js';
 export type {
     ChildCompletionInput,
