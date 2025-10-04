@@ -3,7 +3,7 @@ import { runOfflineReplay } from '../src/loop/offline.js';
 describe('Offline replay', () => {
     it('applies optimizer patch to policy/reward params', async () => {
         const M: any = {
-            memory: { sensory: {}, shortTerm: { vars: {} }, longTerm: { episodic: [{ t: 1, obs: { x: 1 }, act: { k: 'a' }, rew: 0.5 }], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [{ t: 1, obs: { x: 1 }, act: { k: 'a' }, rew: 0.5 }], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: {},
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0.2 },

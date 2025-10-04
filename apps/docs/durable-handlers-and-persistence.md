@@ -52,8 +52,8 @@ return { kind: 'await_input', token: result.token };
 
 **MentalState Components (snapshot.M):**
 - `memory.sensory` (LLM state, lastObservation, lastResult)
-- `memory.shortTerm.vars` (exposed as `ctx.vars` proxy)
-- `memory.shortTerm.thoughts` and `memory.shortTerm.decisions`
+- `memory.vars` (exposed as `ctx.vars` proxy)
+- `memory.thoughts` and `memory.decisions`
 - `memory.longTerm` (episodic/semantic/procedural)
 - `goalState` (hierarchical goals with priorities, statuses)
 - `policyParams` (stochastic sampling, ReAct planner config)
@@ -189,8 +189,8 @@ policy: (M, env) => {
     if (env.input?.kind === 'input') {
         // Access previous state
         const previousGoals = M.goalState?.hierarchy?.roots || [];
-        const thoughts = M.memory.shortTerm.thoughts || [];
-        const vars = M.memory.shortTerm.vars || {};
+        const thoughts = M.memory.thoughts || [];
+        const vars = M.memory.vars || {};
         
         // Process the input event
         return { kind: 'language', content: `Received: ${env.input.value}` };
@@ -276,7 +276,7 @@ async function createLoopContext(taskId: string, tenantId: string, M: MentalStat
     const ctx = await this.createBaseContext(taskId, tenantId);
     
     // Integrate MentalState with context
-    ctx.vars = new Proxy(M.memory.shortTerm.vars || {}, {
+    ctx.vars = new Proxy(M.memory.vars || {}, {
         set: (target, key, value) => {
             target[key] = value;
             // vars changes are reflected in MentalState immediately
@@ -314,18 +314,18 @@ export default createAgent({
     loop: {
         modules: {
             policy: (M, env) => {
-                const step = M.memory.shortTerm.vars?.step || 'category';
+                const step = M.memory.vars?.step || 'category';
                 
                 // Process resumed input
                 if (env.input?.kind === 'input') {
                     switch (step) {
                         case 'category':
-                            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, category: env.input.value, step: 'subcategory' };
+                            M.memory.vars = { ...M.memory.vars, category: env.input.value, step: 'subcategory' };
                             return { kind: 'ask_user', prompt: 'Step 2: Choose subcategory' };
                         case 'subcategory':
-                            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, subcategory: env.input.value, step: 'processing' };
+                            M.memory.vars = { ...M.memory.vars, subcategory: env.input.value, step: 'processing' };
                             return { kind: 'subagent', target: 'processor', input: { 
-                                category: M.memory.shortTerm.vars.category, 
+                                category: M.memory.vars.category, 
                                 subcategory: env.input.value 
                             }};
                     }
@@ -358,18 +358,18 @@ Loop modules can implement error recovery through state management:
 
 ```typescript
 policy: (M, env) => {
-    const retryCount = M.memory.shortTerm.vars?.retryCount || 0;
+    const retryCount = M.memory.vars?.retryCount || 0;
     
     if (env.input?.kind === 'tool' && env.input.result?.error) {
         if (retryCount < 3) {
-            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, retryCount: retryCount + 1 };
+            M.memory.vars = { ...M.memory.vars, retryCount: retryCount + 1 };
             return { kind: 'ask_user', prompt: `Processing failed (attempt ${retryCount + 1}). Retry? (yes/no)` };
         }
         return { kind: 'language', content: 'Maximum retries exceeded. Operation failed.' };
     }
     
     if (env.input?.kind === 'input' && env.input.value.toLowerCase() === 'yes') {
-        return { kind: 'tool', name: 'processor', args: M.memory.shortTerm.vars?.lastArgs || {} };
+        return { kind: 'tool', name: 'processor', args: M.memory.vars?.lastArgs || {} };
     }
     
     return { kind: 'tool', name: 'processor', args: { data: 'initial' } };
@@ -405,7 +405,7 @@ policy: (M, env) => {
    // Minimize MentalState mutations
    policy: (M, env) => {
        // Read-only access preferred, mutations only when necessary
-       const currentVars = M.memory.shortTerm.vars || {};
+       const currentVars = M.memory.vars || {};
        return { kind: 'language', content: `Current step: ${currentVars.step}` };
    }
    ```

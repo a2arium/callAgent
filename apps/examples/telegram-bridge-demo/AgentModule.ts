@@ -6,7 +6,7 @@ import type {
     TurnOutcome,
     TaskContext,
     ProposedAction,
-    ShieldOutcome
+    ShieldOutcome,
 } from '@a2arium/callagent-core';
 import { match, P } from 'ts-pattern';
 
@@ -14,6 +14,8 @@ import { match, P } from 'ts-pattern';
 
 // 1) Stages (explicit control flow)
 type Stage = 'idle' | 'awaiting_input' | 'completed';
+
+type Observation = { text?: string };
 
 // 2) Stage façade + invariants
 const V = {
@@ -59,24 +61,17 @@ createAgent({
         return {} as const;
     },
 
-    // L — Learning (must accept `unknown`; narrow inside)
+    // L — Learning 
     learning: (prev: MentalState, _prevAction: ProposedAction | undefined, obs: unknown): MentalState => {
-        const o = (obs && typeof obs === 'object' ? (obs as { text?: unknown }) : {}) || {};
-        const text = typeof o.text === 'string' ? o.text : undefined;
+        const o = obs as Partial<Observation>;
+        const text = o.text || undefined;
 
-        const prevVars = (prev.memory?.shortTerm?.vars || {}) as Record<string, unknown>;
-        // TODO: shouldn't redefine vars here 
-        // if changign state, could be apisodic memory or something else
         return {
             ...prev,
             memory: {
                 ...prev.memory,
-                shortTerm: {
-                    ...prev.memory.shortTerm,
-                    vars: {
-                        ...prevVars,
-                        lastUserText: text ?? (prevVars.lastUserText as string | undefined)
-                    }
+                sensory: {
+                    current: text
                 }
             }
         };
@@ -84,11 +79,10 @@ createAgent({
 
     // R — Policy (pure): map state to ProposedAction
     policy: (m: MentalState): ProposedAction => {
-        const lastUserText =
-            (m.vars?.lastUserText as string | undefined) ??
-            (m.memory?.shortTerm?.vars?.lastUserText as string | undefined);
+        const currentInputText =
+            (m.memory?.sensory?.current as string | undefined);
 
-        const trimmed = lastUserText?.trim();
+        const trimmed = currentInputText?.trim();
         return trimmed && trimmed.length > 0
             ? ({ kind: 'internal', intent: 'answer_with_llm', data: { query: trimmed } } as const)
             : ({ kind: 'ask_user', prompt: 'Please type your message' } as const);

@@ -222,7 +222,7 @@ export default createAgent({
             };
 
         } catch (error) {
-            ctx.logger.error('Failed to perform semantic search test:', error);
+            ctx.logger.error('Failed to perform semantic search test:', error as any);
             throw error;
         }
     }

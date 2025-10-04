@@ -59,8 +59,8 @@ export async function runLoop(
                         const match = lastObs.match(re);
                         if (match) {
                             const argVal = match[1] || match[0];
-                            // Multi-step: if we have a prior tool result in shortTerm.scratch.react, use it to refine args
-                            const scratch = (((m as any)?.memory?.shortTerm as any)?.scratch?.react) || {};
+                            // Multi-step: if we have a prior tool result in scratch.react, use it to refine args
+                            const scratch = (((m as any)?.memory as any)?.scratch?.react) || {};
                             const refinedArgs = { [p.argKey]: argVal, context: scratch.lastResult };
                             return { kind: 'tool', name: p.tool, args: refinedArgs } as any;
                         }
@@ -135,8 +135,8 @@ export async function runLoop(
                 const result = await (ctx as any).tools.invoke((a as any).name, (a as any).args);
                 // Store result for multi-step planners
                 try {
-                    const st = ((M as any)?.memory?.shortTerm) || {};
-                    (M as any).memory.shortTerm = { ...st, scratch: { ...(st.scratch || {}), react: { ...((st.scratch || {}).react || {}), lastResult: result } } };
+                    const st = ((M as any)?.memory) || {};
+                    (M as any).memory = { ...st, scratch: { ...(st.scratch || {}), react: { ...((st.scratch || {}).react || {}), lastResult: result } } };
                 } catch { /* noop */ }
                 return { kind: 'tool', result } as any;
             }
@@ -175,15 +175,15 @@ export async function runLoop(
             try {
                 const nodes = ((m as any)?.goalState?.hierarchy?.nodes) || {};
                 const done = Object.values(nodes as any).filter((n: any) => n?.status === 'done').length;
-                const prevDone = Number(((m as any)?.shortTermDoneCount) ?? 0);
-                (m as any).shortTermDoneCount = done;
+                const prevDone = Number(((m as any).DoneCount) ?? 0);
+                (m as any).DoneCount = done;
                 return Math.max(0, done - prevDone);
             } catch { return 0; }
         }),
         intrinsicReward: modules.intrinsicReward ?? ((m, obs) => {
             try {
                 const s = JSON.stringify(obs);
-                const st = (m.memory.shortTerm as any);
+                const st = (m.memory as any);
                 st.scratch = st.scratch || {};
                 const scratch = st.scratch as any;
                 scratch.__novelty = scratch.__novelty || [];

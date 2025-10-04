@@ -70,9 +70,9 @@ export class TaskEngine {
         const { tenantId, sessionId, agentId, vars } = params;
         const snap = await this.sessionManager.load(tenantId, sessionId);
         const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const M = ((base as any).M || { memory: { shortTerm: { vars: {} } } }) as any;
-        const currentVars = ((M.memory?.shortTerm?.vars) || {}) as Record<string, unknown>;
-        const nextM = { ...M, memory: { ...(M.memory || {}), shortTerm: { ...(M.memory?.shortTerm || {}), vars: { ...currentVars, ...(vars || {}) } } } };
+        const M = ((base as any).M || { memory: { vars: {} } }) as any;
+        const currentVars = ((M.memory?.vars) || {}) as Record<string, unknown>;
+        const nextM = { ...M, memory: { ...(M.memory || {}), vars: { ...currentVars, ...(vars || {}) } } };
         const snapshot = { ...base, M: nextM } as Record<string, unknown>;
         try {
             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId, expectedWmVersion: BigInt(0), snapshot });
@@ -123,9 +123,9 @@ export class TaskEngine {
         const baseSnap = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
         let M: any = (baseSnap as any).M;
         if (!M) { try { M = (ctx as any).__mental; } catch { /* noop */ } }
-        if (!M) { try { const { initialM } = await import('../../loop/init.js'); M = initialM(ctx); } catch { M = { memory: { shortTerm: { vars: {} }, sensory: {} }, goalState: { hierarchy: { nodes: {}, roots: [] } } } }; }
+        if (!M) { try { const { initialM } = await import('../../loop/init.js'); M = initialM(ctx); } catch { M = { memory: { vars: {}, sensory: {} }, goalState: { hierarchy: { nodes: {}, roots: [] } } } }; }
         // Merge vars
-        try { M.memory = M.memory || {}; M.memory.shortTerm = { ...(M.memory.shortTerm || {}), vars: plainVars }; } catch { /* noop */ }
+        try { M.memory = M.memory || {}; M.memory = { ...(M.memory || {}), vars: plainVars }; } catch { /* noop */ }
         // Attach LLM state into sensory
         try {
             const llmAny = (ctx as any).llm as any;
@@ -222,21 +222,21 @@ export class TaskEngine {
         // One-time migration from legacy snapshot.vars
         try {
             const legacyVars = (baseSnap as any).vars as Record<string, unknown> | undefined;
-            const hasVars = M?.memory && (M.memory as any).shortTerm && Object.keys(((M.memory as any).shortTerm as any).vars || {}).length > 0;
+            const hasVars = M?.memory && (M.memory as any) && Object.keys(((M.memory as any) as any).vars || {}).length > 0;
             if (legacyVars && !hasVars) {
-                (M.memory as any).shortTerm = { ...((M.memory as any).shortTerm || {}), vars: { ...(legacyVars as Record<string, unknown>) } };
+                (M.memory as any) = { ...((M.memory as any) || {}), vars: { ...(legacyVars as Record<string, unknown>) } };
             }
         } catch { /* ignore migration errors */ }
         // Expose MentalState on context for in-turn cognitive operations (e.g., goals API)
         (ctx as any).__mental = M;
-        // Build ctx.vars proxy over M.memory.shortTerm.vars with turn-level flush
-        const currentVars = ((M.memory as any).shortTerm?.vars || {}) as Record<string, unknown>;
+        // Build ctx.vars proxy over M.memory.vars with turn-level flush
+        const currentVars = ((M.memory as any)?.vars || {}) as Record<string, unknown>;
         const varCache = new Map<string, unknown>(Object.entries(currentVars));
         (ctx as any).__wmVersion = session?.wmVersion;
         (ctx as any).__varsDirty = false;
         const assignVarsIntoMental = () => {
-            (M.memory as any).shortTerm = { ...((M.memory as any).shortTerm || {}), vars: Object.fromEntries(varCache) };
-            (M as any).vars = (M.memory as any).shortTerm.vars;
+            (M.memory as any) = { ...((M.memory as any) || {}), vars: Object.fromEntries(varCache) };
+            (M as any).vars = (M.memory as any).vars;
         };
         const updateLlmInMental = () => {
             try {
@@ -704,8 +704,8 @@ export class TaskEngine {
                             try {
                                 const vars = (ctx as any).vars;
                                 if (vars && typeof vars === 'object') {
-                                    const st = ((mNext as any)?.memory?.shortTerm) || {};
-                                    (mNext as any).memory.shortTerm = { ...st, vars: { ...(st.vars || {}), ...(vars as Record<string, unknown>) } };
+                                    const st = ((mNext as any)?.memory) || {};
+                                    (mNext as any).memory = { ...st, vars: { ...(st.vars || {}), ...(vars as Record<string, unknown>) } };
                                 }
                             } catch { /* noop */ }
                             // Apply hygiene caps before saving to bound snapshot size
@@ -914,15 +914,15 @@ export class TaskEngine {
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
             // Reattach working variables facade linked to this MentalState (resume path)
             try {
-                const currentVars = ((M as any)?.memory?.shortTerm?.vars || {}) as Record<string, unknown>;
+                const currentVars = ((M as any)?.memory?.vars || {}) as Record<string, unknown>;
                 const varCache = new Map<string, unknown>(Object.entries(currentVars));
                 const assignVarsIntoMental = () => {
                     (M as any).memory = (M as any).memory || {};
-                    (M as any).memory.shortTerm = {
-                        ...(((M as any).memory || {}).shortTerm || {}),
+                    (M as any).memory = {
+                        ...(((M as any).memory || {}) || {}),
                         vars: Object.fromEntries(varCache)
                     };
-                    (M as any).vars = (M as any).memory.shortTerm.vars;
+                    (M as any).vars = (M as any).memory.vars;
                 };
                 (ctx as any).vars = {
                     get: (key: string) => varCache.get(key),
@@ -948,11 +948,11 @@ export class TaskEngine {
             } as EnvironmentState;
             // Ensure input token is reflected in working variables for this resume turn
             try {
-                const st = ((((M as any).memory || {}).shortTerm) || {}) as any;
+                const st = ((((M as any).memory || {})) || {}) as any;
                 const v = { ...(st.vars || {}) } as Record<string, unknown>;
                 if (typeof v.inputToken === 'undefined') {
                     v.inputToken = token;
-                    if ((M as any).memory) (M as any).memory.shortTerm = { ...st, vars: v };
+                    if ((M as any).memory) (M as any).memory = { ...st, vars: v };
                     (ctx as any).vars?.set?.('inputToken', token);
                 }
             } catch { /* noop */ }
@@ -1553,7 +1553,7 @@ export class TaskEngine {
         // Rehydrate vars from MentalState if present; fallback to legacy vars
         try {
             const M = (baseSnap as any).M as MentalState | undefined;
-            const vars = M ? (((M.memory as any)?.shortTerm?.vars) || {}) : ((baseSnap as any)?.vars || {});
+            const vars = M ? (((M.memory as any)?.vars) || {}) : ((baseSnap as any)?.vars || {});
             // Merge into facade instead of overwriting it
             try { (ctx as any).vars.merge(vars); } catch { (ctx as any).vars = { ...(ctx as any).vars, ...vars }; }
         } catch {

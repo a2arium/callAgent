@@ -13,7 +13,7 @@ export function initialM(ctx: TaskContext): MentalState {
     return {
         memory: {
             sensory: { llmState, lastObservation: ctx.task.input },
-            shortTerm: { vars: {} },
+            vars: {},
             longTerm: {
                 episodic: [],
                 semantic: { concepts: [] },

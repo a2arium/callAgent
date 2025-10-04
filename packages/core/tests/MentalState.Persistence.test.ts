@@ -60,7 +60,7 @@ describe('MentalState persistence and resume', () => {
         expect(snap1).not.toBeNull();
         const M1 = (snap1!.snapshot as any).M;
         expect(M1).toBeDefined();
-        expect(M1.memory?.shortTerm?.vars?.foo).toBe('bar');
+        expect(M1.memory ??.vars?.foo).toBe('bar');
         const goals = M1.goalState?.hierarchy?.nodes || {};
         expect(Object.keys(goals).length).toBeGreaterThan(0);
 

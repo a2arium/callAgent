@@ -68,7 +68,7 @@ describe('Auto-Resume Integration Tests', () => {
                             }
 
                             // Initial turn - ask for input
-                            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, testVar: 'initial-value' };
+                            M.memory.vars = { ...M.memory.vars, testVar: 'initial-value' };
                             return { kind: 'ask_user', prompt: 'Provide a value' };
                         },
 
@@ -111,7 +111,7 @@ describe('Auto-Resume Integration Tests', () => {
             const snap1 = await store.getSessionSnapshot(tenantId, taskId);
             expect(snap1).not.toBeNull();
             const M1 = (snap1!.snapshot as any).M;
-            expect(M1.memory?.shortTerm?.vars?.testVar).toBe('initial-value');
+            expect(M1.memory ??.vars?.testVar).toBe('initial-value');
 
             // Resume with input - should auto-resume and process input
             const token = result1.metadata?.token as string;
@@ -123,7 +123,7 @@ describe('Auto-Resume Integration Tests', () => {
             // Verify final MentalState still has vars
             const snap2 = await store.getSessionSnapshot(tenantId, taskId);
             const M2 = (snap2!.snapshot as any).M;
-            expect(M2.memory?.shortTerm?.vars?.testVar).toBe('initial-value');
+            expect(M2.memory ??.vars?.testVar).toBe('initial-value');
         });
 
         it('preserves MentalState across auto-resume turns', async () => {
@@ -139,13 +139,13 @@ describe('Auto-Resume Integration Tests', () => {
 
                             if (env.input?.kind === 'input') {
                                 // Verify state preserved from previous turn
-                                expect(M.memory.shortTerm.vars.turnNumber).toBe(1);
-                                M.memory.shortTerm.vars.turnNumber = 2;
+                                expect(M.memory.vars.turnNumber).toBe(1);
+                                M.memory.vars.turnNumber = 2;
                                 return { kind: 'language', content: `Turn ${turnCount}, vars preserved` };
                             }
 
                             // Initial turn
-                            M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, turnNumber: 1 };
+                            M.memory.vars = { ...M.memory.vars, turnNumber: 1 };
                             return { kind: 'ask_user', prompt: 'Continue?' };
                         },
 
@@ -177,7 +177,7 @@ describe('Auto-Resume Integration Tests', () => {
             // Verify final state
             const snap = await store.getSessionSnapshot(tenantId, taskId);
             const M = (snap!.snapshot as any).M;
-            expect(M.memory?.shortTerm?.vars?.turnNumber).toBe(2);
+            expect(M.memory ??.vars?.turnNumber).toBe(2);
         });
     });
 

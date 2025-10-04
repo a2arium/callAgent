@@ -56,14 +56,14 @@ describe('TaskEngine - Auto-Resume restores WM vars', () => {
                     policy: (M: any, env: any) => {
                         if (env.input?.kind === 'input') {
                             // Verify vars were restored from MentalState
-                            if (M.memory.shortTerm.vars.debugString === 'first-turn') {
+                            if (M.memory.vars.debugString === 'first-turn') {
                                 varsRestored = true;
                             }
                             return { kind: 'language', content: `Input received: ${env.input.value}` };
                         }
 
                         // Initial turn - set vars and ask for input
-                        M.memory.shortTerm.vars = { ...M.memory.shortTerm.vars, debugString: 'first-turn' };
+                        M.memory.vars = { ...M.memory.vars, debugString: 'first-turn' };
                         return { kind: 'ask_user', prompt: 'Provide value' };
                     },
 

@@ -239,7 +239,7 @@ learning: (prev, _prevAction, obs) => ({
   ...prev,
   reward: {
     ...prev.reward,
-    spent: (prev.reward?.spent ?? 0) + (prev.memory?.shortTerm?.vars?.turnCost ?? 0)
+    spent: (prev.reward?.spent ?? 0) + (prev.memory??.vars?.turnCost ?? 0)
   }
 })
 ```
@@ -349,19 +349,17 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
 
 ```typescript
 type MentalState = {
-  // NOTE: vars? is a read-only alias to memory.shortTerm.vars
+  // NOTE: vars? is a read-only alias to memory.vars
   // ALWAYS use ctx.vars for writes; treat M.vars as framework-internal
   vars?: Record<string, unknown>;
   
   memory: {
     sensory: unknown;
-    shortTerm: {
-      vars: Record<string, unknown>;
-      thoughts?: ThoughtEntry[];
-      decisions?: Record<string, DecisionEntry>;
-      scratch?: unknown;
-      window?: unknown;
-    };
+    vars: Record<string, unknown>;
+    thoughts?: ThoughtEntry[];
+    decisions?: Record<string, DecisionEntry>;
+    scratch?: unknown;
+    window?: unknown;
     longTerm: {
       episodic: EpisodicEvent[];
       semantic: { concepts: SemanticConcept[] };
@@ -394,7 +392,7 @@ ctx.vars.set('token', handle.token);
 ctx.vars.set('prompted', true);
 
 // ❌ Never write to M directly (except in Learning)
-m.memory.shortTerm.vars.stage = 'awaiting_input';  // Violates immutability
+m.memory.vars.stage = 'awaiting_input';  // Violates immutability
 
 // ⚠️ M.vars is read-only convenience; prefer ctx.vars always
 const stage = m.vars?.stage;  // OK to read
@@ -617,7 +615,7 @@ learning: (prev, prevAction, obs, rPrev) => {
   }
   
   // ❌ NEVER do this:
-  // prev.memory.shortTerm.vars.userText = obs.text;  // Mutation!
+  // prev.memory.vars.userText = obs.text;  // Mutation!
   // prev.vars.stage = 'idle';  // Control in cognition!
   
   return prev;
@@ -2355,7 +2353,7 @@ execution: async (intent, ctx) => {
 1. **Don't write to M outside Learning**
    ```typescript
    execution: async (intent, ctx, m) => {
-     m.memory.shortTerm.vars.stage = 'idle';  // ❌ Mutation!
+     m.memory.vars.stage = 'idle';  // ❌ Mutation!
    }
    ```
 

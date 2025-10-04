@@ -8,7 +8,7 @@ describe('LoopRunner basic', () => {
         const ctx: any = createMinimalTestContext('test-tenant', 'test-agent');
         ctx.requestInput = async (prompt: string) => ({ token: 'tok-123', prompt });
         const M: any = {
-            memory: { sensory: {}, shortTerm: { vars: {} }, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0.2 },
@@ -28,7 +28,7 @@ describe('LoopRunner basic', () => {
         let replied = false;
         ctx.reply = async () => { replied = true; };
         const M: any = {
-            memory: { sensory: {}, shortTerm: { vars: {} }, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0.2 },
@@ -47,7 +47,7 @@ describe('LoopRunner basic', () => {
         const ctx: any = createMinimalTestContext('test-tenant', 'test-agent');
         ctx.sendTaskToAgent = async () => ({ childToken: 'child-1' });
         const M: any = {
-            memory: { sensory: {}, shortTerm: { vars: {} }, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0.2 },
@@ -66,7 +66,7 @@ describe('LoopRunner basic', () => {
         const ctx: any = createMinimalTestContext('test-tenant', 'test-agent');
         ctx.tools = { invoke: async () => ({ ok: true }) };
         const M: any = {
-            memory: { sensory: {}, shortTerm: { vars: {} }, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0.2 },

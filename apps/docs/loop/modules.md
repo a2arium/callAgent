@@ -39,7 +39,7 @@ sequenceDiagram
 flowchart TD
   subgraph M[MentalState (M_t)]
     WM[worldModel]
-    MEMS[memory.shortTerm]
+    MEMS[memory]
     MEML[memory.longTerm]
     GOALS[goalState]
     EMO[emotion]

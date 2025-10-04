@@ -4,7 +4,7 @@ describe('Goal progress extrinsic reward', () => {
     it('rewards when done count increases', async () => {
         const ctx: any = { reply: async () => { } };
         const M: any = {
-            memory: { sensory: {}, shortTerm: { vars: {} }, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: {},
             goalState: { hierarchy: { nodes: { g1: { id: 'g1', title: 'A', type: 'short', priority: 1, status: 'active', createdAt: '', updatedAt: '' } }, roots: ['g1'] } },
             emotion: { valence: 0, arousal: 0.2 },

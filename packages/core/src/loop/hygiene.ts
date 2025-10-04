@@ -29,17 +29,17 @@ export function pruneMentalState(input: MentalState, cfg: HygieneConfig = {}): M
 
     // Thoughts cap
     try {
-        const thoughts = Array.isArray((M.memory.shortTerm as any)?.thoughts) ? ((M.memory.shortTerm as any).thoughts as unknown[]) : [];
+        const thoughts = Array.isArray((M.memory as any)?.thoughts) ? ((M.memory as any).thoughts as unknown[]) : [];
         const capped = thoughtsCap > 0 ? thoughts.slice(-thoughtsCap) : thoughts;
-        (M.memory.shortTerm as any).thoughts = capped as any;
+        (M.memory as any).thoughts = capped as any;
     } catch { /* noop */ }
 
     // Decisions cap (keep last keys; order approximated by Object.keys order)
     try {
-        const decisionsObj = ((M.memory.shortTerm as any)?.decisions || {}) as Record<string, unknown>;
+        const decisionsObj = ((M.memory as any)?.decisions || {}) as Record<string, unknown>;
         const entries = Object.entries(decisionsObj);
         const kept = decisionsCap > 0 ? entries.slice(-decisionsCap) : entries;
-        (M.memory.shortTerm as any).decisions = Object.fromEntries(kept) as any;
+        (M.memory as any).decisions = Object.fromEntries(kept) as any;
     } catch { /* noop */ }
 
     return M;

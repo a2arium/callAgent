@@ -4,7 +4,7 @@ describe('ReAct-style planner (feature flag)', () => {
     it('selects tool based on regex pattern over last observation', async () => {
         const ctx: any = { reply: async () => { } };
         const M: any = {
-            memory: { sensory: { lastObservation: 'Search for cats near Boston' }, shortTerm: { vars: {} }, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            memory: { sensory: { lastObservation: 'Search for cats near Boston' }, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: {},
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0.2 },

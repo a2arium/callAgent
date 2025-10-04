@@ -70,17 +70,15 @@ export type GoalState = {
 };
 
 export type MentalState = {
-    // Shortcut alias (read-mostly) to short-term vars; points to memory.shortTerm.vars
+    // Shortcut alias (read-mostly) to short-term vars; points to memory.vars
     vars?: Record<string, unknown>;
     memory: {
         sensory: unknown;        // e.g., { llmState, lastObservation }
-        shortTerm: {
-            vars: Record<string, unknown>;
-            thoughts?: import('../shared/types/workingMemory.js').ThoughtEntry[];
-            decisions?: Record<string, import('../shared/types/workingMemory.js').DecisionEntry>;
-            scratch?: unknown;
-            window?: unknown;
-        };
+        vars: Record<string, unknown>;
+        thoughts?: import('../shared/types/workingMemory.js').ThoughtEntry[];
+        decisions?: Record<string, import('../shared/types/workingMemory.js').DecisionEntry>;
+        scratch?: unknown;
+        window?: unknown;
         longTerm: {
             episodic: EpisodicEvent[];
             semantic: { concepts: SemanticConcept[] };
