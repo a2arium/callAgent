@@ -11,7 +11,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@a2arium/callagent-core@workspace:*, @a2arium/callagent-core@workspace:packages/core":
+"@a2arium/callagent-core@workspace:, @a2arium/callagent-core@workspace:*, @a2arium/callagent-core@workspace:packages/core":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-core@workspace:packages/core"
   dependencies:
@@ -774,6 +774,7 @@ __metadata:
     "@callmessenger/adapter-web": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web"
     "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core"
     "@types/ws": "npm:^8"
+    ts-pattern: "npm:^5.8.0"
     tsx: "npm:^4.19.0"
   languageName: unknown
   linkType: soft
@@ -4725,6 +4726,8 @@ __metadata:
 "loop-agent-mini@workspace:apps/examples/loop-agent-mini":
   version: 0.0.0-use.local
   resolution: "loop-agent-mini@workspace:apps/examples/loop-agent-mini"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:"
   languageName: unknown
   linkType: soft
 
@@ -6518,6 +6521,13 @@ __metadata:
     ts-node-transpile-only: dist/bin-transpile.js
     ts-script: dist/bin-script-deprecated.js
   checksum: 10c0/5f29938489f96982a25ba650b64218e83a3357d76f7bede80195c65ab44ad279c8357264639b7abdd5d7e75fc269a83daa0e9c62fd8637a3def67254ecc9ddc2
+  languageName: node
+  linkType: hard
+
+"ts-pattern@npm:^5.8.0":
+  version: 5.8.0
+  resolution: "ts-pattern@npm:5.8.0"
+  checksum: 10c0/0e41006a8de7490c7edbba36c095550cd4b0e334247f9e76cddbdaadea4bcdc479763fb403a787db19bb83480c02fe6ea0e9799ceaaba0573acbe31e341ab947
   languageName: node
   linkType: hard
 

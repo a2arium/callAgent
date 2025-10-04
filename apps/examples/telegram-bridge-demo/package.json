@@ -14,6 +14,7 @@
     "@a2arium/callagent-chat-bridge": "workspace:*",
     "@callmessenger/adapter-telegram": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram",
     "@callmessenger/adapter-web": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web",
-    "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core"
+    "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core",
+    "ts-pattern": "^5.8.0"
   }
 }

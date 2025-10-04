@@ -1,25 +1,24 @@
 import { createAgent, isDirectInput } from '@a2arium/callagent-core';
-import type { EnvironmentState, MentalState, ExecutableAction, TurnOutcome, TaskContext, ProposedAction, ShieldOutcome } from '@a2arium/callagent-core';
+import type {
+    EnvironmentState,
+    MentalState,
+    ExecutableAction,
+    TurnOutcome,
+    TaskContext,
+    ProposedAction,
+    ShieldOutcome
+} from '@a2arium/callagent-core';
+import { match, P } from 'ts-pattern';
 
-const llmConfig = {
-    provider: 'openai',
-    modelAliasOrName: 'fast',
-    systemPrompt: 'You are a helpful AI assistant. You reply heavily using markdown formatting.'
-};
-
-// === Minimal A-P-L-R-E-T aligned agent ===
+// === Minimal A-P-L-R-E-T aligned agent with ts-pattern ===
 
 // 1) Stages (explicit control flow)
 type Stage = 'idle' | 'awaiting_input' | 'completed';
 
-// 2) Intents (what Policy decides to do)
-type Intent =
-    | { kind: 'prompt_user' }
-    | { kind: 'answer_with_llm'; query: string };
-
-// 4) Typed façade for ctx.vars (+ minimal invariants)
+// 2) Stage façade + invariants
 const V = {
-    stage: (ctx: TaskContext): Stage => (ctx.vars.get('stage') as Stage) ?? 'idle',
+    stage: (ctx: TaskContext): Stage =>
+        (ctx.vars.get('stage') as Stage) ?? 'idle',
     setStage: (ctx: TaskContext, s: Stage) => {
         if (s === 'awaiting_input' && !V.token(ctx)) {
             throw new Error('[invariant] awaiting_input requires token');
@@ -35,37 +34,39 @@ const V = {
     setCompleteCalled: (ctx: TaskContext, v: boolean) => ctx.vars.set('completeCalled', v)
 };
 
-// Loop-first agent implementation (A-P-L-R-E-T modules)
+// 3) Intent mapping is embedded directly in policy
+
+const llmConfig = {
+    provider: 'openai',
+    modelAliasOrName: 'fast',
+    systemPrompt: 'You are a helpful AI assistant. You reply heavily using markdown formatting.'
+};
+
 createAgent({
     manifest: 'agent.json',
     llmConfig,
-    // A - Attention
+
+    // A — Attention
     attention: () => ({ wantPrompt: true }),
 
-    // P - Perception → typed Observation
-    perception: (env: EnvironmentState): unknown => {
-        const inp = env?.input as unknown;
-        if (isDirectInput(inp)) {
-            const v = inp.value;
-            const text = typeof v === 'string'
-                ? v
-                : (v && typeof v === 'object' && typeof (v as { text?: string }).text === 'string')
-                    ? (v as { text?: string }).text
-                    : undefined;
-            return { text, resumeKind: 'input' } as { text?: string; resumeKind?: string };
+    // P — Perception (accept env, produce a small observation object)
+    perception: (env: EnvironmentState) => {
+        if (isDirectInput(env?.input)) {
+            console.log('[tg-agent] perception input', env.input);
+            const { text } = env.input.value as { text?: string };
+            return { text } as const;
         }
-        if (inp && typeof inp === 'object' && typeof (inp as { text?: string }).text === 'string') {
-            return { text: (inp as { text?: string }).text } as { text?: string };
-        }
-        return {};
+        return {} as const;
     },
 
-    // L - Learning (pure, immutable) → write cognition to M
+    // L — Learning (must accept `unknown`; narrow inside)
     learning: (prev: MentalState, _prevAction: ProposedAction | undefined, obs: unknown): MentalState => {
-        const o = (obs && typeof obs === 'object' ? obs as { text?: unknown; resumeKind?: unknown } : {}) as { text?: unknown; resumeKind?: unknown };
+        const o = (obs && typeof obs === 'object' ? (obs as { text?: unknown }) : {}) || {};
         const text = typeof o.text === 'string' ? o.text : undefined;
-        const resumedFrom = o.resumeKind === 'input' ? 'input' : (undefined as string | undefined);
+
         const prevVars = (prev.memory?.shortTerm?.vars || {}) as Record<string, unknown>;
+        // TODO: shouldn't redefine vars here 
+        // if changign state, could be apisodic memory or something else
         return {
             ...prev,
             memory: {
@@ -74,90 +75,63 @@ createAgent({
                     ...prev.memory.shortTerm,
                     vars: {
                         ...prevVars,
-                        lastUserText: text ?? (prevVars.lastUserText as string | undefined),
-                        resumedFrom: resumedFrom ?? (prevVars.resumedFrom as string | undefined)
+                        lastUserText: text ?? (prevVars.lastUserText as string | undefined)
                     }
                 }
             }
         };
     },
 
-    // R - Policy (pure) → Intent
-    policy: (m: MentalState) => {
-        const lastUserText = (m.vars?.lastUserText as string | undefined) || (m.memory?.shortTerm?.vars?.lastUserText as string | undefined);
-        const t = typeof lastUserText === 'string' ? lastUserText.trim() : undefined;
-        const intent: Intent = t ? { kind: 'answer_with_llm', query: t } : { kind: 'prompt_user' };
-        // Map Intent → ProposedAction (engine contract)
-        if (intent.kind === 'prompt_user') {
-            return { kind: 'ask_user', prompt: 'Please type your message' } as ProposedAction;
-        }
-        return { kind: 'internal', intent: 'answer_with_llm', data: { query: intent.query } } as ProposedAction;
+    // R — Policy (pure): map state to ProposedAction
+    policy: (m: MentalState): ProposedAction => {
+        const lastUserText =
+            (m.vars?.lastUserText as string | undefined) ??
+            (m.memory?.shortTerm?.vars?.lastUserText as string | undefined);
+
+        const trimmed = lastUserText?.trim();
+        return trimmed && trimmed.length > 0
+            ? ({ kind: 'internal', intent: 'answer_with_llm', data: { query: trimmed } } as const)
+            : ({ kind: 'ask_user', prompt: 'Please type your message' } as const);
     },
 
-    // S - Shield (align with current engine: pass-through)
-    shield: (_m: MentalState, a: ProposedAction) => ({ action: 'pass', intent: a } as ShieldOutcome),
+    // S — Shield: receives ProposedAction, returns ShieldOutcome
+    shield: (_m: MentalState, a: ProposedAction): ShieldOutcome =>
+        ({ action: 'pass', intent: a } as const),
 
-    // E - Execution (dispatcher by stage + intent)
-    execution: async (a: ProposedAction, ctx: TaskContext, m: MentalState): Promise<ExecutableAction> => {
-        const stage = V.stage(ctx);
-
-        if (stage === 'idle' && a?.kind === 'ask_user') {
-            await ctx.reply('How can I help you today?');
-            const handle = await ctx.requestInput(a.prompt, { onProvided: '__onUserAnswer' });
-            const token = (handle as unknown as { token?: string }).token || 'unknown';
-            V.setToken(ctx, token);
-            V.setStage(ctx, 'awaiting_input');
-            return { kind: 'ask_user', token };
-        }
-
-        // If Policy chose to answer immediately but we're still idle, prompt first
-        if (stage === 'idle' && a?.kind === 'internal' && (a as { intent: string }).intent === 'answer_with_llm') {
-            const resumedFrom = (m.memory?.shortTerm?.vars?.resumedFrom as string | undefined) || (m.vars?.resumedFrom as string | undefined);
-            if (resumedFrom === 'input') {
-                const query = ((a as { data?: { query?: unknown } }).data?.query as string | undefined) || '';
+    // E — Execution: perform action by kind/intent (no policy decisions here)
+    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState): Promise<ExecutableAction> => {
+        return await match(a)
+            .with({ kind: 'ask_user' }, async (a) => {
+                await ctx.reply('How can I help you today?');
+                const handle = await ctx.requestInput(a.prompt, { onProvided: '__onUserAnswer' });
+                const token = (handle as unknown as { token?: string }).token ?? 'unknown';
+                V.setToken(ctx, token);
+                V.setStage(ctx, 'awaiting_input');
+                return { kind: 'ask_user', token } as const satisfies ExecutableAction;
+            })
+            .with({ kind: 'internal', intent: 'answer_with_llm', data: P.select('data') }, async ({ data }) => {
+                const query = (data as { query?: string } | undefined)?.query ?? '';
                 const res = await ctx.llm.call(query);
                 await ctx.reply(`You said: ${query}`);
                 await ctx.reply({ type: 'text', text: (res as Array<{ content?: string }>)[0]?.content ?? 'Ok.' });
                 ctx.complete(100, 'completed');
                 V.setCompleteCalled(ctx, true);
                 V.setStage(ctx, 'completed');
-                return { kind: 'internal', done: true };
-            } else {
-                await ctx.reply('How can I help you today?');
-                const handle = await ctx.requestInput('Please type your message', { onProvided: '__onUserAnswer' });
-                const token = (handle as unknown as { token?: string }).token || 'unknown';
-                V.setToken(ctx, token);
-                V.setStage(ctx, 'awaiting_input');
-                return { kind: 'ask_user', token };
-            }
-        }
-
-        if (stage === 'awaiting_input' && a?.kind === 'internal' && (a as { intent: string }).intent === 'answer_with_llm') {
-            const query = ((a as { data?: { query?: unknown } }).data?.query as string | undefined) || '';
-            const res = await ctx.llm.call(query);
-            await ctx.reply(`You said: ${query}`);
-            await ctx.reply({ type: 'text', text: (res as Array<{ content?: string }>)[0]?.content ?? 'Ok.' });
-            ctx.complete(100, 'completed');
-            V.setCompleteCalled(ctx, true);
-            V.setStage(ctx, 'completed');
-            return { kind: 'internal', done: true };
-        }
-
-        if (stage === 'completed') {
-            return { kind: 'internal', done: true };
-        }
-
-        return { kind: 'internal', done: true };
+                return { kind: 'internal', done: true } as const satisfies ExecutableAction;
+            })
+            .otherwise(async () => {
+                return { kind: 'internal', done: true } as const satisfies ExecutableAction;
+            });
     },
 
-    // T - Transition (await and completion signals)
+    // T — Transition
     transition: (_env: EnvironmentState, exec: ExecutableAction, _m: MentalState): TurnOutcome => {
         if (exec.kind === 'ask_user') {
-            return { kind: 'await_input', token: (exec as { token: string }).token } as TurnOutcome;
+            return { kind: 'await_input', token: exec.token } as const;
         }
         if (exec.kind === 'internal' && exec.done === true) {
-            return { kind: 'complete', result: { ok: true } } as TurnOutcome;
+            return { kind: 'complete', result: { ok: true } } as const;
         }
-        return { kind: 'continue' } as TurnOutcome;
+        return { kind: 'continue' } as const;
     }
 }, import.meta.url);
