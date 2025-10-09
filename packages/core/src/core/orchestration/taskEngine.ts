@@ -357,7 +357,7 @@ export class TaskEngine {
             // Keep existing override set by A2A; do not replace
             try { (ctx as any).logger?.debug?.('TaskEngine.startTask: preserving A2A requestInput override'); } catch { }
         } else {
-            (ctx as any).requestInput = async (prompt: string, opts?: { ttlMs?: number; schema?: unknown }) => {
+            (ctx as any).requestInput = async (prompt: string, opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
                 if (!this.sessionManager) throw new Error('Session manager not configured');
                 // Limits: cap max outstanding prompts
                 const maxPrompts = 100; // TODO: configurable
@@ -369,10 +369,19 @@ export class TaskEngine {
                 }
                 const snap = await this.sessionManager.load(tenantId, sessionId);
                 const base = (snap?.snapshot as Record<string, unknown>) || {};
-                const token = uuidv4();
+                const token = opts?.__existingToken || uuidv4();
                 const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
                 const pending = { ...getPendingInputs(base) };
-                pending[token] = { schema: opts?.schema, expiresAt } as any;
+
+                // Only add to pending if it's a new token request
+                if (!opts?.__existingToken) {
+                    pending[token] = {
+                        schema: opts?.schema,
+                        expiresAt,
+                        handlerName: opts?.onProvided,
+                        expiredHandlerName: opts?.onExpired
+                    } as any;
+                }
                 const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
                     try { await flushMentalState(); } catch { /* best-effort */ }
                     // Reload latest snapshot after flush to avoid overwriting newer M
@@ -417,6 +426,23 @@ export class TaskEngine {
                         metadata: { token }
                     } as any);
                 } catch { /* noop */ }
+                // Automatic token management (default: true)
+                if (opts?.setToken !== false) {
+                    ctx.vars.set('token', token);
+                }
+
+                // Automatic stage management
+                if (opts?.setStage) {
+                    try {
+                        // Import createStageFacade dynamically to avoid circular deps
+                        const { createStageFacade } = await import('../../loop/stageHelpers.js');
+                        const Stage = createStageFacade();
+                        Stage.setStage(ctx, opts.setStage);
+                    } catch (error) {
+                        (ctx as any).logger?.warn?.('Failed to auto-set stage', { stage: opts.setStage, error });
+                    }
+                }
+
                 // Mark that we've persisted WM this turn to avoid duplicate final snapshot
                 (ctx as any).__wmSavedThisTurn = true;
                 const handle = new InputHandle(this.sessionManager, tenantId, sessionId, token);
@@ -897,21 +923,123 @@ export class TaskEngine {
             if (agentName) (ctx as any).agentId = agentName;
             // Ensure replies in this resumed turn are streamed to chat
             try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
-            // Attach LLM adapter for resumed turn
-            try {
-                if (agentName) {
-                    const plugin = PluginManager.findAgent(agentName);
-                    if (plugin?.llmAdapter) {
-                        (ctx as any).llm = plugin.llmAdapter;
-                    } else if (plugin?.llmConfig) {
-                        const { createLLMForTask } = await import('../llm/LLMFactory.js');
-                        (ctx as any).llm = createLLMForTask(plugin.llmConfig, ctx as any);
+
+            // Attach requestInput implementation (same as in startTask) so agent can ask for more input
+            const sessionId = taskId;
+            if ((ctx as any).__a2aParent || (ctx as any).__preserveRequestInput) {
+                // Keep existing A2A override
+                try { (ctx as any).logger?.debug?.('TaskEngine.resumeInput: preserving A2A requestInput override'); } catch { }
+            } else {
+                (ctx as any).requestInput = async (prompt: string, opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
+                    if (!this.sessionManager) throw new Error('Session manager not configured');
+                    // Limits: cap max outstanding prompts
+                    const maxPrompts = 100;
+                    const snapL = await this.sessionManager.load(tenantId, sessionId);
+                    const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
+                    const pendingNow = getPendingInputs(baseL);
+                    if (Object.keys(pendingNow).length >= maxPrompts) {
+                        throw new Error('LIMIT_MAX_PROMPTS_EXCEEDED');
                     }
-                }
-            } catch { /* ignore LLM attach errors */ }
+                    const snap = await this.sessionManager.load(tenantId, sessionId);
+                    const base = (snap?.snapshot as Record<string, unknown>) || {};
+                    const token = opts?.__existingToken || uuidv4();
+                    const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
+                    const pending = { ...getPendingInputs(base) };
+
+                    // Only add to pending if it's a new token request
+                    if (!opts?.__existingToken) {
+                        pending[token] = {
+                            schema: opts?.schema,
+                            expiresAt,
+                            handlerName: opts?.onProvided,
+                            expiredHandlerName: opts?.onExpired
+                        } as any;
+                    }
+                    // Helper to flush M and save snapshot
+                    const flushMentalState = async () => {
+                        try {
+                            const M = ((await this.sessionManager!.load(tenantId, sessionId))?.snapshot as any)?.M;
+                            if (M) {
+                                const llmStateFromM = (((M.memory as any)?.sensory as any)?.llmState);
+                                const llmAny = (ctx as any).llm as any;
+                                if (typeof llmStateFromM === 'undefined' && llmAny?.exportState) {
+                                    const exported = llmAny.exportState();
+                                    if (M.memory) {
+                                        (M.memory as any).sensory = (M.memory as any).sensory || {};
+                                        (M.memory as any).sensory.llmState = exported;
+                                    }
+                                }
+                            }
+                        } catch { /* noop */ }
+                    };
+                    const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
+                        try { await flushMentalState(); } catch { /* best-effort */ }
+                        const latest = await this.sessionManager!.load(tenantId, sessionId);
+                        const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
+                        const nextSnapshot = setPendingInputs(latestBase, pending);
+                        const expectedNext = latest?.wmVersion ?? expectedVer;
+                        await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedNext, snapshot: nextSnapshot });
+                        await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
+                        await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, token, schema: opts?.schema, expiresAt });
+                    };
+                    try {
+                        const expected = snap?.wmVersion ?? BigInt(0);
+                        await writeOnce(base, expected);
+                    } catch (e) {
+                        if ((e as Error).message === 'CAS_MISMATCH') {
+                            try {
+                                const snap2 = await this.sessionManager.load(tenantId, sessionId);
+                                const base2 = (snap2?.snapshot as Record<string, unknown>) || {};
+                                const pending2 = { ...getPendingInputs(base2), [token]: { schema: opts?.schema, expiresAt } } as any;
+                                const expected2 = snap2?.wmVersion ?? BigInt(0);
+                                const next2 = setPendingInputs(base2, pending2);
+                                await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
+                                await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
+                                await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, token, schema: opts?.schema, expiresAt });
+                            } catch { /* swallow second failure */ }
+                        } else {
+                            throw e;
+                        }
+                    }
+                    try { (ctx as any).logger?.info?.('requestInput: input_required emitted', { token, prompt, expiresAt }); } catch { }
+                    try {
+                        ctx.progress({
+                            state: 'input-required',
+                            message: {
+                                role: 'agent',
+                                parts: [{ type: 'text', text: `Input required: ${prompt}` }]
+                            },
+                            timestamp: new Date().toISOString(),
+                            metadata: { token }
+                        } as any);
+                    } catch { /* noop */ }
+                    // Automatic token management (default: true)
+                    if (opts?.setToken !== false) {
+                        ctx.vars.set('token', token);
+                    }
+
+                    // Automatic stage management
+                    if (opts?.setStage) {
+                        try {
+                            // Import createStageFacade dynamically to avoid circular deps
+                            const { createStageFacade } = await import('../../loop/stageHelpers.js');
+                            const Stage = createStageFacade();
+                            Stage.setStage(ctx, opts.setStage);
+                        } catch (error) {
+                            (ctx as any).logger?.warn?.('Failed to auto-set stage', { stage: opts.setStage, error });
+                        }
+                    }
+
+                    (ctx as any).__wmSavedThisTurn = true;
+                    const handle = new InputHandle(this.sessionManager, tenantId, sessionId, token);
+                    return handle;
+                };
+            }
             // Load MentalState and pending for EnvironmentState
             const baseNow = (await this.sessionManager!.load(tenantId, taskId))?.snapshot as Record<string, unknown> || {};
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            // Attach and restore LLM before running loop
+            await this.attachAndRestoreLLM(ctx, agentName, M);
             // Reattach working variables facade linked to this MentalState (resume path)
             try {
                 const currentVars = ((M as any)?.memory?.vars || {}) as Record<string, unknown>;
@@ -1012,6 +1140,8 @@ export class TaskEngine {
             const snapNow = await this.sessionManager!.load(tenantId, taskId);
             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            // Attach and restore LLM before running loop
+            await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTool = Number((baseNow as any)?.meta?.turn) || 0;
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
@@ -1079,6 +1209,8 @@ export class TaskEngine {
             const snapNow = await this.sessionManager!.load(tenantId, taskId);
             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            // Attach and restore LLM before running loop
+            await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
@@ -1168,6 +1300,8 @@ export class TaskEngine {
             }
 
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            // Attach and restore LLM before running loop
+            await this.attachAndRestoreLLM(ctx, agentName, M);
             const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
             const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn; // assume initial run counted as 1 even if not persisted
             const env: EnvironmentState = {
@@ -1419,6 +1553,42 @@ export class TaskEngine {
     }
 
     /**
+     * Helper to attach and restore LLM for a context from persisted MentalState
+     */
+    private async attachAndRestoreLLM(ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined): Promise<void> {
+        if (!agentName) return;
+
+        try {
+            const { PluginManager } = await import('../plugin/pluginManager.js');
+            const plugin = PluginManager.findAgent(agentName);
+
+            // Create/attach LLM
+            if (plugin?.llmAdapter) {
+                (ctx as any).llm = plugin.llmAdapter;
+            } else if (plugin?.llmConfig) {
+                const { createLLMForTask } = await import('../llm/LLMFactory.js');
+                (ctx as any).llm = createLLMForTask(plugin.llmConfig, ctx as any);
+            }
+
+            // Restore LLM conversation state if available
+            if (M) {
+                try {
+                    const llmStateFromM = (((M.memory as any)?.sensory as any)?.llmState);
+                    const llmAny = (ctx as any).llm as any;
+                    if (typeof llmStateFromM !== 'undefined' && llmAny?.importState) {
+                        llmAny.importState(llmStateFromM);
+                        try { console.log('[TaskEngine] Restored LLM history for', agentName); } catch { }
+                    }
+                } catch (e) {
+                    try { console.log('[TaskEngine] Failed to restore LLM state for', agentName, e); } catch { }
+                }
+            }
+        } catch (e) {
+            try { console.log('[TaskEngine] Failed to attach LLM for', agentName, e); } catch { }
+        }
+    }
+
+    /**
      * Create a basic task context
      */
     private createContext(task: TaskEntity): TaskContext {
@@ -1535,7 +1705,7 @@ export class TaskEngine {
             (ctx as any).__mental = M || initialM(ctx);
             (ctx as any).M = (ctx as any).__mental; // readonly view for handlers
         } catch { /* noop */ }
-        // Reattach LLM for this agent if available
+        // Reattach LLM for this agent if available AND restore its conversation state
         try {
             const agentName = snap?.agentId;
             if (agentName) {
@@ -1546,6 +1716,21 @@ export class TaskEngine {
                 } else if (plugin?.llmConfig) {
                     const { createLLMForTask } = await import('../llm/LLMFactory.js');
                     (ctx as any).llm = createLLMForTask(plugin.llmConfig, ctx as any);
+                }
+
+                // Restore LLM state immediately after creating/attaching LLM
+                try {
+                    const M = (baseSnap as any).M as MentalState | undefined;
+                    const llmStateFromM = M ? (((M.memory as any)?.sensory as any)?.llmState) : undefined;
+                    const legacyLlm = (baseSnap as any)?.llm;
+                    const llmState = typeof llmStateFromM !== 'undefined' ? llmStateFromM : legacyLlm;
+                    const llmAny = (ctx as any).llm as any;
+                    if (typeof llmState !== 'undefined' && llmAny?.importState) {
+                        llmAny.importState(llmState);
+                        try { console.log('[TaskEngine] restoreCtx restored LLM history'); } catch { }
+                    }
+                } catch (e) {
+                    try { console.log('[TaskEngine] restoreCtx failed to restore LLM state', e); } catch { }
                 }
             }
             try { console.log('[TaskEngine] restoreCtx LLM type', (ctx as any).llm?.constructor?.name); } catch { }
@@ -1626,17 +1811,7 @@ export class TaskEngine {
             };
             (ctx as any).world = { update: (fn: (wm: any) => void) => { try { fn(((ctx as any).__mental as any).worldModel); } catch { /* noop */ } }, patch: (p: Record<string, unknown>) => { try { Object.assign(((ctx as any).__mental as any).worldModel, p); } catch { /* noop */ } } };
         } catch { /* noop */ }
-        // Restore LLM state from MentalState if present; fallback to legacy snapshot.llm
-        try {
-            const M = (baseSnap as any).M as MentalState | undefined;
-            const llmStateFromM = M ? (((M.memory as any)?.sensory as any)?.llmState) : undefined;
-            const legacyLlm = (baseSnap as any)?.llm;
-            const llmState = typeof llmStateFromM !== 'undefined' ? llmStateFromM : legacyLlm;
-            const llmAny = (ctx as any).llm as any;
-            if (typeof llmState !== 'undefined' && llmAny?.importState) {
-                llmAny.importState(llmState);
-            }
-        } catch { /* ignore */ }
+        // LLM state restoration now happens immediately after LLM creation above (lines 1551-1564)
         // Ensure restored context can emit streaming events to the same task channel
         try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
         // Wire Goals API on durable handler context

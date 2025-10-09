@@ -6,7 +6,7 @@ import {
     GetManyOptions,
     MemoryQueryResult,
     MemoryQueryOptions
-} from '@a2arium/types';
+} from '@a2arium/callagent-types';
 
 /**
  * Mock semantic memory adapter for testing

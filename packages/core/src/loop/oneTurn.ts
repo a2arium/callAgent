@@ -4,9 +4,9 @@
 
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState } from './types.js';
+import type { PureLLMPort } from '../shared/types/LLMTypes.js';
 
 export type AttentionSignal = unknown;
-// Keep Observation as alias for backward compatibility in this module.
 export type Observation = unknown;
 
 export type ProposedAction =
@@ -38,42 +38,64 @@ export type TurnOutcome =
     | { kind: 'fail'; reason: string };
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
-    | ((m: MentalState<Sensory>) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState<Sensory>, o: Obs) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
+    | ((m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
+    | ((m: MentalState<Sensory>, o: Obs, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
+    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
 
-export type Modules<Sensory = unknown, Obs = unknown> = {
-    attention: (prev: MentalState<Sensory>, env: EnvironmentState) => AttentionSignal;
-    perception: (env: EnvironmentState, alpha: AttentionSignal) => Obs;
-    learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number) => MentalState<Sensory>;
+export type Modules<Sensory = unknown, Obs = Observation, Alpha = AttentionSignal> = {
+    attention: (prev: MentalState<Sensory>, env: EnvironmentState, llm?: PureLLMPort) => Alpha;
+    perception: (env: EnvironmentState, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
+    learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
     policy: PolicyFn<Sensory, Obs>;
-    shield: (m: MentalState<Sensory>, a: ProposedAction) => ShieldOutcome;
+    shield: (m: MentalState<Sensory>, a: ProposedAction, llm?: PureLLMPort) => ShieldOutcome;
     execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>;
-    transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>) => TurnOutcome;
-    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
-    intrinsicReward?: (m: MentalState<Sensory>, o: Obs) => number;
+    transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>, llm?: PureLLMPort) => TurnOutcome;
+    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome, llm?: PureLLMPort) => number;
+    intrinsicReward?: (m: MentalState<Sensory>, o: Obs, llm?: PureLLMPort) => number;
 };
 
-export async function oneTurn<Sensory = unknown, Obs = unknown>(
+export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = AttentionSignal>(
     ctx: TaskContext,
     env: EnvironmentState,
     mPrev: MentalState<Sensory>,
-    mods: Modules<Sensory, Obs>,
+    mods: Modules<Sensory, Obs, Alpha>,
     prevAction?: ProposedAction,
     rPrev?: number
 ): Promise<{ m: MentalState<Sensory>; outcome: TurnOutcome; exec: ExecutableAction; timings: Record<string, number>; reward: number }> {
     const timings: Record<string, number> = {};
 
+    // Extract pure LLM port for use in pure modules
+    const { extractPureLLMPort } = await import('../shared/types/LLMTypes.js');
+    const llm = ctx.llm ? extractPureLLMPort(ctx) : undefined;
+
     const tA0 = Date.now();
-    const alpha = mods.attention(mPrev, env);
+    let alpha: Alpha;
+    try {
+        alpha = mods.attention(mPrev, env, llm);
+    } catch (error) {
+        console.error('[oneTurn] Attention module error:', error);
+        throw new Error(`Attention module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     timings.attentionMs = Date.now() - tA0;
 
     const tP0 = Date.now();
-    const o = mods.perception(env, alpha);
+    let o: Obs;
+    try {
+        o = await Promise.resolve(mods.perception(env, alpha, llm));
+    } catch (error) {
+        console.error('[oneTurn] Perception module error:', error);
+        throw new Error(`Perception module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     timings.perceptionMs = Date.now() - tP0;
 
     const tL0 = Date.now();
-    const m1 = mods.learning(mPrev, prevAction, o, rPrev);
+    let m1: MentalState<Sensory>;
+    try {
+        m1 = mods.learning(mPrev, prevAction, o, rPrev, llm);
+    } catch (error) {
+        console.error('[oneTurn] Learning module error:', error);
+        throw new Error(`Learning module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     timings.learningMs = Date.now() - tL0;
 
     // Expose current MentalState for this turn via ctx (read-mostly)
@@ -82,15 +104,21 @@ export async function oneTurn<Sensory = unknown, Obs = unknown>(
     const tPol0 = Date.now();
     const policyFn = mods.policy as unknown as (...args: unknown[]) => ProposedAction | Array<{ action: ProposedAction; prob: number }>;
     const arity = typeof policyFn === 'function' ? policyFn.length : 1;
-    const pi = (() => {
-        try {
-            if (arity >= 3) return (policyFn as any)(m1, mPrev, o);
-            if (arity === 2) return (policyFn as any)(m1, o);
-            return (policyFn as any)(m1);
-        } catch {
-            return (policyFn as any)(m1);
+    let pi: ProposedAction | Array<{ action: ProposedAction; prob: number }>;
+    try {
+        if (arity >= 4) {
+            pi = (policyFn as any)(m1, mPrev, o, llm);
+        } else if (arity === 3) {
+            pi = (policyFn as any)(m1, o, llm);
+        } else if (arity === 2) {
+            pi = (policyFn as any)(m1, llm);
+        } else {
+            pi = (policyFn as any)(m1);
         }
-    })();
+    } catch (error) {
+        console.error('[oneTurn] Policy module error:', error);
+        throw new Error(`Policy module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     timings.policyMs = Date.now() - tPol0;
     let chosen = Array.isArray(pi) ? pi[0].action : pi;
     if (Array.isArray(pi)) {
@@ -126,7 +154,14 @@ export async function oneTurn<Sensory = unknown, Obs = unknown>(
             }
         }
     }
-    const sh = mods.shield(m1, chosen);
+    let sh: ShieldOutcome;
+    try {
+        sh = mods.shield(m1, chosen, llm);
+    } catch (error) {
+        console.error('[oneTurn] Shield module error:', error);
+        throw new Error(`Shield module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     let toExecute: ProposedAction | null = null;
     switch (sh.action) {
         case 'pass':
@@ -142,17 +177,46 @@ export async function oneTurn<Sensory = unknown, Obs = unknown>(
         default:
             toExecute = { kind: 'internal', intent: 'noop' } as ProposedAction;
     }
+
     const tE0 = Date.now();
-    const exec = await mods.execution(toExecute!, ctx, m1);
+    let exec: ExecutableAction;
+    try {
+        exec = await mods.execution(toExecute!, ctx, m1);
+    } catch (error) {
+        console.error('[oneTurn] Execution module error:', error);
+        throw new Error(`Execution module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     timings.executionMs = Date.now() - tE0;
 
     const tT0 = Date.now();
-    const outcome = mods.transition(env, exec, m1);
+    let outcome: TurnOutcome;
+    try {
+        outcome = mods.transition(env, exec, m1, llm);
+    } catch (error) {
+        console.error('[oneTurn] Transition module error:', error);
+        throw new Error(`Transition module failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     timings.transitionMs = Date.now() - tT0;
 
     // Reward hooks (pluggable; default to 0)
-    const rExt = typeof mods.extrinsicReward === 'function' ? Number(mods.extrinsicReward(m1, chosen, exec, outcome) || 0) : 0;
-    const rInt = typeof mods.intrinsicReward === 'function' ? Number(mods.intrinsicReward(m1, o) || 0) : 0;
+    let rExt = 0;
+    if (typeof mods.extrinsicReward === 'function') {
+        try {
+            rExt = Number(mods.extrinsicReward(m1, chosen, exec, outcome, llm) || 0);
+        } catch (error) {
+            console.error('[oneTurn] ExtrinsicReward module error:', error);
+            // Don't throw - reward is optional, just log and default to 0
+        }
+    }
+    let rInt = 0;
+    if (typeof mods.intrinsicReward === 'function') {
+        try {
+            rInt = Number(mods.intrinsicReward(m1, o, llm) || 0);
+        } catch (error) {
+            console.error('[oneTurn] IntrinsicReward module error:', error);
+            // Don't throw - reward is optional, just log and default to 0
+        }
+    }
     const r = (Number.isFinite(rExt) ? rExt : 0) + (Number.isFinite(rInt) ? rInt : 0);
     try {
         // Append reward to last episodic event (if any)

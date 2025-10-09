@@ -83,13 +83,13 @@ const Stage = createStageFacade<Stage>({
 const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>> = {
   idle: async (ctx, m) => {
     await ctx.reply('How can I help you today?');
-    const handle = await ctx.requestInput('Your message');
-    
-    // Update control state
-    ctx.vars.set('token', handle.token);
-    Stage.setStage(ctx, 'awaiting_input');
-    
-    return { kind: 'ask_user', token: handle.token };
+
+    // ✅ NEW: Single line stage management
+    const token = await Stage.setStage(ctx, 'awaiting_input', {
+      prompt: 'Your message'
+    });
+  
+    return { kind: 'ask_user', token };
   },
   
   awaiting_input: async (ctx, m) => {
@@ -449,10 +449,13 @@ execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<Exe
     .with({ kind: 'prompt_user' }, async () => {
       await ctx.reply('How can I help you?');
       V.setPrompted(ctx, true);
-      const handle = await ctx.requestInput('Your message');
-      V.setToken(ctx, handle.token);
-      V.setStage(ctx, 'awaiting_input');
-      return { kind: 'ask_user', token: handle.token };
+
+      // ✅ NEW: Single line stage management
+      const token = await Stage.setStage(ctx, 'awaiting_input', {
+        prompt: 'Your message'
+      });
+
+      return { kind: 'ask_user', token };
     })
     .with({ kind: 'answer_with_llm' }, async ({ query }) => {
       const result = await ctx.llm.call(query);
@@ -1603,12 +1606,14 @@ export const agent = createAgent({
         if (!V.prompted(ctx)) {
           await ctx.reply('How can I help you today?');
           V.setPrompted(ctx, true);
-          
-          const handle = await ctx.requestInput('Your message', { onProvided: '__onUserAnswer' });
-          V.setToken(ctx, (handle as { token?: string }).token);
-          V.setStage(ctx, 'awaiting_input');
-          
-          return { kind: 'ask_user', token: (handle as { token?: string }).token || 'unknown' };
+
+          // ✅ NEW: Single line stage management with handler
+          const token = await Stage.setStage(ctx, 'awaiting_input', {
+            prompt: 'Your message',
+            onProvided: '__onUserAnswer'
+          });
+
+          return { kind: 'ask_user', token };
         }
         return { kind: 'internal', done: true };
       })
@@ -2027,10 +2032,13 @@ const handlers: Record<Stage, Handler> = {
     if (!V.prompted(ctx)) {
       await ctx.reply('How can I help?');
       V.setPrompted(ctx, true);
-      const handle = await ctx.requestInput('Message');
-      V.setToken(ctx, handle.token);
-      V.setStage(ctx, 'awaiting_input');
-      return { kind: 'ask_user', token: handle.token };
+
+      // ✅ NEW: Single line stage management
+      const token = await Stage.setStage(ctx, 'awaiting_input', {
+        prompt: 'Message'
+      });
+
+      return { kind: 'ask_user', token };
     }
     return { kind: 'internal', done: true };
   },
@@ -2164,13 +2172,16 @@ const handlers: Record<Stage, Handler> = {
 
 **Fix**:
 ```typescript
-// ❌ Wrong: Set stage before setting token
-V.setStage(ctx, 'awaiting_input');
-V.setToken(ctx, handle.token);
+// ❌ Old way: Multiple separate operations
+const handle = await ctx.requestInput('Message');
+const token = handle.token;
+ctx.vars.set('token', token);
+Stage.setStage(ctx, 'awaiting_input');
 
-// ✅ Right: Set requirements first, then stage
-V.setToken(ctx, handle.token);
-V.setStage(ctx, 'awaiting_input');
+// ✅ New way: Single line with automatic token handling
+const token = await Stage.setStage(ctx, 'awaiting_input', {
+  prompt: 'Message'
+});
 ```
 
 ### Problem: "Policy returning different intents in same situation"

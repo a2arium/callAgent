@@ -83,17 +83,19 @@ export class ProgrammaticInvoker implements Invoker {
                 }
                 if (st?.state === 'input-required') {
                     let token = st?.metadata?.token as string | undefined;
+                    let promptText: string | undefined = (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
                     if (!token) {
                         try {
                             const events = await wmStore.listEventsSince({ tenantId, sessionId: id, sinceSeq: 0 });
                             const last = [...events].reverse().find((e: any) => e.type === 'task.input_required');
                             token = last?.payload?.token || token;
+                            promptText = (last?.payload?.prompt as string | undefined) || promptText;
                         } catch { /* ignore */ }
                     }
                     token = token || 'opaque';
                     eventBus.unsubscribe(channel, handler);
                     try { console.info(`[invoker] start:input_required id=${id} token=${token}`); } catch { }
-                    resolveFn!({ id, status: 'input_required', token });
+                    resolveFn!({ id, status: 'input_required', token, prompt: promptText });
                 }
                 if (st?.state === 'failed' && ev.final === true) {
                     eventBus.unsubscribe(channel, handler);
@@ -167,10 +169,11 @@ export class ProgrammaticInvoker implements Invoker {
                 }
                 if (st?.state === 'input-required') {
                     let tkn = st?.metadata?.token as string | undefined;
+                    let promptText: string | undefined = (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
                     tkn = tkn || 'opaque';
                     eventBus.unsubscribe(channel, handler);
                     try { console.info(`[invoker] resume:input_required id=${id} token=${tkn}`); } catch { }
-                    resolveFn!({ id, status: 'input_required', token: tkn });
+                    resolveFn!({ id, status: 'input_required', token: tkn, prompt: promptText });
                 }
                 if (st?.state === 'failed' && ev.final === true) {
                     eventBus.unsubscribe(channel, handler);

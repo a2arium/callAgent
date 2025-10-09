@@ -86,11 +86,11 @@ createAgent<Sensory, Obs>({
         return await match(a)
             .with({ kind: 'ask_user' }, async (a) => {
                 await ctx.reply('How can I help you today?');
-                const handle = await ctx.requestInput(a.prompt);
-                const token = (handle as unknown as { token?: string }).token ?? 'unknown';
-                ctx.vars.set('token', token);
-                Stage.setStage(ctx, 'awaiting_input');
-                return { kind: 'ask_user', token } as ExecutableAction;
+                // ✅ NEW: Input-first approach with automatic token and stage management
+                const handle = await ctx.requestInput(a.prompt, {
+                    setStage: 'awaiting_input'  // Automatically sets stage and token
+                });
+                return { kind: 'ask_user', token: handle.token } as ExecutableAction;
             })
             .with({ kind: 'internal', intent: 'answer_with_llm', data: P.select('data') }, async ({ data }) => {
                 const query = (data as { query?: string } | undefined)?.query ?? '';
@@ -98,6 +98,9 @@ createAgent<Sensory, Obs>({
                 await ctx.reply(`You said: ${query}`);
                 await ctx.reply({ type: 'text', text: res[0]?.content ?? 'Ok.' });
                 ctx.progress(100, 'completed');
+
+                // Set completion flag before stage transition for invariant check
+                ctx.vars.set('completed.called', true);
                 Stage.setStage(ctx, 'completed');
                 return { kind: 'internal', done: true } as ExecutableAction;
             })

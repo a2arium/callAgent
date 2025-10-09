@@ -54,7 +54,7 @@ export class InputHandle {
         private readonly session: SessionManager,
         private readonly tenantId: string,
         private readonly sessionId: string,
-        private readonly token: string
+        public readonly token: string
     ) { }
 
     async onProvided(handlerName: string): Promise<this> {

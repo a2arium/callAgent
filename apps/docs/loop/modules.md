@@ -107,22 +107,22 @@ type TurnOutcome =
 // - oneTurn<Sensory, Obs>
 
 type Modules<Sensory = unknown, Obs = unknown> = {
-  attention:  (prev: MentalState<Sensory>, env: EnvironmentState) => unknown;   // "alpha"
-  perception: (env: EnvironmentState, alpha: unknown) => Obs;                   // normalize env
+  attention:  (prev: MentalState<Sensory>, env: EnvironmentState, llm?: PureLLMPort) => unknown;   // "alpha"
+  perception: (env: EnvironmentState, alpha: unknown, llm?: PureLLMPort) => Obs | Promise<Obs>;    // normalize env (can be async)
   learning:   (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined,
-               obs: Obs, rPrev?: number) => MentalState<Sensory>;               // ONLY writer of M
-  policy:     (m: MentalState<Sensory>) => ProposedAction;                      // pure
-  shield:     (m: MentalState<Sensory>, intent: ProposedAction) =>
+               obs: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;               // ONLY writer of M
+  policy:     (m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction;                      // pure
+  shield:     (m: MentalState<Sensory>, intent: ProposedAction, llm?: PureLLMPort) =>
                 | { action: 'pass'; intent: ProposedAction }
                 | { action: 'transform'; intent: ProposedAction }
                 | { action: 'veto'; reason: string }
                 | { action: 'defer'; askUser: string };
   execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>;
-  transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>) => TurnOutcome;
+  transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>, llm?: PureLLMPort) => TurnOutcome;
 
   // Optional reward hooks
-  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome) => number;
-  intrinsicReward?: (m: MentalState<Sensory>, obs: Obs) => number;
+  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome, llm?: PureLLMPort) => number;
+  intrinsicReward?: (m: MentalState<Sensory>, obs: Obs, llm?: PureLLMPort) => number;
 };
 ```
 
@@ -233,6 +233,109 @@ Stage.setStage(ctx, 'completed');
 * **Purpose:** map `ExecutableAction` → `{continue | await_* | complete | fail}` and advance the control loop.
 * **Must:** emit `await_*` with tokens for resumable effects; set completion only after terminal handler runs.
 * **Must:** treat `ctx.vars` as the source of truth for control-flow flags (e.g., `completeCalled`).
+
+---
+
+## LLM in pure modules (optional `llm` parameter)
+
+All modules receive an optional `llm?: PureLLMPort` parameter as their **last parameter**. This enables LLM-powered normalization, reasoning, or validation while maintaining architectural purity.
+
+### What is `PureLLMPort`?
+
+A **sealed interface** that provides ONLY `call()` and `stream()` methods—no tools, no message manipulation, no direct memory writes. It's automatically extracted from `ctx.llm` by the framework and passed to each module.
+
+```typescript
+type PureLLMPort = {
+    call<T = unknown>(message: string, options?: {
+        temperature?: number;
+        schema?: Record<string, unknown>;
+        seed?: number;
+        [key: string]: unknown;
+    }): Promise<UniversalChatResponse<T>[]>;
+    stream?<T = unknown>(message: string, options?: Record<string, unknown>): AsyncIterable<UniversalStreamResponse<T>>;
+};
+```
+
+### Why this design?
+
+* **Architectural purity:** Pure modules (Perception, Policy, Shield, etc.) shouldn't have full `ctx` access, but they sometimes need LLM inference.
+* **Sealed capability:** The port prevents capability leakage—you can't call tools, manipulate conversation history, or access memory through it.
+* **Observability without side effects:** Usage tracking happens automatically but doesn't violate purity—costs are logged for monitoring.
+* **Determinism (best-effort):** Use `temperature: 0` and `seed` for reproducible outputs where possible.
+
+### When to use `llm` in modules
+
+| Module | Use Case | Example |
+|--------|----------|---------|
+| **Perception** | Extract structured data from messy user input | Parse intent + entities with JSON schema validation |
+| **Shield** | Check for PII, offensive content, or safety violations | LLM-based content moderation before execution |
+| **Policy** | LLM-assisted reasoning for complex decision-making | Rarely needed; prefer deterministic policy when possible |
+| **Learning** | Derive cognitive facts from observations | Extract beliefs/sentiments before writing to M |
+| **Attention** | Compute sophisticated attention signals | Usually not needed; keep simple |
+| **Transition** | Complex state transition logic | Usually not needed; keep deterministic |
+
+### Best practices
+
+1. **Always provide fallback logic** - LLM calls can fail; have a simple regex/rule-based fallback.
+2. **Use temperature=0** for best-effort determinism.
+3. **Validate outputs with JSON Schema** - use Ajv to ensure LLM responses match your schema.
+4. **Keep prompts simple** - pure modules should do simple transforms, not complex multi-turn reasoning.
+5. **Make modules async** when using LLM - `perception: async (env, alpha, llm?) => { ... }`.
+6. **Usage tracking is automatic** - costs are recorded via the port; you don't need manual `ctx.recordUsage()`.
+
+### Example: LLM-powered Perception
+
+```typescript
+import Ajv from 'ajv';
+const ajv = new Ajv();
+
+type Obs = { text?: string; intent?: 'question' | 'command' | 'other' };
+
+const obsSchema = {
+    type: 'object',
+    properties: {
+        text: { type: 'string' },
+        intent: { type: 'string', enum: ['question', 'command', 'other'] }
+    }
+};
+const validateObs = ajv.compile(obsSchema);
+
+createAgent<Sensory, Obs>({
+    perception: async (env: EnvironmentState, alpha: AttentionSignal, llm?: PureLLMPort): Promise<Obs> => {
+        if (!isDirectInput(env?.input)) return {};
+        
+        const { text } = env.input.value as { text?: string };
+        if (!text) return {};
+
+        // Try LLM extraction if available
+        if (llm) {
+            try {
+                const prompt = `Extract structured info. Return JSON: ${JSON.stringify(obsSchema)}\n\nInput: "${text}"`;
+                const responses = await llm.call<Obs>(prompt, { temperature: 0, schema: obsSchema });
+                const candidate = responses[0]?.content;
+                
+                if (validateObs(candidate)) {
+                    return candidate as Obs;
+                }
+                console.warn('[perception] LLM output failed validation');
+            } catch (error) {
+                console.warn('[perception] LLM call failed:', error);
+            }
+        }
+
+        // Fallback: simple rule-based extraction
+        return { text, intent: text.includes('?') ? 'question' : 'other' };
+    },
+    // ... other modules
+});
+```
+
+### Important notes
+
+* **Execution has full `ctx` access** - it doesn't need the separate `llm` parameter since it can use `ctx.llm` directly.
+* **The parameter is always optional** - modules can ignore it and use simple rule-based logic.
+* **Perception can be async** - return `Obs | Promise<Obs>` when using LLM.
+* **Don't abuse it** - not every module needs LLM. Prefer deterministic logic when possible.
 
 ---
 

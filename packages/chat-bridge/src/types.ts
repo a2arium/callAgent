@@ -97,7 +97,7 @@ export type RealtimePublisher = { publish: (channelKey: string, event: ChatEvent
 export type ResultPayload =
     | { id: string; status: 'completed'; output: unknown }
     | { id: string; status: 'failed'; error: string }
-    | { id: string; status: 'input_required'; token: string };
+    | { id: string; status: 'input_required'; token: string; prompt?: string };
 
 export type Invoker = {
     start: (params: { id: string; input: unknown; agentId: string; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;

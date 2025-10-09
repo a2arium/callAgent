@@ -13,6 +13,10 @@ import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js
 // Re-export only specific streaming event types needed externally
 export type { A2AEvent, TaskStatus, Artifact };
 
+// Re-export LLM types including the pure LLM port for modules
+export type { PureLLMPort, ILLMCaller, LLMConfig } from './LLMTypes.js';
+export { extractPureLLMPort } from './LLMTypes.js';
+
 // Working Memory Types
 export * from './workingMemory.js';
 export * from './memoryLifecycle.js';
@@ -194,7 +198,14 @@ export type TaskContext = {
      */
     requestInput: (
         prompt: string,
-        opts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }
+        opts?: {
+            schema?: unknown;
+            ttlMs?: number;
+            onProvided?: string;
+            onExpired?: string;
+            setToken?: boolean;
+            setStage?: string
+        }
     ) => Promise<import('../../core/orchestration/Handles.js').InputHandle>;
 
     /**

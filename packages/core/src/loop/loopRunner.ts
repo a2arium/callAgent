@@ -230,11 +230,22 @@ export async function runLoop(
             outcome = { kind: 'fail', reason: 'budget_latency_exceeded' };
             break;
         }
-        const step = await oneTurn(ctx, env, m, defaults, prevAction, rPrev);
-        m = step.m;
-        outcome = step.outcome;
-        if (step.timings) timings.push(step.timings);
-        rewards.push(step.reward || 0);
+
+        try {
+            const step: Awaited<ReturnType<typeof oneTurn>> = await oneTurn(ctx, env, m, defaults, prevAction, rPrev);
+            m = step.m;
+            outcome = step.outcome;
+            if (step.timings) timings.push(step.timings);
+            rewards.push(step.reward || 0);
+        } catch (error) {
+            console.error(`[loopRunner] Turn ${turn} failed:`, error);
+            outcome = {
+                kind: 'fail',
+                reason: `turn_${turn}_error: ${error instanceof Error ? error.message : String(error)}`
+            };
+            break;
+        }
+
         // Stop on await_* or terminal
         if (outcome.kind !== 'continue') break;
         if (turn === maxTurns - 1) {

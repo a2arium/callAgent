@@ -129,7 +129,7 @@ export function createBridge(options: BridgeOptions): Bridge {
             await sessionStore.upsert(record);
             logger?.info('input_required', { key, taskId: res.id, token: res.token });
             metrics?.incr?.('chat_bridge.input_required', 1);
-            await chatSender.sendMessage(route, 'Please provide additional information.');
+            await chatSender.sendMessage(route, res.prompt || 'Please provide additional information.');
             // Realtime publish
             if (realtime) {
                 await realtime.publish(key, {
@@ -137,7 +137,8 @@ export function createBridge(options: BridgeOptions): Bridge {
                     taskId: res.id,
                     seq: nextSeq,
                     ts: new Date().toISOString(),
-                    token: res.token
+                    token: res.token,
+                    prompt: res.prompt
                 } as any);
             }
             return;

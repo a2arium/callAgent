@@ -21,6 +21,8 @@ coverage/
 
 # TypeScript
 *.tsbuildinfo
+# Ignore generated declaration files under source trees
+packages/**/src/**/*.d.ts
 
 # MacOS
 .DS_Store

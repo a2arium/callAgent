@@ -1,472 +1,705 @@
-# NOTE: This is a very early work in progress.
+# CallAgent - APLRET AI Agent Framework 🤖
 
-# Working in the Monorepo
+A production-ready TypeScript AI agent framework implementing the **APLRET** (Attention → Perception → Learning → Reasoning/Policy → Shield → Execution → Transition) brain-inspired architecture with comprehensive **A2A** (Agent-to-Agent) communication support.
 
-This project uses a Turborepo-based monorepo structure with Yarn workspaces for modular development. All core packages and example apps live under `packages/` and `apps/` respectively.
+## 🏗️ Architecture Overview
 
-## Getting Started
+CallAgent implements a **brain-inspired cognitive loop** with six explicit modules plus a safety guard:
 
-1. **Install dependencies:**
-   ```bash
-   yarn install
-   ```
-   This will install all dependencies for every workspace package and app, using hoisting for efficiency.
+```mermaid
+flowchart LR
+    A[Attention] --> P[Perception]
+    P --> L[Learning]
+    L --> R[Policy/Reasoning]
+    R --> S[Shield]
+    S --> E[Execution]
+    E --> T[Transition]
+    T -.-> A
+```
 
-2. **Run lint, build, or test for all packages/apps:**
-   ```bash
-   turbo run lint
-   turbo run build
-   turbo run test
-   ```
-   You can also run these for a specific package/app:
-   ```bash
-   turbo run test --filter=packages/memory-sql
-   ```
+### Core Components
 
-3. **Add new packages or apps:**
-   - Place new packages in `packages/`
-   - Place new example or documentation apps in `apps/`
+- **🎯 APLRET Cognitive Architecture**: Six explicit modules implementing brain-inspired intelligence
+- **🔄 A2A Communication**: Automatic dependency resolution and agent-to-agent communication
+- **🧠 Typed Intent System**: Policy emits discriminated unions, Execution handles exhaustively
+- **📡 Stage Dispatcher Pattern**: Explicit control flow with typed stages and runtime invariants
+- **⚡ Effect Safety**: Budget-aware, timeout-protected external calls with automatic retries
+- **💾 Memory System**: Multi-layered memory with semantic, episodic, and working memory support
+- **🌊 Streaming Support**: Real-time response streaming via Server-Sent Events (SSE)
 
-4. **Workspace Structure:**
-   - `packages/` — Core framework, adapters, shared types, utilities
-   - `apps/` — Example agents, documentation site, integration demos
+## 🚀 Quick Start
 
-5. **More Information:**
-   - See the `monorepo.mdc` rule in `.cursor/rules` for conventions and best practices.
+### 1. Installation
+```bash
+# Install the framework
+npm install @a2arium/callagent-core
 
----
+# Optional: SQL memory persistence
+npm install @a2arium/callagent-memory-sql
+```
 
-# CallAgent AI Framework 🤖
-
-A modern, flexible AI agent framework that can be used both as a **consumable library** and for **framework development**. Build intelligent agents with memory, LLM integration, and agent-to-agent communication.
-
-## 🔗 Quick Navigation
-
-- **📚 [Using CallAgent as a Library](#using-callagent-as-a-library-📚)** - For building applications with CallAgent
-- **🛠️ [Framework Development](#framework-development-🛠️)** - For contributing to CallAgent itself
-
----
-
-## Features
-
-### Automatic LLM Usage Tracking
-
-The framework now automatically tracks LLM API usage without requiring manual calls to `recordUsage`. This tracking works with the [callllm](https://www.npmjs.com/package/callllm) library to:
-
-- Record costs for all LLM calls automatically
-- Accumulate costs throughout the task lifecycle
-- Include usage data in the task completion metadata
-
-Agent developers don't need to add any special code - the framework handles this automatically whenever an agent uses `ctx.llm.call()` or `ctx.llm.stream()`.
-
-[Read more in the usage tracking documentation](docs/usage-tracking.md)
-
-## Getting Started
-
-1.  **Install dependencies:**
-    ```bash
-    yarn install
-    ```
-
-2.  **Build the framework core:**
-    ```bash
-    yarn build
-    ```
-    This compiles the `src` directory to `dist` - the output you would publish as an npm package.
-
-3.  **Run example agents in development mode (using TypeScript directly):**
-    ```bash
-    yarn dev examples/hello-agent/AgentModule.ts '{"name": "Developer"}'
-    ```
-    The development mode uses `ts-node/esm` to run TypeScript files directly, which is perfect for rapid prototyping.
-
-4.  **If you want to build and run a compiled example:**
-    
-    First, manually compile your example agent:
-    ```bash
-    # Create an examples directory in dist
-    mkdir -p dist/examples/hello-agent
-    
-    # Copy the agent.json file
-    cp examples/hello-agent/agent.json dist/examples/hello-agent/
-    
-    # Compile the TypeScript to JavaScript
-    npx tsc --outDir dist/examples examples/hello-agent/AgentModule.ts --module NodeNext
-    ```
-    
-    Then run it:
-    ```bash
-    yarn start dist/examples/hello-agent/AgentModule.js '{"name": "Developer"}'
-    ```
-
-## Project Structure
-
--   `src/`: Framework core source code
-    -   `core/plugin/`: Plugin definition and loading
-    -   `runner/`: Minimal local runner
-    -   `shared/types/`: Shared TypeScript types
-    -   `config/`: Minimal configuration loading
--   `examples/`: Example agent implementations
-    -   `hello-agent/`: Simple greeting agent example
--   `dist/`: Compiled JavaScript output (generated when you run `yarn build`)
-
-## Development vs. Production
-
-This setup keeps a clear separation between:
-
-1. **Framework development** - The code in `src/` is the actual framework that gets compiled and published
-2. **Agent development** - The code in `examples/` is for demonstration and testing
-
-When you're developing agents using this framework:
-
-- Use `yarn dev` to iterate quickly with TypeScript examples
-- Use `yarn build` + `yarn start` for the compiled output validation
-
-## Overview
-
-(Describe the project purpose and core concepts here based on the minimal architecture)
-
-## Agent Dependencies & A2A Communication ✓
-
-The framework provides automatic dependency resolution for Agent-to-Agent (A2A) communication:
-
-- **Automatic Dependency Resolution**: Agents declare dependencies in their manifests
-- **Topological Loading**: Dependencies loaded in correct order automatically  
-- **A2A Communication**: Agents can call other agents via `ctx.sendTaskToAgent()`
-- **Circular Dependency Detection**: Prevents infinite loops and provides clear error messages
-
-### Quick Example
-
+### 2. Create Your First APLRET Agent
 ```typescript
-// agent.json (only when folder name matches agent name)
-{
-  "name": "hello-to-llm-agent",
-  "dependencies": { "agents": ["hello-agent"] }
-}
+import { createAgent } from '@a2arium/callagent-core';
 
-// AgentModule.ts  
-export default createAgent({
-  async handleTask(ctx) {
-    const result = await ctx.sendTaskToAgent('hello-agent', { name: 'User' });
-    return { success: true, dependencyResult: result };
+// Define typed stages for explicit control flow
+type Stage = 'idle' | 'awaiting_input' | 'completed';
+
+// Define typed intents (Policy decides WHAT to do)
+type Intent =
+  | { kind: 'prompt_user' }
+  | { kind: 'answer_with_llm'; query: string };
+
+// Create typed façade for ctx.vars
+const V = {
+  stage: (ctx) => ctx.vars.get('stage') ?? 'idle',
+  setStage: (ctx, stage) => ctx.vars.set('stage', stage),
+  token: (ctx) => ctx.vars.get('token'),
+  setToken: (ctx, token) => ctx.vars.set('token', token),
+  completeCalled: (ctx) => Boolean(ctx.vars.get('completeCalled')),
+  setCompleteCalled: (ctx, v) => ctx.vars.set('completeCalled', v)
+};
+
+export const agent = createAgent({
+  manifest: {
+    name: 'my-agent',
+    version: '1.0.0',
+    runMode: 'loop',
+    budgets: { maxTurns: 5 }
+  },
+  llmConfig: {
+    provider: 'openai',
+    modelAliasOrName: 'fast',
+    systemPrompt: 'You are a helpful assistant.',
+    historyMode: 'dynamic'
+  },
+
+  // A - Attention: What to focus on
+  attention: (m, env) => ({
+    wantPrompt: !env.input
+  }),
+
+  // P - Perception: Normalize input
+  perception: (env) => ({
+    text: env.input as string,
+    eventType: env.input ? 'user_message' : 'idle'
+  }),
+
+  // L - Learning: Update MentalState (immutable, pure)
+  learning: (prev, _action, obs) => ({
+    ...prev,
+    memory: {
+      ...prev.memory,
+      sensory: { current: obs.text }
+    }
+  }),
+
+  // R - Policy: Decide WHAT to do (pure function of MentalState)
+  policy: (m): Intent => {
+    const userText = m.memory?.sensory?.current;
+    return userText
+      ? { kind: 'answer_with_llm', query: userText }
+      : { kind: 'prompt_user' };
+  },
+
+  // S - Shield: Safety checks
+  shield: (m, intent) => ({
+    action: 'pass',
+    intent
+  }),
+
+  // E - Execution: HOW to do it (stage dispatcher)
+  execution: async (intent, ctx, m) => {
+    const stage = V.stage(ctx);
+
+    if (stage === 'idle' && intent.kind === 'prompt_user') {
+      await ctx.reply('How can I help you?');
+
+      // ✅ NEW: Single line stage management
+      const token = await Stage.setStage(ctx, 'awaiting_input', {
+        prompt: 'Your message'
+      });
+
+      return { kind: 'ask_user', token };
+    }
+
+    if (stage === 'awaiting_input' && intent.kind === 'answer_with_llm') {
+      const response = await ctx.llm.call(intent.query);
+      await ctx.reply(response[0]?.content);
+      ctx.complete(100, 'completed');
+      V.setCompleteCalled(ctx, true);
+      V.setStage(ctx, 'completed');
+      return { kind: 'internal', done: true };
+    }
+
+    return { kind: 'internal', done: true };
+  },
+
+  // T - Transition: Control loop flow
+  transition: (_env, exec, ctx) => {
+    if (exec.kind === 'ask_user') {
+      return { kind: 'await_input', token: exec.token };
+    }
+    if (V.completeCalled(ctx)) {
+      return { kind: 'complete', result: { ok: true } };
+    }
+    return { kind: 'continue' };
   }
 }, import.meta.url);
 ```
 
-**Important:** For multi-agent folders, only the main agent (whose name matches the folder) can use external JSON. All other agents must use inline manifests.
-
-[Read the complete Agent Dependencies documentation](docs/agent-dependencies.md)
-
-## Streaming Support ✓
-
-This framework supports both buffered and streaming responses through the A2A protocol:
-
-- **Buffered mode (`tasks/send`)**: Returns a complete response after the task is finished
-- **Streaming mode (`tasks/sendSubscribe`)**: Streams partial results in real-time using Server-Sent Events (SSE)
-
-Agent code remains the same in both modes - the framework automatically handles buffering or streaming based on the API endpoint used.
-
-### Try the Streaming Demo
-
-```bash
-yarn streaming-demo
-```
-
-This interactive demo shows how the same agent code produces different outputs depending on whether streaming is enabled.
-
-### Implementing Streaming in Your Agent
-
-Your agent can use these methods to emit content:
-
+### 3. Run Your Agent
 ```typescript
-// Send progress updates
-ctx.progress({ state: 'working', timestamp: new Date().toISOString() });
+import { agent } from './my-agent.js';
 
-// Send partial content
-ctx.reply([{ type: 'text', text: 'Partial content...' }], { 
-  append: true,  // Append to previous chunk
-  lastChunk: false // Not the last chunk
+const result = await agent.execute({
+  input: "Hello, agent!"
 });
 
-// Complete the task
-ctx.complete({
-  state: 'completed',
-  timestamp: new Date().toISOString()
-});
+console.log(result);
 ```
 
-The framework automatically buffers or streams these updates based on the client's request type.
+---
 
-## Development
+## 📚 Documentation
 
-(Add instructions for developing agents using the framework once implemented)
+- **[APLRET Architecture Guide](apps/docs/loop/aplret-stage-dispatcher.md)** - Complete APLRET implementation guide (2,400+ lines)
+- **[A2A Communication](docs/a2a/architecture.md)** - Agent-to-agent communication protocols
+- **[Memory System](docs/memory/)** - Multi-layered memory architecture
+- **[Examples](apps/examples/)** - 20+ production-ready example agents
 
-## ESM & TypeScript Setup
+---
 
-This monorepo uses **ECMAScript Modules (ESM)** and modern TypeScript for all packages and apps. This ensures compatibility with the latest Node.js features, enables dynamic imports, and future-proofs the codebase.
+## ✨ Key Features
 
-### Why ESM?
-- Native support in Node.js 20+ (and all LTS versions)
-- Enables dynamic `import()` (required for plugin/agent loading)
-- Aligns with the JavaScript ecosystem's direction
-- Better compatibility with modern tooling
+### 🧠 APLRET Cognitive Architecture
+- **Brain-inspired design** based on cognitive science research
+- **Six explicit modules**: Attention → Perception → Learning → Policy → Shield → Execution → Transition
+- **Typed intent system** for clear reasoning and exhaustive handling
+- **Stage dispatcher pattern** with runtime invariants
 
-### Key Configuration
-- All `package.json` files include: `"type": "module"`
-- All `tsconfig.json` files use: `"module": "nodenext"`, `"moduleResolution": "nodenext"`
-- All relative imports in ESM code use explicit `.js` extensions (e.g., `import { x } from './foo.js'`)
-- Each package's `package.json` sets `"main"` and `"exports"` to the ESM entrypoint (e.g., `dist/index.js` or `dist/src/YourModule.js`)
+### 🔄 A2A Communication
+- **Automatic dependency resolution** with topological loading
+- **Agent-to-agent delegation** via `ctx.sendTaskToAgent()`
+- **Circular dependency detection** with clear error messages
+- **Multi-agent coordination** patterns
 
-### Adding New Packages/Apps
-1. Add `"type": "module"` to `package.json`
-2. Use `"module": "nodenext"` and `"moduleResolution": "nodenext"` in `tsconfig.json`
-3. Use explicit `.js` extensions in all relative imports
-4. Set the correct ESM entrypoint in `main` and `exports` fields
+### ⚡ Effect Safety & Performance
+- **Budget-aware execution** with automatic cost tracking
+- **Timeout protection** and automatic retries for external calls
+- **Streaming support** via Server-Sent Events (SSE)
+- **LLM conversation history** persistence across async operations
 
-### Troubleshooting
-- **Cannot find package ... imported from ...**: Ensure the package is built and linked, and the entrypoint is correct in `package.json`.
-- **Relative import paths need explicit file extensions**: Add `.js` to all relative imports in ESM code.
-- **Default/CommonJS export issues**: Use `export`/`import` syntax everywhere; avoid `module.exports` or `require()`.
+### 💾 Advanced Memory System
+- **Multi-layered memory**: Semantic, Episodic, and Working memory
+- **SQL persistence** with Prisma ORM
+- **Tenant isolation** and permission management
+- **Memory lifecycle** orchestration
 
-For more, see the [Node.js ESM docs](https://nodejs.org/api/esm.html) and [TypeScript ESM docs](https://www.typescriptlang.org/docs/handbook/esm-node.html).
+### 🛡️ Production-Ready Safety
+- **Shield module** for PII detection and policy enforcement
+- **Pure functional modules** for predictable behavior
+- **Type safety** with discriminated unions and exhaustive matching
+- **Runtime invariants** for stage validation
 
-## Using CallAgent as a Library 📚
+---
 
-This project can be used as a **consumable library** in your applications, not just for framework development. Here are the main usage patterns:
+## 🎯 Agent Types
 
-### 🚀 Quick Start for Library Users
+### 1. **Simple Agents**
+For basic request-response patterns with minimal configuration.
 
-#### 1. Install the Core Package
+### 2. **Loop Agents** (APLRET)
+For complex conversational agents requiring:
+- Multi-turn conversations with context persistence
+- Complex decision-making and planning
+- Tool coordination and external service integration
+- Human-in-the-loop workflows
+
+### 3. **Multi-Agent Systems**
+For distributed systems requiring:
+- Agent specialization and delegation
+- Coordinated task execution
+- Hierarchical agent architectures
+
+---
+
+## 🏗️ Project Structure
+
+```
+callagent/
+├── packages/
+│   ├── core/           # APLRET framework engine
+│   ├── memory-sql/     # SQL memory persistence
+│   ├── types/          # Shared TypeScript types
+│   ├── utils/          # Utilities and logging
+│   └── chat-bridge/    # External integrations
+├── apps/
+│   ├── examples/       # 20+ example agents
+│   │   ├── hello-agent/           # Simple greeting agent
+│   │   ├── loop-agent-mini/       # APLRET demo with LLM history
+│   │   ├── interactive-a2a-demo/  # Multi-agent communication
+│   │   ├── memory-usage/          # Memory system demo
+│   │   └── ...                    # Many more examples
+│   └── docs/           # Comprehensive documentation
+├── planned_architecture/  # Detailed design specs
+└── scripts/            # Build utilities
+```
+
+---
+
+## 🚀 Development Setup
+
+### Install Dependencies
 ```bash
-npm install @a2arium/callagent-core
-# Optional: For database persistence
-npm install @a2arium/callagent-memory-sql
+yarn install
 ```
 
-#### 2. Set Up Your Database (if using SQL memory)
+### Build the Framework
 ```bash
-# Option A: Create a .env file in your project root (recommended)
-# MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
-
-# Option B: Export as environment variable
-export MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
-
-# Set up the database schema
-npx @a2arium/callagent-memory-sql setup
+yarn build
 ```
 
-#### 2a. View Your Database (optional)
+### Run Examples
 ```bash
-# Open Prisma Studio to view/edit your data
-npx @a2arium/callagent-memory-sql studio
+# Simple agent
+yarn run:hello
 
-# Opens at http://localhost:5555
-# Use Ctrl+C to stop
+# APLRET loop agent with streaming
+yarn run:loop-mini:dev
+
+# Multi-agent demo
+yarn run:interactive-a2a
+
+# All available scripts
+yarn run:llm
+yarn run:memory
+yarn run:csv-parser
+yarn run:data-analyzer
+
+# Telegram bridge demo (requires setup)
+yarn run:telegram-demo
 ```
 
-#### 3. Create Your First Agent
+### Telegram Bridge Demo Setup
+
+The Telegram bridge demo requires additional setup since it connects to external services:
+
+1. **Copy environment template:**
+```bash
+cp apps/examples/telegram-bridge-demo/env.example apps/examples/telegram-bridge-demo/.env
+```
+
+2. **Fill in environment variables in `.env`:**
+```bash
+# Get from @BotFather on Telegram
+CM_TG_BOT_TOKEN="your-telegram-bot-token"
+# Port for webhook (88 works well for local)
+CM_TG_WEBHOOK_PORT=88
+# Your Telegram chat ID for testing
+CM_TG_CHAT_ID="your-chat-id"
+# PostgreSQL database for session storage
+CHAT_DATABASE_URL="postgres://user:pass@host:5432/dbname"
+```
+
+3. **Run the demo:**
+```bash
+# Development mode (no build needed)
+yarn run:telegram-demo:dev
+
+# Production mode (requires build)
+yarn run:telegram-demo
+```
+
+The demo starts a webhook server that receives Telegram messages and responds using the enhanced `Stage.setStage` API.
+
+### Development Commands
+```bash
+# Run tests
+yarn test
+
+# Lint all packages
+turbo run lint
+
+# Build all packages
+turbo run build
+
+# Run specific package tests
+turbo run test --filter=packages/core
+```
+
+### TypeScript Development
+The framework uses **ESM modules** throughout. When developing:
+
+- Use `yarn dev` for rapid TypeScript iteration
+- All relative imports require explicit `.js` extensions
+- Use `import.meta.url` for agent module resolution
+
+## 🔄 A2A Communication & Multi-Agent Systems
+
+The framework provides comprehensive **Agent-to-Agent (A2A) communication** with automatic dependency resolution:
+
+### Core A2A Features
+- **Automatic Dependency Resolution**: Agents declare dependencies in manifests
+- **Topological Loading**: Dependencies loaded in correct order with circular dependency detection
+- **Agent Delegation**: Call other agents via `ctx.sendTaskToAgent()`
+- **Multi-Agent Coordination**: Support for hierarchical agent systems
+
+### Quick Multi-Agent Example
+
 ```typescript
-// my-agent.ts
-import { createAgent } from '@a2arium/callagent-core';
-
-const manifest = {
-  name: 'my-agent',
-  version: '1.0.0',
-  description: 'My custom agent',
-  inputs: {
-    message: { type: 'string', required: true }
-  },
-  outputs: {
-    response: { type: 'string' }
+// agent.json
+{
+  "name": "coordinator-agent",
+  "dependencies": {
+    "agents": ["data-processor", "report-generator"]
   }
-};
+}
 
-export default createAgent(manifest, {
+// AgentModule.ts
+export default createAgent({
+  manifest: 'agent.json',
+
   async handleTask(ctx) {
-    const { message } = ctx.input;
-    
-    // Use memory
-    await ctx.semantic?.add({ id: 'last_message', value: message });
-    
-    // Use LLM
-    const response = await ctx.llm.call({
-      messages: [{ role: 'user', content: `Respond to: ${message}` }]
+    // Delegate to specialized agents
+    const data = await ctx.sendTaskToAgent('data-processor', {
+      source: ctx.input.dataSource
     });
-    
-    return {
-      response: response.content
-    };
-  }
-});
-```
 
-#### 4. Run Your Agent
-```typescript
-// main.ts
-import myAgent from './my-agent.js';
-
-const result = await myAgent.execute({ 
-  message: "Hello, agent!" 
-});
-
-console.log(result.response);
-```
-
-### 💾 Database Configuration Options
-
-The library supports multiple database configuration approaches:
-
-#### Option 1: Environment Variables (Recommended)
-```bash
-export MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
-```
-```typescript
-// The library uses MEMORY_DATABASE_URL
-const agent = createAgent(manifest, handler);
-```
-
-#### Option 2: Direct Database URL
-```typescript
-import { createAgent } from '@a2arium/callagent-core';
-
-const agent = createAgent(manifest, handler, {
-  memory: {
-    database: {
-      url: "postgresql://user:pass@localhost:5432/yourdb"
-    }
-  }
-});
-```
-
-#### Option 3: Pre-configured Prisma Client
-```typescript
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient({
-  // Your custom Prisma configuration
-});
-
-const agent = createAgent(manifest, handler, {
-  memory: {
-    database: {
-      prismaClient: prisma
-    }
-  }
-});
-```
-
-#### Option 4: Custom Memory Adapters
-```typescript
-import { createAgent } from '@a2arium/callagent-core';
-import { MyCustomMemoryAdapter } from './my-adapter.js';
-
-const agent = createAgent(manifest, handler, {
-  memory: {
-    adapters: {
-      semantic: new MyCustomMemoryAdapter(),
-      // working: new MyCustomWorkingMemoryAdapter()
-    }
-  }
-});
-```
-
-### 🔧 Advanced Configuration
-
-#### Full Configuration Example
-```typescript
-import { createAgent } from '@a2arium/callagent-core';
-import { PrismaClient } from '@prisma/client';
-
-const agent = createAgent(manifest, handler, {
-  memory: {
-    database: {
-      url: process.env.MEMORY_DATABASE_URL,
-      // OR prismaClient: customPrismaClient
-    },
-    // Custom adapters override database config
-    adapters: {
-      // semantic: customSemanticAdapter,
-      // working: customWorkingAdapter
-    }
-  },
-  // Other configuration options...
-});
-```
-
-#### Multi-Agent Systems
-```typescript
-// coordinator.ts
-import { createAgent } from '@a2arium/callagent-core';
-
-const coordinator = createAgent({
-  name: 'coordinator',
-  dependencies: { agents: ['data-processor', 'report-generator'] }
-}, {
-  async handleTask(ctx) {
-    // Call other agents
-    const data = await ctx.sendTaskToAgent('data-processor', { 
-      source: ctx.input.dataSource 
+    const report = await ctx.sendTaskToAgent('report-generator', {
+      data: data.processed
     });
-    
-    const report = await ctx.sendTaskToAgent('report-generator', { 
-      data: (data as any).processed 
-    });
-    
+
     return { report: report.content };
   }
-});
+}, import.meta.url);
 ```
 
-### 🏗️ Production Deployment
+### APLRET Multi-Agent Patterns
 
-For production deployments, the library is designed to be **environment-agnostic**:
+For complex multi-agent systems using the APLRET architecture:
 
-- ✅ **Works with any database setup** (your choice of connection management)
-- ✅ **No file system dependencies** (no `.env` file requirements)
-- ✅ **Container-friendly** (Docker, Kubernetes, etc.)
-- ✅ **Cloud-ready** (works with managed databases, secret managers)
-
-Example production setup:
 ```typescript
-// In production, use your deployment platform's configuration
-const agent = createAgent(manifest, handler, {
-  memory: {
-    database: {
-      // Read from your secret manager, env vars, config service, etc.
-      url: await getSecretValue('MEMORY_DATABASE_URL')
+export default createAgent({
+  manifest: {
+    name: 'orchestrator',
+    runMode: 'loop',
+    dependencies: { agents: ['specialist-1', 'specialist-2'] }
+  },
+
+  // APLRET modules for multi-agent coordination
+  policy: (m): Intent => {
+    const task = m.worldModel.currentTask;
+
+    if (task.type === 'data_analysis') {
+      return {
+        kind: 'delegate_to_child',
+        childAgentId: 'data-analyst',
+        input: task.data
+      };
+    }
+
+    if (task.type === 'report_generation') {
+      return {
+        kind: 'delegate_to_child',
+        childAgentId: 'report-writer',
+        input: task.analysis
+      };
+    }
+
+    return { kind: 'prompt_user' };
+  },
+
+  execution: async (intent, ctx) => {
+    if (intent.kind === 'delegate_to_child') {
+      const handle = await ctx.sendTaskToAgent(intent.childAgentId, intent.input);
+      V.setToken(ctx, handle.token);
+      V.setStage(ctx, 'awaiting_child');
+      return { kind: 'subagent', token: handle.token };
+    }
+
+    // Handle other intents...
+  },
+
+  // ... other APLRET modules
+}, import.meta.url);
+```
+
+## 🌊 Streaming Support
+
+The framework supports both **buffered and streaming responses**:
+
+- **Buffered Mode**: Complete response after task completion
+- **Streaming Mode**: Real-time partial results via Server-Sent Events (SSE)
+
+Agent code remains identical - the framework handles the delivery method automatically.
+
+### Streaming Example
+
+```typescript
+export default createAgent({
+  async handleTask(ctx) {
+    // Send progress updates
+    await ctx.progress({
+      state: 'processing',
+      progress: 25
+    });
+
+    // Stream partial content
+    await ctx.reply([{
+      type: 'text',
+      text: 'Processing step 1...'
+    }], { append: true });
+
+    // Continue processing...
+    await ctx.progress({ progress: 50 });
+
+    // Complete the task
+    ctx.complete(100, 'completed');
+    return { result: 'Task completed successfully' };
+  }
+}, import.meta.url);
+```
+
+### Try Streaming Examples
+
+```bash
+# Streaming APLRET agent
+yarn run:loop-mini
+
+# Interactive multi-agent demo with streaming
+yarn run:interactive-a2a
+```
+
+---
+
+## 🛠️ Advanced Usage
+
+### External API Integration with Effect Safety
+
+```typescript
+import { runEffect } from '@a2arium/callagent-core';
+
+export default createAgent({
+  execution: async (intent, ctx) => {
+    if (intent.kind === 'fetch_external_data') {
+      // ✅ Safe external API call with timeout and retries
+      const data = await runEffect(
+        () => fetch(intent.url).then(r => r.json()),
+        { timeoutMs: 10000, maxRetries: 3 }
+      );
+
+      await ctx.reply(`Data fetched: ${JSON.stringify(data)}`);
+      return { kind: 'internal', done: true };
     }
   }
-});
+}, import.meta.url);
 ```
 
-### 📖 Package Documentation
+### Memory System Integration
 
-- **[@a2arium/callagent-core](packages/core/README.md)** - Core framework and agent creation
-- **[@a2arium/callagent-memory-sql](packages/memory-sql/README.md)** - SQL-based memory persistence  
+```typescript
+export default createAgent({
+  learning: (prev, _action, obs) => {
+    // Store conversation in semantic memory
+    if (obs.text) {
+      return {
+        ...prev,
+        memory: {
+          ...prev.memory,
+          sensory: { current: obs.text },
+          longTerm: {
+            ...prev.memory.longTerm,
+            episodic: [
+              ...prev.memory.longTerm.episodic,
+              {
+                t: Date.now(),
+                content: obs.text,
+                type: 'user_message'
+              }
+            ]
+          }
+        }
+      };
+    }
+
+    return prev;
+  },
+
+  policy: (m) => {
+    // Use memory for context-aware decisions
+    const recentHistory = m.memory.longTerm.episodic.slice(-5);
+    const context = recentHistory.map(e => e.content).join('\n');
+
+    return {
+      kind: 'answer_with_llm',
+      query: m.memory.sensory.current,
+      context
+    };
+  }
+}, import.meta.url);
+```
+
+---
+
+## 📖 Learn More
+
+### Documentation
+- **[APLRET Architecture Guide](apps/docs/loop/aplret-stage-dispatcher.md)** - Complete implementation guide
+- **[A2A Communication](planned_architecture/a2a_specs/)** - Multi-agent protocols
+- **[Memory System](planned_architecture/memory/)** - Memory architecture details
+- **[API Reference](packages/core/)** - Full API documentation
+
+### Examples
+- **[Hello Agent](apps/examples/hello-agent/)** - Simple starter agent
+- **[APLRET Mini Demo](apps/examples/loop-agent-mini/)** - Minimal APLRET implementation
+- **[Interactive A2A Demo](apps/examples/interactive-a2a-demo/)** - Multi-agent communication
+- **[Memory Usage](apps/examples/memory-usage/)** - Memory system demonstration
+- **[20+ More Examples](apps/examples/)** - Covering all framework features
+
+### Architecture Papers
+- **[Brain-Inspired Foundation Agents](https://arxiv.org/abs/2504.01990)** - Academic foundation for APLRET
+- **[Planned Architecture](planned_architecture/)** - Complete design specifications
+
+## 📦 Package Documentation
+
+- **[@a2arium/callagent-core](packages/core/README.md)** - APLRET framework and agent creation
+- **[@a2arium/callagent-memory-sql](packages/memory-sql/README.md)** - SQL-based memory persistence
 - **[@a2arium/callagent-types](packages/types/README.md)** - Shared TypeScript types
 - **[@a2arium/callagent-utils](packages/utils/README.md)** - Shared utilities
 
 ---
 
-## Framework Development 🛠️
+## 🏗️ Production Deployment
 
-The following sections are for **developing the CallAgent framework itself**, not for using it as a library.
+### Database Setup
 
-### Environment Variables & Development
+For production use with persistent memory:
 
-For framework developers, this monorepo uses [dotenv](https://www.npmjs.com/package/dotenv) to load environment variables from a `.env` file at the project root during development.
+```bash
+# Set database URL (environment variable or config)
+export MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
 
-#### Development Best Practices
-- Place all shared environment variables in the root `.env` file
-- The sync script automatically propagates `.env` to packages that need it (like `packages/memory-sql`)
-- In production library usage, consumers manage their own environment variables
+# Initialize database schema
+npx @a2arium/callagent-memory-sql setup
 
-#### Environment Sync Behavior
-The `scripts/sync-dotenv.cjs` script automatically detects the environment:
-- ✅ **Framework Development**: Syncs `.env` file to packages
-- ✅ **Library Consumer**: Skips sync entirely (safe for production)
-- ✅ **CI/Production**: Skips sync (environment-aware)
+# Optional: View database with Prisma Studio
+npx @a2arium/callagent-memory-sql studio
+```
 
-#### Troubleshooting Development Setup
-- If you see errors about missing environment variables during framework development, ensure `.env` exists in the project root
-- For library consumers: manage environment variables using your deployment platform's standard approach 
+### Environment-Agnostic Design
+
+CallAgent is designed for **production environments**:
+
+- ✅ **No file system dependencies** (environment-agnostic configuration)
+- ✅ **Container-ready** (Docker, Kubernetes support)
+- ✅ **Cloud-native** (works with managed databases, secret managers)
+- ✅ **Multi-tenant support** with isolation and permissions
+
+### Production Configuration
+
+```typescript
+// Production agent with environment-specific config
+export const agent = createAgent({
+  manifest: {
+    name: 'production-agent',
+    runMode: 'loop',
+    budgets: { maxTurns: 10 }
+  },
+
+  // APLRET modules as shown in quick start
+  // ...
+}, import.meta.url);
+
+// Initialize with your deployment platform's configuration
+await agent.initialize({
+  database: {
+    url: await getSecret('MEMORY_DATABASE_URL')
+  },
+  llm: {
+    apiKey: await getSecret('LLM_API_KEY'),
+    provider: 'your-provider'
+  }
+});
+```
+
+---
+
+## 🔧 Framework Development
+
+### Development Environment
+
+This monorepo uses **Turborepo** and **Yarn workspaces** for modular development:
+
+```bash
+# Install dependencies
+yarn install
+
+# Build all packages
+turbo run build
+
+# Run tests
+turbo run test
+
+# Run specific package tests
+turbo run test --filter=packages/core
+
+# Development mode with hot reload
+yarn dev examples/loop-agent-mini/AgentModule.ts '{}'
+```
+
+### Project Structure
+
+```
+callagent/
+├── packages/
+│   ├── core/           # APLRET framework engine
+│   ├── memory-sql/     # SQL memory persistence
+│   ├── types/          # Shared TypeScript types
+│   ├── utils/          # Logging and utilities
+│   └── chat-bridge/    # External platform integrations
+├── apps/
+│   ├── examples/       # 20+ example agents demonstrating patterns
+│   └── docs/           # APLRET documentation
+├── planned_architecture/  # Comprehensive design specifications
+└── scripts/            # Build and development utilities
+```
+
+### TypeScript & ESM
+
+The framework uses **modern TypeScript** with **ES modules**:
+
+- `"type": "module"` in all `package.json` files
+- `"module": "nodenext"` and `"moduleResolution": "nodenext"` in TypeScript configs
+- Explicit `.js` extensions for relative imports
+- `import.meta.url` for agent module resolution
+
+### Environment Configuration
+
+For framework development, use the root `.env` file for shared configuration. The framework automatically handles environment propagation during development while remaining environment-agnostic in production.
+
+### Contributing
+
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for:
+- Development setup and testing
+- Code style and conventions
+- Pull request process
+- Release process
+
+---
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+---
+
+## 🤝 Community
+
+- **Documentation**: [Complete APLRET Guide](apps/docs/loop/aplret-stage-dispatcher.md)
+- **Issues**: [GitHub Issues](https://github.com/your-repo/callagent/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-repo/callagent/discussions)
+
+---
+
+**CallAgent** - Production-ready APLRET architecture with comprehensive A2A communication support. 
