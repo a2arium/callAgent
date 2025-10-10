@@ -11,6 +11,7 @@ export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResu
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
 export type { MentalState, EnvironmentState } from './loop/types.js';
 export type { ProposedAction, ExecutableAction, TurnOutcome, ShieldOutcome, AttentionSignal, Observation } from './loop/oneTurn.js';
+export type { Modules } from './loop/oneTurn.js';
 export { runEffect } from './loop/effects.js';
 export { createStageFacade } from './loop/stageHelpers.js';
 export type { StageInvariants } from './loop/stageHelpers.js';

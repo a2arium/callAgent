@@ -84,10 +84,11 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
   idle: async (ctx, m) => {
     await ctx.reply('How can I help you today?');
 
-    // ✅ NEW: Single line stage management
-    const token = await Stage.setStage(ctx, 'awaiting_input', {
-      prompt: 'Your message'
+    // ✅ NEW: Input-first approach with automatic token and stage management
+    const handle = await ctx.requestInput('Your message', {
+      setStage: 'awaiting_input'  // Automatically sets stage and token
     });
+    const token = handle.token;
   
     return { kind: 'ask_user', token };
   },
@@ -101,8 +102,8 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
     const result = await ctx.llm.call(userText);
     await ctx.reply(result[0].content);
     
-    // Mark complete
-    ctx.complete(100, 'completed');
+    // Mark complete (set completion flag before stage transition for invariant check)
+    ctx.vars.set('completed.called', true);
     Stage.setStage(ctx, 'completed'); // autoMarks sets 'completed.called'
     
     return { kind: 'internal', done: true };
@@ -391,6 +392,70 @@ m.vars.stage = 'idle';        // ❌ Don't write to M.vars
 - M persists across sessions; vars is ephemeral per turn
 - Keeps Learning pure and testable
 
+### Nested Path Support
+
+`ctx.vars` supports automatic nested path creation for complex control state:
+
+```typescript
+// Alternative approaches for structured control state
+
+// Approach 1: Build nested structure step by step
+ctx.vars.set('workflow.stage', 'data_processing');
+ctx.vars.set('workflow.currentStep', 3);
+ctx.vars.set('workflow.errors', []);
+ctx.vars.set('user.session.id', 'sess_123');
+ctx.vars.set('user.session.preferences', { theme: 'dark' });
+
+// Approach 2: Set complete nested objects directly
+ctx.vars.set('workflow', {
+    stage: 'data_processing',
+    currentStep: 3,
+    errors: []
+});
+
+ctx.vars.set('user', {
+    session: {
+        id: 'sess_123',
+        preferences: { theme: 'dark' }
+    }
+});
+
+// Both approaches create the same nested structure:
+// {
+//   workflow: { stage: 'data_processing', currentStep: 3, errors: [] },
+//   user: { session: { id: 'sess_123', preferences: { theme: 'dark' } } }
+// }
+
+// Update with access to current value
+ctx.vars.update('workflow.currentStep', (current) => (current || 0) + 1);
+
+// Access nested values (same for both approaches)
+const currentStage = ctx.vars.get('workflow.stage');
+const stepNumber = ctx.vars.get('workflow.currentStep');
+const userId = ctx.vars.get('user.session.id');
+
+// Check if nested path exists
+if (ctx.vars.has('workflow.errors')) {
+    // Handle workflow errors
+}
+
+// Delete nested property
+ctx.vars.delete('user.session.preferences');
+```
+
+#### **Key Methods:**
+
+| Method | Description | Use Case |
+|--------|-------------|----------|
+| `set('path.to.prop', value)` | Direct assignment, creates nested structure | Setting control state |
+| `update('path.to.prop', fn)` | Update with access to current value | Conditional state updates |
+| `get('path.to.prop')` | Get nested value | Reading control state |
+| `has('path.to.prop')` | Check if nested path exists | State validation |
+| `delete('path.to.prop')` | Delete nested property | Cleanup control state |
+| `merge(patch)` | Merge objects (dots are keys, not paths) | Batch updates |
+
+**Best Practice:** Use nested paths to organize related control state logically, keeping the same separation between cognitive data (M) and control data (ctx.vars).
+
 ---
 
 ## 3. Typed Intent System
@@ -450,10 +515,11 @@ execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<Exe
       await ctx.reply('How can I help you?');
       V.setPrompted(ctx, true);
 
-      // ✅ NEW: Single line stage management
-      const token = await Stage.setStage(ctx, 'awaiting_input', {
-        prompt: 'Your message'
+      // ✅ NEW: Input-first approach with automatic token and stage management
+      const handle = await ctx.requestInput('Your message', {
+        setStage: 'awaiting_input'  // Automatically sets stage and token
       });
+      const token = handle.token;
 
       return { kind: 'ask_user', token };
     })
@@ -913,7 +979,7 @@ const Stage = createStageFacade<Stage>({
 });
 
 // Usage
-// Stage.setStage(ctx, 'awaiting_input');
+// await ctx.requestInput('Your message', { setStage: 'awaiting_input' });
 // const s = Stage.getStage(ctx);
 ```
 
@@ -1607,11 +1673,12 @@ export const agent = createAgent({
           await ctx.reply('How can I help you today?');
           V.setPrompted(ctx, true);
 
-          // ✅ NEW: Single line stage management with handler
-          const token = await Stage.setStage(ctx, 'awaiting_input', {
-            prompt: 'Your message',
+          // ✅ NEW: Input-first approach with automatic token and stage management
+          const handle = await ctx.requestInput('Your message', {
+            setStage: 'awaiting_input',  // Automatically sets stage and token
             onProvided: '__onUserAnswer'
           });
+          const token = handle.token;
 
           return { kind: 'ask_user', token };
         }
@@ -2033,10 +2100,11 @@ const handlers: Record<Stage, Handler> = {
       await ctx.reply('How can I help?');
       V.setPrompted(ctx, true);
 
-      // ✅ NEW: Single line stage management
-      const token = await Stage.setStage(ctx, 'awaiting_input', {
-        prompt: 'Message'
+      // ✅ NEW: Input-first approach with automatic token and stage management
+      const handle = await ctx.requestInput('Message', {
+        setStage: 'awaiting_input'  // Automatically sets stage and token
       });
+      const token = handle.token;
 
       return { kind: 'ask_user', token };
     }
@@ -2178,10 +2246,11 @@ const token = handle.token;
 ctx.vars.set('token', token);
 Stage.setStage(ctx, 'awaiting_input');
 
-// ✅ New way: Single line with automatic token handling
-const token = await Stage.setStage(ctx, 'awaiting_input', {
-  prompt: 'Message'
+// ✅ New way: Input-first approach with automatic token and stage management
+const handle = await ctx.requestInput('Message', {
+  setStage: 'awaiting_input'  // Automatically sets stage and token
 });
+const token = handle.token;
 ```
 
 ### Problem: "Policy returning different intents in same situation"

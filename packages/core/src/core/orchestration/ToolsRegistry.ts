@@ -5,6 +5,7 @@ export type PendingTools = Record<string, {
     name: string;
     args: unknown;
     handlers?: { completed?: string; failed?: string };
+    options?: { setToken?: boolean; setStage?: string };
 }>;
 
 export function getPendingTools(snapshot: Record<string, unknown>): PendingTools {

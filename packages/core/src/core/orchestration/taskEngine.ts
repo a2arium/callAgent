@@ -93,9 +93,17 @@ export class TaskEngine {
                     try {
                         const snapNow = await this.sessionManager!.load(tenantId, sessionId);
                         const base = (snapNow?.snapshot as Record<string, unknown>) || {};
-                        const vars = ((base as any).vars ? { ...(base as any).vars } : {}) as Record<string, unknown>;
-                        (vars as any)[prop] = value;
-                        const next = { ...base, vars } as Record<string, unknown>;
+                        // Store vars in M.memory.vars to align with APLRET framework expectations
+                        let M = (base as any).M;
+                        if (!M) {
+                            // Initialize M if it doesn't exist
+                            const { initialM } = await import('../../loop/init.js');
+                            M = initialM(ctx);
+                        }
+                        M.memory = M.memory || {};
+                        M.memory.vars = M.memory.vars || {};
+                        (M.memory.vars as any)[prop] = value;
+                        const next = { ...base, M } as Record<string, unknown>;
                         const expected = snapNow?.wmVersion ?? BigInt(0);
                         await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot: next });
                         await this.sessionManager!.appendEvent(tenantId, sessionId, 'wm.vars_updated', { key: String(prop) });
@@ -164,6 +172,7 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
+        try { console.log('[TaskEngine] BUILD-MARKER startTask enter'); } catch { }
         const { task, isStreaming, agentId, tenantId: startTenantId, initialContext } = params;
 
         // Use provided context if present, otherwise create a basic one
@@ -235,8 +244,46 @@ export class TaskEngine {
         (ctx as any).__wmVersion = session?.wmVersion;
         (ctx as any).__varsDirty = false;
         const assignVarsIntoMental = () => {
-            (M.memory as any) = { ...((M.memory as any) || {}), vars: Object.fromEntries(varCache) };
+            // Convert varCache to object while preserving nested structures
+            const varsObject: Record<string, unknown> = {};
+            for (const [key, value] of varCache.entries()) {
+                varsObject[key] = value;
+            }
+            (M.memory as any) = { ...((M.memory as any) || {}), vars: varsObject };
             (M as any).vars = (M.memory as any).vars;
+        };
+
+        // Helper function to handle nested paths
+        const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+            const pathParts = path.split('.');
+            let current = obj;
+
+            // Navigate to parent of the target
+            for (let i = 0; i < pathParts.length - 1; i++) {
+                const part = pathParts[i];
+                if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
+                    current[part] = {};
+                }
+                current = current[part] as Record<string, unknown>;
+            }
+
+            // Set the final value
+            current[pathParts[pathParts.length - 1]] = value;
+            return obj;
+        };
+
+        const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
+            const pathParts = path.split('.');
+            let current = obj;
+
+            for (const part of pathParts) {
+                if (!current || typeof current !== 'object' || Array.isArray(current)) {
+                    return undefined;
+                }
+                current = (current as Record<string, unknown>)[part] as Record<string, unknown>;
+            }
+
+            return current;
         };
         const updateLlmInMental = () => {
             try {
@@ -255,7 +302,9 @@ export class TaskEngine {
         const flushMentalState = async () => {
             if (!this.sessionManager) return;
             try {
+                try { console.log('[TaskEngine] flushMentalState: before assign vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
                 assignVarsIntoMental();
+                try { console.log('[TaskEngine] flushMentalState: after assign vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
                 updateLlmInMental();
                 const snapNow = await this.sessionManager.load(tenantId, sessionId);
                 const base = (snapNow?.snapshot as Record<string, unknown>) || {};
@@ -279,13 +328,110 @@ export class TaskEngine {
             }
         };
         (ctx as any).vars = {
-            get: (key: string) => varCache.get(key),
-            set: (key: string, value: unknown) => { varCache.set(key, value); (ctx as any).__varsDirty = true; assignVarsIntoMental(); },
-            merge: (patch: Record<string, unknown>) => { for (const [k, v] of Object.entries(patch)) varCache.set(k, v); (ctx as any).__varsDirty = true; assignVarsIntoMental(); },
-            update: (key: string, fn: (prev: unknown) => unknown) => { const next = fn(varCache.get(key)); varCache.set(key, next); (ctx as any).__varsDirty = true; assignVarsIntoMental(); },
-            delete: (key: string) => { varCache.delete(key); (ctx as any).__varsDirty = true; assignVarsIntoMental(); },
+            get: (key: string) => {
+                // Handle nested paths
+                if (key.includes('.')) {
+                    const baseKey = key.split('.')[0];
+                    const baseObj = varCache.get(baseKey) as Record<string, unknown>;
+                    if (baseObj && typeof baseObj === 'object' && !Array.isArray(baseObj)) {
+                        return getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
+                    }
+                    return undefined;
+                }
+                return varCache.get(key);
+            },
+            set: (key: string, value: unknown) => {
+                // Handle nested paths
+                if (key.includes('.')) {
+                    const baseKey = key.split('.')[0];
+                    const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
+                    const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), value);
+                    varCache.set(baseKey, updatedObj);
+                } else {
+                    varCache.set(key, value);
+                }
+                (ctx as any).__varsDirty = true;
+                assignVarsIntoMental();
+            },
+            merge: (patch: Record<string, unknown>) => {
+                for (const [k, v] of Object.entries(patch)) {
+                    // For merge, we don't treat dots as paths - it's for object merging
+                    const current = varCache.get(k);
+                    if (current && typeof current === 'object' && !Array.isArray(current) &&
+                        v && typeof v === 'object' && !Array.isArray(v)) {
+                        // Deep merge objects
+                        const merged = { ...(current as Record<string, unknown>), ...(v as Record<string, unknown>) };
+                        varCache.set(k, merged);
+                    } else {
+                        varCache.set(k, v);
+                    }
+                }
+                (ctx as any).__varsDirty = true;
+                assignVarsIntoMental();
+            },
+            update: (key: string, fn: (prev: unknown) => unknown) => {
+                let currentValue: unknown;
+
+                // Handle nested paths
+                if (key.includes('.')) {
+                    const baseKey = key.split('.')[0];
+                    const baseObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
+                    currentValue = getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
+                } else {
+                    currentValue = varCache.get(key);
+                }
+
+                const next = fn(currentValue);
+
+                // Set the updated value
+                if (key.includes('.')) {
+                    const baseKey = key.split('.')[0];
+                    const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
+                    const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), next);
+                    varCache.set(baseKey, updatedObj);
+                } else {
+                    varCache.set(key, next);
+                }
+
+                (ctx as any).__varsDirty = true;
+                assignVarsIntoMental();
+            },
+            delete: (key: string) => {
+                // Handle nested paths
+                if (key.includes('.')) {
+                    const baseKey = key.split('.')[0];
+                    const currentObj = (varCache.get(baseKey) as Record<string, unknown>);
+                    if (currentObj && typeof currentObj === 'object' && !Array.isArray(currentObj)) {
+                        const updatedObj = { ...currentObj };
+                        const pathParts = key.substring(key.indexOf('.') + 1).split('.');
+                        let current = updatedObj;
+
+                        // Navigate to parent of the target
+                        for (let i = 0; i < pathParts.length - 1; i++) {
+                            const part = pathParts[i];
+                            if (current[part] && typeof current[part] === 'object' && !Array.isArray(current[part])) {
+                                current = current[part] as Record<string, unknown>;
+                            }
+                        }
+
+                        // Delete the target property
+                        delete current[pathParts[pathParts.length - 1]];
+                        varCache.set(baseKey, updatedObj);
+                    }
+                } else {
+                    varCache.delete(key);
+                }
+                (ctx as any).__varsDirty = true;
+                assignVarsIntoMental();
+            },
             keys: () => Array.from(varCache.keys()),
-            has: (key: string) => varCache.has(key)
+            has: (key: string) => {
+                // Handle nested paths
+                if (key.includes('.')) {
+                    return (ctx as any).vars.get(key) !== undefined;
+                }
+                return varCache.has(key);
+            }
         } as any;
         // Ensure alias is initialized before loop modules read mentalState.vars
         try { assignVarsIntoMental(); } catch { /* noop */ }
@@ -383,7 +529,9 @@ export class TaskEngine {
                     } as any;
                 }
                 const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
+                    try { console.log('[TaskEngine] requestInput: before flush vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
                     try { await flushMentalState(); } catch { /* best-effort */ }
+                    try { console.log('[TaskEngine] requestInput: after flush vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
                     // Reload latest snapshot after flush to avoid overwriting newer M
                     const latest = await this.sessionManager!.load(tenantId, sessionId);
                     const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
@@ -420,7 +568,7 @@ export class TaskEngine {
                         state: 'input-required',
                         message: {
                             role: 'agent',
-                            parts: [{ type: 'text', text: `Input required: ${prompt}` }]
+                            parts: [{ type: 'text', text: prompt }]
                         },
                         timestamp: new Date().toISOString(),
                         metadata: { token }
@@ -451,18 +599,89 @@ export class TaskEngine {
         }
 
         // Provide requestTool implementation for async tool callbacks (non-blocking)
-        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { onCompleted: string }) => {
+        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => {
             if (!this.sessionManager) throw new Error('Session manager not configured');
             const snap = await this.sessionManager.load(tenantId, sessionId);
             const base = (snap?.snapshot as Record<string, unknown>) || {};
             const token = uuidv4();
             const toolsNow = getPendingTools(base) as any;
             toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
+
+            // Store setToken and setStage options in the tool registry for automatic handling
+            if (opts?.setToken || opts?.setStage) {
+                toolsNow[token].options = {
+                    setToken: opts.setToken,
+                    setStage: opts.setStage
+                };
+            }
+
             try { await flushMentalState(); } catch { /* best-effort */ }
             const expected = snap?.wmVersion ?? BigInt(0);
             const next = setPendingTools(base, toolsNow);
             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
             await this.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
+
+            // Handle automatic token and stage management immediately upon tool invocation
+            if (opts?.setToken || opts?.setStage) {
+                try {
+                    const currentSnap = await this.sessionManager.load(tenantId, sessionId);
+                    if (currentSnap) {
+                        const currentBase = (currentSnap.snapshot as Record<string, unknown>) || {};
+                        const currentM = currentBase.M as any;
+
+                        // Automatic token storage
+                        if (opts.setToken && token && currentM?.vars) {
+                            const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+                                const pathParts = path.split('.');
+                                let current = obj;
+                                for (let i = 0; i < pathParts.length - 1; i++) {
+                                    const part = pathParts[i];
+                                    if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
+                                        current[part] = {};
+                                    }
+                                    current = current[part] as Record<string, unknown>;
+                                }
+                                current[pathParts[pathParts.length - 1]] = value;
+                                return obj;
+                            };
+
+                            const updatedVars = setNestedValue(
+                                { ...(currentM.vars as Record<string, unknown> || {}) },
+                                'toolToken',
+                                token
+                            );
+                            currentM.vars = updatedVars;
+                            (currentM.memory as any) = { ...((currentM.memory as any) || {}), vars: updatedVars };
+                        }
+
+                        // Automatic stage transition
+                        if (opts.setStage && currentM?.control) {
+                            const currentStage = currentM.control.stage;
+                            const targetStage = opts.setStage;
+
+                            // Basic validation that this is a valid stage transition
+                            if (typeof targetStage === 'string' && targetStage.length > 0) {
+                                currentM.control.stage = targetStage;
+
+                                try { console.log(`[TaskEngine] Auto stage transition: ${currentStage} -> ${targetStage} (tool invoked)`); } catch { }
+                            }
+                        }
+
+                        // Save the updated state
+                        const expectedWmVersion = currentSnap?.wmVersion ?? BigInt(0);
+                        await this.sessionManager.saveSnapshot({
+                            tenantId,
+                            sessionId,
+                            agentId: (currentSnap as any)?.agentId || 'default',
+                            expectedWmVersion,
+                            snapshot: currentBase
+                        });
+                    }
+                } catch (error) {
+                    try { console.warn(`[TaskEngine] Failed to apply tool auto token/stage options:`, error); } catch { }
+                }
+            }
+
             // Emit local progress hint
             try {
                 ctx.progress({ state: 'working', timestamp: new Date().toISOString(), metadata: { token, toolName, awaiting: 'tool' } } as any);
@@ -488,7 +707,7 @@ export class TaskEngine {
             return { token } as any;
         };
 
-        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string }) => {
+        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string; setToken?: boolean; setStage?: string }) => {
             if (!this.sessionManager) throw new Error('Session manager not configured');
             // Limits: cap max children
             const maxChildren = 50; // TODO: make configurable
@@ -500,6 +719,29 @@ export class TaskEngine {
             }
             // Persist pending child mapping and return a handle; do not dispatch yet
             const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, agent, childInput);
+
+            // Store setToken and setStage options in the task registry for automatic handling
+            if (options?.setToken || options?.setStage) {
+                const snapOptions = await this.sessionManager.load(tenantId, sessionId);
+                const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
+                const tasks = getPendingTasks(baseOptions);
+                if (tasks[token]) {
+                    tasks[token].options = {
+                        setToken: options.setToken,
+                        setStage: options.setStage
+                    };
+                    const next = setPendingTasks(baseOptions, tasks);
+                    const expected = snapOptions?.wmVersion ?? BigInt(0);
+                    await this.sessionManager.saveSnapshot({
+                        tenantId,
+                        sessionId,
+                        agentId: (snapOptions as any)?.agentId || 'default',
+                        expectedWmVersion: expected,
+                        snapshot: next
+                    });
+                }
+            }
+
             // If handler names provided, register them atomically before dispatch
             if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
             if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
@@ -683,6 +925,12 @@ export class TaskEngine {
                 } catch { /* ignore */ }
                 console.log('loopOpts:', loopOpts);
                 const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
+                try {
+                    console.log('[TaskEngine] post-loop vars', {
+                        fromM: (M as any)?.memory?.vars?.jsonObject,
+                        fromNext: (mNext as any)?.memory?.vars?.jsonObject
+                    });
+                } catch { }
                 // Ensure meta.turn is persisted after initial runLoop
                 try {
                     if (this.sessionManager) {
@@ -692,8 +940,23 @@ export class TaskEngine {
                         const prevMetaAfterStart = ((baseAfterStart as any).meta || {}) as Record<string, unknown>;
                         const turnToSave = Number((env as any).turn) || 1;
                         const nextMetaAfterStart = { ...prevMetaAfterStart, turn: turnToSave } as Record<string, unknown>;
-                        const nextAfterStart = { ...baseAfterStart, M: (baseAfterStart as any).M ?? mNext, meta: nextMetaAfterStart } as Record<string, unknown>;
+                        // Merge latest ctx.vars (written via proxy to M.memory.vars) into mNext before saving
+                        try { console.log('[TaskEngine] meta-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
+                        // This addresses cases where runLoop returns a new MentalState instance that
+                        // does not share object identity with M updated by assignVarsIntoMental()
+                        let mNextWithVars = mNext;
+                        try {
+                            const latestVars = (((M as any)?.memory as any)?.vars) || {};
+                            if (latestVars && typeof latestVars === 'object') {
+                                const mem = ((mNextWithVars as any).memory || {}) as Record<string, unknown>;
+                                (mNextWithVars as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
+                            }
+                        } catch { /* noop merge failure */ }
+                        try { console.log('[TaskEngine] meta-save after merge', { fromMerged: (mNextWithVars as any)?.memory?.vars?.jsonObject }); } catch { }
+                        const nextAfterStart = { ...baseAfterStart, M: mNextWithVars, meta: nextMetaAfterStart } as Record<string, unknown>;
                         await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: ((ctx as any).agentId || 'default') as string, expectedWmVersion: expectedAfterStart, snapshot: nextAfterStart });
+                        // Avoid later flush overwriting this save with stale M
+                        (ctx as any).__wmSavedThisTurn = true;
                     }
                 } catch { /* noop */ }
                 console.log('Outcome from runLoop:', outcome.kind);
@@ -726,14 +989,9 @@ export class TaskEngine {
                 if (this.sessionManager) {
                     try {
                         if (!(ctx as any).__wmSavedThisTurn) {
-                            // Ensure ctx.vars writes are merged into MentalState before saving
-                            try {
-                                const vars = (ctx as any).vars;
-                                if (vars && typeof vars === 'object') {
-                                    const st = ((mNext as any)?.memory) || {};
-                                    (mNext as any).memory = { ...st, vars: { ...(st.vars || {}), ...(vars as Record<string, unknown>) } };
-                                }
-                            } catch { /* noop */ }
+                            // Merge latest ctx.vars into the MentalState being saved.
+                            // assignVarsIntoMental() updates M.memory.vars; runLoop may return a new MentalState (mNext)
+                            // that does not share identity with M, so ensure vars are carried over.
                             // Apply hygiene caps before saving to bound snapshot size
                             try {
                                 const { pruneMentalState } = await import('../../loop/hygiene.js');
@@ -744,8 +1002,19 @@ export class TaskEngine {
                             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
                             const prevMeta = (baseNow as any).meta || {};
                             const nextMeta = { ...prevMeta, turn: env.turn };
-                            const next = { ...baseNow, M: mNext, meta: nextMeta } as Record<string, unknown>;
+                            let mNextEffective = mNext;
+                            try { console.log('[TaskEngine] final-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
+                            try {
+                                const latestVars = (((M as any)?.memory as any)?.vars) || {};
+                                if (latestVars && typeof latestVars === 'object') {
+                                    const mem = ((mNextEffective as any).memory || {}) as Record<string, unknown>;
+                                    (mNextEffective as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
+                                }
+                            } catch { /* noop merge failure */ }
+                            try { console.log('[TaskEngine] final-save after merge', { fromMerged: (mNextEffective as any)?.memory?.vars?.jsonObject }); } catch { }
+                            const next = { ...baseNow, M: mNextEffective, meta: nextMeta } as Record<string, unknown>;
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+                            (ctx as any).__wmSavedThisTurn = true;
                         } else {
                             // Even if M was saved earlier in the turn, increment turnTotal meta
                             const snapNow = await this.sessionManager.load(tenantId, sessionId);
@@ -892,6 +1161,7 @@ export class TaskEngine {
      * Real handler dispatch will be added with durable handler registry.
      */
     async resumeInput(params: { tenantId: string; taskId: string; token: string; input: unknown }): Promise<{ acknowledged: true }> {
+        try { console.log('[TaskEngine] BUILD-MARKER resumeInput enter'); } catch { }
         const { tenantId, taskId, token, input } = params;
         // load snapshot
         const snap = await this.sessionManager?.load(tenantId, taskId);
@@ -1007,7 +1277,7 @@ export class TaskEngine {
                             state: 'input-required',
                             message: {
                                 role: 'agent',
-                                parts: [{ type: 'text', text: `Input required: ${prompt}` }]
+                                parts: [{ type: 'text', text: prompt }]
                             },
                             timestamp: new Date().toISOString(),
                             metadata: { token }
@@ -1045,21 +1315,152 @@ export class TaskEngine {
                 const currentVars = ((M as any)?.memory?.vars || {}) as Record<string, unknown>;
                 const varCache = new Map<string, unknown>(Object.entries(currentVars));
                 const assignVarsIntoMental = () => {
+                    // Convert varCache to object while preserving nested structures
+                    const varsObject: Record<string, unknown> = {};
+                    for (const [key, value] of varCache.entries()) {
+                        varsObject[key] = value;
+                    }
                     (M as any).memory = (M as any).memory || {};
                     (M as any).memory = {
                         ...(((M as any).memory || {}) || {}),
-                        vars: Object.fromEntries(varCache)
+                        vars: varsObject
                     };
                     (M as any).vars = (M as any).memory.vars;
                 };
+
+                // Helper function to handle nested paths
+                const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+                    const pathParts = path.split('.');
+                    let current = obj;
+
+                    // Navigate to parent of the target
+                    for (let i = 0; i < pathParts.length - 1; i++) {
+                        const part = pathParts[i];
+                        if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
+                            current[part] = {};
+                        }
+                        current = current[part] as Record<string, unknown>;
+                    }
+
+                    // Set the final value
+                    current[pathParts[pathParts.length - 1]] = value;
+                    return obj;
+                };
+
+                const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
+                    const pathParts = path.split('.');
+                    let current = obj;
+
+                    for (const part of pathParts) {
+                        if (!current || typeof current !== 'object' || Array.isArray(current)) {
+                            return undefined;
+                        }
+                        current = (current as Record<string, unknown>)[part] as Record<string, unknown>;
+                    }
+
+                    return current;
+                };
                 (ctx as any).vars = {
-                    get: (key: string) => varCache.get(key),
-                    set: (key: string, value: unknown) => { varCache.set(key, value); assignVarsIntoMental(); },
-                    merge: (patch: Record<string, unknown>) => { for (const [k, v] of Object.entries(patch)) varCache.set(k, v); assignVarsIntoMental(); },
-                    update: (key: string, fn: (prev: unknown) => unknown) => { const next = fn(varCache.get(key)); varCache.set(key, next); assignVarsIntoMental(); },
-                    delete: (key: string) => { varCache.delete(key); assignVarsIntoMental(); },
+                    get: (key: string) => {
+                        // Handle nested paths
+                        if (key.includes('.')) {
+                            const baseKey = key.split('.')[0];
+                            const baseObj = varCache.get(baseKey) as Record<string, unknown>;
+                            if (baseObj && typeof baseObj === 'object' && !Array.isArray(baseObj)) {
+                                return getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
+                            }
+                            return undefined;
+                        }
+                        return varCache.get(key);
+                    },
+                    set: (key: string, value: unknown) => {
+                        // Handle nested paths
+                        if (key.includes('.')) {
+                            const baseKey = key.split('.')[0];
+                            const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
+                            const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), value);
+                            varCache.set(baseKey, updatedObj);
+                        } else {
+                            varCache.set(key, value);
+                        }
+                        assignVarsIntoMental();
+                    },
+                    merge: (patch: Record<string, unknown>) => {
+                        for (const [k, v] of Object.entries(patch)) {
+                            // For merge, we don't treat dots as paths - it's for object merging
+                            const current = varCache.get(k);
+                            if (current && typeof current === 'object' && !Array.isArray(current) &&
+                                v && typeof v === 'object' && !Array.isArray(v)) {
+                                // Deep merge objects
+                                const merged = { ...(current as Record<string, unknown>), ...(v as Record<string, unknown>) };
+                                varCache.set(k, merged);
+                            } else {
+                                varCache.set(k, v);
+                            }
+                        }
+                        assignVarsIntoMental();
+                    },
+                    update: (key: string, fn: (prev: unknown) => unknown) => {
+                        let currentValue: unknown;
+
+                        // Handle nested paths
+                        if (key.includes('.')) {
+                            const baseKey = key.split('.')[0];
+                            const baseObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
+                            currentValue = getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
+                        } else {
+                            currentValue = varCache.get(key);
+                        }
+
+                        const next = fn(currentValue);
+
+                        // Set the updated value
+                        if (key.includes('.')) {
+                            const baseKey = key.split('.')[0];
+                            const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
+                            const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), next);
+                            varCache.set(baseKey, updatedObj);
+                        } else {
+                            varCache.set(key, next);
+                        }
+
+                        assignVarsIntoMental();
+                    },
+                    delete: (key: string) => {
+                        // Handle nested paths
+                        if (key.includes('.')) {
+                            const baseKey = key.split('.')[0];
+                            const currentObj = (varCache.get(baseKey) as Record<string, unknown>);
+                            if (currentObj && typeof currentObj === 'object' && !Array.isArray(currentObj)) {
+                                const updatedObj = { ...currentObj };
+                                const pathParts = key.substring(key.indexOf('.') + 1).split('.');
+                                let current = updatedObj;
+
+                                // Navigate to parent of the target
+                                for (let i = 0; i < pathParts.length - 1; i++) {
+                                    const part = pathParts[i];
+                                    if (current[part] && typeof current[part] === 'object' && !Array.isArray(current[part])) {
+                                        current = current[part] as Record<string, unknown>;
+                                    }
+                                }
+
+                                // Delete the target property
+                                delete current[pathParts[pathParts.length - 1]];
+                                varCache.set(baseKey, updatedObj);
+                            }
+                        } else {
+                            varCache.delete(key);
+                        }
+                        assignVarsIntoMental();
+                    },
                     keys: () => Array.from(varCache.keys()),
-                    has: (key: string) => varCache.has(key)
+                    has: (key: string) => {
+                        // Handle nested paths
+                        if (key.includes('.')) {
+                            return (ctx as any).vars.get(key) !== undefined;
+                        }
+                        return varCache.has(key);
+                    }
                 } as any;
             } catch { /* noop */ }
             const env: EnvironmentState = {
@@ -1094,12 +1495,23 @@ export class TaskEngine {
                 if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
-            // Persist updated M
+            try { console.log('[TaskEngine] resume post-loop vars', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
+            // Persist updated M with latest ctx.vars merged into mNext
             try {
                 const snapAfter = await this.sessionManager!.load(tenantId, taskId);
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
-                const nextSnap = { ...baseSnap, M: mNext } as Record<string, unknown>;
+                try { console.log('[TaskEngine] resume-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
+                let mNextEffective = mNext;
+                try {
+                    const latestVars = (((M as any)?.memory as any)?.vars) || {};
+                    if (latestVars && typeof latestVars === 'object') {
+                        const mem = ((mNextEffective as any).memory || {}) as Record<string, unknown>;
+                        (mNextEffective as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
+                    }
+                } catch { /* noop merge failure */ }
+                try { console.log('[TaskEngine] resume-save after merge', { fromMerged: (mNextEffective as any)?.memory?.vars?.jsonObject }); } catch { }
+                const nextSnap = { ...baseSnap, M: mNextEffective } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
             // Emit status event for the resumed turn
@@ -1398,6 +1810,68 @@ export class TaskEngine {
         const entry = tasks[token] as any;
         const alreadyDelivered = !!entry?.deliveredInput;
         const handlerName = entry?.handlers?.inputRequired;
+
+        // Handle automatic token and stage management if options are set
+        if (entry?.options) {
+            try {
+                const parentSnap = await this.sessionManager?.load(tenantId, parentTaskId);
+                if (parentSnap) {
+                    const parentBase = (parentSnap.snapshot as Record<string, unknown>) || {};
+                    const parentM = parentBase.M as any;
+
+                    // Automatic token storage
+                    if (entry.options.setToken && token && parentM?.vars) {
+                        const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+                            const pathParts = path.split('.');
+                            let current = obj;
+                            for (let i = 0; i < pathParts.length - 1; i++) {
+                                const part = pathParts[i];
+                                if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
+                                    current[part] = {};
+                                }
+                                current = current[part] as Record<string, unknown>;
+                            }
+                            current[pathParts[pathParts.length - 1]] = value;
+                            return obj;
+                        };
+
+                        const updatedVars = setNestedValue(
+                            { ...(parentM.vars as Record<string, unknown> || {}) },
+                            'childToken',
+                            token
+                        );
+                        parentM.vars = updatedVars;
+                        (parentM.memory as any) = { ...((parentM.memory as any) || {}), vars: updatedVars };
+                    }
+
+                    // Automatic stage transition
+                    if (entry.options.setStage && parentM?.control) {
+                        const currentStage = parentM.control.stage;
+                        const targetStage = entry.options.setStage;
+
+                        // Basic validation that this is a valid stage transition
+                        if (typeof targetStage === 'string' && targetStage.length > 0) {
+                            parentM.control.stage = targetStage;
+
+                            try { console.log(`[TaskEngine] Auto stage transition: ${currentStage} -> ${targetStage} (child input required)`); } catch { }
+                        }
+                    }
+
+                    // Save the updated parent state
+                    const expectedWmVersion = parentSnap?.wmVersion ?? BigInt(0);
+                    await this.sessionManager?.saveSnapshot({
+                        tenantId,
+                        sessionId: parentTaskId,
+                        agentId: (parentSnap as any)?.agentId || 'default',
+                        expectedWmVersion,
+                        snapshot: parentBase
+                    });
+                }
+            } catch (error) {
+                try { console.warn(`[TaskEngine] Failed to apply auto token/stage options:`, error); } catch { }
+            }
+        }
+
         await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_input_required', { token, childTaskId, prompt, schema, childOnProvided });
         try { console.log(`[TaskEngine] child input_required: token=${token} handler='${handlerName}' childOnProvided='${childOnProvided}' childTaskId=${childTaskId} prompt='${prompt}'`); } catch { }
         if (!alreadyDelivered && handlerName && this.handlerInvoker) {
@@ -1614,7 +2088,7 @@ export class TaskEngine {
             // Stub implementations for other required properties
             llm: {} as any,
             tools: {
-                invoke: async <T>(toolName: string, args: unknown) => {
+                invoke: async <T>(toolName: string, args: unknown, options?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => {
                     const { withSafety } = await import('../../loop/effectSafety.js');
                     return withSafety(async () => ({} as unknown as T), { timeoutMs: 60000, maxRetries: 2 });
                 }
@@ -1741,6 +2215,7 @@ export class TaskEngine {
             const vars = M ? (((M.memory as any)?.vars) || {}) : ((baseSnap as any)?.vars || {});
             // Merge into facade instead of overwriting it
             try { (ctx as any).vars.merge(vars); } catch { (ctx as any).vars = { ...(ctx as any).vars, ...vars }; }
+            try { console.log('[TaskEngine] restoreCtx: vars.jsonObject', (vars as any)?.jsonObject); } catch { }
         } catch {
             (ctx as any).vars = ((baseSnap as any)?.vars || {}) as Record<string, unknown>;
         }
@@ -1838,13 +2313,36 @@ export class TaskEngine {
         // Enable A2A from durable handler context - use the proper TaskEngine sendTaskToAgent implementation
         try {
             const engine = this;
-            (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string }) => {
+            (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string; setToken?: boolean; setStage?: string }) => {
                 if (!engine.sessionManager) throw new Error('Session manager not configured');
                 const tenantId = (ctx as any).tenantId;
                 const sessionId = taskId;
 
                 // Use the same logic as the main TaskEngine implementation
                 const { handle, token } = await createTaskHandle(engine.sessionManager, tenantId, sessionId, agent, childInput);
+
+                // Store setToken and setStage options in the task registry for automatic handling
+                if (options?.setToken || options?.setStage) {
+                    const snapOptions = await engine.sessionManager.load(tenantId, sessionId);
+                    const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
+                    const tasks = getPendingTasks(baseOptions);
+                    if (tasks[token]) {
+                        tasks[token].options = {
+                            setToken: options.setToken,
+                            setStage: options.setStage
+                        };
+                        const next = setPendingTasks(baseOptions, tasks);
+                        const expected = snapOptions?.wmVersion ?? BigInt(0);
+                        await engine.sessionManager.saveSnapshot({
+                            tenantId,
+                            sessionId,
+                            agentId: (snapOptions as any)?.agentId || 'default',
+                            expectedWmVersion: expected,
+                            snapshot: next
+                        });
+                    }
+                }
+
                 // If handler names provided, register them atomically before dispatch
                 if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
                 if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }

@@ -134,12 +134,70 @@ export type TaskContext = {
 
     // Working memory variables - facade (writes via methods only)
     vars: {
+        /**
+         * Get a variable value. Supports nested paths using dot notation.
+         * @param key - Variable key or nested path (e.g., 'user.profile.name')
+         * @returns The stored value or undefined if not found
+         * @example
+         * const name = ctx.vars.get('user.profile.name');
+         * const stage = ctx.vars.get('stage');
+         */
         get<T = unknown>(key: string): T | undefined;
+
+        /**
+         * Set a variable value. Supports nested paths with automatic object creation.
+         * @param key - Variable key or nested path (e.g., 'user.profile.email')
+         * @param value - Value to store
+         * @example
+         * ctx.vars.set('user.profile.email', 'john@example.com');
+         * ctx.vars.set('stage', 'completed');
+         */
         set<T = unknown>(key: string, value: T): void;
+
+        /**
+         * Merge multiple key-value pairs into variables. Does NOT treat dots as paths.
+         * @param patch - Object containing key-value pairs to merge
+         * @example
+         * ctx.vars.merge({ stage: 'completed', counter: 42 });
+         * // Note: merge({ 'user.profile.email': 'value' }) creates a key with dots
+         */
         merge(patch: Record<string, unknown>): void;
+
+        /**
+         * Update a variable value using a function that receives the current value.
+         * Supports nested paths with automatic object creation.
+         * @param key - Variable key or nested path (e.g., 'counter', 'user.profile.name')
+         * @param fn - Function that receives current value and returns new value
+         * @example
+         * ctx.vars.update('counter', (current) => (current || 0) + 1);
+         * ctx.vars.update('user.profile.name', (current) => current?.toUpperCase() || 'UNKNOWN');
+         */
         update<T = unknown>(key: string, fn: (prev: T | undefined) => T): void;
+
+        /**
+         * Delete a variable. Supports nested paths.
+         * @param key - Variable key or nested path to delete
+         * @example
+         * ctx.vars.delete('user.profile.email');
+         * ctx.vars.delete('temporaryData');
+         */
         delete(key: string): void;
+
+        /**
+         * Get all variable keys (top-level only).
+         * @returns Array of variable keys
+         * @example
+         * const keys = ctx.vars.keys(); // ['user', 'stage', 'counter']
+         */
         keys(): string[];
+
+        /**
+         * Check if a variable exists. Supports nested paths.
+         * @param key - Variable key or nested path to check
+         * @returns True if the variable exists
+         * @example
+         * if (ctx.vars.has('user.profile.email')) { ... }
+         */
         has(key: string): boolean;
     };
 
@@ -173,7 +231,7 @@ export type TaskContext = {
     remember: (key: string, value: unknown, options?: RememberOptions) => Promise<void>;
 
     // Future Capabilities (Stubbed/Placeholder - DO NOT USE in minimal agent logic)
-    tools: { invoke: <T = unknown>(toolName: string, args: unknown) => Promise<T> };
+    tools: { invoke: <T = unknown>(toolName: string, args: unknown, options?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => Promise<T> };
     memory: IMemory & {
         // NEW: Direct MLO access (will be defined later)
         mlo?: unknown; // Enhanced for A2A serialization - UnifiedMemoryService or compatible service
@@ -216,7 +274,7 @@ export type TaskContext = {
         opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
     ) => Promise<import('../../core/orchestration/Handles.js').GroupHandle>;
 
-    /** 
+    /**
      * A2A: Send task to another agent with context inheritance
      * This method enables agent-to-agent communication with memory context transfer
      * @param targetAgent - Name of the target agent
@@ -227,7 +285,7 @@ export type TaskContext = {
     sendTaskToAgent: (
         targetAgent: string,
         taskInput: TaskInput,
-        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string; streaming?: boolean }
+        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string; streaming?: boolean; setToken?: boolean; setStage?: string }
     ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
 }
 

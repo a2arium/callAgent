@@ -10,6 +10,7 @@ type PendingTasks = Record<string, {
     pendingCompletion?: unknown;
     deliveredInput?: boolean;
     deliveredCompletion?: boolean;
+    options?: { setToken?: boolean; setStage?: string };
 }>;
 type PendingGroups = Record<string, { childTokens: string[]; results: Record<string, unknown>; handlers?: { allCompleted?: string; anyFailed?: string }; cancelRemaining?: boolean; timeoutMs?: number }>;
 

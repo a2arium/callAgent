@@ -123,11 +123,17 @@ export default createAgent({
     await (ctx as any).goals.add({ title: `Complete ${input.phase} phase for project ${input.projectId}` });
     await (ctx as any).thoughts.add('Initializing project workflow');
     
-    // Store project metadata in variables
-    ctx.vars!.projectId = input.projectId;
-    ctx.vars!.phase = input.phase;
-    ctx.vars!.startTime = new Date().toISOString();
-    ctx.vars!.priority = 'high';
+    // Store project metadata in variables with nested paths
+    ctx.vars.set('project.id', input.projectId);
+    ctx.vars.set('project.phase', input.phase);
+    ctx.vars.set('project.startTime', new Date().toISOString());
+    ctx.vars.set('project.priority', 'high');
+
+    // Alternative: Using the old way (still works)
+    // ctx.vars!.projectId = input.projectId;
+    // ctx.vars!.phase = input.phase;
+    // ctx.vars!.startTime = new Date().toISOString();
+    // ctx.vars!.priority = 'high';
 
     // Delegate to development team with context inheritance
     const devResult = await ctx.sendTaskToAgent?.('development-team', {

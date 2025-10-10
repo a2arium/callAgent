@@ -43,6 +43,10 @@ export type A2ACallOptions = {
     timeout?: number;
     /** Enable streaming updates (future) */
     streaming?: boolean;
+    /** Automatically store child token in ctx.vars when child requests input */
+    setToken?: boolean;
+    /** Automatically transition to stage when child requests input */
+    setStage?: string;
 };
 
 /**

@@ -114,6 +114,7 @@ export class ProgrammaticInvoker implements Invoker {
         eventBus.subscribe(channel, handler);
 
         // Start task in streaming mode
+        try { console.info('[invoker] calling engine.startTask now...'); } catch { }
         await engine.startTask({ task: { id, input }, isStreaming: true, agentId, tenantId });
         return done;
     }

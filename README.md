@@ -115,10 +115,11 @@ export const agent = createAgent({
     if (stage === 'idle' && intent.kind === 'prompt_user') {
       await ctx.reply('How can I help you?');
 
-      // ✅ NEW: Single line stage management
-      const token = await Stage.setStage(ctx, 'awaiting_input', {
-        prompt: 'Your message'
+      // ✅ NEW: Input-first approach with automatic token and stage management
+      const handle = await ctx.requestInput('Your message', {
+        setStage: 'awaiting_input'  // Automatically sets stage and token
       });
+      const token = handle.token;
 
       return { kind: 'ask_user', token };
     }
@@ -311,7 +312,7 @@ yarn run:telegram-demo:dev
 yarn run:telegram-demo
 ```
 
-The demo starts a webhook server that receives Telegram messages and responds using the enhanced `Stage.setStage` API.
+The demo starts a webhook server that receives Telegram messages and responds using the enhanced input-first `requestInput` API with automatic token and stage management.
 
 ### Development Commands
 ```bash

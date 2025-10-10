@@ -88,9 +88,121 @@ ctx.vars.set('searchResults', [
 ]);
 ctx.vars.set('selectedApproach', "guided_walkthrough");
 
+// Nested path support with automatic object creation
+ctx.vars.set('user.profile.name', 'John Doe');
+ctx.vars.set('user.profile.email', 'john@example.com');
+ctx.vars.set('user.preferences.theme', 'dark');
+// Creates: { user: { profile: { name: 'John Doe', email: 'john@example.com' }, preferences: { theme: 'dark' } } }
+
+// Alternative: Set complete nested objects directly
+ctx.vars.set('user', {
+    profile: {
+        name: 'John Doe',
+        email: 'john@example.com'
+    },
+    preferences: {
+        theme: 'dark'
+    }
+});
+
+// Both approaches allow the same access patterns:
+ctx.vars.update('user.preferences.theme', (current) => {
+    console.log('Current theme:', current); // 'dark'
+    return current === 'dark' ? 'light' : 'dark'; // Toggle theme
+});
+
 // Access variables
 const query = ctx.vars.get('userQuery');
 const results = ctx.vars.get('searchResults');
+const userName = ctx.vars.get('user.profile.name'); // 'John Doe'
+const theme = ctx.vars.get('user.preferences.theme'); // 'light' (after update)
+```
+
+### Nested Path Support
+
+The framework provides automatic nested path support for working variables, making it easy to work with complex data structures:
+
+```typescript
+// ctx.vars Methods
+ctx.vars.set(key: string, value: unknown)           // Direct assignment, creates nested structure
+ctx.vars.get(key: string)                          // Get nested value, returns undefined if path doesn't exist
+ctx.vars.update(key: string, fn: (current) => any)  // Update with access to current value
+ctx.vars.has(key: string)                          // Check if nested path exists
+ctx.vars.delete(key: string)                       // Delete nested property
+ctx.vars.merge(patch: Record<string, unknown>)     // Merge objects (dots are keys, not paths)
+```
+
+#### **Key Differences:**
+
+| Method | Nested Path Support | Current Value Access | Use Case |
+|--------|-------------------|---------------------|----------|
+| `set('path.to.prop', value)` | ✅ Creates nested structure | ❌ No access to current | Direct assignment |
+| `update('path.to.prop', fn)` | ✅ Creates nested structure | ✅ `fn(current)` gets current | Conditional updates |
+| `get('path.to.prop')` | ✅ Reads nested values | N/A | Access nested data |
+| `merge({ obj })` | ❌ Dots are object keys | N/A | Object merging |
+
+#### **Examples:**
+
+```typescript
+// Alternative approaches for nested structures
+
+// Approach 1: Build step by step using paths
+ctx.vars.set('config.api.endpoint', 'https://api.example.com');
+ctx.vars.set('config.api.version', 'v2');
+ctx.vars.set('config.ui.theme', 'dark');
+// Result: { config: { api: { endpoint: '...', version: 'v2' }, ui: { theme: 'dark' } } }
+
+// Approach 2: Set complete nested object directly
+ctx.vars.set('config', {
+    api: {
+        endpoint: 'https://api.example.com',
+        version: 'v2'
+    },
+    ui: {
+        theme: 'dark'
+    }
+});
+
+// Both approaches allow the same access patterns:
+const endpoint = ctx.vars.get('config.api.endpoint'); // 'https://api.example.com'
+const theme = ctx.vars.get('config.ui.theme'); // 'dark'
+
+// Update with current value access
+ctx.vars.update('config.ui.theme', (current) => {
+    return current === 'dark' ? 'light' : 'dark'; // Toggle theme
+});
+
+// Check existence
+if (ctx.vars.has('config.api.endpoint')) {
+    // Do something
+}
+
+// Delete nested property
+ctx.vars.delete('config.api.version');
+
+// Note: merge() treats dots as object keys, not paths
+ctx.vars.merge({ 'config.api.timeout': 5000 });
+// Creates: { 'config.api.timeout': 5000 } NOT nested structure
+```
+
+#### **When to Use Each Approach**
+
+| Approach | Best For | Example |
+|----------|----------|---------|
+| **Path-based (`set('path.to.prop', value)`)** | Building structure incrementally, updating specific properties, when data arrives gradually | `ctx.vars.set('user.profile.email', userEmail)` |
+| **Direct object (`set('key', {...})`)** | Complete objects ready at once, configuration data, API responses | `ctx.vars.set('config', apiResponse)` |
+
+**Mixed Usage Pattern:**
+```typescript
+// Set initial configuration as complete object
+ctx.vars.set('config', {
+    api: { version: 'v1', timeout: 5000 },
+    ui: { theme: 'light' }
+});
+
+// Update specific properties later as needed
+ctx.vars.set('config.api.version', 'v2');
+ctx.vars.update('config.ui.theme', (current) => current === 'light' ? 'dark' : 'light');
 ```
 
 ### Unified Memory Operations

@@ -114,7 +114,7 @@ const Stage = createStageFacade<Stage>({
   }
 });
 
-// ====== CONTROL STATE HELPERS (Optional - for non-Stage.setStage usage) ======
+// ====== CONTROL STATE HELPERS (Optional - for manual ctx.vars usage) ======
 const V = {
   stage: (ctx) => ctx.vars.get('stage') ?? 'idle',
   completeCalled: (ctx) => Boolean(ctx.vars.get('completed.called')),
@@ -186,12 +186,12 @@ export const agent = createAgent<Sensory, Obs>({
       .with({ stage: 'idle', intent: { kind: 'prompt_user' } }, async () => {
         await ctx.reply('How can I help you?');
 
-        // ✅ NEW: Single line stage management
-        const token = await Stage.setStage(ctx, 'awaiting_input', {
-          prompt: 'Your message'
+        // ✅ NEW: Input-first approach with automatic token and stage management
+        const handle = await ctx.requestInput('Your message', {
+          setStage: 'awaiting_input'  // Automatically sets stage and token
         });
 
-        return { kind: 'ask_user', token };
+        return { kind: 'ask_user', token: handle.token };
       })
 
       .with({ stage: 'awaiting_input', intent: { kind: 'answer_with_llm' } }, async ({ query }) => {
@@ -350,7 +350,7 @@ export const dataProcessor = createAgent<Sensory, Obs>({
      }
    });
    ```
-   - **Set all required ctx.vars BEFORE Stage.setStage** to satisfy invariants
+   - **Set all required ctx.vars BEFORE stage transitions** to satisfy invariants
 
 5. **Type Safety** (mandatory):
    - Define explicit `type Sensory` and `type Obs`
@@ -424,7 +424,7 @@ For each turn, specify:
 1. **Observation** (env → Obs): What input will arrive?
 2. **Learning** (immutable M updates): How will MentalState change? (obey sensory freshness)
 3. **Policy** (WHAT to do): What decision will Policy make? (pure function of M)
-4. **Execution** (HOW to do it): What effects will occur? (ctx.vars writes, Stage.setStage)
+4. **Execution** (HOW to do it): What effects will occur? (ctx.vars writes, requestInput with setStage)
 5. **Transition** (flow control): await_* | continue | complete | fail (include token lifecycle)
 6. **Success Criteria**: Measurable checks (reply sent, token set, stage correct)
 
@@ -478,8 +478,8 @@ For each turn, specify:
 
 ### F) Execution (Effects & control)
 - **Purpose**: Perform effects, manage control state
-- **DO**: Update ctx.vars, call Stage.setStage, perform effects
-- **CRITICAL**: Set required ctx.vars BEFORE Stage.setStage
+- **DO**: Update ctx.vars, call requestInput with setStage, perform effects
+- **CRITICAL**: Set required ctx.vars BEFORE stage transitions (automatic with requestInput)
 - **Framework methods**: Use `ctx.llm`, `ctx.reply`, `ctx.tools` directly
 - **Full ctx access**: No separate `llm` parameter needed
 
@@ -647,18 +647,19 @@ Canonical events the engine injects on resume (`env.input`):
 - **child**: `{ kind:'child', token, output }`
 - **external**: `{ kind:'external', token, payload }`
 
-### Enhanced Stage.setStage API (NEW NORM)
+### Input-First Approach (NEW NORM)
 
-**Single-line stage management** - combines requestInput, token generation, and ctx.vars:
+**Primary operation is input request** - with automatic token and stage management:
 
 ```typescript
-// NEW: Enhanced Stage.setStage API
-const token = await Stage.setStage(ctx, 'awaiting_input', {
-  prompt: 'Your message',
+// NEW: Input-first approach with enhanced requestInput API
+const handle = await ctx.requestInput('Your message', {
   schema: validationSchema,
-  ttlMs: 300000  // 5 minutes
+  ttlMs: 300000,        // 5 minutes
+  setStage: 'awaiting_input'  // Automatically sets stage and token
 });
-return { kind:'ask_user', token };
+
+return { kind:'ask_user', token: handle.token };
 ```
 
 **Available stage options**:
@@ -691,11 +692,12 @@ type StageOptions = {
 
 **ask_user** (1 line):
 ```typescript
-// Execution
-const token = await Stage.setStage(ctx, 'awaiting_input', {
-  prompt: 'What would you like to do?',
+// Execution (input-first approach)
+const handle = await ctx.requestInput('What would you like to do?', {
+  setStage: 'awaiting_input',  // Automatically sets stage and token
   schema: { type: 'string', minLength: 1 }
 });
+const token = handle.token;
 
 // Transition (unchanged)
 { kind:'await_input', token }
@@ -703,12 +705,12 @@ const token = await Stage.setStage(ctx, 'awaiting_input', {
 
 **tool (async callback)** (1 line):
 ```typescript
-// Execution
-const token = await Stage.setStage(ctx, 'awaiting_tool', {
-  toolName: 'search',
-  toolArgs: { query: 'something' },
+// Execution (tool call with automatic token/stage)
+const handle = await ctx.tools.invoke('search', { query: 'something' }, {
+  setStage: 'awaiting_tool',  // Automatically sets stage and token
   onCompleted: '__onSearchCompleted'
 });
+const token = handle.token;
 
 // Transition
 { kind:'await_tool', token }
@@ -716,12 +718,12 @@ const token = await Stage.setStage(ctx, 'awaiting_tool', {
 
 **subagent** (1 line):
 ```typescript
-// Execution
-const token = await Stage.setStage(ctx, 'awaiting_child', {
-  childTarget: 'data-processor',
-  childInput: { data: 'payload' },
+// Execution (A2A call with automatic token/stage)
+const handle = await ctx.sendTaskToAgent('data-processor', { data: 'payload' }, {
+  setStage: 'awaiting_child',  // Automatically sets stage and token
   awaitCompletion: true
 });
+const token = handle.token;
 
 // Transition
 { kind:'await_child', token }
@@ -744,7 +746,7 @@ policy: (m) => {
 
 ### Token Lifecycle
 1. **Generate token** in Execution
-2. **Set required ctx.vars** BEFORE `Stage.setStage`
+2. **Set required ctx.vars** BEFORE stage transitions (automatic with requestInput/tools.invoke/sendTaskToAgent)
 3. **Transition returns** `await_*` with token
 4. **Engine persists M** and waits for event
 5. **On resume**, engine populates `env.input` and clears pending state
@@ -850,12 +852,12 @@ execution: async (intent, ctx) => {
     .with({ stage: 'idle', intent: { kind: 'prompt_user' } }, async () => {
       await ctx.reply('How can I help?');
 
-      // ✅ NEW: Single line stage management
-      const token = await Stage.setStage(ctx, 'awaiting_input', {
-        prompt: 'Your message'
+      // ✅ NEW: Input-first approach with automatic token and stage management
+      const handle = await ctx.requestInput('Your message', {
+        setStage: 'awaiting_input'  // Automatically sets stage and token
       });
 
-      return { kind: 'ask_user', token };
+      return { kind: 'ask_user', token: handle.token };
     })
     .with({ stage: 'awaiting_input', intent: { kind: 'answer_with_llm' } }, async ({ query }) => {
       const response = await ctx.llm.call(query);
@@ -944,7 +946,7 @@ transition: () => {
 1. **Writing to M outside Learning** → Fix: Move all MentalState updates to Learning
 2. **Reading env/ctx.vars in Policy** → Fix: Route data through Perception → Learning → M
 3. **Stale sensory data** → Fix: Always use `freshText ?? undefined`
-4. **Stage before invariants** → Fix: Set required vars BEFORE `Stage.setStage`
+4. **Stage before invariants** → Fix: Set required vars BEFORE stage transitions (automatic with requestInput)
 5. **Wrapping framework methods** → Fix: Use `ctx.llm` directly, only wrap external calls
 
 **Code Smells**:

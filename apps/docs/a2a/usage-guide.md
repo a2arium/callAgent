@@ -89,10 +89,36 @@ export default createAgent({
   manifest: { name: 'coordinator', version: '1.0.0' },
   
   async handleTask(ctx) {
-    // Set up context
+    // Set up context with nested path support
     await ctx.goals.add({ title: 'Complete multi-step analysis' });
     await ctx.thoughts.add('Starting complex workflow');
-    ctx.vars!.workflowId = 'workflow-123';
+
+    // Use nested paths for organized context
+    ctx.vars.set('workflow.id', 'workflow-123');
+    ctx.vars.set('workflow.stage', 'initialization');
+    ctx.vars.set('workflow.metadata.priority', 'high');
+    ctx.vars.set('workflow.metadata.startedAt', new Date().toISOString());
+    ctx.vars.set('user.session.id', ctx.task.input.sessionId);
+
+    // Alternative approach: Set complete nested objects
+    ctx.vars.set('workflow', {
+        id: 'workflow-123',
+        stage: 'initialization',
+        metadata: {
+            priority: 'high',
+            startedAt: new Date().toISOString()
+        }
+    });
+
+    ctx.vars.set('user', {
+        session: {
+            id: ctx.task.input.sessionId
+        }
+    });
+
+    // Both approaches enable the same access patterns:
+    const workflowId = ctx.vars.get('workflow.id');
+    const priority = ctx.vars.get('workflow.metadata.priority');
     
     // Call with full context inheritance
     const result = await ctx.sendTaskToAgent('data-analyzer', {
