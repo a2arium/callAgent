@@ -980,3 +980,51 @@ transition: () => {
 - Use `createAgent<Sensory, Obs>` with explicit types
 
 **Follow these rules strictly. If your output violates any rule, correct it proactively before finalizing.** 
+
+---
+
+## 💬 Chat Markup Quick Guide
+
+Use `ctx.reply` with text, media, or markup. The chat bridge maps these to the channel (Telegram, Slack, web) via a sender.
+
+### Text
+```ts
+// Markdown (default)
+await ctx.reply('Hello **world**');
+
+// HTML
+await ctx.reply({ type: 'text', text: '<b>Bold</b> <i>italic</i> <code>code</code>', format: 'html' });
+```
+
+### Image
+```ts
+// URL or base64
+await ctx.reply({ type: 'image', url: 'https://example.com/image.jpg', caption: 'Optional <b>HTML</b> caption' });
+```
+
+### Location (markup)
+```ts
+await ctx.reply({
+  type: 'markup',
+  value: { kind: 'location', lat: 56.9496, lng: 24.1052, name: 'Riga', address: 'Latvia' }
+});
+```
+
+### Buttons (markup)
+```ts
+await ctx.reply({
+  type: 'markup',
+  value: {
+    kind: 'buttons',
+    prompt: 'Choose an option:',
+    buttons: [
+      { title: 'Option 1', payload: { action: 'option1', data: 'any JSON data' } },
+      { title: 'Option 2', payload: { action: 'option2', id: 123 } }
+    ]
+  }
+});
+```
+
+Notes:
+- Text `format` can be `'markdown' | 'html' | 'plain'` (default is `'markdown'`).
+- For custom UI (buttons/location), use `type: 'markup'` and pass a Markup object in `value`.

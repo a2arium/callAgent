@@ -64,6 +64,17 @@ export class TaskEngine {
         try { outboxPublisher.start(); } catch { /* noop */ }
     }
 
+    private mergeVarsIntoMental(source: MentalState, target: MentalState): MentalState {
+        try {
+            const latestVars = (((source as any)?.memory as any)?.vars) || {};
+            if (latestVars && typeof latestVars === 'object') {
+                const mem = (((target as any).memory) || {}) as Record<string, unknown>;
+                (target as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
+            }
+        } catch { /* noop */ }
+        return target;
+    }
+
     // Persist a child's minimal context (e.g., vars) so durable handlers can restore it later
     public async persistChildContext(params: { tenantId: string; sessionId: string; agentId: string; vars?: Record<string, unknown> }): Promise<void> {
         if (!this.sessionManager) return;
@@ -944,14 +955,7 @@ export class TaskEngine {
                         try { console.log('[TaskEngine] meta-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
                         // This addresses cases where runLoop returns a new MentalState instance that
                         // does not share object identity with M updated by assignVarsIntoMental()
-                        let mNextWithVars = mNext;
-                        try {
-                            const latestVars = (((M as any)?.memory as any)?.vars) || {};
-                            if (latestVars && typeof latestVars === 'object') {
-                                const mem = ((mNextWithVars as any).memory || {}) as Record<string, unknown>;
-                                (mNextWithVars as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
-                            }
-                        } catch { /* noop merge failure */ }
+                        let mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
                         try { console.log('[TaskEngine] meta-save after merge', { fromMerged: (mNextWithVars as any)?.memory?.vars?.jsonObject }); } catch { }
                         const nextAfterStart = { ...baseAfterStart, M: mNextWithVars, meta: nextMetaAfterStart } as Record<string, unknown>;
                         await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: ((ctx as any).agentId || 'default') as string, expectedWmVersion: expectedAfterStart, snapshot: nextAfterStart });
@@ -1502,14 +1506,7 @@ export class TaskEngine {
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 try { console.log('[TaskEngine] resume-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
-                let mNextEffective = mNext;
-                try {
-                    const latestVars = (((M as any)?.memory as any)?.vars) || {};
-                    if (latestVars && typeof latestVars === 'object') {
-                        const mem = ((mNextEffective as any).memory || {}) as Record<string, unknown>;
-                        (mNextEffective as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
-                    }
-                } catch { /* noop merge failure */ }
+                let mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 try { console.log('[TaskEngine] resume-save after merge', { fromMerged: (mNextEffective as any)?.memory?.vars?.jsonObject }); } catch { }
                 const nextSnap = { ...baseSnap, M: mNextEffective } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
@@ -1577,12 +1574,13 @@ export class TaskEngine {
                 if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
-            // Persist and emit status
+            // Persist and emit status (merge latest vars)
             try {
                 const snapAfter = await this.sessionManager!.load(tenantId, taskId);
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
-                const nextSnap = { ...baseSnap, M: mNext } as Record<string, unknown>;
+                const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
+                const nextSnap = { ...baseSnap, M: mNextEffective } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
             const channel = taskChannel(taskId);
@@ -1653,7 +1651,8 @@ export class TaskEngine {
                 const executedTurns = 1;
                 const prevMeta = (baseSnap as any).meta || {};
                 const nextMeta = { ...prevMeta, turnTotal: (Number(prevMeta.turnTotal) || 0) + executedTurns };
-                const nextSnap = { ...baseSnap, M: mNext, meta: nextMeta } as Record<string, unknown>;
+                const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
+                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
             const channel = taskChannel(taskId);
