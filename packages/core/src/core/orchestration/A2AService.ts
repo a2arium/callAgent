@@ -327,8 +327,18 @@ export class A2AService implements IA2AService {
         // Mark this context so the engine preserves this override
         (targetCtx as any).__preserveRequestInput = true;
         (targetCtx as any).__a2aParent = { parentTenantId, parentTaskId, parentChildToken };
-        (targetCtx as any).requestInput = async (prompt: string, riOpts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }) => {
-            try { console.log(`[A2AService] Child requestInput called: prompt='${prompt}' onProvided='${riOpts?.onProvided}' parentTenantId=${parentTenantId} parentTaskId=${parentTaskId} parentChildToken=${parentChildToken}`); } catch { }
+        (targetCtx as any).requestInput = async (promptOrParts: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[], riOpts?: { schema?: unknown; ttlMs?: number; onProvided?: string; onExpired?: string }) => {
+            // Normalize parts like ctx.reply
+            const normalizeParts = (p: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[]): import('../../shared/types/index.js').MessagePart[] => {
+                if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' } as any];
+                if (Array.isArray(p) && p.length > 0 && typeof p[0] === 'string') return (p as string[]).map(t => ({ type: 'text', text: t, format: 'markdown' } as any));
+                if (Array.isArray(p)) return (p as any[]).map(part => (part?.type === 'text' && !part?.format ? { ...part, format: 'markdown' } : part));
+                const one = p as any;
+                return [one?.type === 'text' && !one?.format ? { ...one, format: 'markdown' } : one];
+            };
+            const parts = normalizeParts(promptOrParts);
+            const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
+            try { console.log(`[A2AService] Child requestInput called: prompt='${prompt || ''}' onProvided='${riOpts?.onProvided}' parentTenantId=${parentTenantId} parentTaskId=${parentTaskId} parentChildToken=${parentChildToken}`); } catch { }
             if (parentTenantId && parentTaskId && parentChildToken) {
                 try {
                     const eng = EngineLocator.getEngine() || taskEngine;
@@ -345,12 +355,12 @@ export class A2AService implements IA2AService {
                     const next = setPendingInputs(base, inputs);
                     const expected = snap?.wmVersion ?? BigInt(0);
                     await (eng as any).sessionManager?.saveSnapshot({ tenantId: targetCtx.tenantId, sessionId: targetCtx.task.id, agentId: targetPlugin.manifest.name, expectedWmVersion: expected, snapshot: next });
-                    await (eng as any).sessionManager?.appendEvent(targetCtx.tenantId, targetCtx.task.id, 'task.input_required', { token: childToken, prompt, schema: riOpts?.schema, expiresAt });
-                    await (eng as any).sessionManager?.enqueueOutbox(targetCtx.tenantId, 'task.input_required', targetCtx.task.id, { taskId: targetCtx.task.id, prompt, token: childToken, schema: riOpts?.schema, expiresAt });
+                    await (eng as any).sessionManager?.appendEvent(targetCtx.tenantId, targetCtx.task.id, 'task.input_required', { token: childToken, prompt, parts, schema: riOpts?.schema, expiresAt });
+                    await (eng as any).sessionManager?.enqueueOutbox(targetCtx.tenantId, 'task.input_required', targetCtx.task.id, { taskId: targetCtx.task.id, prompt, parts, token: childToken, schema: riOpts?.schema, expiresAt });
 
                     // Now notify parent about input_required
                     const childOnProvided = riOpts?.onProvided;
-                    try { console.log(`[A2AService] Child '${targetPlugin.manifest.name}' requestInput -> parent onInputRequired (childOnProvided='${childOnProvided}') prompt='${prompt}'`); } catch { }
+                    try { console.log(`[A2AService] Child '${targetPlugin.manifest.name}' requestInput -> parent onInputRequired (childOnProvided='${childOnProvided}') prompt='${prompt || ''}'`); } catch { }
                     await eng.handleChildInputRequired({
                         tenantId: parentTenantId,
                         parentTaskId,

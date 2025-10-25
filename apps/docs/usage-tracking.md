@@ -2,15 +2,48 @@
 
 This document explains how LLM usage tracking works in the A2A framework.
 
+## API Overview
+
+Two supported forms for recording usage:
+
+```ts
+// Shortcut form
+ctx.recordUsage(0.05);
+
+// Detailed form
+ctx.recordUsage({
+  cost: 0.12,
+  kind: 'llm',            // 'llm' | 'embedding' | 'tool' | 'external_api' | 'storage' | 'network' | 'other'
+  op: 'call',             // 'call' | 'stream' | 'embed' | 'invoke' | 'read' | 'write'
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  tokens: { input: 210, output: 512 },
+  // turn is auto-filled if omitted
+});
+```
+
+Usage totals are aggregated and exposed on the final task status as:
+
+```json
+{
+  "metadata": {
+    "usage": {
+      "totalCost": 0.73,
+      "byKind": { "llm": 0.68, "external_api": 0.05 }
+    }
+  }
+}
+```
+
 ## Automatic Usage Tracking
 
-The framework now supports automatic tracking of LLM API usage without requiring manual `recordUsage` calls in agent implementations. This is done by connecting the callllm library's usage tracking features directly to the framework's recordUsage mechanism.
+The framework supports automatic tracking of LLM API usage without requiring manual `recordUsage` calls in agent implementations. This is done by connecting the callllm library's usage tracking features directly to the framework's recordUsage mechanism.
 
 ### How It Works
 
 1. **Automatic Tracking**: When an LLM call is made, the cost is automatically tracked and recorded.
-2. **Simplified API**: The `recordUsage` function now accepts a simple cost parameter instead of a complex usage structure.
-3. **Cost Accumulation**: All costs are accumulated and included in the task metadata.
+2. **Simplified API**: The `recordUsage` function accepts either a simple cost number or a detailed record.
+3. **Aggregation**: Costs are aggregated into `totalCost` and `byKind` and included in the final task metadata.
 
 ## Usage in Agents
 
@@ -27,12 +60,33 @@ const response = await ctx.llm.call("Your prompt here");
 
 ### Manual Usage Recording (If Needed)
 
-If you need to manually record usage (e.g., from external API calls), you can use the simplified `recordUsage` API:
+If you need to manually record usage (e.g., from external API calls), use one of the two supported forms:
 
 ```typescript
-// Record a specific cost
-ctx.recordUsage({ cost: 0.05 }); // Object form
-ctx.recordUsage(0.05);           // Numeric form (both work)
+// Shortcut form
+ctx.recordUsage(0.05);
+
+// Detailed form
+ctx.recordUsage({
+  cost: 0.12,
+  kind: 'llm',
+  op: 'call',
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  tokens: { input: 210, output: 512 },
+  // turn is auto-filled if omitted
+});
+```
+
+Examples:
+
+```ts
+// External API call
+ctx.recordUsage(0.05); // counted under kind="other"
+ctx.recordUsage({ cost: 0.05, kind: 'external_api', op: 'invoke', provider: 'stripe' });
+
+// Tool invocation
+ctx.recordUsage({ cost: 0.02, kind: 'tool', op: 'invoke', toolName: 'search' as any });
 ```
 
 ## Implementation Details
@@ -50,12 +104,19 @@ const llm = createLLMForTask(config, ctx);
 
 ### Usage Callback
 
-The LLM caller adapter sets up a usage callback that is triggered by the callllm library:
+The LLM caller adapter sets up a usage callback that is triggered by the callllm library and forwards a detailed record:
 
 ```typescript
 const usageCallback = (usage) => {
   if (usage.costs?.total) {
-    recordUsage({ cost: usage.costs.total });
+    ctx.recordUsage({
+      cost: usage.costs.total,
+      kind: 'llm',
+      op: 'call',
+      provider: config.provider,
+      model: config.modelAliasOrName,
+      tokens: usage.tokens
+    });
   }
 }
 ```
@@ -81,7 +142,7 @@ Existing agents that manually track usage can:
 
 ## Usage Data in Task Results
 
-The accumulated usage data is automatically included in the `metadata` field of the task's final status, using a simplified structure:
+The accumulated usage data is included in the `metadata` field of the task's final status:
 
 ```json
 {
@@ -89,10 +150,19 @@ The accumulated usage data is automatically included in the `metadata` field of 
   "timestamp": "2023-06-15T12:00:00.000Z",
   "metadata": {
     "usage": {
-      "cost": 0.0075
+      "totalCost": 0.73,
+      "byKind": { "llm": 0.68, "external_api": 0.05 }
     }
   }
 }
 ```
 
-This simplified format makes it easier to consume and process usage data. The system internally accumulates all costs from various operations and presents only the final total cost. 
+Notes:
+- `turn` is auto-attributed per record when available.
+- The numeric shortcut is treated as `kind: 'other'` for aggregation.
+
+## Budgets vs Costs
+
+- Budgets are loop constraints configured per agent manifest (`budgets.maxTurns`, `budgets.latencyMs`). They do not represent money and don’t cap spend directly.
+- Costs are aggregated from provider-reported usage and any manual records via `ctx.recordUsage`.
+- See budgets examples in `apps/docs/loop/overview.md` (section: “Default budgets per agent”).

@@ -550,6 +550,21 @@ __metadata:
   languageName: node
   linkType: soft
 
+"@cerebras/cerebras_cloud_sdk@npm:^1.50.0":
+  version: 1.50.0
+  resolution: "@cerebras/cerebras_cloud_sdk@npm:1.50.0"
+  dependencies:
+    "@types/node": "npm:^18.11.18"
+    "@types/node-fetch": "npm:^2.6.4"
+    abort-controller: "npm:^3.0.0"
+    agentkeepalive: "npm:^4.2.1"
+    form-data-encoder: "npm:1.7.2"
+    formdata-node: "npm:^4.3.2"
+    node-fetch: "npm:^2.6.7"
+  checksum: 10c0/546151b80de5198cfad2b849c451ac4b6cdb97ba1d56bfc219fabd8e17088b60914a6a3e48d219e14a774a71e0c0a60dd8afdeea5fefae1eae4ca1e5d28b0f0a
+  languageName: node
+  linkType: hard
+
 "@cspotcode/source-map-support@npm:^0.8.0":
   version: 0.8.1
   resolution: "@cspotcode/source-map-support@npm:0.8.1"
@@ -1873,6 +1888,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"a-sync-waterfall@npm:^1.0.0":
+  version: 1.0.1
+  resolution: "a-sync-waterfall@npm:1.0.1"
+  checksum: 10c0/1c7b258da2c77eb1447dcc683afb10ca3dc8880de990562ccbb7b282538aba01e910345ce9e8500c1458272c7866b85fcfa5ca8159e33550b011ab5c586ec5a4
+  languageName: node
+  linkType: hard
+
 "a2a-local-demo@workspace:apps/examples/a2a-local-demo":
   version: 0.0.0-use.local
   resolution: "a2a-local-demo@workspace:apps/examples/a2a-local-demo"
@@ -2044,6 +2066,13 @@ __metadata:
   dependencies:
     sprintf-js: "npm:~1.0.2"
   checksum: 10c0/b2972c5c23c63df66bca144dbc65d180efa74f25f8fd9b7d9a0a6c88ae839db32df3d54770dcb6460cf840d232b60695d1a6b1053f599d84e73f7437087712de
+  languageName: node
+  linkType: hard
+
+"asap@npm:^2.0.3":
+  version: 2.0.6
+  resolution: "asap@npm:2.0.6"
+  checksum: 10c0/c6d5e39fe1f15e4b87677460bd66b66050cd14c772269cee6688824c1410a08ab20254bb6784f9afb75af9144a9f9a7692d49547f4d19d715aeb7c0318f3136d
   languageName: node
   linkType: hard
 
@@ -2415,6 +2444,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "callllm@portal:/Users/maximantonov/Work/_lab/callllm::locator=%40a2arium%2Fcallagent-core%40workspace%3Apackages%2Fcore"
   dependencies:
+    "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
     "@dqbd/tiktoken": "npm:^1.0.18"
     "@modelcontextprotocol/sdk": "npm:^1.10.2"
     "@types/jest": "npm:^29.5.14"
@@ -2422,14 +2452,14 @@ __metadata:
     dotenv: "npm:^16.4.7"
     jest: "npm:^29.7.0"
     jsonrepair: "npm:^3.12.0"
-    openai: "npm:^4.90.0"
-    opik: "npm:^1.8.33"
+    openai: "npm:^6.2.0"
+    opik: "npm:^1.8.70"
     sharp: "npm:^0.34.1"
     tree-kill: "npm:^1.2.2"
     ts-jest: "npm:^29.2.5"
     ts-morph: "npm:^25.0.1"
     uuid: "npm:^10.0.0"
-    zod: "npm:^3.24.1"
+    zod: "npm:^4.1.12"
   peerDependencies:
     "@opentelemetry/api": ">=1.6.0"
     "@opentelemetry/semantic-conventions": ">=1.22.0"
@@ -2634,6 +2664,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"commander@npm:^5.1.0":
+  version: 5.1.0
+  resolution: "commander@npm:5.1.0"
+  checksum: 10c0/da9d71dbe4ce039faf1fe9eac3771dca8c11d66963341f62602f7b66e36d2a3f8883407af4f9a37b1db1a55c59c0c1325f186425764c2e963dc1d67aec2a4b6d
+  languageName: node
+  linkType: hard
+
 "concat-map@npm:0.0.1":
   version: 0.0.1
   resolution: "concat-map@npm:0.0.1"
@@ -2766,6 +2803,13 @@ __metadata:
   version: 4.0.1
   resolution: "data-uri-to-buffer@npm:4.0.1"
   checksum: 10c0/20a6b93107597530d71d4cb285acee17f66bcdfc03fd81040921a81252f19db27588d87fc8fc69e1950c55cfb0bf8ae40d0e5e21d907230813eb5d5a7f9eb45b
+  languageName: node
+  linkType: hard
+
+"date-fns@npm:^3.5.0":
+  version: 3.6.0
+  resolution: "date-fns@npm:3.6.0"
+  checksum: 10c0/0b5fb981590ef2f8e5a3ba6cd6d77faece0ea7f7158948f2eaae7bbb7c80a8f63ae30b01236c2923cf89bb3719c33aeb150c715ea4fe4e86e37dcf06bed42fb6
   languageName: node
   linkType: hard
 
@@ -3331,7 +3375,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"fast-deep-equal@npm:^3.1.1":
+"fast-deep-equal@npm:^3.1.1, fast-deep-equal@npm:^3.1.3":
   version: 3.1.3
   resolution: "fast-deep-equal@npm:3.1.3"
   checksum: 10c0/40dedc862eb8992c54579c66d914635afbec43350afbbe991235fdcb4e3a8d5af1b23ae7e79bef7d4882d0ecee06c3197488026998fb19f72dc95acff1d1b1d0
@@ -5029,6 +5073,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"mustache@npm:^4.2.0":
+  version: 4.2.0
+  resolution: "mustache@npm:4.2.0"
+  bin:
+    mustache: bin/mustache
+  checksum: 10c0/1f8197e8a19e63645a786581d58c41df7853da26702dbc005193e2437c98ca49b255345c173d50c08fe4b4dbb363e53cb655ecc570791f8deb09887248dd34a2
+  languageName: node
+  linkType: hard
+
 "natural-compare@npm:^1.4.0":
   version: 1.4.0
   resolution: "natural-compare@npm:1.4.0"
@@ -5186,6 +5239,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"nunjucks@npm:^3.2.4":
+  version: 3.2.4
+  resolution: "nunjucks@npm:3.2.4"
+  dependencies:
+    a-sync-waterfall: "npm:^1.0.0"
+    asap: "npm:^2.0.3"
+    commander: "npm:^5.1.0"
+  peerDependencies:
+    chokidar: ^3.3.0
+  peerDependenciesMeta:
+    chokidar:
+      optional: true
+  bin:
+    nunjucks-precompile: bin/precompile
+  checksum: 10c0/7fe5197559b7c09972c79e2a86f9c093459b9075bc9b41134cd2bc599ae93567b53bd09d472a748edc736192d9ccd2998aa8c20cfcbe6a3fffd281f91897c888
+  languageName: node
+  linkType: hard
+
 "nypm@npm:^0.6.0":
   version: 0.6.2
   resolution: "nypm@npm:0.6.2"
@@ -5258,20 +5329,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"openai@npm:^4.90.0":
-  version: 4.104.0
-  resolution: "openai@npm:4.104.0"
-  dependencies:
-    "@types/node": "npm:^18.11.18"
-    "@types/node-fetch": "npm:^2.6.4"
-    abort-controller: "npm:^3.0.0"
-    agentkeepalive: "npm:^4.2.1"
-    form-data-encoder: "npm:1.7.2"
-    formdata-node: "npm:^4.3.2"
-    node-fetch: "npm:^2.6.7"
+"openai@npm:^6.2.0":
+  version: 6.3.0
+  resolution: "openai@npm:6.3.0"
   peerDependencies:
     ws: ^8.18.0
-    zod: ^3.23.8
+    zod: ^3.25 || ^4.0
   peerDependenciesMeta:
     ws:
       optional: true
@@ -5279,21 +5342,26 @@ __metadata:
       optional: true
   bin:
     openai: bin/cli
-  checksum: 10c0/c4f2e837684ed96b8cec58c65a584646d667c69918f29052775e2e8c05ff5c860d8b58214a7770bc6895ca8602480420c1db6a5392dd250179eb0b91c2b19a2f
+  checksum: 10c0/192304069a75b9b0d71ee6e1b719544ec31f6f64cd750e1837cff9cc00187c023c80dd2c6d3049627b3b74721dd0a463a8fed230443003e4ab72c705c0d540dc
   languageName: node
   linkType: hard
 
-"opik@npm:^1.8.33":
-  version: 1.8.51
-  resolution: "opik@npm:1.8.51"
+"opik@npm:^1.8.70":
+  version: 1.8.72
+  resolution: "opik@npm:1.8.72"
   dependencies:
     ansi-escapes: "npm:^7.0.0"
     boxen: "npm:^8.0.1"
     chalk: "npm:^5.4.1"
+    date-fns: "npm:^3.5.0"
     dotenv: "npm:^16.5.0"
+    fast-deep-equal: "npm:^3.1.3"
     fast-json-stable-stringify: "npm:^2.1.0"
     ini: "npm:^5.0.0"
+    jest-diff: "npm:^29.7.0"
+    mustache: "npm:^4.2.0"
     node-fetch: "npm:^3.3.2"
+    nunjucks: "npm:^3.2.4"
     ora: "npm:^8.2.0"
     qs: "npm:^6.13.1"
     readable-stream: "npm:^4.7.0"
@@ -5306,7 +5374,7 @@ __metadata:
   peerDependenciesMeta:
     zod:
       optional: false
-  checksum: 10c0/3d4ae6d1a28f6bf7efffb8693e318cc762f295469786a95514d38b4f663f65eefba42ccc8f0d3d3ce4cfb809e8351cd6fd5b843fa672aeaad6d29c07d6094dd5
+  checksum: 10c0/28c394404c06b200b6bcb6932b90ac27eb106dfbe3dff985140ea5f9d36d54db7f1e7898f355f2a080191c83cf29a13fa0ea9a9f7f28a9b064da4c8b0d190cd0
   languageName: node
   linkType: hard
 
@@ -7073,9 +7141,16 @@ __metadata:
   languageName: node
   linkType: hard
 
-"zod@npm:^3.22.4, zod@npm:^3.23.8, zod@npm:^3.24.1":
+"zod@npm:^3.22.4, zod@npm:^3.23.8":
   version: 3.25.76
   resolution: "zod@npm:3.25.76"
   checksum: 10c0/5718ec35e3c40b600316c5b4c5e4976f7fee68151bc8f8d90ec18a469be9571f072e1bbaace10f1e85cf8892ea12d90821b200e980ab46916a6166a4260a983c
+  languageName: node
+  linkType: hard
+
+"zod@npm:^4.1.12":
+  version: 4.1.12
+  resolution: "zod@npm:4.1.12"
+  checksum: 10c0/b64c1feb19e99d77075261eaf613e0b2be4dfcd3551eff65ad8b4f2a079b61e379854d066f7d447491fcf193f45babd8095551a9d47973d30b46b6d8e2c46774
   languageName: node
   linkType: hard

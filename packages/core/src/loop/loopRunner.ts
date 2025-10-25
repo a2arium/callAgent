@@ -222,6 +222,8 @@ export async function runLoop(
 
     // env.turn is already set correctly by taskEngine for the first turn
     for (let turn = 0; turn < maxTurns; turn++) {
+        // expose current turn on ctx for usage attribution
+        try { (ctx as any).__turn = (env as any).turn; } catch { }
         // For subsequent iterations in the same runLoop call, increment turn
         if (turn > 0) {
             try { (env as any).turn += 1; } catch { }

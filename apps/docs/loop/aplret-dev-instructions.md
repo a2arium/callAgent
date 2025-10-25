@@ -1297,6 +1297,63 @@ execution: async (intent, ctx, m) => {
 }
 ```
 
+### Usage accounting (costs)
+LLM calls made with ctx.llm are automatically tracked by the framework. You can also manually record usage for other types of calls.
+Keep effect safety separate from spend accounting. Record spend when relevant:
+
+```ts
+// Shortcut form
+ctx.recordUsage(0.05);
+
+// Detailed form (LLM/tool/external)
+ctx.recordUsage({
+  cost: 0.12, // USD
+  kind: 'tool',        // 'llm' | 'embedding' | 'tool' | 'external_api' | 'storage' | 'network' | 'other'
+  op: 'call',         // 'call' | 'stream' | 'embed' | 'invoke' | 'read' | 'write'
+  provider: 'aws',
+  model: 'textract'
+  // turn is auto-filled if omitted
+});
+```
+
+Final task status includes aggregated usage:
+
+```json
+{
+  "metadata": {
+    "usage": {
+      "totalCost": 0.73,
+      "byKind": { "tool": 0.68, "external_api": 0.05 }
+    }
+  }
+}
+```
+
+Notes:
+- Budgets (`budgets.maxTurns`, `budgets.latencyMs`) control loop constraints, not money.
+- Cost gating is separate; you can optionally enforce limits with policy/shield logic.
+
+### Agent result caching (quick)
+
+Enable result caching per agent in the manifest. On a cache hit, the runner short‑circuits execution and returns the cached result, marking provenance and zeroing usage for this run.
+
+```json
+{
+  "name": "my-agent",
+  "version": "1.0.0",
+  "cache": {
+    "enabled": true,
+    "ttlSeconds": 300,
+    "excludePaths": ["timestamp", "requestId"]
+  }
+}
+```
+
+Behavior on cache hit:
+- Final status includes `metadata.source = "cache"`.
+- Final usage is zeroed: `metadata.usage = { "totalCost": 0, "byKind": {} }`.
+- No LLM/tool execution occurs for that run (fast return).
+
 ---
 
 ## 8. Resume Contract

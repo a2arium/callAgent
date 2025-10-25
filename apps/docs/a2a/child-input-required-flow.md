@@ -463,3 +463,7 @@ export async function onChildNeedsInput(ctx, ev) {
 - [A2A Architecture](./architecture.md) - System architecture overview
 - [Working Memory](../memory/working-memory.md) - Working memory persistence
 - [Memory SQL Adapter](../memory-sql-adapter.md) - Database persistence layer
+
+### Markup/Parts in Child Prompts
+- Child `requestInput` accepts strings or message parts (including `type:'markup'`).
+- The parts are emitted to the child stream immediately (so UI renders) and the `input_required` event carries the same parts to the parent stream. The legacy `prompt` string remains for backward compatibility.

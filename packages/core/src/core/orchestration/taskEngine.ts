@@ -152,7 +152,6 @@ export class TaskEngine {
             if (llmAny?.getMessages) {
                 const messages = llmAny.getMessages(true);
                 llmState = { messages } as unknown;
-                try { console.log(`[TaskEngine] flushContextSnapshot messages count: ${Array.isArray(messages) ? messages.length : 'n/a'}`); } catch { }
             } else if (llmAny?.exportState) {
                 llmState = llmAny.exportState();
             }
@@ -164,8 +163,6 @@ export class TaskEngine {
             const expected = snap?.wmVersion ?? BigInt(0);
             const next = { ...(baseSnap as any), M } as Record<string, unknown>;
             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot: next });
-            try { /* saved */ } catch { /* noop */ }
-            try { console.log(`[TaskEngine] flushContextSnapshot saved`); } catch { }
         } catch (e) {
             if ((e as Error).message === 'CAS_MISMATCH') {
                 try {
@@ -173,7 +170,6 @@ export class TaskEngine {
                     const expected2 = snap2?.wmVersion ?? BigInt(0);
                     const next2 = { ...(((await this.sessionManager.load(tenantId, sessionId))?.snapshot as any) || {}), M } as Record<string, unknown>;
                     await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot: next2 });
-                    try { console.log(`[TaskEngine] flushContextSnapshot saved after retry`); } catch { }
                 } catch { /* ignore */ }
             }
         }
@@ -183,7 +179,6 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
-        try { console.log('[TaskEngine] BUILD-MARKER startTask enter'); } catch { }
         const { task, isStreaming, agentId, tenantId: startTenantId, initialContext } = params;
 
         // Use provided context if present, otherwise create a basic one
@@ -313,9 +308,7 @@ export class TaskEngine {
         const flushMentalState = async () => {
             if (!this.sessionManager) return;
             try {
-                try { console.log('[TaskEngine] flushMentalState: before assign vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
                 assignVarsIntoMental();
-                try { console.log('[TaskEngine] flushMentalState: after assign vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
                 updateLlmInMental();
                 const snapNow = await this.sessionManager.load(tenantId, sessionId);
                 const base = (snapNow?.snapshot as Record<string, unknown>) || {};
@@ -514,7 +507,7 @@ export class TaskEngine {
             // Keep existing override set by A2A; do not replace
             try { (ctx as any).logger?.debug?.('TaskEngine.startTask: preserving A2A requestInput override'); } catch { }
         } else {
-            (ctx as any).requestInput = async (prompt: string, opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
+            (ctx as any).requestInput = async (promptOrParts: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[], opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
                 if (!this.sessionManager) throw new Error('Session manager not configured');
                 // Limits: cap max outstanding prompts
                 const maxPrompts = 100; // TODO: configurable
@@ -529,6 +522,20 @@ export class TaskEngine {
                 const token = opts?.__existingToken || uuidv4();
                 const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
                 const pending = { ...getPendingInputs(base) };
+
+                // Normalize promptOrParts into parts[] and derive a fallback prompt string
+                const normalizeParts = (p: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[]): import('../../shared/types/index.js').MessagePart[] => {
+                    if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' } as any];
+                    if (Array.isArray(p) && p.length > 0 && typeof p[0] === 'string') return (p as string[]).map(t => ({ type: 'text', text: t, format: 'markdown' } as any));
+                    if (Array.isArray(p)) return (p as any[]).map(part => (part?.type === 'text' && !part?.format ? { ...part, format: 'markdown' } : part));
+                    const one = p as any;
+                    return [one?.type === 'text' && !one?.format ? { ...one, format: 'markdown' } : one];
+                };
+                const parts = normalizeParts(promptOrParts);
+                const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
+
+                // Emit prompt parts as a reply ASAP so chat UIs render before any IO
+                try { await ctx.reply(parts as any); } catch { /* best-effort */ }
 
                 // Only add to pending if it's a new token request
                 if (!opts?.__existingToken) {
@@ -549,8 +556,8 @@ export class TaskEngine {
                     const nextSnapshot = setPendingInputs(latestBase, pending);
                     const expectedNext = latest?.wmVersion ?? expectedVer;
                     await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedNext, snapshot: nextSnapshot });
-                    await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
-                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, token, schema: opts?.schema, expiresAt });
+                    await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
+                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
                 };
                 try {
                     const expected = snap?.wmVersion ?? BigInt(0);
@@ -565,21 +572,21 @@ export class TaskEngine {
                             const expected2 = snap2?.wmVersion ?? BigInt(0);
                             const next2 = setPendingInputs(base2, pending2);
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
-                            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
-                            await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, token, schema: opts?.schema, expiresAt });
+                            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
+                            await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
                         } catch { /* swallow second failure */ }
                     } else {
                         throw e;
                     }
                 }
                 try { (ctx as any).logger?.info?.('requestInput: input_required emitted', { token, prompt, expiresAt }); } catch { }
-                // Emit a streaming status so local runner shows the prompt
+                // Emit a streaming status so local runner shows the prompt (with parts)
                 try {
                     ctx.progress({
                         state: 'input-required',
                         message: {
                             role: 'agent',
-                            parts: [{ type: 'text', text: prompt }]
+                            parts
                         },
                         timestamp: new Date().toISOString(),
                         metadata: { token }
@@ -1062,6 +1069,14 @@ export class TaskEngine {
                             timestamp: new Date().toISOString(),
                             metadata: { result: outcome.result, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg }
                         } as any;
+                        // Publish final completion event for cache listener and other subscribers
+                        try {
+                            eventBus.publish(taskChannel(task.id), {
+                                id: task.id,
+                                status: task.status,
+                                final: true
+                            } as any);
+                        } catch { }
                         return task;
                     }
                 }
@@ -1204,7 +1219,7 @@ export class TaskEngine {
                 // Keep existing A2A override
                 try { (ctx as any).logger?.debug?.('TaskEngine.resumeInput: preserving A2A requestInput override'); } catch { }
             } else {
-                (ctx as any).requestInput = async (prompt: string, opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
+                (ctx as any).requestInput = async (promptOrParts: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[], opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
                     if (!this.sessionManager) throw new Error('Session manager not configured');
                     // Limits: cap max outstanding prompts
                     const maxPrompts = 100;
@@ -1219,6 +1234,17 @@ export class TaskEngine {
                     const token = opts?.__existingToken || uuidv4();
                     const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
                     const pending = { ...getPendingInputs(base) };
+
+                    // Normalize promptOrParts into parts[] and derive a fallback prompt string
+                    const normalizeParts = (p: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[]): import('../../shared/types/index.js').MessagePart[] => {
+                        if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' } as any];
+                        if (Array.isArray(p) && p.length > 0 && typeof p[0] === 'string') return (p as string[]).map(t => ({ type: 'text', text: t, format: 'markdown' } as any));
+                        if (Array.isArray(p)) return (p as any[]).map(part => (part?.type === 'text' && !part?.format ? { ...part, format: 'markdown' } : part));
+                        const one = p as any;
+                        return [one?.type === 'text' && !one?.format ? { ...one, format: 'markdown' } : one];
+                    };
+                    const parts = normalizeParts(promptOrParts);
+                    const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
 
                     // Only add to pending if it's a new token request
                     if (!opts?.__existingToken) {
@@ -1253,8 +1279,8 @@ export class TaskEngine {
                         const nextSnapshot = setPendingInputs(latestBase, pending);
                         const expectedNext = latest?.wmVersion ?? expectedVer;
                         await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedNext, snapshot: nextSnapshot });
-                        await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
-                        await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, token, schema: opts?.schema, expiresAt });
+                        await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
+                        await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
                     };
                     try {
                         const expected = snap?.wmVersion ?? BigInt(0);
@@ -1268,20 +1294,22 @@ export class TaskEngine {
                                 const expected2 = snap2?.wmVersion ?? BigInt(0);
                                 const next2 = setPendingInputs(base2, pending2);
                                 await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
-                                await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, schema: opts?.schema, expiresAt });
-                                await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, token, schema: opts?.schema, expiresAt });
+                                await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
+                                await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
                             } catch { /* swallow second failure */ }
                         } else {
                             throw e;
                         }
                     }
                     try { (ctx as any).logger?.info?.('requestInput: input_required emitted', { token, prompt, expiresAt }); } catch { }
+                    // Emit prompt parts as a reply so chat UIs can render markup/buttons/etc.
+                    try { await ctx.reply(parts as any); } catch { /* best-effort */ }
                     try {
                         ctx.progress({
                             state: 'input-required',
                             message: {
                                 role: 'agent',
-                                parts: [{ type: 'text', text: prompt }]
+                                parts
                             },
                             timestamp: new Date().toISOString(),
                             metadata: { token }
@@ -1499,15 +1527,12 @@ export class TaskEngine {
                 if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
-            try { console.log('[TaskEngine] resume post-loop vars', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
             // Persist updated M with latest ctx.vars merged into mNext
             try {
                 const snapAfter = await this.sessionManager!.load(tenantId, taskId);
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
-                try { console.log('[TaskEngine] resume-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
                 let mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
-                try { console.log('[TaskEngine] resume-save after merge', { fromMerged: (mNextEffective as any)?.memory?.vars?.jsonObject }); } catch { }
                 const nextSnap = { ...baseSnap, M: mNextEffective } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
@@ -1696,7 +1721,6 @@ export class TaskEngine {
         try {
             const agentName = (snap as any)?.agentId;
             const plugin = agentName ? PluginManager.findAgent(agentName) : null;
-            try { console.log(`[TaskEngine] handleChildCompleted: resume parent agent='${agentName}' pluginFound=${!!plugin}`); } catch { }
             const ctx = this.createContext({ id: parentTaskId, input: {} });
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
             // Ensure replies in this resumed parent turn are streamed to console
@@ -1706,7 +1730,6 @@ export class TaskEngine {
 
             const prevMetaCheck = (baseNow as any).meta || {};
             if (prevMetaCheck.lastChildToken === token) {
-                console.log(`[TaskEngine] Skipping duplicate handleChildCompleted for token ${token}`);
                 return;
             }
 
@@ -1731,7 +1754,7 @@ export class TaskEngine {
             } as EnvironmentState;
 
             const overrides = (plugin as any)?.loop?.modules || {};
-            try { console.log(`[TaskEngine] handleChildCompleted: loop overrides keys=`, Object.keys(overrides || {})); } catch { }
+
             let loopOpts: { maxTurns?: number; latencyMs?: number } = { maxTurns: 1 };
             try {
                 const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
@@ -1851,8 +1874,6 @@ export class TaskEngine {
                         // Basic validation that this is a valid stage transition
                         if (typeof targetStage === 'string' && targetStage.length > 0) {
                             parentM.control.stage = targetStage;
-
-                            try { console.log(`[TaskEngine] Auto stage transition: ${currentStage} -> ${targetStage} (child input required)`); } catch { }
                         }
                     }
 

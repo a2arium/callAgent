@@ -184,6 +184,15 @@ graph TD
     I --> J
 ```
 
+### Cache Hit Provenance and Usage
+
+On a cache hit, the framework:
+
+- Marks provenance in the final status: `metadata.source = 'cache'`.
+- Reports zero usage for the current run: `metadata.usage = { totalCost: 0, byKind: {} }`.
+
+This ensures cache-served runs are explicitly identified and do not count any spend for that execution. The original run that produced the cached result may have non-zero usage (kept in your historical logs), but cached replays are billed as zero for the current run.
+
 ## Multi-Tenant Support
 
 ### Tenant Isolation

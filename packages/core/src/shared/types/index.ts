@@ -3,7 +3,7 @@ import type { ILLMCaller } from './LLMTypes.js';
 import type { ComponentLogger } from '@a2arium/callagent-utils'; // Import ComponentLogger
 // Explicitly import only needed types from StreamingEvents
 import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
-import type { Usage } from './LLMTypes.js'; // Import Usage type
+// UsageRecord is defined in this file (no dependency on provider-specific Usage)
 import type { IMemory } from '@a2arium/callagent-types';
 // Import working memory types for TaskContext
 import type { ThoughtEntry, DecisionEntry } from './workingMemory.js';
@@ -70,6 +70,17 @@ export type AgentManifest = {
     [key: string]: unknown;
 }
 
+// --- Usage Tracking ---
+export type UsageRecord = {
+    cost: number; // USD
+    kind: 'llm' | 'embedding' | 'tool' | 'external_api' | 'storage' | 'network' | 'other';
+    op?: 'call' | 'stream' | 'embed' | 'invoke' | 'read' | 'write';
+    provider?: string;
+    model?: string;
+    tokens?: { input?: number; output?: number };
+    turn?: number; // auto-filled when available
+};
+
 // --- Messages & Parts (Simplified) ---
 export type MessagePart = {
     type: string; // e.g., 'text', 'data', 'file'
@@ -124,8 +135,8 @@ export type TaskContext = {
     complete: (pct?: number, status?: string) => void; // Basic console log
     fail: (error: unknown) => Promise<void>; // Added fail method
 
-    // Add usage recording method that accepts multiple formats for backward compatibility
-    recordUsage: (cost: number | { cost: number } | Usage) => void;
+    // Usage recording supports numeric shortcut or detailed record
+    recordUsage: (cost: number | UsageRecord) => void;
 
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
@@ -255,7 +266,7 @@ export type TaskContext = {
      * Request human or external input. Returns an InputHandle for durable handler chaining.
      */
     requestInput: (
-        prompt: string,
+        promptOrParts: string | string[] | MessagePart | MessagePart[],
         opts?: {
             schema?: unknown;
             ttlMs?: number;

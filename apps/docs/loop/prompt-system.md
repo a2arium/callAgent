@@ -482,6 +482,7 @@ For each turn, specify:
 - **CRITICAL**: Set required ctx.vars BEFORE stage transitions (automatic with requestInput)
 - **Framework methods**: Use `ctx.llm`, `ctx.reply`, `ctx.tools` directly
 - **Full ctx access**: No separate `llm` parameter needed
+  - Note: `ctx.requestInput` accepts the same payloads as `ctx.reply` (strings or `MessagePart`/`MessagePart[]`, including `type: 'markup'`). Parts are emitted immediately so UI (buttons/location) renders before entering `input-required`.
 
 ### G) Transition (Flow control)
 - **Purpose**: Map ExecutableAction to TurnOutcome
@@ -1028,3 +1029,29 @@ await ctx.reply({
 Notes:
 - Text `format` can be `'markdown' | 'html' | 'plain'` (default is `'markdown'`).
 - For custom UI (buttons/location), use `type: 'markup'` and pass a Markup object in `value`.
+
+### Requesting Input with Parts/Markup
+`ctx.requestInput` now accepts the same payloads as `ctx.reply`:
+```ts
+// String prompt (backward compatible)
+await ctx.requestInput('Provide a value:');
+
+// HTML prompt
+await ctx.requestInput({ type: 'text', text: '<b>Confirm?</b>', format: 'html' });
+
+// Buttons markup
+await ctx.requestInput({
+  type: 'markup',
+  value: {
+    kind: 'buttons',
+    prompt: 'Choose an option:',
+    buttons: [
+      { title: 'Yes', payload: { action: 'yes' } },
+      { title: 'No', payload: { action: 'no' } }
+    ]
+  }
+});
+```
+Behavior:
+- The parts are sent immediately as a chat reply (so markup renders), and the task enters `input-required` state with the same parts in status.
+- Plain string prompts continue to work exactly as before.

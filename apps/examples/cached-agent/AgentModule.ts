@@ -1,116 +1,63 @@
 import { createAgent } from '@a2arium/callagent-core';
-import type { TaskContext } from '@a2arium/callagent-core';
+import type { EnvironmentState, MentalState, ProposedAction, ExecutableAction, TurnOutcome, TaskContext } from '@a2arium/callagent-core';
+import { match, P } from 'ts-pattern';
 
-interface CacheExampleInput {
-    operation: string;
-    data?: string;
-    timestamp?: string;
-    requestId?: string;
-    user?: {
-        id: string;
-        name: string;
-        sessionId?: string;
-    };
-}
+// Minimal APLRET agent to test agent-level caching of transition result
+type Sensory = { payload?: unknown };
+type Obs = { payload?: unknown };
 
-interface CacheExampleOutput {
-    result: string;
-    processedAt: string;
-    executionTime: number;
-    processingCost: number;
-    cacheStatus: 'miss' | 'potential_hit';
-}
+export default createAgent<Sensory, Obs>({
+    manifest: 'agent.json',
 
-/**
- * Cached Agent Example
- * 
- * This agent demonstrates result caching functionality including:
- * - TTL-based cache expiration (60 seconds)
- * - Path exclusions (timestamp, requestId, user.sessionId won't affect cache keys)
- * - Artificial processing delay to show cache benefits
- * - Different operations with different processing costs
- */
+    // A - Attention
+    attention: (_m: MentalState<Sensory>, env: EnvironmentState) => ({ hasInput: Boolean(env.input) }),
 
-// Simulate processing delay to demonstrate cache benefits
-async function simulateProcessing(operation: string): Promise<{ result: string; cost: number }> {
-    const operations = {
-        'complex-calculation': { delay: 3000, cost: 10.50, result: 'Complex mathematical computation completed' },
-        'data-analysis': { delay: 5000, cost: 15.25, result: 'Data analysis and statistical modeling finished' },
-        'image-processing': { delay: 8000, cost: 22.75, result: 'Image processing and enhancement completed' },
-        'text-generation': { delay: 4000, cost: 12.00, result: 'Natural language text generation completed' },
-        'default': { delay: 2000, cost: 5.00, result: 'Basic processing completed' }
-    };
+    // P - Perception: normalize the initial input as-is
+    perception: (env: EnvironmentState): Obs => ({ payload: env.input }),
 
-    const config = operations[operation as keyof typeof operations] || operations.default;
+    // L - Learning: store sensory snapshot
+    learning: (prev: MentalState<Sensory>, _action: ProposedAction | undefined, obs: Obs): MentalState<Sensory> => ({
+        ...prev,
+        memory: { ...prev.memory, sensory: { payload: obs.payload } }
+    }),
 
-    // Simulate processing time
-    await new Promise(resolve => setTimeout(resolve, config.delay));
+    // R - Policy: proceed if we have any payload
+    policy: (m: MentalState<Sensory>): ProposedAction => {
+        const hasPayload = typeof m.memory?.sensory?.payload !== 'undefined';
+        return hasPayload
+            ? ({ kind: 'internal', intent: 'process', data: { ok: true } } as const)
+            : ({ kind: 'internal', intent: 'no_input' } as const);
+    },
 
-    return {
-        result: config.result,
-        cost: config.cost
-    };
-}
+    // S - Shield
+    shield: (_m: MentalState<Sensory>, a: ProposedAction) => ({ action: 'pass', intent: a } as const),
 
-async function handleTask(ctx: TaskContext): Promise<CacheExampleOutput> {
-    const input = ctx.task.input as unknown as CacheExampleInput;
-    const startTime = Date.now();
+    // E - Execution: generate random number to verify cache hit (same number = cached)
+    execution: async (a: ProposedAction, ctx: TaskContext): Promise<ExecutableAction> => {
+        return await match(a)
+            .with({ kind: 'internal', intent: 'process', data: P.select() }, async () => {
+                const started = Date.now();
+                const randomValue = Math.floor(Math.random() * 1000000);
+                ctx.progress(5, `processing... (random=${randomValue})`);
+                await new Promise((r) => setTimeout(r, 200));
+                const elapsed = Date.now() - started;
+                ctx.progress(95, `done in ${elapsed}ms`);
+                ctx.logger.info(`Execution completed with random=${randomValue}`);
+                // Return random number - if cache works, subsequent runs will return same number
+                return { kind: 'internal', done: true, result: { ok: true, randomValue, elapsedMs: elapsed } } as unknown as ExecutableAction;
+            })
+            .with({ kind: 'internal', intent: 'no_input' }, async () => {
+                ctx.progress(100, 'No input provided');
+                return { kind: 'internal', done: true, result: { ok: false, reason: 'no_input' } } as unknown as ExecutableAction;
+            })
+            .otherwise(async () => ({ kind: 'internal', done: true } as ExecutableAction));
+    },
 
-    ctx.logger.info('🔄 Starting cached agent execution', {
-        operation: input.operation,
-        hasTimestamp: !!input.timestamp,
-        hasRequestId: !!input.requestId,
-        hasSessionId: !!input.user?.sessionId
-    });
-
-    // Log cache-relevant information
-    ctx.logger.info('📊 Cache configuration active', {
-        ttl: '60 seconds',
-        excludedPaths: ['timestamp', 'requestId', 'user.sessionId'],
-        note: 'Identical operations will be cached regardless of excluded fields'
-    });
-
-    // Update status
-    ctx.updateStatus('processing');
-    await ctx.reply([{
-        type: 'text',
-        text: `🚀 Processing ${input.operation || 'default'} operation...`
-    }]);
-
-    // Simulate expensive processing
-    const processing = await simulateProcessing(input.operation || 'default');
-    const executionTime = Date.now() - startTime;
-
-    // Create result
-    const result: CacheExampleOutput = {
-        result: processing.result,
-        processedAt: new Date().toISOString(),
-        executionTime,
-        processingCost: processing.cost,
-        cacheStatus: 'miss' // This execution was not from cache
-    };
-
-    // Log completion
-    ctx.logger.info('✅ Processing completed', {
-        operation: input.operation,
-        executionTime: `${executionTime}ms`,
-        cost: `$${processing.cost}`,
-        cacheNote: 'Result will be cached for 60 seconds'
-    });
-
-    await ctx.reply([{
-        type: 'text',
-        text: `✅ Operation completed in ${executionTime}ms (Cost: $${processing.cost})\n` +
-            `Result: ${processing.result}\n\n` +
-            `💡 This result is now cached for 60 seconds. ` +
-            `Identical operations (ignoring timestamp, requestId, user.sessionId) ` +
-            `will return instantly from cache.`
-    }]);
-
-    return result;
-}
-
-// Create and export the agent
-export default createAgent({
-    handleTask
-}, import.meta.url); 
+    // T - Transition: produce final TurnOutcome with result -> cached by runner
+    transition: (_env: EnvironmentState, exec: ExecutableAction, _m: MentalState<Sensory>): TurnOutcome => {
+        const hasResult = (e: unknown): e is { result: unknown } => typeof e === 'object' && e !== null && 'result' in (e as Record<string, unknown>);
+        return match(exec)
+            .with({ kind: 'internal', done: true }, (e) => ({ kind: 'complete', result: hasResult(e) ? (e as { result: unknown }).result : { ok: true } } as TurnOutcome))
+            .otherwise(() => ({ kind: 'complete', result: { ok: true } } as TurnOutcome));
+    }
+}, import.meta.url);

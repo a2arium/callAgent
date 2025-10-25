@@ -188,6 +188,11 @@ export async function handler(event) {
 - For WS live updates, publish `ChatEvent` to `channelKey = ${network}:${conversationId}`
 - For tenant isolation, default `tenantId = network`
 
+### Input Required + Parts/Markup
+- `ctx.requestInput(...)` now accepts the same payloads as `ctx.reply` (strings, MessagePart(s), including `type:'markup'`).
+- The bridge will have already received and forwarded any parts (text/media/markup) via artifacts before the `input_required` status resolves.
+- The invoker omits the plain `prompt` string when parts were present to avoid duplicating messages.
+
 ## Session stores: Chat vs Working Memory
 
 - Chat SessionStore (this package)

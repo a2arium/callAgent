@@ -1,10 +1,10 @@
-import type { TaskContext, Message, MessagePart } from '../../shared/types/index.js';
+import type { TaskContext, Message, MessagePart, UsageRecord } from '../../shared/types/index.js';
 import type {
     TaskStatus,
     TaskState,
     Artifact
 } from '../../shared/types/StreamingEvents.js';
-import type { Usage } from '../../shared/types/LLMTypes.js';
+// no provider-specific Usage type in public API anymore
 import { eventBus } from '../../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 
@@ -40,8 +40,9 @@ export function extendContextWithStreaming(
         artifacts: [] as Artifact[],
         latestStatus: null as TaskStatus | null
     };
-    // Add state to hold accumulated cost
-    let accumulatedCost: number = 0;
+    // Add state to hold accumulated usage
+    let totalCost: number = 0;
+    const byKind: Record<string, number> = {};
 
     // Get logger if available or use console as fallback
     const logger = ctx.logger || console;
@@ -233,30 +234,27 @@ export function extendContextWithStreaming(
             });
         },
 
-        // Simplified implementation for recordUsage that accepts cost directly
-        recordUsage: (cost: number | { cost: number } | Usage): void => {
-            // Handle different input formats
-            let costValue: number;
-
-            if (typeof cost === 'number') {
-                // Direct cost number
-                costValue = cost;
-            } else if ('cost' in cost) {
-                // { cost: number } format
-                costValue = cost.cost;
+        // Usage recording: number shortcut or detailed record
+        recordUsage: (usage: number | UsageRecord): void => {
+            let record: UsageRecord;
+            if (typeof usage === 'number') {
+                record = { cost: usage, kind: 'other' };
             } else {
-                // Legacy Usage object format - extract costs.total
-                costValue = cost.costs?.total || 0;
+                record = { ...usage };
             }
-
-            // Simply add the cost value to the accumulated cost
-            accumulatedCost += costValue;
-
-            logger.debug('Usage recorded', {
-                taskId: ctx.task.id,
-                cost: costValue,
-                totalAccumulatedCost: accumulatedCost
-            });
+            if (typeof record.turn !== 'number') {
+                try {
+                    const t = (ctx as any).__turn;
+                    if (typeof t === 'number') record.turn = t;
+                } catch { /* noop */ }
+            }
+            const inc = Number(record.cost) || 0;
+            totalCost += inc;
+            const k = record.kind || 'other';
+            byKind[k] = (byKind[k] || 0) + inc;
+            try {
+                logger.debug('Usage recorded', { taskId: ctx.task.id, record, totalCost, byKind });
+            } catch { /* noop */ }
         },
 
         // Modify complete to include usage metadata
@@ -264,7 +262,7 @@ export function extendContextWithStreaming(
             const finalStatus: TaskStatus = {
                 state: (statusStr || 'completed') as TaskState,
                 timestamp: new Date().toISOString(),
-                metadata: accumulatedCost > 0 ? { usage: { cost: accumulatedCost } } : undefined
+                metadata: totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : undefined
             };
             if (typeof pctOrStatus === 'number') {
                 (finalStatus as any).progress = pctOrStatus;
@@ -274,7 +272,8 @@ export function extendContextWithStreaming(
                 taskId: ctx.task.id,
                 status: finalStatus
             });
-            accumulatedCost = 0; // Reset after sending
+            totalCost = 0; // Reset after sending
+            for (const k of Object.keys(byKind)) delete byKind[k];
         },
 
         // Modify fail to handle unknown error type and include usage metadata
@@ -292,7 +291,7 @@ export function extendContextWithStreaming(
                     role: 'agent',
                     parts: [{ type: 'text', text: errorMessage }]
                 },
-                metadata: accumulatedCost > 0 ? { usage: { cost: accumulatedCost } } : {}
+                metadata: totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : {}
             };
 
             // Note: The original implementation expected a TaskStatus. 
@@ -304,7 +303,8 @@ export function extendContextWithStreaming(
                 taskId: ctx.task.id,
                 status: finalStatus
             });
-            accumulatedCost = 0; // Reset after sending
+            totalCost = 0; // Reset after sending
+            for (const k of Object.keys(byKind)) delete byKind[k];
         },
 
         // Signal that the task requires more input

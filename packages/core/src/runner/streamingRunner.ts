@@ -394,12 +394,18 @@ export async function runAgentWithStreaming(
             if (options.isStreaming) {
                 // For streaming mode, replay cached result as stream events
                 try {
-                    // Emit cached result as final status
+                    // Emit cached artifact
                     await taskCtx.reply([{
                         type: 'text',
                         text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult)
                     }]);
-                    taskCtx.complete(100, 'completed');
+                    // Emit final status with cache provenance and zeroed usage
+                    const finalStatus: TaskStatus = {
+                        state: 'completed',
+                        timestamp: new Date().toISOString(),
+                        metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
+                    } as any;
+                    try { eventBus.publish(taskChannel(taskId), { id: taskId, status: finalStatus, final: true } as any); } catch { }
                 } catch (error) {
                     agentLogger.error('Failed to replay cached result in streaming mode', error);
                     await taskCtx.fail(error);
@@ -409,7 +415,8 @@ export async function runAgentWithStreaming(
                 const results = {
                     status: {
                         state: 'completed' as const,
-                        timestamp: new Date().toISOString()
+                        timestamp: new Date().toISOString(),
+                        metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
                     },
                     artifacts: [{
                         id: 'cached-response',
@@ -426,6 +433,36 @@ export async function runAgentWithStreaming(
             }
             return;
         }
+    }
+
+    // If caching enabled, subscribe to final completion to persist result using original input as key
+    if (agentResultCache) {
+        const channel = taskChannel(taskId);
+        const cacheListener = async (event: A2AEvent) => {
+            agentLogger.debug(`Cache listener received event`, { hasStatus: 'status' in event, final: (event as any).final, state: (event as any).status?.state });
+            if ('status' in event && event.final === true && (event.status as any)?.state === 'completed') {
+                try {
+                    const resultToCache = (event.status as any)?.metadata?.result;
+                    agentLogger.info(`Caching result for agent ${plugin.manifest.name}`, { hasResult: resultToCache !== undefined });
+                    if (resultToCache !== undefined) {
+                        await agentResultCache.setCachedResult(
+                            plugin.manifest.name,
+                            input,
+                            resultToCache,
+                            plugin.manifest.cache?.ttlSeconds || 300,
+                            plugin.manifest.cache?.excludePaths || [],
+                            finalTenantId
+                        );
+                        agentLogger.info(`Result cached successfully for agent ${plugin.manifest.name}`);
+                    }
+                } catch (error) {
+                    agentLogger.error('Failed to cache agent result on completion', error);
+                } finally {
+                    try { eventBus.unsubscribe(channel, cacheListener as any); } catch { }
+                }
+            }
+        };
+        try { eventBus.subscribe(channel, cacheListener as any); } catch { }
     }
 
     // --- Execute via Task Engine ---

@@ -6,9 +6,10 @@ import type {
     Usage
 } from 'callllm';
 import { ILLMCaller, LLMConfig } from '../../shared/types/LLMTypes.js';
+import type { UsageRecord } from '../../shared/types/index.js';
 
-// Type for the recordUsage function that accepts a cost parameter
-type RecordUsageFunction = (cost: number | { cost: number }) => void;
+// Type for the recordUsage function that accepts our detailed record
+type RecordUsageFunction = (cost: number | UsageRecord) => void;
 
 /**
  * Adapter for the callllm library that implements the ILLMCaller interface
@@ -17,16 +18,28 @@ type RecordUsageFunction = (cost: number | { cost: number }) => void;
 export class LLMCallerAdapter implements ILLMCaller {
     private caller: LLMCaller;
     private recordUsage?: RecordUsageFunction;
+    private provider?: string;
+    private modelName?: string;
 
     constructor(config: LLMConfig, recordUsage?: RecordUsageFunction) {
         // Store the recordUsage function for later use
         this.recordUsage = recordUsage;
+        this.provider = config.provider;
+        this.modelName = config.modelAliasOrName;
 
         // Define the usage callback that will automatically track costs
         const usageCallback = config.usageCallback || (this.recordUsage ?
             (usage: Usage) => {
                 if (usage.costs?.total && this.recordUsage) {
-                    this.recordUsage({ cost: usage.costs.total });
+                    const record: UsageRecord = {
+                        cost: usage.costs.total,
+                        kind: 'llm',
+                        op: 'call',
+                        provider: this.provider,
+                        model: this.modelName,
+                        tokens: (usage as any)?.tokens ? { input: (usage as any)?.tokens?.input, output: (usage as any)?.tokens?.output } : undefined
+                    };
+                    this.recordUsage(record);
                 }
             } : undefined);
 
@@ -71,13 +84,27 @@ export class LLMCallerAdapter implements ILLMCaller {
             // Automatically record usage if not using the callback approach
             if (!options?.usageCallback && this.recordUsage && responses.length > 0) {
                 let totalCost = 0;
+                let tokensIn = 0;
+                let tokensOut = 0;
                 for (const response of responses) {
                     if (response.metadata?.usage?.costs?.total) {
                         totalCost += response.metadata.usage.costs.total;
                     }
+                    try {
+                        tokensIn += Number((response.metadata as any)?.usage?.tokens?.input || 0);
+                        tokensOut += Number((response.metadata as any)?.usage?.tokens?.output || 0);
+                    } catch { /* noop */ }
                 }
                 if (totalCost > 0) {
-                    this.recordUsage({ cost: totalCost });
+                    const record: UsageRecord = {
+                        cost: totalCost,
+                        kind: 'llm',
+                        op: 'call',
+                        provider: this.provider,
+                        model: this.modelName,
+                        tokens: (tokensIn || tokensOut) ? { input: tokensIn || undefined, output: tokensOut || undefined } : undefined
+                    };
+                    this.recordUsage(record);
                 }
             }
 
@@ -102,7 +129,15 @@ export class LLMCallerAdapter implements ILLMCaller {
                 // If this is the final chunk and we're not using callbacks, record the usage
                 if (chunk.isComplete && !options?.usageCallback && this.recordUsage &&
                     chunk.metadata?.usage?.costs?.total) {
-                    this.recordUsage({ cost: chunk.metadata.usage.costs.total });
+                    const record: UsageRecord = {
+                        cost: chunk.metadata.usage.costs.total,
+                        kind: 'llm',
+                        op: 'stream',
+                        provider: this.provider,
+                        model: this.modelName,
+                        tokens: (chunk.metadata as any)?.usage?.tokens ? { input: (chunk.metadata as any)?.usage?.tokens?.input, output: (chunk.metadata as any)?.usage?.tokens?.output } : undefined
+                    };
+                    this.recordUsage(record);
                 }
 
                 // We need to verify that callllm's StreamResponse matches our expected type

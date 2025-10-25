@@ -66,6 +66,11 @@ await ctx.requestInput('Which region?', { ttlMs: 900_000, schema: { type: 'strin
 return;
 ```
 
+### Notes on Markup and Parts in requestInput
+- `requestInput` accepts the same payloads as `ctx.reply`: strings, `MessagePart`, `MessagePart[]`, including `type: 'markup'` with a Markup value.
+- Parts are emitted to the task stream immediately (so buttons/location render) and the task enters `input-required` with the same parts available to the parent stream.
+- The legacy `prompt` string remains supported for backward compatibility.
+
 ### Idempotency for tasks/input
 
 When replying to an input-required task, include an `Idempotency-Key` header to safely retry without duplicating state transitions.

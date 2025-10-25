@@ -129,7 +129,10 @@ export function createBridge(options: BridgeOptions): Bridge {
             await sessionStore.upsert(record);
             logger?.info('input_required', { key, taskId: res.id, token: res.token });
             metrics?.incr?.('chat_bridge.input_required', 1);
-            await chatSender.sendMessage(route, res.prompt || 'Please provide additional information.');
+            // Only echo a prompt if an explicit non-empty prompt string is provided.
+            if (typeof res.prompt === 'string' && res.prompt.trim().length > 0) {
+                await chatSender.sendMessage(route, res.prompt);
+            }
             // Realtime publish
             if (realtime) {
                 await realtime.publish(key, {

@@ -57,12 +57,6 @@ export class ProgrammaticInvoker implements Invoker {
                         const media: any = { type: p.type, url: p.url, bytesBase64: p.bytesBase64, mime: p.mime, filename: p.filename, caption: p.caption };
                         try { await this.deps.chatSender.sendMedia!(route, media); } catch { }
                     }
-                    if (typeof this.deps.chatSender.sendMarkup === 'function' && p?.type === 'markup') {
-                        try {
-                            const m = typeof p.value === 'string' ? JSON.parse(p.value) : p.value;
-                            await this.deps.chatSender.sendMarkup!(route, m);
-                        } catch { /* ignore malformed */ }
-                    }
                     if (p?.type === 'text' && p?.format) {
                         try { await this.deps.chatSender.sendMessage(route, p.text, { parseMode: p.format === 'html' ? 'html' as any : p.format }); } catch { }
                     } else if (p?.type === 'markup' && p?.value) {
@@ -83,7 +77,8 @@ export class ProgrammaticInvoker implements Invoker {
                 }
                 if (st?.state === 'input-required') {
                     let token = st?.metadata?.token as string | undefined;
-                    let promptText: string | undefined = (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
+                    const hadParts = Array.isArray(st?.message?.parts) && (st!.message!.parts!.length > 0);
+                    let promptText: string | undefined = hadParts ? undefined : (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
                     if (!token) {
                         try {
                             const events = await wmStore.listEventsSince({ tenantId, sessionId: id, sinceSeq: 0 });
@@ -170,7 +165,8 @@ export class ProgrammaticInvoker implements Invoker {
                 }
                 if (st?.state === 'input-required') {
                     let tkn = st?.metadata?.token as string | undefined;
-                    let promptText: string | undefined = (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
+                    const hadParts = Array.isArray(st?.message?.parts) && (st!.message!.parts!.length > 0);
+                    let promptText: string | undefined = hadParts ? undefined : (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
                     tkn = tkn || 'opaque';
                     eventBus.unsubscribe(channel, handler);
                     try { console.info(`[invoker] resume:input_required id=${id} token=${tkn}`); } catch { }
