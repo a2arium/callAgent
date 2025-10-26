@@ -915,6 +915,7 @@ export class TaskEngine {
                     input: ctx.task.input,
                     sessionId,
                     turn: startTurnTotal + 1,
+                    budget: undefined,
                     pending: {
                         inputs: (base?.pending?.inputs) || {},
                         children: (base?.pending?.children) || {},
@@ -1596,7 +1597,10 @@ export class TaskEngine {
             try {
                 const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-                if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
+                if (b && typeof b === 'object') {
+                    loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
+                    try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
+                }
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             // Persist and emit status (merge latest vars)

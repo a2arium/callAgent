@@ -124,7 +124,8 @@ export class ContextSerializer {
         try {
             // Use existing TaskContext APIs - check both direct method and goals.read for tests
             if (ctx.getGoal && typeof ctx.getGoal === 'function') {
-                workingMemory.goal = await ctx.getGoal();
+                const g = await ctx.getGoal();
+                workingMemory.goal = g == null ? undefined : g;
             } else if ((ctx as any).goals?.read) {
                 const goals = await (ctx as any).goals.read({});
                 const goal = Array.isArray(goals) && goals[0] ? (goals[0].title || goals[0].id) : undefined;
@@ -240,7 +241,7 @@ export class ContextSerializer {
     ): Promise<void> {
         try {
             // Restore goal
-            if (workingMemory.goal) {
+            if (workingMemory.goal != null) {
                 // Ensure goal is a string - handle complex objects from MLO processing
                 let goalString: string;
                 if (typeof workingMemory.goal === 'string') {
@@ -260,25 +261,23 @@ export class ContextSerializer {
 
                 // For A2A context transfer, bypass MLO processing and set goal directly in adapter
                 // This avoids the MLO pipeline size limits and complex object transformations
-              // Try direct setGoal method first (for tests), then fallback to goals.add API
-                if (ctx.setGoal && typeof ctx.setGoal === 'function') {
-                    await ctx.setGoal(goalString);
-                } else if ((ctx as any).goals?.add) {
+                // Try direct setGoal method first (for tests), then fallback to goals.add API
+                if ((ctx as any).goals?.add) {
                     await (ctx as any).goals.add({ title: goalString });
                 }
             }
 
             // Restore thoughts
-            if (workingMemory.thoughts && workingMemory.thoughts.length > 0 && ctx.addThought) {
+            if (workingMemory.thoughts && workingMemory.thoughts.length > 0 && (ctx as any).thoughts?.add) {
                 for (const thought of workingMemory.thoughts) {
-                    await ctx.addThought((thought as any).content || thought);
+                    await (ctx as any).thoughts.add((thought as any).content || thought);
                 }
             }
 
             // Restore decisions
-            if (workingMemory.decisions && ctx.makeDecision && typeof ctx.makeDecision === 'function') {
+            if (workingMemory.decisions && (ctx as any).decisions?.add) {
                 for (const [key, decision] of Object.entries(workingMemory.decisions)) {
-                    await ctx.makeDecision(key, (decision as any).decision, (decision as any).reasoning);
+                    await (ctx as any).decisions.add(key, (decision as any).decision, (decision as any).reasoning);
                 }
             }
 

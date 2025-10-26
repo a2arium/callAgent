@@ -257,6 +257,12 @@ export function extendContextWithStreaming(
             } catch { /* noop */ }
         },
 
+        // Read-only accessor for current usage totals (for mid-run observability)
+        getUsage: (): { totalCost: number; byKind: Record<string, number> } => ({
+            totalCost,
+            byKind: { ...byKind }
+        }),
+
         // Modify complete to include usage metadata
         complete: (pctOrStatus?: number, statusStr?: string): void => {
             const finalStatus: TaskStatus = {

@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { SemanticMemoryBackend, MemoryQueryOptions, MemoryQueryResult, MemoryFilter, FilterOperator, MemoryError } from '@a2arium/callagent-types';
 import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetManyOptions, GetManyQuery } from './types.js';
 import { EntityFieldParser } from './EntityFieldParser.js';
@@ -1960,8 +1960,8 @@ new MemorySQLAdapter({
                 }
             },
             data: {
-                blobData: undefined,
-                blobMetadata: undefined,
+                blobData: null,
+                blobMetadata: Prisma.DbNull,
                 updatedAt: new Date()
             }
         });

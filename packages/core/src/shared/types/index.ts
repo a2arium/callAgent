@@ -137,6 +137,8 @@ export type TaskContext = {
 
     // Usage recording supports numeric shortcut or detailed record
     recordUsage: (cost: number | UsageRecord) => void;
+    // Read-only accessor for current aggregated usage
+    getUsage?: () => { totalCost: number; byKind: Record<string, number> };
 
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };

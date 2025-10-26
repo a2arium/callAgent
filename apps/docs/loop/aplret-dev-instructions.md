@@ -214,24 +214,6 @@ export const agent = createAgent({
 - Wrap external calls with `runEffect()` ([Section 7](#7-effect-safety-and-budgets))
 - Write golden path test ([Section 9](#9-testing-strategy))
 
-**Budget wiring (example):**
-
-```typescript
-// During execution after an effect completes
-const effectCost = 120; // from the platform/tooling
-ctx.vars.set('turnCost', (ctx.vars.get('turnCost') as number ?? 0) + effectCost);
-
-// In Learning on the next turn, roll up spent
-learning: (prev, _prevAction, obs) => ({
-  ...prev,
-  reward: {
-    ...prev.reward,
-    spent: (prev.reward?.spent ?? 0) + (prev.memory??.vars?.turnCost ?? 0)
-  }
-})
-```
-
----
 
 ## Table of Contents
 
@@ -1353,6 +1335,30 @@ Behavior on cache hit:
 - Final status includes `metadata.source = "cache"`.
 - Final usage is zeroed: `metadata.usage = { "totalCost": 0, "byKind": {} }`.
 - No LLM/tool execution occurs for that run (fast return).
+
+### Turn, budget, and usage observability
+
+Quick references you can read during the loop:
+
+```ts
+// Turn index
+// In modules that receive env (attention, perception, transition):
+const turn = env.turn;
+
+// In execution handler:
+const turnExec = (ctx as any).__turn; // best‑effort exposure
+
+// Budgets from manifest (loop constraints)
+const { maxTurns, latencyMs } = env.budget || {};
+
+// Accumulated usage mid‑run (read‑only snapshot)
+const { totalCost, byKind } = ctx.getUsage?.() ?? { totalCost: 0, byKind: {} };
+```
+
+Notes:
+- `env.turn` is advanced each iteration; `ctx.__turn` mirrors it for execution.
+- `env.budget` is populated from `manifest.budgets` (e.g., `{ maxTurns, latencyMs }`).
+- `ctx.getUsage()` is read‑only; final totals are emitted on completion in `status.metadata.usage`.
 
 ---
 
