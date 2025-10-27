@@ -216,7 +216,7 @@ When implementing an agent's `handleTask` function, you receive a `TaskContext` 
 *   `ctx.complete(pct?: number, status?: string)`: Marks the task as successfully completed. Attaches final status metadata.
 *   `ctx.fail(error: unknown)`: Marks the task as failed. Attaches final status metadata.
 *   `ctx.llm.call()` / `ctx.llm.stream()`: Makes calls to the configured Large Language Model.
-*   `ctx.logger`: Provides access to a structured logger (debug, info, warn, error).
+*   `logger` (from `@a2arium/callagent-utils`): Centralized logger with automatic context enrichment (debug, info, warn, error). See [Logging Guidelines](../.cursor/rules/logging.mdc).
 *   `ctx.memory`: Adapter-agnostic memory system, configured via DI/factory. See [Memory System](./memory-system.md).
 
 ### Recording Usage Data  

@@ -420,18 +420,20 @@ docker run -e CALLAGENT_TENANT_ID=customer-123 callagent/app
 
 **Log Tenant Context:**
 ```typescript
-// Tenant information is automatically included in logs
-await ctx.logger.info('Processing user request', {
-    tenantId: ctx.tenantId,
+import { logger } from '@a2arium/callagent-utils';
+
+// Tenant information is automatically included in logs via AsyncLocalStorage
+logger.info('Processing user request', {
     userId: 'user-123'
+    // tenantId is automatically included
 });
 
 // Use structured logging for better observability
-await ctx.logger.info('Memory operation', {
+logger.info('Memory operation', {
     operation: 'set',
     key: 'user:123',
-    tenantId: ctx.tenantId,
     dataSize: JSON.stringify(data).length
+    // tenantId is automatically included
 });
 ```
 
@@ -503,13 +505,15 @@ async function secureOperation(ctx: TaskContext, key: string) {
 
 **Audit Logging:**
 ```typescript
-// All operations include tenant context for auditing
-await ctx.logger.info('Data access', {
+import { logger } from '@a2arium/callagent-utils';
+
+// All operations include tenant context for auditing (automatic via AsyncLocalStorage)
+logger.info('Data access', {
     operation: 'get',
     key: key,
-    tenantId: ctx.tenantId,
     userId: ctx.task.input.userId,
     timestamp: new Date().toISOString()
+    // tenantId is automatically included
 });
 ```
 

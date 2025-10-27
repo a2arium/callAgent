@@ -7,6 +7,7 @@ import type {
 // no provider-specific Usage type in public API anymore
 import { eventBus } from '../../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
+import { logger } from '@a2arium/callagent-utils';
 
 /**
  * Options for the reply method
@@ -43,9 +44,6 @@ export function extendContextWithStreaming(
     // Add state to hold accumulated usage
     let totalCost: number = 0;
     const byKind: Record<string, number> = {};
-
-    // Get logger if available or use console as fallback
-    const logger = ctx.logger || console;
 
     // Helper to emit or buffer events
     const emitEvent = (event: InternalEngineEvent): void => {

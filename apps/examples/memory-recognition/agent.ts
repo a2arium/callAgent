@@ -1,5 +1,6 @@
 import { createAgent } from '@a2arium/callagent-core';
 import { completeEventSchema } from './eventSchema.js';
+import { logger } from '@a2arium/callagent-utils';
 
 // LLM configuration for memory recognition and enrichment
 const llmConfig = {
@@ -281,27 +282,27 @@ export default createAgent({
  * Setup sample data for demonstration
  */
 async function setupSampleData(ctx: any) {
-    ctx.logger.info(`📋 Setting up sample data...`);
+    logger.info(`📋 Setting up sample data...`);
 
     for (const sample of sampleEvents) {
         await ctx.semantic?.add({ id: sample.key, value: sample.data, tags: sample.tags, entities: sample.entities });
-        ctx.logger.info(`   ✓ Stored: ${sample.key}`);
+        logger.info(`   ✓ Stored: ${sample.key}`);
     }
 
-    ctx.logger.info(`📋 Sample data ready!\n`);
+    logger.info(`📋 Sample data ready!\n`);
 }
 
 /**
  * Demonstrate recognition functionality
  */
 async function demonstrateRecognition(ctx: any) {
-    ctx.logger.info(`🔍 === RECOGNITION DEMONSTRATION ===\n`);
+    logger.info(`🔍 === RECOGNITION DEMONSTRATION ===\n`);
 
     for (const candidate of recognitionCandidates) {
-        ctx.logger.info(`🧪 Testing: "${candidate.name}"`);
-        ctx.logger.info(`📝 Candidate data:`);
-        ctx.logger.info(`   Title: ${candidate.data.titleAndDescription[0].title}`);
-        ctx.logger.info(`   Venue: ${candidate.data.venue.name}`);
+        logger.info(`🧪 Testing: "${candidate.name}"`);
+        logger.info(`📝 Candidate data:`);
+        logger.info(`   Title: ${candidate.data.titleAndDescription[0].title}`);
+        logger.info(`   Venue: ${candidate.data.venue.name}`);
 
         try {
             const result = await ctx.memory.semantic.recognize(candidate.data, {
@@ -312,33 +313,33 @@ async function demonstrateRecognition(ctx: any) {
                 llmUpperBound: 0.85
             });
 
-            ctx.logger.info(`📊 Recognition Result:`);
-            ctx.logger.info(`   Is Match: ${result.isMatch}`);
-            ctx.logger.info(`   Confidence: ${result.confidence.toFixed(3)}`);
-            ctx.logger.info(`   Used LLM: ${result.usedLLM}`);
+            logger.info(`📊 Recognition Result:`);
+            logger.info(`   Is Match: ${result.isMatch}`);
+            logger.info(`   Confidence: ${result.confidence.toFixed(3)}`);
+            logger.info(`   Used LLM: ${result.usedLLM}`);
 
             if (result.matchingKey) {
-                ctx.logger.info(`   Matching Key: ${result.matchingKey}`);
+                logger.info(`   Matching Key: ${result.matchingKey}`);
             }
 
             if (result.explanation) {
-                ctx.logger.info(`   LLM Explanation: ${result.explanation}`);
+                logger.info(`   LLM Explanation: ${result.explanation}`);
             }
 
             // Validate against expected result
             const expected = candidate.expectedMatch;
             if (typeof expected === 'boolean') {
                 const correct = result.isMatch === expected;
-                ctx.logger.info(`   Expected: ${expected}, Got: ${result.isMatch} ${correct ? '✅' : '❌'}`);
+                logger.info(`   Expected: ${expected}, Got: ${result.isMatch} ${correct ? '✅' : '❌'}`);
             } else {
-                ctx.logger.info(`   Expected: ${expected} ${result.usedLLM ? '✅' : '❌'}`);
+                logger.info(`   Expected: ${expected} ${result.usedLLM ? '✅' : '❌'}`);
             }
 
         } catch (error) {
-            ctx.logger.error(`   ❌ Recognition failed:`, error);
+            logger.error(`   ❌ Recognition failed:`, error);
         }
 
-        ctx.logger.info(``); // Empty line for spacing
+        logger.info(``); // Empty line for spacing
     }
 }
 
@@ -346,21 +347,21 @@ async function demonstrateRecognition(ctx: any) {
  * Demonstrate enrichment functionality
  */
 async function demonstrateEnrichment(ctx: any) {
-    ctx.logger.info(`🔧 === ENRICHMENT DEMONSTRATION ===\n`);
+    logger.info(`🔧 === ENRICHMENT DEMONSTRATION ===\n`);
 
     for (const testCase of enrichmentTestData) {
-        ctx.logger.info(`🧪 Testing: "${testCase.name}"`);
+        logger.info(`🧪 Testing: "${testCase.name}"`);
 
         // Show original data
         const originalArr = await ctx.semantic?.read?.({ id: testCase.baseKey, limit: 1 });
         const originalData = Array.isArray(originalArr) && originalArr[0] ? (originalArr[0] as any).value : undefined;
-        ctx.logger.info(`📝 Original data (${testCase.baseKey}):`);
-        ctx.logger.info(`${JSON.stringify(originalData, null, 2)}\n`);
+        logger.info(`📝 Original data (${testCase.baseKey}):`);
+        logger.info(`${JSON.stringify(originalData, null, 2)}\n`);
 
         // Show additional sources
-        ctx.logger.info(`📚 Additional sources to merge:`);
+        logger.info(`📚 Additional sources to merge:`);
         testCase.additionalSources.forEach((source, i) => {
-            ctx.logger.info(`   Source ${i + 1}: ${JSON.stringify(source, null, 2)}`);
+            logger.info(`   Source ${i + 1}: ${JSON.stringify(source, null, 2)}`);
         });
 
         try {
@@ -368,37 +369,37 @@ async function demonstrateEnrichment(ctx: any) {
                 schema: completeEventSchema
             });
 
-            ctx.logger.info(`📊 Enrichment Result:`);
-            ctx.logger.info(`   Used LLM: ${result.usedLLM}`);
-            ctx.logger.info(`   Changes Made: ${result.changes.length}`);
+            logger.info(`📊 Enrichment Result:`);
+            logger.info(`   Used LLM: ${result.usedLLM}`);
+            logger.info(`   Changes Made: ${result.changes.length}`);
 
             // Show changes
             if (result.changes.length > 0) {
-                ctx.logger.info(`\n📋 Changes Applied:`);
+                logger.info(`\n📋 Changes Applied:`);
                 result.changes.forEach((change: any, i: number) => {
-                    ctx.logger.info(`   ${i + 1}. Field: ${change.field}`);
-                    ctx.logger.info(`      Action: ${change.action}`);
-                    ctx.logger.info(`      Source: ${change.source}`);
+                    logger.info(`   ${i + 1}. Field: ${change.field}`);
+                    logger.info(`      Action: ${change.action}`);
+                    logger.info(`      Source: ${change.source}`);
                     if (change.oldValue !== undefined) {
-                        ctx.logger.info(`      Old: ${JSON.stringify(change.oldValue)}`);
+                        logger.info(`      Old: ${JSON.stringify(change.oldValue)}`);
                     }
-                    ctx.logger.info(`      New: ${JSON.stringify(change.newValue)}`);
+                    logger.info(`      New: ${JSON.stringify(change.newValue)}`);
                 });
             }
 
             // Show final enriched data
-            ctx.logger.info(`\n📦 Enriched Data:`);
-            ctx.logger.info(`${JSON.stringify(result.enrichedData, null, 2)}`);
+            logger.info(`\n📦 Enriched Data:`);
+            logger.info(`${JSON.stringify(result.enrichedData, null, 2)}`);
 
             if (result.explanation) {
-                ctx.logger.info(`\n💡 LLM Explanation: ${result.explanation}`);
+                logger.info(`\n💡 LLM Explanation: ${result.explanation}`);
             }
 
         } catch (error) {
-            ctx.logger.error(`   ❌ Enrichment failed:`, error);
+            logger.error(`   ❌ Enrichment failed:`, error);
         }
 
-        ctx.logger.info(``); // Empty line for spacing
+        logger.info(``); // Empty line for spacing
     }
 }
 
@@ -406,25 +407,25 @@ async function demonstrateEnrichment(ctx: any) {
  * Clean up demo data
  */
 async function cleanupDemoData(ctx: any) {
-    ctx.logger.info(`🧹 Cleaning up demo data...`);
+    logger.info(`🧹 Cleaning up demo data...`);
 
     for (const sample of sampleEvents) {
         try {
             await ctx.semantic?.remove?.(sample.key);
-            ctx.logger.info(`   ✓ Deleted: ${sample.key}`);
+            logger.info(`   ✓ Deleted: ${sample.key}`);
         } catch (error) {
-            ctx.logger.warn(`   ⚠️ Failed to delete ${sample.key}:`, error);
+            logger.warn(`   ⚠️ Failed to delete ${sample.key}:`, error);
         }
     }
 
-    ctx.logger.info(`🧹 Cleanup completed!\n`);
+    logger.info(`🧹 Cleanup completed!\n`);
 }
 
 /**
  * NEW: Demonstrate array expansion functionality
  */
 async function demonstrateArraySupport(ctx: any) {
-    ctx.logger.info(`🔄 === ARRAY EXPANSION DEMONSTRATION ===\n`);
+    logger.info(`🔄 === ARRAY EXPANSION DEMONSTRATION ===\n`);
 
     // Test data with multiple array elements
     const arrayTestData = {
@@ -445,10 +446,10 @@ async function demonstrateArraySupport(ctx: any) {
         ]
     };
 
-    ctx.logger.info(`📊 Storing event with array expansion...`);
-    ctx.logger.info(`   Titles: ${arrayTestData.titleAndDescription.map(t => t.title).join(', ')}`);
-    ctx.logger.info(`   Speakers: ${arrayTestData.speakers.map(s => s.name).join(', ')}`);
-    ctx.logger.info(`   Occurrences: ${arrayTestData.eventOccurrences.map(o => o.date).join(', ')}`);
+    logger.info(`📊 Storing event with array expansion...`);
+    logger.info(`   Titles: ${arrayTestData.titleAndDescription.map(t => t.title).join(', ')}`);
+    logger.info(`   Speakers: ${arrayTestData.speakers.map(s => s.name).join(', ')}`);
+    logger.info(`   Occurrences: ${arrayTestData.eventOccurrences.map(o => o.date).join(', ')}`);
 
     // Store with array expansion
     await ctx.semantic?.add({
@@ -461,10 +462,10 @@ async function demonstrateArraySupport(ctx: any) {
         }
     });
 
-    ctx.logger.info(`   ✅ Stored with array expansion!\n`);
+    logger.info(`   ✅ Stored with array expansion!\n`);
 
     // Test recognition with array cross-product comparison
-    ctx.logger.info(`🔍 Testing array-aware recognition...`);
+    logger.info(`🔍 Testing array-aware recognition...`);
 
     const candidateWithArrays = {
         "titleAndDescription": [
@@ -486,30 +487,30 @@ async function demonstrateArraySupport(ctx: any) {
         }
     });
 
-    ctx.logger.info(`   Recognition result: ${recognitionResult.isMatch ? '✅ MATCH' : '❌ NO MATCH'}`);
-    ctx.logger.info(`   Confidence: ${recognitionResult.confidence.toFixed(3)}`);
+    logger.info(`   Recognition result: ${recognitionResult.isMatch ? '✅ MATCH' : '❌ NO MATCH'}`);
+    logger.info(`   Confidence: ${recognitionResult.confidence.toFixed(3)}`);
     if (recognitionResult.matchingKey) {
-        ctx.logger.info(`   Matching key: ${recognitionResult.matchingKey}`);
+        logger.info(`   Matching key: ${recognitionResult.matchingKey}`);
     }
     if (recognitionResult.usedLLM) {
-        ctx.logger.info(`   Used LLM: ${recognitionResult.explanation}`);
+        logger.info(`   Used LLM: ${recognitionResult.explanation}`);
     }
 
     // Test queries with array patterns
-    ctx.logger.info(`\n🔎 Testing array-aware queries...`);
+    logger.info(`\n🔎 Testing array-aware queries...`);
 
     const queryResults = await ctx.semantic.read({
         filters: ['titleAndDescription[].title ~ "AI"'] as any,
         tag: 'demo'
     });
 
-    ctx.logger.info(`   Query 'titleAndDescription[].title ~ "AI"' found ${queryResults.length} results`);
+    logger.info(`   Query 'titleAndDescription[].title ~ "AI"' found ${queryResults.length} results`);
     for (const result of queryResults) {
-        ctx.logger.info(`   - ${result.key}: ${result.value.titleAndDescription[0].title}`);
+        logger.info(`   - ${result.key}: ${result.value.titleAndDescription[0].title}`);
     }
 
     // Test enrichment with arrays
-    ctx.logger.info(`\n🔗 Testing array enrichment...`);
+    logger.info(`\n🔗 Testing array enrichment...`);
 
     const enrichmentData = [{
         "titleAndDescription": [
@@ -529,11 +530,11 @@ async function demonstrateArraySupport(ctx: any) {
         }
     });
 
-    ctx.logger.info(`   Enrichment result: ${enrichmentResult.addedFields?.length || 0} new fields added`);
-    ctx.logger.info(`   Added fields: ${enrichmentResult.addedFields?.join(', ') || 'none'}`);
-    ctx.logger.info(`   Confidence: ${enrichmentResult.confidence?.toFixed(3) || 'unknown'}`);
+    logger.info(`   Enrichment result: ${enrichmentResult.addedFields?.length || 0} new fields added`);
+    logger.info(`   Added fields: ${enrichmentResult.addedFields?.join(', ') || 'none'}`);
+    logger.info(`   Confidence: ${enrichmentResult.confidence?.toFixed(3) || 'unknown'}`);
 
     // Cleanup
     await ctx.semantic?.remove?.('demo:array:multi-event');
-    ctx.logger.info(`\n🧹 Array demo cleanup completed!\n`);
+    logger.info(`\n🧹 Array demo cleanup completed!\n`);
 }

@@ -107,15 +107,6 @@ export type TaskInput = {
     [key: string]: unknown;
 }
 
-// Define a type for the logger expected by TaskContext
-// This could eventually just be ComponentLogger directly
-export type TaskLogger = {
-    debug: (event: string, data?: Record<string, unknown>) => void;
-    info: (event: string, data?: Record<string, unknown>) => void;
-    warn: (event: string, data?: Record<string, unknown>) => void;
-    error: (event: string, data?: Record<string, unknown>) => void;
-};
-
 // --- Task Context (Interface for agent task handling) ---
 export type TaskContext = {
     // Readonly mental state view for queries
@@ -253,7 +244,6 @@ export type TaskContext = {
         embed?: unknown; // Placeholder for embed adapter access
     };
     cognitive: { loadWorkingMemory: (e: unknown) => void; plan: (prompt: string, options?: unknown) => Promise<unknown>; record: (state: unknown) => void; flush: () => Promise<void>; };
-    logger: TaskLogger; // Structured logger
     config: unknown; // Minimal config object
     validate: (schema: unknown, data: unknown) => void; // Basic validation, will throw
     retry: <T = unknown>(fn: () => Promise<T>, opts: unknown) => Promise<T>;

@@ -2153,12 +2153,6 @@ export class TaskEngine {
                 record: () => { },
                 flush: async () => { }
             },
-            logger: {
-                debug: (_event: string, _data?: Record<string, unknown>) => { },
-                info: (_event: string, _data?: Record<string, unknown>) => { },
-                warn: (_event: string, _data?: Record<string, unknown>) => { },
-                error: (_event: string, _data?: Record<string, unknown>) => { }
-            },
             config: {},
             validate: () => { },
             retry: async (fn) => fn(),

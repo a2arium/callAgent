@@ -1,4 +1,5 @@
 import { createAgent } from '@a2arium/callagent-core';
+import { logger } from '@a2arium/callagent-utils';
 
 export default createAgent({
     manifest: {
@@ -66,7 +67,7 @@ export default createAgent({
             ctx.complete();
 
         } catch (error) {
-            ctx.logger?.error?.('Memory demo failed', error as Record<string, unknown>);
+            logger.error('Memory demo failed', error);
             await ctx.reply(`❌ Memory demo failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             await ctx.fail?.(error);
         }

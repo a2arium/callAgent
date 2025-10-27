@@ -87,10 +87,13 @@ await ctx.fail(new Error('Something went wrong'));
 ### Logging
 
 ```typescript
-// Agent-specific logging
-ctx.logger.info('Processing started', { userId: ctx.task.input.userId });
-ctx.logger.warn('Rate limit approaching', { remaining: 10 });
-ctx.logger.error('Database connection failed', error, { retryCount: 3 });
+// Import the centralized logger
+import { logger } from '@a2arium/callagent-utils';
+
+// Use logger directly - context is automatic
+logger.info('Processing started', { userId: ctx.task.input.userId });
+logger.warn('Rate limit approaching', { remaining: 10 });
+logger.error('Database connection failed', error, { retryCount: 3 });
 ```
 
 ### Memory Operations

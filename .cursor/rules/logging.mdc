@@ -7,96 +7,199 @@ alwaysApply: false
 
 ## Core Principles
 
-1.  **Use the Centralized Logger:** Always use the provided logger instance from `@a2arium/utils`.
-2.  **Avoid `console.log`:** Use logger methods (`debug`, `info`, `warn`, `error`) for structured and controllable output.
-3.  **Use Appropriate Levels:** Choose the level that best reflects the message's importance.
-4.  **Include Context:** Log relevant variables and error objects.
-5.  **Keep Logs Actionable:** Ensure logs provide useful information for monitoring and debugging.
+1. **Use the Centralized Logger:** Always use the logger from `@a2arium/callagent-utils`.
+2. **Avoid `console.log`:** Use logger methods (`debug`, `info`, `warn`, `error`) for structured and controllable output.
+3. **Use Appropriate Levels:** Choose the level that best reflects the message's importance.
+4. **Include Context:** Log relevant variables and error objects.
+5. **Keep Logs Actionable:** Ensure logs provide useful information for monitoring and debugging.
 
 ## Logger Structure
 
-The framework uses a singleton `logger` factory from `@a2arium/utils` to create `ComponentLogger` instances. These instances support nested creation for clear component/sub-component identification.
+The framework uses a singleton `logger` from `@a2arium/callagent-utils` with **automatic context enrichment** via AsyncLocalStorage.
 
--   **Import the Logger:**
-    ```typescript
-    import { logger } from '@a2arium/utils';
-    ```
+- **Import the Logger:**
+  ```typescript
+  import { logger } from '@a2arium/callagent-utils';
+  ```
 
--   **Base Loggers:** Components create a base logger:
-    ```typescript
-    const componentLogger = logger.createLogger({ prefix: 'ComponentName' });
-    componentLogger.info('Component starting...'); 
-    // Output: [ComponentName] Component starting...
-    ```
--   **Nested Loggers:** Base loggers can create child loggers with extended prefixes:
-    ```typescript
-    const childLogger = componentLogger.createLogger({ prefix: 'SubComponent' });
-    childLogger.info('Sub-component initialized.');
-    // Output: [ComponentName: SubComponent] Sub-component initialized.
-    ```
+- **Use Directly - Context is Automatic:**
+  ```typescript
+  logger.info('Component starting...');
+  // Output: [ComponentName | task:a1b2c3d4|tenant:acme|agent:hello-agent|turn:0] Component starting...
+  ```
 
-## Agent Logging (`ctx.logger`)
+- **Create Component-Specific Loggers (Optional):**
+  ```typescript
+  const componentLogger = logger.createLogger({ prefix: 'ComponentName' });
+  componentLogger.info('Component starting...'); 
+  // Output: [ComponentName | task:a1b2c3d4|tenant:acme|agent:hello-agent|turn:0] Component starting...
+  ```
 
-Agents should **always** use the logger provided on the task context (`ctx.logger`). This logger is automatically created by the runner with the correct nested prefix (e.g., `[StreamingRunner: agent-name]`).
+- **Nested Loggers:**
+  ```typescript
+  const childLogger = componentLogger.createLogger({ prefix: 'SubComponent' });
+  childLogger.info('Sub-component initialized.');
+  // Output: [ComponentName: SubComponent | task:a1b2c3d4|tenant:acme|agent:hello-agent|turn:0] Sub-component initialized.
+  ```
+
+## Automatic Context Enrichment
+
+The logger automatically enriches all log messages with execution context via AsyncLocalStorage:
+
+- **Task ID**: Short identifier for correlation (`task:a1b2c3d4`)
+- **Tenant ID**: Multi-tenant isolation (`tenant:acme`)
+- **Agent ID**: Which agent is executing (`agent:hello-agent`)
+- **Turn Number**: Current loop iteration (`turn:0`)
+- **Stage**: Current workflow stage if set (`stage:executing`)
+
+**No manual context passing needed!** The context is automatically propagated through all async operations.
+
+## Agent Logging
+
+Agents should simply import and use the logger directly. Context is automatically available.
 
 ```typescript
-// Inside an agent's handleTask(ctx)
-async handleTask(ctx: TaskContext) {
-    ctx.logger.info('Processing input', { inputData: ctx.task.input });
+import { createAgent } from '@callagent/core';
+import { logger } from '@a2arium/callagent-utils';
 
-    try {
-        // ... agent logic ...
-        ctx.logger.debug('Intermediate step successful');
-        // ... more logic ...
-        ctx.logger.info('Task completed successfully');
-    } catch (error) {
-        // ctx.fail() uses the logger internally, but you can add more context
-        ctx.logger.error('Specific error during processing', error, { additionalDetail: '...' });
-        await ctx.fail(error); // Use ctx.fail for standard failure handling
+export const agent = createAgent({
+    async handleTask(ctx) {
+        logger.info('Processing input', { inputData: ctx.task.input });
+
+        try {
+            // ... agent logic ...
+            logger.debug('Intermediate step successful');
+            // ... more logic ...
+            logger.info('Task completed successfully');
+        } catch (error) {
+            logger.error('Specific error during processing', error, { additionalDetail: '...' });
+            await ctx.fail(error);
+        }
     }
-}
+}, import.meta.url);
+```
+
+## APLRET Module Logging
+
+In APLRET modules (Attention, Perception, Learning, Policy, Shield), use logger directly even though you don't have `ctx`:
+
+```typescript
+export const agent = createAgent({
+    // A - Attention (no ctx!)
+    attention: (M, env) => {
+        logger.debug('Analyzing attention signals', {
+            hasInput: Boolean(env.input),
+            goalPriority: M.goalState?.priority
+        });
+        return { wantPrompt: !env.input };
+    },
+    
+    // P - Perception (no ctx!)
+    perception: (env, alpha) => {
+        logger.info('Perceived user message', {
+            inputType: typeof env.input
+        });
+        return { text: env.input };
+    },
+    
+    // L - Learning (no ctx!)
+    learning: (prevM, prevAction, obs, rPrev) => {
+        logger.debug('Learning from observation', {
+            hasObservation: Boolean(obs),
+            reward: rPrev
+        });
+        return { ...prevM, /* updated state */ };
+    },
+    
+    // R - Policy (no ctx!)
+    policy: (M) => {
+        logger.info('Policy decision: answer with LLM', {
+            reason: 'user asked question'
+        });
+        return { kind: 'answer_with_llm', query: M.memory.sensory.current };
+    },
+    
+    // S - Shield (no ctx!)
+    shield: (M, intent) => {
+        logger.warn('Shield blocked intent: budget exceeded', {
+            intent: intent.kind
+        });
+        return null; // Veto
+    },
+    
+    // E - Execution (has ctx, but still use plain logger!)
+    execution: async (intent, ctx, M) => {
+        logger.info('Executing intent', { intent: intent.kind });
+        // ... execute ...
+    }
+}, import.meta.url);
 ```
 
 ## Log Levels & Usage
 
--   **`debug`**: Detailed internal state, variable values, steps useful only for deep debugging.
-    ```typescript
-    ctx.logger.debug('LLM Request prepared', { requestOptions });
-    ```
--   **`info`**: General operational flow, task start/end, significant state changes.
-    ```typescript
-    ctx.logger.info('Received task', { taskId: ctx.task.id });
-    ctx.logger.info('Agent reply sent');
-    ```
--   **`warn`**: Potential issues, unexpected but recoverable situations, use of deprecated features, missing optional config.
-    ```typescript
-    ctx.logger.warn('Input parameter missing, using default value', { parameter: 'x' });
-    ```
--   **`error`**: Unrecoverable errors, exceptions caught, failed operations. Use `ctx.fail()` for standard task failure.
-    ```typescript
-    // Logged automatically by ctx.fail() or runner's top-level catch:
-    // logger.error('Agent task failed', error, { taskId }); 
-    
-    // Example of logging a specific error before calling ctx.fail()
-    ctx.logger.error('Database connection failed', dbError, { connectionString });
-    await ctx.fail(dbError);
-    ```
+- **`debug`**: Detailed internal state, variable values, steps useful only for deep debugging.
+  ```typescript
+  logger.debug('LLM Request prepared', { requestOptions });
+  ```
+
+- **`info`**: General operational flow, task start/end, significant state changes.
+  ```typescript
+  logger.info('Received task', { taskId: ctx.task.id });
+  logger.info('Agent reply sent');
+  ```
+
+- **`warn`**: Potential issues, unexpected but recoverable situations, use of deprecated features, missing optional config.
+  ```typescript
+  logger.warn('Input parameter missing, using default value', { parameter: 'x' });
+  ```
+
+- **`error`**: Unrecoverable errors, exceptions caught, failed operations.
+  ```typescript
+  logger.error('Database connection failed', dbError, { connectionString });
+  await ctx.fail(dbError);
+  ```
 
 ## Best Practices
 
-1.  **Use `ctx.logger` in Agents:** Always prefer the context logger.
-2.  **Import from Utils:** For non-agent code, import from `@a2arium/utils`.
-3.  **Structured Logging:** Pass objects/errors as separate arguments, not stringified.
-    ```typescript
-    // Good
-    ctx.logger.info('User data retrieved', { userId: user.id });
-    ctx.logger.error('API call failed', apiError, { endpoint: '/data' });
+1. **Import logger directly** - No need for ctx.logger
+   ```typescript
+   import { logger } from '@a2arium/callagent-utils';
+   ```
 
-    // Bad
-    ctx.logger.info(`User data retrieved: ${JSON.stringify(user)}`);
-    ctx.logger.error(`API call failed: ${apiError.message}`); 
-    ```
-4.  **Error Handling:** Use `ctx.fail(error)` for standard task failures. Log specific errors with `ctx.logger.error` *before* calling `ctx.fail` if extra context is needed.
+2. **Structured Logging** - Pass objects as separate arguments, not stringified
+   ```typescript
+   // ✅ Good
+   logger.info('User data retrieved', { userId: user.id });
+   logger.error('API call failed', apiError, { endpoint: '/data' });
+
+   // ❌ Bad
+   logger.info(`User data retrieved: ${JSON.stringify(user)}`);
+   logger.error(`API call failed: ${apiError.message}`); 
+   ```
+
+3. **Error Handling** - Use `ctx.fail(error)` for standard task failures
+   ```typescript
+   try {
+       await doWork();
+   } catch (error) {
+       logger.error('Work failed', error, { context: 'value' });
+       await ctx.fail(error);
+   }
+   ```
+
+4. **Context is automatic** - Don't manually pass taskId, tenantId, etc.
+   ```typescript
+   // ✅ Good - context is automatic
+   logger.info('Processing started');
+   
+   // ❌ Bad - redundant
+   logger.info('Processing started', { taskId: ctx.task.id, tenantId: ctx.tenantId });
+   ```
+
+5. **Component prefixes** - Use for service/utility classes
+   ```typescript
+   const dbLogger = logger.createLogger({ prefix: 'DatabaseService' });
+   ```
 
 ## Configuration
 
@@ -109,14 +212,61 @@ LOG_LEVEL=debug
 
 ## Testing
 
--   Minimize logging in tests (e.g., set `LOG_LEVEL=error`).
--   Use mocking/spying (`jest.spyOn`) to verify specific log calls if necessary.
+- Minimize logging in tests (e.g., set `LOG_LEVEL=error`).
+- Use mocking/spying (`jest.spyOn`) to verify specific log calls if necessary.
 
 ## Architecture
 
 The logging system follows proper layering:
-- **Foundation Layer**: `@a2arium/utils` (contains logger)
-- **Infrastructure Layer**: `@a2arium/memory-sql`, adapters
-- **Application Layer**: `@a2arium/core`, business logic
+- **Foundation Layer**: `@a2arium/callagent-utils` (contains logger and context management)
+- **Infrastructure Layer**: `@callagent/memory-sql`, adapters
+- **Application Layer**: `@callagent/core`, business logic
 
 This ensures all packages can use consistent logging without circular dependencies.
+
+## How It Works
+
+The logging system uses Node.js **AsyncLocalStorage** to automatically propagate context through async operations:
+
+1. **Context Establishment**: The runner establishes context at task start
+   ```typescript
+   await withLoggingContext(
+       { taskId, tenantId, agentId, correlationId },
+       async () => {
+           // All code here has automatic context
+           await agent.handleTask(ctx);
+       }
+   );
+   ```
+
+2. **Automatic Propagation**: Context flows through all async calls
+   - No need to pass context manually
+   - Works across module boundaries
+   - Survives through awaits and callbacks
+
+3. **Turn Updates**: Loop runner updates turn number automatically
+   ```typescript
+   updateLoggingContext({ turn: env.turn });
+   ```
+
+4. **Log Enrichment**: Logger reads context and enriches every log
+   - Adds task ID, tenant ID, agent ID
+   - Includes turn number and stage
+   - Creates correlation chains
+
+## Migration Notes
+
+**Previous approach** (deprecated):
+```typescript
+// ❌ Old way - no longer supported
+ctx.logger.info('Processing task');
+```
+
+**New approach**:
+```typescript
+// ✅ New way - context is automatic
+import { logger } from '@a2arium/callagent-utils';
+logger.info('Processing task');
+```
+
+The `ctx.logger` property has been removed from TaskContext. All logging now uses the centralized logger with automatic context enrichment.

@@ -395,10 +395,12 @@ if (!(ctx as any).goals?.add) {
 
 **Memory operations failing:**
 ```typescript
+import { logger } from '@a2arium/callagent-utils';
+
 try {
     await ctx.thoughts.add("Processing step");
 } catch (error) {
-    ctx.logger.error("Working memory operation failed", error);
+    logger.error("Working memory operation failed", error);
     // Continue with task execution
 }
 ```

@@ -1,7 +1,10 @@
 /**
  * Centralized logging utility for the AI Agents Framework
  * Provides consistent logging with levels, component prefixing, and structured output
+ * Uses AsyncLocalStorage for automatic context enrichment
  */
+
+import { getLoggingContext } from './loggingContext.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -45,10 +48,51 @@ export class ComponentLogger {
     }
 
     /**
-     * Format log prefix
+     * Format log prefix with automatic context enrichment
      */
     private getPrefix(): string {
-        return this.config.prefix ? `[${this.config.prefix}]` : '';
+        const context = getLoggingContext();
+        const parts: string[] = [];
+
+        // Add configured prefix first
+        if (this.config.prefix) {
+            parts.push(this.config.prefix);
+        }
+
+        // Automatically add context info if available
+        if (context) {
+            const contextParts: string[] = [];
+            if (context.taskId) contextParts.push(`task:${context.taskId.slice(0, 8)}`);
+            if (context.tenantId) contextParts.push(`tenant:${context.tenantId}`);
+            if (context.agentId) contextParts.push(`agent:${context.agentId}`);
+            if (context.turn !== undefined) contextParts.push(`turn:${context.turn}`);
+            if (context.stage) contextParts.push(`stage:${context.stage}`);
+
+            if (contextParts.length > 0) {
+                parts.push(contextParts.join('|'));
+            }
+        }
+
+        return parts.length > 0 ? `[${parts.join(' | ')}]` : '';
+    }
+
+    /**
+     * Get context metadata for structured logging
+     */
+    private getContextMetadata(): Record<string, unknown> {
+        const context = getLoggingContext();
+        if (!context) return {};
+
+        const metadata: Record<string, unknown> = {};
+        if (context.taskId) metadata.taskId = context.taskId;
+        if (context.tenantId) metadata.tenantId = context.tenantId;
+        if (context.agentId) metadata.agentId = context.agentId;
+        if (context.parentTaskId) metadata.parentTaskId = context.parentTaskId;
+        if (context.correlationId) metadata.correlationId = context.correlationId;
+        if (context.turn !== undefined) metadata.turn = context.turn;
+        if (context.stage) metadata.stage = context.stage;
+
+        return metadata;
     }
 
     /**
@@ -76,27 +120,42 @@ export class ComponentLogger {
     /**
      * Log a debug message
      */
-    debug(message: string, ...args: unknown[]): void {
+    debug(message: string, data?: Record<string, unknown>): void {
         if (this.shouldLog('debug')) {
-            console.debug(`${this.getPrefix()} ${message}`, ...args);
+            const metadata = { ...this.getContextMetadata(), ...data };
+            if (Object.keys(metadata).length > 0) {
+                console.debug(`${this.getPrefix()} ${message}`, metadata);
+            } else {
+                console.debug(`${this.getPrefix()} ${message}`);
+            }
         }
     }
 
     /**
      * Log an informational message
      */
-    info(message: string, ...args: unknown[]): void {
+    info(message: string, data?: Record<string, unknown>): void {
         if (this.shouldLog('info')) {
-            console.info(`${this.getPrefix()} ${message}`, ...args);
+            const metadata = { ...this.getContextMetadata(), ...data };
+            if (Object.keys(metadata).length > 0) {
+                console.info(`${this.getPrefix()} ${message}`, metadata);
+            } else {
+                console.info(`${this.getPrefix()} ${message}`);
+            }
         }
     }
 
     /**
      * Log a warning message
      */
-    warn(message: string, ...args: unknown[]): void {
+    warn(message: string, data?: Record<string, unknown>): void {
         if (this.shouldLog('warn')) {
-            console.warn(`${this.getPrefix()} ${message}`, ...args);
+            const metadata = { ...this.getContextMetadata(), ...data };
+            if (Object.keys(metadata).length > 0) {
+                console.warn(`${this.getPrefix()} ${message}`, metadata);
+            } else {
+                console.warn(`${this.getPrefix()} ${message}`);
+            }
         }
     }
 
@@ -105,11 +164,14 @@ export class ComponentLogger {
      */
     error(message: string, error?: unknown, context?: Record<string, unknown>): void {
         if (this.shouldLog('error')) {
+            // Merge automatic context metadata with provided context
+            const metadata = { ...this.getContextMetadata(), ...context };
+
             // Safe JSON serialization to avoid circular reference issues
-            const contextStr = context ? (() => {
+            const contextStr = Object.keys(metadata).length > 0 ? (() => {
                 try {
                     const seenObjects = new WeakSet();
-                    return ` ${JSON.stringify(context, (key, value) => {
+                    return ` ${JSON.stringify(metadata, (key, value) => {
                         if (typeof value === 'object' && value !== null) {
                             // Simple circular reference detection using a WeakSet
                             if (seenObjects.has(value)) {
@@ -185,22 +247,22 @@ class Logger {
     /**
      * Log a debug message (using default logger)
      */
-    debug(message: string, ...args: unknown[]): void {
-        this.getDefaultLogger().debug(message, ...args);
+    debug(message: string, data?: Record<string, unknown>): void {
+        this.getDefaultLogger().debug(message, data);
     }
 
     /**
      * Log an informational message (using default logger)
      */
-    info(message: string, ...args: unknown[]): void {
-        this.getDefaultLogger().info(message, ...args);
+    info(message: string, data?: Record<string, unknown>): void {
+        this.getDefaultLogger().info(message, data);
     }
 
     /**
      * Log a warning message (using default logger)
      */
-    warn(message: string, ...args: unknown[]): void {
-        this.getDefaultLogger().warn(message, ...args);
+    warn(message: string, data?: Record<string, unknown>): void {
+        this.getDefaultLogger().warn(message, data);
     }
 
     /**

@@ -5,7 +5,7 @@ import { PluginManager } from '../core/plugin/pluginManager.js';
 import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus, Artifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
-import { logger, type LoggerConfig } from '@a2arium/callagent-utils';
+import { logger, withLoggingContext, type LoggerConfig } from '@a2arium/callagent-utils';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
@@ -276,8 +276,6 @@ export async function runAgentWithStreaming(
                 return Promise.resolve({ success: true, output: "Stubbed tool result" } as T);
             }
         },
-        // Assign the agentLogger directly
-        logger: agentLogger,
         cognitive: {
             loadWorkingMemory: (e: unknown): void => { agentLogger.warn(`cognitive.loadWorkingMemory is stubbed`, { e }); },
             plan: async (prompt: string, options?: unknown): Promise<unknown> => { agentLogger.warn(`cognitive.plan is stubbed`, { prompt, options }); return { steps: [] }; },
@@ -467,6 +465,16 @@ export async function runAgentWithStreaming(
 
     // --- Execute via Task Engine ---
     agentLogger.info(`Starting Engine Execution for Task ${taskCtx.task.id}`);
+    
+    // Establish logging context for entire task execution
+    await withLoggingContext(
+        {
+            taskId: taskCtx.task.id,
+            tenantId: finalTenantId,
+            agentId: agentName,
+            correlationId: `corr-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+        },
+        async () => {
     try {
         // Register durable handlers from the module
         try {
@@ -537,6 +545,7 @@ export async function runAgentWithStreaming(
             });
         }
     }
+    }); // End of withLoggingContext
 }
 
 /**

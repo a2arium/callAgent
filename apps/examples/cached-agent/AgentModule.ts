@@ -1,6 +1,7 @@
 import { createAgent } from '@a2arium/callagent-core';
 import type { EnvironmentState, MentalState, ProposedAction, ExecutableAction, TurnOutcome, TaskContext } from '@a2arium/callagent-core';
 import { match, P } from 'ts-pattern';
+import { logger } from '@a2arium/callagent-utils';
 
 // Minimal APLRET agent to test agent-level caching of transition result
 type Sensory = { payload?: unknown };
@@ -42,7 +43,7 @@ export default createAgent<Sensory, Obs>({
                 await new Promise((r) => setTimeout(r, 200));
                 const elapsed = Date.now() - started;
                 ctx.progress(95, `done in ${elapsed}ms`);
-                ctx.logger.info(`Execution completed with random=${randomValue}`);
+                logger.info(`Execution completed with random=${randomValue}`);
                 // Return random number - if cache works, subsequent runs will return same number
                 return { kind: 'internal', done: true, result: { ok: true, randomValue, elapsedMs: elapsed } } as unknown as ExecutableAction;
             })

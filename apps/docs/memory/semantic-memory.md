@@ -103,6 +103,7 @@ const memory = new MemorySQLAdapter(prisma);
 
 ```typescript
 import { createAgent } from '@a2arium/core';
+import { logger } from '@a2arium/callagent-utils';
 
 export default createAgent({
   manifest: './agent.json',
@@ -116,7 +117,7 @@ export default createAgent({
     // Retrieve information from memory (via facade)
     const prefArr = await ctx.semantic?.read?.({});
     const preference = Array.isArray(prefArr) ? (prefArr as any[]).find(x => (x as any)?.id === 'user-preference')?.value : undefined;
-    if (preference) ctx.logger.info(`User prefers ${preference.theme} theme`);
+    if (preference) logger.info(`User prefers ${preference.theme} theme`);
     await ctx.reply([{ type: 'text', text: 'Preferences saved!' }]);
     ctx.complete();
   }
@@ -129,6 +130,7 @@ Agents created with the `createAgent` factory function have access to the memory
 
 ```typescript
 import { createAgent } from '@a2arium/core';
+import { logger } from '@a2arium/callagent-utils';
 
 export default createAgent({
   manifest: './agent.json',
@@ -143,7 +145,7 @@ export default createAgent({
     const preference = (await ctx.semantic?.read?.({ id: 'user-preference', limit: 1 }))?.[0]?.value;
     
     // Use the retrieved data
-    ctx.logger.info(`User prefers ${preference.theme} theme`);
+    logger.info(`User prefers ${preference.theme} theme`);
     
     // Complete the task
     await ctx.reply([{ type: 'text', text: 'Preferences saved!' }]);
@@ -2302,7 +2304,7 @@ try {
   await ctx.semantic?.add({ id: 'important-data', value: { value: 'critical' } });
 } catch (error) {
   // Log the error and handle gracefully
-  ctx.logger.error('Failed to store memory', error);
+  logger.error('Failed to store memory', error);
   // Implement fallback behavior or report to monitoring
 }
 ```

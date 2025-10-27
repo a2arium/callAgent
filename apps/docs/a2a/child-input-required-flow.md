@@ -327,6 +327,8 @@ export async function onAnalyzerNeedsInput(ctx: Ctx, ev: { prompt: string; schem
 ### 4. Use Proper Error Handling
 
 ```typescript
+import { logger } from '@a2arium/callagent-utils';
+
 export async function onAnalyzerNeedsInput(ctx: Ctx, ev: { prompt: string; token: string }) {
     try {
         // Attempt to get cached value
@@ -339,7 +341,7 @@ export async function onAnalyzerNeedsInput(ctx: Ctx, ev: { prompt: string; token
         // Request user input
         await ctx.requestInput(ev.prompt, { onProvided: 'onThresholdProvided' });
     } catch (error) {
-        ctx.logger.error('Failed to handle analyzer input request', error);
+        logger.error('Failed to handle analyzer input request', error);
         throw error;
     }
 }

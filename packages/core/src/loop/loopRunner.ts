@@ -1,6 +1,7 @@
 import type { TaskContext } from '../shared/types/index.js';
 import { oneTurn, type Modules, type TurnOutcome, type ProposedAction } from './oneTurn.js';
 import type { EnvironmentState, MentalState } from './types.js';
+import { logger, withLoggingContext, updateLoggingContext } from '@a2arium/callagent-utils';
 
 type LoopRunnerOptions = {
     maxTurns?: number;
@@ -228,6 +229,8 @@ export async function runLoop(
         if (turn > 0) {
             try { (env as any).turn += 1; } catch { }
         }
+        // Update logging context with current turn number
+        updateLoggingContext({ turn: (env as any).turn });
         if (opts.latencyMs && Date.now() - start > opts.latencyMs) {
             outcome = { kind: 'fail', reason: 'budget_latency_exceeded' };
             break;

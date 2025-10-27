@@ -1,4 +1,5 @@
 import { createAgent } from '@a2arium/callagent-core';
+import { logger } from '@a2arium/callagent-utils';
 
 // Test data - variations of the same event/venue
 const testEvents = [
@@ -110,31 +111,31 @@ const searchTests = [
 export default createAgent({
     handleTask: async (ctx) => {
         try {
-            ctx.logger.info("🚀 Starting semantic search test with entity alignment");
+            logger.info("🚀 Starting semantic search test with entity alignment");
 
             // Step 1: Store test events with entity alignment (exactly like your code)
-            ctx.logger.info("📝 Storing test events...");
+            logger.info("📝 Storing test events...");
             for (const testEvent of testEvents) {
                 await ctx.semantic?.add({ id: testEvent.key, value: testEvent.data, tags: ['event', 'Riga', testEvent.data.titleAndDescription[0].language || 'unknown'], entities: { "titleAndDescription.title": "event", "venue.name": "location" } });
-                ctx.logger.info(`✅ Stored event: ${testEvent.key}`);
+                logger.info(`✅ Stored event: ${testEvent.key}`);
             }
 
             // Step 2: Store test venues with entity alignment (exactly like your code)  
-            ctx.logger.info("🏢 Storing test venues...");
+            logger.info("🏢 Storing test venues...");
             for (const testVenue of testVenues) {
                 await ctx.semantic?.add({ id: testVenue.key, value: testVenue.data, tags: ['venue', 'Riga', 'Latvia'], entities: { venueName: 'location', address: 'location' } });
-                ctx.logger.info(`✅ Stored venue: ${testVenue.key}`);
+                logger.info(`✅ Stored venue: ${testVenue.key}`);
             }
 
             // Step 3: Test semantic search with various combinations
-            ctx.logger.info("🔍 Testing semantic search combinations...");
+            logger.info("🔍 Testing semantic search combinations...");
 
             const results = [];
 
             for (const test of searchTests) {
-                ctx.logger.info(`\n🧪 Testing: ${test.description}`);
-                ctx.logger.info(`   Query: "${test.query}" in field "${test.field}"`);
-                ctx.logger.info(`   Type: ${test.type}`);
+                logger.info(`\n🧪 Testing: ${test.description}`);
+                logger.info(`   Query: "${test.query}" in field "${test.field}"`);
+                logger.info(`   Type: ${test.type}`);
 
                 try {
                     // Use entity-aware search with ~ operator
@@ -147,7 +148,7 @@ export default createAgent({
                         limit: 10
                     } as any);
 
-                    ctx.logger.info(`   📊 Found ${searchResults.length} matches`);
+                    logger.info(`   📊 Found ${searchResults.length} matches`);
 
                     if (searchResults.length > 0) {
                         for (let i = 0; i < searchResults.length; i++) {
@@ -156,10 +157,10 @@ export default createAgent({
                             const title = value.titleAndDescription?.[0]?.title ||
                                 value.venueName ||
                                 'Unknown';
-                            ctx.logger.info(`   ${i + 1}. ${result.id} - "${title}"`);
+                            logger.info(`   ${i + 1}. ${result.id} - "${title}"`);
                         }
                     } else {
-                        ctx.logger.info(`   ❌ No matches found`);
+                        logger.info(`   ❌ No matches found`);
                     }
 
                     results.push({
@@ -173,7 +174,7 @@ export default createAgent({
 
                 } catch (error) {
                     const errorMessage = error instanceof Error ? error.message : String(error);
-                    ctx.logger.error(`   💥 Error: ${errorMessage}`);
+                    logger.error(`   💥 Error: ${errorMessage}`);
                     results.push({
                         test: test.description,
                         query: test.query,
@@ -185,32 +186,32 @@ export default createAgent({
             }
 
             // Step 4: Summary of results
-            ctx.logger.info("\n📊 SUMMARY OF RESULTS:");
+            logger.info("\n📊 SUMMARY OF RESULTS:");
             for (const result of results) {
                 if (result.error) {
-                    ctx.logger.info(`❌ ${result.test}: ERROR - ${result.error}`);
+                    logger.info(`❌ ${result.test}: ERROR - ${result.error}`);
                 } else {
                     const matches = result.matches ?? 0;
-                    ctx.logger.info(`${matches > 0 ? '✅' : '❌'} ${result.test}: ${matches} matches`);
+                    logger.info(`${matches > 0 ? '✅' : '❌'} ${result.test}: ${matches} matches`);
                 }
             }
 
             // Step 5: Clean up test data
-            ctx.logger.info("\n🧹 Cleaning up test data...");
+            logger.info("\n🧹 Cleaning up test data...");
 
             // Delete test events
             for (const testEvent of testEvents) {
                 await ctx.semantic?.remove?.(testEvent.key);
-                ctx.logger.info(`🗑️ Deleted event: ${testEvent.key}`);
+                logger.info(`🗑️ Deleted event: ${testEvent.key}`);
             }
 
             // Delete test venues
             for (const testVenue of testVenues) {
                 await ctx.semantic?.remove?.(testVenue.key);
-                ctx.logger.info(`🗑️ Deleted venue: ${testVenue.key}`);
+                logger.info(`🗑️ Deleted venue: ${testVenue.key}`);
             }
 
-            ctx.logger.info("✅ Test completed and cleaned up!");
+            logger.info("✅ Test completed and cleaned up!");
 
             await ctx.complete(100, 'Semantic search test completed');
 
@@ -222,7 +223,7 @@ export default createAgent({
             };
 
         } catch (error) {
-            ctx.logger.error('Failed to perform semantic search test:', error as any);
+            logger.error('Failed to perform semantic search test:', error as any);
             throw error;
         }
     }

@@ -1,4 +1,5 @@
 import { createAgent } from '@a2arium/callagent-core';
+import { logger } from '@a2arium/callagent-utils';
 
 export default createAgent({
     async handleTask(ctx) {
@@ -7,7 +8,7 @@ export default createAgent({
         const timestamp = input.timestamp;
         const requestId = input.requestId;
 
-        ctx.logger.info('🔄 Hello agent processing started', {
+        logger.info('🔄 Hello agent processing started', {
             name,
             timestamp,
             requestId,
@@ -15,13 +16,13 @@ export default createAgent({
         });
 
         // Simulate some processing time to make cache benefits visible
-        ctx.logger.info('⏳ Simulating processing delay...');
+        logger.info('⏳ Simulating processing delay...');
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const greeting = `Hello, ${name}! 👋`;
         const processedAt = new Date().toISOString();
 
-        ctx.logger.info('✅ Processing completed', {
+        logger.info('✅ Processing completed', {
             greeting,
             processedAt,
             cacheNote: 'This result will be cached for 30 seconds'

@@ -221,6 +221,7 @@ export const agent = createAgent({
 - [2. Core Concepts](#2-core-concepts)
 - [3. Typed Intent System](#3-typed-intent-system)
 - [4. Module Contracts](#4-module-contracts)
+- [4.1. Logging in APLRET Modules](#41-logging-in-aplret-modules)
 - [5. Stage Dispatcher Pattern](#5-stage-dispatcher-pattern)
 - [6. State Management Strategy](#6-state-management-strategy)
 - [7. Effect Safety and Budgets](#7-effect-safety-and-budgets)
@@ -836,7 +837,7 @@ Note: Examples below assume the upcoming `ShieldOutcome` API (pass/transform/vet
   ```typescript
   // In the loop, after calling shield(m, intent)
   const outcome = shield(m, intent);
-  ctx.log.info('shield_decision', {
+   logger.info('shield_decision', {
     module: 'shield',
     action: outcome.action,
     originalIntent: intent.kind,
@@ -894,6 +895,78 @@ transition: (env, exec, m) => {
   return { kind: 'continue' };
 }
 ```
+
+---
+
+## 4.1. Logging in APLRET Modules
+
+**Import the logger directly** - all APLRET modules use the same centralized logger with automatic context enrichment:
+
+```typescript
+import { logger } from '@a2arium/callagent-utils';
+
+export const agent = createAgent({
+    // A - Attention (no ctx!)
+    attention: (M, env) => {
+        logger.debug('Analyzing attention signals', {
+            hasInput: Boolean(env.input),
+            goalPriority: M.goalState?.priority
+        });
+        return { wantPrompt: !env.input };
+    },
+
+    // P - Perception (no ctx!)
+    perception: (env, alpha) => {
+        logger.info('Perceived user message', {
+            inputType: typeof env.input
+        });
+        return { text: env.input };
+    },
+
+    // L - Learning (no ctx!)
+    learning: (prevM, prevAction, obs, rPrev) => {
+        logger.debug('Learning from observation', {
+            hasObservation: Boolean(obs),
+            reward: rPrev
+        });
+        return { ...prevM, /* updated state */ };
+    },
+
+    // R - Policy (no ctx!)
+    policy: (M) => {
+        logger.info('Policy decision: answer with LLM', {
+            reason: 'user asked question'
+        });
+        return { kind: 'answer_with_llm', query: M.memory.sensory.current };
+    },
+
+    // S - Shield (no ctx!)
+    shield: (M, intent) => {
+        logger.warn('Shield blocked intent: budget exceeded', {
+            intent: intent.kind
+        });
+        return null; // Veto
+    },
+
+    // E - Execution (has ctx, but still use plain logger!)
+    execution: async (intent, ctx, M) => {
+        logger.info('Executing intent', { intent: intent.kind });
+        // ... execute ...
+    }
+}, import.meta.url);
+```
+
+**Key benefits:**
+- **Automatic context**: taskId, tenantId, agentId, turn number added automatically
+- **No ctx.logger**: Use plain `logger` everywhere - context is automatic via AsyncLocalStorage
+- **Consistent output**: All logs follow the same format: `[Component | context] Message`
+- **Structured logging**: Pass objects as separate arguments, not stringified
+
+**Log levels:**
+- `debug`: Detailed internal state for debugging
+- `info`: General operational flow, significant state changes
+- `warn`: Potential issues, unexpected but recoverable situations
+- `error`: Unrecoverable errors, exceptions caught
 
 ---
 
@@ -1338,7 +1411,7 @@ Behavior on cache hit:
 
 ### Turn, budget, and usage observability
 
-Quick references you can read during the loop:
+Quick references you can read during the loop:f
 
 ```ts
 // Turn index
