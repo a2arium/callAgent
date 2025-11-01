@@ -432,7 +432,7 @@ export class AgentDependencyResolver {
             const manifest = await this.loadManifest(agentName);
             return manifest.dependencies?.agents || [];
         } catch (error) {
-            resolverLogger.warn('Failed to get immediate dependencies', error, { agentName });
+            resolverLogger.error('Failed to get immediate dependencies', error, { agentName });
             return [];
         }
     }

@@ -112,8 +112,8 @@ export type EnvironmentState = {
     time: string; // ISO timestamp
     input: unknown; // current task input or event payload
     sessionId?: string; // current session id (task id)
-    turn?: number; // cumulative loop turn (persisted per session)
-    budget?: { maxTurns?: number; latencyMs?: number }; // loop constraints from manifest
+    turn: number; // cumulative loop turn (persisted per session)
+    budget: { maxTurns: number; latencyMs: number }; // loop constraints from manifest
     pending: {
         inputs: Record<string, unknown>;
         children: Record<string, unknown>;

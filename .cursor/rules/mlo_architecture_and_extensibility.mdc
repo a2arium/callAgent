@@ -348,7 +348,7 @@ Working memory is crucial for an agent's active reasoning and task execution.
     *   `ctx.vars.set(key: string, value: unknown)` / `ctx.vars.get<T>(key: string): T | undefined`
     *   `ctx.semantic.add({ id, value, tags?, entities? })` / `ctx.semantic.read({ id?, tag?/tags?, filters?, limit? })` / `ctx.semantic.remove(id | filter)`
     *   Note: `ctx.semantic.read` supports string filters and array-aware paths like `speakers[].name contains "John"`.
-*   **MLO Pipeline Flow**: All these operations create `MemoryItem` instances that are processed through the MLO pipeline, configured by the active `MEMORY_PROFILE`. This allows for compression, reflection, etc., on working memory elements too.
+*   **MLO Pipeline Flow**: All these operations create `MemoryItem` instances that are processed through the MLO pipeline, configured by the active `MEMORY_PROFILE`. This allows for compression, reflection, etc., on working memory elements too. Decisions now route through `UnifiedMemoryService` and are persisted via the working-memory backend instead of the transient `ctx.vars` cache.
 *   **Persistence**: Working memory is now externalized and persisted through dedicated backend adapters (e.g., `WorkingMemorySQLAdapter`). The `WorkingMemoryRegistry` routes operations to the appropriate backend, following the same pattern as semantic, episodic, and embed memory types.
 
 ## 6. Configuration and Profiles

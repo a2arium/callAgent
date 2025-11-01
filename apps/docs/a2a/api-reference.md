@@ -339,17 +339,76 @@ type Agent = {
 
 ### AgentManifest
 
-Agent metadata and configuration.
+Agent manifests describe how callAgent discovers, initializes, and governs individual agents. You can define the manifest inline (via `createAgent({ manifest })`) or in a JSON file next to the agent entrypoint. When a folder contains multiple agents, only the primary agent may ship a JSON manifest; supporting agents use inline manifests.
+
+#### Naming and versioning rules
+- `name` must be lowercase and use `-` as the separator (`research-orchestrator`, not `ResearchOrchestrator`). For folder-based discovery, the main agent name must match the folder name exactly.
+- `version` follows semantic versioning so orchestrators can reason about compatibility.
+
+#### Core metadata
+- `description` communicates agent purpose in registries and tooling.
+- `runMode` determines whether the loop runtime (`'loop'`, default) or legacy runner powers execution.
+- `budgets.maxTurns` / `budgets.latencyMs` provide default loop limits that runners enforce unless overridden per task.
+- `hitl` selects the human-in-the-loop posture (`'advise' | 'consent' | 'guardrails'`).
+- `safety` enables sanitization, cost ceilings, and PII detection patterns without custom guards.
+
+#### Dependencies and memory profile
+- `dependencies.agents` lists other agents this agent can invoke; entries must reference registered agent names (same lowercase-with-dashes convention).
+- `memory.profile` selects one of the predefined Memory Lifecycle Orchestrator profiles (for example `basic` or `mlo-latency-optimized`) and may include additional per-profile settings. All memory inheritance flows through the MLO pipeline.
+
+#### A2A defaults
+- `a2a.maxConcurrentCalls` caps fan-out.
+- `a2a.defaultTimeout` establishes a default timeout for downstream A2A calls.
+- `a2a.allowedTargets` limits which agents may be contacted (use `['*']` to allow all).
+- `a2a.memoryInheritance` supplies default working/semantic/episodic inheritance flags if callers omit options.
+
+#### Result caching and extensibility
+- `cache.enabled` toggles agent result caching. When enabled, matching inputs short-circuit the handler and reuse the cached payload while marking provenance.
+- `cache.ttlSeconds` sets the time-to-live (default 300 seconds if omitted).
+- `cache.excludePaths` prevents dynamic fields (for example `requestId`) from contributing to the cache key.
+- Additional keys are permitted so packages can extend the manifest without breaking existing tooling. Runners ignore unknown settings but propagate them to child agents.
+
+#### Full type definition
 
 ```typescript
 type AgentManifest = {
   name: string;
   version: string;
   description?: string;
-  capabilities?: string[];
+  runMode?: 'loop' | 'legacy';
+  budgets?: {
+    maxTurns?: number;
+    latencyMs?: number;
+  };
+  hitl?: 'advise' | 'consent' | 'guardrails';
+  safety?: {
+    sanitize?: boolean;
+    costLimit?: number;
+    piiPatterns?: string[];
+  };
+  dependencies?: {
+    agents?: string[];
+  };
   memory?: {
     profile?: string;
+    [key: string]: unknown;
   };
+  a2a?: {
+    maxConcurrentCalls?: number;
+    defaultTimeout?: number;
+    allowedTargets?: string[];
+    memoryInheritance?: {
+      working?: boolean;
+      semantic?: boolean;
+      episodic?: boolean;
+    };
+  };
+  cache?: {
+    enabled?: boolean;
+    ttlSeconds?: number;
+    excludePaths?: string[];
+  };
+  [key: string]: unknown;
 }
 ```
 

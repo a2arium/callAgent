@@ -34,17 +34,228 @@ This document describes a **reusable, production-ready agent architecture** that
 
 ## Design Checklist
 
-Before implementing an A-P-L-R-E-T agent, ensure:
+**Checklist** an LLM should follow when **designing and debugging** agents in  A-P-L-R-E-T framework.  
 
-- [ ] **Intents defined**: Closed discriminated union with exhaustive handling (via switch/handlers now; consider `.exhaustive()` later)
-- [ ] **Stage invariants**: Runtime validation for required/forbidden `ctx.vars` keys
-- [ ] **Shield active**: Budget checks, PII detection, policy constraints implemented
-- [ ] **Budgets configured**: Cost caps in `m.reward.budget`, tracked per effect
-- [ ] **Resume tokens**: Stored in `ctx.vars` for `await_input`, `await_tool`, `await_child`
-- [ ] **Idempotency keys**: Attached to critical effects to prevent double-execution
-- [ ] **Policy pure**: `policy(m)` reads only from M, env events routed through Learning
-- [ ] **Trace logging**: Shield decisions, effect costs, stage transitions logged
-- [ ] **Golden path test**: End-to-end test covering prompt → await → respond → complete
+# APLRET Design & Debugging Checklist
+
+## 0) First principles (turns + MDP thinking)
+
+* [ ] Treat each step as a **turn**: any effect result is only available **next turn** after it flows Perception → Learning → M. Don’t “see the future.” 
+* [ ] Keep the classic loop: **observe → update belief → choose action** (Policy is pure on M). 
+
+## 1) Module responsibilities (use this mapping every time)
+
+* [ ] **Attention**: pick focus/filters; no decisions, no effects.
+* [ ] **Perception**: **normalize & validate** inputs (schema/units/ranges), label event type (input/tool/child); no effects. (This is the observation step.) 
+* [ ] **Learning**: the **only** place to immutably update **M** (belief/world model, goals, reward). No effects. (Belief update.) 
+* [ ] **Policy**: choose **typed Intent** purely from **M** (π(M) → Intent). No env/ctx reads here.
+* [ ] **Shield**: enforce constraints/budgets/PII; **pass/transform/defer/veto** before acting. (Constrained MDP + shielding.) 
+* [ ] **Execution**: implement **HOW** (effects only). Use timeouts/retries + **idempotency keys**. Write **control** to `ctx.vars` only. 
+* [ ] **Transition**: emit `continue | await_* | complete | fail`; bookkeeping only.
+
+## 2) State separation (never mix these)
+
+* [ ] **Cognitive & persistent** → **M** via Learning (user intent/entities, validated tool results to be reasoned on).
+* [ ] **Control & ephemeral** → **`ctx.vars`** (stage, tokens, prompted flags, step indices).
+* [ ] Never write to **M** outside Learning; never persist cognition in `ctx.vars`. (Mirrors belief vs. control in POMDP/state patterns.) 
+
+## 3) Typed safety (prevent drift at compile time)
+
+* [ ] Keep **Intents** and **Stages** as **closed unions**; handle them **exhaustively** (ts-pattern or exhaustive switch). Build fails if a case is missing. ([GitHub][4])
+* [ ] Enforce **intent → allowed stages** mapping (typestate) and **stage invariants** at runtime (require/forbid keys).
+* [ ] For complex flows, promote to **statecharts** (guards, timeouts, parallel states, visualization). 
+
+## 4) Turn templates (how to “think in turns”)
+
+* [ ] **Gather data via tool**
+
+  * Turn N: Policy(Intent=fetch) → Shield → Execution(call tool, store token in `ctx.vars`) → Transition(`await_tool`).
+  * Turn N+1: Perception(validates tool result) → Learning(write to M) → Policy(decide next).
+* [ ] **User input**
+
+  * Turn N: Execution(`requestInput` with `setStage='awaiting_input'`) → Transition(`await_input`).
+  * Turn N+1: Perception(validate input) → Learning(update M) → Policy(next Intent).
+    (Enforces observe→update→decide rhythm.) 
+
+## 5) Effect safety & budgets
+
+* [ ] Wrap external calls with **timeouts + bounded retries**; attach **idempotency keys** to get exactly-once semantics across resumes. 
+* [ ] Always pass intents through **Shield** before external effects; allow **transform/defer/veto** when over budget/unsafe. (Shielding in safe RL.)  
+* [ ] Record usage/cost per effect; include estimate in Shield checks (constrained MDP mindset). 
+
+## 6) Logging & observability (make debugging easy)
+
+* [ ] Log **{turn, stage, intent, token, shield_action, effect_cost, latency}** every turn.
+* [ ] On invariant/typestate failures, include **required/forbidden keys** and current `ctx.vars` diff.
+* [ ] For each effect, log **idempotency key** and retry count.
+
+## 7) Debugging playbook (quick triage → deep fix)
+
+**A. Fast checks**
+
+* [ ] Did Policy read env/ctx instead of M? If yes, fix: route via Perception→Learning first. 
+* [ ] Did a handler violate **stage invariants** (e.g., awaiting_input without token)? Add invariant asserts.
+* [ ] Missing handler case? Turn on **exhaustive matching** (ts-pattern or exhaustive switch). 
+
+**B. Resume errors**
+
+* [ ] After `await_*`, is the resume event first validated in **Perception** and stored to **M** in **Learning**? If not, fix.
+* [ ] Double calls on resume? Ensure **idempotency keys** are used and checked. 
+
+**C. Safety issues**
+
+* [ ] Did Shield run and log a decision for the intent? If not, treat as a bug.  
+* [ ] Are cost/budget constraints encoded as Shield guards (defer/veto) rather than ad-hoc checks? (Constrained MDP.) 
+
+**D. Control vs cognition mix-ups**
+
+* [ ] Cognitive facts in `ctx.vars`? Move to **M** via Learning.
+* [ ] Control flags in M? Move to **`ctx.vars`**.
+
+**E. Complex branching**
+
+* [ ] If the dispatcher is growing brittle, migrate the flow to **statecharts** with **guards** and **timeouts** to clarify transitions and avoid if-pyramids. 
+
+**F. Security/supply-chain sanity (bonus)**
+
+* [ ] When generating tool/package names or commands, add a **validation step** (Perception) to avoid “package hallucination/slopsquatting” hazards. 
+
+## 8) Test strategy (must-haves)
+
+* [ ] **Golden path** E2E: prompt → await → respond → complete (assert stages, tokens, Policy purity).
+* [ ] **Resume paths**: tool and child completion; ensure data only appears **after** resume via P→L→M.
+* [ ] **Failure paths**: Shield veto/defer, timeouts, retries, idempotency collisions.
+* [ ] **Exhaustiveness**: add a compile-time test (ts-pattern `.exhaustive()` or never-type trick in switch). 
+
+
+---
+
+## Hard rules to follow
+
+You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rules:
+
+1) TURN DISCIPLINE (POMDP mindset)
+- You NEVER read “future” data. Any effect result is only available on the NEXT turn.
+- Route all environment or resume events through Perception → Learning → MentalState (M) before Policy reasons on them.
+- Policy is a PURE function of M. Policy must NOT read env, ctx, or perform side effects.
+
+2) MODULE RESPONSIBILITIES
+* **Attention (A) — what to look at**
+  * **Purpose:** Prioritize/focus inputs so downstream work is cheaper and more relevant.
+  * **Focus on:** simple, explainable filters (e.g., “only tool events”, “DOM region X”).
+  * **Inputs → Output:** (M_{t-1}, s_t) → **α_t** (focus mask/priority list).
+  * **Do:** cut noise; save tokens/compute.
+  * **Don’t:** infer intent, call tools, or modify state.
+
+* **Perception (P) — make inputs usable**
+  * **Purpose:** Normalize and validate raw inputs into a clean **observation**.
+  * **Focus on:** types, ranges, schemas, units, timestamps, provenance; **structured errors**.
+  * **Inputs → Output:** (s_t, α_t) (+ inbox events) → **o_t** with `source` (user/tool/child/env) and `kind` (taxonomy label).
+  * **Do:** annotate provenance; emit `o_t.error` instead of throwing.
+  * **Don’t:** write memory, guess goals/intent, or perform effects.
+
+* **Learning (L) — update the mind (only writer of M)**
+  * **Purpose:** Turn the new observation into a better **mental state (M_t)**.
+  * **Focus on:** immutable update (return a new M), provenance, safe online changes.
+  * **Inputs → Output:** (M_{t-1}, a_{t-1}, o_t) (opt. (r_{t-1})) → **M_t**.
+  * **Do:** write episodic/semantic/procedural memory; refine world model; adjust goals, reward weights, and affect.
+  * **Don’t:** choose external actions.
+
+* **Policy / Reasoning (R) — what to do next**
+  * **Purpose:** Decide **WHAT** to do based on the current mind.
+  * **Focus on:** clear, typed intentions (and short plans when needed).
+  * **Inputs → Output:** (M_t) → **Intent** *(or small Plan)*.
+  * **Do:** stick to simple intent types: AskUser, UseTool, Navigate, Reflect, Delegate.
+  * **Don’t:** perform effects or mutate M.
+
+* **Shield (S) — safety, compliance, budgets**
+  * **Purpose:** Enforce constraints before anything runs.
+  * **Focus on:** explicit outcomes: **pass / transform / defer / veto**.
+  * **Inputs → Output:** Intent/Plan, (M_t) → guarded Intent/Plan or block.
+  * **Do:**
+    * **transform** (edit to safe form) with a short note,
+    * **defer** (state what approval/info is needed),
+    * **veto** (clear human-friendly reason).
+  * **Don’t:** run effects or change M.
+
+* **Execution (E) — how to do it (effects happen here)**
+  * **Purpose:** Ground the intent into real actions (APIs/tools/robotics) with retries/timeouts.
+  * **Focus on:** idempotency keys, correlation IDs, timeouts, clean receipts/results.
+  * **Inputs → Output:** Intent/Plan → **exec result** (data/status/receipts).
+  * **Do:** update only **control state** (ids, retries, timers); feed outputs back as observations.
+  * **Don’t:** stash semantic knowledge (Learning will write M).
+
+* **Transition (T) — advance the loop**
+  * **Purpose:** Apply effects to the environment model and steer control flow.
+  * **Focus on:** produce next env state, extrinsic reward, and post-action signals.
+  * **Inputs → Output:** env_t + exec result → **next env**, **r_ext**, **observations**, **control**.
+  * **Control signals:** `continue | await_input | await_tool | await_child | complete | fail`.
+  * **Don’t:** modify M or intents.
+
+* **Design rules**
+  * **Single-writer:** Only **Learning** updates (M).
+  * **Effect boundary:** Only **Execution** causes side effects.
+  * **Typed intentions:** Policy emits clear intent types (or a short plan).
+  * **Graceful errors:** Perception emits structured error observations; no cross-module throws.
+  * **Provenance everywhere:** timestamps, ids, sources on observations and memory writes.
+  * **Short feedback loop:** keep online updates small/safe; do heavy optimization offline.
+
+* **What to measure**
+  * **Attention:** token/compute saved w/o hurting success.
+  * **Perception:** schema error rate, latency.
+  * **Learning:** memory hit@k, world-model prediction error.
+  * **Policy:** chain success rate, think time.
+  * **Shield:** block/transform rates, reasons.
+  * **Execution:** exec success %, retries, cost.
+  * **Transition:** time in await states, completion rate.
+
+3) STATE SEPARATION
+- Put mechanical/control state in ctx.vars (stage, token, flags, subtask indices).
+- Put cognitive facts in M via Learning (user intent, belief/estimates, tool results to reason about).
+- Never write to M outside Learning. Never persist cognition in ctx.vars.
+
+4) STAGE & TYPE SAFETY
+- Always maintain the current stage and obey stage invariants.
+- Enforce intent→allowed-stages typestate; error if an Intent is not valid for the current stage.
+- Handle Intents EXHAUSTIVELY. If a new Intent or Stage appears, add explicit handling.
+
+5) EFFECT SAFETY
+- Wrap external calls with timeouts and bounded retries; attach idempotency keys for exactly-once semantics across resumes.
+- Call Shield BEFORE executing external tools/requests. Abort or defer if over budget or violating constraints.
+- Log {turn, stage, intent, token, shield_action, effect_cost, latency} for traceability.
+
+6) HOW TO THINK (TURN TEMPLATES)
+- If you need data from a tool/API:
+  Turn N: Policy→Intent(fetch), Shield, Execution→invoke tool, store token in ctx.vars, Transition→await_tool(token).
+  Turn N+1: Perception validates tool result; Learning writes validated result to M; Policy chooses next Intent (e.g., fetch more if invalid/incomplete; otherwise proceed).
+- For user input:
+  Turn N: prompt + requestInput(setStage='awaiting_input') → await_input(token).
+  Turn N+1: Perception validates input; Learning updates M; Policy decides next step.
+
+7) I/O CONTRACTS (examples)
+- Perception must produce normalized observation objects (e.g., {text, eventType, resumeToken?, meta?}).
+- Learning must return a NEW M (immutable update) that includes everything Policy will need next turn.
+- Execution returns either ask_user/tool/subagent/internal and may set ctx.vars.*. Execution never mutates M.
+
+8) WHEN IN DOUBT
+- Prefer gathering/validating in a FUTURE TURN rather than mixing steps.
+- Prefer explicit failure with actionable messages over silent assumption.
+
+9) OUTPUT STYLE
+- Be explicit about which module is doing what (e.g., “Perception validated …”, “Learning updated M …”, “Policy emitted Intent …”).
+- If stage/typestate would be violated, refuse and explain.
+
+Follow this minimal recipe every turn:
+A) Attention: pick focus flags.
+B) Perception: normalize+validate env input → observation {…}.
+C) Learning: M' = f(M, observation) (immutable).
+D) Policy: Intent = π(M').
+E) Shield: gate = pass/transform/defer/veto. If not pass, stop.
+F) Execution: handle Intent respecting current stage; update ctx.vars only; produce outcome.
+G) Transition: emit await_* or complete or continue.
+
+Your single source of truth for cognition is M. Your single source of truth for control is ctx.vars. Effects are only in Execution. Data needed later must flow Perception→Learning→M first.
+
 
 ---
 
@@ -1213,6 +1424,12 @@ execution: async (intent, ctx, m) => {
   V.setPrompted(ctx, true);
 }
 ```
+
+### Working Memory Helpers
+
+- **Goals** (`ctx.goals.add/read`): capture the agent’s current objective through the MLO pipeline so subsequent turns resume with the right intent focus without manual bookkeeping.
+- **Thoughts** (`ctx.thoughts.add`): append reasoning breadcrumbs or observations; these are persisted via working memory for audits, summaries, and downstream reflection.
+- **Decisions** (`ctx.decisions.add/get/read`): log policy choices with optional reasoning; stored alongside goals/thoughts in working memory so you avoid overloading `ctx.vars` for cognitive history.
 
 ### Decision Matrix
 

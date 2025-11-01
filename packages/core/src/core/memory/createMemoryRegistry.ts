@@ -89,7 +89,7 @@ export async function createMemoryRegistry(
                         embedFunction = await createEmbeddingFunction();
                         memoryLogger.debug('Embedding function created successfully');
                     } catch (error) {
-                        memoryLogger.warn('Failed to create embedding function:', error);
+                        memoryLogger.error('Failed to create embedding function:', error);
                     }
                 }
 

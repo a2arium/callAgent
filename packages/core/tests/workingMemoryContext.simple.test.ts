@@ -29,8 +29,10 @@ describe('workingMemoryContext - Simple Tests', () => {
         expect(context.getGoal).toBeDefined();
         expect(context.addThought).toBeDefined();
         expect(context.getThoughts).toBeDefined();
-        expect(context.makeDecision).toBeDefined();
-        expect(context.getDecision).toBeDefined();
+        expect(context.decisions).toBeDefined();
+        expect(context.decisions?.add).toBeDefined();
+        expect(context.decisions?.get).toBeDefined();
+        expect(context.decisions?.read).toBeDefined();
         expect(context.vars).toBeDefined();
         expect(context.recall).toBeDefined();
         expect(context.remember).toBeDefined();

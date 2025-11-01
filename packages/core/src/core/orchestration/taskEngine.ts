@@ -255,8 +255,30 @@ export class TaskEngine {
             for (const [key, value] of varCache.entries()) {
                 varsObject[key] = value;
             }
-            (M.memory as any) = { ...((M.memory as any) || {}), vars: varsObject };
-            (M as any).vars = (M.memory as any).vars;
+
+            const applyVars = (mental: unknown) => {
+                if (!mental || typeof mental !== 'object') return;
+                const target = mental as Record<string, unknown>;
+                let memory = target.memory;
+
+                if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
+                    memory = {};
+                    target.memory = memory as Record<string, unknown>;
+                }
+
+                (memory as Record<string, unknown>).vars = varsObject;
+                target.vars = (memory as Record<string, unknown>).vars;
+            };
+
+            const targets = new Set<unknown>([
+                M,
+                (ctx as any).M,
+                (ctx as any).__mental
+            ]);
+
+            for (const mental of targets) {
+                applyVars(mental);
+            }
         };
 
         // Helper function to handle nested paths
@@ -915,7 +937,7 @@ export class TaskEngine {
                     input: ctx.task.input,
                     sessionId,
                     turn: startTurnTotal + 1,
-                    budget: undefined,
+                    budget: { maxTurns: Infinity, latencyMs: Infinity }, // we will override this with the actual budgets from the manifest
                     pending: {
                         inputs: (base?.pending?.inputs) || {},
                         children: (base?.pending?.children) || {},
@@ -940,7 +962,8 @@ export class TaskEngine {
                     const b = (plugin?.manifest as any)?.budgets;
                     const hitl = (plugin?.manifest as any)?.hitl;
                     if (hitl) { try { (M as any).hitl = hitl; } catch { /* noop */ } }
-                    if (isStreaming && b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
+                    if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
+                    try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
                 } catch { /* ignore */ }
                 console.log('loopOpts:', loopOpts);
                 const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
@@ -1526,6 +1549,7 @@ export class TaskEngine {
                 const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
                 if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
+                try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             // Persist updated M with latest ctx.vars merged into mNext
@@ -1671,6 +1695,7 @@ export class TaskEngine {
                 const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
                 if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns ?? 1, latencyMs: (b as any).latencyMs };
+                try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             try {
@@ -1764,6 +1789,7 @@ export class TaskEngine {
                 const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
                 if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns ?? 1, latencyMs: (b as any).latencyMs };
+                try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
             } catch { }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             try {
@@ -2278,29 +2304,6 @@ export class TaskEngine {
                         return typeof filter.limit === 'number' ? byTags.slice(0, Math.max(0, filter.limit)) : byTags;
                     } catch { return []; }
                 }
-            };
-            (ctx as any).decisions = {
-                add: (key: string, value: unknown, reasoning?: string) => {
-                    try {
-                        const d = (((ctx as any).vars.get('decisions')) || {}) as Record<string, any>;
-                        d[key] = { value, reasoning, ts: new Date().toISOString() };
-                        (ctx as any).vars.set('decisions', d);
-                        (ctx as any).thoughts?.add?.(`Decision: ${key} ${String(value)}${reasoning ? ' (' + reasoning + ')' : ''}`);
-                    } catch { /* noop */ }
-                },
-                get: (key: string) => {
-                    try { const d = ((ctx as any).vars.get('decisions') || {}) as Record<string, any>; return d[key]?.value; } catch { return undefined; }
-                },
-                read: (_filter?: { prefix?: string }) => {
-                    try {
-                        const d = ((ctx as any).vars.get('decisions') || {}) as Record<string, any>;
-                        return Object.entries(d).map(([k, v]) => ({ key: k, value: (v as any).value, reasoning: (v as any).reasoning, ts: (v as any).ts }));
-                    } catch { return []; }
-                },
-                remove: (key: string) => {
-                    try { const d = ((ctx as any).vars.get('decisions') || {}) as Record<string, any>; delete d[key]; (ctx as any).vars.set('decisions', d); } catch { /* noop */ }
-                },
-                clear: () => { try { (ctx as any).vars.set('decisions', {}); } catch { /* noop */ } }
             };
             (ctx as any).world = { update: (fn: (wm: any) => void) => { try { fn(((ctx as any).__mental as any).worldModel); } catch { /* noop */ } }, patch: (p: Record<string, unknown>) => { try { Object.assign(((ctx as any).__mental as any).worldModel, p); } catch { /* noop */ } } };
         } catch { /* noop */ }

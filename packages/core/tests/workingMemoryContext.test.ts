@@ -75,8 +75,10 @@ describe('workingMemoryContext', () => {
             expect(context.getGoal).toBeDefined();
             expect(context.addThought).toBeDefined();
             expect(context.getThoughts).toBeDefined();
-            expect(context.makeDecision).toBeDefined();
-            expect(context.getDecision).toBeDefined();
+            expect(context.decisions).toBeDefined();
+            expect(context.decisions?.add).toBeDefined();
+            expect(context.decisions?.get).toBeDefined();
+            expect(context.decisions?.read).toBeDefined();
             expect(context.vars).toBeDefined();
             expect(context.recall).toBeDefined();
             expect(context.remember).toBeDefined();
@@ -116,12 +118,16 @@ describe('workingMemoryContext', () => {
             const decision = 'Choose option A';
             const reasoning = 'Option A has better performance';
 
-            await context.makeDecision!(key, decision, reasoning);
-            const retrievedDecision = await context.getDecision!(key);
+            await context.decisions?.add(key, decision, reasoning);
+            const retrievedDecision = await context.decisions?.get(key);
 
             expect(retrievedDecision).not.toBeNull();
-            expect(retrievedDecision!.decision).toBe(decision);
-            expect(retrievedDecision!.reasoning).toBe(reasoning);
+            expect(retrievedDecision?.value).toBe(decision);
+            expect(retrievedDecision?.reasoning).toBe(reasoning);
+
+            const history = await context.decisions?.read();
+            expect(Array.isArray(history)).toBe(true);
+            expect(history?.some(entry => entry.key === key && entry.value === decision)).toBe(true);
         });
 
         it('should handle working variables through proxy', async () => {

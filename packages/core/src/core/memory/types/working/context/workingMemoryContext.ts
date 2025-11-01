@@ -208,6 +208,39 @@ export async function extendContextWithMemory(
         }
     };
     (context as any).thoughts = { add: async (t: any) => unifiedMemory.addThought(String(t?.text ?? t), agentId) };
+    (context as any).decisions = {
+        add: async (key: string, value: unknown, reasoning?: string) => {
+            const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+            await unifiedMemory.makeDecision(key, serialized, reasoning, agentId);
+        },
+        get: async (key: string) => {
+            const decision = await unifiedMemory.getDecision(key, agentId);
+            if (!decision) {
+                return null;
+            }
+            return {
+                key,
+                value: decision.decision,
+                reasoning: decision.reasoning,
+                ts: decision.timestamp
+            };
+        },
+        read: async (filter?: { prefix?: string }) => {
+            const decisions = await unifiedMemory.getAllDecisions(agentId);
+            const entries = Object.entries(decisions).map(([decisionKey, entry]) => ({
+                key: decisionKey,
+                value: entry.decision,
+                reasoning: entry.reasoning,
+                ts: entry.timestamp
+            }));
+
+            if (filter?.prefix) {
+                return entries.filter(({ key }) => key.startsWith(filter.prefix!));
+            }
+
+            return entries;
+        }
+    };
 
     // Add simple working variables for synchronous access
     context.vars = createSimpleWorkingVariablesProxy(unifiedMemory, agentId) as any;

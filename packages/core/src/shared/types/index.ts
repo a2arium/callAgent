@@ -223,11 +223,9 @@ export type TaskContext = {
     };
     world?: { update: (fn: (wm: any) => void) => void; patch: (p: Record<string, unknown>) => void };
     decisions?: {
-        add: (key: string, value: unknown, reasoning?: string) => void | Promise<void>;
-        get: (key: string) => unknown | Promise<unknown>;
-        read: (filter?: { prefix?: string }) => Array<{ key: string; value: unknown; reasoning?: string; ts: string }> | Promise<Array<{ key: string; value: unknown; reasoning?: string; ts: string }>>;
-        remove: (key: string) => void | Promise<void>;
-        clear: () => void | Promise<void>;
+        add: (key: string, value: unknown, reasoning?: string) => Promise<void>;
+        get: (key: string) => Promise<{ key: string; value: unknown; reasoning?: string; ts: string } | null>;
+        read: (filter?: { prefix?: string }) => Promise<Array<{ key: string; value: unknown; reasoning?: string; ts: string }>>;
     };
 
     // Unified memory operations - REQUIRED

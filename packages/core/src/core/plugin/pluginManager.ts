@@ -275,7 +275,7 @@ export class PluginManager {
                 hasDependencies: dependencies.length > 0
             };
         } catch (error) {
-            pluginLogger.warn('Failed to get agent dependencies', error, { agentName });
+            pluginLogger.error('Failed to get agent dependencies', error, { agentName });
             return null;
         }
     }

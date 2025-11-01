@@ -69,9 +69,11 @@ describe('ContextSerializer', () => {
             getGoal: jest.fn().mockResolvedValue(null),
             addThought: jest.fn().mockResolvedValue(undefined),
             getThoughts: jest.fn().mockResolvedValue([]),
-            makeDecision: jest.fn().mockResolvedValue(undefined),
-            getDecision: jest.fn().mockResolvedValue(null),
-            getAllDecisions: jest.fn().mockResolvedValue({}),
+            decisions: {
+                add: jest.fn().mockResolvedValue(undefined),
+                get: jest.fn().mockResolvedValue(null),
+                read: jest.fn().mockResolvedValue([])
+            },
             vars: {},
             recall: jest.fn().mockResolvedValue([]),
             remember: jest.fn().mockResolvedValue(undefined),
@@ -257,7 +259,7 @@ describe('ContextSerializer', () => {
             // Verify working memory restoration
             expect(mockTargetContext.setGoal).toHaveBeenCalledWith('Restored goal');
             expect(mockTargetContext.addThought).toHaveBeenCalledWith('Restored thought');
-            expect(mockTargetContext.makeDecision).toHaveBeenCalledWith(
+            expect(mockTargetContext.decisions?.add).toHaveBeenCalledWith(
                 'restored-decision',
                 'Restored choice',
                 'Restored reasoning'
@@ -311,7 +313,7 @@ describe('ContextSerializer', () => {
                 ...mockTargetContext,
                 setGoal: undefined,
                 addThought: undefined,
-                makeDecision: undefined,
+                decisions: undefined,
                 remember: undefined
             } as any; // Type assertion for test purposes
 

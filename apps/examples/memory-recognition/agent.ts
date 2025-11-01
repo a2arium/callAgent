@@ -414,7 +414,11 @@ async function cleanupDemoData(ctx: any) {
             await ctx.semantic?.remove?.(sample.key);
             logger.info(`   ✓ Deleted: ${sample.key}`);
         } catch (error) {
-            logger.warn(`   ⚠️ Failed to delete ${sample.key}:`, error);
+            if (error instanceof Error) {
+                logger.error(`   ⚠️ Failed to delete ${sample.key}:`, error);
+            } else {
+                logger.error(`   ⚠️ Failed to delete ${sample.key}:`, undefined, { error });
+            }
         }
     }
 

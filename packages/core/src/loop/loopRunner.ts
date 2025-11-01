@@ -16,7 +16,7 @@ export async function runLoop(
     opts: LoopRunnerOptions = {}
 ): Promise<{ M: MentalState; outcome: TurnOutcome; metrics?: { timings: Record<string, number>[]; rewards: number[] } }> {
     const start = Date.now();
-    const maxTurns = opts.maxTurns ?? 10; // default safety budget
+    const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
     try { console.info('[loopRunner] start', { maxTurns }); } catch { }
 
     // Provide minimal defaults (prefer agent overrides when present)

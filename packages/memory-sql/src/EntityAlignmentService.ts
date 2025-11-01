@@ -188,7 +188,7 @@ export class EntityAlignmentService {
         try {
             embedding = await this.embedFunction(field.value);
         } catch (error) {
-            alignmentLogger.warn(`Failed to generate embedding for "${field.value}"`, error);
+            alignmentLogger.error(`Failed to generate embedding for "${field.value}"`, error);
             return null;
         }
 
@@ -361,18 +361,22 @@ export class EntityAlignmentService {
             LIMIT 10
         `;
 
-        alignmentLogger.debug(`All entities of type "${entityType}":`, allResults.map((r: { canonical_name: string; similarity: number }) => ({
-            name: r.canonical_name,
-            similarity: r.similarity ? r.similarity.toFixed(3) : 'undefined'
-        })));
+        alignmentLogger.debug(`All entities of type "${entityType}":`, {
+            entities: allResults.map((r: { canonical_name: string; similarity: number }) => ({
+                name: r.canonical_name,
+                similarity: r.similarity ? r.similarity.toFixed(3) : 'undefined'
+            }))
+        });
 
         // Filter by threshold
         const results = allResults.filter((r: { similarity: number }) => r.similarity && r.similarity > threshold);
 
-        alignmentLogger.debug(`Found ${results.length} similar entities above threshold ${threshold}:`, results.map((r: { canonical_name: string; similarity: number }) => ({
-            name: r.canonical_name,
-            similarity: r.similarity.toFixed(3)
-        })));
+        alignmentLogger.debug(`Found ${results.length} similar entities above threshold ${threshold}:`, {
+            entities: results.map((r: { canonical_name: string; similarity: number }) => ({
+                name: r.canonical_name,
+                similarity: r.similarity.toFixed(3)
+            }))
+        });
 
         return results.map((r: { id: string; canonical_name: string; similarity: number }) => ({
             entityId: r.id,

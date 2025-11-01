@@ -49,7 +49,7 @@ export class A2AService implements IA2AService {
             this.agentResultCache = new AgentResultCache(prisma);
             a2aLogger.debug('A2A cache service initialized successfully');
         } catch (error) {
-            a2aLogger.warn('A2A cache service initialization failed, continuing without caching', error);
+            a2aLogger.error('A2A cache service initialization failed, continuing without caching', error);
         }
     }
 
@@ -166,7 +166,7 @@ export class A2AService implements IA2AService {
                         childAgentId: targetPlugin.manifest.name
                     });
                 } catch (notifyError) {
-                    a2aLogger.warn('Failed to notify parent on child completion', notifyError as any, {
+                    a2aLogger.error('Failed to notify parent on child completion', notifyError as any, {
                         parentTaskId: options.parentTaskId
                     });
                 }
@@ -373,7 +373,7 @@ export class A2AService implements IA2AService {
                     });
                     (targetCtx as any).__inputRequired = { prompt, schema: riOpts?.schema, childOnProvided, childTaskId: targetCtx.task.id, childInputToken: childToken };
                 } catch (err) {
-                    a2aLogger.warn('Failed to notify parent on child input_required', err as any, { parentTaskId });
+                    a2aLogger.error('Failed to notify parent on child input_required', err as any, { parentTaskId });
                 }
             }
             // Return a minimal InputHandle-like object for chaining (include child input token)
@@ -493,14 +493,14 @@ export class A2AService implements IA2AService {
      */
     private createTargetLogger(targetPlugin: AgentPlugin) {
         return {
-            debug: (msg: string, ...args: unknown[]) => {
-                a2aLogger.debug(`[${targetPlugin.manifest.name}] ${msg}`, ...args);
+            debug: (msg: string, data?: Record<string, unknown>) => {
+                a2aLogger.debug(`[${targetPlugin.manifest.name}] ${msg}`, data);
             },
-            info: (msg: string, ...args: unknown[]) => {
-                a2aLogger.info(`[${targetPlugin.manifest.name}] ${msg}`, ...args);
+            info: (msg: string, data?: Record<string, unknown>) => {
+                a2aLogger.info(`[${targetPlugin.manifest.name}] ${msg}`, data);
             },
-            warn: (msg: string, ...args: unknown[]) => {
-                a2aLogger.warn(`[${targetPlugin.manifest.name}] ${msg}`, ...args);
+            warn: (msg: string, data?: Record<string, unknown>) => {
+                a2aLogger.warn(`[${targetPlugin.manifest.name}] ${msg}`, data);
             },
             error: (msg: string, error?: unknown, context?: Record<string, unknown>) => {
                 a2aLogger.error(`[${targetPlugin.manifest.name}] ${msg}`, error, {
