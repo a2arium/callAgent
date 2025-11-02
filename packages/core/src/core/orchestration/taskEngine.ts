@@ -18,10 +18,32 @@ import { createTraceparent } from '../tracing/Tracing.js';
 import type { MentalState } from '../../loop/types.js';
 import { initialM } from '../../loop/init.js';
 import { runLoop } from '../../loop/loopRunner.js';
-import type { EnvironmentState } from '../../loop/types.js';
+import type { EnvironmentState, ObservationInbox } from '../../loop/types.js';
+import type { Observation } from '../../loop/oneTurn.js';
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
+
+const normalizeInbox = (value: unknown): ObservationInbox => {
+    if (Array.isArray(value)) {
+        const arr = value as Observation[];
+        return { current: [...arr], all: [...arr] };
+    }
+    if (value && typeof value === 'object') {
+        const candidate = value as Partial<ObservationInbox>;
+        const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
+        const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
+        return { current, all };
+    }
+    return { current: [], all: [] };
+};
+
+const addObservationToInbox = (inboxValue: unknown, observation: Observation): ObservationInbox => {
+    const inbox = normalizeInbox(inboxValue);
+    inbox.current.push(observation);
+    inbox.all.push(observation);
+    return inbox;
+};
 
 /**
  * Task entity with the necessary properties for the task engine
@@ -932,12 +954,14 @@ export class TaskEngine {
                 // Build EnvironmentState from snapshot and context
                 const base = (session?.snapshot as any) || {};
                 const startTurnTotal = Number(base?.meta?.turn) || 0;
+                const envInbox = normalizeInbox((base as any)?.inbox);
                 const env: EnvironmentState = {
                     time: new Date().toISOString(),
                     input: ctx.task.input,
                     sessionId,
                     turn: startTurnTotal + 1,
                     budget: { maxTurns: Infinity, latencyMs: Infinity }, // we will override this with the actual budgets from the manifest
+                    inbox: envInbox,
                     pending: {
                         inputs: (base?.pending?.inputs) || {},
                         children: (base?.pending?.children) || {},
@@ -988,7 +1012,8 @@ export class TaskEngine {
                         // does not share object identity with M updated by assignVarsIntoMental()
                         let mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
                         try { console.log('[TaskEngine] meta-save after merge', { fromMerged: (mNextWithVars as any)?.memory?.vars?.jsonObject }); } catch { }
-                        const nextAfterStart = { ...baseAfterStart, M: mNextWithVars, meta: nextMetaAfterStart } as Record<string, unknown>;
+                        const nextInboxAfterStart = normalizeInbox(env.inbox);
+                        const nextAfterStart = { ...baseAfterStart, M: mNextWithVars, meta: nextMetaAfterStart, inbox: nextInboxAfterStart } as Record<string, unknown>;
                         await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: ((ctx as any).agentId || 'default') as string, expectedWmVersion: expectedAfterStart, snapshot: nextAfterStart });
                         // Avoid later flush overwriting this save with stale M
                         (ctx as any).__wmSavedThisTurn = true;
@@ -1047,7 +1072,8 @@ export class TaskEngine {
                                 }
                             } catch { /* noop merge failure */ }
                             try { console.log('[TaskEngine] final-save after merge', { fromMerged: (mNextEffective as any)?.memory?.vars?.jsonObject }); } catch { }
-                            const next = { ...baseNow, M: mNextEffective, meta: nextMeta } as Record<string, unknown>;
+                            const nextInbox = normalizeInbox(env.inbox);
+                            const next = { ...baseNow, M: mNextEffective, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
                             (ctx as any).__wmSavedThisTurn = true;
                         } else {
@@ -1057,7 +1083,7 @@ export class TaskEngine {
                             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
                             const prevMeta = (baseNow as any).meta || {};
                             const nextMeta = { ...prevMeta, turn: env.turn };
-                            const next = { ...baseNow, meta: nextMeta } as Record<string, unknown>;
+                            const next = { ...baseNow, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
                         }
                     } catch { /* noop */ }
@@ -1366,6 +1392,7 @@ export class TaskEngine {
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
+            const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
             // Reattach working variables facade linked to this MentalState (resume path)
             try {
                 const currentVars = ((M as any)?.memory?.vars || {}) as Record<string, unknown>;
@@ -1519,15 +1546,19 @@ export class TaskEngine {
                     }
                 } as any;
             } catch { /* noop */ }
+            const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 input: { kind: 'input', token, value: input },
+                sessionId: taskId,
+                turn: startTurnTotal + 1,
                 pending: {
                     inputs: ((baseNow as any)?.pending?.inputs) || {},
                     children: ((baseNow as any)?.pending?.children) || {},
                     tools: ((baseNow as any)?.pending?.tools) || {},
                     groups: ((baseNow as any)?.pending?.groups) || {}
                 },
+                inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
             } as EnvironmentState;
@@ -1557,8 +1588,10 @@ export class TaskEngine {
                 const snapAfter = await this.sessionManager!.load(tenantId, taskId);
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
-                let mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
-                const nextSnap = { ...baseSnap, M: mNextEffective } as Record<string, unknown>;
+                const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
+                const prevMeta = ((baseSnap as any).meta || {}) as Record<string, unknown>;
+                const nextMeta = { ...prevMeta, turn: env.turn } as Record<string, unknown>;
+                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
             // Emit status event for the resumed turn
@@ -1587,7 +1620,20 @@ export class TaskEngine {
         const entry = tools[token];
         if (!entry) return;
         delete tools[token];
-        const next = setPendingTools(base, tools);
+        const next = setPendingTools(base, tools) as Record<string, unknown>;
+        const toolObservation: Observation = {
+            source: 'tool',
+            kind: 'tool.completed',
+            payload: { token, result, tool: entry?.name },
+            provenance: {
+                ts: Date.now(),
+                turn: Number((base as any)?.meta?.turn ?? 0) + 1,
+                id: token,
+                toolId: entry?.name,
+                correlationId: token
+            }
+        };
+        (next as any).inbox = addObservationToInbox((next as any).inbox, toolObservation);
         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', { token });
         // Always auto-resume one loop turn to consume the tool result
@@ -1602,6 +1648,7 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTool = Number((baseNow as any)?.meta?.turn) || 0;
+            const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 input: { kind: 'tool', token, result },
@@ -1613,6 +1660,7 @@ export class TaskEngine {
                     tools: ((baseNow as any)?.pending?.tools) || {},
                     groups: ((baseNow as any)?.pending?.groups) || {}
                 },
+                inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
             } as EnvironmentState;
@@ -1633,7 +1681,9 @@ export class TaskEngine {
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
-                const nextSnap = { ...baseSnap, M: mNextEffective } as Record<string, unknown>;
+                const prevMeta = ((baseSnap as any).meta || {}) as Record<string, unknown>;
+                const nextMeta = { ...prevMeta, turn: env.turn } as Record<string, unknown>;
+                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
             const channel = taskChannel(taskId);
@@ -1660,9 +1710,21 @@ export class TaskEngine {
         const entry = events[token];
         if (!entry) return;
         delete events[token];
-        const next = setPendingExternalEvents(base, events);
+        const next = setPendingExternalEvents(base, events) as Record<string, unknown>;
+        const externalObservation: Observation = {
+            source: 'env',
+            kind: 'external.event',
+            payload: { token, payload, type: entry?.type },
+            provenance: {
+                ts: Date.now(),
+                turn: Number((base as any)?.meta?.turn ?? 0) + 1,
+                id: token,
+                correlationId: token
+            }
+        };
+        (next as any).inbox = addObservationToInbox((next as any).inbox, externalObservation);
         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-        await this.sessionManager?.appendEvent(tenantId, taskId, 'task.external_event_occurred', { token, type: entry?.type });
+        await this.sessionManager?.appendEvent(tenantId, taskId, 'task.external_event_registered', { token, type: entry?.type });
         // Always auto-resume one loop turn to consume the external event
         try {
             const agentName = (snap as any)?.agentId;
@@ -1675,6 +1737,7 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
+            const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 input: { kind: 'event', token, payload, type: entry?.type },
@@ -1686,6 +1749,7 @@ export class TaskEngine {
                     tools: ((baseNow as any)?.pending?.tools) || {},
                     groups: ((baseNow as any)?.pending?.groups) || {}
                 },
+                inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
             } as EnvironmentState;
@@ -1706,7 +1770,7 @@ export class TaskEngine {
                 const prevMeta = (baseSnap as any).meta || {};
                 const nextMeta = { ...prevMeta, turnTotal: (Number(prevMeta.turnTotal) || 0) + executedTurns };
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
-                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta } as Record<string, unknown>;
+                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
             const channel = taskChannel(taskId);
@@ -1742,7 +1806,19 @@ export class TaskEngine {
         }
         // Remove mapping and auto-resume a loop turn with the child result
         delete tasks[token];
-        const next = setPendingTasks(base, tasks);
+        const next = setPendingTasks(base, tasks) as Record<string, unknown>;
+        const childObservation: Observation = {
+            source: 'child',
+            kind: 'child.completed',
+            payload: { token, childTaskId, result, agentId: childAgentId },
+            provenance: {
+                ts: Date.now(),
+                turn: Number((base as any)?.meta?.turn ?? 0) + 1,
+                id: token,
+                correlationId: token
+            }
+        };
+        (next as any).inbox = addObservationToInbox((next as any).inbox, childObservation);
         // Preserve the parent agent id on the session to ensure resumed turns use the parent's loop modules
         const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
@@ -1767,6 +1843,7 @@ export class TaskEngine {
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
             const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn; // assume initial run counted as 1 even if not persisted
+            const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 input: { kind: 'child', token, childTaskId, result, agentId: childAgentId },
@@ -1778,6 +1855,7 @@ export class TaskEngine {
                     tools: ((baseNow as any)?.pending?.tools) || {},
                     groups: ((baseNow as any)?.pending?.groups) || {}
                 },
+                inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
             } as EnvironmentState;
@@ -1798,7 +1876,7 @@ export class TaskEngine {
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 const prevMeta = (baseSnap as any).meta || {};
                 const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token };
-                const nextSnap = { ...baseSnap, M: mNext, meta: nextMeta } as Record<string, unknown>;
+                const nextSnap = { ...baseSnap, M: mNext, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch (e) { /* noop */ }
             const channel = taskChannel(parentTaskId);

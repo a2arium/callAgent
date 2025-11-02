@@ -36,7 +36,7 @@ Requirements:
   awaiting_input: require token, forbid 'completed.called'
   completed: require 'completed.called'
   autoMarks: completed → { 'completed.called': true }
-- Perception: use `isDirectInput` to extract `{ text }` or `{}`.
+- Perception: read `env.inbox.current` (e.g., latest `{ source:'user' }` observation) to extract `{ text }` or `{}`.
 - Learning: ONLY place writing M; enforce **sensory freshness** (if no new text, set undefined).
 - Policy (pure): Policy reads only M (no env or ctx.vars). If fresh text → internal/answer_with_llm; else → ask_user.
 - Execution: use **ts-pattern** with `.exhaustive()` on action kind (or on {stage,intent} if using full Intents). 
@@ -44,9 +44,9 @@ Requirements:
   - answer_with_llm → ctx.llm.call + replies → Stage.setStage(ctx, 'completed')
 - Inputs/Tools/Subagent (optional; pick the minimal variant):
   - Tools (no await, 3-stage): `ctx.tools.invoke(name, args)` and continue in the same turn.
-  - Tools (awaiting variant): `requestTool(...){ token }` → Transition `await_tool(token)` → on resume handle `env.input.kind === 'tool'`.
+  - Tools (awaiting variant): `requestTool(...){ token }` → Transition `await_tool(token)` → on resume read `env.inbox.current` for the `{ source: 'tool', kind: 'tool.completed' }` observation.
   - Subagent (no await, 3-stage): `sendTaskToAgent(..., { awaitCompletion:false })` and continue in the same turn.
-  - Subagent (awaiting variant): `sendTaskToAgent(...){ token }` → Transition `await_child(token)` → on resume handle `env.input.kind === 'child'`.
+  - Subagent (awaiting variant): `sendTaskToAgent(...){ token }` → Transition `await_child(token)` → on resume read `env.inbox.current` for the `{ source: 'child', kind: 'child.completed' }` observation.
   - Caveat: if child requests input while parent awaited completion, switch to `awaitCompletion:false` and propagate `await_child`.
 - Transition: **ts-pattern**; ask_user → await_input(token); internal done → complete; else → continue. Include tool/child awaits only if you used those variants.
 - Shield: deterministic (veto > defer > transform > pass). Pass-through OK for now, but scaffold the API.
@@ -62,8 +62,8 @@ Deliverables:
    - Invariant enforcement: cannot enter awaiting_input without token; completed requires 'completed.called'
    - Policy purity unit test (depends only on M; no env/ctx.vars reads)
    - Transition mapping correctness
-   - If tools awaiting used: tool action → await_tool(token) → resume with `env.input.kind === 'tool'`
-   - If subagent awaiting used: subagent action → await_child(token) → resume with `env.input.kind === 'child'`
+   - If tools awaiting used: tool action → await_tool(token) → resume with `env.inbox.current` containing a tool observation
+   - If subagent awaiting used: subagent action → await_child(token) → resume with `env.inbox.current` containing a child observation
 ```
 
 ---

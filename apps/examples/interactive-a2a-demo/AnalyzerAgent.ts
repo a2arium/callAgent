@@ -36,11 +36,21 @@ export default createAgent({
     shield: (_m: any, a: any) => a,
     execution: async (a: any, ctx: any, m: any) => {
         console.log('[Analyzer] Execution: handling action kind =', a?.kind);
+        const base = (toolId: string, status: 'ok' | 'error' = 'ok', data?: unknown) => ({
+            status,
+            ts: Date.now(),
+            toolId,
+            data
+        });
         if (a?.kind === 'ask_user') {
             console.log('[Analyzer] Execution: asking user');
             await ctx.reply([{ type: 'text', text: 'Analyzer: ready' }]);
             const tokenHandle = await (ctx as any).requestInput(a.prompt as string, {});
-            return { kind: 'ask_user', token: (tokenHandle as any)?.token || 'unknown' } as any;
+            const token = (tokenHandle as any)?.token || 'unknown';
+            return {
+                action: { kind: 'ask_user', token },
+                result: { ...base('analyzer', 'ok', { prompt: a.prompt }), correlationId: token }
+            } as any;
         }
 
         console.log('[Analyzer] Execution: finalizing');
@@ -50,13 +60,17 @@ export default createAgent({
         const threshold = Number(raw) * 2 || 50;
         await ctx.reply([{ type: 'text', text: `Analyzer: threshold=${threshold}` }]);
         (ctx.vars as any).set('analyzer.threshold', threshold);
-        return { kind: 'internal', done: true } as any;
+        return {
+            action: { kind: 'internal', done: true },
+            result: base('analyzer', 'ok', { threshold })
+        } as any;
     },
     transition: (_env: any, exec: any) => {
         console.log('[Analyzer] Transition: exec.kind =', exec?.kind);
-        if (exec?.kind === 'ask_user') {
+        const action = exec?.action || exec;
+        if (action?.kind === 'ask_user') {
             console.log('[Analyzer] Transition: returning await_input');
-            return { kind: 'await_input', token: exec.token } as any;
+            return { kind: 'await_input', token: action.token } as any;
         }
         console.log('[Analyzer] Transition: returning complete');
         return { kind: 'complete' } as any;

@@ -1,5 +1,5 @@
 import { createAgent } from '@a2arium/callagent-core';
-import type { EnvironmentState, MentalState, ProposedAction, ExecutableAction, TurnOutcome, TaskContext } from '@a2arium/callagent-core';
+import type { EnvironmentState, MentalState, ProposedAction, ExecutableAction, TurnOutcome, TaskContext, Modules, ExecResult } from '@a2arium/callagent-core';
 import { match, P } from 'ts-pattern';
 import { logger } from '@a2arium/callagent-utils';
 
@@ -7,34 +7,23 @@ import { logger } from '@a2arium/callagent-utils';
 type Sensory = { payload?: unknown };
 type Obs = { payload?: unknown };
 
-export default createAgent<Sensory, Obs>({
-    manifest: 'agent.json',
-
-    // A - Attention
+const modules: Partial<Modules<Sensory, Obs>> = {
     attention: (_m: MentalState<Sensory>, env: EnvironmentState) => ({ hasInput: Boolean(env.input) }),
-
-    // P - Perception: normalize the initial input as-is
-    perception: (env: EnvironmentState): Obs => ({ payload: env.input }),
-
-    // L - Learning: store sensory snapshot
-    learning: (prev: MentalState<Sensory>, _action: ProposedAction | undefined, obs: Obs): MentalState<Sensory> => ({
+    perception: (env: EnvironmentState) => ({ payload: env.input }),
+    learning: (prev: MentalState<Sensory>, _action: ProposedAction | undefined, obs: Obs) => ({
         ...prev,
         memory: { ...prev.memory, sensory: { payload: obs.payload } }
     }),
-
-    // R - Policy: proceed if we have any payload
     policy: (m: MentalState<Sensory>): ProposedAction => {
         const hasPayload = typeof m.memory?.sensory?.payload !== 'undefined';
         return hasPayload
             ? ({ kind: 'internal', intent: 'process', data: { ok: true } } as const)
             : ({ kind: 'internal', intent: 'no_input' } as const);
     },
-
-    // S - Shield
     shield: (_m: MentalState<Sensory>, a: ProposedAction) => ({ action: 'pass', intent: a } as const),
+    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState<Sensory>) => {
+        const baseResult = (): ExecResult => ({ status: 'ok', ts: Date.now(), toolId: 'cached-agent' });
 
-    // E - Execution: generate random number to verify cache hit (same number = cached)
-    execution: async (a: ProposedAction, ctx: TaskContext): Promise<ExecutableAction> => {
         return await match(a)
             .with({ kind: 'internal', intent: 'process', data: P.select() }, async () => {
                 const started = Date.now();
@@ -44,21 +33,27 @@ export default createAgent<Sensory, Obs>({
                 const elapsed = Date.now() - started;
                 ctx.progress(95, `done in ${elapsed}ms`);
                 logger.info(`Execution completed with random=${randomValue}`);
-                // Return random number - if cache works, subsequent runs will return same number
-                return { kind: 'internal', done: true, result: { ok: true, randomValue, elapsedMs: elapsed } } as unknown as ExecutableAction;
+                return {
+                    action: { kind: 'internal', done: true } as ExecutableAction,
+                    result: { ...baseResult(), data: { ok: true, randomValue, elapsedMs: elapsed } }
+                };
             })
-            .with({ kind: 'internal', intent: 'no_input' }, async () => {
-                ctx.progress(100, 'No input provided');
-                return { kind: 'internal', done: true, result: { ok: false, reason: 'no_input' } } as unknown as ExecutableAction;
-            })
-            .otherwise(async () => ({ kind: 'internal', done: true } as ExecutableAction));
+            .with({ kind: 'internal', intent: 'no_input' }, async () => ({
+                action: { kind: 'internal', done: true } as ExecutableAction,
+                result: { ...baseResult(), data: { ok: false, reason: 'no_input' } }
+            }))
+            .otherwise(async () => ({
+                action: { kind: 'internal', done: true } as ExecutableAction,
+                result: baseResult()
+            }));
     },
-
-    // T - Transition: produce final TurnOutcome with result -> cached by runner
-    transition: (_env: EnvironmentState, exec: ExecutableAction, _m: MentalState<Sensory>): TurnOutcome => {
-        const hasResult = (e: unknown): e is { result: unknown } => typeof e === 'object' && e !== null && 'result' in (e as Record<string, unknown>);
-        return match(exec)
-            .with({ kind: 'internal', done: true }, (e) => ({ kind: 'complete', result: hasResult(e) ? (e as { result: unknown }).result : { ok: true } } as TurnOutcome))
-            .otherwise(() => ({ kind: 'complete', result: { ok: true } } as TurnOutcome));
+    transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, _m: MentalState<Sensory>): TurnOutcome => {
+        const payload = typeof exec.result.data !== 'undefined' ? exec.result.data : { ok: true };
+        return { kind: 'complete', result: payload } as TurnOutcome;
     }
+};
+
+export default createAgent<Sensory, Obs>({
+    manifest: 'agent.json',
+    loop: { modules }
 }, import.meta.url);

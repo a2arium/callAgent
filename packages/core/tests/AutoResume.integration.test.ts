@@ -73,25 +73,36 @@ describe('Auto-Resume Integration Tests', () => {
                         },
 
                         execution: async (action: any, ctx: any, M: any) => {
+                            const base = () => ({ status: 'ok', ts: Date.now(), toolId: 'auto-resume-test-agent' });
                             if (action.kind === 'ask_user') {
                                 const handle = await ctx.requestInput(action.prompt);
-                                return { kind: 'ask_user', token: handle.token };
+                                return {
+                                    action: { kind: 'ask_user', token: handle.token },
+                                    result: { ...base(), data: { prompt: action.prompt }, correlationId: handle.token }
+                                };
                             }
                             if (action.kind === 'language') {
                                 await ctx.reply(action.content);
-                                return { kind: 'language', echoed: true };
+                                return {
+                                    action: { kind: 'language', echoed: true },
+                                    result: { ...base(), data: { message: action.content } }
+                                };
                             }
-                            return { kind: 'internal', done: true };
+                            return {
+                                action: { kind: 'internal', done: true },
+                                result: base()
+                            };
                         },
 
                         transition: (env: any, exec: any, M: any) => {
-                            if (exec.kind === 'ask_user') {
-                                return { kind: 'await_input', token: exec.token };
+                            const { action, result } = exec;
+                            if (action?.kind === 'ask_user') {
+                                return { kind: 'await_input', token: action.token };
                             }
-                            if (exec.kind === 'language') {
-                                return { kind: 'complete' };
+                            if (action?.kind === 'language') {
+                                return { kind: 'complete', result: result?.data };
                             }
-                            return { kind: 'continue' };
+                            return { kind: 'continue', observations: [] };
                         }
                     }
                 },
@@ -150,9 +161,10 @@ describe('Auto-Resume Integration Tests', () => {
                         },
 
                         transition: (env: any, exec: any, M: any) => {
-                            if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
-                            if (exec.kind === 'language') return { kind: 'complete' };
-                            return { kind: 'continue' };
+                            const action = exec?.action || exec;
+                            if (action?.kind === 'ask_user') return { kind: 'await_input', token: action.token };
+                            if (action?.kind === 'language') return { kind: 'complete' };
+                            return { kind: 'continue', observations: [] };
                         }
                     }
                 },
@@ -199,26 +211,37 @@ describe('Auto-Resume Integration Tests', () => {
                         },
 
                         execution: async (action: any, ctx: any, M: any) => {
+                            const base = (toolId?: string) => ({ status: 'ok', ts: Date.now(), toolId: toolId ?? 'tool-resume-test-agent' });
                             if (action.kind === 'tool') {
                                 // Mock tool execution
                                 const result = { success: true, data: 'tool-response' };
-                                return { kind: 'tool', token: 'tool-token-123', result };
+                                return {
+                                    action: { kind: 'tool', token: 'tool-token-123' },
+                                    result: { ...base(action.name), data: result, correlationId: 'tool-token-123' }
+                                };
                             }
                             if (action.kind === 'language') {
                                 await ctx.reply(action.content);
-                                return { kind: 'language', echoed: true };
+                                return {
+                                    action: { kind: 'language', echoed: true },
+                                    result: { ...base('language'), data: { message: action.content } }
+                                };
                             }
-                            return { kind: 'internal', done: true };
+                            return {
+                                action: { kind: 'internal', done: true },
+                                result: base()
+                            };
                         },
 
                         transition: (env: any, exec: any, M: any) => {
-                            if (exec.kind === 'tool' && exec.token) {
-                                return { kind: 'await_tool', token: exec.token };
+                            const { action, result } = exec;
+                            if (action?.kind === 'tool' && action.token) {
+                                return { kind: 'await_tool', token: action.token };
                             }
-                            if (exec.kind === 'language') {
-                                return { kind: 'complete' };
+                            if (action?.kind === 'language') {
+                                return { kind: 'complete', result: result?.data };
                             }
-                            return { kind: 'continue' };
+                            return { kind: 'continue', observations: [] };
                         }
                     }
                 },
@@ -262,25 +285,36 @@ describe('Auto-Resume Integration Tests', () => {
                         },
 
                         execution: async (action: any, ctx: any, M: any) => {
+                            const base = (id?: string) => ({ status: 'ok', ts: Date.now(), toolId: id ?? 'child-resume-test-agent' });
                             if (action.kind === 'subagent') {
                                 // Mock child execution
-                                return { kind: 'subagent', token: 'child-token-456' };
+                                return {
+                                    action: { kind: 'subagent', token: 'child-token-456' },
+                                    result: { ...base(action.target), correlationId: 'child-token-456' }
+                                };
                             }
                             if (action.kind === 'language') {
                                 await ctx.reply(action.content);
-                                return { kind: 'language', echoed: true };
+                                return {
+                                    action: { kind: 'language', echoed: true },
+                                    result: { ...base('language'), data: { message: action.content } }
+                                };
                             }
-                            return { kind: 'internal', done: true };
+                            return {
+                                action: { kind: 'internal', done: true },
+                                result: base()
+                            };
                         },
 
                         transition: (env: any, exec: any, M: any) => {
-                            if (exec.kind === 'subagent' && exec.token) {
-                                return { kind: 'await_child', token: exec.token };
+                            const { action, result } = exec;
+                            if (action?.kind === 'subagent' && action.token) {
+                                return { kind: 'await_child', token: action.token };
                             }
-                            if (exec.kind === 'language') {
-                                return { kind: 'complete' };
+                            if (action?.kind === 'language') {
+                                return { kind: 'complete', result: result?.data };
                             }
-                            return { kind: 'continue' };
+                            return { kind: 'continue', observations: [] };
                         }
                     }
                 },
@@ -325,25 +359,36 @@ describe('Auto-Resume Integration Tests', () => {
                         },
 
                         execution: async (action: any, ctx: any, M: any) => {
+                            const base = (channel?: string) => ({ status: 'ok', ts: Date.now(), toolId: channel ?? 'external-event-test-agent' });
                             if (action.kind === 'internal' && action.intent === 'wait-for-external') {
                                 // Mock external event registration
-                                return { kind: 'external', token: 'external-token-789' };
+                                return {
+                                    action: { kind: 'external', token: 'external-token-789' },
+                                    result: { ...base('external'), correlationId: 'external-token-789' }
+                                };
                             }
                             if (action.kind === 'language') {
                                 await ctx.reply(action.content);
-                                return { kind: 'language', echoed: true };
+                                return {
+                                    action: { kind: 'language', echoed: true },
+                                    result: { ...base('language'), data: { message: action.content } }
+                                };
                             }
-                            return { kind: 'internal', done: true };
+                            return {
+                                action: { kind: 'internal', done: true },
+                                result: base()
+                            };
                         },
 
                         transition: (env: any, exec: any, M: any) => {
-                            if (exec.kind === 'external' && exec.token) {
-                                return { kind: 'await_external', token: exec.token };
+                            const { action, result } = exec;
+                            if (action?.kind === 'external' && action.token) {
+                                return { kind: 'await_external', token: action.token };
                             }
-                            if (exec.kind === 'language') {
-                                return { kind: 'complete' };
+                            if (action?.kind === 'language') {
+                                return { kind: 'complete', result: result?.data };
                             }
-                            return { kind: 'continue' };
+                            return { kind: 'continue', observations: [] };
                         }
                     }
                 },

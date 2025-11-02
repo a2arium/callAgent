@@ -36,11 +36,14 @@ describe('TaskEngine ctx.vars + MentalState synchronization', () => {
                         if (seenSelectors.length === 1) {
                             ctx.vars.set('selectors', 'from-execution');
                         }
-                        return { kind: 'internal', done: true } as const;
+                        return {
+                            action: { kind: 'internal', done: true } as const,
+                            result: { status: 'ok', ts: Date.now(), toolId: 'ctx-vars-sync' }
+                        };
                     },
-                    transition: () => (seenSelectors.length >= 2
-                        ? { kind: 'complete', result: { ok: true } } as const
-                        : { kind: 'continue' } as const)
+                    transition: (_env: any, exec: any, _m: any) => (exec.action?.kind === 'language'
+                        ? { kind: 'complete', result: 'done' } as const
+                        : { kind: 'continue', observations: [] } as const)
                 }
             },
             async handleTask() { /* noop */ }

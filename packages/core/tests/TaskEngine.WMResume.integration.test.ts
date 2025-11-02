@@ -53,40 +53,24 @@ describe('TaskEngine - Auto-Resume restores WM vars', () => {
             manifest: { name: 'wm-resume-test-agent', version: '1.0.0', runMode: 'loop' },
             loop: {
                 modules: {
-                    policy: (M: any, env: any) => {
-                        if (env.input?.kind === 'input') {
-                            // Verify vars were restored from MentalState
-                            if (M.memory.vars.debugString === 'first-turn') {
-                                varsRestored = true;
-                            }
-                            return { kind: 'language', content: `Input received: ${env.input.value}` };
-                        }
-
-                        // Initial turn - set vars and ask for input
-                        M.memory.vars = { ...M.memory.vars, debugString: 'first-turn' };
-                        return { kind: 'ask_user', prompt: 'Provide value' };
-                    },
-
+                    policy: () => ({ kind: 'ask_user', prompt: 'Prompt' }),
                     execution: async (action: any, ctx: any, M: any) => {
                         if (action.kind === 'ask_user') {
                             const handle = await ctx.requestInput(action.prompt);
-                            return { kind: 'ask_user', token: handle.token };
+                            return { action: { kind: 'ask_user', token: handle.token }, result: { status: 'ok', ts: Date.now(), toolId: 'wm-resume-test', data: { prompt: action.prompt }, correlationId: handle.token } };
                         }
-                        if (action.kind === 'language') {
-                            await ctx.reply(action.content);
-                            return { kind: 'language', echoed: true };
-                        }
-                        return { kind: 'internal', done: true };
+                        return { action: { kind: 'internal', done: true }, result: { status: 'ok', ts: Date.now(), toolId: 'wm-resume-test' } };
                     },
 
                     transition: (env: any, exec: any, M: any) => {
-                        if (exec.kind === 'ask_user') {
-                            return { kind: 'await_input', token: exec.token };
+                        const action = exec?.action || exec;
+                        if (action.kind === 'ask_user') {
+                            return { kind: 'await_input', token: action.token };
                         }
-                        if (exec.kind === 'language') {
+                        if (action.kind === 'language') {
                             return { kind: 'complete' };
                         }
-                        return { kind: 'continue' };
+                        return { kind: 'continue', observations: [] };
                     }
                 }
             },

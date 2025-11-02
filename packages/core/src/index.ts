@@ -9,8 +9,18 @@ export { A2AService, globalA2AService } from './core/orchestration/A2AService.js
 export { TaskEngine } from './core/orchestration/taskEngine.js';
 export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
-export type { MentalState, EnvironmentState } from './loop/types.js';
-export type { ProposedAction, ExecutableAction, TurnOutcome, ShieldOutcome, AttentionSignal, Observation } from './loop/oneTurn.js';
+export type { MentalState, EnvironmentState, ObservationInbox } from './loop/types.js';
+export type {
+    ProposedAction,
+    ExecutableAction,
+    ExecResult,
+    TransitionOut,
+    TurnOutcome,
+    ShieldOutcome,
+    AttentionSignal,
+    Observation,
+    ObservationProvenance
+} from './loop/oneTurn.js';
 export type { Modules } from './loop/oneTurn.js';
 export { runEffect } from './loop/effects.js';
 export { createStageFacade } from './loop/stageHelpers.js';

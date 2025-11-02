@@ -7,7 +7,22 @@ import type { MentalState, EnvironmentState } from './types.js';
 import type { PureLLMPort } from '../shared/types/LLMTypes.js';
 
 export type AttentionSignal = unknown;
-export type Observation = unknown;
+
+export type ObservationProvenance = {
+    ts: number;
+    turn: number;
+    id?: string;
+    toolId?: string;
+    correlationId?: string;
+};
+
+export type Observation = {
+    source: 'tool' | 'child' | 'env' | 'user' | 'internal';
+    kind: string;
+    payload: unknown;
+    provenance: ObservationProvenance;
+    error?: { code: string; message: string };
+};
 
 export type ProposedAction =
     | { kind: 'ask_user'; prompt: string; schema?: unknown }
@@ -18,10 +33,20 @@ export type ProposedAction =
 
 export type ExecutableAction =
     | { kind: 'ask_user'; token: string }
-    | { kind: 'subagent'; token?: string; result?: unknown }
-    | { kind: 'tool'; token?: string; result?: unknown }
+    | { kind: 'subagent'; token?: string }
+    | { kind: 'tool'; token?: string }
     | { kind: 'language'; echoed: boolean }
     | { kind: 'internal'; done: boolean };
+
+export type ExecResult = {
+    status: 'ok' | 'error';
+    data?: unknown;
+    error?: { code: string; message: string };
+    receipts?: unknown;
+    correlationId?: string;
+    toolId?: string;
+    ts?: number;
+};
 
 export type ShieldOutcome =
     | { action: 'pass'; intent: ProposedAction }
@@ -29,13 +54,16 @@ export type ShieldOutcome =
     | { action: 'veto'; reason: string }
     | { action: 'defer'; askUser: string };
 
-export type TurnOutcome =
-    | { kind: 'continue' }
+export type TransitionOut =
+    | { kind: 'continue'; observations: Observation[] }
     | { kind: 'await_input'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; reason: string };
+
+// Temporary alias while downstream modules migrate
+export type TurnOutcome = TransitionOut;
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
     | ((m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
@@ -48,9 +76,9 @@ export type Modules<Sensory = unknown, Obs = Observation, Alpha = AttentionSigna
     learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
     policy: PolicyFn<Sensory, Obs>;
     shield: (m: MentalState<Sensory>, a: ProposedAction, llm?: PureLLMPort) => ShieldOutcome;
-    execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>;
-    transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>, llm?: PureLLMPort) => TurnOutcome;
-    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome, llm?: PureLLMPort) => number;
+    execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult }>;
+    transition: (env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut;
+    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult }, outcome: TransitionOut, llm?: PureLLMPort) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, llm?: PureLLMPort) => number;
 };
 
@@ -61,7 +89,13 @@ export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = Atte
     mods: Modules<Sensory, Obs, Alpha>,
     prevAction?: ProposedAction,
     rPrev?: number
-): Promise<{ m: MentalState<Sensory>; outcome: TurnOutcome; exec: ExecutableAction; timings: Record<string, number>; reward: number }> {
+): Promise<{
+    m: MentalState<Sensory>;
+    outcome: TransitionOut;
+    exec: { action: ExecutableAction; result: ExecResult };
+    timings: Record<string, number>;
+    reward: number;
+}> {
     const timings: Record<string, number> = {};
 
     // Extract pure LLM port for use in pure modules
@@ -179,7 +213,7 @@ export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = Atte
     }
 
     const tE0 = Date.now();
-    let exec: ExecutableAction;
+    let exec: { action: ExecutableAction; result: ExecResult };
     try {
         exec = await mods.execution(toExecute!, ctx, m1);
     } catch (error) {
@@ -189,7 +223,7 @@ export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = Atte
     timings.executionMs = Date.now() - tE0;
 
     const tT0 = Date.now();
-    let outcome: TurnOutcome;
+    let outcome: TransitionOut;
     try {
         outcome = mods.transition(env, exec, m1, llm);
     } catch (error) {

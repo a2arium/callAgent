@@ -5,23 +5,20 @@ This document describes the loop-first execution model (Attention → Perception
 - MentalState `snapshot.M` is the single source of truth, persisted at turn boundaries and before await exits.
 - LoopRunner runs one turn per invocation; auto-resume triggers additional turns after events.
 - Modules are declared per-agent in `createAgent({ loop: { modules: {...} } })`.
-- Auto-resume eliminates the need for explicit durable handlers by injecting event payloads into `env.input`.
+- Auto-resume eliminates the need for explicit durable handlers by appending event payloads to `env.inbox` (and mirroring them on `env.input` for legacy agents).
 
 ### EnvironmentState with Auto-Resume
 ```ts
 type EnvironmentState = {
   time: string;
-  input?: EventPayload;  // Auto-resume event data
+  inbox: {
+    current: Observation[];   // events for this turn
+    all: Observation[];       // historical log
+  };
   pending: { inputs: Record<string, unknown>; children: Record<string, unknown>; tools: Record<string, unknown>; groups: Record<string, unknown> };
   lastExec?: unknown;
   externalEvents?: unknown[];
-}
-
-type EventPayload = 
-  | { kind: 'input'; token: string; value: string }
-  | { kind: 'tool'; token: string; result: unknown }
-  | { kind: 'child'; token: string; output: unknown }
-  | { kind: 'external'; token: string; payload: unknown };
+};
 ```
 
 ### Declaring Loop Modules
@@ -32,9 +29,11 @@ export default createAgent({
   loop: {
     modules: {
       policy: (M, env) => {
-        // Handle auto-resumed events
-        if (env.input?.kind === 'input') {
-          return { kind: 'language', content: `Received: ${env.input.value}` };
+        // Handle auto-resumed events via inbox
+        const latestInput = env.inbox.current.find(o => o.source === 'user');
+        const value = (latestInput?.payload as { value?: string })?.value;
+        if (typeof value === 'string') {
+          return { kind: 'language', content: `Received: ${value}` };
         }
         return { kind: 'ask_user', prompt: 'What should I do?' };
       }
@@ -68,13 +67,13 @@ When agents produce `await_*` outcomes, the engine automatically resumes after e
 1. **Agent produces await outcome**: `{ kind: 'await_input', token: 'abc123' }`
 2. **Engine persists MentalState** and exits with `input-required` status
 3. **Event occurs**: User provides input via `/tasks/{taskId}/input`
-4. **Engine auto-resumes**: Builds `env.input = { kind: 'input', token: 'abc123', value: 'user response' }`
-5. **Loop processes event**: Policy module handles `env.input` and continues
+4. **Engine auto-resumes**: Pushes `{ source: 'user', kind: 'input.provided', payload: { token: 'abc123', value: 'user response' } }` onto `env.inbox`
+5. **Loop processes event**: Policy module reads `env.inbox.current` and continues
 
 ### Example agent with auto-resume
 - Example path: `apps/examples/loop-agent-mini/AgentModule.ts`
 - Demonstrates:
-  - Policy handling `env.input?.kind === 'input'` to process resumed events
+  - Policy handling user observations from `env.inbox.current` to process resumed events
   - Transition returning `await_input` for user interactions
   - Execution calling `ctx.requestInput()` without `onProvided` handlers
 

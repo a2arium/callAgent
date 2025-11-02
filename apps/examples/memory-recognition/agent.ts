@@ -242,6 +242,20 @@ export default createAgent({
      */
     execution: async (action: any, ctx: any, mentalState: any) => {
         const mode = (ctx.task.input as any)?.mode || 'both';
+        const base = (status: 'ok' | 'error', payload?: { data?: unknown; error?: { code: string; message: string } }) => ({
+            status,
+            ts: Date.now(),
+            toolId: 'memory-recognition-demo',
+            data: payload?.data,
+            error: payload?.error
+        });
+
+        if (action?.kind !== 'run_demo') {
+            return {
+                action: { kind: 'internal', done: true },
+                result: base('ok', { data: { state: 'noop', mode } })
+            } as any;
+        }
 
         await ctx.progress(0.01, `Memory Recognition Demo Agent Started (mode: ${mode})`);
         await ctx.reply([{ type: 'text', text: '📊 Goal: Test semantic memory recognition and enrichment' }]);
@@ -268,7 +282,10 @@ export default createAgent({
 
             await ctx.reply([{ type: 'text', text: '✅ Demo completed successfully!' }]);
             ctx.complete(1, 'completed');
-            return { kind: 'internal', done: true } as any;
+            return {
+                action: { kind: 'internal', done: true },
+                result: base('ok', { data: { state: 'done', mode } })
+            } as any;
         } catch (error) {
             await ctx.reply([{ type: 'text', text: `❌ Demo failed: ${error instanceof Error ? error.message : String(error)}` }]);
             throw error;

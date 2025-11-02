@@ -3,7 +3,7 @@ import { oneTurn, type Modules } from '../src/loop/oneTurn.js';
 describe('Policy sampling with explorationEpsilon and temperature', () => {
     it('samples from distribution and honors epsilon', async () => {
         const ctx: any = { reply: async () => { } };
-        const env: any = {};
+        const env: any = { inbox: { current: [], all: [] } };
         const baseM: any = {
             memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },
@@ -21,8 +21,14 @@ describe('Policy sampling with explorationEpsilon and temperature', () => {
                 { action: { kind: 'language', content: 'B' } as any, prob: 0.1 }
             ]),
             shield: (_m, a) => a,
-            execution: async (a: any, c: any) => { await c.reply(a.content); return { kind: 'language', echoed: true } as any; },
-            transition: () => ({ kind: 'continue' })
+            execution: async (a: any, c: any) => {
+                await c.reply(a.content);
+                return {
+                    action: { kind: 'language', echoed: true } as any,
+                    result: { status: 'ok', ts: Date.now(), toolId: 'policy-sampling', data: { message: a.content } }
+                };
+            },
+            transition: () => ({ kind: 'continue', observations: [] })
         };
         let seenA = 0, seenB = 0;
         for (let i = 0; i < 50; i++) {

@@ -1,3 +1,6 @@
+import type { Observation } from '../../loop/oneTurn.js';
+import type { ObservationInbox } from '../../loop/types.js';
+
 export type PendingInputHandler = {
     // optional metadata like schema, expiresAt, etc.
     schema?: unknown;
@@ -9,6 +12,29 @@ export type SnapshotShape = {
     pending?: {
         inputs?: Record<string, PendingInputHandler>;
     };
+    inbox?: ObservationInbox | Observation[];
+    meta?: { turn?: number };
+};
+
+const normalizeInbox = (value: SnapshotShape['inbox']): ObservationInbox => {
+    if (Array.isArray(value)) {
+        const arr = value as Observation[];
+        return { current: [...arr], all: [...arr] };
+    }
+    if (value && typeof value === 'object') {
+        const candidate = value as Partial<ObservationInbox>;
+        const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
+        const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
+        return { current, all };
+    }
+    return { current: [], all: [] };
+};
+
+const addObservationToInbox = (value: SnapshotShape['inbox'], observation: Observation): ObservationInbox => {
+    const inbox = normalizeInbox(value);
+    inbox.current.push(observation);
+    inbox.all.push(observation);
+    return inbox;
 };
 
 export function getPendingInputs(snapshot: Record<string, unknown>): Record<string, PendingInputHandler> {
@@ -45,7 +71,22 @@ export function applyInputProvided(
     const inputs = (vars.__inputs as Record<string, unknown>) || {};
     inputs[token] = input as unknown;
     vars.__inputs = inputs;
-    const next = setPendingInputs({ ...snapshot, vars }, pending);
+    const snapshotWithVars = { ...snapshot, vars } as SnapshotShape;
+    const observation: Observation = {
+        source: 'user',
+        kind: 'input.provided',
+        payload: { token, value: input },
+        provenance: {
+            ts: Date.now(),
+            turn: Number(snapshotWithVars.meta?.turn ?? 0) + 1,
+            id: token,
+            toolId: 'user',
+            correlationId: token
+        }
+    };
+    const nextSnapshot = setPendingInputs(snapshotWithVars as Record<string, unknown>, pending) as SnapshotShape;
+    const nextInbox = addObservationToInbox(nextSnapshot.inbox, observation);
+    const next = { ...nextSnapshot, inbox: nextInbox } as Record<string, unknown>;
     return { next };
 }
 

@@ -69,6 +69,25 @@ type Observation = {
   text?: string;
   eventType?: 'user' | 'input' | 'tool' | 'child' | 'internal';
   meta?: unknown;
+  provenance?: ObservationProvenance;
+};
+
+type ExecResult = {
+  status: 'ok' | 'error';
+  data?: unknown;
+  error?: { code: string; message: string };
+  receipts?: unknown;
+  correlationId?: string;
+  toolId?: string;
+  ts: number;
+};
+
+type ObservationProvenance = {
+  ts: number;
+  turn: number;
+  id?: string;
+  toolId?: string;
+  correlationId?: string;
 };
 
 // WHAT to do (pure decision)
@@ -81,21 +100,20 @@ type Intent =
   | { kind: 'wait' }
   | { kind: 'complete'; result?: unknown };
 
-// Result of doing (side effects performed)
 type ExecutableAction =
   | { kind: 'ask_user'; token: string }
-  | { kind: 'tool'; token?: string; result?: unknown }
-  | { kind: 'subagent'; token?: string; result?: unknown }
+  | { kind: 'tool'; token?: string }
+  | { kind: 'subagent'; token?: string }
   | { kind: 'internal'; done: boolean };
 
-// Loop outcome
-type TurnOutcome =
-  | { kind: 'continue' }
-  | { kind: 'await_input'; token: string }
+type TransitionOut =
+  | { kind: 'continue'; observations: Observation[] }
   | { kind: 'await_tool'; token: string }
   | { kind: 'await_child'; token: string }
   | { kind: 'complete'; result?: unknown }
   | { kind: 'fail'; reason: string };
+
+Execution now returns `{ action, result }` where `result` is an `ExecResult` persisted with provenance (`ts`, optional `correlationId/toolId`). Transition consumes that payload, emits loop control, and returns normalized `Observation` objects. The runtime appends every observation to `env.inbox.all`, stages the batch on `env.inbox.current`, and stamps each entry with the current `env.turn` so the very next turn’s Perception can drain, validate, and hand Learning a fresh observation.
 ```
 
 ### Generic MentalState and Modules
@@ -117,11 +135,11 @@ type Modules<Sensory = unknown, Obs = unknown> = {
                 | { action: 'transform'; intent: ProposedAction }
                 | { action: 'veto'; reason: string }
                 | { action: 'defer'; askUser: string };
-  execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>;
-  transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState<Sensory>, llm?: PureLLMPort) => TurnOutcome;
+  execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult }>;
+  transition: (env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut;
 
   // Optional reward hooks
-  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: ExecutableAction, outcome: TurnOutcome, llm?: PureLLMPort) => number;
+  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult }, outcome: TransitionOut, llm?: PureLLMPort) => number;
   intrinsicReward?: (m: MentalState<Sensory>, obs: Obs, llm?: PureLLMPort) => number;
 };
 ```
@@ -302,9 +320,8 @@ const validateObs = ajv.compile(obsSchema);
 
 createAgent<Sensory, Obs>({
     perception: async (env: EnvironmentState, alpha: AttentionSignal, llm?: PureLLMPort): Promise<Obs> => {
-        if (!isDirectInput(env?.input)) return {};
-        
-        const { text } = env.input.value as { text?: string };
+        const latest = env.inbox.current.find(o => o.source === 'user');
+        const { text } = ((latest?.payload as { value?: { text?: string } })?.value) || {};
         if (!text) return {};
 
         // Try LLM extraction if available
@@ -381,7 +398,8 @@ If the framework exposes defaults (e.g., `ctx.defaults.execution`), you may **ov
 
 ```ts
 perception: (env) => {
-  const i = env.input;
+  const latest = env.inbox.current.at(-1);
+  const i = latest?.payload;
   if (!i) return {};
   if (typeof i === 'string') return { text: i, eventType: 'user' };
 

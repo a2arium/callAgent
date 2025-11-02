@@ -50,15 +50,23 @@ export default createAgent({
     shield: (_m: any, a: any) => a,
     execution: async (a: any, ctx: any, m: any) => {
         const v = (m.vars = (m.vars || ({} as Record<string, unknown>)) as Record<string, unknown>);
+        const baseResult = () => ({ status: 'ok', ts: Date.now(), toolId: 'orchestrator' });
         if (a?.kind === 'internal' && a.intent === 'run') {
             await ctx.reply([{ type: 'text', text: 'Orchestrator: starting flow' }]);
             ctx.vars.set('workflow', `wf_${Date.now()}`);
             const extract = await ctx.sendTaskToAgent?.('extractor', { source: 'db', limit: 100 } as ExtractorInput, { awaitCompletion: true });
             console.log('[Orchestrator] execution: extract =', extract);
             (v as any).extract = extract;
-            await ctx.sendTaskToAgent?.('analyzer', { method: 'basic' } as AnalyzerInput, { awaitCompletion: false, onInputRequired: 'onAnalyzerAsk' });
+            const analyzerHandle = await ctx.sendTaskToAgent?.('analyzer', { method: 'basic' } as AnalyzerInput, { awaitCompletion: false, onInputRequired: 'onAnalyzerAsk' });
+            const analyzerToken = analyzerHandle?.token || analyzerHandle?.childToken;
+            if (analyzerToken) {
+                ctx.vars.set('analyzer.token', analyzerToken);
+            }
             await ctx.reply([{ type: 'text', text: 'Orchestrator: dispatched analyzer (awaiting input)' }]);
-            return { kind: 'internal', done: true } as any;
+            return {
+                action: { kind: 'internal', done: true },
+                result: { ...baseResult(), data: { phase: 'launched', extract, analyzerToken }, correlationId: analyzerToken }
+            } as any;
         }
         if (a?.kind === 'language') {
             // Extra confirmation that we received and processed analyzer output
@@ -71,14 +79,26 @@ export default createAgent({
             } catch { /* noop */ }
             await ctx.reply([{ type: 'text', text: a.content }]);
             ctx.complete(100, 'completed');
-            return { kind: 'language', echoed: true } as any;
+            return {
+                action: { kind: 'language', echoed: true },
+                result: { ...baseResult(), data: { ok: true, message: a.content } }
+            } as any;
         }
-        return { kind: 'internal', done: true } as any;
+        return {
+            action: { kind: 'internal', done: true },
+            result: baseResult()
+        } as any;
     },
     transition: (_env: any, exec: any) => {
-        // Keep the parent task open until the child reports back
-        if (exec?.kind === 'internal') return { kind: 'await_child' } as any;
-        return { kind: 'complete' } as any;
+        const action = exec?.action || exec;
+        if (action?.kind === 'internal') {
+            const token = (exec as any)?.result?.correlationId;
+            if (typeof token === 'string' && token.length > 0) {
+                return { kind: 'await_child', token } as any;
+            }
+            return { kind: 'await_child', token: 'analyzer' } as any;
+        }
+        return { kind: 'complete', result: exec?.result?.data } as any;
     }
 }, import.meta.url);
 

@@ -76,14 +76,19 @@ export const agent = createAgent({
 
   // A - Attention: What to focus on
   attention: (m, env) => ({
-    wantPrompt: !env.input
+    wantPrompt: !env.inbox.current.some(o => o.source === 'user')
   }),
 
   // P - Perception: Normalize input
-  perception: (env) => ({
-    text: env.input as string,
-    eventType: env.input ? 'user_message' : 'idle'
-  }),
+  perception: (env) => {
+    const latest = env.inbox.current.find(o => o.source === 'user');
+    const value = (latest?.payload as { value?: string | { text?: string } })?.value;
+    const text = typeof value === 'string' ? value : value?.text;
+    return {
+      text,
+      eventType: latest ? 'user_message' : 'idle'
+    };
+  },
 
   // L - Learning: Update MentalState (immutable, pure)
   learning: (prev, _action, obs) => ({

@@ -19,7 +19,7 @@ export type ProposedAction =
     | { kind: 'language'; content: string };
 
 export type ExecutableAction =
-    | { kind: 'internal'; done?: boolean; result?: unknown }
+    | { kind: 'internal'; done?: boolean }
     | { kind: 'language'; echoed?: boolean };
 
 export type OrchestratorVars = {

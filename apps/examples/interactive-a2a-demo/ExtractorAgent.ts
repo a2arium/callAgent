@@ -9,16 +9,23 @@ export default createAgent({
     policy: () => ({ kind: 'internal', intent: 'extract' } as any),
     shield: (_m: any, a: any) => a,
     execution: async (_a: any, ctx: any) => {
-        await ctx.reply([{ type: 'text', text: 'Extractor: fetching data...' }]);
-        ctx.complete(50, 'working');
-        const input = ctx.task.input as ExtractorInput;
-        const rows: ExtractorResult = Array.from({ length: input?.limit || 5 }, (_, i) => ({ id: i + 1, value: Math.random() * 100 }));
-        ctx.vars.set('extract.rowsCount', rows.length);
-        await ctx.reply([{ type: 'text', text: `Extractor: rows=${rows.length}` }]);
-        // Return rows via the executable action so transition can complete with a result
-        return { kind: 'internal', result: rows } as any;
+         await ctx.reply([{ type: 'text', text: 'Extractor: fetching data...' }]);
+         ctx.complete(50, 'working');
+         const input = ctx.task.input as ExtractorInput;
+         const rows: ExtractorResult = Array.from({ length: input?.limit || 5 }, (_, i) => ({ id: i + 1, value: Math.random() * 100 }));
+         ctx.vars.set('extract.rowsCount', rows.length);
+         await ctx.reply([{ type: 'text', text: `Extractor: rows=${rows.length}` }]);
+        return {
+            action: { kind: 'internal', done: true },
+            result: {
+                status: 'ok',
+                data: rows,
+                ts: Date.now(),
+                toolId: 'extractor'
+            }
+        } as any;
     },
-    transition: (_env: any, exec: any) => ({ kind: 'complete', result: (exec as any)?.result } as any)
+    transition: (_env: any, exec: any) => ({ kind: 'complete', result: (exec as any)?.result?.data } as any)
 }, import.meta.url);
 
 

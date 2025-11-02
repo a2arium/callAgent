@@ -1,4 +1,4 @@
-import { createAgent, isDirectInput, createStageFacade } from '@a2arium/callagent-core';
+import { createAgent, createStageFacade } from '@a2arium/callagent-core';
 import type {
     EnvironmentState,
     MentalState,
@@ -7,6 +7,7 @@ import type {
     TaskContext,
     ProposedAction,
     ShieldOutcome,
+    ExecResult,
 } from '@a2arium/callagent-core';
 import { match, P } from 'ts-pattern';
 
@@ -45,9 +46,11 @@ createAgent<Sensory, Obs>({
 
     // P — Perception (accept env, produce a small observation object)
     perception: (env: EnvironmentState) => {
-        if (isDirectInput(env?.input)) {
-            console.log('[tg-agent] perception input', env.input);
-            const { text } = env.input.value as { text?: string };
+        const latestInput = env.inbox.current.find(obs => obs.source === 'user' && obs.kind === 'input.provided');
+        if (latestInput) {
+            const payload = latestInput.payload as { value: { text: string } };
+            const text = payload.value.text;
+            console.log('[tg-agent] perception input', { text });
             return { text } as const;
         }
         return {} as const;
@@ -82,15 +85,19 @@ createAgent<Sensory, Obs>({
         ({ action: 'pass', intent: a } as const),
 
     // E — Execution: perform action by kind/intent (no policy decisions here)
-    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState<Sensory>): Promise<ExecutableAction> => {
+    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState<Sensory>): Promise<{ action: ExecutableAction; result: ExecResult }> => {
+        const baseResult = (): ExecResult => ({ status: 'ok', ts: Date.now(), toolId: 'telegram-bridge' });
+
         return await match(a)
-            .with({ kind: 'ask_user' }, async (a) => {
+            .with({ kind: 'ask_user' }, async (intent) => {
                 await ctx.reply('How can I help you today?');
-                // ✅ NEW: Input-first approach with automatic token and stage management
-                const handle = await ctx.requestInput(a.prompt, {
-                    setStage: 'awaiting_input'  // Automatically sets stage and token
+                const handle = await ctx.requestInput(intent.prompt, {
+                    setStage: 'awaiting_input'
                 });
-                return { kind: 'ask_user', token: handle.token } as ExecutableAction;
+                return {
+                    action: { kind: 'ask_user', token: handle.token } as ExecutableAction,
+                    result: { ...baseResult(), data: { prompt: intent.prompt }, correlationId: handle.token }
+                };
             })
             .with({ kind: 'internal', intent: 'answer_with_llm', data: P.select('data') }, async ({ data }) => {
                 const query = (data as { query?: string } | undefined)?.query ?? '';
@@ -98,26 +105,28 @@ createAgent<Sensory, Obs>({
                 await ctx.reply(`You said: ${query}`);
                 await ctx.reply({ type: 'text', text: res[0]?.content ?? 'Ok.' });
                 ctx.progress(100, 'completed');
-
-                // Set completion flag before stage transition for invariant check
                 ctx.vars.set('completed.called', true);
                 Stage.setStage(ctx, 'completed');
-                return { kind: 'internal', done: true } as ExecutableAction;
+                return {
+                    action: { kind: 'internal', done: true } as ExecutableAction,
+                    result: { ...baseResult(), data: { ok: true, query, response: res[0]?.content ?? 'Ok.' } }
+                };
             })
-            .otherwise(async () => {
-                return { kind: 'internal', done: true } as ExecutableAction;
-            });
+            .otherwise(async () => ({
+                action: { kind: 'internal', done: true } as ExecutableAction,
+                result: baseResult()
+            }));
     },
 
     // T — Transition
-    transition: (_env: EnvironmentState, exec: ExecutableAction, _m: MentalState<Sensory>): TurnOutcome => {
-        return match(exec)
-            .with({ kind: 'ask_user' }, (e) => (
-                { kind: 'await_input', token: e.token } as TurnOutcome
+    transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, _m: MentalState<Sensory>): TurnOutcome => {
+        return match(exec.action)
+            .with({ kind: 'ask_user' }, (action) => (
+                { kind: 'await_input', token: action.token } as TurnOutcome
             ))
             .with({ kind: 'internal', done: true }, () => (
-                { kind: 'complete', result: { ok: true } } as TurnOutcome
+                { kind: 'complete', result: exec.result.data ?? { ok: true } } as TurnOutcome
             ))
-            .otherwise(() => ({ kind: 'continue' } as TurnOutcome));
+            .otherwise(() => ({ kind: 'continue', observations: [] } as TurnOutcome));
     }
 }, import.meta.url);

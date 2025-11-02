@@ -28,7 +28,19 @@ export default createAgent({
     // returns: execution result consumed by transition
     execution: async (action: any, ctx: any) => {
         console.log('[memory-usage] execution start', action);
-        if (action?.kind !== 'run_demo') return { kind: 'noop' } as any;
+        const base = (status: 'ok' | 'error', payload?: { data?: unknown; error?: { code: string; message: string } }) => ({
+            status,
+            ts: Date.now(),
+            toolId: 'memory-usage',
+            data: payload?.data,
+            error: payload?.error
+        });
+        if (action?.kind !== 'run_demo') {
+            return {
+                action: { kind: 'internal', done: true },
+                result: base('ok', { data: { state: 'noop' } })
+            } as any;
+        }
         await ctx.progress({ state: 'working', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: 'Running memory demo…' }] } } as any);
 
         await ctx.reply('🧠 Memory System Demo\n');
@@ -228,19 +240,27 @@ export default createAgent({
                 `• Complex filtered events: ${complexEvents.length} events`
             ].join('\n'));
             console.log('[memory-usage] execution done');
-            return { kind: 'done' } as any;
+            return {
+                action: { kind: 'internal', done: true },
+                result: base('ok', { data: { state: 'done' } })
+            } as any;
         } catch (error: any) {
-            await ctx.reply(`❌ Error: ${error.message}`);
-            console.log('[memory-usage] execution fail', error?.message);
-            return { kind: 'fail', reason: error?.message || 'unknown' } as any;
+            console.error('[memory-usage] error:', error);
+            await ctx.reply(`❌ Error running memory demo: ${error?.message || error}`);
+            return {
+                action: { kind: 'internal', done: true },
+                result: base('error', { error: { code: 'memory_usage_error', message: error?.message || 'unknown' } })
+            } as any;
         }
     },
-    // Decides the loop control state for the next step/turn.
-    // args: env (runner-provided input), executionResult (from execution)
+
+    // Maps execution result to loop control flow.
+    // args: env (current environment input), executionResult
     // returns: loop state (await_input | complete | continue)
     transition: (_env: any, exec: any) => {
-        if (exec?.kind === 'fail') return { kind: 'fail', reason: exec.reason } as any;
-        if (exec?.kind === 'done') return { kind: 'complete', result: 'ok' } as any;
-        return { kind: 'continue' } as any;
+        const status = exec?.result?.status || exec?.status;
+        if (status === 'error') return { kind: 'fail', reason: exec?.result?.error?.message || 'unknown_error' } as any;
+        if (status === 'ok' && exec?.result?.data?.state === 'done') return { kind: 'complete', result: 'ok' } as any;
+        return { kind: 'continue', observations: [] } as any;
     }
 }, import.meta.url);

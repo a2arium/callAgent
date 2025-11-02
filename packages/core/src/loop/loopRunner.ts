@@ -1,11 +1,40 @@
 import type { TaskContext } from '../shared/types/index.js';
-import { oneTurn, type Modules, type TurnOutcome, type ProposedAction } from './oneTurn.js';
-import type { EnvironmentState, MentalState } from './types.js';
-import { logger, withLoggingContext, updateLoggingContext } from '@a2arium/callagent-utils';
+import {
+    oneTurn,
+    type Modules,
+    type TurnOutcome,
+    type TransitionOut,
+    type ProposedAction,
+    type ExecutableAction,
+    type ExecResult,
+    type Observation
+} from './oneTurn.js';
+import type { EnvironmentState, MentalState, ObservationInbox } from './types.js';
+import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 
 type LoopRunnerOptions = {
     maxTurns?: number;
     latencyMs?: number;
+};
+
+const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
+    const raw = environment.inbox as unknown;
+    if (Array.isArray(raw)) {
+        const legacy = raw as Observation[];
+        const converted: ObservationInbox = { current: [...legacy], all: [...legacy] };
+        environment.inbox = converted;
+        return converted;
+    }
+    if (raw && typeof raw === 'object') {
+        const candidate = raw as ObservationInbox;
+        if (!Array.isArray(candidate.current)) candidate.current = [];
+        if (!Array.isArray(candidate.all)) candidate.all = [];
+        environment.inbox = candidate;
+        return candidate;
+    }
+    const initialized: ObservationInbox = { current: [], all: [] };
+    environment.inbox = initialized;
+    return initialized;
 };
 
 export async function runLoop(
@@ -19,10 +48,14 @@ export async function runLoop(
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
     try { console.info('[loopRunner] start', { maxTurns }); } catch { }
 
+    const inbox = ensureInbox(env);
+
     // Provide minimal defaults (prefer agent overrides when present)
     const defaults: Modules = {
         attention: modules.attention ?? ((_prev, _env) => ({ kind: 'all' })),
         perception: modules.perception ?? ((e: EnvironmentState) => {
+            const inboxState = ensureInbox(e);
+            const turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
             try {
                 // import via dynamic require to avoid ESM circulars in tests
                 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -30,9 +63,9 @@ export async function runLoop(
                 // Allow manifest to disable sanitization
                 const shouldSanitize = ((M as any)?.safety?.sanitize) !== false;
                 const safeInput = shouldSanitize ? sanitizeObservation(e.input) : e.input;
-                return { input: safeInput, time: e.time, pending: e.pending } as any;
+                return { input: safeInput, time: e.time, pending: e.pending, inbox: turnInbox } as any;
             } catch {
-                return { input: e.input, time: e.time, pending: e.pending } as any;
+                return { input: e.input, time: e.time, pending: e.pending, inbox: turnInbox } as any;
             }
         }),
         learning: modules.learning ?? ((prev, _prevAction, obs) => {
@@ -114,63 +147,147 @@ export async function runLoop(
         }),
         execution: modules.execution ?? (async (a, ctx) => {
             const kind = (a as any).kind;
+            const base: ExecResult = { status: 'ok', ts: Date.now() };
+
             if (kind === 'ask_user') {
-                const handle = await (ctx as any).requestInput((a as any).prompt, { schema: (a as any).schema, onProvided: '__onInputProvided' });
+                const handle = await (ctx as any).requestInput((a as any).prompt, {
+                    schema: (a as any).schema,
+                    onProvided: '__onInputProvided'
+                });
                 const token = (handle as any)?.token || '';
                 try { console.log(`[LoopRunner] execution ask_user -> token=${token}`); } catch { }
-                return { kind: 'ask_user', token } as any;
+                return {
+                    action: { kind: 'ask_user', token } as ExecutableAction,
+                    result: {
+                        ...base,
+                        data: { prompt: (a as any).prompt },
+                        correlationId: token || undefined,
+                        toolId: 'user'
+                    }
+                };
             }
+
             if (kind === 'subagent') {
-                const res = await (ctx as any).sendTaskToAgent((a as any).target, (a as any).input, { onCompleted: '__onChildCompleted' });
+                const res = await (ctx as any).sendTaskToAgent((a as any).target, (a as any).input, {
+                    onCompleted: '__onChildCompleted'
+                });
                 const token = (res as any)?.token || (res as any)?.childToken;
-                if (token) return { kind: 'subagent', token } as any;
-                return { kind: 'subagent', result: res } as any;
-            }
-            if (kind === 'tool') {
-                // If awaitCallback requested, register as external tool and await
-                if ((a as any).awaitCallback) {
-                    const handle = await (ctx as any).requestTool((a as any).name, (a as any).args, { onCompleted: '__onToolCompleted' });
-                    const token = (handle as any)?.token || '';
-                    return { kind: 'tool', token } as any;
+                if (token) {
+                    return {
+                        action: { kind: 'subagent', token } as ExecutableAction,
+                        result: { ...base, correlationId: token, toolId: (a as any).target }
+                    };
                 }
-                const result = await (ctx as any).tools.invoke((a as any).name, (a as any).args);
-                // Store result for multi-step planners
-                try {
-                    const st = ((M as any)?.memory) || {};
-                    (M as any).memory = { ...st, scratch: { ...(st.scratch || {}), react: { ...((st.scratch || {}).react || {}), lastResult: result } } };
-                } catch { /* noop */ }
-                return { kind: 'tool', result } as any;
+                return {
+                    action: { kind: 'subagent' } as ExecutableAction,
+                    result: { ...base, data: res, toolId: (a as any).target }
+                };
             }
+
+            if (kind === 'tool') {
+                const toolName = (a as any).name;
+                if ((a as any).awaitCallback) {
+                    const handle = await (ctx as any).requestTool(toolName, (a as any).args, {
+                        onCompleted: '__onToolCompleted'
+                    });
+                    const token = (handle as any)?.token || '';
+                    return {
+                        action: { kind: 'tool', token } as ExecutableAction,
+                        result: { ...base, correlationId: token || undefined, toolId: toolName }
+                    };
+                }
+                try {
+                    const result = await (ctx as any).tools.invoke(toolName, (a as any).args);
+                    return {
+                        action: { kind: 'tool' } as ExecutableAction,
+                        result: { ...base, data: result, toolId: toolName }
+                    };
+                } catch (error) {
+                    return {
+                        action: { kind: 'tool' } as ExecutableAction,
+                        result: {
+                            ...base,
+                            status: 'error',
+                            error: {
+                                code: 'tool_invoke_error',
+                                message: error instanceof Error ? error.message : String(error)
+                            },
+                            toolId: toolName
+                        }
+                    };
+                }
+            }
+
             if (kind === 'language') {
                 await (ctx as any).reply((a as any).content);
-                return { kind: 'language', echoed: true } as any;
+                return {
+                    action: { kind: 'language', echoed: true } as ExecutableAction,
+                    result: { ...base, data: { echoed: true, content: (a as any).content }, toolId: 'language' }
+                };
             }
-            return { kind: 'internal', done: true } as any;
+
+            return {
+                action: { kind: 'internal', done: true } as ExecutableAction,
+                result: { ...base, data: { intent: (a as any).intent, done: true }, toolId: 'internal' }
+            };
         }),
         transition: modules.transition ?? ((env, exec, m) => {
-            const k = (exec as any).kind;
-            if (k === 'ask_user') {
-                const t = (exec as any).token;
-                try { console.log(`[LoopRunner] transition await_input token=${t}`); } catch { }
-                return { kind: 'await_input', token: t } as any;
+            const { action, result } = exec;
+
+            if (action.kind === 'ask_user' && action.token) {
+                try { console.log(`[LoopRunner] transition await_input token=${action.token}`); } catch { }
+                return { kind: 'await_input', token: action.token } as TransitionOut;
             }
-            // Safety: if an ask_user ProposedAction was executed but transition is not await_*, log and fail
-            try {
-                const lastIntent = (env as any)?.lastIntentKind;
-                if (lastIntent === 'ask_user' && k !== 'ask_user') {
-                    console.warn('[LoopRunner] Transition did not return await_* after ask_user; failing turn');
-                    return { kind: 'fail', reason: 'transition_missing_await_after_ask_user' } as any;
+
+            if (action.kind === 'subagent' && action.token) {
+                return { kind: 'await_child', token: action.token } as TransitionOut;
+            }
+
+            if (action.kind === 'tool' && action.token) {
+                return { kind: 'await_tool', token: action.token } as TransitionOut;
+            }
+
+            const observations: Observation[] = [];
+            const mapSource = (): Observation['source'] => {
+                switch (action.kind) {
+                    case 'tool':
+                        return 'tool';
+                    case 'subagent':
+                        return 'child';
+                    case 'ask_user':
+                        return 'user';
+                    case 'language':
+                        return 'env';
+                    default:
+                        return 'internal';
                 }
-            } catch { /* noop */ }
-            if (k === 'subagent' && (exec as any).token) return { kind: 'await_child', token: (exec as any).token } as any;
-            if (k === 'tool' && (exec as any).token) return { kind: 'await_tool', token: (exec as any).token } as any;
+            };
+
+            const baseObservation: Observation = {
+                source: mapSource(),
+                kind: `${action.kind}.${result.status}`,
+                payload: result.data ?? null,
+                provenance: {
+                    ts: result.ts ?? Date.now(),
+                    turn: (env as any)?.turn ?? 0,
+                    id: result.correlationId ?? undefined,
+                    toolId: result.toolId,
+                    correlationId: result.correlationId
+                },
+                error: result.status === 'error' ? (result.error ?? { code: 'execution_error', message: 'Execution returned error' }) : undefined
+            };
+
+            // Only record successful/failed immediates; await branches returned above.
+            observations.push(baseObservation);
+
             // Enrich env goal stats (best-effort)
             try {
                 const nodes = ((m as any)?.goalState?.hierarchy?.nodes) || {};
                 const doneCount = Object.values(nodes as any).filter((n: any) => n?.status === 'done').length;
                 (env as any).goalStats = { doneCount };
             } catch { /* noop */ }
-            return { kind: 'continue' } as any;
+
+            return { kind: 'continue', observations } as TransitionOut;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {
             try {
@@ -217,14 +334,12 @@ export async function runLoop(
     let m = M;
     let prevAction: ProposedAction | undefined = undefined;
     let rPrev: number | undefined = undefined;
-    let outcome: TurnOutcome = { kind: 'continue' };
+    let outcome: TurnOutcome = { kind: 'continue', observations: [] };
     const timings: Record<string, number>[] = [];
     const rewards: number[] = [];
 
     // env.turn is already set correctly by taskEngine for the first turn
     for (let turn = 0; turn < maxTurns; turn++) {
-        // expose current turn on ctx for usage attribution
-        try { (ctx as any).__turn = (env as any).turn; } catch { }
         // For subsequent iterations in the same runLoop call, increment turn
         if (turn > 0) {
             try { (env as any).turn += 1; } catch { }
@@ -240,6 +355,16 @@ export async function runLoop(
             const step: Awaited<ReturnType<typeof oneTurn>> = await oneTurn(ctx, env, m, defaults, prevAction, rPrev);
             m = step.m;
             outcome = step.outcome;
+            if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
+                outcome = { kind: 'continue', observations: [] } as TransitionOut;
+            }
+            const observations = Array.isArray((outcome as any).observations) ? (outcome as any).observations as Observation[] : [];
+            if (observations.length > 0) {
+                inbox.all.push(...observations);
+                inbox.current = [...observations];
+            } else {
+                inbox.current = [];
+            }
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
         } catch (error) {

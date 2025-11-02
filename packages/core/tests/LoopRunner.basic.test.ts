@@ -15,12 +15,19 @@ describe('LoopRunner basic', () => {
             rewardParams: { extrinsicWeights: [1], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 0.99 },
             policyParams: { theta: null, stochastic: false }
         };
-        const env: EnvironmentState = { time: new Date().toISOString(), input: { x: 1 }, pending: { inputs: {}, children: {}, tools: {}, groups: {} } } as any;
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: { x: 1 },
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] }
+        } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'ask_user', prompt: 'enter value' })
         });
         expect(outcome.kind).toBe('await_input');
         expect((outcome as any).token).toBe('tok-123');
+        expect(env.inbox.current).toEqual([]);
+        expect(env.inbox.all).toEqual([]);
     });
 
     it('runs language path and continues', async () => {
@@ -35,12 +42,20 @@ describe('LoopRunner basic', () => {
             rewardParams: { extrinsicWeights: [1], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 0.99 },
             policyParams: { theta: null, stochastic: false }
         };
-        const env: EnvironmentState = { time: new Date().toISOString(), input: { x: 1 }, pending: { inputs: {}, children: {}, tools: {}, groups: {} } } as any;
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: { x: 1 },
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] }
+        } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'language', content: 'hi' })
         });
         expect(outcome.kind).toBe('continue');
         expect(replied).toBe(true);
+        expect(env.inbox.all.length).toBeGreaterThanOrEqual(1);
+        expect(env.inbox.current.length).toBeGreaterThanOrEqual(1);
+        expect(env.inbox.current[0].source).toBe('env');
     });
 
     it('maps subagent to await_child when token returned', async () => {
@@ -54,12 +69,18 @@ describe('LoopRunner basic', () => {
             rewardParams: { extrinsicWeights: [1], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 0.99 },
             policyParams: { theta: null, stochastic: false }
         };
-        const env: EnvironmentState = { time: new Date().toISOString(), input: { x: 1 }, pending: { inputs: {}, children: {}, tools: {}, groups: {} } } as any;
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: { x: 1 },
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] }
+        } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'subagent', target: 'child', input: { y: 1 }, awaitCompletion: true })
         });
         expect(outcome.kind).toBe('await_child');
         expect((outcome as any).token).toBe('child-1');
+        expect(env.inbox.current).toEqual([]);
     });
 
     it('maps tool to continue by default (sync tool)', async () => {
@@ -73,10 +94,18 @@ describe('LoopRunner basic', () => {
             rewardParams: { extrinsicWeights: [1], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 0.99 },
             policyParams: { theta: null, stochastic: false }
         };
-        const env: EnvironmentState = { time: new Date().toISOString(), input: { x: 1 }, pending: { inputs: {}, children: {}, tools: {}, groups: {} } } as any;
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: { x: 1 },
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] }
+        } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'tool', name: 'syncTool', args: {} })
         });
         expect(outcome.kind).toBe('continue');
+        expect(env.inbox.all.length).toBeGreaterThanOrEqual(1);
+        expect(env.inbox.current.length).toBeGreaterThanOrEqual(1);
+        expect(env.inbox.current[0].source).toBe('tool');
     });
 });

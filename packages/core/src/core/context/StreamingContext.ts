@@ -240,12 +240,6 @@ export function extendContextWithStreaming(
             } else {
                 record = { ...usage };
             }
-            if (typeof record.turn !== 'number') {
-                try {
-                    const t = (ctx as any).__turn;
-                    if (typeof t === 'number') record.turn = t;
-                } catch { /* noop */ }
-            }
             const inc = Number(record.cost) || 0;
             totalCost += inc;
             const k = record.kind || 'other';

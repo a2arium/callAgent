@@ -89,7 +89,7 @@ Total: 1 turn, processes ctx.input directly
 
 ### Complete Working APLRET Agent
 ```typescript
-import { createAgent, createStageFacade, isDirectInput } from '@a2arium/callagent-core';
+import { createAgent, createStageFacade } from '@a2arium/callagent-core';
 import { match } from 'ts-pattern';
 
 // ====== DEFINE YOUR TYPES (REQUIRED) ======
@@ -132,15 +132,15 @@ export const agent = createAgent<Sensory, Obs>({
 
   // A - Attention: What to focus on (tiny hints only)
   attention: (m, env) => ({
-    wantPrompt: !env.input
+    wantPrompt: !env.inbox.current.some(o => o.source === 'user')
   }),
 
   // P - Perception: Normalize input into Obs
   perception: (env) => {
-    if (isDirectInput(env.input)) {
-      const text = typeof env.input.value === 'string'
-        ? env.input.value
-        : (env.input.value as any)?.text;
+    const latest = env.inbox.current.find(o => o.source === 'user');
+    if (latest) {
+      const value = (latest.payload as { value?: string | { text?: string } }).value;
+      const text = typeof value === 'string' ? value : value?.text;
       return { text: text?.trim() };
     }
     return {};
@@ -263,12 +263,12 @@ export const dataProcessor = createAgent<Sensory, Obs>({
 
   // A - Attention
   attention: (m, env) => ({
-    needsProcessing: Boolean(env.input?.data)
+  needsProcessing: env.inbox.current.some(o => o.source === 'env' && o.kind === 'external.event')
   }),
 
   // P - Perception: Extract data from input
   perception: (env) => ({
-    data: env.input?.data
+    data: env.inbox.current.find(o => o.source === 'env' && o.kind === 'external.event')?.payload
   }),
 
   // L - Learning: Store input data
@@ -318,7 +318,7 @@ export const dataProcessor = createAgent<Sensory, Obs>({
 
 1. **APLRET Order** (never change sequence):
    - **A**ttention → tiny hints only
-   - **P**erception → normalize env.input into compact Obs
+   - **P**erception → normalize `env.inbox.current` into compact Obs
    - **L**earning → ONLY writer of MentalState, return NEW M (immutable)
    - **R**easoning/Policy → pure function of M → emits WHAT to do
    - **S**hield → safety gate before Execution
@@ -533,9 +533,8 @@ const obsSchema = {
 const validateObs = ajv.compile(obsSchema);
 
 perception: async (env, alpha, llm?: PureLLMPort): Promise<Obs> => {
-    if (!isDirectInput(env?.input)) return {};
-
-    const { text } = env.input.value as { text?: string };
+    const userObs = env.inbox.current.find(o => o.source === 'user');
+    const { text } = ((userObs?.payload as { value?: { text?: string } })?.value) || {};
     if (!text) return {};
 
     // Try LLM extraction if available
@@ -642,7 +641,7 @@ const payment = await runEffect(
 ## 🔧 Async Operations & External Integration
 
 ### Input Resume Events
-Canonical events the engine injects on resume (`env.input`):
+Canonical events the engine injects on resume (`env.inbox.current`):
 - **input**: `{ kind:'input', token, value }`
 - **tool**: `{ kind:'tool', token, result }`
 - **child**: `{ kind:'child', token, output }`
@@ -750,7 +749,7 @@ policy: (m) => {
 2. **Set required ctx.vars** BEFORE stage transitions (automatic with requestInput/tools.invoke/sendTaskToAgent)
 3. **Transition returns** `await_*` with token
 4. **Engine persists M** and waits for event
-5. **On resume**, engine populates `env.input` and clears pending state
+5. **On resume**, engine appends an observation to `env.inbox.all`, stages it on `env.inbox.current`, and clears the pending state (legacy agents can still read `env.input`, which mirrors the same payload).
 
 ---
 
@@ -788,10 +787,10 @@ type Intent = { kind: 'process_and_complete'; input: unknown };
 **Perception** (minimal):
 ```typescript
 perception: (env) => {
-  if (isDirectInput(env.input)) {
-    const text = typeof env.input.value === 'string'
-      ? env.input.value
-      : (env.input.value as any)?.text;
+  const latest = env.inbox.current.find(o => o.source === 'user');
+  if (latest) {
+    const value = (latest.payload as { value?: string | { text?: string } }).value;
+    const text = typeof value === 'string' ? value : value?.text;
     return { text: text?.trim() };
   }
   return {};

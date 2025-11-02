@@ -15,6 +15,8 @@
     "isolatedModules": true,
     "baseUrl": ".",
     "paths": {
+      "@a2arium/callagent-core": ["packages/core/src"],
+      "@a2arium/callagent-core/*": ["packages/core/src/*"],
       "@a2arium/core": ["packages/core/src"],
       "@a2arium/types": ["packages/types/src"],
       "@a2arium/memory-sql": ["packages/memory-sql/src"]

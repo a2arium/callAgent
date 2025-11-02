@@ -30,6 +30,16 @@ This document describes a **reusable, production-ready agent architecture** that
 - **Type safety**: Exhaustive pattern matching prevents runtime errors
 - **Scalability**: Clean path from simple dispatcher → exhaustive matching → statecharts
 
+### Effect → Observation Pipeline
+
+- **Execution always returns `{ action, result }`** where `result` is an `ExecResult` containing status, data/error, provenance (`ts` plus any correlation metadata), and optional receipts.
+- **Transition packages that `ExecResult` into one or more normalized `Observation` objects** and returns them via `TransitionOut.observations` together with the control signal (`continue`, `await_*`, etc.).
+- **Runtime handoff:** The loop runner appends every observation to `env.inbox.all` and stages the batch on `env.inbox.current` before the next turn begins. Perception reads the staged slice; history remains in `all` for replay/debugging.
+- **Environment exposes `{ world, inbox: { current, all } }`** to the next turn. `current` holds only the observations for the upcoming turn; `all` keeps the ordered log. Perception treats `current` as read-only, validates each entry, then the runtime clears it when the turn ends.
+- **Turn _t+1_ – Perception: Perception validates and annotates inbox entries** (plus any ambient world state). At the start of the next turn, Perception drains the inbox (append-only queue), validates each observation, and hands Learning a structured observation payload. Learning then updates the mental state, making the effects from turn _t_ available to Policy on turn _t+1_.
+- **Learning remains the single writer of MentalState (M)**; all effect outputs must flow via `Observation → Learning → M`, not through ad-hoc state writes.
+- **Continue outcomes always carry `observations: Observation[]`** so downstream tooling/tests can assert what effects occurred, even when the loop stays active.
+
 ---
 
 ## Design Checklist
@@ -40,7 +50,7 @@ This document describes a **reusable, production-ready agent architecture** that
 
 ## 0) First principles (turns + MDP thinking)
 
-* [ ] Treat each step as a **turn**: any effect result is only available **next turn** after it flows Perception → Learning → M. Don’t “see the future.” 
+* [ ] Treat each step as a **turn**: any effect result is only available **next turn** after it flows Perception → Learning → M. Don't "see the future." 
 * [ ] Keep the classic loop: **observe → update belief → choose action** (Policy is pure on M). 
 
 ## 1) Module responsibilities (use this mapping every time)
@@ -65,7 +75,7 @@ This document describes a **reusable, production-ready agent architecture** that
 * [ ] Enforce **intent → allowed stages** mapping (typestate) and **stage invariants** at runtime (require/forbid keys).
 * [ ] For complex flows, promote to **statecharts** (guards, timeouts, parallel states, visualization). 
 
-## 4) Turn templates (how to “think in turns”)
+## 4) Turn templates (how to "think in turns")
 
 * [ ] **Gather data via tool**
 
@@ -118,7 +128,7 @@ This document describes a **reusable, production-ready agent architecture** that
 
 **F. Security/supply-chain sanity (bonus)**
 
-* [ ] When generating tool/package names or commands, add a **validation step** (Perception) to avoid “package hallucination/slopsquatting” hazards. 
+* [ ] When generating tool/package names or commands, add a **validation step** (Perception) to avoid "package hallucination/slopsquatting" hazards. 
 
 ## 8) Test strategy (must-haves)
 
@@ -135,38 +145,38 @@ This document describes a **reusable, production-ready agent architecture** that
 You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rules:
 
 1) TURN DISCIPLINE (POMDP mindset)
-- You NEVER read “future” data. Any effect result is only available on the NEXT turn.
+- You NEVER read "future" data. Any effect result is only available on the NEXT turn.
 - Route all environment or resume events through Perception → Learning → MentalState (M) before Policy reasons on them.
 - Policy is a PURE function of M. Policy must NOT read env, ctx, or perform side effects.
 
 2) MODULE RESPONSIBILITIES
 * **Attention (A) — what to look at**
   * **Purpose:** Prioritize/focus inputs so downstream work is cheaper and more relevant.
-  * **Focus on:** simple, explainable filters (e.g., “only tool events”, “DOM region X”).
+  * **Focus on:** simple, explainable filters (e.g., "only tool events", "DOM region X").
   * **Inputs → Output:** (M_{t-1}, s_t) → **α_t** (focus mask/priority list).
   * **Do:** cut noise; save tokens/compute.
-  * **Don’t:** infer intent, call tools, or modify state.
+  * **Don't:** infer intent, call tools, or modify state.
 
 * **Perception (P) — make inputs usable**
   * **Purpose:** Normalize and validate raw inputs into a clean **observation**.
   * **Focus on:** types, ranges, schemas, units, timestamps, provenance; **structured errors**.
   * **Inputs → Output:** (s_t, α_t) (+ inbox events) → **o_t** with `source` (user/tool/child/env) and `kind` (taxonomy label).
   * **Do:** annotate provenance; emit `o_t.error` instead of throwing.
-  * **Don’t:** write memory, guess goals/intent, or perform effects.
+  * **Don't:** write memory, guess goals/intent, or perform effects.
 
 * **Learning (L) — update the mind (only writer of M)**
   * **Purpose:** Turn the new observation into a better **mental state (M_t)**.
   * **Focus on:** immutable update (return a new M), provenance, safe online changes.
   * **Inputs → Output:** (M_{t-1}, a_{t-1}, o_t) (opt. (r_{t-1})) → **M_t**.
   * **Do:** write episodic/semantic/procedural memory; refine world model; adjust goals, reward weights, and affect.
-  * **Don’t:** choose external actions.
+  * **Don't:** choose external actions.
 
 * **Policy / Reasoning (R) — what to do next**
   * **Purpose:** Decide **WHAT** to do based on the current mind.
   * **Focus on:** clear, typed intentions (and short plans when needed).
   * **Inputs → Output:** (M_t) → **Intent** *(or small Plan)*.
   * **Do:** stick to simple intent types: AskUser, UseTool, Navigate, Reflect, Delegate.
-  * **Don’t:** perform effects or mutate M.
+  * **Don't:** perform effects or mutate M.
 
 * **Shield (S) — safety, compliance, budgets**
   * **Purpose:** Enforce constraints before anything runs.
@@ -176,21 +186,21 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
     * **transform** (edit to safe form) with a short note,
     * **defer** (state what approval/info is needed),
     * **veto** (clear human-friendly reason).
-  * **Don’t:** run effects or change M.
+  * **Don't:** run effects or change M.
 
 * **Execution (E) — how to do it (effects happen here)**
   * **Purpose:** Ground the intent into real actions (APIs/tools/robotics) with retries/timeouts.
   * **Focus on:** idempotency keys, correlation IDs, timeouts, clean receipts/results.
   * **Inputs → Output:** Intent/Plan → **exec result** (data/status/receipts).
   * **Do:** update only **control state** (ids, retries, timers); feed outputs back as observations.
-  * **Don’t:** stash semantic knowledge (Learning will write M).
+  * **Don't:** stash semantic knowledge (Learning will write M).
 
 * **Transition (T) — advance the loop**
   * **Purpose:** Apply effects to the environment model and steer control flow.
   * **Focus on:** produce next env state, extrinsic reward, and post-action signals.
   * **Inputs → Output:** env_t + exec result → **next env**, **r_ext**, **observations**, **control**.
   * **Control signals:** `continue | await_input | await_tool | await_child | complete | fail`.
-  * **Don’t:** modify M or intents.
+  * **Don't:** modify M or intents.
 
 * **Design rules**
   * **Single-writer:** Only **Learning** updates (M).
@@ -242,7 +252,7 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 - Prefer explicit failure with actionable messages over silent assumption.
 
 9) OUTPUT STYLE
-- Be explicit about which module is doing what (e.g., “Perception validated …”, “Learning updated M …”, “Policy emitted Intent …”).
+- Be explicit about which module is doing what (e.g., "Perception validated …", "Learning updated M …", "Policy emitted Intent …").
 - If stage/typestate would be violated, refuse and explain.
 
 Follow this minimal recipe every turn:
@@ -282,11 +292,12 @@ const Stage = createStageFacade<Stage>({
   initial: 'idle',
   invariants: {
     awaiting_input: { require: ['token'], forbid: ['completed.called'] },
-    completed: { require: ['completed.called'] }
+    completed: { require: ['awaiting_input.called'] }
   },
   // Optional: automatically mark flags when entering a stage
   autoMarks: {
-    completed: { 'completed.called': true }
+    completed: { 'completed.called': true },
+    awaiting_input: { 'awaiting_input.called': true }
   }
 });
 
@@ -331,15 +342,21 @@ export const agent = createAgent({
   llmConfig: { provider: 'openai', modelAliasOrName: 'fast' },
 
   // A - Attention: What to focus on
-  attention: (m, env) => ({ 
-    wantPrompt: !env.input 
-  }),
+  attention: (m, env) => {
+    const hasUserObservation = env.inbox.current.some(o => o.source === 'user');
+    return { wantPrompt: !hasUserObservation };
+  },
 
-  // P - Perception: Normalize input
-  perception: (env) => ({ 
-    text: env.input as string,
-    eventType: env.input ? 'user_message' : 'idle'
-  }),
+  // P - Perception: Normalize inbox payloads
+  perception: (env) => {
+    const latestInput = env.inbox.current.find(o => o.source === 'user');
+    const value = (latestInput?.payload as { value?: string | { text?: string } })?.value;
+    const text = typeof value === 'string' ? value : value?.text;
+    return {
+      text,
+      eventType: latestInput ? 'user_message' : 'idle'
+    };
+  },
 
   // L - Learning: Update M (immutable, pure)
   learning: (prev, _action, obs) => ({
@@ -796,7 +813,7 @@ attention: (prevMentalState: MentalState, env: EnvironmentState) => AttentionSig
 **Example**:
 ```typescript
 attention: (m, env) => {
-  const hasInput = Boolean(env.input);
+const hasInput = env.inbox.current.length > 0;
   const goalUrgency = m.goalState.priority;
   const emotionalState = m.emotion.valence;
   
@@ -825,21 +842,23 @@ perception: (env: EnvironmentState, alpha: AttentionSignal) => Observation
 **Example**:
 ```typescript
 perception: (env, alpha) => {
-  const input = env.input;
+  const inputObservation = env.inbox.current.find(o => o.source === 'user');
+  const input = (inputObservation?.payload as { value?: string | { text?: string } })?.value;
+  const text = typeof input === 'string' ? input : input?.text;
   
-  if (typeof input === 'string') {
-    return { text: input, eventType: 'user_message' };
+  if (typeof text === 'string') {
+    return { text, eventType: 'user_message' };
   }
   
-  if (input && typeof input === 'object') {
-    const event = input as { kind?: string; text?: string };
+  if (inputObservation) {
+    const event = inputObservation.payload as { kind?: string; text?: string };
     return {
       text: event.text,
       meta: input,
       eventType: event.kind
     };
   }
-  
+
   if (alpha.wantPrompt) {
     return { meta: { needsPrompt: true }, eventType: 'internal' };
   }
@@ -1120,18 +1139,21 @@ export const agent = createAgent({
     // A - Attention (no ctx!)
     attention: (M, env) => {
         logger.debug('Analyzing attention signals', {
-            hasInput: Boolean(env.input),
+            inboxSize: env.inbox.current.length,
             goalPriority: M.goalState?.priority
         });
-        return { wantPrompt: !env.input };
+        return { wantPrompt: !env.inbox.current.some(o => o.source === 'user') };
     },
 
     // P - Perception (no ctx!)
     perception: (env, alpha) => {
         logger.info('Perceived user message', {
-            inputType: typeof env.input
+            inboxEntries: env.inbox.current.length
         });
-        return { text: env.input };
+        const latest = env.inbox.current.find(o => o.source === 'user');
+        const value = (latest?.payload as { value?: string | { text?: string } })?.value;
+        const text = typeof value === 'string' ? value : value?.text;
+        return { text };
     },
 
     // L - Learning (no ctx!)
@@ -1427,7 +1449,7 @@ execution: async (intent, ctx, m) => {
 
 ### Working Memory Helpers
 
-- **Goals** (`ctx.goals.add/read`): capture the agent’s current objective through the MLO pipeline so subsequent turns resume with the right intent focus without manual bookkeeping.
+- **Goals** (`ctx.goals.add/read`): capture the agent's current objective through the MLO pipeline so subsequent turns resume with the right intent focus without manual bookkeeping.
 - **Thoughts** (`ctx.thoughts.add`): append reasoning breadcrumbs or observations; these are persisted via working memory for audits, summaries, and downstream reflection.
 - **Decisions** (`ctx.decisions.add/get/read`): log policy choices with optional reasoning; stored alongside goals/thoughts in working memory so you avoid overloading `ctx.vars` for cognitive history.
 
@@ -1631,24 +1653,20 @@ Behavior on cache hit:
 Quick references you can read during the loop:f
 
 ```ts
-// Turn index
-// In modules that receive env (attention, perception, transition):
+// Turn index (env.turn is incremented before each turn)
 const turn = env.turn;
-
-// In execution handler:
-const turnExec = (ctx as any).__turn; // best‑effort exposure
 
 // Budgets from manifest (loop constraints)
 const { maxTurns, latencyMs } = env.budget || {};
 
-// Accumulated usage mid‑run (read‑only snapshot)
+// Accumulated usage mid-run (read-only snapshot)
 const { totalCost, byKind } = ctx.getUsage?.() ?? { totalCost: 0, byKind: {} };
 ```
 
 Notes:
-- `env.turn` is advanced each iteration; `ctx.__turn` mirrors it for execution.
+- `env.turn` is advanced each iteration before invoking modules.
 - `env.budget` is populated from `manifest.budgets` (e.g., `{ maxTurns, latencyMs }`).
-- `ctx.getUsage()` is read‑only; final totals are emitted on completion in `status.metadata.usage`.
+- `ctx.getUsage()` is read-only; final totals are emitted on completion in `status.metadata.usage`.
 
 ---
 
@@ -1682,82 +1700,82 @@ sequenceDiagram
     Engine->>External: Emit input_required(token)
     External->>Engine: POST /tasks/{id}/input {token, value}
     Engine->>DB: Load MentalState
-    Engine->>Agent: Resume with env.input = {kind:'input', token, value}
+    Engine->>Agent: Resume with env.inbox.current = [{ source:'user', kind:'input.provided', payload:{ token, value } }]
     Agent->>Engine: Continue or complete
 ```
 
-### Resume Event Payloads
+### Resume Observations
 
-When the agent resumes, `env.input` contains the event:
+When the agent resumes, the engine pushes canonical observations onto `env.inbox`:
 
 ```typescript
-type ResumeEvent = 
-  | { kind: 'input'; token: string; value: string }
-  | { kind: 'tool'; token: string; result: unknown }
-  | { kind: 'child'; token: string; output: unknown }
-  | { kind: 'external'; token: string; payload: unknown };
+type ResumeObservation =
+  | { source: 'user'; kind: 'input.provided'; payload: { token: string; value: unknown }; provenance: ObservationProvenance }
+  | { source: 'tool'; kind: 'tool.completed'; payload: { token: string; result: unknown; tool?: string }; provenance: ObservationProvenance }
+  | { source: 'child'; kind: 'child.completed'; payload: { token: string; childTaskId: string; result: unknown; agentId?: string }; provenance: ObservationProvenance }
+  | { source: 'env'; kind: 'external.event'; payload: { token: string; payload: unknown; type?: string }; provenance: ObservationProvenance };
 ```
 
-### Environment Input Helper Guards (Recommended)
-
-To reliably interpret `env.input` in Perception and Execution, use the framework-provided type guards. They help you branch on canonical resume/input events safely without ad‑hoc checks.
+### Inspecting Inbox Observations
 
 ```typescript
-import { isDirectInput, isToolCompletionInput, isChildCompletionInput, isExternalEventInput } from '@a2arium/callagent-core';
+const latestUserInput = env.inbox.current.find(
+  (obs): obs is ResumeObservation & { source: 'user'; kind: 'input.provided' } =>
+    obs.source === 'user' && obs.kind === 'input.provided'
+);
 
-perception: (env) => {
-  const input = env.input;
-  if (isDirectInput(input)) {
-    // Human input resumed via token
-    const v = input.value;
-    const text = typeof v === 'string' ? v : (v && typeof v === 'object' ? (v as any).text : undefined);
-    return { text, eventType: 'input', resumeToken: input.token };
-  }
-
-  if (isToolCompletionInput(input)) {
-    return { meta: { result: input.result }, eventType: 'tool', resumeToken: input.token };
-  }
-
-  if (isChildCompletionInput(input)) {
-    return { meta: { output: input.output }, eventType: 'child', resumeToken: input.token } as any;
-  }
-
-  if (isExternalEventInput(input)) {
-    return { meta: { event: input.event }, eventType: 'external' };
-  }
-
-  return {};
+if (latestUserInput) {
+  const value = latestUserInput.payload.value;
+  const text = typeof value === 'string' ? value : (value as any)?.text;
+  return { text, eventType: 'input', resumeToken: latestUserInput.payload.token };
 }
+
+const latestToolResult = env.inbox.current.find(
+  obs => obs.source === 'tool' && obs.kind === 'tool.completed'
+);
+if (latestToolResult) {
+  return {
+    meta: { result: latestToolResult.payload.result },
+    eventType: 'tool',
+    resumeToken: latestToolResult.payload.token
+  };
+}
+
+// ...similar pattern for child/external observations
 ```
 
-Helper guard cheatsheet:
-- `isDirectInput(x)`: true for `{ kind: 'input'; value; token }`
-- `isToolCompletionInput(x)`: true for `{ kind: 'tool'; result; token }`
-- `isChildCompletionInput(x)`: true for `{ kind: 'child'; output; token }`
-- `isExternalEventInput(x)`: true for `{ kind: 'external'; event }`
-
-Using these ensures Perception remains small and consistent, and keeps Policy pure by routing all environment changes through Learning → M.
+This keeps Perception small and consistent, routing every environment change through Learning → M.
 
 ### Handling Resume in Policy (Pure Approach)
 
 **Policy is pure: `policy(m)` reads only from M.** Resume events flow through **Perception → Learning → M** first.
 
-**Step 1: Perception normalizes resume event**
+**Step 1: Perception normalizes the inbox slice**
 
 ```typescript
 perception: (env, alpha) => {
-  const input = env.input;
-  
-  if (input && typeof input === 'object') {
-    const event = input as ResumeEvent;
+  const userObs = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
+  if (userObs) {
+    const value = userObs.payload.value as string | { text?: string };
+    const text = typeof value === 'string' ? value : value?.text;
     return {
-      eventType: event.kind,  // 'input', 'tool', 'child'
-      text: event.kind === 'input' ? event.value : undefined,
-      meta: event,
-      resumeToken: event.token
+      eventType: 'input',
+      text,
+      meta: userObs.payload,
+      resumeToken: userObs.payload.token
     };
   }
-  
+
+  const toolObs = env.inbox.current.find(o => o.source === 'tool');
+  if (toolObs) {
+    return {
+      eventType: 'tool',
+      meta: toolObs.payload,
+      resumeToken: (toolObs.payload as any).token
+    };
+  }
+
+  // Handle child/external similarly…
   return {};
 }
 ```
@@ -1838,7 +1856,7 @@ policy: (m) => {  // Pure - only reads M
 ## 9. Testing Strategy
 
 ```typescript
-import { createAgent, isDirectInput } from '@a2arium/callagent-core';
+import { createAgent } from '@a2arium/callagent-core';
 import type {
   EnvironmentState,
   MentalState,
@@ -1908,7 +1926,7 @@ export const agent = createAgent({
 
   // === A - Attention ===
   attention: (m, env) => {
-    const hasInput = Boolean(env.input);
+    const hasInput = env.inbox.current.some(o => o.source === 'user');
     const goalUrgency = m.goalState?.priority || 'normal';
     
     return {
@@ -1918,20 +1936,27 @@ export const agent = createAgent({
 
   // === P - Perception ===
   perception: (env, alpha) => {
-    const input = env.input;
-    
-    if (typeof input === 'string') {
-      return { text: input, eventType: 'user_message' };
-    }
-    
-    if (input && typeof input === 'object') {
+    const userObs = env.inbox.current.find(o => o.source === 'user');
+    if (userObs) {
+      const value = (userObs.payload as { value?: string | { text?: string } }).value;
+      const text = typeof value === 'string' ? value : value?.text;
       return {
-        text: (input as { text?: string; value?: string }).text || (input as { value?: string }).value,
-        meta: input,
-        eventType: (input as { kind?: string }).kind
+        text,
+        meta: userObs.payload,
+        eventType: 'input',
+        resumeToken: (userObs.payload as { token?: string }).token
       };
     }
-    
+
+    const toolObs = env.inbox.current.find(o => o.source === 'tool');
+    if (toolObs) {
+      return {
+        meta: toolObs.payload,
+        eventType: 'tool',
+        resumeToken: (toolObs.payload as { token?: string }).token
+      };
+    }
+
     if (alpha.wantPrompt) {
       return { meta: { needsPrompt: true }, eventType: 'internal' };
     }
@@ -1941,10 +1966,10 @@ export const agent = createAgent({
 
   // === L - Learning (pure, immutable) ===
   learning: (prev, _prevAction, obs, rPrev) => {
-    if (isDirectInput(obs)) {
-      const text = extractText(obs.value);
+    const text = obs.text?.trim();
+    if (text) {
       const intent = extractIntent(text);
-      
+
       return {
         ...prev,
         worldModel: {
@@ -1973,22 +1998,7 @@ export const agent = createAgent({
         }
       };
     }
-    
-    // Handle resume events
-    if (obs && typeof obs === 'object') {
-      const event = obs as { kind?: string; value?: string };
-      if (event.kind === 'input' && event.value) {
-        const text = event.value;
-        const intent = extractIntent(text);
-        
-    return {
-      ...prev,
-      memory: { ...prev.memory, sensory: { current: text } },
-      worldModel: { ...prev.worldModel, lastUserIntent: intent }
-    };
-      }
-    }
-    
+
     return prev;
   },
 
@@ -2079,20 +2089,40 @@ export const agent = createAgent({
   },
 
   // === T - Transition ===
-  transition: (_env, exec, ctx) => {
-    // Await outcomes
-    if ((exec as { kind?: string }).kind === 'ask_user') {
-      return { kind: 'await_input', token: (exec as { token?: string }).token } as TurnOutcome;
+  transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, ctx) => {
+    const action = exec.action ?? exec;
+    if (action.kind === 'ask_user') {
+      return { kind: 'await_input', token: action.token } as TransitionOut;
     }
-    
-    // Terminal outcomes
-    const stage = V.stage(ctx as TaskContext);
-    if (stage === 'completed') {
+    if (V.completeCalled(ctx as TaskContext)) {
       return { kind: 'complete', result: { ok: true } } as TurnOutcome;
     }
-    
-    // Continue loop
-    return { kind: 'continue' } as TurnOutcome;
+    return { kind: 'continue', observations: [exec.result.status === 'ok'
+      ? {
+          source: 'internal',
+          kind: 'internal.success',
+          payload: exec.result.data,
+          provenance: {
+            ts: exec.result.ts,
+            turn: env.turn,
+            id: exec.result.correlationId,
+            toolId: exec.result.toolId,
+            correlationId: exec.result.correlationId
+          }
+        }
+      : {
+          source: 'internal',
+          kind: 'internal.error',
+          payload: exec.result.error,
+          provenance: {
+            ts: exec.result.ts,
+            turn: env.turn,
+            id: exec.result.correlationId,
+            toolId: exec.result.toolId,
+            correlationId: exec.result.correlationId
+          }
+        }
+    ] } as TransitionOut;
   }
 }, import.meta.url);
 ```
@@ -2616,11 +2646,16 @@ const token = handle.token;
 ```typescript
 // ❌ Wrong: Policy depends on env (not pure)
 policy: (m, env) => {
-  if (env.input) return { kind: 'answer' };
+  if (env.inbox.current.length > 0) return { kind: 'answer' };
 }
 
 // ✅ Right: Route env through Perception → Learning → M
-perception: (env) => ({ text: env.input }),
+perception: (env) => {
+  const latest = env.inbox.current.find(o => o.source === 'user');
+  const value = (latest?.payload as { value?: string | { text?: string } })?.value;
+  const text = typeof value === 'string' ? value : value?.text;
+  return { text };
+},
 learning: (prev, _, obs) => ({
   ...prev,
   worldModel: { ...prev.worldModel, lastUserText: obs.text }
@@ -2847,7 +2882,7 @@ execution: async (intent, ctx) => {
 8. **Don't forget resume handling in Policy**
    ```typescript
    policy: (m) => {
-     // ❌ Missing: check env.input for resume events
+     // ❌ Missing: check env.inbox.current for resume events
      if (m.worldModel.lastUserIntent) return { kind: 'answer' };
    }
    ```
@@ -2915,4 +2950,5 @@ This architecture is **production-ready** today while providing a clean runway t
 - [ ] Review and apply best practices
 
 For questions or contributions, see the main [documentation index](../DOCUMENTATION_INDEX.md).
+
 

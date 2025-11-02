@@ -1,4 +1,78 @@
-import { createAgent } from '@a2arium/callagent-core';
+import {
+    createAgent,
+    type EnvironmentState,
+    type ExecResult,
+    type ExecutableAction,
+    type MentalState,
+    type Observation,
+    type ProposedAction,
+    type TaskContext,
+    type TransitionOut
+} from '@a2arium/callagent-core';
+
+type MiniPerception = {
+    input: unknown;
+    time: string;
+    observations: Observation[];
+};
+
+type MiniSensory = {
+    lastObservation?: MiniPerception;
+};
+
+type MiniMentalState = MentalState<MiniSensory>;
+
+type ProposedActionWithNextTurn = ProposedAction & { nextTurn?: number };
+
+const describe = (label: string, value: unknown): void => {
+    try {
+        console.log(label, JSON.stringify(value, null, 2));
+    } catch {
+        console.log(label, value);
+    }
+};
+
+const createExecResult = (
+    toolId: string,
+    status: ExecResult['status'],
+    overrides: Partial<Omit<ExecResult, 'status' | 'toolId'>> = {}
+): ExecResult => ({
+    status,
+    toolId,
+    ts: Date.now(),
+    ...overrides
+});
+
+const mapSource = (action: ExecutableAction): Observation['source'] => {
+    switch (action.kind) {
+        case 'ask_user':
+            return 'user';
+        case 'subagent':
+            return 'child';
+        case 'tool':
+            return 'tool';
+        case 'language':
+            return 'env';
+        default:
+            return 'internal';
+    }
+};
+
+const buildObservation = (
+    env: EnvironmentState,
+    exec: { action: ExecutableAction; result: ExecResult }
+): Observation => ({
+    source: mapSource(exec.action),
+    kind: `${exec.action.kind}.${exec.result.status}`,
+    payload: exec.result.data ?? null,
+    provenance: {
+        ts: exec.result.ts ?? Date.now(),
+        turn: env.turn,
+        toolId: exec.result.toolId,
+        correlationId: exec.result.correlationId
+    },
+    error: exec.result.status === 'error' ? exec.result.error : undefined
+});
 
 /**
  * Loop-agent-mini: Demonstrates LLM conversation history persistence across loop turns
@@ -32,22 +106,30 @@ export default createAgent({
         historyMode: 'dynamic'
     },
 
-    perception: (env: any) => ({
-        input: env.input,
-        time: env.time
-    }),
+    perception: (env: EnvironmentState): MiniPerception => {
+        const drained = env.inbox.current;
+        if (drained.length > 0) {
+            describe('[Perception] Drained observations', drained);
+        } else {
+            console.log('[Perception] Inbox empty');
+        }
+        return {
+            input: env.input,
+            time: env.time,
+            observations: drained
+        };
+    },
 
-    learning: (prevMentalState: any, _prevAction: any, obs: any) => {
-        // Update sensory with latest observation
-        (prevMentalState.memory as any).sensory = {
-            ...(prevMentalState.memory.sensory || {}),
+    learning: (prevMentalState: MiniMentalState, _prevAction: ProposedAction | undefined, obs: MiniPerception) => {
+        prevMentalState.memory.sensory = {
+            ...prevMentalState.memory.sensory,
             lastObservation: obs
         };
         return prevMentalState;
     },
 
-    policy: (mentalState: any) => {
-        const turn = (mentalState.vars?.turn as number) || 0;
+    policy: (mentalState: MiniMentalState): ProposedActionWithNextTurn => {
+        const turn = Number(mentalState.vars?.turn ?? 0);
 
         console.log(`\n📍 [Policy] Turn ${turn}`);
 
@@ -56,7 +138,7 @@ export default createAgent({
                 kind: 'language',
                 content: 'Tell me a fun fact about space.',
                 nextTurn: 1
-            } as any;
+            } satisfies ProposedActionWithNextTurn;
         }
 
         if (turn === 1) {
@@ -64,7 +146,7 @@ export default createAgent({
                 kind: 'language',
                 content: 'That was interesting! What\'s another fun fact about space?',
                 nextTurn: 2
-            } as any;
+            } satisfies ProposedActionWithNextTurn;
         }
 
         if (turn === 2) {
@@ -72,74 +154,105 @@ export default createAgent({
                 kind: 'language',
                 content: 'Great! Can you combine both of those facts into a very short 2-sentence story?',
                 nextTurn: 3
-            } as any;
+            } satisfies ProposedActionWithNextTurn;
         }
 
-        return { kind: 'internal', intent: 'complete', done: true } as any;
+        return { kind: 'internal', intent: 'complete' } satisfies ProposedActionWithNextTurn;
     },
 
-    shield: (_mentalState: any, action: any) => {
-        console.log('[Shield] Received action from policy:', JSON.stringify(action, null, 2));
-        // Explicitly pass through the action
+    shield: (_mentalState: MiniMentalState, action: ProposedActionWithNextTurn) => {
+        describe('[Shield] Received action from policy:', action);
         const result = { action: 'pass' as const, intent: action };
-        console.log('[Shield] Returning:', JSON.stringify(result, null, 2));
-        return result as any;
+        describe('[Shield] Returning:', result);
+        return result;
     },
 
-    execution: async (action: any, ctx: any) => {
-        console.log(`\n[Execution] Received action:`, JSON.stringify(action, null, 2));
+    execution: async (action: ProposedActionWithNextTurn, ctx: TaskContext, _mentalState: MiniMentalState) => {
+        describe('\n[Execution] Received action:', action);
 
-        if (action?.kind === 'language') {
+        if (action.kind === 'language') {
             console.log(`\n💬 [Question]: ${action.content}`);
 
             try {
-                // Call LLM - it will have history from previous turns!
                 const responses = await ctx.llm.call(action.content);
-                console.log('[Execution] LLM responses:', JSON.stringify(responses, null, 2));
+                describe('[Execution] LLM raw responses:', responses);
 
-                // Try different response formats
-                const response = responses[0]?.text
-                    || responses[0]?.content
-                    || (typeof responses[0] === 'string' ? responses[0] : null)
-                    || 'Error: No response from LLM';
+                const first = Array.isArray(responses) ? responses[0] : undefined;
+                let response = '';
+                if (typeof first === 'string') {
+                    response = first;
+                } else if (typeof first === 'object' && first !== null) {
+                    const candidate = (first as { text?: unknown; content?: unknown }).text ?? (first as { text?: unknown; content?: unknown }).content;
+                    response = typeof candidate === 'string' ? candidate : JSON.stringify(first);
+                }
+                if (!response) {
+                    response = 'Error: No response from LLM';
+                }
 
                 console.log(`🤖 [Assistant]: ${response}`);
                 await ctx.reply(`\n🤖 ${response}\n`);
 
-                // Advance turn counter if provided
                 if (action.nextTurn !== undefined) {
                     ctx.vars.set('turn', action.nextTurn);
                 }
 
-                return { kind: 'language', echoed: true } as any;
+                return {
+                    action: { kind: 'language', echoed: true },
+                    result: createExecResult('language', 'ok', { data: { message: response } })
+                };
             } catch (error) {
-                console.error('[Execution] LLM call failed:', error);
-                await ctx.reply(`\n❌ LLM Error: ${error instanceof Error ? error.message : String(error)}\n`);
-                return { kind: 'language', echoed: true } as any;
+                const message = error instanceof Error ? error.message : String(error);
+                console.error('[Execution] LLM call failed:', message);
+                await ctx.reply(`\n❌ LLM Error: ${message}\n`);
+                return {
+                    action: { kind: 'language', echoed: true },
+                    result: createExecResult('language', 'error', {
+                        error: { code: 'llm_error', message }
+                    })
+                };
             }
         }
 
-        if (action?.kind === 'internal' && action?.intent === 'complete') {
-            console.log('[Execution] Internal complete', ctx.llm.getMessages());
+        if (action.kind === 'internal' && action.intent === 'complete') {
+            describe('[Execution] Internal complete, LLM messages:', ctx.llm.getMessages?.());
             console.log('\n✅ Demo Complete!');
             console.log('📝 The LLM successfully referenced previous turns in its final story,');
             console.log('   proving that conversation history was preserved across all turns.');
             await ctx.reply('\n✅ Demo complete! The conversation history was preserved across all 3 turns.');
-            return { kind: 'internal', done: true } as any;
+            return {
+                action: { kind: 'internal', done: true },
+                result: createExecResult('internal', 'ok', { data: { status: 'complete' } })
+            };
         }
 
-        console.log(`\n❌ [Execution] Unknown action: ${action?.kind}/${action?.intent}`);
-        return { kind: 'internal', done: true } as any;
+        console.log(`\n❌ [Execution] Unknown action: ${action.kind}`);
+        return {
+            action: { kind: 'internal', done: true },
+            result: createExecResult('internal', 'error', {
+                error: {
+                    code: 'unknown_action',
+                    message: `Unknown action received in execution: ${action.kind}`
+                }
+            })
+        };
     },
 
-    transition: (_env: any, executionResult: any) => {
-        if (executionResult?.kind === 'internal' && executionResult?.done) {
-            return { kind: 'complete', result: 'success' } as any;
+    transition: (env: EnvironmentState, executionResult: { action: ExecutableAction; result: ExecResult }, _mentalState: MiniMentalState): TransitionOut => {
+        const { action, result } = executionResult;
+
+        if (action.kind === 'internal' && action.done) {
+            const completionObservation = buildObservation(env, executionResult);
+            describe('[Transition] Completion observation (not enqueued):', completionObservation);
+            return { kind: 'complete', result: result.data ?? 'success' };
         }
-        if (executionResult?.kind === 'language' && executionResult?.echoed) {
-            return { kind: 'continue' } as any;
+
+        if (action.kind === 'language') {
+            const observation = buildObservation(env, executionResult);
+            describe('[Transition] Language observation (returning only):', observation);
+            return { kind: 'continue', observations: [observation] };
         }
-        return { kind: 'continue' } as any;
+
+        return { kind: 'continue', observations: [] };
     }
 }, import.meta.url);
 

@@ -15,16 +15,24 @@ export function createStageFacade<St extends string = string>(opts: {
     const initial = opts.initial as St | undefined;
     const rules = (opts.invariants ?? {}) as StageInvariants<St>;
 
+    const readVar = (ctx: TaskContext, key: string): unknown => {
+        const fromVars = ctx.vars.get(key);
+        if (typeof fromVars !== 'undefined') return fromVars;
+        const memoryVars = (ctx.M as any)?.memory?.vars;
+        return memoryVars ? (memoryVars as Record<string, unknown>)[key] : undefined;
+    };
+
     const getStage = (ctx: TaskContext): St =>
-        ((ctx.vars.get(stageKey) as St | undefined) ?? (initial as St));
+        ((readVar(ctx, stageKey) as St | undefined)
+        ?? (initial as St));
 
     const assertStage = (ctx: TaskContext, s: St): void => {
         const r = (rules[s] || {}) as { require?: string[]; forbid?: string[] };
         for (const k of r.require ?? []) {
-            if (!ctx.vars.get(k)) throw new Error(`[invariant] ${s} requires ${k}`);
+            if (readVar(ctx, k) === undefined) throw new Error(`[invariant] ${s} requires ${k}`);
         }
         for (const k of r.forbid ?? []) {
-            if (ctx.vars.get(k)) throw new Error(`[invariant] ${s} forbids ${k}`);
+            if (readVar(ctx, k) !== undefined) throw new Error(`[invariant] ${s} forbids ${k}`);
         }
     };
 

@@ -16,17 +16,28 @@ describe('Example agent overrides (docs parity)', () => {
         (ctx as any).agentId = 'docs-mini';
         setModuleOverrides('docs-mini', {
             execution: async (a, c, m) => {
-                if ((a as any).kind === 'tool') return { kind: 'tool', token: 'tool-xyz' } as any;
+                if ((a as any).kind === 'tool') {
+                    return {
+                        action: { kind: 'tool', token: 'tool-xyz' },
+                        result: { status: 'ok', ts: Date.now(), toolId: (a as any).name, correlationId: 'tool-xyz' }
+                    } as any;
+                }
                 return c.defaults.execution(a, c, m);
             },
             transition: (_env, exec) => {
-                if ((exec as any).kind === 'tool' && (exec as any).token) {
-                    return { kind: 'await_tool', token: (exec as any).token, category: 'io' } as any;
+                const action = exec?.action || exec;
+                if (action?.kind === 'tool' && action.token) {
+                    return { kind: 'await_tool', token: action.token, category: 'io' } as any;
                 }
-                return { kind: 'continue' } as any;
+                return { kind: 'continue', observations: [] } as any;
             }
         });
-        const env: EnvironmentState = { time: new Date().toISOString(), input: {}, pending: { inputs: {}, children: {}, tools: {}, groups: {} } } as any;
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: {},
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] }
+        } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'tool', name: 'dummy', args: {} })
         });

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The loop-first agent architecture eliminates the need for explicit durable handlers through an "always-auto-resume" model. When agents await events (user input, tool completion, child agent completion), the engine automatically resumes execution by running one additional loop turn with the event payload injected as `env.input`. This document covers the technical implementation of auto-resume, MentalState persistence, and event-driven continuation.
+The loop-first agent architecture eliminates the need for explicit durable handlers through an "always-auto-resume" model. When agents await events (user input, tool completion, child agent completion), the engine automatically resumes execution by running one additional loop turn after appending an observation to `env.inbox`. (For legacy agents the payload is still mirrored on `env.input`, but new code should read from `env.inbox.current`.) This document covers the technical implementation of auto-resume, MentalState persistence, and event-driven continuation.
 
 ## Auto-Resume Architecture
 
