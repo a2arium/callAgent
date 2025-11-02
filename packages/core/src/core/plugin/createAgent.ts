@@ -28,7 +28,13 @@ const getDirname = (metaUrl: string): string => path.dirname(fileURLToPath(metaU
  * @throws {ManifestError} If the manifest cannot be loaded or is invalid
  * @throws {PluginError} If agent creation fails for other reasons
  */
-export const createAgent = <Sensory = unknown, Obs = unknown, Alpha = unknown>(options: CreateAgentPluginOptions<Sensory, Obs, Alpha>, metaUrl: string): AgentPlugin => {
+export const createAgent = <
+    Sensory = unknown,
+    Obs = unknown,
+    Alpha = unknown,
+    ExecData = unknown,
+    ExecError = import('../../loop/oneTurn.js').ExecErrorPayload
+>(options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>, metaUrl: string): AgentPlugin => {
     // Get caller directory directly from required metaUrl
     const callerDir = getDirname(metaUrl);
 
@@ -122,7 +128,7 @@ export const createAgent = <Sensory = unknown, Obs = unknown, Alpha = unknown>(o
 
     // Build loop.modules from either explicit loop or top-level sugar
     const sugarModules: Record<string, unknown> = {};
-    const moduleKeys: Array<keyof NonNullable<NonNullable<CreateAgentPluginOptions['loop']>['modules']>> = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
+    const moduleKeys: Array<keyof NonNullable<NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>['loop']>['modules']>> = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
     for (const k of moduleKeys) {
         const v = (options as any)[k];
         if (typeof v === 'function') sugarModules[k as string] = v;

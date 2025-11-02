@@ -14,6 +14,7 @@ export type {
     ProposedAction,
     ExecutableAction,
     ExecResult,
+    ExecErrorPayload,
     TransitionOut,
     TurnOutcome,
     ShieldOutcome,

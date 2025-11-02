@@ -10,6 +10,7 @@ export function createStageFacade<St extends string = string>(opts: {
     initial?: St;
     invariants?: StageInvariants<St>;
     autoMarks?: Partial<Record<St, Record<string, unknown>>>; // keys to set when entering stage
+    onEnter?: Partial<Record<St, (ctx: TaskContext, stage: St) => void>>;
 } = {}) {
     const stageKey = opts.stageKey ?? 'stage';
     const initial = opts.initial as St | undefined;
@@ -45,6 +46,11 @@ export function createStageFacade<St extends string = string>(opts: {
             for (const [k, v] of Object.entries(marks)) {
                 ctx.vars.set(k, v as unknown);
             }
+        }
+        const onEnter = (opts.onEnter ?? {}) as Partial<Record<St, (ctx: TaskContext, stage: St) => void>>;
+        const hook = onEnter[s];
+        if (hook) {
+            hook(ctx, s);
         }
     };
 

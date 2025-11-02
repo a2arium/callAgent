@@ -298,8 +298,17 @@ const Stage = createStageFacade<Stage>({
   autoMarks: {
     completed: { 'completed.called': true },
     awaiting_input: { 'awaiting_input.called': true }
+  },
+  onEnter: {
+    executing: (ctx) => ctx.progress(50, 'running'),
+    completed: (ctx) => ctx.complete(100, 'done')
   }
 });
+
+// Tip: Stage facade reads both ctx.vars and m.memory.vars, so mirroring stage flags into
+// memory keeps invariants working even when you persist them.
+// Optional `onEnter` hooks let you centralize progress/complete side-effects that should occur
+// whenever a stage is entered; omit them if you prefer to drive status updates manually.
 
 // 4. Stage dispatcher (Execution decides HOW to do it)
 const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>> = {
@@ -1391,6 +1400,10 @@ execution: async (intent, ctx, m) => {
 ```
 
 Note: `createStageFacade` enforces per-stage invariants and auto-marks; typestate (intent → allowed stages) is a separate concern. The recommended pattern is to compose both: use the facade to read/validate the current stage and a small assertion to enforce intent-stage compatibility.
+
+Behind the scenes the facade inspects both `ctx.vars` and `M.memory.vars`, so if you persist stage markers in mental state (for snapshot hygiene) the same invariant checks still apply without extra plumbing.
+
+You can optionally register `onEnter` hooks for stages to centralize side-effects like `ctx.progress(...)` or `ctx.complete(...)`; treat them as sugar—leave them out when status updates depend on richer business rules.
 
 > Prefer exhaustive matching: When feasible, use `ts-pattern` on `{ stage, intent }` with `.exhaustive()` to get compile-time guarantees that all combinations you care about are handled. Keep the typestate assertion as a lightweight runtime guard and documentation aid for medium/large flows or when handler reachability could drift.
 

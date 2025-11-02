@@ -38,10 +38,12 @@ export type ExecutableAction =
     | { kind: 'language'; echoed: boolean }
     | { kind: 'internal'; done: boolean };
 
-export type ExecResult = {
+export type ExecErrorPayload = { code: string; message: string };
+
+export type ExecResult<Data = unknown, ErrorPayload = ExecErrorPayload> = {
     status: 'ok' | 'error';
-    data?: unknown;
-    error?: { code: string; message: string };
+    data?: Data;
+    error?: ErrorPayload;
     receipts?: unknown;
     correlationId?: string;
     toolId?: string;
@@ -70,29 +72,41 @@ export type PolicyFn<Sensory = unknown, Obs = unknown> =
     | ((m: MentalState<Sensory>, o: Obs, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
     | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
 
-export type Modules<Sensory = unknown, Obs = Observation, Alpha = AttentionSignal> = {
+export type Modules<
+    Sensory = unknown,
+    Obs = Observation,
+    Alpha = AttentionSignal,
+    ExecData = unknown,
+    ExecError = ExecErrorPayload
+> = {
     attention: (prev: MentalState<Sensory>, env: EnvironmentState, llm?: PureLLMPort) => Alpha;
     perception: (env: EnvironmentState, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
     learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
     policy: PolicyFn<Sensory, Obs>;
     shield: (m: MentalState<Sensory>, a: ProposedAction, llm?: PureLLMPort) => ShieldOutcome;
-    execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult }>;
-    transition: (env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut;
-    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult }, outcome: TransitionOut, llm?: PureLLMPort) => number;
+    execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
+    transition: (env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut | Promise<TransitionOut>;
+    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut, llm?: PureLLMPort) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, llm?: PureLLMPort) => number;
 };
 
-export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = AttentionSignal>(
+export async function oneTurn<
+    Sensory = unknown,
+    Obs = Observation,
+    Alpha = AttentionSignal,
+    ExecData = unknown,
+    ExecError = ExecErrorPayload
+>(
     ctx: TaskContext,
     env: EnvironmentState,
     mPrev: MentalState<Sensory>,
-    mods: Modules<Sensory, Obs, Alpha>,
+    mods: Modules<Sensory, Obs, Alpha, ExecData, ExecError>,
     prevAction?: ProposedAction,
     rPrev?: number
 ): Promise<{
     m: MentalState<Sensory>;
     outcome: TransitionOut;
-    exec: { action: ExecutableAction; result: ExecResult };
+    exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     timings: Record<string, number>;
     reward: number;
 }> {
@@ -213,7 +227,7 @@ export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = Atte
     }
 
     const tE0 = Date.now();
-    let exec: { action: ExecutableAction; result: ExecResult };
+    let exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     try {
         exec = await mods.execution(toExecute!, ctx, m1);
     } catch (error) {
@@ -225,7 +239,7 @@ export async function oneTurn<Sensory = unknown, Obs = Observation, Alpha = Atte
     const tT0 = Date.now();
     let outcome: TransitionOut;
     try {
-        outcome = mods.transition(env, exec, m1, llm);
+        outcome = await Promise.resolve(mods.transition(env, exec, m1, llm));
     } catch (error) {
         console.error('[oneTurn] Transition module error:', error);
         throw new Error(`Transition module failed: ${error instanceof Error ? error.message : String(error)}`);
