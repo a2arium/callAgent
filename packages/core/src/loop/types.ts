@@ -8,9 +8,9 @@
 // - Placeholders for future capabilities (world model, emotion, reward)
 import type { Observation } from './oneTurn.js';
 
-export type ObservationInbox = {
-    current: Observation[];
-    all: Observation[];
+export type ObservationInbox<Payload = unknown> = {
+    current: Observation<Payload>[];
+    all: Observation<Payload>[];
 };
 
 export type EpisodicEvent = {
@@ -114,13 +114,13 @@ export type Snapshot = {
 };
 
 // Environment state visible to the loop per turn
-export type EnvironmentState = {
+export type EnvironmentState<ObservationPayload = unknown> = {
     time: string; // ISO timestamp
     input: unknown; // current task input or event payload
     sessionId?: string; // current session id (task id)
     turn: number; // cumulative loop turn (persisted per session)
     budget: { maxTurns: number; latencyMs: number }; // loop constraints from manifest
-    inbox: ObservationInbox; // ordered observations awaiting perception (current turn + history)
+    inbox: ObservationInbox<ObservationPayload>; // ordered observations awaiting perception (current turn + history)
     pending: {
         inputs: Record<string, unknown>;
         children: Record<string, unknown>;

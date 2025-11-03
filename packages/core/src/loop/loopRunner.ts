@@ -7,7 +7,9 @@ import {
     type ProposedAction,
     type ExecutableAction,
     type ExecResult,
-    type Observation
+    type ExecErrorPayload,
+    type Observation,
+    type AttentionSignal
 } from './oneTurn.js';
 import type { EnvironmentState, MentalState, ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
@@ -17,33 +19,44 @@ type LoopRunnerOptions = {
     latencyMs?: number;
 };
 
-const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
+const ensureInbox = <ObservationPayload = unknown>(environment: EnvironmentState<ObservationPayload>): ObservationInbox<ObservationPayload> => {
     const raw = environment.inbox as unknown;
     if (Array.isArray(raw)) {
-        const legacy = raw as Observation[];
-        const converted: ObservationInbox = { current: [...legacy], all: [...legacy] };
+        const legacy = raw as Observation<ObservationPayload>[];
+        const converted: ObservationInbox<ObservationPayload> = { current: [...legacy], all: [...legacy] };
         environment.inbox = converted;
         return converted;
     }
     if (raw && typeof raw === 'object') {
-        const candidate = raw as ObservationInbox;
+        const candidate = raw as ObservationInbox<ObservationPayload>;
         if (!Array.isArray(candidate.current)) candidate.current = [];
         if (!Array.isArray(candidate.all)) candidate.all = [];
         environment.inbox = candidate;
         return candidate;
     }
-    const initialized: ObservationInbox = { current: [], all: [] };
+    const initialized: ObservationInbox<ObservationPayload> = { current: [], all: [] };
     environment.inbox = initialized;
     return initialized;
 };
 
-export async function runLoop(
+export async function runLoop<
+    Sensory = unknown,
+    Obs = Observation,
+    Alpha = AttentionSignal,
+    ExecData = unknown,
+    ExecError extends import('./oneTurn.js').ExecErrorPayload = import('./oneTurn.js').ExecErrorPayload,
+    ObservationPayload = unknown
+>(
     ctx: TaskContext,
-    M: MentalState,
-    env: EnvironmentState,
-    modules: Partial<Modules>,
+    M: MentalState<Sensory>,
+    env: EnvironmentState<ObservationPayload>,
+    modules: Partial<Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>>,
     opts: LoopRunnerOptions = {}
-): Promise<{ M: MentalState; outcome: TurnOutcome; metrics?: { timings: Record<string, number>[]; rewards: number[] } }> {
+): Promise<{
+    M: MentalState<Sensory>;
+    outcome: TurnOutcome<ObservationPayload>;
+    metrics?: { timings: Record<string, number>[]; rewards: number[] };
+}> {
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
     try { console.info('[loopRunner] start', { maxTurns }); } catch { }
@@ -51,7 +64,7 @@ export async function runLoop(
     const inbox = ensureInbox(env);
 
     // Provide minimal defaults (prefer agent overrides when present)
-    const defaults: Modules = {
+    const defaults: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload> = {
         attention: modules.attention ?? ((_prev, _env) => ({ kind: 'all' })),
         perception: modules.perception ?? ((e: EnvironmentState) => {
             const inboxState = ensureInbox(e);
@@ -236,19 +249,19 @@ export async function runLoop(
 
             if (action.kind === 'ask_user' && action.token) {
                 try { console.log(`[LoopRunner] transition await_input token=${action.token}`); } catch { }
-                return { kind: 'await_input', token: action.token } as TransitionOut;
+                return { kind: 'await_input', token: action.token } as TransitionOut<ObservationPayload>;
             }
 
             if (action.kind === 'subagent' && action.token) {
-                return { kind: 'await_child', token: action.token } as TransitionOut;
+                return { kind: 'await_child', token: action.token } as TransitionOut<ObservationPayload>;
             }
 
             if (action.kind === 'tool' && action.token) {
-                return { kind: 'await_tool', token: action.token } as TransitionOut;
+                return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
             }
 
-            const observations: Observation[] = [];
-            const mapSource = (): Observation['source'] => {
+            const observations: Observation<ObservationPayload>[] = [];
+            const mapSource = (): Observation<ObservationPayload>['source'] => {
                 switch (action.kind) {
                     case 'tool':
                         return 'tool';
@@ -263,10 +276,16 @@ export async function runLoop(
                 }
             };
 
-            const baseObservation: Observation = {
+            const payloadValue = (result.data ?? null) as ObservationPayload;
+            const errorValue: ExecErrorPayload | undefined =
+                result.status === 'error'
+                    ? (result.error ?? { code: 'execution_error', message: 'Execution returned error' })
+                    : undefined;
+
+            const baseObservation: Observation<ObservationPayload> = {
                 source: mapSource(),
                 kind: `${action.kind}.${result.status}`,
-                payload: result.data ?? null,
+                payload: payloadValue,
                 provenance: {
                     ts: result.ts ?? Date.now(),
                     turn: (env as any)?.turn ?? 0,
@@ -274,7 +293,7 @@ export async function runLoop(
                     toolId: result.toolId,
                     correlationId: result.correlationId
                 },
-                error: result.status === 'error' ? (result.error ?? { code: 'execution_error', message: 'Execution returned error' }) : undefined
+                error: errorValue
             };
 
             // Only record successful/failed immediates; await branches returned above.
@@ -287,7 +306,7 @@ export async function runLoop(
                 (env as any).goalStats = { doneCount };
             } catch { /* noop */ }
 
-            return { kind: 'continue', observations } as TransitionOut;
+            return { kind: 'continue', observations } as TransitionOut<ObservationPayload>;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {
             try {
@@ -316,7 +335,7 @@ export async function runLoop(
                 return 0;
             } catch { return 0; }
         })
-    } as Modules;
+    } as Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>;
 
     function scanForPII(value: unknown, regexes: RegExp[]): boolean {
         try {
@@ -334,7 +353,7 @@ export async function runLoop(
     let m = M;
     let prevAction: ProposedAction | undefined = undefined;
     let rPrev: number | undefined = undefined;
-    let outcome: TurnOutcome = { kind: 'continue', observations: [] };
+    let outcome: TurnOutcome<ObservationPayload> = { kind: 'continue', observations: [] };
     const timings: Record<string, number>[] = [];
     const rewards: number[] = [];
 
@@ -352,13 +371,22 @@ export async function runLoop(
         }
 
         try {
-            const step: Awaited<ReturnType<typeof oneTurn>> = await oneTurn(ctx, env, m, defaults, prevAction, rPrev);
+            const step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
+                ctx,
+                env,
+                m,
+                defaults,
+                prevAction,
+                rPrev
+            );
             m = step.m;
             outcome = step.outcome;
             if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
-                outcome = { kind: 'continue', observations: [] } as TransitionOut;
+                outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
             }
-            const observations = Array.isArray((outcome as any).observations) ? (outcome as any).observations as Observation[] : [];
+            const observations = Array.isArray((outcome as any).observations)
+                ? ((outcome as any).observations as Observation<ObservationPayload>[])
+                : [];
             if (observations.length > 0) {
                 inbox.all.push(...observations);
                 inbox.current = [...observations];

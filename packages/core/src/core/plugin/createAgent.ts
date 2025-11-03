@@ -33,8 +33,12 @@ export const createAgent = <
     Obs = unknown,
     Alpha = unknown,
     ExecData = unknown,
-    ExecError = import('../../loop/oneTurn.js').ExecErrorPayload
->(options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>, metaUrl: string): AgentPlugin => {
+    ExecError extends import('../../loop/oneTurn.js').ExecErrorPayload = import('../../loop/oneTurn.js').ExecErrorPayload,
+    ObservationPayload = unknown
+>(
+    options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>,
+    metaUrl: string
+): AgentPlugin => {
     // Get caller directory directly from required metaUrl
     const callerDir = getDirname(metaUrl);
 
@@ -128,7 +132,11 @@ export const createAgent = <
 
     // Build loop.modules from either explicit loop or top-level sugar
     const sugarModules: Record<string, unknown> = {};
-    const moduleKeys: Array<keyof NonNullable<NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>['loop']>['modules']>> = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
+    const moduleKeys: Array<
+        keyof NonNullable<
+            NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['loop']>['modules']
+        >
+    > = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
     for (const k of moduleKeys) {
         const v = (options as any)[k];
         if (typeof v === 'function') sugarModules[k as string] = v;

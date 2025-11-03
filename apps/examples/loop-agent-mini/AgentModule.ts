@@ -2,6 +2,7 @@ import {
     createAgent,
     type EnvironmentState,
     type ExecResult,
+    type ExecErrorPayload,
     type ExecutableAction,
     type MentalState,
     type Observation,
@@ -10,10 +11,20 @@ import {
     type TransitionOut
 } from '@a2arium/callagent-core';
 
+type MiniExecData = { message?: string; status?: 'complete' };
+
+type MiniObservationPayload = {
+    message?: string;
+    status: ExecResult['status'];
+    toolId?: string;
+};
+
+type MiniObservation = Observation<MiniObservationPayload>;
+
 type MiniPerception = {
     input: unknown;
     time: string;
-    observations: Observation[];
+    observations: MiniObservation[];
 };
 
 type MiniSensory = {
@@ -35,15 +46,15 @@ const describe = (label: string, value: unknown): void => {
 const createExecResult = (
     toolId: string,
     status: ExecResult['status'],
-    overrides: Partial<Omit<ExecResult, 'status' | 'toolId'>> = {}
-): ExecResult => ({
+    overrides: Partial<Omit<ExecResult<MiniExecData>, 'status' | 'toolId'>> = {}
+): ExecResult<MiniExecData> => ({
     status,
     toolId,
     ts: Date.now(),
     ...overrides
 });
 
-const mapSource = (action: ExecutableAction): Observation['source'] => {
+const mapSource = (action: ExecutableAction): MiniObservation['source'] => {
     switch (action.kind) {
         case 'ask_user':
             return 'user';
@@ -59,12 +70,16 @@ const mapSource = (action: ExecutableAction): Observation['source'] => {
 };
 
 const buildObservation = (
-    env: EnvironmentState,
-    exec: { action: ExecutableAction; result: ExecResult }
-): Observation => ({
+    env: EnvironmentState<MiniObservationPayload>,
+    exec: { action: ExecutableAction; result: ExecResult<MiniExecData> }
+): MiniObservation => ({
     source: mapSource(exec.action),
     kind: `${exec.action.kind}.${exec.result.status}`,
-    payload: exec.result.data ?? null,
+    payload: {
+        message: exec.result.data?.message,
+        status: exec.result.status,
+        toolId: exec.result.toolId
+    },
     provenance: {
         ts: exec.result.ts ?? Date.now(),
         turn: env.turn,
@@ -90,7 +105,7 @@ const buildObservation = (
  * Key Insight: MentalState (including llmState) is saved after EVERY runLoop execution,
  * so history persists across turns even within a single task execution.
  */
-export default createAgent({
+export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, ExecErrorPayload, MiniObservationPayload>({
     manifest: {
         name: 'loop-agent-mini',
         version: '0.3.0',
@@ -106,7 +121,7 @@ export default createAgent({
         historyMode: 'dynamic'
     },
 
-    perception: (env: EnvironmentState): MiniPerception => {
+    perception: (env: EnvironmentState<MiniObservationPayload>): MiniPerception => {
         const drained = env.inbox.current;
         if (drained.length > 0) {
             describe('[Perception] Drained observations', drained);
@@ -237,7 +252,11 @@ export default createAgent({
         };
     },
 
-    transition: (env: EnvironmentState, executionResult: { action: ExecutableAction; result: ExecResult }, _mentalState: MiniMentalState): TransitionOut => {
+    transition: (
+        env: EnvironmentState<MiniObservationPayload>,
+        executionResult: { action: ExecutableAction; result: ExecResult<MiniExecData> },
+        _mentalState: MiniMentalState
+    ): TransitionOut<MiniObservationPayload> => {
         const { action, result } = executionResult;
 
         if (action.kind === 'internal' && action.done) {

@@ -32,8 +32,8 @@ This document describes a **reusable, production-ready agent architecture** that
 
 ### Effect → Observation Pipeline
 
-- **Execution always returns `{ action, result }`** where `result` is an `ExecResult` containing status, data/error, provenance (`ts` plus any correlation metadata), and optional receipts.
-- **Transition packages that `ExecResult` into one or more normalized `Observation` objects** and returns them via `TransitionOut.observations` together with the control signal (`continue`, `await_*`, etc.).
+- **Execution always returns `{ action, result }`** where `result` is an `ExecResult<Data>` (you control `Data`) containing status, typed `data`/`error`, provenance (`ts` plus any correlation metadata), and optional receipts.
+- **Transition packages that `ExecResult<Data>` into one or more normalized `Observation<Payload>` objects** (you control `Payload`) and returns them via `TransitionOut.observations` together with the control signal (`continue`, `await_*`, etc.).
 - **Runtime handoff:** The loop runner appends every observation to `env.inbox.all` and stages the batch on `env.inbox.current` before the next turn begins. Perception reads the staged slice; history remains in `all` for replay/debugging.
 - **Environment exposes `{ world, inbox: { current, all } }`** to the next turn. `current` holds only the observations for the upcoming turn; `all` keeps the ordered log. Perception treats `current` as read-only, validates each entry, then the runtime clears it when the turn ends.
 - **Turn _t+1_ – Perception: Perception validates and annotates inbox entries** (plus any ambient world state). At the start of the next turn, Perception drains the inbox (append-only queue), validates each observation, and hands Learning a structured observation payload. Learning then updates the mental state, making the effects from turn _t_ available to Policy on turn _t+1_.
@@ -275,7 +275,15 @@ Your single source of truth for cognition is M. Your single source of truth for 
 
 ```typescript
 import { createAgent } from '@a2arium/callagent-core';
-import type { TaskContext, MentalState, ExecutableAction } from '@a2arium/callagent-core';
+import type {
+  TaskContext,
+  MentalState,
+  ExecutableAction,
+  EnvironmentState,
+  AttentionSignal,
+  ExecErrorPayload,
+  TransitionOut
+} from '@a2arium/callagent-core';
 
 // 1. Define typed stages for explicit control flow
 type Stage = 'idle' | 'awaiting_input' | 'completed';
@@ -311,7 +319,11 @@ const Stage = createStageFacade<Stage>({
 // whenever a stage is entered; omit them if you prefer to drive status updates manually.
 
 // 4. Stage dispatcher (Execution decides HOW to do it)
-const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>> = {
+type Sensory = { current?: string };
+type Obs = { text?: string; eventType: 'user_message' | 'idle' };
+type InboxPayload = { value?: string | { text?: string }; token?: string };
+
+const handlers: Record<Stage, (ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>> = {
   idle: async (ctx, m) => {
     await ctx.reply('How can I help you today?');
 
@@ -346,20 +358,20 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
 };
 
 // 5. Create agent with all modules
-export const agent = createAgent({
+export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayload, InboxPayload>({
   manifest: 'agent.json',
   llmConfig: { provider: 'openai', modelAliasOrName: 'fast' },
 
   // A - Attention: What to focus on
-  attention: (m, env) => {
+  attention: (m, env: EnvironmentState<InboxPayload>) => {
     const hasUserObservation = env.inbox.current.some(o => o.source === 'user');
     return { wantPrompt: !hasUserObservation };
   },
 
   // P - Perception: Normalize inbox payloads
-  perception: (env) => {
+  perception: (env: EnvironmentState<InboxPayload>): Obs => {
     const latestInput = env.inbox.current.find(o => o.source === 'user');
-    const value = (latestInput?.payload as { value?: string | { text?: string } })?.value;
+    const value = latestInput?.payload?.value;
     const text = typeof value === 'string' ? value : value?.text;
     return {
       text,
@@ -368,7 +380,7 @@ export const agent = createAgent({
   },
 
   // L - Learning: Update M (immutable, pure)
-  learning: (prev, _action, obs) => ({
+  learning: (prev, _action, obs: Obs): MentalState<Sensory> => ({
     ...prev,
     memory: {
       ...prev.memory,
@@ -414,14 +426,18 @@ export const agent = createAgent({
   },
 
   // T - Transition: Control loop flow (based on control state)
-  transition: (_env, exec, ctx) => {
+  transition: (
+    _env: EnvironmentState<InboxPayload>,
+    exec,
+    ctx
+  ): TransitionOut<InboxPayload> => {
     if (exec.kind === 'ask_user') {
-      return { kind: 'await_input', token: exec.token } as TurnOutcome;
+      return { kind: 'await_input', token: exec.token };
     }
     if (V.completeCalled(ctx as TaskContext)) {
-      return { kind: 'complete', result: { ok: true } } as TurnOutcome;
+      return { kind: 'complete', result: { ok: true } };
     }
-    return { kind: 'continue' } as TurnOutcome;
+    return { kind: 'continue', observations: [] };
   }
 }, import.meta.url);
 ```
@@ -767,19 +783,21 @@ execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<Exe
 
 ## 4. Module Contracts
 
-### Per‑Agent Typing (Sensory, Obs)
+### Per‑Agent Typing (Sensory, Obs, ExecData, ObservationPayload)
 
-Define explicit `Sensory` and `Obs` types and pass them to `createAgent<Sensory, Obs>`. This is the only acceptable pattern.
+Define explicit `Sensory` and `Obs` types and pass them to `createAgent<Sensory, Obs>`. When you need typed execution results or inbox payloads, extend the signature to `createAgent<Sensory, Obs, Alpha, ExecData, ObservationPayload>` (all tail parameters default to `AttentionSignal`, `unknown`, `unknown`). This is the only acceptable pattern.
 
 ```typescript
 type Sensory = { current?: string };
 type Obs = { text?: string };
+type InboxPayload = { value?: string | { text?: string } };
 
-export const agent = createAgent<Sensory, Obs>({
+export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayload, InboxPayload>({
   // perception returns Obs
-  perception: (env): Obs => {
-    const input = env?.input;
-    const text = typeof input === 'string' ? input : (input && typeof input === 'object' ? (input as any).text : undefined);
+  perception: (env: EnvironmentState<InboxPayload>): Obs => {
+    const input = env?.input as InboxPayload | undefined;
+    const value = input?.value;
+    const text = typeof value === 'string' ? value : value?.text;
     return { text };
   },
 
@@ -793,7 +811,7 @@ export const agent = createAgent<Sensory, Obs>({
   }),
 
   // policy reads only M, emits Intent/ProposedAction
-  policy: (m) => {
+  policy: (m): ProposedAction => {
     const q = m.memory.sensory.current?.trim();
     return q
       ? { kind: 'internal', intent: 'answer_with_llm', data: { query: q } }
@@ -803,7 +821,33 @@ export const agent = createAgent<Sensory, Obs>({
 }, import.meta.url);
 ```
 
-Do not omit generics or rely on implicit `unknown`—define `Sensory` and `Obs` per agent to keep Perception/Learning/Policy contracts explicit and testable.
+Need typed effect payloads? Supply the extra generics:
+
+```typescript
+type ToolResult = { summary: string; raw: unknown };
+type InboxPayload = { outcome: ToolResult; status: 'ok' | 'error' };
+
+export const agent = createAgent<Sensory, Obs, AttentionSignal, ToolResult, ExecErrorPayload, InboxPayload>({
+  execution: async () => ({
+    action: { kind: 'internal', done: true },
+    result: { status: 'ok', data: { summary: '...' , raw: {} } }
+  }),
+  transition: (_env, exec) => ({
+    kind: 'continue',
+    observations: [{
+      source: 'tool',
+      kind: 'tool.completed',
+      payload: { outcome: exec.result.data!, status: exec.result.status },
+      provenance: { ts: Date.now(), turn: _env.turn }
+    }]
+  })
+  // ...
+}, import.meta.url);
+```
+
+Do not omit generics or rely on implicit `unknown`—define `Sensory`/`Obs` and add `ExecData`/`ObservationPayload` when you need type-safe execution → observation plumbing.
+
+> **ExecData primer**: The fourth generic parameter (`ExecData`) flows straight into `ExecResult<ExecData>`. Whatever shape you pick here becomes the statically-known type of `result.data` inside both `execution` and `transition`, which means no more `unknown` casts when you dereference tool returns or internal side-effect payloads. In the snippet below we pass `ToolResult` as `ExecData`, so `exec.result.data` narrows to `ToolResult` everywhere the framework hands it back.
 
 ### Attention
 
@@ -814,7 +858,10 @@ type AttentionSignal = {
   priority?: 'low' | 'normal' | 'high';
 };
 
-attention: (prevMentalState: MentalState, env: EnvironmentState) => AttentionSignal
+attention: (
+  prevMentalState: MentalState<Sensory>,
+  env: EnvironmentState<InboxPayload>
+) => AttentionSignal
 ```
 
 **Purpose**: Goal/affect-guided focus; optionally nudges prompting or filters for Perception.
@@ -841,30 +888,34 @@ type Observation = {
   text?: string;
   meta?: Record<string, unknown>;
   eventType?: string;
+  resumeToken?: string;
 };
 
-perception: (env: EnvironmentState, alpha: AttentionSignal) => Observation
+type InboxPayload = { value?: string | { text?: string }; token?: string; kind?: string };
+
+perception: (env: EnvironmentState<InboxPayload>, alpha: AttentionSignal) => Observation
 ```
 
 **Purpose**: Normalize multimodal environment into compact observation.
 
 **Example**:
 ```typescript
-perception: (env, alpha) => {
+perception: (env: EnvironmentState<InboxPayload>, alpha) => {
   const inputObservation = env.inbox.current.find(o => o.source === 'user');
-  const input = (inputObservation?.payload as { value?: string | { text?: string } })?.value;
+  const input = inputObservation?.payload?.value;
   const text = typeof input === 'string' ? input : input?.text;
   
   if (typeof text === 'string') {
-    return { text, eventType: 'user_message' };
+    return { text, eventType: 'user_message', resumeToken: inputObservation?.payload?.token };
   }
   
   if (inputObservation) {
-    const event = inputObservation.payload as { kind?: string; text?: string };
+    const event = inputObservation.payload;
     return {
       text: event.text,
-      meta: input,
-      eventType: event.kind
+      meta: { raw: event },
+      eventType: event.kind,
+      resumeToken: event.token
     };
   }
 
@@ -1111,8 +1162,9 @@ transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState) => T
 **Purpose**: Control loop flow based on execution result.
 
 **Example**:
-```typescript
-transition: (env, exec, m) => {
+type InboxPayload = { token?: string; result?: unknown };
+
+transition: (env: EnvironmentState<InboxPayload>, exec, m): TransitionOut<InboxPayload> => {
   // Await outcomes
   if (exec.kind === 'ask_user') {
     return { kind: 'await_input', token: exec.token };
@@ -1131,7 +1183,7 @@ transition: (env, exec, m) => {
   }
   
   // Continue loop
-  return { kind: 'continue' };
+  return { kind: 'continue', observations: [] };
 }
 ```
 
@@ -1719,14 +1771,16 @@ sequenceDiagram
 
 ### Resume Observations
 
-When the agent resumes, the engine pushes canonical observations onto `env.inbox`:
+When the agent resumes, the engine pushes canonical observations onto `env.inbox`. Model them as `Observation<ResumePayload>` so the inbox payload stays typed:
 
 ```typescript
-type ResumeObservation =
-  | { source: 'user'; kind: 'input.provided'; payload: { token: string; value: unknown }; provenance: ObservationProvenance }
-  | { source: 'tool'; kind: 'tool.completed'; payload: { token: string; result: unknown; tool?: string }; provenance: ObservationProvenance }
-  | { source: 'child'; kind: 'child.completed'; payload: { token: string; childTaskId: string; result: unknown; agentId?: string }; provenance: ObservationProvenance }
-  | { source: 'env'; kind: 'external.event'; payload: { token: string; payload: unknown; type?: string }; provenance: ObservationProvenance };
+type ResumePayload =
+  | { token: string; value: unknown }
+  | { token: string; result: unknown; tool?: string }
+  | { token: string; childTaskId: string; result: unknown; agentId?: string }
+  | { token: string; payload: unknown; type?: string };
+
+type ResumeObservation = Observation<ResumePayload>;
 ```
 
 ### Inspecting Inbox Observations
@@ -1738,19 +1792,21 @@ const latestUserInput = env.inbox.current.find(
 );
 
 if (latestUserInput) {
-  const value = latestUserInput.payload.value;
+  const payload = latestUserInput.payload;
+  const value = 'value' in payload ? payload.value : undefined;
   const text = typeof value === 'string' ? value : (value as any)?.text;
-  return { text, eventType: 'input', resumeToken: latestUserInput.payload.token };
+  return { text, eventType: 'input', resumeToken: payload.token };
 }
 
 const latestToolResult = env.inbox.current.find(
   obs => obs.source === 'tool' && obs.kind === 'tool.completed'
 );
 if (latestToolResult) {
+  const payload = latestToolResult.payload;
   return {
-    meta: { result: latestToolResult.payload.result },
+    meta: { result: 'result' in payload ? payload.result : undefined },
     eventType: 'tool',
-    resumeToken: latestToolResult.payload.token
+    resumeToken: payload.token
   };
 }
 
@@ -2102,43 +2158,33 @@ export const agent = createAgent({
   },
 
   // === T - Transition ===
-  transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, ctx) => {
+  transition: (
+    _env: EnvironmentState<InboxPayload>,
+    exec: { action: ExecutableAction; result: ExecResult<unknown> },
+    ctx
+  ): TransitionOut<InboxPayload> => {
     const action = exec.action ?? exec;
     if (action.kind === 'ask_user') {
-      return { kind: 'await_input', token: action.token } as TransitionOut;
+      return { kind: 'await_input', token: action.token };
     }
     if (V.completeCalled(ctx as TaskContext)) {
-      return { kind: 'complete', result: { ok: true } } as TurnOutcome;
+      return { kind: 'complete', result: { ok: true } };
     }
-    return { kind: 'continue', observations: [exec.result.status === 'ok'
-      ? {
+    return {
+      kind: 'continue',
+      observations: [
+        {
           source: 'internal',
-          kind: 'internal.success',
-          payload: exec.result.data,
-          provenance: {
-            ts: exec.result.ts,
-            turn: env.turn,
-            id: exec.result.correlationId,
-            toolId: exec.result.toolId,
-            correlationId: exec.result.correlationId
-          }
+          kind: exec.result.status === 'ok' ? 'internal.success' : 'internal.error',
+          payload: exec.result.status === 'ok' ? exec.result.data : exec.result.error
         }
-      : {
-          source: 'internal',
-          kind: 'internal.error',
-          payload: exec.result.error,
-          provenance: {
-            ts: exec.result.ts,
-            turn: env.turn,
-            id: exec.result.correlationId,
-            toolId: exec.result.toolId,
-            correlationId: exec.result.correlationId
-          }
-        }
-    ] } as TransitionOut;
+      ]
+    };
   }
 }, import.meta.url);
 ```
+
+The loop runner fills in provenance (`ts`, `turn`, `correlationId`, `toolId`) for any observations you return. Supply those fields yourself only if you need to override them; otherwise just set `source`, `kind`, and `payload` (or return an empty array and let the runtime synthesize a canonical observation from the `ExecResult`).
 
 ---
 

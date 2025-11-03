@@ -271,15 +271,17 @@ export class TaskEngine {
         const varCache = new Map<string, unknown>(Object.entries(currentVars));
         (ctx as any).__wmVersion = session?.wmVersion;
         (ctx as any).__varsDirty = false;
-        const assignVarsIntoMental = () => {
-            // Convert varCache to object while preserving nested structures
-            const varsObject: Record<string, unknown> = {};
-            for (const [key, value] of varCache.entries()) {
-                varsObject[key] = value;
-            }
+        const iterMentalTargets = (
+            fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
+        ): void => {
+            const candidates: unknown[] = [
+                M,
+                (ctx as any).M,
+                (ctx as any).__mental
+            ];
 
-            const applyVars = (mental: unknown) => {
-                if (!mental || typeof mental !== 'object') return;
+            for (const mental of candidates) {
+                if (!mental || typeof mental !== 'object') continue;
                 const target = mental as Record<string, unknown>;
                 let memory = target.memory;
 
@@ -288,19 +290,68 @@ export class TaskEngine {
                     target.memory = memory as Record<string, unknown>;
                 }
 
-                (memory as Record<string, unknown>).vars = varsObject;
-                target.vars = (memory as Record<string, unknown>).vars;
-            };
-
-            const targets = new Set<unknown>([
-                M,
-                (ctx as any).M,
-                (ctx as any).__mental
-            ]);
-
-            for (const mental of targets) {
-                applyVars(mental);
+                const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
+                fn({ target, memory: memory as Record<string, unknown>, existing });
             }
+        };
+
+        const assignVarsIntoMental = () => {
+            const varsObject = Object.fromEntries(varCache) as Record<string, unknown>;
+            iterMentalTargets(({ target, memory, existing }) => {
+                const merged = { ...existing, ...varsObject } as Record<string, unknown>;
+                (memory as Record<string, unknown>).vars = merged;
+                target.vars = merged;
+            });
+        };
+
+        const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
+            const pathParts = path.split('.');
+            if (pathParts.length === 0) {
+                return { next: { ...obj }, changed: false };
+            }
+
+            const clone = { ...obj } as Record<string, unknown>;
+            let currentClone: Record<string, unknown> = clone;
+            let currentOrig: Record<string, unknown> | undefined = obj;
+
+            for (let i = 0; i < pathParts.length - 1; i++) {
+                const part = pathParts[i];
+                const nextOrig = currentOrig?.[part];
+                if (!nextOrig || typeof nextOrig !== 'object' || Array.isArray(nextOrig)) {
+                    return { next: clone, changed: false };
+                }
+                const nextClone = { ...(nextOrig as Record<string, unknown>) };
+                currentClone[part] = nextClone;
+                currentClone = nextClone;
+                currentOrig = nextOrig as Record<string, unknown>;
+            }
+
+            const leafKey = pathParts[pathParts.length - 1];
+            if (!currentOrig || !Object.prototype.hasOwnProperty.call(currentOrig, leafKey)) {
+                return { next: clone, changed: false };
+            }
+
+            delete currentClone[leafKey];
+            return { next: clone, changed: true };
+        };
+
+        const removeKeyFromMental = (key: string): void => {
+            iterMentalTargets(({ target, memory, existing }) => {
+                let updated: Record<string, unknown> | undefined;
+
+                if (key.includes('.')) {
+                    const { next, changed } = deleteNestedValue(existing, key);
+                    if (!changed) return;
+                    updated = next;
+                } else {
+                    if (!Object.prototype.hasOwnProperty.call(existing, key)) return;
+                    updated = { ...existing };
+                    delete updated[key];
+                }
+
+                (memory as Record<string, unknown>).vars = updated;
+                target.vars = updated;
+            });
         };
 
         // Helper function to handle nested paths
@@ -465,9 +516,11 @@ export class TaskEngine {
                         // Delete the target property
                         delete current[pathParts[pathParts.length - 1]];
                         varCache.set(baseKey, updatedObj);
+                        removeKeyFromMental(key);
                     }
                 } else {
                     varCache.delete(key);
+                    removeKeyFromMental(key);
                 }
                 (ctx as any).__varsDirty = true;
                 assignVarsIntoMental();
@@ -1397,18 +1450,68 @@ export class TaskEngine {
             try {
                 const currentVars = ((M as any)?.memory?.vars || {}) as Record<string, unknown>;
                 const varCache = new Map<string, unknown>(Object.entries(currentVars));
-                const assignVarsIntoMental = () => {
-                    // Convert varCache to object while preserving nested structures
-                    const varsObject: Record<string, unknown> = {};
-                    for (const [key, value] of varCache.entries()) {
-                        varsObject[key] = value;
+                const iterMentalTargets = (
+                    fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
+                ): void => {
+                    const candidates: unknown[] = [
+                        M,
+                        (ctx as any).M,
+                        (ctx as any).__mental
+                    ];
+
+                    for (const mental of candidates) {
+                        if (!mental || typeof mental !== 'object') continue;
+                        const target = mental as Record<string, unknown>;
+                        let memory = target.memory;
+
+                        if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
+                            memory = {};
+                            target.memory = memory as Record<string, unknown>;
+                        }
+
+                        const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
+                        fn({ target, memory: memory as Record<string, unknown>, existing });
                     }
-                    (M as any).memory = (M as any).memory || {};
-                    (M as any).memory = {
-                        ...(((M as any).memory || {}) || {}),
-                        vars: varsObject
-                    };
-                    (M as any).vars = (M as any).memory.vars;
+                };
+
+                const assignVarsIntoMental = () => {
+                    const varsObject = Object.fromEntries(varCache) as Record<string, unknown>;
+                    iterMentalTargets(({ target, memory, existing }) => {
+                        const merged = { ...existing, ...varsObject } as Record<string, unknown>;
+                        (memory as Record<string, unknown>).vars = merged;
+                        target.vars = merged;
+                    });
+                };
+
+                const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
+                    const pathParts = path.split('.');
+                    if (pathParts.length === 0) {
+                        return { next: { ...obj }, changed: false };
+                    }
+
+                    const clone = { ...obj } as Record<string, unknown>;
+                    let currentClone: Record<string, unknown> = clone;
+                    let currentOrig: Record<string, unknown> | undefined = obj;
+
+                    for (let i = 0; i < pathParts.length - 1; i++) {
+                        const part = pathParts[i];
+                        const nextOrig = currentOrig?.[part];
+                        if (!nextOrig || typeof nextOrig !== 'object' || Array.isArray(nextOrig)) {
+                            return { next: clone, changed: false };
+                        }
+                        const nextClone = { ...(nextOrig as Record<string, unknown>) };
+                        currentClone[part] = nextClone;
+                        currentClone = nextClone;
+                        currentOrig = nextOrig as Record<string, unknown>;
+                    }
+
+                    const leafKey = pathParts[pathParts.length - 1];
+                    if (!currentOrig || !Object.prototype.hasOwnProperty.call(currentOrig, leafKey)) {
+                        return { next: clone, changed: false };
+                    }
+
+                    delete currentClone[leafKey];
+                    return { next: clone, changed: true };
                 };
 
                 // Helper function to handle nested paths
@@ -1442,6 +1545,25 @@ export class TaskEngine {
                     }
 
                     return current;
+                };
+
+                const removeKeyFromMental = (key: string): void => {
+                    iterMentalTargets(({ target, memory, existing }) => {
+                        let updated: Record<string, unknown> | undefined;
+
+                        if (key.includes('.')) {
+                            const { next, changed } = deleteNestedValue(existing, key);
+                            if (!changed) return;
+                            updated = next;
+                        } else {
+                            if (!Object.prototype.hasOwnProperty.call(existing, key)) return;
+                            updated = { ...existing };
+                            delete updated[key];
+                        }
+
+                        (memory as Record<string, unknown>).vars = updated;
+                        target.vars = updated;
+                    });
                 };
                 (ctx as any).vars = {
                     get: (key: string) => {
@@ -1530,9 +1652,11 @@ export class TaskEngine {
                                 // Delete the target property
                                 delete current[pathParts[pathParts.length - 1]];
                                 varCache.set(baseKey, updatedObj);
+                                removeKeyFromMental(key);
                             }
                         } else {
                             varCache.delete(key);
+                            removeKeyFromMental(key);
                         }
                         assignVarsIntoMental();
                     },
@@ -1545,6 +1669,7 @@ export class TaskEngine {
                         return varCache.has(key);
                     }
                 } as any;
+                assignVarsIntoMental();
             } catch { /* noop */ }
             const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {

@@ -64,22 +64,23 @@ flowchart TD
 ### Core types
 
 ```ts
-// Observation normalized by Perception (shape is app-specific, keep it compact)
-type Observation = {
-  text?: string;
+// Observation normalized by Perception (payload shape is app-specific)
+type Observation<Payload = unknown> = {
+  text?: string; // legacy helper fields allowed, but prefer payload
   eventType?: 'user' | 'input' | 'tool' | 'child' | 'internal';
-  meta?: unknown;
+  payload: Payload;
   provenance?: ObservationProvenance;
+  error?: { code: string; message: string };
 };
 
-type ExecResult = {
+type ExecResult<Data = unknown> = {
   status: 'ok' | 'error';
-  data?: unknown;
+  data?: Data;
   error?: { code: string; message: string };
   receipts?: unknown;
   correlationId?: string;
   toolId?: string;
-  ts: number;
+  ts?: number;
 };
 
 type ObservationProvenance = {
@@ -106,14 +107,14 @@ type ExecutableAction =
   | { kind: 'subagent'; token?: string }
   | { kind: 'internal'; done: boolean };
 
-type TransitionOut =
-  | { kind: 'continue'; observations: Observation[] }
+type TransitionOut<ObservationPayload = unknown> =
+  | { kind: 'continue'; observations: Observation<ObservationPayload>[] }
   | { kind: 'await_tool'; token: string }
   | { kind: 'await_child'; token: string }
   | { kind: 'complete'; result?: unknown }
   | { kind: 'fail'; reason: string };
 
-Execution now returns `{ action, result }` where `result` is an `ExecResult` persisted with provenance (`ts`, optional `correlationId/toolId`). Transition consumes that payload, emits loop control, and returns normalized `Observation` objects. The runtime appends every observation to `env.inbox.all`, stages the batch on `env.inbox.current`, and stamps each entry with the current `env.turn` so the very next turn’s Perception can drain, validate, and hand Learning a fresh observation.
+Execution now returns `{ action, result }` where `result` is an `ExecResult<Data>` (you control `Data`) persisted with provenance (`ts`, optional `correlationId/toolId`). Transition consumes that payload, emits loop control, and returns normalized `Observation<Payload>` objects. The runtime appends every observation to `env.inbox.all`, stages the batch on `env.inbox.current`, and stamps each entry with the current `env.turn` so the very next turn’s Perception can drain, validate, and hand Learning a fresh observation.
 ```
 
 ### Generic MentalState and Modules
@@ -121,25 +122,32 @@ Execution now returns `{ action, result }` where `result` is an `ExecResult` per
 ```ts
 // Core generics 
 // - MentalState<Sensory>
-// - Modules<Sensory, Obs>
-// - oneTurn<Sensory, Obs>
+// - Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>
+// - oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>
 
-type Modules<Sensory = unknown, Obs = unknown> = {
-  attention:  (prev: MentalState<Sensory>, env: EnvironmentState, llm?: PureLLMPort) => unknown;   // "alpha"
-  perception: (env: EnvironmentState, alpha: unknown, llm?: PureLLMPort) => Obs | Promise<Obs>;    // normalize env (can be async)
+type Modules<
+  Sensory = unknown,
+  Obs = unknown,
+  Alpha = AttentionSignal,
+  ExecData = unknown,
+  ExecError = ExecErrorPayload,
+  ObservationPayload = unknown
+> = {
+  attention:  (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, llm?: PureLLMPort) => Alpha;
+  perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
   learning:   (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined,
-               obs: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;               // ONLY writer of M
-  policy:     (m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction;                      // pure
+               obs: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
+  policy:     (m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction;
   shield:     (m: MentalState<Sensory>, intent: ProposedAction, llm?: PureLLMPort) =>
                 | { action: 'pass'; intent: ProposedAction }
                 | { action: 'transform'; intent: ProposedAction }
                 | { action: 'veto'; reason: string }
                 | { action: 'defer'; askUser: string };
-  execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult }>;
-  transition: (env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut;
+  execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
+  transition: (env: EnvironmentState<ObservationPayload>, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut<ObservationPayload>;
 
   // Optional reward hooks
-  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult }, outcome: TransitionOut, llm?: PureLLMPort) => number;
+  extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>, llm?: PureLLMPort) => number;
   intrinsicReward?: (m: MentalState<Sensory>, obs: Obs, llm?: PureLLMPort) => number;
 };
 ```

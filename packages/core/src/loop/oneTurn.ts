@@ -16,11 +16,11 @@ export type ObservationProvenance = {
     correlationId?: string;
 };
 
-export type Observation = {
+export type Observation<Payload = unknown> = {
     source: 'tool' | 'child' | 'env' | 'user' | 'internal';
     kind: string;
-    payload: unknown;
-    provenance: ObservationProvenance;
+    payload: Payload;
+    provenance?: ObservationProvenance;
     error?: { code: string; message: string };
 };
 
@@ -40,7 +40,7 @@ export type ExecutableAction =
 
 export type ExecErrorPayload = { code: string; message: string };
 
-export type ExecResult<Data = unknown, ErrorPayload = ExecErrorPayload> = {
+export type ExecResult<Data = unknown, ErrorPayload extends ExecErrorPayload = ExecErrorPayload> = {
     status: 'ok' | 'error';
     data?: Data;
     error?: ErrorPayload;
@@ -56,8 +56,8 @@ export type ShieldOutcome =
     | { action: 'veto'; reason: string }
     | { action: 'defer'; askUser: string };
 
-export type TransitionOut =
-    | { kind: 'continue'; observations: Observation[] }
+export type TransitionOut<ObservationPayload = unknown> =
+    | { kind: 'continue'; observations: Observation<ObservationPayload>[] }
     | { kind: 'await_input'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
@@ -65,7 +65,7 @@ export type TransitionOut =
     | { kind: 'fail'; reason: string };
 
 // Temporary alias while downstream modules migrate
-export type TurnOutcome = TransitionOut;
+export type TurnOutcome<ObservationPayload = unknown> = TransitionOut<ObservationPayload>;
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
     | ((m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
@@ -77,16 +77,22 @@ export type Modules<
     Obs = Observation,
     Alpha = AttentionSignal,
     ExecData = unknown,
-    ExecError = ExecErrorPayload
+    ExecError extends ExecErrorPayload = ExecErrorPayload,
+    ObservationPayload = unknown
 > = {
-    attention: (prev: MentalState<Sensory>, env: EnvironmentState, llm?: PureLLMPort) => Alpha;
-    perception: (env: EnvironmentState, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
+    attention: (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, llm?: PureLLMPort) => Alpha;
+    perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
     learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
     policy: PolicyFn<Sensory, Obs>;
     shield: (m: MentalState<Sensory>, a: ProposedAction, llm?: PureLLMPort) => ShieldOutcome;
     execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
-    transition: (env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut | Promise<TransitionOut>;
-    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut, llm?: PureLLMPort) => number;
+    transition: (
+        env: EnvironmentState<ObservationPayload>,
+        exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> },
+        m: MentalState<Sensory>,
+        llm?: PureLLMPort
+    ) => TransitionOut<ObservationPayload> | Promise<TransitionOut<ObservationPayload>>;
+    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>, llm?: PureLLMPort) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, llm?: PureLLMPort) => number;
 };
 
@@ -95,17 +101,18 @@ export async function oneTurn<
     Obs = Observation,
     Alpha = AttentionSignal,
     ExecData = unknown,
-    ExecError = ExecErrorPayload
+    ExecError extends ExecErrorPayload = ExecErrorPayload,
+    ObservationPayload = unknown
 >(
     ctx: TaskContext,
-    env: EnvironmentState,
+    env: EnvironmentState<ObservationPayload>,
     mPrev: MentalState<Sensory>,
-    mods: Modules<Sensory, Obs, Alpha, ExecData, ExecError>,
+    mods: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>,
     prevAction?: ProposedAction,
     rPrev?: number
 ): Promise<{
     m: MentalState<Sensory>;
-    outcome: TransitionOut;
+    outcome: TransitionOut<ObservationPayload>;
     exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     timings: Record<string, number>;
     reward: number;
@@ -237,7 +244,7 @@ export async function oneTurn<
     timings.executionMs = Date.now() - tE0;
 
     const tT0 = Date.now();
-    let outcome: TransitionOut;
+    let outcome: TransitionOut<ObservationPayload>;
     try {
         outcome = await Promise.resolve(mods.transition(env, exec, m1, llm));
     } catch (error) {
