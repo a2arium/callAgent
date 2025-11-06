@@ -2627,6 +2627,20 @@ const handlers: Record<Stage, Handler> = {
 
 ### Pattern 3: Child Agent Coordination
 
+When delegating to another agent, add its identifier to `manifest.dependencies.agents`; the loop runner refuses `ctx.sendTaskToAgent` calls if the sub agent is missing from the manifest.
+
+Example manifest fragment:
+
+```json
+{
+  "name": "orchestrator",
+  "version": "1.0.0",
+  "dependencies": {
+    "agents": ["analyzer", "extractor"]
+  }
+}
+```
+
 ```typescript
 const handlers: Record<Stage, Handler> = {
   planning: async (ctx, m) => {
