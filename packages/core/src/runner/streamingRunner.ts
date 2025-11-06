@@ -24,6 +24,7 @@ import { extendContextWithMemory } from '../core/memory/types/working/context/wo
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
 import { globalA2AService } from '../core/orchestration/A2AService.js';
 import { AgentResultCache } from '../core/cache/index.js';
+import { loadAgentIndexIfPresent } from '../core/plugin/AgentIndexLoader.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -62,6 +63,8 @@ export async function runAgentWithStreaming(
     input: TaskInput,
     options: StreamingOptions
 ): Promise<void> {
+    await loadAgentIndexIfPresent();
+
     const config: MinimalConfig = loadConfig();
 
     // Determine log method based on output format for runner logs

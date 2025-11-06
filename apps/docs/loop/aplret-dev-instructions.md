@@ -2879,27 +2879,35 @@ execution: async (intent, ctx) => {
    
    // ✅ Third-party SDKs
    const result = await runEffect(
-     () => stripe.charges.create({ amount: 1000, currency: 'usd' }),
-     { timeoutMs: 15000 }
+     () => externalService.process(data),
+     { timeoutMs: 30000, maxRetries: 2 }
    );
    ```
 
-7. **Enforce stage invariants** with runtime asserts
+7. **Generate the agent index and let the runner preload it**
+   ```bash
+   yarn agent-index          # writes .callagent/agent-paths.json
+   yarn agent-index:fast     # regenerate after incremental builds
+   ```
+   The runner loads `.callagent/agent-paths.json` automatically, so `ctx.sendTaskToAgent`
+   resolves dependencies without extra boilerplate.
+
+8. **Enforce stage invariants** with runtime asserts
    ```typescript
    function assertStageInvariants(ctx: TaskContext, stage: Stage): void { /* ... */ }
    ```
 
-8. **Log effects for traceability**
+9. **Log effects for traceability**
    ```typescript
    function logEffect(event: { kind: EffectKind; success: boolean; latencyMs: number }): void { /* ... */ }
    ```
 
-9. **Test golden path end-to-end**
-   ```typescript
-   it('prompt → await → respond → complete', async () => { /* ... */ })
-   ```
+10. **Test golden path end-to-end**
+    ```typescript
+    it('prompt → await → respond → complete', async () => { /* ... */ })
+    ```
 
-10. **Use emotion/reward naming** consistent with survey
+11. **Use emotion/reward naming** consistent with survey
     ```typescript
     m.emotion.valence  // Not m.emotionState.mood
     m.reward.total     // Not m.rewardState.sum

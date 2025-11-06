@@ -39,6 +39,8 @@
     "run:telegram-demo": "yarn workspace @examples/telegram-bridge-demo run start",
     "run:telegram-demo:dev": "yarn workspace @examples/telegram-bridge-demo run dev",
     "agent-cache": "yarn build && node packages/core/dist/runner/cacheCli.js",
+    "agent-index": "yarn build && node packages/core/dist/runner/agentsCli.js index",
+    "agent-index:fast": "node packages/core/dist/runner/agentsCli.js index",
     "cache:cleanup": "yarn agent-cache cleanup",
     "cache:stats": "yarn agent-cache stats",
     "cache:clear": "yarn agent-cache clear",

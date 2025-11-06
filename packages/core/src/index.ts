@@ -2,6 +2,13 @@ export * from './config/index.js';
 export * from './core/plugin/types.js';
 export * from './core/plugin/createAgent.js';
 export * from './runner/streamingRunner.js';
+export {
+    buildAgentIndex,
+    type AgentIndexBuildResult,
+    type AgentIndexEntry,
+    DEFAULT_AGENT_INDEX_PATH
+} from './core/plugin/AgentIndexBuilder.js';
+export { loadAgentIndex, loadAgentIndexIfPresent, type LoadAgentIndexOptions } from './core/plugin/AgentIndexLoader.js';
 export { AgentRegistry, globalAgentRegistry } from './core/plugin/AgentRegistry.js';
 export { PluginManager } from './core/plugin/pluginManager.js';
 export { ContextSerializer } from './core/orchestration/ContextSerializer.js';

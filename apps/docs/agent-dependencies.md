@@ -14,6 +14,26 @@ yarn run-agent apps/examples/hello-to-llm-demo/dist/AgentModule.js '{}'
 yarn run-agent apps/examples/hello-to-llm-demo/dist/AgentModule.js '{}' --no-resolve-deps
 ```
 
+### Automatic Agent Index (Recommended)
+
+- Build project and create .callagent/agent-paths.json
+- OR Regenerate quickly after incremental builds
+
+```bash
+   {
+     "scripts": {
+       "agent-index": "node node_modules/@a2arium/callagent-core/dist/runner/agentsCli.js index",
+       "agent-index:fast": "node node_modules/@a2arium/callagent-core/dist/runner/agentsCli.js index --allowSourceFallback"
+     }
+   }
+```
+
+- The index builder scans all discoverable agents, validates manifests, and writes a
+  canonical map (`agentName -> module path`) to `.callagent/agent-paths.json`.
+- The local runner loads this file automatically on startup, so `ctx.sendTaskToAgent`
+  has deterministic lookups with zero filename heuristics.
+- Build warnings highlight missing or duplicate agents early, keeping CI reliable.
+
 ### Creating an Agent with Dependencies
 
 ```typescript
