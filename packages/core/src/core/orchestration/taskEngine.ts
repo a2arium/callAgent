@@ -822,7 +822,17 @@ export class TaskEngine {
             return { token } as any;
         };
 
-        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string; setToken?: boolean; setStage?: string }) => {
+        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: {
+            awaitCompletion?: boolean;
+            streaming?: boolean;
+            onCompleted?: string;
+            onFailed?: string;
+            onInputRequired?: string;
+            setToken?: boolean;
+            tokenPath?: string;
+            autoClearToken?: boolean;
+            setStage?: string;
+        }) => {
             if (!this.sessionManager) throw new Error('Session manager not configured');
             // Limits: cap max children
             const maxChildren = 50; // TODO: make configurable
@@ -835,26 +845,36 @@ export class TaskEngine {
             // Persist pending child mapping and return a handle; do not dispatch yet
             const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, agent, childInput);
 
-            // Store setToken and setStage options in the task registry for automatic handling
-            if (options?.setToken || options?.setStage) {
-                const snapOptions = await this.sessionManager.load(tenantId, sessionId);
-                const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
-                const tasks = getPendingTasks(baseOptions);
-                if (tasks[token]) {
-                    tasks[token].options = {
-                        setToken: options.setToken,
-                        setStage: options.setStage
-                    };
-                    const next = setPendingTasks(baseOptions, tasks);
-                    const expected = snapOptions?.wmVersion ?? BigInt(0);
-                    await this.sessionManager.saveSnapshot({
-                        tenantId,
-                        sessionId,
-                        agentId: (snapOptions as any)?.agentId || 'default',
-                        expectedWmVersion: expected,
-                        snapshot: next
-                    });
-                }
+            const tokenPath = options?.tokenPath ?? 'child.token';
+            const shouldSetToken = options?.setToken !== false;
+            const autoClearToken = options?.autoClearToken !== false;
+
+            if (shouldSetToken) {
+                try { ctx.vars.set(tokenPath, token); } catch { /* noop */ }
+            }
+            if (options?.setStage) {
+                try { ctx.vars.set('stage', options.setStage); } catch { /* noop */ }
+            }
+
+            const snapOptions = await this.sessionManager.load(tenantId, sessionId);
+            const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
+            const tasks = getPendingTasks(baseOptions);
+            if (tasks[token]) {
+                tasks[token].options = {
+                    setToken: shouldSetToken,
+                    tokenPath,
+                    autoClearToken,
+                    setStage: options?.setStage
+                };
+                const next = setPendingTasks(baseOptions, tasks);
+                const expected = snapOptions?.wmVersion ?? BigInt(0);
+                await this.sessionManager.saveSnapshot({
+                    tenantId,
+                    sessionId,
+                    agentId: (snapOptions as any)?.agentId || 'default',
+                    expectedWmVersion: expected,
+                    snapshot: next
+                });
             }
 
             // If handler names provided, register them atomically before dispatch
@@ -2075,6 +2095,7 @@ export class TaskEngine {
                     const parentM = parentBase.M as any;
 
                     // Automatic token storage
+                    const childTokenPath = entry.options.tokenPath ?? 'child.token';
                     if (entry.options.setToken && token && parentM?.vars) {
                         const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
                             const pathParts = path.split('.');
@@ -2092,7 +2113,7 @@ export class TaskEngine {
 
                         const updatedVars = setNestedValue(
                             { ...(parentM.vars as Record<string, unknown> || {}) },
-                            'childToken',
+                            childTokenPath,
                             token
                         );
                         parentM.vars = updatedVars;
@@ -2537,7 +2558,17 @@ export class TaskEngine {
         // Enable A2A from durable handler context - use the proper TaskEngine sendTaskToAgent implementation
         try {
             const engine = this;
-            (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: { awaitCompletion?: boolean; streaming?: boolean; onCompleted?: string; onFailed?: string; onInputRequired?: string; setToken?: boolean; setStage?: string }) => {
+            (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: {
+                awaitCompletion?: boolean;
+                streaming?: boolean;
+                onCompleted?: string;
+                onFailed?: string;
+                onInputRequired?: string;
+                setToken?: boolean;
+                tokenPath?: string;
+                autoClearToken?: boolean;
+                setStage?: string;
+            }) => {
                 if (!engine.sessionManager) throw new Error('Session manager not configured');
                 const tenantId = (ctx as any).tenantId;
                 const sessionId = taskId;
@@ -2545,26 +2576,36 @@ export class TaskEngine {
                 // Use the same logic as the main TaskEngine implementation
                 const { handle, token } = await createTaskHandle(engine.sessionManager, tenantId, sessionId, agent, childInput);
 
-                // Store setToken and setStage options in the task registry for automatic handling
-                if (options?.setToken || options?.setStage) {
-                    const snapOptions = await engine.sessionManager.load(tenantId, sessionId);
-                    const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
-                    const tasks = getPendingTasks(baseOptions);
-                    if (tasks[token]) {
-                        tasks[token].options = {
-                            setToken: options.setToken,
-                            setStage: options.setStage
-                        };
-                        const next = setPendingTasks(baseOptions, tasks);
-                        const expected = snapOptions?.wmVersion ?? BigInt(0);
-                        await engine.sessionManager.saveSnapshot({
-                            tenantId,
-                            sessionId,
-                            agentId: (snapOptions as any)?.agentId || 'default',
-                            expectedWmVersion: expected,
-                            snapshot: next
-                        });
-                    }
+                const tokenPath = options?.tokenPath ?? 'child.token';
+                const shouldSetToken = options?.setToken !== false;
+                const autoClearToken = options?.autoClearToken !== false;
+
+                if (shouldSetToken) {
+                    try { ctx.vars.set(tokenPath, token); } catch { /* noop */ }
+                }
+                if (options?.setStage) {
+                    try { ctx.vars.set('stage', options.setStage); } catch { /* noop */ }
+                }
+
+                const snapOptions = await engine.sessionManager.load(tenantId, sessionId);
+                const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
+                const tasks = getPendingTasks(baseOptions);
+                if (tasks[token]) {
+                    tasks[token].options = {
+                        setToken: shouldSetToken,
+                        tokenPath,
+                        autoClearToken,
+                        setStage: options?.setStage
+                    };
+                    const next = setPendingTasks(baseOptions, tasks);
+                    const expected = snapOptions?.wmVersion ?? BigInt(0);
+                    await engine.sessionManager.saveSnapshot({
+                        tenantId,
+                        sessionId,
+                        agentId: (snapOptions as any)?.agentId || 'default',
+                        expectedWmVersion: expected,
+                        snapshot: next
+                    });
                 }
 
                 // If handler names provided, register them atomically before dispatch

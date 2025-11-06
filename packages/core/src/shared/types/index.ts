@@ -286,7 +286,7 @@ export type TaskContext = {
     sendTaskToAgent: (
         targetAgent: string,
         taskInput: TaskInput,
-        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string; streaming?: boolean; setToken?: boolean; setStage?: string }
+        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string }
     ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
 }
 

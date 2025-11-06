@@ -43,8 +43,14 @@ export type A2ACallOptions = {
     timeout?: number;
     /** Enable streaming updates (future) */
     streaming?: boolean;
+    /** When false, child result arrives via inbox on next turn (even from cache). When true, parent receives result immediately (blocking). */
+    awaitCompletion?: boolean;
     /** Automatically store child token in ctx.vars when child requests input */
     setToken?: boolean;
+    /** Path in ctx.vars where token is stored (default: 'child.token') */
+    tokenPath?: string;
+    /** Automatically clear token when child completes (default: true) */
+    autoClearToken?: boolean;
     /** Automatically transition to stage when child requests input */
     setStage?: string;
 };

@@ -157,18 +157,32 @@ export class A2AService implements IA2AService {
 
             // Notify parent engine on completion when correlation is provided
             if (options.parentTenantId && options.parentTaskId && options.parentChildToken) {
-                try {
+                const deliverCompletion = async () => {
                     await eng.handleChildCompleted({
-                        tenantId: options.parentTenantId,
-                        parentTaskId: options.parentTaskId,
-                        childToken: options.parentChildToken,
+                        tenantId: options.parentTenantId!,
+                        parentTaskId: options.parentTaskId!,
+                        childToken: options.parentChildToken!,
                         result,
                         childAgentId: targetPlugin.manifest.name
                     });
-                } catch (notifyError) {
-                    a2aLogger.error('Failed to notify parent on child completion', notifyError as any, {
-                        parentTaskId: options.parentTaskId
+                };
+
+                if (options.awaitCompletion === false) {
+                    queueMicrotask(() => {
+                        deliverCompletion().catch(notifyError => {
+                            a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
+                                parentTaskId: options.parentTaskId
+                            });
+                        });
                     });
+                } else {
+                    try {
+                        await deliverCompletion();
+                    } catch (notifyError) {
+                        a2aLogger.error('Failed to notify parent on child completion', notifyError as any, {
+                            parentTaskId: options.parentTaskId
+                        });
+                    }
                 }
             }
 

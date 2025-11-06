@@ -28,11 +28,13 @@ yarn run-agent apps/examples/hello-to-llm-demo/dist/AgentModule.js '{}' --no-res
    }
 ```
 
-- The index builder scans all discoverable agents, validates manifests, and writes a
+- The index builder performs a deep scan of your workspaces, validates manifests, and writes a
   canonical map (`agentName -> module path`) to `.callagent/agent-paths.json`.
 - The local runner loads this file automatically on startup, so `ctx.sendTaskToAgent`
   has deterministic lookups with zero filename heuristics.
 - Build warnings highlight missing or duplicate agents early, keeping CI reliable.
+- `ctx.sendTaskToAgent` now stores the generated token at `ctx.vars.child.token` by default and clears it when the child finishes. Pass `{ tokenPath: 'custom.path' }` or `{ setToken:false }` for custom control state layouts.
+- With `{ awaitCompletion:false }`, child completions arrive through the next turn's inbox even when served from cache, so stage invariants stay consistent.
 
 ### Creating an Agent with Dependencies
 

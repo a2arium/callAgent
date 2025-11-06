@@ -42,6 +42,15 @@ Configuration options for agent-to-agent communication.
 
 ```typescript
 type A2AOptions = {
+  awaitCompletion?: boolean;
+  streaming?: boolean;
+  onCompleted?: string;
+  onFailed?: string;
+  onInputRequired?: string;
+  setToken?: boolean;
+  tokenPath?: string;
+  autoClearToken?: boolean;
+  setStage?: string;
   inheritWorkingMemory?: boolean;
   inheritMemory?: boolean;
   tenantId?: string;
@@ -50,9 +59,18 @@ type A2AOptions = {
 
 #### Properties
 
-- **inheritWorkingMemory** (`boolean`, optional): Whether to transfer working memory (goals, thoughts, decisions, variables) to the target agent. Default: `false`
-- **inheritMemory** (`boolean`, optional): Whether to transfer long-term memory (semantic, episodic) to the target agent. Default: `false`
-- **tenantId** (`string`, optional): Override the tenant ID for the target agent. Default: uses source agent's tenant
+- **awaitCompletion** (`boolean`, optional): When `true`, `sendTaskToAgent` resolves with the child's final result and cleans up immediately. When `false`, the call returns a `TaskHandle` and the child completion arrives on the next turn (even if served from cache). Default: `true` if you do not register `onCompleted`.
+- **streaming** (`boolean`, optional): Forward child streaming progress back to the parent task stream.
+- **onCompleted / onFailed / onInputRequired** (`string`, optional): Durable handler names fired when the child finishes, fails, or requests more input. Supplying `onCompleted` implicitly sets `awaitCompletion=false`.
+- **setToken** (`boolean`, optional): Automatically persist the child token to working memory. Default: `true`.
+- **tokenPath** (`string`, optional): Path inside `ctx.vars` where the token is stored when `setToken` is enabled. Default: `child.token`.
+- **autoClearToken** (`boolean`, optional): Remove the stored token once the child completes. Default: `true`.
+- **setStage** (`string`, optional): Convenience helper to set the parent's stage immediately after dispatch (e.g., `'awaiting_child'`).
+- **inheritWorkingMemory** (`boolean`, optional): Whether to transfer working memory (goals, thoughts, decisions, variables) to the target agent. Default: `false`.
+- **inheritMemory** (`boolean`, optional): Whether to transfer long-term memory (semantic, episodic) to the target agent. Default: `false`.
+- **tenantId** (`string`, optional): Override the tenant ID for the target agent. Default: uses source agent's tenant.
+
+> **Token defaults**: With no overrides, the engine writes the generated token to `ctx.vars.child.token` and clears it automatically after the child delivers a terminal observation. Provide your own `tokenPath` (or `setToken:false`) if you need bespoke control-state layout.
 
 ## A2A Service
 

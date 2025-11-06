@@ -241,6 +241,10 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 - For user input:
   Turn N: prompt + requestInput(setStage='awaiting_input') → await_input(token).
   Turn N+1: Perception validates input; Learning updates M; Policy decides next step.
+- For sub-agent delegation:
+  Turn N: Execution→sendTaskToAgent(agent, input, {setStage, awaitCompletion:false}) → await_child(token). Token stored at ctx.vars.child.token automatically.
+  Turn N+1: Perception validates child observation from env.inbox.current; Learning writes result to M; Policy decides next Intent.
+  (With awaitCompletion:true, result arrives immediately in same turn—use for tool-like blocking calls.)
 
 7) I/O CONTRACTS (examples)
 - Perception must produce normalized observation objects (e.g., {text, eventType, resumeToken?, meta?}).
@@ -1527,6 +1531,8 @@ execution: async (intent, ctx, m) => {
 }
 ```
 
+**Note:** `ctx.sendTaskToAgent` and `ctx.requestInput` automatically store tokens in `ctx.vars` (default: `child.token` and `token` respectively). Use `tokenPath` option to customize the location, or `setToken:false` to disable.
+
 ### Working Memory Helpers
 
 - **Goals** (`ctx.goals.add/read`): capture the agent's current objective through the MLO pipeline so subsequent turns resume with the right intent focus without manual bookkeeping.
@@ -2629,6 +2635,12 @@ const handlers: Record<Stage, Handler> = {
 
 When delegating to another agent, add its identifier to `manifest.dependencies.agents`; the loop runner refuses `ctx.sendTaskToAgent` calls if the sub agent is missing from the manifest.
 
+**Default token handling:** The engine automatically stores the child token at `ctx.vars.child.token` and clears it when the child completes. Override with `tokenPath` or disable with `setToken:false`.
+
+**awaitCompletion behavior:** 
+- `awaitCompletion:false` (default when `onCompleted` is set): Child result arrives via `env.inbox.current` on the next turn, even if served from cache. Use this for multi-turn orchestration.
+- `awaitCompletion:true` (default when no handlers): Parent receives result immediately (blocking). Use this for tool-like synchronous calls.
+
 Example manifest fragment:
 
 ```json
@@ -2668,22 +2680,24 @@ const handlers: Record<Stage, Handler> = {
     const subtaskId = subtasks[currentIndex];
     await ctx.reply(`Delegating subtask ${currentIndex + 1}/${subtasks.length}: ${subtaskId}`);
     
-    const handle = await ctx.sendTaskToAgent({
-      agentId: 'child-agent',
-      input: { subtaskId }
+    // ✅ Automatic token storage and stage transition
+    const handle = await ctx.sendTaskToAgent('child-agent', { subtaskId }, {
+      setStage: 'awaiting_child',
+      awaitCompletion: false  // Result arrives via inbox on next turn
     });
     
-    V.setToken(ctx, handle.token);
-    V.setStage(ctx, 'awaiting_child');
+    // Token is available at ctx.vars.get('child.token') automatically
     return { kind: 'subagent', token: handle.token };
   },
   
   awaiting_child: async (ctx, m, env) => {
-    // Check if child result is available
-    const childEvent = env?.input as ResumeEvent | undefined;
+    // Child result arrives via inbox observation
+    const childObs = env.inbox.current.find(
+      o => o.source === 'child' && o.kind === 'child.completed'
+    );
     
-    if (childEvent?.kind === 'child') {
-      const result = childEvent.output;
+    if (childObs) {
+      const result = (childObs.payload as { result: unknown }).result;
       await ctx.reply(`Subtask completed: ${JSON.stringify(result)}`);
       
       // Move to next subtask
@@ -2884,7 +2898,22 @@ execution: async (intent, ctx) => {
    );
    ```
 
-7. **Generate the agent index and let the runner preload it**
+7. **Use automatic token handling for sub-agents**
+   ```typescript
+   // ✅ Automatic token storage and stage transition
+   const handle = await ctx.sendTaskToAgent('child-agent', input, {
+     setStage: 'awaiting_child',
+     awaitCompletion: false  // Multi-turn: result via inbox
+   });
+   // Token stored at ctx.vars.child.token automatically
+   
+   // ✅ Blocking call (tool-like)
+   const result = await ctx.sendTaskToAgent('calculator', input, {
+     awaitCompletion: true  // Immediate result
+   });
+   ```
+
+8. **Generate the agent index and let the runner preload it**
    ```bash
    yarn agent-index          # writes .callagent/agent-paths.json
    yarn agent-index:fast     # regenerate after incremental builds
@@ -2892,22 +2921,22 @@ execution: async (intent, ctx) => {
    The runner loads `.callagent/agent-paths.json` automatically, so `ctx.sendTaskToAgent`
    resolves dependencies without extra boilerplate.
 
-8. **Enforce stage invariants** with runtime asserts
+9. **Enforce stage invariants** with runtime asserts
    ```typescript
    function assertStageInvariants(ctx: TaskContext, stage: Stage): void { /* ... */ }
    ```
 
-9. **Log effects for traceability**
+10. **Log effects for traceability**
    ```typescript
    function logEffect(event: { kind: EffectKind; success: boolean; latencyMs: number }): void { /* ... */ }
    ```
 
-10. **Test golden path end-to-end**
-    ```typescript
-    it('prompt → await → respond → complete', async () => { /* ... */ })
-    ```
+11. **Test golden path end-to-end**
+   ```typescript
+   it('prompt → await → respond → complete', async () => { /* ... */ })
+   ```
 
-11. **Use emotion/reward naming** consistent with survey
+12. **Use emotion/reward naming** consistent with survey
     ```typescript
     m.emotion.valence  // Not m.emotionState.mood
     m.reward.total     // Not m.rewardState.sum
