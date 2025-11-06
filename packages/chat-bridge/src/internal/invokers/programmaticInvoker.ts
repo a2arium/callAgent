@@ -1,14 +1,21 @@
 import { PluginManager } from '@a2arium/callagent-core';
-import type { ChatRoute, ChatSender, Invoker, ResultPayload } from '../../types.js';
+import type { BridgeTaskInput, ChatRoute, ChatSender, Invoker, ResultPayload } from '../../types.js';
 
-type StartParams = { id: string; input: unknown; agentId: string; tenantId?: string; route: ChatRoute };
-type ResumeParams = { id: string; token: string; input: unknown; tenantId?: string; route: ChatRoute };
+type StartParams = { id: string; input: BridgeTaskInput; agentId: string; tenantId?: string; route: ChatRoute };
+type ResumeParams = { id: string; token: string; input: BridgeTaskInput; tenantId?: string; route: ChatRoute };
 
 export class ProgrammaticInvoker implements Invoker {
     constructor(private readonly deps: { chatSender: ChatSender }) { }
 
     async start(params: StartParams): Promise<ResultPayload> {
         const { id, input, agentId, tenantId = 'default', route } = params;
+        const normalizedInput: BridgeTaskInput = {
+            route,
+            text: input.text,
+            attachments: input.attachments,
+            replyToMessageId: input.replyToMessageId,
+            raw: input.raw
+        };
         try { console.info(`[invoker] start: id=${id} agentId=${agentId} tenantId=${tenantId}`); } catch { }
         const effectiveTenantId = 'default';
         // Ensure agent is loaded or discoverable
@@ -110,12 +117,19 @@ export class ProgrammaticInvoker implements Invoker {
 
         // Start task in streaming mode
         try { console.info('[invoker] calling engine.startTask now...'); } catch { }
-        await engine.startTask({ task: { id, input }, isStreaming: true, agentId, tenantId });
+        await engine.startTask({ task: { id, input: normalizedInput }, isStreaming: true, agentId, tenantId });
         return done;
     }
 
     async resume(params: ResumeParams): Promise<ResultPayload> {
         const { id, token, input, tenantId = 'default', route } = params;
+        const normalizedInput: BridgeTaskInput = {
+            route,
+            text: input.text,
+            attachments: input.attachments,
+            replyToMessageId: input.replyToMessageId,
+            raw: input.raw
+        };
         try { console.info(`[invoker] resume: id=${id} token=${token} tenantId=${tenantId}`); } catch { }
         const [{ TaskEngine, eventBus, taskChannel }, { WorkingMemorySessionStore }] = await Promise.all([
             import('@a2arium/callagent-core' as any),
@@ -189,7 +203,7 @@ export class ProgrammaticInvoker implements Invoker {
         eventBus.subscribe(channel, handler);
 
         // Resume input and wait for next status
-        await engine.resumeInput({ tenantId, taskId: id, token, input });
+        await engine.resumeInput({ tenantId, taskId: id, token, input: normalizedInput });
         return done;
     }
 }

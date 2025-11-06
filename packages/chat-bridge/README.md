@@ -41,6 +41,14 @@ export type MessageNormalized = {
 
 export type ChatRoute = { network: Network; conversationId: string; userId?: string };
 
+export type BridgeTaskInput = {
+  route: ChatRoute;
+  text?: string;
+  attachments?: Attachment[];
+  replyToMessageId?: string;
+  raw?: unknown;
+};
+
 export type ChatSender = {
   sendMessage(route: ChatRoute, text: string, options?: { parseMode?: 'plain' | 'markdown' | 'html' }): Promise<void>;
   sendTyping?(route: ChatRoute): Promise<void>;
@@ -84,8 +92,8 @@ export type ResultPayload =
   | { id: string; status: 'input_required'; token: string };
 
 export type Invoker = {
-  start: (params: { id: string; input: unknown; agentId: string; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
-  resume: (params: { id: string; token: string; input: unknown; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
+  start: (params: { id: string; input: BridgeTaskInput; agentId: string; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
+  resume: (params: { id: string; token: string; input: BridgeTaskInput; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
 };
 
 export type BridgeOptions = {
@@ -178,6 +186,27 @@ export async function handler(event) {
     await bridge.handleIncomingMessage(msg);
   }
   return { statusCode: 200, body: 'OK' };
+}
+```
+
+### Accessing chat route inside agents
+
+The task input now includes the chat route so agents can read the originating user/session metadata without additional lookups:
+
+```ts
+import type { TaskContext } from '@a2arium/callagent-core';
+import type { BridgeTaskInput } from '@a2arium/callagent-chat-bridge';
+
+export async function handleTask(ctx: TaskContext) {
+  const input = ctx.task.input as BridgeTaskInput;
+  const { route, text } = input;
+  ctx.logger?.info?.('incoming-chat', {
+    network: route.network,
+    conversationId: route.conversationId,
+    userId: route.userId,
+    text
+  });
+  // ...continue agent logic
 }
 ```
 

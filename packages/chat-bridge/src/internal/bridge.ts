@@ -2,9 +2,11 @@ import type {
     AgentSelector,
     Bridge,
     BridgeOptions,
+    BridgeTaskInput,
     MessageNormalized,
     SessionRecord,
-    SessionState
+    SessionState,
+    ChatRoute
 } from '../types.js';
 
 function now(): number { return Date.now(); }
@@ -72,7 +74,7 @@ export function createBridge(options: BridgeOptions): Bridge {
                 const res = await invoker.resume({
                     id: prev.taskId,
                     token: prev.token,
-                    input: toInput(msg),
+                    input: toInput(msg, route),
                     tenantId: (tenantIdResolver ? tenantIdResolver(msg) : msg.network) || 'default',
                     route
                 });
@@ -96,7 +98,7 @@ export function createBridge(options: BridgeOptions): Bridge {
         logger?.info('starting_new_task', { key, agentId, taskId });
         const res = await invoker.start({
             id: taskId,
-            input: toInput(msg),
+            input: toInput(msg, route),
             agentId,
             tenantId: (tenantIdResolver ? tenantIdResolver(msg) : msg.network) || 'default',
             route
@@ -189,10 +191,13 @@ export function createBridge(options: BridgeOptions): Bridge {
         await sessionStore.clear(key);
     }
 
-    function toInput(msg: MessageNormalized): unknown {
+    function toInput(msg: MessageNormalized, route: ChatRoute): BridgeTaskInput {
         return {
+            route,
             text: msg.text,
-            attachments: msg.attachments
+            attachments: msg.attachments,
+            replyToMessageId: msg.replyToMessageId,
+            raw: msg.raw
         };
     }
 

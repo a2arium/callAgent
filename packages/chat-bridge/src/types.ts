@@ -54,6 +54,14 @@ export type MessageNormalized = {
 
 export type ChatRoute = { network: Network; conversationId: string; userId?: string };
 
+export type BridgeTaskInput = {
+    route: ChatRoute;
+    text?: string;
+    attachments?: Attachment[];
+    replyToMessageId?: string;
+    raw?: unknown;
+};
+
 export type ChatSender = {
     sendMessage(route: ChatRoute, text: string, options?: { parseMode?: 'plain' | 'markdown' | 'html' }): Promise<void>;
     sendTyping?(route: ChatRoute): Promise<void>;
@@ -100,8 +108,8 @@ export type ResultPayload =
     | { id: string; status: 'input_required'; token: string; prompt?: string };
 
 export type Invoker = {
-    start: (params: { id: string; input: unknown; agentId: string; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
-    resume: (params: { id: string; token: string; input: unknown; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
+    start: (params: { id: string; input: BridgeTaskInput; agentId: string; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
+    resume: (params: { id: string; token: string; input: BridgeTaskInput; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
 };
 
 export type BridgeOptions = {

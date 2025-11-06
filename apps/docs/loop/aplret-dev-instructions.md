@@ -679,6 +679,19 @@ if (ctx.vars.has('workflow.errors')) {
 ctx.vars.delete('user.session.preferences');
 ```
 
+> 💡 **Chat bridge tip**: Tasks triggered via the chat bridge receive a typed `BridgeTaskInput`. You can read the originating channel metadata (including `userId`) directly from the task input and mirror anything you need into control state:
+>
+> ```typescript
+> import type { BridgeTaskInput } from '@a2arium/callagent-chat-bridge';
+>
+> const input = ctx.task.input as BridgeTaskInput;
+> const { route } = input;
+> if (route.userId) {
+>     ctx.vars.set('user.session.id', route.userId);
+> }
+> ctx.vars.set('session.route', route); // optional: keep network/conversationId handy for logs
+> ```
+
 #### **Key Methods:**
 
 | Method | Description | Use Case |
@@ -1293,7 +1306,7 @@ Each stage has **invariants** that must hold:
 | `executing` | `planSteps?: string[]` | - | Running tasks |
 | `awaiting_tool` | `token: string` | `completeCalled` | Waiting for tool callback |
 | `awaiting_child` | `token: string` | `completeCalled` | Waiting for child agent |
-| `completed` | `completeCalled: true` | - | Terminal |
+| `completed` | - | - | Terminal (auto-marks can stamp `completed.called` after entry) |
 
 **Enforce with runtime asserts (implement all rows):**
 
@@ -1319,13 +1332,15 @@ const Stage = createStageFacade<Stage>({
     executing: {},
     awaiting_tool: { require: ['token'], forbid: ['completeCalled'] },
     awaiting_child: { require: ['token'], forbid: ['completeCalled'] },
-    completed: { require: ['completeCalled'] }
+    completed: {}
   },
   // Optional: auto-mark flags on entry
   autoMarks: {
     completed: { completeCalled: true }
   }
 });
+
+> ⚠️ Invariants are evaluated **before** `autoMarks` apply. If you auto-mark `completed.called`, do not put it under `require`—set the flag yourself before `Stage.setStage(ctx, 'completed')`, or require a different prerequisite (e.g., `'awaiting_input.called'`). Otherwise the stage transition will fail even though the auto-mark exists.
 
 // Usage
 // await ctx.requestInput('Your message', { setStage: 'awaiting_input' });
