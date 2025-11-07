@@ -25,7 +25,7 @@ export class SessionManager {
         try {
             const serialized = JSON.stringify(params.snapshot);
             const envCap = Number(process.env.WM_SNAPSHOT_MAX_BYTES);
-            const maxBytes = Number.isFinite(envCap) && envCap > 0 ? envCap : 512 * 1024; // 512KB default cap
+            const maxBytes = Number.isFinite(envCap) && envCap > 0 ? envCap : 2 * 1024 * 1024; // 2MB default cap
             if (serialized.length > maxBytes) {
                 throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
             }

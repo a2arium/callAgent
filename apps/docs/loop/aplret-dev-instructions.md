@@ -3044,6 +3044,94 @@ Here's a full production-ready agent using all patterns:
 
 ---
 
+## Observation Payload Reference
+
+### `child.completed`
+
+When a parent agent resumes after `await_child`, it receives a `child.completed` observation containing the child task snapshot. The child’s return value is available under `payload.result.status.metadata.result`:
+
+```jsonc
+{
+  "source": "child",
+  "kind": "child.completed",
+  "payload": {
+    "token": "c2c1dd0f-c045-412d-b361-42ed48854186",
+    "childTaskId": "a2a_task_1762521251805_f5p9q7aq4",
+    "agentId": "fetch-webpage",
+    "result": {
+      "id": "a2a_task_1762521251805_f5p9q7aq4",
+      "input": { "url": "https://example.com/demo" },
+      "status": {
+        "state": "completed",
+        "timestamp": "2025-02-07T12:34:56.000Z",
+        "metadata": {
+          "result": {
+            "ok": true,
+            "data": {
+              "html": "<html>…</html>",
+              "url": "https://example.com/demo"
+            }
+          }
+        }
+      },
+      "artifacts": []
+    }
+  },
+  "provenance": {
+    "ts": 1762521251805,
+    "turn": 2,
+    "correlationId": "c2c1dd0f-c045-412d-b361-42ed48854186"
+  }
+}
+```
+
+### Helper Functions
+
+Use the exported helpers to decode the payload without digging through nested objects manually:
+
+```ts
+import {
+  findChildCompletion,
+  extractChildResult,
+  type ChildCompletedObservation
+} from '@a2arium/callagent-core';
+
+type FetchResult = { ok: boolean; data?: { html?: string; url?: string } };
+
+const completion = findChildCompletion<FetchResult>(env.inbox.current, childToken);
+const childResult = completion?.result; // typed as FetchResult | undefined
+const html = childResult?.data?.html ?? extractChildResult<FetchResult>(completion?.observation)?.data?.html;
+
+if (html) {
+  // Continue processing with HTML content
+}
+```
+
+#### Legacy vs. Helper Access
+
+```ts
+// ❌ Manual, brittle traversal
+const legacyHtml = env.inbox.current
+  .find(o => o.source === 'child' && o.kind === 'child.completed')
+  ?.payload?.result?.status?.metadata?.result?.data?.html;
+
+// ✅ Recommended helper usage
+const completion = findChildCompletion<FetchResult>(env.inbox.current, childToken);
+const safeHtml = completion?.result?.data?.html;
+```
+
+### Child Result Lifecycle
+
+| Stage | Value | Notes |
+|-------|-------|-------|
+| Child loop return | `outcome.result` | Whatever the child agent returned on completion |
+| Task engine wrap | `TaskStatus` with `metadata.result` | Stored for outbox/events |
+| Parent perception | `Observation<ChildCompletedPayload>` | Delivered on the resume turn |
+
+The helper API guarantees a consistent, typed view of the child result.
+
+---
+
 ## Summary
 
 The **A-P-L-R-E-T + Typed Intent + Stage Dispatcher** architecture provides:

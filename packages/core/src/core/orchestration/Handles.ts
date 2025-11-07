@@ -91,6 +91,11 @@ export class TaskHandle {
         private readonly childToken: string
     ) { }
 
+    // Public getter for token to allow agents to access it
+    get token(): string {
+        return this.childToken;
+    }
+
     // Dispatcher will be injected by the engine; fallback logic exists if missing
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private dispatcher?: (opts?: { awaitCompletion?: boolean; streaming?: boolean }) => Promise<unknown | void>;

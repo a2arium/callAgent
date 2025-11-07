@@ -515,6 +515,11 @@ export async function runAgentWithStreaming(
         logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
         if (!options.isStreaming) {
             logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
+            try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
+                runnerLogger.warn('Failed waiting for pending A2A notifications', {
+                    error: err instanceof Error ? err.message : String(err)
+                });
+            }
             try { await sessionStore.close(); } catch { }
             try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
             try { (outboxPublisher as any)?.stop?.(); } catch { }

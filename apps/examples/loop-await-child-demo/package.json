@@ -1,0 +1,14 @@
+{
+  "name": "loop-await-child-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/LoopAwaitChildDemoParentAgent.js",
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:",
+    "@a2arium/callagent-utils": "workspace:"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

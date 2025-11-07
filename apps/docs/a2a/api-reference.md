@@ -59,7 +59,7 @@ type A2AOptions = {
 
 #### Properties
 
-- **awaitCompletion** (`boolean`, optional): When `true`, `sendTaskToAgent` resolves with the child's final result and cleans up immediately. When `false`, the call returns a `TaskHandle` and the child completion arrives on the next turn (even if served from cache). Default: `true` if you do not register `onCompleted`.
+- **awaitCompletion** (`boolean`, optional): When `true`, `sendTaskToAgent` resolves with the child's final result and cleans up immediately. When `false`, the call returns a `TaskHandle` with a public `token` getter, and the child completion arrives on the next turn via `env.inbox.current` (even if served from cache). Default: `true` if you do not register `onCompleted`.
 - **streaming** (`boolean`, optional): Forward child streaming progress back to the parent task stream.
 - **onCompleted / onFailed / onInputRequired** (`string`, optional): Durable handler names fired when the child finishes, fails, or requests more input. Supplying `onCompleted` implicitly sets `awaitCompletion=false`.
 - **setToken** (`boolean`, optional): Automatically persist the child token to working memory. Default: `true`.
@@ -71,6 +71,58 @@ type A2AOptions = {
 - **tenantId** (`string`, optional): Override the tenant ID for the target agent. Default: uses source agent's tenant.
 
 > **Token defaults**: With no overrides, the engine writes the generated token to `ctx.vars.child.token` and clears it automatically after the child delivers a terminal observation. Provide your own `tokenPath` (or `setToken:false`) if you need bespoke control-state layout.
+
+### TaskHandle
+
+When `awaitCompletion: false`, `sendTaskToAgent` returns a `TaskHandle` object.
+
+```typescript
+class TaskHandle {
+  readonly token: string;  // Public getter for the child token
+  
+  async run(opts?: { awaitCompletion?: boolean; streaming?: boolean }): Promise<unknown | void>;
+  async onCompleted(handlerName: string): Promise<this>;
+  async onFailed(handlerName: string): Promise<this>;
+  async onInputRequired(handlerName: string): Promise<this>;
+}
+```
+
+#### Properties
+
+- **token** (`string`, readonly): The unique token identifying this child task. Use this in transition logic to return `{ kind: 'await_child', token: handle.token }`.
+
+#### Example Usage
+
+```typescript
+// In execution module
+const handle = await ctx.sendTaskToAgent('fetch-webpage', { url }, {
+    awaitCompletion: false,
+    tokenPath: 'fetch.token',
+    setStage: 'awaiting_fetch'
+});
+
+return {
+    action: { kind: 'internal', done: true },
+    result: {
+        status: 'ok',
+        data: {
+            awaitingFetch: true,
+            token: handle.token  // ✅ Access token via public getter
+        }
+    }
+};
+
+// In transition module
+transition: (env, exec, M) => {
+    if (exec.result.data?.awaitingFetch && exec.result.data?.token) {
+        return {
+            kind: 'await_child',
+            token: exec.result.data.token
+        };
+    }
+    // ...
+}
+```
 
 ## A2A Service
 

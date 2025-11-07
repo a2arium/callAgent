@@ -52,7 +52,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@a2arium/callagent-utils@npm:0.2.0, @a2arium/callagent-utils@workspace:*, @a2arium/callagent-utils@workspace:packages/utils":
+"@a2arium/callagent-utils@npm:0.2.0, @a2arium/callagent-utils@workspace:, @a2arium/callagent-utils@workspace:*, @a2arium/callagent-utils@workspace:packages/utils":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-utils@workspace:packages/utils"
   dependencies:
@@ -4772,6 +4772,15 @@ __metadata:
   resolution: "loop-agent-mini@workspace:apps/examples/loop-agent-mini"
   dependencies:
     "@a2arium/callagent-core": "workspace:"
+  languageName: unknown
+  linkType: soft
+
+"loop-await-child-demo@workspace:apps/examples/loop-await-child-demo":
+  version: 0.0.0-use.local
+  resolution: "loop-await-child-demo@workspace:apps/examples/loop-await-child-demo"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:"
+    "@a2arium/callagent-utils": "workspace:"
   languageName: unknown
   linkType: soft
 

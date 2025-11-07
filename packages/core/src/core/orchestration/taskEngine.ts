@@ -45,6 +45,25 @@ const addObservationToInbox = (inboxValue: unknown, observation: Observation): O
     return inbox;
 };
 
+const addObservationToInboxIfMissing = (
+    inboxValue: unknown,
+    observation: Observation,
+    predicate: (obs: Observation) => boolean
+): ObservationInbox => {
+    const inbox = normalizeInbox(inboxValue);
+    const hasInAll = inbox.all.some(predicate);
+    const hasInCurrent = inbox.current.some(predicate);
+
+    if (!hasInAll) {
+        inbox.all.push(observation);
+    }
+    if (!hasInCurrent) {
+        inbox.current.push(observation);
+    }
+
+    return inbox;
+};
+
 /**
  * Task entity with the necessary properties for the task engine
  */
@@ -1027,7 +1046,92 @@ export class TaskEngine {
                 // Build EnvironmentState from snapshot and context
                 const base = (session?.snapshot as any) || {};
                 const startTurnTotal = Number(base?.meta?.turn) || 0;
-                const envInbox = normalizeInbox((base as any)?.inbox);
+                let envInbox = normalizeInbox((base as any)?.inbox);
+
+                console.log('[TaskEngine][Resume] pre-check', {
+                    sessionId,
+                    currentLength: envInbox.current.length,
+                    allLength: envInbox.all.length,
+                    currentKinds: envInbox.current.map(o => o.kind),
+                    allKinds: envInbox.all.map(o => o.kind),
+                });
+
+                // If inbox is empty, check for child completion events that might not be in the snapshot
+                // This handles the case where handleChildCompleted ran but failed to persist the inbox,
+                // or where the deferred notification hasn't run yet but the child has completed
+                if (envInbox.current.length === 0 && this.sessionManager) {
+                    try {
+                        // Check meta.lastChildToken first (set by handleChildCompleted after processing)
+                        const lastChildToken = (base?.meta as any)?.lastChildToken;
+                        const pendingChildren = (base?.pending?.children) || {};
+                        const pendingChildTokens = Object.keys(pendingChildren);
+
+                        // Collect all potential child tokens to check
+                        const tokensToCheck = new Set<string>();
+                        if (lastChildToken) tokensToCheck.add(lastChildToken);
+                        pendingChildTokens.forEach(t => tokensToCheck.add(t));
+
+                        console.log('[TaskEngine][Resume] checking child completions', {
+                            sessionId,
+                            tokensToCheck: Array.from(tokensToCheck),
+                        });
+
+                        if (tokensToCheck.size > 0) {
+                            // Check for child_completed events that might not be in the snapshot inbox
+                            const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: 0 });
+                            console.log('[TaskEngine][Resume] events', {
+                                total: events.length,
+                                types: events.map(e => e.type),
+                            });
+                            const childCompletedEvents = events.filter(e => e.type === 'task.child_completed');
+                            console.log('[TaskEngine][Resume] child completions', {
+                                count: childCompletedEvents.length,
+                                tokens: childCompletedEvents.map(e => (e.payload as any)?.token),
+                            });
+
+                            // For each token, check if there's a completion event
+                            for (const token of tokensToCheck) {
+                                const completionEvent = childCompletedEvents.find(e =>
+                                    (e.payload as any)?.token === token
+                                );
+
+                                if (completionEvent) {
+                                    const observationPredicate = (obs: Observation) =>
+                                        obs?.kind === 'child.completed' &&
+                                        typeof obs === 'object' &&
+                                        obs !== null &&
+                                        (obs as any)?.payload &&
+                                        (obs as any).payload.token === token;
+
+                                    const childObservation: Observation = {
+                                        source: 'child',
+                                        kind: 'child.completed',
+                                        payload: {
+                                            token,
+                                            childTaskId: (completionEvent.payload as any)?.childTaskId,
+                                            result: (completionEvent.payload as any)?.result,
+                                            agentId: (completionEvent.payload as any)?.agentId
+                                        },
+                                        provenance: {
+                                            ts: new Date(completionEvent.createdAt).getTime(),
+                                            turn: startTurnTotal + 1,
+                                            id: token,
+                                            correlationId: token
+                                        }
+                                    };
+                                    envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        // If event lookup fails, continue with empty inbox (better than crashing)
+                        console.warn('[TaskEngine] Failed to check for child completion events on resume', {
+                            error: error instanceof Error ? error.message : String(error),
+                            sessionId
+                        });
+                    }
+                }
+
                 const env: EnvironmentState = {
                     time: new Date().toISOString(),
                     input: ctx.task.input,
@@ -1963,11 +2067,60 @@ export class TaskEngine {
                 correlationId: token
             }
         };
+        console.log('[TaskEngine][ChildCompleted] appending event', {
+            parentTaskId,
+            token,
+            resultStatus: (result as any)?.status,
+        });
         (next as any).inbox = addObservationToInbox((next as any).inbox, childObservation);
         // Preserve the parent agent id on the session to ensure resumed turns use the parent's loop modules
         const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-        await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', { token, childTaskId, result });
+        let snapshotSaved = false;
+
+        // Save snapshot with inbox observation - handle LIMIT_WM_SNAPSHOT_TOO_LARGE gracefully
+        try {
+            await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+            snapshotSaved = true;
+        } catch (snapshotError) {
+            if ((snapshotError as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                // Attempt to prune the MentalState and retry
+                try {
+                    const { pruneMentalState } = await import('../../loop/hygiene.js');
+                    pruneMentalState((next as any).M);
+                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+                    snapshotSaved = true;
+                } catch (retryError) {
+                    // If still too large after pruning, log warning but continue to resume logic
+                    // The parent will still resume with the child observation in memory, even if not persisted
+                    console.warn('[TaskEngine] Failed to save snapshot with child completion observation even after pruning', {
+                        error: (retryError as Error).message,
+                        parentTaskId,
+                        childToken: token
+                    });
+                }
+            } else {
+                // For other errors, log and continue to ensure resume happens
+                console.warn('[TaskEngine] Failed to save snapshot during child completion', {
+                    error: (snapshotError as Error).message,
+                    parentTaskId,
+                    childToken: token
+                });
+            }
+        }
+
+        // Append event - handle database connection errors gracefully
+        try {
+            await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', { token, childTaskId, result });
+        } catch (eventError) {
+            // If database connection is closed (common in deferred notifications), log but continue
+            console.warn('[TaskEngine] Failed to append child completion event, likely due to closed connection', {
+                error: (eventError as Error).message,
+                parentTaskId,
+                childToken: token
+            });
+        }
+
+        // Resume parent turn - wrap in comprehensive error handler
         try {
             const agentName = (snap as any)?.agentId;
             const plugin = agentName ? PluginManager.findAgent(agentName) : null;
@@ -1976,7 +2129,14 @@ export class TaskEngine {
             // Ensure replies in this resumed parent turn are streamed to console
             try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
             const snapNow = await this.sessionManager!.load(tenantId, parentTaskId);
-            const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
+            let baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
+            if (!snapshotSaved) {
+                baseNow = {
+                    ...baseNow,
+                    pending: (next as any).pending,
+                    inbox: (next as any).inbox
+                } as Record<string, unknown>;
+            }
 
             const prevMetaCheck = (baseNow as any).meta || {};
             if (prevMetaCheck.lastChildToken === token) {
@@ -1988,7 +2148,30 @@ export class TaskEngine {
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
             const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn; // assume initial run counted as 1 even if not persisted
-            const envInbox = normalizeInbox((baseNow as any)?.inbox);
+            let envInbox = normalizeInbox((baseNow as any)?.inbox);
+            console.log('[TaskEngine][ChildResume] before helper', {
+                sessionId: parentTaskId,
+                currentLength: envInbox.current.length,
+                allLength: envInbox.all.length,
+                currentKinds: envInbox.current.map(o => o.kind),
+                allKinds: envInbox.all.map(o => o.kind),
+            });
+
+            const observationPredicate = (obs: Observation) =>
+                obs?.kind === 'child.completed' &&
+                typeof obs === 'object' &&
+                obs !== null &&
+                (obs as any)?.payload &&
+                (obs as any).payload.token === token;
+            envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
+
+            console.log('[TaskEngine][ChildResume] after helper', {
+                sessionId: parentTaskId,
+                currentLength: envInbox.current.length,
+                allLength: envInbox.all.length,
+                currentKinds: envInbox.current.map(o => o.kind),
+                allKinds: envInbox.all.map(o => o.kind),
+            });
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 input: { kind: 'child', token, childTaskId, result, agentId: childAgentId },
@@ -2033,7 +2216,16 @@ export class TaskEngine {
                 return { state: 'working', timestamp: new Date().toISOString() } as any;
             })();
             try { eventBus.publish(channel, { id: parentTaskId, status, final: status.state === 'completed' || status.state === 'failed' } as any); } catch { }
-        } catch { }
+        } catch (resumeError) {
+            // If resume fails (e.g., database connection closed), log the error
+            // This is expected when deferred notifications run after parent task completes
+            console.warn('[TaskEngine] Failed to resume parent after child completion', {
+                error: (resumeError as Error).message,
+                parentTaskId,
+                childToken: token,
+                note: 'This may occur if the parent task completed before the deferred notification ran'
+            });
+        }
 
         // Update any pending group aggregations that include this child token
         const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);

@@ -29,6 +29,7 @@ const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
  */
 export class A2AService implements IA2AService {
     private agentResultCache: AgentResultCache | null = null;
+    private readonly pendingNotifications: Set<Promise<void>> = new Set();
 
     constructor(
         private eventBus?: any // Future: for interactive communication
@@ -51,6 +52,23 @@ export class A2AService implements IA2AService {
         } catch (error) {
             a2aLogger.error('A2A cache service initialization failed, continuing without caching', error);
         }
+    }
+
+    private trackNotification(promise: Promise<void>): void {
+        this.pendingNotifications.add(promise);
+        promise.finally(() => {
+            this.pendingNotifications.delete(promise);
+        }).catch(() => {
+            // Ignored: the original promise already logged the error
+        });
+    }
+
+    async waitForPendingNotifications(): Promise<void> {
+        if (this.pendingNotifications.size === 0) {
+            return;
+        }
+        const pending = Array.from(this.pendingNotifications);
+        await Promise.allSettled(pending);
     }
 
     /**
@@ -169,11 +187,12 @@ export class A2AService implements IA2AService {
 
                 if (options.awaitCompletion === false) {
                     queueMicrotask(() => {
-                        deliverCompletion().catch(notifyError => {
+                        const notifyPromise = deliverCompletion().catch(notifyError => {
                             a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
                                 parentTaskId: options.parentTaskId
                             });
                         });
+                        this.trackNotification(notifyPromise);
                     });
                 } else {
                     try {

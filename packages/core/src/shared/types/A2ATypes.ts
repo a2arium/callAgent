@@ -136,4 +136,5 @@ export type IA2AService = {
     ) => Promise<InteractiveTaskResult | unknown>;
 
     findLocalAgent: (agentName: string) => Promise<import('../../core/plugin/types.js').AgentPlugin | null>;
+    waitForPendingNotifications: () => Promise<void>;
 }; 

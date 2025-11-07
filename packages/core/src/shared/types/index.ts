@@ -20,6 +20,7 @@ export { extractPureLLMPort } from './LLMTypes.js';
 // Working Memory Types
 export * from './workingMemory.js';
 export * from './memoryLifecycle.js';
+export * from './observation.js';
 
 // A2A (Agent-to-Agent) Communication Types
 export * from './A2ATypes.js';

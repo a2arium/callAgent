@@ -30,6 +30,18 @@ export type {
     ObservationProvenance
 } from './loop/oneTurn.js';
 export type { Modules } from './loop/oneTurn.js';
+export type {
+    ChildCompletedPayload,
+    ChildCompletedObservation,
+    InteractiveTaskSnapshot,
+    TaskStatusWithResult,
+    TaskStatusMetadataWithResult
+} from './shared/types/observation.js';
+export {
+    isChildCompletedObservation,
+    extractChildResult,
+    findChildCompletion
+} from './helpers/childObservations.js';
 export { runEffect } from './loop/effects.js';
 export { createStageFacade } from './loop/stageHelpers.js';
 export type { StageInvariants } from './loop/stageHelpers.js';
