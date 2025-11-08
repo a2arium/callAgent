@@ -1,0 +1,18 @@
+{
+  "name": "aplret-bug-reproduction",
+  "version": "1.0.0",
+  "description": "Reproduces critical framework bugs: memory vars persistence and multiple A2A calls",
+  "runMode": "loop",
+  "budgets": {
+    "maxTurns": 10,
+    "latencyMs": 60000
+  },
+  "dependencies": {
+    "agents": ["helper-agent"]
+  },
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4o-mini"
+  }
+}
+

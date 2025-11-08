@@ -122,7 +122,7 @@ export class A2AService implements IA2AService {
             // 5. Execute target agent via TaskEngine for WM/LLM persistence
             const eng = EngineLocator.getEngine() || taskEngine;
             // Attach WM proxy so child ctx.vars writes persist
-            try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
 
             const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId);
 
@@ -630,7 +630,7 @@ export class A2AService implements IA2AService {
                 ? await (async () => {
                     // Always route loop-first agents through the engine so A2A overrides are respected
                     const eng = EngineLocator.getEngine() || taskEngine;
-                    try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                    try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
                     const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
                     const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
                     return started ?? { status: 'started' } as any;
@@ -640,7 +640,7 @@ export class A2AService implements IA2AService {
                     : await (async () => {
                         // Fallback: engine path
                         const eng = EngineLocator.getEngine() || taskEngine;
-                        try { (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                        try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
                         const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
                         const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
                         return started ?? { status: 'started' } as any;

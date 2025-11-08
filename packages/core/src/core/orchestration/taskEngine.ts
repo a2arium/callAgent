@@ -4,6 +4,7 @@ import { eventBus } from '../../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 import { extendContextWithStreaming } from '../context/StreamingContext.js';
 import { SessionManager } from './SessionManager.js';
+import { InMemorySessionManager } from './InMemorySessionManager.js';
 import type { IWorkingMemorySessionStore } from '../memory/stores/SessionStore.js';
 import { decide } from './reducer.js';
 import { applyInputProvided, getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
@@ -94,7 +95,16 @@ export class TaskEngine {
     private handlerInvoker?: DurableHandlerInvoker;
 
     constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
-        if (opts?.sessionStore) this.sessionManager = new SessionManager(opts.sessionStore);
+        if (opts?.sessionStore) {
+            this.sessionManager = new SessionManager(opts.sessionStore);
+        } else {
+            // Default to in-memory session manager for testing/CLI
+            console.warn('[TaskEngine] No SessionStore configured - using IN-MEMORY mode');
+            console.warn('[TaskEngine] ⚠️  IN-MEMORY MODE IS NOT SUITABLE FOR PRODUCTION');
+            console.warn('[TaskEngine] For production, configure a database-backed SessionStore');
+            console.warn('[TaskEngine] See: docs/a2a/production-setup.md');
+            this.sessionManager = new SessionManager(new InMemorySessionManager());
+        }
         if (opts?.handlerInvoker) {
             this.handlerInvoker = opts.handlerInvoker;
         } else {
@@ -107,10 +117,19 @@ export class TaskEngine {
 
     private mergeVarsIntoMental(source: MentalState, target: MentalState): MentalState {
         try {
-            const latestVars = (((source as any)?.memory as any)?.vars) || {};
-            if (latestVars && typeof latestVars === 'object') {
+            const sourceVars = (((source as any)?.memory as any)?.vars) || {};
+            const targetVars = (((target as any)?.memory as any)?.vars) || {};
+            if ((sourceVars && typeof sourceVars === 'object') || (targetVars && typeof targetVars === 'object')) {
                 const mem = (((target as any).memory) || {}) as Record<string, unknown>;
-                (target as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
+                // ✅ FIX: MERGE vars from both source and target, don't overwrite
+                // target (mNext) has Learning's changes, source (M) has ctx.vars changes
+                const merged = { ...(targetVars as Record<string, unknown>), ...(sourceVars as Record<string, unknown>) };
+                console.log('[TaskEngine] mergeVarsIntoMental:', {
+                    sourceVars: Object.keys(sourceVars),
+                    targetVars: Object.keys(targetVars),
+                    merged: Object.keys(merged)
+                });
+                (target as any).memory = { ...mem, vars: merged };
             }
         } catch { /* noop */ }
         return target;
@@ -134,9 +153,22 @@ export class TaskEngine {
     }
 
     // Attach working memory var proxy to an existing context so that writes are CAS-persisted
-    public attachWorkingMemory(ctx: TaskContext, tenantId: string, sessionId: string, agentId: string): void {
+    public async attachWorkingMemory(ctx: TaskContext, tenantId: string, sessionId: string, agentId: string): Promise<void> {
         if (!this.sessionManager) return;
-        const varCache = new Map<string, unknown>();
+
+        // ✅ FIX Bug #1 Issue 1A: Load existing vars from snapshot (like startTask does)
+        const snapshot = await this.sessionManager.load(tenantId, sessionId);
+        const M = (snapshot?.snapshot as any)?.M;
+        const currentVars = ((M?.memory as any)?.vars || {}) as Record<string, unknown>;
+        const varCache = new Map<string, unknown>(Object.entries(currentVars));
+
+        console.log('[TaskEngine] attachWorkingMemory: sessionId=', sessionId);
+        console.log('[TaskEngine] attachWorkingMemory: snapshot exists=', !!snapshot);
+        console.log('[TaskEngine] attachWorkingMemory: M exists=', !!M);
+        console.log('[TaskEngine] attachWorkingMemory: M.memory exists=', !!(M?.memory));
+        console.log('[TaskEngine] attachWorkingMemory: M.memory.vars=', JSON.stringify(currentVars));
+        console.log('[TaskEngine] attachWorkingMemory: Loaded vars from snapshot:', Object.keys(currentVars));
+
         (ctx as any).vars = new Proxy({} as Record<string, unknown>, {
             get: (_t, prop: string) => varCache.get(prop),
             set: (_t, prop: string, value: unknown) => {
@@ -469,7 +501,8 @@ export class TaskEngine {
                     varCache.set(key, value);
                 }
                 (ctx as any).__varsDirty = true;
-                assignVarsIntoMental();
+                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
+                // assignVarsIntoMental will be called at end of turn in mergeVarsIntoMental
             },
             merge: (patch: Record<string, unknown>) => {
                 for (const [k, v] of Object.entries(patch)) {
@@ -485,7 +518,7 @@ export class TaskEngine {
                     }
                 }
                 (ctx as any).__varsDirty = true;
-                assignVarsIntoMental();
+                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
             },
             update: (key: string, fn: (prev: unknown) => unknown) => {
                 let currentValue: unknown;
@@ -512,7 +545,7 @@ export class TaskEngine {
                 }
 
                 (ctx as any).__varsDirty = true;
-                assignVarsIntoMental();
+                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
             },
             delete: (key: string) => {
                 // Handle nested paths
@@ -542,7 +575,7 @@ export class TaskEngine {
                     removeKeyFromMental(key);
                 }
                 (ctx as any).__varsDirty = true;
-                assignVarsIntoMental();
+                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
             },
             keys: () => Array.from(varCache.keys()),
             has: (key: string) => {
@@ -1167,7 +1200,10 @@ export class TaskEngine {
                     try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
                 } catch { /* ignore */ }
                 console.log('loopOpts:', loopOpts);
+                console.log('[TaskEngine] BEFORE runLoop, M.memory.vars:', Object.keys(((M as any)?.memory?.vars) || {}));
                 const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
+                console.log('[TaskEngine] AFTER runLoop, mNext.memory.vars:', Object.keys(((mNext as any)?.memory?.vars) || {}));
+                console.log('[TaskEngine] AFTER runLoop, M.memory.vars:', Object.keys(((M as any)?.memory?.vars) || {}));
                 try {
                     console.log('[TaskEngine] post-loop vars', {
                         fromM: (M as any)?.memory?.vars?.jsonObject,
@@ -2144,6 +2180,10 @@ export class TaskEngine {
             }
 
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+
+            // ✅ FIX Bug #1 Issue 1B: Attach working memory proxy before running loop
+            await this.attachWorkingMemory(ctx, tenantId, parentTaskId, agentName || 'default');
+
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
@@ -2204,7 +2244,11 @@ export class TaskEngine {
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 const prevMeta = (baseSnap as any).meta || {};
                 const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token };
-                const nextSnap = { ...baseSnap, M: mNext, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
+
+                // ✅ FIX: Merge ctx.vars into mNext before saving (same as startTask does)
+                const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
+
+                const nextSnap = { ...baseSnap, M: mNextWithVars, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch (e) { /* noop */ }
             const channel = taskChannel(parentTaskId);

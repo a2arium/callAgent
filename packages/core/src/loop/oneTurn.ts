@@ -147,6 +147,7 @@ export async function oneTurn<
     let m1: MentalState<Sensory>;
     try {
         m1 = mods.learning(mPrev, prevAction, o, rPrev, llm);
+        console.log('[oneTurn] Learning returned M with memory.vars:', Object.keys(((m1 as any).memory?.vars) || {}));
     } catch (error) {
         console.error('[oneTurn] Learning module error:', error);
         throw new Error(`Learning module failed: ${error instanceof Error ? error.message : String(error)}`);

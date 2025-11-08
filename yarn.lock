@@ -2053,6 +2053,14 @@ __metadata:
   languageName: node
   linkType: hard
 
+"aplret-bug-reproduction@workspace:apps/examples/aplret-bug-reproduction":
+  version: 0.0.0-use.local
+  resolution: "aplret-bug-reproduction@workspace:apps/examples/aplret-bug-reproduction"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:"
+  languageName: unknown
+  linkType: soft
+
 "arg@npm:^4.1.0":
   version: 4.1.3
   resolution: "arg@npm:4.1.3"

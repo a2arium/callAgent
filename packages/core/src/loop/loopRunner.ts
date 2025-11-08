@@ -371,6 +371,7 @@ export async function runLoop<
         }
 
         try {
+            console.log('[runLoop] BEFORE oneTurn, m.memory.vars:', Object.keys(((m as any).memory?.vars) || {}));
             const step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
                 ctx,
                 env,
@@ -379,7 +380,36 @@ export async function runLoop<
                 prevAction,
                 rPrev
             );
+            console.log('[runLoop] AFTER oneTurn, step.m.memory.vars:', Object.keys(((step.m as any).memory?.vars) || {}));
             m = step.m;
+            
+            // ✅ FIX Bug #1E: Sync ctx.vars into m after each turn so next turn sees them
+            // This ensures vars written via ctx.vars during Execution are visible to the next turn
+            try {
+                const ctxVars = (ctx as any).vars;
+                if (ctxVars && typeof ctxVars === 'object' && m && (m as any).memory) {
+                    const existingVars = ((m as any).memory.vars) || {};
+                    const varsToMerge: Record<string, unknown> = {};
+                    
+                    // Extract all vars from ctx.vars - use get() method for proxy
+                    if (typeof ctxVars.keys === 'function') {
+                        for (const key of ctxVars.keys()) {
+                            const value = typeof ctxVars.get === 'function' ? ctxVars.get(key) : ctxVars[key];
+                            if (value !== undefined) {
+                                varsToMerge[key] = value;
+                            }
+                        }
+                    }
+                    
+                    // Merge ctx.vars into m.memory.vars (ctx.vars takes precedence)
+                    (m as any).memory.vars = { ...existingVars, ...varsToMerge };
+                    console.log('[runLoop] Synced ctx.vars into m.memory.vars:', Object.keys(varsToMerge), varsToMerge);
+                }
+            } catch (syncError) {
+                console.warn('[runLoop] Failed to sync ctx.vars into m:', syncError);
+            }
+            
+            console.log('[runLoop] After sync, m.memory.vars:', Object.keys(((m as any).memory?.vars) || {}));
             outcome = step.outcome;
             if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
                 outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
