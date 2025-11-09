@@ -1,6 +1,7 @@
 // src/api/rpc/tasksSubscribe.ts
 import type { Request, Response } from 'express';
-import { taskEngine, TaskEntity } from '../../core/orchestration/taskEngine.js';
+import { EngineLocator } from '../../core/orchestration/EngineLocator.js';
+import type { TaskEngine, TaskEntity } from '../../core/orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 
@@ -23,16 +24,19 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
             input: params
         };
 
+        const engine = getEngineOrRespond(res);
+        if (!engine) return;
+
         // Send initial response (acknowledgement)
         // Don't await the task completion - we'll stream updates
-        taskEngine.startTask({ task, isStreaming: true }).catch(error => {
+        engine.startTask({ task, isStreaming: true }).catch((error: unknown) => {
             console.error('Error in streaming task execution:', error);
         });
 
         // Hand off to SSE handler (never returns - response is managed by SSE)
         const tenantId = (req as any).tenantId || 'default';
         await handleSSE(req, res, task.id, new (WorkingMemorySessionStore as any)(), tenantId);
-    } catch (error) {
+    } catch (error: unknown) {
         console.error('Error handling tasks/sendSubscribe:', error);
         sendError(
             res,
@@ -56,3 +60,12 @@ function sendError(res: Response, code: number, message: string, data?: unknown)
         id: null
     });
 } 
+
+function getEngineOrRespond(res: Response): TaskEngine | null {
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    if (!engine) {
+        sendError(res, -32603, 'TaskEngine not configured on server');
+        return null;
+    }
+    return engine;
+}

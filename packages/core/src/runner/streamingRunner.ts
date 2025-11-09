@@ -468,7 +468,7 @@ export async function runAgentWithStreaming(
 
     // --- Execute via Task Engine ---
     agentLogger.info(`Starting Engine Execution for Task ${taskCtx.task.id}`);
-    
+
     // Establish logging context for entire task execution
     await withLoggingContext(
         {
@@ -478,82 +478,83 @@ export async function runAgentWithStreaming(
             correlationId: `corr-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
         },
         async () => {
-    try {
-        // Register durable handlers from the module
-        try {
-            const moduleUrl = pathToFileURL(agentFilePath).href;
-            const mod: Record<string, unknown> = await import(moduleUrl);
-            // Always register default handleTask from the loaded plugin
-            if (plugin.handleTask) {
-                registerHandler('handleTask', async (ctx: any) => {
-                    runnerLogger.info(`Invoking durable handler: handleTask`, { taskId: ctx?.task?.id });
-                    await plugin.handleTask!(ctx);
+            try {
+                // Register durable handlers from the module
+                try {
+                    const moduleUrl = pathToFileURL(agentFilePath).href;
+                    const mod: Record<string, unknown> = await import(moduleUrl);
+                    // Always register default handleTask from the loaded plugin
+                    if (plugin.handleTask) {
+                        registerHandler('handleTask', async (ctx: any) => {
+                            runnerLogger.info(`Invoking durable handler: handleTask`, { taskId: ctx?.task?.id });
+                            await plugin.handleTask!(ctx);
+                        });
+                    }
+                    for (const [name, fn] of Object.entries(mod)) {
+                        if (name === 'default') continue;
+                        if (typeof fn === 'function') {
+                            runnerLogger.info(`Registering durable handler: ${name}`);
+                            registerHandler(name, async (ctx: any, ev: any) => (fn as any)(ctx, ev));
+                        }
+                    }
+                    runnerLogger.info(`Handler registration completed`);
+                } catch (e) {
+                    agentLogger.warn('Handler auto-registration failed', e as any);
+                }
+
+                const sessionStore = new WorkingMemorySessionStore();
+                const engine = new TaskEngine({ sessionStore });
+                try { EngineLocator.setEngine(engine as any); } catch { }
+                const entity: TaskEntity = { id: taskCtx.task.id, input };
+                runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
+                const wmCap = process.env.WM_SNAPSHOT_MAX_BYTES;
+                if (wmCap) {
+                    runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
+                }
+                await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx });
+                logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
+                if (!options.isStreaming) {
+                    logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
+                    try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
+                        runnerLogger.warn('Failed waiting for pending A2A notifications', {
+                            error: err instanceof Error ? err.message : String(err)
+                        });
+                    }
+                    try { await sessionStore.close(); } catch { }
+                    try { EngineLocator.setEngine(null as any); } catch { }
+                    try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
+                    try { (outboxPublisher as any)?.stop?.(); } catch { }
+                }
+            } catch (error: unknown) {
+                // Use agentLogger here for error
+                agentLogger.error(`Unhandled Agent Execution Error`, error, {
+                    taskId: taskCtx.task.id
                 });
-            }
-            for (const [name, fn] of Object.entries(mod)) {
-                if (name === 'default') continue;
-                if (typeof fn === 'function') {
-                    runnerLogger.info(`Registering durable handler: ${name}`);
-                    registerHandler(name, async (ctx: any, ev: any) => (fn as any)(ctx, ev));
+
+                try {
+                    if (taskCtx.fail) {
+                        await taskCtx.fail(new Error('Unhandled exception during task execution'));
+                    } else {
+                        taskCtx.complete(100, 'failed_unhandled');
+                    }
+                } catch { /* ignore double failure */ }
+
+                if (error instanceof AgentError) {
+                    throw error;
+                }
+                if (error instanceof Error) {
+                    throw new AgentError(error.message, agentName, {
+                        originalError: error,
+                        taskId: taskCtx.task.id
+                    });
+                } else {
+                    throw new AgentError('Unknown agent error', agentName, {
+                        originalError: error,
+                        taskId: taskCtx.task.id
+                    });
                 }
             }
-            runnerLogger.info(`Handler registration completed`);
-        } catch (e) {
-            agentLogger.warn('Handler auto-registration failed', e as any);
-        }
-
-        const sessionStore = new WorkingMemorySessionStore();
-        const engine = new TaskEngine({ sessionStore });
-        try { EngineLocator.setEngine(engine as any); } catch { }
-        const entity: TaskEntity = { id: taskCtx.task.id, input };
-        runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
-        const wmCap = process.env.WM_SNAPSHOT_MAX_BYTES;
-        if (wmCap) {
-            runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
-        }
-        await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx });
-        logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
-        if (!options.isStreaming) {
-            logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
-            try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
-                runnerLogger.warn('Failed waiting for pending A2A notifications', {
-                    error: err instanceof Error ? err.message : String(err)
-                });
-            }
-            try { await sessionStore.close(); } catch { }
-            try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
-            try { (outboxPublisher as any)?.stop?.(); } catch { }
-        }
-    } catch (error: unknown) {
-        // Use agentLogger here for error
-        agentLogger.error(`Unhandled Agent Execution Error`, error, {
-            taskId: taskCtx.task.id
-        });
-
-        try {
-            if (taskCtx.fail) {
-                await taskCtx.fail(new Error('Unhandled exception during task execution'));
-            } else {
-                taskCtx.complete(100, 'failed_unhandled');
-            }
-        } catch { /* ignore double failure */ }
-
-        if (error instanceof AgentError) {
-            throw error;
-        }
-        if (error instanceof Error) {
-            throw new AgentError(error.message, agentName, {
-                originalError: error,
-                taskId: taskCtx.task.id
-            });
-        } else {
-            throw new AgentError('Unknown agent error', agentName, {
-                originalError: error,
-                taskId: taskCtx.task.id
-            });
-        }
-    }
-    }); // End of withLoggingContext
+        }); // End of withLoggingContext
 }
 
 /**

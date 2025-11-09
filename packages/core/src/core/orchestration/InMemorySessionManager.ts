@@ -23,7 +23,9 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
         const key = `${tenantId}:${sessionId}`;
-        return this.snapshots.get(key) || null;
+        const snapshot = this.snapshots.get(key) || null;
+
+        return snapshot;
     }
 
     async writeSnapshotCAS(params: {
@@ -34,21 +36,23 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         snapshot: Record<string, unknown>;
     }): Promise<{ newVersion: bigint }> {
         const key = `${params.tenantId}:${params.sessionId}`;
+
         const current = this.snapshots.get(key);
-        
+
         // Simple CAS check - in production this would be atomic at database level
         if (current && current.wmVersion !== params.expectedWmVersion) {
             throw new Error('WM_VERSION_CONFLICT');
         }
-        
+
         const newVersion = (current?.wmVersion ?? BigInt(0)) + BigInt(1);
+
         this.snapshots.set(key, {
             wmVersion: newVersion,
             snapshot: params.snapshot,
             agentId: params.agentId,
             updatedAt: new Date().toISOString()
         });
-        
+
         return { newVersion };
     }
 

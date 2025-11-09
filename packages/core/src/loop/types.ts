@@ -130,6 +130,7 @@ export type EnvironmentState<ObservationPayload = unknown> = {
     lastExec?: unknown; // optional description of last execution result
     externalEvents?: unknown[]; // future: bus events since last turn
     goalStats?: { doneCount: number };
+    config?: Record<string, unknown>; // manifest-level configuration
 };
 
 

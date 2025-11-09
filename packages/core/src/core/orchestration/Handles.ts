@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { EngineLocator } from './EngineLocator.js';
 import type { SessionManager } from './SessionManager.js';
 
 type PendingInputs = Record<string, { handlerName?: string; expiredHandlerName?: string; schema?: unknown; expiresAt?: string }>;
@@ -123,18 +124,22 @@ export class TaskHandle {
         // If an inputRequired handler is being set after a pending input was recorded, trigger routing now
         if (kind === 'inputRequired' && pendingInput) {
             try { console.log(`[Handles] inputRequired handler '${handlerName}' registered with pending input; routing now (token=${this.childToken})`); } catch { }
-            try {
-                const { taskEngine } = await import('./taskEngine.js');
-                await taskEngine.handleChildInputRequired({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, prompt: pendingInput.prompt, schema: pendingInput.schema });
+            const engine = EngineLocator.getEngine();
+            if (engine) {
+                await engine.handleChildInputRequired({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, prompt: pendingInput.prompt, schema: pendingInput.schema });
                 try { console.log(`[Handles] routed pending input to parent handler '${handlerName}' (token=${this.childToken})`); } catch { }
-            } catch { /* noop */ }
+            } else {
+                console.warn('[Handles] TaskEngine not registered; unable to route pending input');
+            }
         }
         // If a completed handler is set after a pending completion was recorded, deliver it now
         if (kind === 'completed' && typeof pendingCompletion !== 'undefined') {
-            try {
-                const { taskEngine } = await import('./taskEngine.js');
-                await taskEngine.handleChildCompleted({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, result: pendingCompletion });
-            } catch { /* noop */ }
+            const engine = EngineLocator.getEngine();
+            if (engine) {
+                await engine.handleChildCompleted({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, result: pendingCompletion });
+            } else {
+                console.warn('[Handles] TaskEngine not registered; unable to deliver pending completion');
+            }
         }
         return this;
     }
@@ -161,7 +166,6 @@ export class TaskHandle {
         const hasCompleted = !!entry.handlers?.completed;
         const awaitCompletion = opts?.awaitCompletion ?? (!hasCompleted);
         try {
-            const { EngineLocator } = await import('./EngineLocator.js');
             const { globalA2AService } = await import('./A2AService.js');
             const engine = EngineLocator.getEngine();
             const result = await globalA2AService.sendTaskToAgent({} as any, target, input as any, {

@@ -14,14 +14,24 @@ import { InteractiveTaskHandler } from './InteractiveTaskResult.js';
 import { logger } from '@a2arium/callagent-utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '../cache/index.js';
-import { taskEngine } from './taskEngine.js';
 import { EngineLocator } from './EngineLocator.js';
 import { eventBus } from '../../eventbus/inMemoryEventBus.js';
 import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
 import { v4 as uuidv4 } from 'uuid';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
+import type { TaskEngine } from './taskEngine.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
+
+function getRequiredEngine(): TaskEngine {
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    if (!engine) {
+        throw new Error(
+            '[A2AService] TaskEngine is not registered. Call EngineLocator.setEngine(...) with a configured TaskEngine before using agent-to-agent workflows.'
+        );
+    }
+    return engine;
+}
 
 /**
  * Service for agent-to-agent communication
@@ -64,11 +74,14 @@ export class A2AService implements IA2AService {
     }
 
     async waitForPendingNotifications(): Promise<void> {
-        if (this.pendingNotifications.size === 0) {
-            return;
+        while (this.pendingNotifications.size > 0) {
+            const pending = Array.from(this.pendingNotifications);
+            await Promise.allSettled(pending);
+            // Yield to allow any follow-up notifications enqueued during await to register
+            if (this.pendingNotifications.size > 0) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
         }
-        const pending = Array.from(this.pendingNotifications);
-        await Promise.allSettled(pending);
     }
 
     /**
@@ -120,7 +133,7 @@ export class A2AService implements IA2AService {
             await ContextSerializer.deserializeContext(targetCtx, serializedContext);
 
             // 5. Execute target agent via TaskEngine for WM/LLM persistence
-            const eng = EngineLocator.getEngine() || taskEngine;
+            const eng = getRequiredEngine();
             // Attach WM proxy so child ctx.vars writes persist
             try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
 
@@ -137,7 +150,7 @@ export class A2AService implements IA2AService {
                         `make the child complete in one turn for this path, or call with awaitCompletion=false and propagate await_child from the parent.`
                     );
                 }
-                const eng = EngineLocator.getEngine() || taskEngine;
+                const eng = getRequiredEngine();
                 const { prompt, schema, childOnProvided, childTaskId } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown; childOnProvided?: string; childTaskId?: string };
                 try { console.log(`[A2AService] Post-turn child input_required routing -> parent (childOnProvided='${childOnProvided}', childTaskId='${childTaskId}') prompt='${prompt}'`); } catch { }
                 await eng.handleChildInputRequired({
@@ -327,6 +340,15 @@ export class A2AService implements IA2AService {
             inheritedSemanticAdapter
         ) as FullTaskContext;
 
+        // Record manifest config on child context for propagation
+        if (targetPlugin.manifest.config) {
+            if (!targetCtx.config || typeof targetCtx.config !== 'object') {
+                (targetCtx as any).config = {};
+            }
+            (targetCtx.config as any).manifestConfig = targetPlugin.manifest.config;
+            (targetCtx as any).__manifestConfig = targetPlugin.manifest.config;
+        }
+
         // Set up LLM configuration for the target agent (similar to runner logic)
         if (!targetPlugin.llmAdapter && targetPlugin.llmConfig) {
             a2aLogger.debug('Creating LLM for target agent', {
@@ -374,7 +396,7 @@ export class A2AService implements IA2AService {
             try { console.log(`[A2AService] Child requestInput called: prompt='${prompt || ''}' onProvided='${riOpts?.onProvided}' parentTenantId=${parentTenantId} parentTaskId=${parentTaskId} parentChildToken=${parentChildToken}`); } catch { }
             if (parentTenantId && parentTaskId && parentChildToken) {
                 try {
-                    const eng = EngineLocator.getEngine() || taskEngine;
+                    const eng = getRequiredEngine();
                     // Persist child's current WM + LLM state BEFORE writing pending input
                     try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
 
@@ -400,7 +422,7 @@ export class A2AService implements IA2AService {
                         childToken: parentChildToken,
                         childTaskId: targetCtx.task.id,
                         childInputToken: childToken,
-                        prompt,
+                        prompt: prompt ?? '',
                         schema: riOpts?.schema,
                         childOnProvided
                     });
@@ -629,7 +651,7 @@ export class A2AService implements IA2AService {
             const result = hasLoopModules
                 ? await (async () => {
                     // Always route loop-first agents through the engine so A2A overrides are respected
-                    const eng = EngineLocator.getEngine() || taskEngine;
+                    const eng = getRequiredEngine();
                     try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
                     const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
                     const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
@@ -639,7 +661,7 @@ export class A2AService implements IA2AService {
                     ? await targetPlugin.handleTask(targetCtx)
                     : await (async () => {
                         // Fallback: engine path
-                        const eng = EngineLocator.getEngine() || taskEngine;
+                        const eng = getRequiredEngine();
                         try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
                         const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
                         const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });

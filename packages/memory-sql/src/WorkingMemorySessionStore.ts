@@ -12,6 +12,7 @@ export class WorkingMemorySessionStore {
     private readonly prisma: PrismaClient;
     private readonly ownsPrisma: boolean;
     private readonly log = logger.createLogger({ prefix: 'WMSessionStore' });
+    private connecting: Promise<void> | null = null;
 
     constructor(prisma?: PrismaClient) {
         if (prisma) {
@@ -20,6 +21,35 @@ export class WorkingMemorySessionStore {
         } else {
             this.prisma = new PrismaClient();
             this.ownsPrisma = true;
+        }
+    }
+
+    private async ensureConnected(): Promise<void> {
+        if (this.connecting) {
+            await this.connecting;
+            return;
+        }
+        this.connecting = this.prisma.$connect().catch((err) => {
+            // Reset so a later call can retry
+            this.connecting = null;
+            throw err;
+        });
+        try {
+            await this.connecting;
+        } finally {
+            this.connecting = null;
+        }
+    }
+
+    private async runWithReconnect<T>(operation: () => Promise<T>): Promise<T> {
+        try {
+            return await operation();
+        } catch (error) {
+            if (error instanceof Error && error.message.includes('Engine is not yet connected')) {
+                await this.prisma.$connect();
+                return await operation();
+            }
+            throw error;
         }
     }
 
@@ -33,9 +63,10 @@ export class WorkingMemorySessionStore {
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<SessionSnapshot | null> {
-        const rec = await this.prisma.wMSession.findUnique({
+        await this.ensureConnected();
+        const rec = await this.runWithReconnect(() => this.prisma.wMSession.findUnique({
             where: { tenantId_sessionId: { tenantId, sessionId } }
-        });
+        }));
         if (!rec) return null;
         return {
             wmVersion: rec.wmVersion,
@@ -58,7 +89,8 @@ export class WorkingMemorySessionStore {
     }): Promise<{ newVersion: bigint }> {
         const { tenantId, sessionId, agentId, expectedWmVersion, snapshot } = params;
 
-        return await this.prisma.$transaction(async (tx) => {
+        await this.ensureConnected();
+        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
             const existing = await tx.wMSession.findUnique({
                 where: { tenantId_sessionId: { tenantId, sessionId } },
                 select: { wmVersion: true }
@@ -66,7 +98,12 @@ export class WorkingMemorySessionStore {
 
             const currentVersion = existing?.wmVersion ?? BigInt(0);
             if (currentVersion !== expectedWmVersion) {
-                this.log.warn('CAS mismatch on writeSnapshotCAS', { tenantId, sessionId, expectedWmVersion: expectedWmVersion.toString(), currentVersion: currentVersion.toString() });
+                this.log.debug?.('CAS mismatch on writeSnapshotCAS (will retry upstream)', {
+                    tenantId,
+                    sessionId,
+                    expectedWmVersion: expectedWmVersion.toString(),
+                    currentVersion: currentVersion.toString()
+                });
                 throw new Error('CAS_MISMATCH');
             }
 
@@ -78,7 +115,7 @@ export class WorkingMemorySessionStore {
             });
 
             return { newVersion };
-        });
+        }));
     }
 
     /**
@@ -92,7 +129,8 @@ export class WorkingMemorySessionStore {
     }): Promise<{ eventId: string; seq: number }> {
         const { tenantId, sessionId, type, payload } = params;
 
-        return await this.prisma.$transaction(async (tx) => {
+        await this.ensureConnected();
+        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
             const last = await tx.wMEvent.findFirst({
                 where: { tenantId, sessionId },
                 orderBy: { seq: 'desc' },
@@ -103,7 +141,7 @@ export class WorkingMemorySessionStore {
                 data: { tenantId, sessionId, seq: nextSeq, type, payload: payload as unknown as any }
             });
             return { eventId: ev.eventId, seq: ev.seq };
-        });
+        }));
     }
 
     async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>> {
@@ -122,7 +160,8 @@ export class WorkingMemorySessionStore {
         payload: Record<string, unknown>;
     }): Promise<void> {
         const { tenantId, topic, key, payload } = params;
-        await this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as any } });
+        await this.ensureConnected();
+        await this.runWithReconnect(() => this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as any } }));
     }
 }
 

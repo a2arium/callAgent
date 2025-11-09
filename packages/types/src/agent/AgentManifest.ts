@@ -76,6 +76,9 @@ export interface AgentManifest {
         excludePaths?: string[];
     };
 
+    /** Manifest-level configuration available at runtime */
+    config?: Record<string, unknown>;
+
     // Allow additional fields for future expansion
     [key: string]: unknown;
 }

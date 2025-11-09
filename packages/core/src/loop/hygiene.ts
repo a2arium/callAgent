@@ -16,6 +16,10 @@ export function pruneMentalState(input: MentalState, cfg: HygieneConfig = {}): M
     } = cfg;
 
     const M = input; // mutate in place for performance
+    try {
+        const beforeVars = Object.keys((((M as any)?.memory as any)?.vars) || {});
+        console.log('[pruneMentalState] BEFORE vars:', beforeVars);
+    } catch { /* noop */ }
 
     // Episodic TTL + cap
     try {
@@ -40,6 +44,11 @@ export function pruneMentalState(input: MentalState, cfg: HygieneConfig = {}): M
         const entries = Object.entries(decisionsObj);
         const kept = decisionsCap > 0 ? entries.slice(-decisionsCap) : entries;
         (M.memory as any).decisions = Object.fromEntries(kept) as any;
+    } catch { /* noop */ }
+
+    try {
+        const afterVars = Object.keys((((M as any)?.memory as any)?.vars) || {});
+        console.log('[pruneMentalState] AFTER vars:', afterVars);
     } catch { /* noop */ }
 
     return M;

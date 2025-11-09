@@ -108,4 +108,41 @@ describe('LoopRunner basic', () => {
         expect(env.inbox.current.length).toBeGreaterThanOrEqual(1);
         expect(env.inbox.current[0].source).toBe('tool');
     });
+
+    it('passes manifest config through env.config to modules', async () => {
+        const ctx: any = createMinimalTestContext('test-tenant', 'test-agent');
+        const M: any = {
+            memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+            worldModel: { implicit: null, explicit: null, simulator: null },
+            goalState: { hierarchy: { nodes: {}, roots: [] } },
+            emotion: { valence: 0, arousal: 0.2 },
+            rewardParams: { extrinsicWeights: [1], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 0.99 },
+            policyParams: { theta: null, stochastic: false }
+        };
+        
+        // Create environment with manifest config
+        const manifestConfig = { enableValidation: true, validationCoverageThreshold: 95 };
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: { x: 1 },
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] },
+            config: manifestConfig
+        } as any;
+
+        // Track that perception receives the config
+        let receivedConfig: Record<string, unknown> | undefined;
+        const { outcome } = await runLoop(ctx, M, env, {
+            perception: (env) => {
+                receivedConfig = env.config as Record<string, unknown>;
+                return [];
+            },
+            policy: () => ({ kind: 'complete', result: { success: true } })
+        });
+
+        expect(outcome.kind).toBe('complete');
+        expect(receivedConfig).toBeDefined();
+        expect(receivedConfig?.enableValidation).toBe(true);
+        expect(receivedConfig?.validationCoverageThreshold).toBe(95);
+    });
 });

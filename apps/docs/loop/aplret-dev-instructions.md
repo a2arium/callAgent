@@ -472,6 +472,99 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
 - Write golden path test ([Section 9](#9-testing-strategy))
 
 
+## Manifest Structure
+
+The agent manifest defines metadata and configuration for your agent. You can provide the manifest in two ways:
+
+1. **Inline object**: Pass a manifest object directly to `createAgent()`
+2. **JSON file**: Reference an external `agent.json` file (recommended for production)
+
+### Manifest Fields
+
+```typescript
+{
+  // Required fields
+  "name": "my-agent",           // Agent identifier
+  "version": "1.0.0",           // Agent version (semver)
+  
+  // Optional: Agent description
+  "description": "My production agent",
+  
+  // Optional: Execution mode ('loop' or 'legacy')
+  "runMode": "loop",
+  
+  // Optional: Loop budgets (defaults from framework if not set)
+  "budgets": {
+    "maxTurns": 10,             // Maximum loop iterations
+    "latencyMs": 30000          // Maximum total latency in milliseconds
+  },
+  
+  // Optional: Human-in-the-loop level
+  "hitl": "consent",            // 'advise' | 'consent' | 'guardrails'
+  
+  // Optional: Safety configuration
+  "safety": {
+    "sanitize": true,           // Enable default perception sanitization
+    "costLimit": 10.0,          // Cost threshold in USD
+    "piiPatterns": ["\\b\\d{3}-\\d{2}-\\d{4}\\b"]  // Regex patterns for sensitive data
+  },
+  
+  // Optional: Agent result caching
+  "cache": {
+    "enabled": true,            // Enable caching for this agent
+    "ttlSeconds": 300,          // Cache TTL (default: 5 minutes)
+    "excludePaths": ["timestamp", "session.id"]  // Exclude fields from cache key
+  },
+  
+  // Optional: Runtime configuration (NEW!)
+  "config": {
+    "enableValidation": true,
+    "validationCoverageThreshold": 95,
+    "customFeatureFlags": {
+      "useExperimentalParser": false
+    }
+  }
+}
+```
+
+### Using Manifest Configuration at Runtime
+
+The `config` field in your manifest is available throughout your agent implementation:
+
+**In Policy, Shield, and Execution modules** (via `ctx.config.manifestConfig`):
+
+```typescript
+policy: (m, ctx) => {
+  const cfg = ctx.config.manifestConfig as { enableValidation?: boolean };
+  
+  if (cfg?.enableValidation) {
+    // Use validation logic
+    return { kind: 'validate_input' };
+  }
+  
+  return { kind: 'process_input' };
+}
+```
+
+**In Perception, Learning, and Transition modules** (via `env.config`):
+
+```typescript
+perception: (env) => {
+  const cfg = env.config as { validationCoverageThreshold?: number };
+  const threshold = cfg?.validationCoverageThreshold ?? 80;
+  
+  // Use configuration in perception logic
+  return observations.filter(o => o.confidence >= threshold / 100);
+}
+```
+
+### Configuration for A2A Child Agents
+
+When one agent invokes another via `ctx.sendTaskToAgent()`, each agent receives its own manifest configuration. The child agent's `config` field is automatically propagated through the same mechanisms (`ctx.config.manifestConfig` and `env.config`).
+
+This allows you to configure agent behavior without hardcoded constants, making agents more flexible and easier to test with different configurations.
+
+
 ## Table of Contents
 
 - [1. Architecture Philosophy](#1-architecture-philosophy)

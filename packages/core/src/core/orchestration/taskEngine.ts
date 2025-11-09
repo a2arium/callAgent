@@ -93,6 +93,7 @@ export type StartTaskParams = {
 export class TaskEngine {
     private sessionManager?: SessionManager;
     private handlerInvoker?: DurableHandlerInvoker;
+    private readonly childCompletionInFlight = new Map<string, number>();
 
     constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
         if (opts?.sessionStore) {
@@ -152,6 +153,466 @@ export class TaskEngine {
         }
     }
 
+    private async attachOrchestrationAPIs(
+        ctx: TaskContext,
+        params: { tenantId: string; sessionId: string; agentId?: string; flushMentalState: () => Promise<void> }
+    ): Promise<void> {
+        if (!this.sessionManager) {
+            throw new Error('TaskEngine requires a configured session manager for orchestration APIs');
+        }
+
+        const { tenantId, sessionId } = params;
+        const agentId = params.agentId ?? ((ctx as any).agentId as string) ?? 'default';
+        const flushMentalState = params.flushMentalState;
+
+        // Goals API facade
+        try {
+            const goals = await import('../../loop/goals.js');
+            (ctx as any).addGoal = (node: any) => goals.addGoal(ctx as any, node);
+            (ctx as any).updateGoal = (id: any, patch: any) => goals.updateGoal(ctx as any, id, patch);
+            (ctx as any).moveGoal = (id: any, parentId?: any, order?: any) => goals.moveGoal(ctx as any, id, parentId, order);
+            (ctx as any).completeGoal = (id: any, opts?: any) => goals.completeGoal(ctx as any, id, opts);
+            (ctx as any).failGoal = (id: any) => goals.failGoal(ctx as any, id);
+            (ctx as any).listGoals = (filter?: any) => goals.listGoals(ctx as any, filter);
+            (ctx as any).goals = {
+                add: (g: any) => goals.addGoal(ctx as any, g),
+                update: (goalId: string, patch: any) => goals.updateGoal(ctx as any, goalId, patch),
+                remove: (goalId: string) => goals.failGoal(ctx as any, goalId),
+                clear: async (predicate?: (g: any) => boolean) => {
+                    const all = await goals.listGoals(ctx as any, {});
+                    for (const g of all) {
+                        if (!predicate || predicate(g as any)) {
+                            await goals.failGoal(ctx as any, (g as any).id);
+                        }
+                    }
+                },
+                read: (filter?: any) => goals.listGoals(ctx as any, filter)
+            };
+        } catch { /* noop */ }
+
+        // Semantic facade (only attach if caller has not provided their own)
+        if (!(ctx as any).semantic) {
+            (ctx as any).semantic = {
+                add: async (item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
+                    await (ctx.memory as any)?.semantic?.set?.(item.id, item.value, { tags: item.tags, entities: item.entities });
+                },
+                read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number }) => {
+                    const res = await (ctx.memory as any)?.semantic?.getMany?.('*');
+                    const mapped = Array.isArray(res)
+                        ? res.map((r: any) => ({ id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities }))
+                        : [];
+                    if (!filter) return mapped;
+                    const byIds = filter.id
+                        ? mapped.filter(m => Array.isArray(filter.id) ? filter.id.includes(m.id) : m.id === filter.id)
+                        : mapped;
+                    const tagSet = filter.tags || (filter.tag ? [filter.tag] : undefined);
+                    const byTags = tagSet && tagSet.length
+                        ? byIds.filter(m => {
+                            const mt = new Set(m.tags || []);
+                            return tagSet!.every(t => mt.has(t));
+                        })
+                        : byIds;
+                    return typeof filter.limit === 'number' ? byTags.slice(0, Math.max(0, filter.limit)) : byTags;
+                },
+                remove: async (idOrPredicate: string | ((item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
+                    if (typeof idOrPredicate === 'string') {
+                        await (ctx.memory as any)?.semantic?.delete?.(idOrPredicate);
+                        return;
+                    }
+                    const res = await (ctx.memory as any)?.semantic?.getMany?.('*');
+                    if (!Array.isArray(res)) return;
+                    for (const r of res) {
+                        const item = { id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities } as any;
+                        if ((idOrPredicate as any)(item)) {
+                            await (ctx.memory as any)?.semantic?.delete?.(item.id);
+                        }
+                    }
+                }
+            };
+        }
+
+        const hasPreservedRequestInput = (ctx as any).__a2aParent || (ctx as any).__preserveRequestInput;
+        if (!hasPreservedRequestInput) {
+            (ctx as any).requestInput = async (
+                promptOrParts: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[],
+                opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }
+            ) => {
+                if (!this.sessionManager) throw new Error('Session manager not configured');
+                const maxPrompts = 100; // TODO: configurable
+                const snapL = await this.sessionManager.load(tenantId, sessionId);
+                const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
+                const pendingNow = getPendingInputs(baseL);
+                if (Object.keys(pendingNow).length >= maxPrompts) {
+                    throw new Error('LIMIT_MAX_PROMPTS_EXCEEDED');
+                }
+                const snap = await this.sessionManager.load(tenantId, sessionId);
+                const base = (snap?.snapshot as Record<string, unknown>) || {};
+                const token = opts?.__existingToken || uuidv4();
+                const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
+                const pending = { ...getPendingInputs(base) };
+
+                const normalizeParts = (
+                    p: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[]
+                ): import('../../shared/types/index.js').MessagePart[] => {
+                    if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' } as any];
+                    if (Array.isArray(p) && p.length > 0 && typeof p[0] === 'string') {
+                        return (p as string[]).map(t => ({ type: 'text', text: t, format: 'markdown' } as any));
+                    }
+                    if (Array.isArray(p)) {
+                        return (p as any[]).map(part => (part?.type === 'text' && !part?.format ? { ...part, format: 'markdown' } : part));
+                    }
+                    const one = p as any;
+                    return [one?.type === 'text' && !one?.format ? { ...one, format: 'markdown' } : one];
+                };
+
+                const parts = normalizeParts(promptOrParts);
+                const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
+
+                try { await ctx.reply(parts as any); } catch { /* best-effort */ }
+
+                if (!opts?.__existingToken) {
+                    pending[token] = {
+                        schema: opts?.schema,
+                        expiresAt,
+                        handlerName: opts?.onProvided,
+                        expiredHandlerName: opts?.onExpired
+                    } as any;
+                }
+
+                const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
+                    const mental = (ctx as any).__mental;
+                    try { console.log('[TaskEngine] requestInput: before flush vars', (mental as any)?.memory?.vars?.jsonObject); } catch { }
+                    try { await flushMentalState(); } catch { /* best-effort */ }
+                    try { console.log('[TaskEngine] requestInput: after flush vars', (mental as any)?.memory?.vars?.jsonObject); } catch { }
+                    const latest = await this.sessionManager!.load(tenantId, sessionId);
+                    const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
+                    const nextSnapshot = setPendingInputs(latestBase, pending);
+                    const expectedNext = latest?.wmVersion ?? expectedVer;
+                    await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedNext, snapshot: nextSnapshot });
+                    await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
+                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
+                };
+
+                try {
+                    const expected = snap?.wmVersion ?? BigInt(0);
+                    await writeOnce(base, expected);
+                } catch (e) {
+                    if ((e as Error).message === 'CAS_MISMATCH') {
+                        try {
+                            const snap2 = await this.sessionManager.load(tenantId, sessionId);
+                            const base2 = (snap2?.snapshot as Record<string, unknown>) || {};
+                            const pending2 = { ...getPendingInputs(base2), [token]: { schema: opts?.schema, expiresAt } } as any;
+                            const expected2 = snap2?.wmVersion ?? BigInt(0);
+                            const next2 = setPendingInputs(base2, pending2);
+                            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
+                            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
+                            await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
+                        } catch { /* swallow second failure */ }
+                    } else {
+                        throw e;
+                    }
+                }
+
+                try { (ctx as any).logger?.info?.('requestInput: input_required emitted', { token, prompt, expiresAt }); } catch { }
+                try {
+                    ctx.progress({
+                        state: 'input-required',
+                        message: {
+                            role: 'agent',
+                            parts
+                        },
+                        timestamp: new Date().toISOString(),
+                        metadata: { token }
+                    } as any);
+                } catch { /* noop */ }
+
+                if (opts?.setToken !== false) {
+                    ctx.vars.set('token', token);
+                }
+
+                if (opts?.setStage) {
+                    try {
+                        const { createStageFacade } = await import('../../loop/stageHelpers.js');
+                        const Stage = createStageFacade();
+                        Stage.setStage(ctx, opts.setStage);
+                    } catch (error) {
+                        (ctx as any).logger?.warn?.('Failed to auto-set stage', { stage: opts.setStage, error });
+                    }
+                }
+
+                (ctx as any).__wmSavedThisTurn = true;
+                const handle = new InputHandle(this.sessionManager, tenantId, sessionId, token);
+                return handle;
+            };
+        }
+
+        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => {
+            if (!this.sessionManager) throw new Error('Session manager not configured');
+            const snap = await this.sessionManager.load(tenantId, sessionId);
+            const base = (snap?.snapshot as Record<string, unknown>) || {};
+            const token = uuidv4();
+            const toolsNow = getPendingTools(base) as any;
+            toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
+
+            if (opts?.setToken || opts?.setStage) {
+                toolsNow[token].options = {
+                    setToken: opts.setToken,
+                    setStage: opts.setStage
+                };
+            }
+
+            try { await flushMentalState(); } catch { /* best-effort */ }
+            const expected = snap?.wmVersion ?? BigInt(0);
+            const next = setPendingTools(base, toolsNow);
+            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
+
+            if (opts?.setToken || opts?.setStage) {
+                try {
+                    const currentSnap = await this.sessionManager.load(tenantId, sessionId);
+                    if (currentSnap) {
+                        const currentBase = (currentSnap.snapshot as Record<string, unknown>) || {};
+                        const currentM = currentBase.M as any;
+
+                        if (opts.setToken && token && currentM?.vars) {
+                            const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+                                const pathParts = path.split('.');
+                                let current = obj;
+                                for (let i = 0; i < pathParts.length - 1; i++) {
+                                    const part = pathParts[i];
+                                    if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
+                                        current[part] = {};
+                                    }
+                                    current = current[part] as Record<string, unknown>;
+                                }
+                                current[pathParts[pathParts.length - 1]] = value;
+                                return obj;
+                            };
+
+                            const updatedVars = setNestedValue(
+                                { ...(currentM.vars as Record<string, unknown> || {}) },
+                                'toolToken',
+                                token
+                            );
+                            currentM.vars = updatedVars;
+                            (currentM.memory as any) = { ...((currentM.memory as any) || {}), vars: updatedVars };
+                        }
+
+                        if (opts.setStage && currentM?.control) {
+                            const currentStage = currentM.control.stage;
+                            const targetStage = opts.setStage;
+
+                            if (typeof targetStage === 'string' && targetStage.length > 0) {
+                                currentM.control.stage = targetStage;
+                                try { console.log(`[TaskEngine] Auto stage transition: ${currentStage} -> ${targetStage} (tool invoked)`); } catch { }
+                            }
+                        }
+
+                        const expectedWmVersion = currentSnap?.wmVersion ?? BigInt(0);
+                        await this.sessionManager.saveSnapshot({
+                            tenantId,
+                            sessionId,
+                            agentId: (currentSnap as any)?.agentId || 'default',
+                            expectedWmVersion,
+                            snapshot: currentBase
+                        });
+                    }
+                } catch (error) {
+                    try { console.warn('[TaskEngine] Failed to apply tool auto token/stage options:', error); } catch { }
+                }
+            }
+
+            try {
+                ctx.progress({ state: 'working', timestamp: new Date().toISOString(), metadata: { token, toolName, awaiting: 'tool' } } as any);
+            } catch { /* noop */ }
+            (ctx as any).__wmSavedThisTurn = true;
+            return { token } as any;
+        };
+
+        (ctx as any).registerExternalEvent = async (eventType: string, data: unknown, opts?: { onOccurred: string }) => {
+            if (!this.sessionManager) throw new Error('Session manager not configured');
+            const snap = await this.sessionManager.load(tenantId, sessionId);
+            const base = (snap?.snapshot as Record<string, unknown>) || {};
+            const token = uuidv4();
+            const eventsNow = getPendingExternalEvents(base) as any;
+            eventsNow[token] = { type: eventType, data, handlers: { occurred: opts?.onOccurred } };
+            try { await flushMentalState(); } catch { /* best-effort */ }
+            const expected = snap?.wmVersion ?? BigInt(0);
+            const next = setPendingExternalEvents(base, eventsNow);
+            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.external_event_registered', { token, eventType });
+            (ctx as any).__wmSavedThisTurn = true;
+            return { token } as any;
+        };
+
+        (ctx as any).sendTaskToAgent = async (
+            agent: string,
+            childInput: unknown,
+            options?: {
+                awaitCompletion?: boolean;
+                streaming?: boolean;
+                onCompleted?: string;
+                onFailed?: string;
+                onInputRequired?: string;
+                setToken?: boolean;
+                tokenPath?: string;
+                autoClearToken?: boolean;
+                setStage?: string;
+            }
+        ) => {
+            if (!this.sessionManager) throw new Error('Session manager not configured');
+            const maxChildren = 50; // TODO: make configurable
+            const snapLimits = await this.sessionManager.load(tenantId, sessionId);
+            const baseLimits = (snapLimits?.snapshot as Record<string, unknown>) || {};
+            const tasksNow = getPendingTasks(baseLimits);
+            if (Object.keys(tasksNow).length >= maxChildren) {
+                throw new Error('LIMIT_MAX_CHILDREN_EXCEEDED');
+            }
+            const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, agent, childInput);
+
+            const tokenPath = options?.tokenPath ?? 'child.token';
+            const shouldSetToken = options?.setToken !== false;
+            const autoClearToken = options?.autoClearToken !== false;
+
+            if (shouldSetToken) {
+                try { ctx.vars.set(tokenPath, token); } catch { /* noop */ }
+            }
+            if (options?.setStage) {
+                try { ctx.vars.set('stage', options.setStage); } catch { /* noop */ }
+            }
+
+            const snapOptions = await this.sessionManager.load(tenantId, sessionId);
+            const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
+            const tasks = getPendingTasks(baseOptions);
+            if (tasks[token]) {
+                tasks[token].options = {
+                    setToken: shouldSetToken,
+                    tokenPath,
+                    autoClearToken,
+                    setStage: options?.setStage
+                };
+                const next = setPendingTasks(baseOptions, tasks);
+                // Option 1B: Retry-based coordination - load latest version and retry on CAS failure
+                let retryCount = 0;
+                const maxRetries = 3;
+                let success = false;
+
+                while (!success && retryCount < maxRetries) {
+                    try {
+                        const latestSnap = await this.sessionManager.load(tenantId, sessionId);
+                        const nextExpected = latestSnap?.wmVersion ?? BigInt(0);
+                        await this.sessionManager.saveSnapshot({
+                            tenantId,
+                            sessionId,
+                            agentId: (latestSnap as any)?.agentId || 'default',
+                            expectedWmVersion: nextExpected,
+                            snapshot: next
+                        });
+                        success = true;
+                    } catch (error) {
+                        if ((error as Error).message === 'CAS_MISMATCH' && retryCount < maxRetries - 1) {
+                            retryCount++;
+                            // Small delay before retry
+                            await new Promise(resolve => setTimeout(resolve, 10));
+                        } else {
+                            throw error;
+                        }
+                    }
+                }
+
+                if (!success) {
+                    throw new Error('CAS_MISMATCH after max retries');
+                }
+            }
+
+            if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
+            if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
+            if (options?.onFailed) { try { await (handle as any).onFailed(options.onFailed); } catch { } }
+            const minimalCtx = ctx as any;
+
+            const dispatch = async (runOpts?: { awaitCompletion?: boolean; streaming?: boolean }) => {
+                (ctx as any).logger?.info?.('Child dispatch', { parentTaskId: sessionId, childAgent: agent, token });
+                try { await flushMentalState(); } catch { /* best-effort */ }
+                const a2aOptions = { tenantId, streaming: (runOpts?.streaming ?? options?.streaming) === true } as any;
+                try { console.log(`[TaskEngine] sendTaskToAgent dispatch: tenantId=${tenantId} sessionId=${sessionId} token=${token} agent=${agent}`); } catch { }
+                try {
+                    const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
+                        ...(options || {}),
+                        ...a2aOptions,
+                        parentTenantId: tenantId,
+                        parentTaskId: sessionId,
+                        parentChildToken: token
+                    } as any);
+                    if (result && typeof result === 'object' && (result as any).status === 'input_required') {
+                        (ctx as any).logger?.info?.('Child input_required', { parentTaskId: sessionId, childAgent: agent, token });
+                        return;
+                    }
+                    const snapNow = await this.sessionManager!.load(tenantId, sessionId);
+                    const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
+                    const tasksNow2 = getPendingTasks(baseNow) as any;
+                    const entry = tasksNow2[token];
+                    const hasCompleted = !!entry?.handlers?.completed;
+                    const awaitCompletion = runOpts?.awaitCompletion ?? options?.awaitCompletion ?? (!hasCompleted);
+                    if (awaitCompletion) {
+                        await this.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
+                        return result;
+                    }
+                    return;
+                } catch (e) {
+                    (ctx as any).logger?.error?.('Child dispatch failed', e, { parentTaskId: sessionId, childAgent: agent, token });
+                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
+                        taskId: sessionId,
+                        childAgent: agent,
+                        error: e instanceof Error ? e.message : String(e)
+                    });
+                    return;
+                }
+            };
+
+            const result = await dispatch({});
+            return result ?? handle;
+        };
+
+        (ctx as any).allTasks = async (
+            children: Array<{ agent: string; input: unknown }>,
+            opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
+        ) => {
+            if (!this.sessionManager) throw new Error('Session manager not configured');
+            const maxGroup = 50; // TODO: make configurable
+            if (children.length > maxGroup) throw new Error('LIMIT_MAX_GROUP_CHILDREN_EXCEEDED');
+            const childTokens: string[] = [];
+            for (const child of children) {
+                const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, child.agent);
+                childTokens.push(token);
+                globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
+                    tenantId,
+                    parentTenantId: tenantId,
+                    parentTaskId: sessionId,
+                    parentChildToken: token
+                } as any).catch(async (e) => {
+                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
+                        taskId: sessionId,
+                        childAgent: child.agent,
+                        error: e instanceof Error ? e.message : String(e)
+                    });
+                });
+            }
+            const { handle: groupHandle, groupToken } = await createGroupHandle(this.sessionManager, tenantId, sessionId, childTokens);
+            const snap = await this.sessionManager.load(tenantId, sessionId);
+            const base = (snap?.snapshot as Record<string, unknown>) || {};
+            const groups = getPendingGroups(base);
+            const g = groups[groupToken] || { childTokens: childTokens, results: {}, handlers: {} };
+            if (opts?.withTimeoutMs) g.timeoutMs = opts.withTimeoutMs;
+            if (opts?.cancelRemaining !== undefined) g.cancelRemaining = opts.cancelRemaining;
+            if (opts?.onAllCompleted) { g.handlers = g.handlers || {}; (g.handlers as any).allCompleted = opts.onAllCompleted; }
+            if (opts?.onAnyFailed) { g.handlers = g.handlers || {}; (g.handlers as any).anyFailed = opts.onAnyFailed; }
+            groups[groupToken] = g;
+            const next = setPendingGroups(base, groups);
+            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap?.wmVersion ?? BigInt(0), snapshot: next });
+            return groupHandle as GroupHandle;
+        };
+    }
+
     // Attach working memory var proxy to an existing context so that writes are CAS-persisted
     public async attachWorkingMemory(ctx: TaskContext, tenantId: string, sessionId: string, agentId: string): Promise<void> {
         if (!this.sessionManager) return;
@@ -162,15 +623,76 @@ export class TaskEngine {
         const currentVars = ((M?.memory as any)?.vars || {}) as Record<string, unknown>;
         const varCache = new Map<string, unknown>(Object.entries(currentVars));
 
-        console.log('[TaskEngine] attachWorkingMemory: sessionId=', sessionId);
-        console.log('[TaskEngine] attachWorkingMemory: snapshot exists=', !!snapshot);
-        console.log('[TaskEngine] attachWorkingMemory: M exists=', !!M);
-        console.log('[TaskEngine] attachWorkingMemory: M.memory exists=', !!(M?.memory));
-        console.log('[TaskEngine] attachWorkingMemory: M.memory.vars=', JSON.stringify(currentVars));
-        console.log('[TaskEngine] attachWorkingMemory: Loaded vars from snapshot:', Object.keys(currentVars));
+
+        if (!(ctx as any).tenantId) (ctx as any).tenantId = tenantId;
+        if (!(ctx as any).agentId) (ctx as any).agentId = agentId;
+        if (M && !(ctx as any).__mental) {
+            (ctx as any).__mental = M;
+        }
+
 
         (ctx as any).vars = new Proxy({} as Record<string, unknown>, {
-            get: (_t, prop: string) => varCache.get(prop),
+            get: (_t, prop: string) => {
+                // Handle Map-like method access
+                if (prop === 'get') return (key: string) => varCache.get(key);
+                if (prop === 'set') return (key: string, value: unknown) => {
+                    varCache.set(key, value);
+                    (async () => {
+                        try {
+                            const snapNow = await this.sessionManager!.load(tenantId, sessionId);
+                            const base = (snapNow?.snapshot as Record<string, unknown>) || {};
+                            // Store vars in M.memory.vars to align with APLRET framework expectations
+                            let M = (base as any).M;
+                            if (!M) {
+                                // Initialize M if it doesn't exist
+                                const { initialM } = await import('../../loop/init.js');
+                                M = initialM(ctx);
+                            }
+                            M.memory = M.memory || {};
+                            M.memory.vars = M.memory.vars || {};
+                            (M.memory.vars as any)[key] = value;
+                            const next = { ...base, M } as Record<string, unknown>;
+                            // Option 1B: Retry-based coordination for vars saves
+                            let varRetryCount = 0;
+                            const varMaxRetries = 3;
+                            let varSuccess = false;
+
+                            while (!varSuccess && varRetryCount < varMaxRetries) {
+                                try {
+                                    const latestVarSnap = await this.sessionManager!.load(tenantId, sessionId);
+                                    const varExpected = latestVarSnap?.wmVersion ?? BigInt(0);
+                                    await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: varExpected, snapshot: next });
+                                    varSuccess = true;
+                                    // Update coordinated version to reflect the new save
+                                    (ctx as any).__coordinatedVersion = varExpected + BigInt(1);
+                                } catch (varError) {
+                                    if ((varError as Error).message === 'CAS_MISMATCH' && varRetryCount < varMaxRetries - 1) {
+                                        varRetryCount++;
+                                        await new Promise(resolve => setTimeout(resolve, 5));
+                                    } else {
+                                        throw varError;
+                                    }
+                                }
+                            }
+
+                            if (varSuccess) {
+                                await this.sessionManager!.appendEvent(tenantId, sessionId, 'wm.vars_updated', { key: String(key) });
+                            }
+                        } catch { /* best-effort */ }
+                    })();
+                    return true;
+                };
+                if (prop === 'has') return (key: string) => varCache.has(key);
+                if (prop === 'delete') return (key: string) => varCache.delete(key);
+                if (prop === 'keys') return () => varCache.keys();
+                if (prop === 'values') return () => varCache.values();
+                if (prop === 'entries') return () => varCache.entries();
+                if (prop === 'clear') return () => varCache.clear();
+                if (prop === 'size') return varCache.size;
+                if (prop === 'forEach') return (callback: (value: unknown, key: string) => void) => varCache.forEach(callback);
+                // Handle normal property access
+                return varCache.get(prop);
+            },
             set: (_t, prop: string, value: unknown) => {
                 varCache.set(prop, value);
                 (async () => {
@@ -200,6 +722,15 @@ export class TaskEngine {
             getOwnPropertyDescriptor: (_t, prop: string) =>
                 varCache.has(prop as string) ? { enumerable: true, configurable: true } : undefined
         });
+
+        await this.attachOrchestrationAPIs(ctx, {
+            tenantId,
+            sessionId,
+            agentId,
+            flushMentalState: async () => {
+                await this.flushContextSnapshot(tenantId, sessionId, agentId, ctx);
+            }
+        });
     }
 
     // Flush current MentalState (preferred) or fallback vars/llm state into snapshot
@@ -214,10 +745,21 @@ export class TaskEngine {
         // Prepare MentalState if available or compose one minimally
         const baseSnap = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
         let M: any = (baseSnap as any).M;
-        if (!M) { try { M = (ctx as any).__mental; } catch { /* noop */ } }
+        const mentalFromCtx = (() => { try { return (ctx as any).__mental; } catch { return undefined; } })();
+        if (!M && mentalFromCtx) { M = mentalFromCtx; }
         if (!M) { try { const { initialM } = await import('../../loop/init.js'); M = initialM(ctx); } catch { M = { memory: { vars: {}, sensory: {} }, goalState: { hierarchy: { nodes: {}, roots: [] } } } }; }
-        // Merge vars
-        try { M.memory = M.memory || {}; M.memory = { ...(M.memory || {}), vars: plainVars }; } catch { /* noop */ }
+        // Merge vars without dropping Learning's contributions
+        try {
+            const snapshotVars = (((M.memory as any)?.vars) || {}) as Record<string, unknown>;
+            const mentalVars = (((mentalFromCtx as any)?.memory as any)?.vars) || {} as Record<string, unknown>;
+            console.log('[flushContextSnapshot] merging vars', {
+                snapshotKeys: Object.keys(snapshotVars),
+                mentalKeys: Object.keys(mentalVars),
+                plainKeys: Object.keys(plainVars)
+            });
+            const mergedVars = { ...mentalVars, ...snapshotVars, ...plainVars } as Record<string, unknown>;
+            M.memory = { ...(M.memory || {}), vars: mergedVars };
+        } catch { /* noop */ }
         // Attach LLM state into sensory
         try {
             const llmAny = (ctx as any).llm as any;
@@ -348,10 +890,19 @@ export class TaskEngine {
 
         const assignVarsIntoMental = () => {
             const varsObject = Object.fromEntries(varCache) as Record<string, unknown>;
-            iterMentalTargets(({ target, memory, existing }) => {
-                const merged = { ...existing, ...varsObject } as Record<string, unknown>;
-                (memory as Record<string, unknown>).vars = merged;
-                target.vars = merged;
+            const mergedVars: Record<string, unknown> = {};
+            iterMentalTargets(({ existing }) => {
+                Object.assign(mergedVars, existing);
+            });
+            Object.assign(mergedVars, varsObject);
+            iterMentalTargets(({ target, memory }) => {
+                try {
+                    console.log('[assignVarsIntoMental] applying', {
+                        mergedKeys: Object.keys(mergedVars)
+                    });
+                } catch { /* noop */ }
+                (memory as Record<string, unknown>).vars = { ...mergedVars };
+                target.vars = { ...mergedVars };
             });
         };
 
@@ -589,437 +1140,12 @@ export class TaskEngine {
         // Ensure alias is initialized before loop modules read mentalState.vars
         try { assignVarsIntoMental(); } catch { /* noop */ }
 
-        // Wire Goals API to operate on __mental.goalState
-        try {
-            const goals = await import('../../loop/goals.js');
-            (ctx as any).addGoal = (node: any) => goals.addGoal(ctx as any, node);
-            (ctx as any).updateGoal = (id: any, patch: any) => goals.updateGoal(ctx as any, id, patch);
-            (ctx as any).moveGoal = (id: any, parentId?: any, order?: any) => goals.moveGoal(ctx as any, id, parentId, order);
-            (ctx as any).completeGoal = (id: any, opts?: any) => goals.completeGoal(ctx as any, id, opts);
-            (ctx as any).failGoal = (id: any) => goals.failGoal(ctx as any, id);
-            (ctx as any).listGoals = (filter?: any) => goals.listGoals(ctx as any, filter);
-            // Minimal goals namespace with read helper
-            (ctx as any).goals = {
-                add: (g: any) => goals.addGoal(ctx as any, g),
-                update: (id: string, patch: any) => goals.updateGoal(ctx as any, id, patch),
-                remove: (id: string) => goals.failGoal(ctx as any, id),
-                clear: async (predicate?: (g: any) => boolean) => {
-                    const all = await goals.listGoals(ctx as any, {});
-                    for (const g of all) { if (!predicate || predicate(g as any)) await goals.failGoal(ctx as any, (g as any).id); }
-                },
-                read: (filter?: any) => goals.listGoals(ctx as any, filter)
-            };
-        } catch { /* noop */ }
-
-        // Semantic facade wired to memory.semantic, supporting tags/entities (fail fast on errors)
-        if (!(ctx as any).semantic) (ctx as any).semantic = {
-            add: async (item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
-                await (ctx.memory as any)?.semantic?.set?.(item.id, item.value, { tags: item.tags, entities: item.entities });
-            },
-            read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number }) => {
-                const res = await (ctx.memory as any)?.semantic?.getMany?.('*');
-                const mapped = Array.isArray(res)
-                    ? res.map((r: any) => ({ id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities }))
-                    : [];
-                if (!filter) return mapped;
-                const byIds = filter.id
-                    ? mapped.filter(m => Array.isArray(filter.id) ? filter.id.includes(m.id) : m.id === filter.id)
-                    : mapped;
-                const tagSet = filter.tags || (filter.tag ? [filter.tag] : undefined);
-                const byTags = tagSet && tagSet.length
-                    ? byIds.filter(m => {
-                        const mt = new Set(m.tags || []);
-                        return tagSet!.every(t => mt.has(t));
-                    })
-                    : byIds;
-                return typeof filter.limit === 'number' ? byTags.slice(0, Math.max(0, filter.limit)) : byTags;
-            },
-            remove: async (idOrPredicate: string | ((item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
-                if (typeof idOrPredicate === 'string') {
-                    await (ctx.memory as any)?.semantic?.delete?.(idOrPredicate);
-                    return;
-                }
-                const res = await (ctx.memory as any)?.semantic?.getMany?.('*');
-                if (!Array.isArray(res)) return;
-                for (const r of res) {
-                    const item = { id: r?.key ?? r?.id, value: r?.value, tags: r?.tags, entities: r?.entities } as any;
-                    if ((idOrPredicate as any)(item)) {
-                        await (ctx.memory as any)?.semantic?.delete?.(item.id);
-                    }
-                }
-            }
-        };
-
-        // Provide requestInput implementation (non-blocking; persists pending handler and emits input_required)
-        // Respect A2A override when parent correlation is present
-        if ((ctx as any).__a2aParent || (ctx as any).__preserveRequestInput) {
-            // Keep existing override set by A2A; do not replace
-            try { (ctx as any).logger?.debug?.('TaskEngine.startTask: preserving A2A requestInput override'); } catch { }
-        } else {
-            (ctx as any).requestInput = async (promptOrParts: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[], opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }) => {
-                if (!this.sessionManager) throw new Error('Session manager not configured');
-                // Limits: cap max outstanding prompts
-                const maxPrompts = 100; // TODO: configurable
-                const snapL = await this.sessionManager.load(tenantId, sessionId);
-                const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
-                const pendingNow = getPendingInputs(baseL);
-                if (Object.keys(pendingNow).length >= maxPrompts) {
-                    throw new Error('LIMIT_MAX_PROMPTS_EXCEEDED');
-                }
-                const snap = await this.sessionManager.load(tenantId, sessionId);
-                const base = (snap?.snapshot as Record<string, unknown>) || {};
-                const token = opts?.__existingToken || uuidv4();
-                const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
-                const pending = { ...getPendingInputs(base) };
-
-                // Normalize promptOrParts into parts[] and derive a fallback prompt string
-                const normalizeParts = (p: string | string[] | import('../../shared/types/index.js').MessagePart | import('../../shared/types/index.js').MessagePart[]): import('../../shared/types/index.js').MessagePart[] => {
-                    if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' } as any];
-                    if (Array.isArray(p) && p.length > 0 && typeof p[0] === 'string') return (p as string[]).map(t => ({ type: 'text', text: t, format: 'markdown' } as any));
-                    if (Array.isArray(p)) return (p as any[]).map(part => (part?.type === 'text' && !part?.format ? { ...part, format: 'markdown' } : part));
-                    const one = p as any;
-                    return [one?.type === 'text' && !one?.format ? { ...one, format: 'markdown' } : one];
-                };
-                const parts = normalizeParts(promptOrParts);
-                const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
-
-                // Emit prompt parts as a reply ASAP so chat UIs render before any IO
-                try { await ctx.reply(parts as any); } catch { /* best-effort */ }
-
-                // Only add to pending if it's a new token request
-                if (!opts?.__existingToken) {
-                    pending[token] = {
-                        schema: opts?.schema,
-                        expiresAt,
-                        handlerName: opts?.onProvided,
-                        expiredHandlerName: opts?.onExpired
-                    } as any;
-                }
-                const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
-                    try { console.log('[TaskEngine] requestInput: before flush vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
-                    try { await flushMentalState(); } catch { /* best-effort */ }
-                    try { console.log('[TaskEngine] requestInput: after flush vars', (M as any)?.memory?.vars?.jsonObject); } catch { }
-                    // Reload latest snapshot after flush to avoid overwriting newer M
-                    const latest = await this.sessionManager!.load(tenantId, sessionId);
-                    const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
-                    const nextSnapshot = setPendingInputs(latestBase, pending);
-                    const expectedNext = latest?.wmVersion ?? expectedVer;
-                    await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedNext, snapshot: nextSnapshot });
-                    await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
-                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
-                };
-                try {
-                    const expected = snap?.wmVersion ?? BigInt(0);
-                    await writeOnce(base, expected);
-                } catch (e) {
-                    if ((e as Error).message === 'CAS_MISMATCH') {
-                        try {
-                            const snap2 = await this.sessionManager.load(tenantId, sessionId);
-                            const base2 = (snap2?.snapshot as Record<string, unknown>) || {};
-                            // Merge into latest view
-                            const pending2 = { ...getPendingInputs(base2), [token]: { schema: opts?.schema, expiresAt } } as any;
-                            const expected2 = snap2?.wmVersion ?? BigInt(0);
-                            const next2 = setPendingInputs(base2, pending2);
-                            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
-                            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
-                            await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
-                        } catch { /* swallow second failure */ }
-                    } else {
-                        throw e;
-                    }
-                }
-                try { (ctx as any).logger?.info?.('requestInput: input_required emitted', { token, prompt, expiresAt }); } catch { }
-                // Emit a streaming status so local runner shows the prompt (with parts)
-                try {
-                    ctx.progress({
-                        state: 'input-required',
-                        message: {
-                            role: 'agent',
-                            parts
-                        },
-                        timestamp: new Date().toISOString(),
-                        metadata: { token }
-                    } as any);
-                } catch { /* noop */ }
-                // Automatic token management (default: true)
-                if (opts?.setToken !== false) {
-                    ctx.vars.set('token', token);
-                }
-
-                // Automatic stage management
-                if (opts?.setStage) {
-                    try {
-                        // Import createStageFacade dynamically to avoid circular deps
-                        const { createStageFacade } = await import('../../loop/stageHelpers.js');
-                        const Stage = createStageFacade();
-                        Stage.setStage(ctx, opts.setStage);
-                    } catch (error) {
-                        (ctx as any).logger?.warn?.('Failed to auto-set stage', { stage: opts.setStage, error });
-                    }
-                }
-
-                // Mark that we've persisted WM this turn to avoid duplicate final snapshot
-                (ctx as any).__wmSavedThisTurn = true;
-                const handle = new InputHandle(this.sessionManager, tenantId, sessionId, token);
-                return handle;
-            };
-        }
-
-        // Provide requestTool implementation for async tool callbacks (non-blocking)
-        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => {
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const token = uuidv4();
-            const toolsNow = getPendingTools(base) as any;
-            toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
-
-            // Store setToken and setStage options in the tool registry for automatic handling
-            if (opts?.setToken || opts?.setStage) {
-                toolsNow[token].options = {
-                    setToken: opts.setToken,
-                    setStage: opts.setStage
-                };
-            }
-
-            try { await flushMentalState(); } catch { /* best-effort */ }
-            const expected = snap?.wmVersion ?? BigInt(0);
-            const next = setPendingTools(base, toolsNow);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
-            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
-
-            // Handle automatic token and stage management immediately upon tool invocation
-            if (opts?.setToken || opts?.setStage) {
-                try {
-                    const currentSnap = await this.sessionManager.load(tenantId, sessionId);
-                    if (currentSnap) {
-                        const currentBase = (currentSnap.snapshot as Record<string, unknown>) || {};
-                        const currentM = currentBase.M as any;
-
-                        // Automatic token storage
-                        if (opts.setToken && token && currentM?.vars) {
-                            const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-                                const pathParts = path.split('.');
-                                let current = obj;
-                                for (let i = 0; i < pathParts.length - 1; i++) {
-                                    const part = pathParts[i];
-                                    if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
-                                        current[part] = {};
-                                    }
-                                    current = current[part] as Record<string, unknown>;
-                                }
-                                current[pathParts[pathParts.length - 1]] = value;
-                                return obj;
-                            };
-
-                            const updatedVars = setNestedValue(
-                                { ...(currentM.vars as Record<string, unknown> || {}) },
-                                'toolToken',
-                                token
-                            );
-                            currentM.vars = updatedVars;
-                            (currentM.memory as any) = { ...((currentM.memory as any) || {}), vars: updatedVars };
-                        }
-
-                        // Automatic stage transition
-                        if (opts.setStage && currentM?.control) {
-                            const currentStage = currentM.control.stage;
-                            const targetStage = opts.setStage;
-
-                            // Basic validation that this is a valid stage transition
-                            if (typeof targetStage === 'string' && targetStage.length > 0) {
-                                currentM.control.stage = targetStage;
-
-                                try { console.log(`[TaskEngine] Auto stage transition: ${currentStage} -> ${targetStage} (tool invoked)`); } catch { }
-                            }
-                        }
-
-                        // Save the updated state
-                        const expectedWmVersion = currentSnap?.wmVersion ?? BigInt(0);
-                        await this.sessionManager.saveSnapshot({
-                            tenantId,
-                            sessionId,
-                            agentId: (currentSnap as any)?.agentId || 'default',
-                            expectedWmVersion,
-                            snapshot: currentBase
-                        });
-                    }
-                } catch (error) {
-                    try { console.warn(`[TaskEngine] Failed to apply tool auto token/stage options:`, error); } catch { }
-                }
-            }
-
-            // Emit local progress hint
-            try {
-                ctx.progress({ state: 'working', timestamp: new Date().toISOString(), metadata: { token, toolName, awaiting: 'tool' } } as any);
-            } catch { /* noop */ }
-            (ctx as any).__wmSavedThisTurn = true;
-            return { token } as any;
-        };
-
-        // Register an external event to be delivered to a durable handler (turn-boundary interrupt)
-        (ctx as any).registerExternalEvent = async (eventType: string, data: unknown, opts?: { onOccurred: string }) => {
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const token = uuidv4();
-            const eventsNow = getPendingExternalEvents(base) as any;
-            eventsNow[token] = { type: eventType, data, handlers: { occurred: opts?.onOccurred } };
-            try { await flushMentalState(); } catch { /* best-effort */ }
-            const expected = snap?.wmVersion ?? BigInt(0);
-            const next = setPendingExternalEvents(base, eventsNow);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
-            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.external_event_registered', { token, eventType });
-            (ctx as any).__wmSavedThisTurn = true;
-            return { token } as any;
-        };
-
-        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: {
-            awaitCompletion?: boolean;
-            streaming?: boolean;
-            onCompleted?: string;
-            onFailed?: string;
-            onInputRequired?: string;
-            setToken?: boolean;
-            tokenPath?: string;
-            autoClearToken?: boolean;
-            setStage?: string;
-        }) => {
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            // Limits: cap max children
-            const maxChildren = 50; // TODO: make configurable
-            const snapLimits = await this.sessionManager.load(tenantId, sessionId);
-            const baseLimits = (snapLimits?.snapshot as Record<string, unknown>) || {};
-            const tasksNow = getPendingTasks(baseLimits);
-            if (Object.keys(tasksNow).length >= maxChildren) {
-                throw new Error('LIMIT_MAX_CHILDREN_EXCEEDED');
-            }
-            // Persist pending child mapping and return a handle; do not dispatch yet
-            const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, agent, childInput);
-
-            const tokenPath = options?.tokenPath ?? 'child.token';
-            const shouldSetToken = options?.setToken !== false;
-            const autoClearToken = options?.autoClearToken !== false;
-
-            if (shouldSetToken) {
-                try { ctx.vars.set(tokenPath, token); } catch { /* noop */ }
-            }
-            if (options?.setStage) {
-                try { ctx.vars.set('stage', options.setStage); } catch { /* noop */ }
-            }
-
-            const snapOptions = await this.sessionManager.load(tenantId, sessionId);
-            const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
-            const tasks = getPendingTasks(baseOptions);
-            if (tasks[token]) {
-                tasks[token].options = {
-                    setToken: shouldSetToken,
-                    tokenPath,
-                    autoClearToken,
-                    setStage: options?.setStage
-                };
-                const next = setPendingTasks(baseOptions, tasks);
-                const expected = snapOptions?.wmVersion ?? BigInt(0);
-                await this.sessionManager.saveSnapshot({
-                    tenantId,
-                    sessionId,
-                    agentId: (snapOptions as any)?.agentId || 'default',
-                    expectedWmVersion: expected,
-                    snapshot: next
-                });
-            }
-
-            // If handler names provided, register them atomically before dispatch
-            if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
-            if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
-            if (options?.onFailed) { try { await (handle as any).onFailed(options.onFailed); } catch { } }
-            const minimalCtx = ctx as any; // current task context as source
-            // Inject dispatcher to be executed on handle.run()
-            const dispatch = async (runOpts?: { awaitCompletion?: boolean; streaming?: boolean }) => {
-                (ctx as any).logger?.info?.('Child dispatch', { parentTaskId: sessionId, childAgent: agent, token });
-                try { await flushMentalState(); } catch { /* best-effort */ }
-                const a2aOptions = { tenantId, streaming: (runOpts?.streaming ?? options?.streaming) === true } as any;
-                try { console.log(`[TaskEngine] sendTaskToAgent dispatch: tenantId=${tenantId} sessionId=${sessionId} token=${token} agent=${agent}`); } catch { }
-                try {
-                    const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
-                        ...(options || {}),
-                        ...a2aOptions,
-                        parentTenantId: tenantId,
-                        parentTaskId: sessionId,
-                        parentChildToken: token
-                    } as any);
-                    // If child requested input, do not synthesize completion
-                    if (result && typeof result === 'object' && (result as any).status === 'input_required') {
-                        (ctx as any).logger?.info?.('Child input_required', { parentTaskId: sessionId, childAgent: agent, token });
-                        return;
-                    }
-                    // Determine await behavior: default to true when no completed handler is registered
-                    const snapNow = await this.sessionManager!.load(tenantId, sessionId);
-                    const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
-                    const tasksNow2 = getPendingTasks(baseNow) as any;
-                    const entry = tasksNow2[token];
-                    const hasCompleted = !!entry?.handlers?.completed;
-                    const awaitCompletion = runOpts?.awaitCompletion ?? options?.awaitCompletion ?? (!hasCompleted);
-                    if (awaitCompletion) {
-                        await this.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
-                        return result;
-                    }
-                    return;
-                } catch (e) {
-                    (ctx as any).logger?.error?.('Child dispatch failed', e, { parentTaskId: sessionId, childAgent: agent, token });
-                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
-                        taskId: sessionId,
-                        childAgent: agent,
-                        error: e instanceof Error ? e.message : String(e)
-                    });
-                    return;
-                }
-            };
-            // Auto-dispatch now; if no onCompleted registered, return result synchronously
-            const result = await dispatch({});
-            return result ?? handle;
-        };
-
-        // Group orchestration API: allTasks
-        (ctx as any).allTasks = async (children: Array<{ agent: string; input: unknown }>, opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }) => {
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            // Limits: cap max group size
-            const maxGroup = 50; // TODO: make configurable
-            if (children.length > maxGroup) throw new Error('LIMIT_MAX_GROUP_CHILDREN_EXCEEDED');
-            // create N child handles and dispatch
-            const childTokens: string[] = [];
-            for (const child of children) {
-                const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, child.agent);
-                childTokens.push(token);
-                // fire-and-forget child dispatch
-                globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
-                    tenantId,
-                    parentTenantId: tenantId,
-                    parentTaskId: sessionId,
-                    parentChildToken: token
-                } as any).catch(async (e) => {
-                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
-                        taskId: sessionId,
-                        childAgent: child.agent,
-                        error: e instanceof Error ? e.message : String(e)
-                    });
-                });
-            }
-            const { handle: groupHandle, groupToken } = await createGroupHandle(this.sessionManager, tenantId, sessionId, childTokens);
-            // store timeout/cancel policies
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const groups = getPendingGroups(base);
-            const g = groups[groupToken] || { childTokens: childTokens, results: {}, handlers: {} };
-            if (opts?.withTimeoutMs) g.timeoutMs = opts.withTimeoutMs;
-            if (opts?.cancelRemaining !== undefined) g.cancelRemaining = opts.cancelRemaining;
-            if (opts?.onAllCompleted) { g.handlers = g.handlers || {}; (g.handlers as any).allCompleted = opts.onAllCompleted; }
-            if (opts?.onAnyFailed) { g.handlers = g.handlers || {}; (g.handlers as any).anyFailed = opts.onAnyFailed; }
-            groups[groupToken] = g;
-            const next = setPendingGroups(base, groups);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap?.wmVersion ?? BigInt(0), snapshot: next });
-            return groupHandle as GroupHandle;
-        };
+        await this.attachOrchestrationAPIs(ctx, {
+            tenantId,
+            sessionId,
+            agentId: (ctx as any).agentId || 'default',
+            flushMentalState
+        });
 
         // Append start event and publish status via outbox; reducer entrypoint
         const traceparent = createTraceparent();
@@ -1636,10 +1762,19 @@ export class TaskEngine {
 
                 const assignVarsIntoMental = () => {
                     const varsObject = Object.fromEntries(varCache) as Record<string, unknown>;
-                    iterMentalTargets(({ target, memory, existing }) => {
-                        const merged = { ...existing, ...varsObject } as Record<string, unknown>;
-                        (memory as Record<string, unknown>).vars = merged;
-                        target.vars = merged;
+                    const mergedVars: Record<string, unknown> = {};
+                    iterMentalTargets(({ existing }) => {
+                        Object.assign(mergedVars, existing);
+                    });
+                    Object.assign(mergedVars, varsObject);
+                    iterMentalTargets(({ target, memory }) => {
+                        try {
+                            console.log('[assignVarsIntoMental|resume] applying', {
+                                mergedKeys: Object.keys(mergedVars)
+                            });
+                        } catch { /* noop */ }
+                        (memory as Record<string, unknown>).vars = { ...mergedVars };
+                        target.vars = { ...mergedVars };
                     });
                 };
 
@@ -2076,234 +2211,253 @@ export class TaskEngine {
      */
     async handleChildCompleted(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }): Promise<void> {
         const { tenantId, parentTaskId, childToken, childTaskId, result, childAgentId } = params;
-        const snap = await this.sessionManager?.load(tenantId, parentTaskId);
-        if (!snap) return;
-        const base = (snap.snapshot as Record<string, unknown>) || {};
-        const tasks = getPendingTasks(base);
-        // Find entry
-        const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
-        if (!token) return;
-        const entry = tasks[token] as any;
-        // If this child was awaited synchronously by the parent, skip auto-resume (already handled in-turn)
-        if (entry && entry.handlers && entry.handlers.completed === undefined && entry.handlers.failed === undefined && entry.handlers.inputRequired === undefined && (result as any)?.status?.state !== 'input-required') {
-            // Default await path: no handlers set and result is terminal -> no extra resume needed
-            // Fall through to cleanup mapping only
-        }
-        // Remove mapping and auto-resume a loop turn with the child result
-        delete tasks[token];
-        const next = setPendingTasks(base, tasks) as Record<string, unknown>;
-        const childObservation: Observation = {
-            source: 'child',
-            kind: 'child.completed',
-            payload: { token, childTaskId, result, agentId: childAgentId },
-            provenance: {
-                ts: Date.now(),
-                turn: Number((base as any)?.meta?.turn ?? 0) + 1,
-                id: token,
-                correlationId: token
-            }
-        };
-        console.log('[TaskEngine][ChildCompleted] appending event', {
-            parentTaskId,
-            token,
-            resultStatus: (result as any)?.status,
+        const inflightKey = `${parentTaskId}:${childToken ?? childTaskId ?? 'n/a'}`;
+        const callCount = (this.childCompletionInFlight.get(inflightKey) ?? 0) + 1;
+        this.childCompletionInFlight.set(inflightKey, callCount);
+        console.log('[TaskEngine.handleChildCompleted] ENTRY:', {
+            parentTaskId: parentTaskId.substring(0, 25),
+            childToken: childToken?.substring(0, 15),
+            callCount,
+            inflightKey
         });
-        (next as any).inbox = addObservationToInbox((next as any).inbox, childObservation);
-        // Preserve the parent agent id on the session to ensure resumed turns use the parent's loop modules
-        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-        let snapshotSaved = false;
+        if (callCount > 1) {
+            console.warn('[TaskEngine.handleChildCompleted] DUPLICATE invocation detected for inflightKey', inflightKey);
+        }
 
-        // Save snapshot with inbox observation - handle LIMIT_WM_SNAPSHOT_TOO_LARGE gracefully
+        const detach = () => {
+            this.childCompletionInFlight.delete(inflightKey);
+        };
+
+        let ctx: TaskContext | undefined;
         try {
-            await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-            snapshotSaved = true;
-        } catch (snapshotError) {
-            if ((snapshotError as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                // Attempt to prune the MentalState and retry
-                try {
-                    const { pruneMentalState } = await import('../../loop/hygiene.js');
-                    pruneMentalState((next as any).M);
-                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-                    snapshotSaved = true;
-                } catch (retryError) {
-                    // If still too large after pruning, log warning but continue to resume logic
-                    // The parent will still resume with the child observation in memory, even if not persisted
-                    console.warn('[TaskEngine] Failed to save snapshot with child completion observation even after pruning', {
-                        error: (retryError as Error).message,
+            const snap = await this.sessionManager?.load(tenantId, parentTaskId);
+            if (!snap) return;
+            const base = (snap.snapshot as Record<string, unknown>) || {};
+            const tasks = getPendingTasks(base);
+            const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
+            if (!token) return;
+            const entry = tasks[token] as any;
+            // If this child was awaited synchronously by the parent, skip auto-resume (already handled in-turn)
+            if (entry && entry.handlers && entry.handlers.completed === undefined && entry.handlers.failed === undefined && entry.handlers.inputRequired === undefined && (result as any)?.status?.state !== 'input-required') {
+                // Default await path: no handlers set and result is terminal -> no extra resume needed
+                // Fall through to cleanup mapping only
+            }
+            delete tasks[token];
+            const next = setPendingTasks(base, tasks) as Record<string, unknown>;
+            const childObservation: Observation = {
+                source: 'child',
+                kind: 'child.completed',
+                payload: { token, childTaskId, result, agentId: childAgentId },
+                provenance: {
+                    ts: Date.now(),
+                    turn: Number((base as any)?.meta?.turn ?? 0) + 1,
+                    id: token,
+                    correlationId: token
+                }
+            };
+            console.log('[TaskEngine][ChildCompleted] appending event', {
+                parentTaskId,
+                token,
+                resultStatus: (result as any)?.status,
+            });
+            (next as any).inbox = addObservationToInbox((next as any).inbox, childObservation);
+            const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
+            let snapshotSaved = false;
+
+            try {
+                await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+                snapshotSaved = true;
+            } catch (snapshotError) {
+                if ((snapshotError as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                    try {
+                        const { pruneMentalState } = await import('../../loop/hygiene.js');
+                        pruneMentalState((next as any).M);
+                        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+                        snapshotSaved = true;
+                    } catch (retryError) {
+                        console.warn('[TaskEngine] Failed to save snapshot with child completion observation even after pruning', {
+                            error: (retryError as Error).message,
+                            parentTaskId,
+                            childToken: token
+                        });
+                    }
+                } else {
+                    console.warn('[TaskEngine] Failed to save snapshot during child completion', {
+                        error: (snapshotError as Error).message,
                         parentTaskId,
                         childToken: token
                     });
                 }
-            } else {
-                // For other errors, log and continue to ensure resume happens
-                console.warn('[TaskEngine] Failed to save snapshot during child completion', {
-                    error: (snapshotError as Error).message,
+            }
+
+            try {
+                await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', { token, childTaskId, result });
+            } catch (eventError) {
+                console.warn('[TaskEngine] Failed to append child completion event, likely due to closed connection', {
+                    error: (eventError as Error).message,
                     parentTaskId,
                     childToken: token
                 });
             }
-        }
 
-        // Append event - handle database connection errors gracefully
-        try {
-            await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', { token, childTaskId, result });
-        } catch (eventError) {
-            // If database connection is closed (common in deferred notifications), log but continue
-            console.warn('[TaskEngine] Failed to append child completion event, likely due to closed connection', {
-                error: (eventError as Error).message,
-                parentTaskId,
-                childToken: token
-            });
-        }
+            try {
+                const agentName = (snap as any)?.agentId;
+                const plugin = agentName ? PluginManager.findAgent(agentName) : null;
+                ctx = this.createContext({ id: parentTaskId, input: {} });
+                (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
+                try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
+                // OPTION 1: Version Coordination in Parent Resume
+                // After ALL saves in handleChildCompleted, load the final snapshot
+                const finalSnap = await this.sessionManager!.load(tenantId, parentTaskId);
+                let baseNow = (finalSnap?.snapshot as Record<string, unknown>) || {};
+                if (!snapshotSaved) {
+                    baseNow = {
+                        ...baseNow,
+                        pending: (next as any).pending,
+                        inbox: (next as any).inbox
+                    } as Record<string, unknown>;
+                }
 
-        // Resume parent turn - wrap in comprehensive error handler
-        try {
-            const agentName = (snap as any)?.agentId;
-            const plugin = agentName ? PluginManager.findAgent(agentName) : null;
-            const ctx = this.createContext({ id: parentTaskId, input: {} });
-            (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
-            // Ensure replies in this resumed parent turn are streamed to console
-            try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
-            const snapNow = await this.sessionManager!.load(tenantId, parentTaskId);
-            let baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
-            if (!snapshotSaved) {
-                baseNow = {
-                    ...baseNow,
-                    pending: (next as any).pending,
-                    inbox: (next as any).inbox
-                } as Record<string, unknown>;
+                const prevMetaCheck = (baseNow as any).meta || {};
+                if (prevMetaCheck.lastChildToken === token) {
+                    return;
+                }
+
+                let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+                await this.attachWorkingMemory(ctx, tenantId, parentTaskId, agentName || 'default');
+
+                // CRITICAL: Store the FINAL version in context for coordination
+                // This ensures all subsequent operations use the correct expected version
+                (ctx as any).__coordinatedVersion = finalSnap?.wmVersion ?? BigInt(0);
+
+                await this.attachAndRestoreLLM(ctx, agentName, M);
+
+                // FINAL VERSION COORDINATION: Load the absolute latest version right before execution
+                const absoluteLatestSnap = await this.sessionManager!.load(tenantId, parentTaskId);
+                (ctx as any).__coordinatedVersion = absoluteLatestSnap?.wmVersion ?? BigInt(0);
+
+                const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
+                const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn;
+                let envInbox = normalizeInbox((baseNow as any)?.inbox);
+                console.log('[TaskEngine][ChildResume] before helper', {
+                    sessionId: parentTaskId,
+                    currentLength: envInbox.current.length,
+                    allLength: envInbox.all.length,
+                    currentKinds: envInbox.current.map(o => o.kind),
+                    allKinds: envInbox.all.map(o => o.kind),
+                });
+
+                const observationPredicate = (obs: Observation) =>
+                    obs?.kind === 'child.completed' &&
+                    typeof obs === 'object' &&
+                    obs !== null &&
+                    (obs as any)?.payload &&
+                    (obs as any).payload.token === token;
+                envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
+
+                console.log('[TaskEngine][ChildResume] after helper', {
+                    sessionId: parentTaskId,
+                    currentLength: envInbox.current.length,
+                    allLength: envInbox.all.length,
+                    currentKinds: envInbox.current.map(o => o.kind),
+                    allKinds: envInbox.all.map(o => o.kind),
+                });
+                const env: EnvironmentState = {
+                    time: new Date().toISOString(),
+                    input: { kind: 'child', token, childTaskId, result, agentId: childAgentId },
+                    sessionId: parentTaskId,
+                    turn: startTurnTotal2 + 1,
+                    pending: {
+                        inputs: ((baseNow as any)?.pending?.inputs) || {},
+                        children: ((baseNow as any)?.pending?.children) || {},
+                        tools: ((baseNow as any)?.pending?.tools) || {},
+                        groups: ((baseNow as any)?.pending?.groups) || {}
+                    },
+                    inbox: envInbox,
+                    lastExec: (baseNow as any)?.meta?.lastExec || undefined,
+                    externalEvents: undefined
+                } as EnvironmentState;
+
+                const overrides = (plugin as any)?.loop?.modules || {};
+
+                let loopOpts: { maxTurns?: number; latencyMs?: number } = { maxTurns: 1 };
+                try {
+                    const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
+                    if (hitl) { try { (M as any).hitl = hitl; } catch { } }
+                    if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns ?? 1, latencyMs: (b as any).latencyMs };
+                    try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
+                } catch { }
+                const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
+                try {
+                    const snapAfter = await this.sessionManager!.load(tenantId, parentTaskId);
+                    const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
+                    const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
+                    const prevMeta = (baseSnap as any).meta || {};
+                    const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token };
+
+                    // ✅ FIX: Merge ctx.vars into mNext before saving (same as startTask does)
+                    const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
+
+                    const nextSnap = { ...baseSnap, M: mNextWithVars, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
+                    await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
+                } catch (e) { /* noop */ }
+                const channel = taskChannel(parentTaskId);
+                const status: TaskStatus = (() => {
+                    if (outcome.kind === 'await_input') return { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: (outcome as any).token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards } } as any;
+                    if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') return { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token: (outcome as any).token, awaitExtra: { kind: outcome.kind } } } as any;
+                    if (outcome.kind === 'fail') return { state: 'failed', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }] }, metadata: { reason: outcome.reason } } as any;
+                    if (outcome.kind === 'complete') return { state: 'completed', timestamp: new Date().toISOString(), metadata: { result: (outcome as any).result } } as any;
+                    return { state: 'working', timestamp: new Date().toISOString() } as any;
+                })();
+                try { eventBus.publish(channel, { id: parentTaskId, status, final: status.state === 'completed' || status.state === 'failed' } as any); } catch { }
+            } catch (resumeError) {
+                // If resume fails (e.g., database connection closed), log the error
+                // This is expected when deferred notifications run after parent task completes
+                console.warn('[TaskEngine] Failed to resume parent after child completion', {
+                    error: (resumeError as Error).message,
+                    parentTaskId,
+                    childToken: token,
+                    note: 'This may occur if the parent task completed before the deferred notification ran'
+                });
             }
 
-            const prevMetaCheck = (baseNow as any).meta || {};
-            if (prevMetaCheck.lastChildToken === token) {
-                return;
-            }
-
-            let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
-
-            // ✅ FIX Bug #1 Issue 1B: Attach working memory proxy before running loop
-            await this.attachWorkingMemory(ctx, tenantId, parentTaskId, agentName || 'default');
-
-            // Attach and restore LLM before running loop
-            await this.attachAndRestoreLLM(ctx, agentName, M);
-            const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
-            const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn; // assume initial run counted as 1 even if not persisted
-            let envInbox = normalizeInbox((baseNow as any)?.inbox);
-            console.log('[TaskEngine][ChildResume] before helper', {
-                sessionId: parentTaskId,
-                currentLength: envInbox.current.length,
-                allLength: envInbox.all.length,
-                currentKinds: envInbox.current.map(o => o.kind),
-                allKinds: envInbox.all.map(o => o.kind),
-            });
-
-            const observationPredicate = (obs: Observation) =>
-                obs?.kind === 'child.completed' &&
-                typeof obs === 'object' &&
-                obs !== null &&
-                (obs as any)?.payload &&
-                (obs as any).payload.token === token;
-            envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
-
-            console.log('[TaskEngine][ChildResume] after helper', {
-                sessionId: parentTaskId,
-                currentLength: envInbox.current.length,
-                allLength: envInbox.all.length,
-                currentKinds: envInbox.current.map(o => o.kind),
-                allKinds: envInbox.all.map(o => o.kind),
-            });
-            const env: EnvironmentState = {
-                time: new Date().toISOString(),
-                input: { kind: 'child', token, childTaskId, result, agentId: childAgentId },
-                sessionId: parentTaskId,
-                turn: startTurnTotal2 + 1,
-                pending: {
-                    inputs: ((baseNow as any)?.pending?.inputs) || {},
-                    children: ((baseNow as any)?.pending?.children) || {},
-                    tools: ((baseNow as any)?.pending?.tools) || {},
-                    groups: ((baseNow as any)?.pending?.groups) || {}
-                },
-                inbox: envInbox,
-                lastExec: (baseNow as any)?.meta?.lastExec || undefined,
-                externalEvents: undefined
-            } as EnvironmentState;
-
-            const overrides = (plugin as any)?.loop?.modules || {};
-
-            let loopOpts: { maxTurns?: number; latencyMs?: number } = { maxTurns: 1 };
-            try {
-                const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
-                if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-                if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns ?? 1, latencyMs: (b as any).latencyMs };
-                try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
-            } catch { }
-            const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
-            try {
-                const snapAfter = await this.sessionManager!.load(tenantId, parentTaskId);
-                const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
-                const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
-                const prevMeta = (baseSnap as any).meta || {};
-                const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token };
-
-                // ✅ FIX: Merge ctx.vars into mNext before saving (same as startTask does)
-                const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
-
-                const nextSnap = { ...baseSnap, M: mNextWithVars, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
-                await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
-            } catch (e) { /* noop */ }
-            const channel = taskChannel(parentTaskId);
-            const status: TaskStatus = (() => {
-                if (outcome.kind === 'await_input') return { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: (outcome as any).token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards } } as any;
-                if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') return { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token: (outcome as any).token, awaitExtra: { kind: outcome.kind } } } as any;
-                if (outcome.kind === 'fail') return { state: 'failed', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }] }, metadata: { reason: outcome.reason } } as any;
-                if (outcome.kind === 'complete') return { state: 'completed', timestamp: new Date().toISOString(), metadata: { result: (outcome as any).result } } as any;
-                return { state: 'working', timestamp: new Date().toISOString() } as any;
-            })();
-            try { eventBus.publish(channel, { id: parentTaskId, status, final: status.state === 'completed' || status.state === 'failed' } as any); } catch { }
-        } catch (resumeError) {
-            // If resume fails (e.g., database connection closed), log the error
-            // This is expected when deferred notifications run after parent task completes
-            console.warn('[TaskEngine] Failed to resume parent after child completion', {
-                error: (resumeError as Error).message,
-                parentTaskId,
-                childToken: token,
-                note: 'This may occur if the parent task completed before the deferred notification ran'
-            });
-        }
-
-        // Update any pending group aggregations that include this child token
-        const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);
-        if (snap2) {
-            const base2 = (snap2.snapshot as Record<string, unknown>) || {};
-            const groups = getPendingGroups(base2);
-            let mutated = false;
-            for (const [gToken, g] of Object.entries(groups)) {
-                if (g.childTokens?.includes(token)) {
-                    g.results = g.results || {} as any;
-                    (g.results as any)[token] = { ok: true, value: result };
-                    mutated = true;
-                    // Check if all children have results recorded
-                    const allDone = g.childTokens.every(ct => (g.results as any)[ct] !== undefined);
-                    if (allDone) {
-                        // invoke group allCompleted handler if set
-                        const handler = g.handlers?.allCompleted;
-                        // remove group from snapshot
-                        delete groups[gToken];
-                        const next2 = setPendingGroups(base2, groups);
-                        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
-                        await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_completed', { groupToken: gToken });
-                        if (handler && this.handlerInvoker) {
-                            await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName: handler, input: g.results });
+            // Update any pending group aggregations that include this child token
+            const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);
+            if (snap2) {
+                const base2 = (snap2.snapshot as Record<string, unknown>) || {};
+                const groups = getPendingGroups(base2);
+                let mutated = false;
+                for (const [gToken, g] of Object.entries(groups)) {
+                    if (g.childTokens?.includes(token)) {
+                        g.results = g.results || {} as any;
+                        (g.results as any)[token] = { ok: true, value: result };
+                        mutated = true;
+                        // Check if all children have results recorded
+                        const allDone = g.childTokens.every(ct => (g.results as any)[ct] !== undefined);
+                        if (allDone) {
+                            // invoke group allCompleted handler if set
+                            const handler = g.handlers?.allCompleted;
+                            // remove group from snapshot
+                            delete groups[gToken];
+                            const next2 = setPendingGroups(base2, groups);
+                            await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
+                            await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_completed', { groupToken: gToken });
+                            if (handler && this.handlerInvoker) {
+                                await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName: handler, input: g.results });
+                            }
                         }
                     }
                 }
+                if (mutated) {
+                    // If not all done, persist interim results
+                    const next2 = setPendingGroups(base2, groups);
+                    const parentAgentId2 = (snap2 as any)?.agentId || (base2 as any)?.meta?.agentId || 'default';
+                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId2, expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
+                }
             }
-            if (mutated) {
-                // If not all done, persist interim results
-                const next2 = setPendingGroups(base2, groups);
-                const parentAgentId = (snap2 as any)?.agentId || (base2 as any)?.meta?.agentId || 'default';
-                await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
-            }
+
+        } finally {
+            detach();
         }
     }
 
@@ -2723,6 +2877,45 @@ export class TaskEngine {
         } catch {
             (ctx as any).vars = ((baseSnap as any)?.vars || {}) as Record<string, unknown>;
         }
+        const ensureVarsFacade = () => {
+            const current = (ctx as any).vars as Record<string, unknown> | undefined;
+            if (current && typeof (current as any).get === 'function' && typeof (current as any).set === 'function') {
+                return;
+            }
+            const mentalMemory = ((ctx as any).__mental?.memory as Record<string, unknown>) || {};
+            const varsState = (mentalMemory.vars = { ...(mentalMemory.vars as Record<string, unknown> | undefined), ...(current || {}) });
+            (ctx as any).__mental = {
+                ...(ctx as any).__mental,
+                memory: {
+                    ...(mentalMemory),
+                    vars: varsState
+                }
+            };
+            (ctx as any).vars = {
+                get: (key: string) => varsState[key],
+                set: (key: string, value: unknown) => { varsState[key] = value; },
+                merge: (patch: Record<string, unknown>) => {
+                    for (const [k, v] of Object.entries(patch)) {
+                        varsState[k] = v;
+                    }
+                },
+                update: (key: string, fn: (prev: unknown) => unknown) => {
+                    varsState[key] = fn(varsState[key]);
+                },
+                delete: (key: string) => { delete varsState[key]; },
+                keys: () => Object.keys(varsState),
+                has: (key: string) => Object.prototype.hasOwnProperty.call(varsState, key)
+            } as TaskContext['vars'];
+        };
+        ensureVarsFacade();
+        await this.attachOrchestrationAPIs(ctx, {
+            tenantId,
+            sessionId: taskId,
+            agentId: (ctx as any).agentId || snap?.agentId || 'default',
+            flushMentalState: async () => {
+                await this.flushContextSnapshot(tenantId, taskId, (ctx as any).agentId || snap?.agentId || 'default', ctx);
+            }
+        });
         // Minimal namespaces for episodic, thoughts, world
         try {
             (ctx as any).episodic = {
@@ -2885,6 +3078,3 @@ export class TaskEngine {
         return ctx;
     }
 }
-
-// Export a singleton instance
-export const taskEngine = new TaskEngine(); 

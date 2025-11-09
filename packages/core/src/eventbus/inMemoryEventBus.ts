@@ -17,6 +17,17 @@ export class InMemoryEventBus implements IEventBus {
      * Publish an event to a channel
      */
     async publish<T>(channel: string, event: T): Promise<void> {
+        try {
+            console.log('[EventBus.publish]', {
+                channel,
+                eventKind: (event as any)?.status?.state ?? (event as any)?.kind ?? (event as any)?.type ?? typeof event,
+                eventSummary: (() => {
+                    try { return JSON.stringify(event); } catch { return '[unserializable]'; }
+                })(),
+                subscriberCount: this.handlers.get(channel)?.size ?? 0,
+                caller: new Error().stack?.split('\n')[2]?.trim()
+            });
+        } catch { /* noop */ }
         const subs = this.handlers.get(channel);
         if (!subs) return;
 
@@ -30,6 +41,13 @@ export class InMemoryEventBus implements IEventBus {
      * Subscribe to events on a channel
      */
     subscribe<T>(channel: string, handler: (e: T) => void): void {
+        try {
+            console.log('[EventBus.subscribe]', {
+                channel,
+                handlerId: handler.name || '(anonymous)',
+                caller: new Error().stack?.split('\n')[2]?.trim()
+            });
+        } catch { /* noop */ }
         if (!this.handlers.has(channel)) {
             this.handlers.set(channel, new Set());
         }
@@ -40,6 +58,12 @@ export class InMemoryEventBus implements IEventBus {
      * Unsubscribe from events on a channel
      */
     unsubscribe(channel: string, handler: Function): void {
+        try {
+            console.log('[EventBus.unsubscribe]', {
+                channel,
+                handlerId: handler.name || '(anonymous)'
+            });
+        } catch { /* noop */ }
         this.handlers.get(channel)?.delete(handler);
     }
 }

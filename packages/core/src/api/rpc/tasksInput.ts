@@ -1,6 +1,7 @@
 // src/api/rpc/tasksInput.ts
 import type { Request, Response } from 'express';
-import { taskEngine } from '../../core/orchestration/taskEngine.js';
+import { EngineLocator } from '../../core/orchestration/EngineLocator.js';
+import type { TaskEngine } from '../../core/orchestration/taskEngine.js';
 import { getIdempotent, setIdempotent } from './IdempotencyStore.js';
 
 /**
@@ -21,18 +22,30 @@ export async function handleTasksInput(req: Request, res: Response): Promise<voi
             res.json(cached);
             return;
         }
-        const result = await taskEngine.resumeInput({ tenantId, taskId: params.id, token: params.token, input: params.input });
+        const engine = getEngineOrRespond(res);
+        if (!engine) return;
+
+        const result = await engine.resumeInput({ tenantId, taskId: params.id, token: params.token, input: params.input });
         const payload = { jsonrpc: '2.0' as const, id: req.body.id ?? null, result };
         if (idempotencyKey) setIdempotent(tenantId, params.id, params.token, idempotencyKey, payload);
         res.json(payload);
         return;
-    } catch (error) {
+    } catch (error: unknown) {
         sendError(res, -32603, error instanceof Error ? error.message : 'Internal error');
     }
 }
 
 function sendError(res: Response, code: number, message: string, data?: unknown): void {
     res.json({ jsonrpc: '2.0', error: { code, message, data }, id: null });
+}
+
+function getEngineOrRespond(res: Response): TaskEngine | null {
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    if (!engine) {
+        sendError(res, -32603, 'TaskEngine not configured on server');
+        return null;
+    }
+    return engine;
 }
 
 

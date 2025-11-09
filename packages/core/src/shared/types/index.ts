@@ -67,6 +67,8 @@ export type AgentManifest = {
         /** Paths to exclude from cache key (dot notation for nested objects) */
         excludePaths?: string[];
     };
+    /** Manifest-level configuration available at runtime */
+    config?: Record<string, unknown>;
     // Future: capabilities, endpoint, auth, plugins, tools, etc.
     [key: string]: unknown;
 }

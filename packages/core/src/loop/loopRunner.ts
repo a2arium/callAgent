@@ -57,6 +57,11 @@ export async function runLoop<
     outcome: TurnOutcome<ObservationPayload>;
     metrics?: { timings: Record<string, number>[]; rewards: number[] };
 }> {
+    // DIAGNOSTIC: Unique ID for this runLoop execution to detect race conditions
+    const runId = Math.random().toString(36).substring(2, 8);
+    const taskId = ctx.task.id.substring(0, 20);
+    console.log(`[runLoop ${taskId}/${runId}] ENTRY`);
+    
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
     try { console.info('[loopRunner] start', { maxTurns }); } catch { }
@@ -371,7 +376,7 @@ export async function runLoop<
         }
 
         try {
-            console.log('[runLoop] BEFORE oneTurn, m.memory.vars:', Object.keys(((m as any).memory?.vars) || {}));
+            console.log(`[runLoop ${taskId}/${runId}] BEFORE oneTurn turn=${turn}, m.memory.vars:`, Object.keys(((m as any).memory?.vars) || {}));
             const step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
                 ctx,
                 env,
@@ -380,7 +385,7 @@ export async function runLoop<
                 prevAction,
                 rPrev
             );
-            console.log('[runLoop] AFTER oneTurn, step.m.memory.vars:', Object.keys(((step.m as any).memory?.vars) || {}));
+            console.log(`[runLoop ${taskId}/${runId}] AFTER oneTurn turn=${turn}, step.m.memory.vars:`, Object.keys(((step.m as any).memory?.vars) || {}));
             m = step.m;
             
             // ✅ FIX Bug #1E: Sync ctx.vars into m after each turn so next turn sees them
@@ -401,9 +406,14 @@ export async function runLoop<
                         }
                     }
                     
-                    // Merge ctx.vars into m.memory.vars (ctx.vars takes precedence)
-                    (m as any).memory.vars = { ...existingVars, ...varsToMerge };
-                    console.log('[runLoop] Synced ctx.vars into m.memory.vars:', Object.keys(varsToMerge), varsToMerge);
+                    // ✅ FIX Bug #1H: Only merge if varsToMerge has keys, otherwise keep Learning's vars!
+                    // Don't overwrite Learning's vars with empty ctx.vars
+                    if (Object.keys(varsToMerge).length > 0) {
+                        (m as any).memory.vars = { ...existingVars, ...varsToMerge };
+                        console.log('[runLoop] Synced ctx.vars into m.memory.vars:', Object.keys(varsToMerge), varsToMerge);
+                    } else {
+                        console.log('[runLoop] No ctx.vars to sync, keeping Learning vars:', Object.keys(existingVars));
+                    }
                 }
             } catch (syncError) {
                 console.warn('[runLoop] Failed to sync ctx.vars into m:', syncError);
@@ -442,6 +452,13 @@ export async function runLoop<
         }
         // no-op
     }
+
+    // DIAGNOSTIC: Log what runLoop is returning
+    const finalVars = Object.keys(((m as any)?.memory?.vars) || {});
+    console.log('[runLoop] RETURNING M with vars:', {
+        varsCount: finalVars.length,
+        vars: finalVars
+    });
 
     return { M: m, outcome, metrics: timings.length ? { timings, rewards } : undefined };
 }

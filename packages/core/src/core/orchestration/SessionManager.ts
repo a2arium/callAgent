@@ -4,8 +4,11 @@ export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
 
     async load(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
-        if (!this.store) return null;
-        return this.store.getSessionSnapshot(tenantId, sessionId);
+        if (!this.store) {
+            return null;
+        }
+        const result = await this.store.getSessionSnapshot(tenantId, sessionId);
+        return result;
     }
 
     async appendEvent(tenantId: string, sessionId: string, type: string, payload: Record<string, unknown>) {
@@ -20,7 +23,10 @@ export class SessionManager {
         expectedWmVersion: bigint;
         snapshot: Record<string, unknown>;
     }): Promise<{ newVersion: bigint } | null> {
-        if (!this.store) return null;
+        if (!this.store) {
+            return null;
+        }
+
         // Enforce WM snapshot size cap (bytes)
         try {
             const serialized = JSON.stringify(params.snapshot);
@@ -34,8 +40,9 @@ export class SessionManager {
             // If snapshot isn't serializable, surface error
             throw new Error('WM_SNAPSHOT_SERIALIZE_FAILED');
         }
-        try { /* minimal */ } catch { /* noop */ }
-        return this.store.writeSnapshotCAS(params);
+
+        const result = await this.store.writeSnapshotCAS(params);
+        return result;
     }
 
     async enqueueOutbox(tenantId: string, topic: string, key: string, payload: Record<string, unknown>) {
