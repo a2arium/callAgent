@@ -5,6 +5,9 @@
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState } from './types.js';
 import type { PureLLMPort } from '../shared/types/LLMTypes.js';
+import { logger } from '@a2arium/callagent-utils';
+
+const log = logger.createLogger({ prefix: 'oneTurn' });
 
 export type AttentionSignal = unknown;
 
@@ -128,7 +131,7 @@ export async function oneTurn<
     try {
         alpha = mods.attention(mPrev, env, llm);
     } catch (error) {
-        console.error('[oneTurn] Attention module error:', error);
+        log.error('Attention module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Attention module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.attentionMs = Date.now() - tA0;
@@ -138,7 +141,7 @@ export async function oneTurn<
     try {
         o = await Promise.resolve(mods.perception(env, alpha, llm));
     } catch (error) {
-        console.error('[oneTurn] Perception module error:', error);
+        log.error('Perception module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Perception module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.perceptionMs = Date.now() - tP0;
@@ -147,9 +150,9 @@ export async function oneTurn<
     let m1: MentalState<Sensory>;
     try {
         m1 = mods.learning(mPrev, prevAction, o, rPrev, llm);
-        console.log('[oneTurn] Learning returned M with memory.vars:', Object.keys(((m1 as any).memory?.vars) || {}));
+        log.debug('Learning returned MentalState', { varsCount: Object.keys(((m1 as any).memory?.vars) || {}).length });
     } catch (error) {
-        console.error('[oneTurn] Learning module error:', error);
+        log.error('Learning module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Learning module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.learningMs = Date.now() - tL0;
@@ -172,7 +175,7 @@ export async function oneTurn<
             pi = (policyFn as any)(m1);
         }
     } catch (error) {
-        console.error('[oneTurn] Policy module error:', error);
+        log.error('Policy module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Policy module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.policyMs = Date.now() - tPol0;
@@ -214,7 +217,7 @@ export async function oneTurn<
     try {
         sh = mods.shield(m1, chosen, llm);
     } catch (error) {
-        console.error('[oneTurn] Shield module error:', error);
+        log.error('Shield module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Shield module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
@@ -239,7 +242,7 @@ export async function oneTurn<
     try {
         exec = await mods.execution(toExecute!, ctx, m1);
     } catch (error) {
-        console.error('[oneTurn] Execution module error:', error);
+        log.error('Execution module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Execution module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.executionMs = Date.now() - tE0;
@@ -249,7 +252,7 @@ export async function oneTurn<
     try {
         outcome = await Promise.resolve(mods.transition(env, exec, m1, llm));
     } catch (error) {
-        console.error('[oneTurn] Transition module error:', error);
+        log.error('Transition module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Transition module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.transitionMs = Date.now() - tT0;
@@ -260,7 +263,7 @@ export async function oneTurn<
         try {
             rExt = Number(mods.extrinsicReward(m1, chosen, exec, outcome, llm) || 0);
         } catch (error) {
-            console.error('[oneTurn] ExtrinsicReward module error:', error);
+            log.error('ExtrinsicReward module error', { error: error instanceof Error ? error.message : String(error) });
             // Don't throw - reward is optional, just log and default to 0
         }
     }
@@ -269,7 +272,7 @@ export async function oneTurn<
         try {
             rInt = Number(mods.intrinsicReward(m1, o, llm) || 0);
         } catch (error) {
-            console.error('[oneTurn] IntrinsicReward module error:', error);
+            log.error('IntrinsicReward module error', { error: error instanceof Error ? error.message : String(error) });
             // Don't throw - reward is optional, just log and default to 0
         }
     }

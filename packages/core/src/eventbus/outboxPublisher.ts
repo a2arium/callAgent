@@ -42,7 +42,15 @@ export class OutboxPublisher {
             try {
                 // Idempotent consumers: include id and key for de-duplication
                 await this.dispatch(row);
-                await this.prisma.outbox.delete({ where: { id: row.id } });
+                // Idempotent delete - ignore if record already deleted by another process
+                await this.prisma.outbox.delete({ where: { id: row.id } }).catch((deleteError: any) => {
+                    // Check if it's a "record not found" error (P2025 in Prisma)
+                    if (deleteError.code === 'P2025' || deleteError.message?.includes('No record was found')) {
+                        log.debug('Outbox record already deleted by another process', { id: row.id });
+                        return; // This is expected in concurrent scenarios
+                    }
+                    throw deleteError; // Re-throw other errors
+                });
             } catch (e) {
                 log.error('Failed to dispatch outbox row', e as any, { id: row.id, topic: row.topic });
                 // leave row for retry
@@ -62,7 +70,7 @@ export class OutboxPublisher {
             data: row.payload
         };
         // TODO: push to SSE/webhook/Kafka; here we just log for scaffold
-        log.info('Dispatch', { topic: row.topic, key: row.key, id: row.id });
+        log.debug('Dispatch', { topic: row.topic, key: row.key, id: row.id });
     }
 }
 

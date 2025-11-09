@@ -1,4 +1,7 @@
 import type { MentalState } from './types.js';
+import { logger } from '@a2arium/callagent-utils';
+
+const log = logger.createLogger({ prefix: 'Hygiene' });
 
 type HygieneConfig = {
     episodicCap?: number; // keep last N events
@@ -18,7 +21,7 @@ export function pruneMentalState(input: MentalState, cfg: HygieneConfig = {}): M
     const M = input; // mutate in place for performance
     try {
         const beforeVars = Object.keys((((M as any)?.memory as any)?.vars) || {});
-        console.log('[pruneMentalState] BEFORE vars:', beforeVars);
+        log.debug('Mental state pruning started', { varsBefore: Object.keys(beforeVars) });
     } catch { /* noop */ }
 
     // Episodic TTL + cap
@@ -48,7 +51,7 @@ export function pruneMentalState(input: MentalState, cfg: HygieneConfig = {}): M
 
     try {
         const afterVars = Object.keys((((M as any)?.memory as any)?.vars) || {});
-        console.log('[pruneMentalState] AFTER vars:', afterVars);
+        log.debug('Mental state pruning completed', { varsAfter: Object.keys(afterVars) });
     } catch { /* noop */ }
 
     return M;

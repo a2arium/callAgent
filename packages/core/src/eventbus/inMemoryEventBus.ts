@@ -7,9 +7,14 @@ export interface IEventBus {
     unsubscribe(channel: string, handler: Function): void;
 }
 
+import { logger } from '@a2arium/callagent-utils';
+
 /**
  * In-memory implementation of the event bus
  */
+
+const log = logger.createLogger({ prefix: 'EventBus' });
+
 export class InMemoryEventBus implements IEventBus {
     private handlers = new Map<string, Set<Function>>();
 
@@ -18,7 +23,7 @@ export class InMemoryEventBus implements IEventBus {
      */
     async publish<T>(channel: string, event: T): Promise<void> {
         try {
-            console.log('[EventBus.publish]', {
+            log.debug('Event published', {
                 channel,
                 eventKind: (event as any)?.status?.state ?? (event as any)?.kind ?? (event as any)?.type ?? typeof event,
                 eventSummary: (() => {
@@ -42,7 +47,7 @@ export class InMemoryEventBus implements IEventBus {
      */
     subscribe<T>(channel: string, handler: (e: T) => void): void {
         try {
-            console.log('[EventBus.subscribe]', {
+            log.debug('Event subscription added', {
                 channel,
                 handlerId: handler.name || '(anonymous)',
                 caller: new Error().stack?.split('\n')[2]?.trim()
@@ -59,7 +64,7 @@ export class InMemoryEventBus implements IEventBus {
      */
     unsubscribe(channel: string, handler: Function): void {
         try {
-            console.log('[EventBus.unsubscribe]', {
+            log.debug('Event subscription removed', {
                 channel,
                 handlerId: handler.name || '(anonymous)'
             });

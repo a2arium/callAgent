@@ -280,7 +280,18 @@ export async function buildAgentIndex(options: BuildAgentIndexOptions = {}): Pro
 
     const resolvedDir = path.dirname(outputPath);
     await fs.mkdir(resolvedDir, { recursive: true });
-    await fs.writeFile(outputPath, JSON.stringify(index, null, 2), 'utf8');
+
+    // Convert paths to be relative to the index file's directory, not the project root
+    const indexDir = resolvedDir;
+    const adjustedIndex: AgentIndexRecord = {};
+    for (const [name, entry] of Object.entries(index)) {
+        adjustedIndex[name] = {
+            module: toPosix(path.relative(indexDir, path.resolve(cwd, entry.module))),
+            manifest: entry.manifest ? toPosix(path.relative(indexDir, path.resolve(cwd, entry.manifest))) : entry.manifest
+        };
+    }
+
+    await fs.writeFile(outputPath, JSON.stringify(adjustedIndex, null, 2), 'utf8');
 
     indexLogger.info('Agent index written', {
         outputPath,

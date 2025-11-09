@@ -18,6 +18,7 @@ import { outboxPublisher } from '../../eventbus/outboxPublisher.js';
 import { createTraceparent } from '../tracing/Tracing.js';
 import type { MentalState } from '../../loop/types.js';
 import { initialM } from '../../loop/init.js';
+import { logger } from '@a2arium/callagent-utils';
 import { runLoop } from '../../loop/loopRunner.js';
 import type { EnvironmentState, ObservationInbox } from '../../loop/types.js';
 import type { Observation } from '../../loop/oneTurn.js';
@@ -90,6 +91,9 @@ export type StartTaskParams = {
  * A minimal task engine that handles task execution
  * This is a simplified implementation that would use XState in a full framework
  */
+
+const log = logger.createLogger({ prefix: 'TaskEngine' });
+
 export class TaskEngine {
     private sessionManager?: SessionManager;
     private handlerInvoker?: DurableHandlerInvoker;
@@ -100,10 +104,10 @@ export class TaskEngine {
             this.sessionManager = new SessionManager(opts.sessionStore);
         } else {
             // Default to in-memory session manager for testing/CLI
-            console.warn('[TaskEngine] No SessionStore configured - using IN-MEMORY mode');
-            console.warn('[TaskEngine] ⚠️  IN-MEMORY MODE IS NOT SUITABLE FOR PRODUCTION');
-            console.warn('[TaskEngine] For production, configure a database-backed SessionStore');
-            console.warn('[TaskEngine] See: docs/a2a/production-setup.md');
+            log.warn('No SessionStore configured - using IN-MEMORY mode');
+            log.warn('⚠️  IN-MEMORY MODE IS NOT SUITABLE FOR PRODUCTION');
+            log.warn('For production, configure a database-backed SessionStore');
+            log.warn('See: docs/a2a/production-setup.md');
             this.sessionManager = new SessionManager(new InMemorySessionManager());
         }
         if (opts?.handlerInvoker) {
@@ -125,11 +129,6 @@ export class TaskEngine {
                 // ✅ FIX: MERGE vars from both source and target, don't overwrite
                 // target (mNext) has Learning's changes, source (M) has ctx.vars changes
                 const merged = { ...(targetVars as Record<string, unknown>), ...(sourceVars as Record<string, unknown>) };
-                console.log('[TaskEngine] mergeVarsIntoMental:', {
-                    sourceVars: Object.keys(sourceVars),
-                    targetVars: Object.keys(targetVars),
-                    merged: Object.keys(merged)
-                });
                 (target as any).memory = { ...mem, vars: merged };
             }
         } catch { /* noop */ }
@@ -281,9 +280,7 @@ export class TaskEngine {
 
                 const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
                     const mental = (ctx as any).__mental;
-                    try { console.log('[TaskEngine] requestInput: before flush vars', (mental as any)?.memory?.vars?.jsonObject); } catch { }
                     try { await flushMentalState(); } catch { /* best-effort */ }
-                    try { console.log('[TaskEngine] requestInput: after flush vars', (mental as any)?.memory?.vars?.jsonObject); } catch { }
                     const latest = await this.sessionManager!.load(tenantId, sessionId);
                     const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
                     const nextSnapshot = setPendingInputs(latestBase, pending);
@@ -404,7 +401,7 @@ export class TaskEngine {
 
                             if (typeof targetStage === 'string' && targetStage.length > 0) {
                                 currentM.control.stage = targetStage;
-                                try { console.log(`[TaskEngine] Auto stage transition: ${currentStage} -> ${targetStage} (tool invoked)`); } catch { }
+                                try { log.info('Auto stage transition', { from: currentStage, to: targetStage, trigger: 'tool_invoked' }); } catch { }
                             }
                         }
 
@@ -418,7 +415,7 @@ export class TaskEngine {
                         });
                     }
                 } catch (error) {
-                    try { console.warn('[TaskEngine] Failed to apply tool auto token/stage options:', error); } catch { }
+                    try { log.warn('Failed to apply tool auto token/stage options', { error: error instanceof Error ? error.message : String(error) }); } catch { }
                 }
             }
 
@@ -534,7 +531,7 @@ export class TaskEngine {
                 (ctx as any).logger?.info?.('Child dispatch', { parentTaskId: sessionId, childAgent: agent, token });
                 try { await flushMentalState(); } catch { /* best-effort */ }
                 const a2aOptions = { tenantId, streaming: (runOpts?.streaming ?? options?.streaming) === true } as any;
-                try { console.log(`[TaskEngine] sendTaskToAgent dispatch: tenantId=${tenantId} sessionId=${sessionId} token=${token} agent=${agent}`); } catch { }
+                try { log.info('A2A dispatch', { tenantId, sessionId, token, agent }); } catch { }
                 try {
                     const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
                         ...(options || {}),
@@ -752,11 +749,6 @@ export class TaskEngine {
         try {
             const snapshotVars = (((M.memory as any)?.vars) || {}) as Record<string, unknown>;
             const mentalVars = (((mentalFromCtx as any)?.memory as any)?.vars) || {} as Record<string, unknown>;
-            console.log('[flushContextSnapshot] merging vars', {
-                snapshotKeys: Object.keys(snapshotVars),
-                mentalKeys: Object.keys(mentalVars),
-                plainKeys: Object.keys(plainVars)
-            });
             const mergedVars = { ...mentalVars, ...snapshotVars, ...plainVars } as Record<string, unknown>;
             M.memory = { ...(M.memory || {}), vars: mergedVars };
         } catch { /* noop */ }
@@ -897,8 +889,8 @@ export class TaskEngine {
             Object.assign(mergedVars, varsObject);
             iterMentalTargets(({ target, memory }) => {
                 try {
-                    console.log('[assignVarsIntoMental] applying', {
-                        mergedKeys: Object.keys(mergedVars)
+                    log.debug('Variable assignment completed', {
+                        mergedKeysCount: Object.keys(mergedVars).length
                     });
                 } catch { /* noop */ }
                 (memory as Record<string, unknown>).vars = { ...mergedVars };
@@ -1182,12 +1174,12 @@ export class TaskEngine {
 
             // Choose execution path: loop-first (default) or durable handler
             const runMode: 'loop' | 'legacy' = (ctx as any).runMode || 'loop';
-            try { console.log(`[TaskEngine] runMode=${runMode} agentId=${(ctx as any).agentId}`); } catch { }
+            try { log.info('Task execution start', { runMode, agentId: (ctx as any).agentId }); } catch { }
 
             const runLegacy = async () => {
                 if (isStreaming) {
                     this.executeTaskHandler(ctx).catch(error => {
-                        console.error('Task handler error:', error);
+                        log.error('Task handler error', { error: error instanceof Error ? error.message : String(error) });
                         ctx.fail({
                             state: 'failed',
                             message: { role: 'agent', parts: [{ type: 'text', text: `Task execution failed: ${error instanceof Error ? error.message : String(error)}` }] },
@@ -1207,13 +1199,6 @@ export class TaskEngine {
                 const startTurnTotal = Number(base?.meta?.turn) || 0;
                 let envInbox = normalizeInbox((base as any)?.inbox);
 
-                console.log('[TaskEngine][Resume] pre-check', {
-                    sessionId,
-                    currentLength: envInbox.current.length,
-                    allLength: envInbox.all.length,
-                    currentKinds: envInbox.current.map(o => o.kind),
-                    allKinds: envInbox.all.map(o => o.kind),
-                });
 
                 // If inbox is empty, check for child completion events that might not be in the snapshot
                 // This handles the case where handleChildCompleted ran but failed to persist the inbox,
@@ -1230,23 +1215,11 @@ export class TaskEngine {
                         if (lastChildToken) tokensToCheck.add(lastChildToken);
                         pendingChildTokens.forEach(t => tokensToCheck.add(t));
 
-                        console.log('[TaskEngine][Resume] checking child completions', {
-                            sessionId,
-                            tokensToCheck: Array.from(tokensToCheck),
-                        });
 
                         if (tokensToCheck.size > 0) {
                             // Check for child_completed events that might not be in the snapshot inbox
                             const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: 0 });
-                            console.log('[TaskEngine][Resume] events', {
-                                total: events.length,
-                                types: events.map(e => e.type),
-                            });
                             const childCompletedEvents = events.filter(e => e.type === 'task.child_completed');
-                            console.log('[TaskEngine][Resume] child completions', {
-                                count: childCompletedEvents.length,
-                                tokens: childCompletedEvents.map(e => (e.payload as any)?.token),
-                            });
 
                             // For each token, check if there's a completion event
                             for (const token of tokensToCheck) {
@@ -1284,7 +1257,7 @@ export class TaskEngine {
                         }
                     } catch (error) {
                         // If event lookup fails, continue with empty inbox (better than crashing)
-                        console.warn('[TaskEngine] Failed to check for child completion events on resume', {
+                        log.warn('Failed to check for child completion events on resume', {
                             error: error instanceof Error ? error.message : String(error),
                             sessionId
                         });
@@ -1312,9 +1285,12 @@ export class TaskEngine {
                 const plugin = agentId ? PluginManager.findAgent(agentId) : null;
                 const overrides = (plugin as any)?.loop?.modules || {};
                 try {
-                    console.log(`[TaskEngine] plugin keys:`, Object.keys((plugin as any) || {}));
-                    console.log(`[TaskEngine] plugin.loop:`, (plugin as any)?.loop ? 'present' : 'absent');
-                    console.log(`[TaskEngine] loop module keys from agent '${agentId}': ${Object.keys(overrides).join(',') || '(none)'}`);
+                    log.debug('Plugin loaded', {
+                        pluginKeys: Object.keys((plugin as any) || {}),
+                        hasLoop: !!(plugin as any)?.loop,
+                        agentId,
+                        loopOverrides: Object.keys(overrides)
+                    });
                 } catch { }
                 // Derive default budgets and hitl from manifest if available
                 let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
@@ -1325,17 +1301,8 @@ export class TaskEngine {
                     if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
                     try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
                 } catch { /* ignore */ }
-                console.log('loopOpts:', loopOpts);
-                console.log('[TaskEngine] BEFORE runLoop, M.memory.vars:', Object.keys(((M as any)?.memory?.vars) || {}));
+                log.debug('Loop options configured', loopOpts);
                 const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
-                console.log('[TaskEngine] AFTER runLoop, mNext.memory.vars:', Object.keys(((mNext as any)?.memory?.vars) || {}));
-                console.log('[TaskEngine] AFTER runLoop, M.memory.vars:', Object.keys(((M as any)?.memory?.vars) || {}));
-                try {
-                    console.log('[TaskEngine] post-loop vars', {
-                        fromM: (M as any)?.memory?.vars?.jsonObject,
-                        fromNext: (mNext as any)?.memory?.vars?.jsonObject
-                    });
-                } catch { }
                 // Ensure meta.turn is persisted after initial runLoop
                 try {
                     if (this.sessionManager) {
@@ -1346,11 +1313,9 @@ export class TaskEngine {
                         const turnToSave = Number((env as any).turn) || 1;
                         const nextMetaAfterStart = { ...prevMetaAfterStart, turn: turnToSave } as Record<string, unknown>;
                         // Merge latest ctx.vars (written via proxy to M.memory.vars) into mNext before saving
-                        try { console.log('[TaskEngine] meta-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
                         // This addresses cases where runLoop returns a new MentalState instance that
                         // does not share object identity with M updated by assignVarsIntoMental()
                         let mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
-                        try { console.log('[TaskEngine] meta-save after merge', { fromMerged: (mNextWithVars as any)?.memory?.vars?.jsonObject }); } catch { }
                         const nextInboxAfterStart = normalizeInbox(env.inbox);
                         const nextAfterStart = { ...baseAfterStart, M: mNextWithVars, meta: nextMetaAfterStart, inbox: nextInboxAfterStart } as Record<string, unknown>;
                         await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: ((ctx as any).agentId || 'default') as string, expectedWmVersion: expectedAfterStart, snapshot: nextAfterStart });
@@ -1358,8 +1323,7 @@ export class TaskEngine {
                         (ctx as any).__wmSavedThisTurn = true;
                     }
                 } catch { /* noop */ }
-                console.log('Outcome from runLoop:', outcome.kind);
-                console.log('Outcome details:', outcome, 'kind type:', typeof outcome.kind, 'kind value:', outcome.kind);
+                log.debug('RunLoop completed', { outcome: outcome.kind, hasToken: !!(outcome as any).token });
                 // Aggregate metrics for convenience
                 const timingsArray = metrics?.timings || [];
                 const rewardsArray = metrics?.rewards || [];
@@ -1402,7 +1366,6 @@ export class TaskEngine {
                             const prevMeta = (baseNow as any).meta || {};
                             const nextMeta = { ...prevMeta, turn: env.turn };
                             let mNextEffective = mNext;
-                            try { console.log('[TaskEngine] final-save before merge', { fromM: (M as any)?.memory?.vars?.jsonObject, fromNext: (mNext as any)?.memory?.vars?.jsonObject }); } catch { }
                             try {
                                 const latestVars = (((M as any)?.memory as any)?.vars) || {};
                                 if (latestVars && typeof latestVars === 'object') {
@@ -1410,7 +1373,6 @@ export class TaskEngine {
                                     (mNextEffective as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
                                 }
                             } catch { /* noop merge failure */ }
-                            try { console.log('[TaskEngine] final-save after merge', { fromMerged: (mNextEffective as any)?.memory?.vars?.jsonObject }); } catch { }
                             const nextInbox = normalizeInbox(env.inbox);
                             const next = { ...baseNow, M: mNextEffective, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
@@ -1427,22 +1389,22 @@ export class TaskEngine {
                         }
                     } catch { /* noop */ }
                 }
-                console.log('isStreaming:', isStreaming);
+                log.debug('Processing outcome', { outcome: outcome.kind, isStreaming });
                 if (!isStreaming) {
                     if (outcome.kind === 'await_input') {
-                        console.log('Handling outcome: await_input');
+                        log.info('Task awaiting input', { token: outcome.token });
                         task.status = { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: outcome.token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg } } as any;
                         return task;
                     }
                     if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
-                        console.log('Handling outcome: await_child or await_tool');
+                        log.info('Task awaiting completion', { kind: outcome.kind, token: (outcome as any).token });
                         const token = (outcome as any).token;
                         const extra = { kind: outcome.kind, token };
                         task.status = { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token, awaitExtra: extra, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg } } as any;
                         return task;
                     }
                     if (outcome.kind === 'fail') {
-                        console.log('Handling outcome: fail, reason:', outcome.reason);
+                        log.warn('Task failed', { reason: outcome.reason });
                         task.status = {
                             state: 'failed',
                             timestamp: new Date().toISOString(),
@@ -1452,7 +1414,7 @@ export class TaskEngine {
                         return task;
                     }
                     if (outcome.kind === 'complete') {
-                        console.log('Handling outcome: complete');
+                        log.info('Task completed successfully');
                         task.status = {
                             state: 'completed',
                             timestamp: new Date().toISOString(),
@@ -1512,7 +1474,7 @@ export class TaskEngine {
             // Return the updated task
             return task;
         } catch (error) {
-            console.error('Task engine error:', error);
+            log.error('Task engine error', { error: error instanceof Error ? error.message : String(error) });
 
             // Set failure status for non-streaming mode
             if (!isStreaming) {
@@ -1569,7 +1531,7 @@ export class TaskEngine {
      * Real handler dispatch will be added with durable handler registry.
      */
     async resumeInput(params: { tenantId: string; taskId: string; token: string; input: unknown }): Promise<{ acknowledged: true }> {
-        try { console.log('[TaskEngine] BUILD-MARKER resumeInput enter'); } catch { }
+        log.debug('Resume input processing started');
         const { tenantId, taskId, token, input } = params;
         // load snapshot
         const snap = await this.sessionManager?.load(tenantId, taskId);
@@ -1769,7 +1731,7 @@ export class TaskEngine {
                     Object.assign(mergedVars, varsObject);
                     iterMentalTargets(({ target, memory }) => {
                         try {
-                            console.log('[assignVarsIntoMental|resume] applying', {
+                            log.debug('Resume variable assignment', {
                                 mergedKeys: Object.keys(mergedVars)
                             });
                         } catch { /* noop */ }
@@ -2214,14 +2176,14 @@ export class TaskEngine {
         const inflightKey = `${parentTaskId}:${childToken ?? childTaskId ?? 'n/a'}`;
         const callCount = (this.childCompletionInFlight.get(inflightKey) ?? 0) + 1;
         this.childCompletionInFlight.set(inflightKey, callCount);
-        console.log('[TaskEngine.handleChildCompleted] ENTRY:', {
+        log.info('Child completion processing started', {
             parentTaskId: parentTaskId.substring(0, 25),
             childToken: childToken?.substring(0, 15),
             callCount,
             inflightKey
         });
         if (callCount > 1) {
-            console.warn('[TaskEngine.handleChildCompleted] DUPLICATE invocation detected for inflightKey', inflightKey);
+            log.warn('Duplicate child completion invocation detected', { inflightKey, callCount });
         }
 
         const detach = () => {
@@ -2255,7 +2217,7 @@ export class TaskEngine {
                     correlationId: token
                 }
             };
-            console.log('[TaskEngine][ChildCompleted] appending event', {
+            log.debug('Appending child completion event', {
                 parentTaskId,
                 token,
                 resultStatus: (result as any)?.status,
@@ -2275,14 +2237,14 @@ export class TaskEngine {
                         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
                         snapshotSaved = true;
                     } catch (retryError) {
-                        console.warn('[TaskEngine] Failed to save snapshot with child completion observation even after pruning', {
+                        log.warn('Failed to save snapshot with child completion observation even after pruning', {
                             error: (retryError as Error).message,
                             parentTaskId,
                             childToken: token
                         });
                     }
                 } else {
-                    console.warn('[TaskEngine] Failed to save snapshot during child completion', {
+                    log.warn('Failed to save snapshot during child completion', {
                         error: (snapshotError as Error).message,
                         parentTaskId,
                         childToken: token
@@ -2293,7 +2255,7 @@ export class TaskEngine {
             try {
                 await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', { token, childTaskId, result });
             } catch (eventError) {
-                console.warn('[TaskEngine] Failed to append child completion event, likely due to closed connection', {
+                log.warn('Failed to append child completion event, likely due to closed connection', {
                     error: (eventError as Error).message,
                     parentTaskId,
                     childToken: token
@@ -2339,7 +2301,7 @@ export class TaskEngine {
                 const recordedTurn = Number((baseNow as any)?.meta?.turn) || 0;
                 const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn;
                 let envInbox = normalizeInbox((baseNow as any)?.inbox);
-                console.log('[TaskEngine][ChildResume] before helper', {
+                log.debug('Child resume before helper', {
                     sessionId: parentTaskId,
                     currentLength: envInbox.current.length,
                     allLength: envInbox.all.length,
@@ -2355,7 +2317,7 @@ export class TaskEngine {
                     (obs as any).payload.token === token;
                 envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
 
-                console.log('[TaskEngine][ChildResume] after helper', {
+                log.debug('Child resume after helper', {
                     sessionId: parentTaskId,
                     currentLength: envInbox.current.length,
                     allLength: envInbox.all.length,
@@ -2413,7 +2375,7 @@ export class TaskEngine {
             } catch (resumeError) {
                 // If resume fails (e.g., database connection closed), log the error
                 // This is expected when deferred notifications run after parent task completes
-                console.warn('[TaskEngine] Failed to resume parent after child completion', {
+                log.warn('Failed to resume parent after child completion', {
                     error: (resumeError as Error).message,
                     parentTaskId,
                     childToken: token,
@@ -2537,31 +2499,31 @@ export class TaskEngine {
         }
 
         await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_input_required', { token, childTaskId, prompt, schema, childOnProvided });
-        try { console.log(`[TaskEngine] child input_required: token=${token} handler='${handlerName}' childOnProvided='${childOnProvided}' childTaskId=${childTaskId} prompt='${prompt}'`); } catch { }
+        try { log.debug('Child input required processing', { token, handlerName, childOnProvided, childTaskId }); } catch { }
         if (!alreadyDelivered && handlerName && this.handlerInvoker) {
-            try { console.log(`[TaskEngine] invoking parent handler '${handlerName}' for token=${token}`); } catch { }
+            log.debug('Invoking parent handler', { handlerName, token });
             const maybe = await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: { prompt, schema, token, childTaskId } });
-            try { console.log(`[TaskEngine] parent handler '${handlerName}' returned: ${JSON.stringify(maybe)}`); } catch { }
+            log.debug('Parent handler completed', { handlerName, hasResult: maybe !== undefined });
             if (typeof maybe !== 'undefined') {
                 // Parent provided immediate answer; first try to invoke child's onProvided if available
                 let finalChildResult: unknown = maybe;
                 try {
                     const effectiveChildOnProvided = childOnProvided || (entry?.pendingInput?.childOnProvided as string | undefined);
                     if (effectiveChildOnProvided && childTaskId && this.handlerInvoker) {
-                        try { console.log(`[TaskEngine] invoking child onProvided='${effectiveChildOnProvided}' for childTaskId=${childTaskId} with value=${JSON.stringify(maybe)}`); } catch { }
+                        log.debug('Invoking child onProvided', { childOnProvided: effectiveChildOnProvided, childTaskId });
                         try {
                             const _childResult = await this.handlerInvoker.invoke({ tenantId, taskId: childTaskId, handlerName: effectiveChildOnProvided, input: maybe });
-                            try { console.log(`[TaskEngine] child onProvided result for childTaskId=${childTaskId}: ${JSON.stringify(_childResult)}`); } catch { }
+                            log.debug('Child onProvided completed', { childTaskId, hasResult: _childResult !== undefined });
                             if (typeof _childResult !== 'undefined') {
                                 finalChildResult = _childResult;
                             }
                         } catch (err) {
-                            try { console.warn(`[TaskEngine] HANDLER_NOT_FOUND or error invoking child onProvided='${effectiveChildOnProvided}'`, err instanceof Error ? err.message : String(err)); } catch { }
+                            try { log.warn('Handler not found or error invoking child onProvided', { childOnProvided: effectiveChildOnProvided, error: err instanceof Error ? err.message : String(err) }); } catch { }
                         }
                     }
                 } catch (e) {
                     // If invoking child's handler fails, fall back to using parent's value
-                    try { console.log(`[TaskEngine] Child onProvided invocation failed; using parent value. Error: ${(e as Error).message}`); } catch { }
+                    try { log.debug('Child onProvided invocation failed; using parent value', { error: (e as Error).message }); } catch { }
                 }
                 // Resume the child loop once with env.input so it processes the provided value inside its own loop
                 if (childTaskId && childInputToken) {

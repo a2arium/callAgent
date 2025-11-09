@@ -37,6 +37,9 @@ function getRequiredEngine(): TaskEngine {
  * Service for agent-to-agent communication
  * Handles local agent discovery, context transfer, and task execution
  */
+
+const log = logger.createLogger({ prefix: 'A2AService' });
+
 export class A2AService implements IA2AService {
     private agentResultCache: AgentResultCache | null = null;
     private readonly pendingNotifications: Set<Promise<void>> = new Set();
@@ -152,7 +155,7 @@ export class A2AService implements IA2AService {
                 }
                 const eng = getRequiredEngine();
                 const { prompt, schema, childOnProvided, childTaskId } = (targetCtx as any).__inputRequired as { prompt: string; schema?: unknown; childOnProvided?: string; childTaskId?: string };
-                try { console.log(`[A2AService] Post-turn child input_required routing -> parent (childOnProvided='${childOnProvided}', childTaskId='${childTaskId}') prompt='${prompt}'`); } catch { }
+                try { log.debug('Post-turn child input_required routing to parent', { childOnProvided, childTaskId, prompt }); } catch { }
                 await eng.handleChildInputRequired({
                     tenantId: options.parentTenantId,
                     parentTaskId: options.parentTaskId,
@@ -393,7 +396,7 @@ export class A2AService implements IA2AService {
             };
             const parts = normalizeParts(promptOrParts);
             const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
-            try { console.log(`[A2AService] Child requestInput called: prompt='${prompt || ''}' onProvided='${riOpts?.onProvided}' parentTenantId=${parentTenantId} parentTaskId=${parentTaskId} parentChildToken=${parentChildToken}`); } catch { }
+            try { log.debug('Child requestInput called', { prompt, onProvided: riOpts?.onProvided, parentTenantId, parentTaskId, parentChildToken }); } catch { }
             if (parentTenantId && parentTaskId && parentChildToken) {
                 try {
                     const eng = getRequiredEngine();
@@ -415,7 +418,7 @@ export class A2AService implements IA2AService {
 
                     // Now notify parent about input_required
                     const childOnProvided = riOpts?.onProvided;
-                    try { console.log(`[A2AService] Child '${targetPlugin.manifest.name}' requestInput -> parent onInputRequired (childOnProvided='${childOnProvided}') prompt='${prompt || ''}'`); } catch { }
+                    try { log.info('Child requestInput routed to parent', { childAgent: targetPlugin.manifest.name, childOnProvided, prompt }); } catch { }
                     await eng.handleChildInputRequired({
                         tenantId: parentTenantId,
                         parentTaskId,

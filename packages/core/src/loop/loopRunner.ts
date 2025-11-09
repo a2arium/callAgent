@@ -14,6 +14,8 @@ import {
 import type { EnvironmentState, MentalState, ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 
+const log = logger.createLogger({ prefix: 'runLoop' });
+
 type LoopRunnerOptions = {
     maxTurns?: number;
     latencyMs?: number;
@@ -60,11 +62,11 @@ export async function runLoop<
     // DIAGNOSTIC: Unique ID for this runLoop execution to detect race conditions
     const runId = Math.random().toString(36).substring(2, 8);
     const taskId = ctx.task.id.substring(0, 20);
-    console.log(`[runLoop ${taskId}/${runId}] ENTRY`);
+    log.debug('runLoop started', { taskId, runId });
     
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
-    try { console.info('[loopRunner] start', { maxTurns }); } catch { }
+    try { log.info('LoopRunner started', { maxTurns }); } catch { }
 
     const inbox = ensureInbox(env);
 
@@ -173,7 +175,7 @@ export async function runLoop<
                     onProvided: '__onInputProvided'
                 });
                 const token = (handle as any)?.token || '';
-                try { console.log(`[LoopRunner] execution ask_user -> token=${token}`); } catch { }
+                try { log.info('Execution asking for user input', { token }); } catch { }
                 return {
                     action: { kind: 'ask_user', token } as ExecutableAction,
                     result: {
@@ -253,7 +255,7 @@ export async function runLoop<
             const { action, result } = exec;
 
             if (action.kind === 'ask_user' && action.token) {
-                try { console.log(`[LoopRunner] transition await_input token=${action.token}`); } catch { }
+                try { log.info('Transition to await_input', { token: action.token }); } catch { }
                 return { kind: 'await_input', token: action.token } as TransitionOut<ObservationPayload>;
             }
 
@@ -376,7 +378,7 @@ export async function runLoop<
         }
 
         try {
-            console.log(`[runLoop ${taskId}/${runId}] BEFORE oneTurn turn=${turn}, m.memory.vars:`, Object.keys(((m as any).memory?.vars) || {}));
+            log.debug('Before oneTurn', { taskId, runId, turn, varsCount: Object.keys(((m as any).memory?.vars) || {}).length });
             const step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
                 ctx,
                 env,
@@ -385,7 +387,7 @@ export async function runLoop<
                 prevAction,
                 rPrev
             );
-            console.log(`[runLoop ${taskId}/${runId}] AFTER oneTurn turn=${turn}, step.m.memory.vars:`, Object.keys(((step.m as any).memory?.vars) || {}));
+            log.debug('After oneTurn', { taskId, runId, turn, stepVarsCount: Object.keys(((step.m as any).memory?.vars) || {}).length });
             m = step.m;
             
             // ✅ FIX Bug #1E: Sync ctx.vars into m after each turn so next turn sees them
@@ -410,16 +412,16 @@ export async function runLoop<
                     // Don't overwrite Learning's vars with empty ctx.vars
                     if (Object.keys(varsToMerge).length > 0) {
                         (m as any).memory.vars = { ...existingVars, ...varsToMerge };
-                        console.log('[runLoop] Synced ctx.vars into m.memory.vars:', Object.keys(varsToMerge), varsToMerge);
+                        log.debug('Synced ctx.vars into m.memory.vars', { syncedVars: Object.keys(varsToMerge) });
                     } else {
-                        console.log('[runLoop] No ctx.vars to sync, keeping Learning vars:', Object.keys(existingVars));
+                        log.debug('No ctx.vars to sync, keeping Learning vars', { learningVarsCount: Object.keys(existingVars).length });
                     }
                 }
             } catch (syncError) {
-                console.warn('[runLoop] Failed to sync ctx.vars into m:', syncError);
+                log.warn('Failed to sync ctx.vars into m', { error: syncError instanceof Error ? syncError.message : String(syncError) });
             }
             
-            console.log('[runLoop] After sync, m.memory.vars:', Object.keys(((m as any).memory?.vars) || {}));
+            log.debug('After sync', { finalVarsCount: Object.keys(((m as any).memory?.vars) || {}).length });
             outcome = step.outcome;
             if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
                 outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
@@ -436,7 +438,7 @@ export async function runLoop<
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
         } catch (error) {
-            console.error(`[loopRunner] Turn ${turn} failed:`, error);
+            log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {
                 kind: 'fail',
                 reason: `turn_${turn}_error: ${error instanceof Error ? error.message : String(error)}`
@@ -455,7 +457,7 @@ export async function runLoop<
 
     // DIAGNOSTIC: Log what runLoop is returning
     const finalVars = Object.keys(((m as any)?.memory?.vars) || {});
-    console.log('[runLoop] RETURNING M with vars:', {
+    log.debug('runLoop returning MentalState', {
         varsCount: finalVars.length,
         vars: finalVars
     });

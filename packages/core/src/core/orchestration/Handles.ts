@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { EngineLocator } from './EngineLocator.js';
 import type { SessionManager } from './SessionManager.js';
+import { logger } from '@a2arium/callagent-utils';
+
+const log = logger.createLogger({ prefix: 'Handles' });
 
 type PendingInputs = Record<string, { handlerName?: string; expiredHandlerName?: string; schema?: unknown; expiresAt?: string }>;
 type PendingTasks = Record<string, {
@@ -123,13 +126,13 @@ export class TaskHandle {
         await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
         // If an inputRequired handler is being set after a pending input was recorded, trigger routing now
         if (kind === 'inputRequired' && pendingInput) {
-            try { console.log(`[Handles] inputRequired handler '${handlerName}' registered with pending input; routing now (token=${this.childToken})`); } catch { }
+            try { log.debug('Routing pending input to newly registered handler', { handlerName, token: this.childToken }); } catch { }
             const engine = EngineLocator.getEngine();
             if (engine) {
                 await engine.handleChildInputRequired({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, prompt: pendingInput.prompt, schema: pendingInput.schema });
-                try { console.log(`[Handles] routed pending input to parent handler '${handlerName}' (token=${this.childToken})`); } catch { }
+                try { log.info('Pending input routed to parent handler', { handlerName, token: this.childToken }); } catch { }
             } else {
-                console.warn('[Handles] TaskEngine not registered; unable to route pending input');
+                log.warn('TaskEngine not registered; unable to route pending input');
             }
         }
         // If a completed handler is set after a pending completion was recorded, deliver it now
