@@ -190,6 +190,14 @@ export class A2AService implements IA2AService {
             });
 
             // Notify parent engine on completion when correlation is provided
+            a2aLogger.info('🔍 A2A: Checking if should notify parent', {
+                hasParentTenantId: !!options.parentTenantId,
+                hasParentTaskId: !!options.parentTaskId,
+                hasParentChildToken: !!options.parentChildToken,
+                parentTaskId: options.parentTaskId,
+                parentChildToken: options.parentChildToken,
+                awaitCompletion: (options as any).awaitCompletion
+            });
             if (options.parentTenantId && options.parentTaskId && options.parentChildToken) {
                 const deliverCompletion = async () => {
                     await eng.handleChildCompleted({
@@ -201,7 +209,44 @@ export class A2AService implements IA2AService {
                     });
                 };
 
-                if (options.awaitCompletion === false) {
+                // ✅ FIX: Check if awaitCompletion is false (now explicitly passed from taskEngine)
+                // The awaitCompletion value is determined in taskEngine before calling sendTaskToAgent
+                // and passed in a2aOptions, so it should be in options here
+                const awaitCompletionValue = (options as any).awaitCompletion;
+                a2aLogger.info('🔍 A2A: Checking awaitCompletion for staging', {
+                    parentTaskId: options.parentTaskId,
+                    childToken: options.parentChildToken,
+                    awaitCompletionValue,
+                    awaitCompletionType: typeof awaitCompletionValue,
+                    shouldStage: awaitCompletionValue === false
+                });
+                if (awaitCompletionValue === false) {
+                    // ✅ FIX: Stage observation synchronously BEFORE deferring resume
+                    // This ensures the observation is available when the parent resumes, even for synchronous completions
+                    a2aLogger.info('Staging child completion observation synchronously', {
+                        parentTaskId: options.parentTaskId,
+                        childToken: options.parentChildToken
+                    });
+                    try {
+                        await eng.stageChildCompletionObservation({
+                            tenantId: options.parentTenantId!,
+                            parentTaskId: options.parentTaskId!,
+                            childToken: options.parentChildToken!,
+                            result,
+                            childAgentId: targetPlugin.manifest.name
+                        });
+                        a2aLogger.info('Successfully staged child completion observation', {
+                            parentTaskId: options.parentTaskId,
+                            childToken: options.parentChildToken
+                        });
+                    } catch (stageError) {
+                        a2aLogger.warn('Failed to stage child completion observation synchronously', {
+                            error: stageError instanceof Error ? stageError.message : String(stageError),
+                            parentTaskId: options.parentTaskId
+                        });
+                    }
+
+                    // Defer the resume to next turn to ensure observation is available
                     queueMicrotask(() => {
                         const notifyPromise = deliverCompletion().catch(notifyError => {
                             a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
@@ -340,7 +385,8 @@ export class A2AService implements IA2AService {
             serializedContext.tenantId,
             targetPlugin.manifest.name,
             targetPlugin.manifest,
-            inheritedSemanticAdapter
+            inheritedSemanticAdapter,
+            await (await import('../memory/prismaSingleton.js')).getMemoryPrismaClient()
         ) as FullTaskContext;
 
         // Record manifest config on child context for propagation

@@ -1,0 +1,8 @@
+{
+  "name": "child-observation-staging-bug-child",
+  "version": "0.1.0",
+  "cache": {
+    "enabled": true,
+    "ttlSeconds": 3600
+  }
+}

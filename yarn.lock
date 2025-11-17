@@ -2533,6 +2533,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"child-observation-staging-bug@workspace:apps/examples/child-observation-staging-bug":
+  version: 0.0.0-use.local
+  resolution: "child-observation-staging-bug@workspace:apps/examples/child-observation-staging-bug"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:"
+    "@a2arium/callagent-utils": "workspace:"
+  languageName: unknown
+  linkType: soft
+
 "chokidar@npm:^4.0.3":
   version: 4.0.3
   resolution: "chokidar@npm:4.0.3"

@@ -334,7 +334,8 @@ export async function runAgentWithStreaming(
         finalTenantId,
         agentName,
         plugin.manifest, // Agent config for memory profile
-        semanticAdapter // Existing semantic adapter for backward compatibility
+        semanticAdapter, // Existing semantic adapter for backward compatibility
+        await (await import('../core/memory/prismaSingleton.js')).getMemoryPrismaClient()
     );
 
     // memory registry constructed
@@ -523,6 +524,7 @@ export async function runAgentWithStreaming(
                     try { await sessionStore.close(); } catch { }
                     try { EngineLocator.setEngine(null as any); } catch { }
                     try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
+                    try { await (await import('../core/memory/prismaSingleton.js')).disconnectMemoryPrismaClient(); } catch { }
                     try { (outboxPublisher as any)?.stop?.(); } catch { }
                 }
             } catch (error: unknown) {

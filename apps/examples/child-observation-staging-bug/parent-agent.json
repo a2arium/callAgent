@@ -1,0 +1,11 @@
+{
+  "name": "child-observation-staging-bug-parent",
+  "version": "0.1.0",
+  "runMode": "loop",
+  "budgets": {
+    "maxTurns": 3
+  },
+  "dependencies": {
+    "agents": ["child-observation-staging-bug-child"]
+  }
+}

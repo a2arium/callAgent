@@ -156,7 +156,8 @@ export async function extendContextWithMemory(
     tenantId: string,
     agentId: string,
     agentConfig: unknown,
-    existingSemanticAdapter?: unknown
+    existingSemanticAdapter?: unknown,
+    existingPrismaClient?: unknown
 ): Promise<TaskContext> {
     const memoryConfig = resolveMemoryConfiguration(agentConfig);
 
@@ -166,7 +167,8 @@ export async function extendContextWithMemory(
         const { PrismaClient } = await import('@prisma/client');
         const { WorkingMemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
 
-        const prisma = new PrismaClient();
+        // Use existing PrismaClient if provided, otherwise create new one
+        const prisma = existingPrismaClient as any || new PrismaClient();
         workingMemoryAdapter = new WorkingMemorySQLAdapter(prisma, {
             defaultTenantId: tenantId
         });
