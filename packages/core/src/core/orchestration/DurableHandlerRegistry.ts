@@ -1,4 +1,4 @@
-import type { Observation } from '../../loop/oneTurn.js';
+import type { Observation, ObservationConfig, SynthesizeObservation } from '../../loop/oneTurn.js';
 import type { ObservationInbox } from '../../loop/types.js';
 
 export type PendingInputHandler = {
@@ -7,30 +7,47 @@ export type PendingInputHandler = {
     expiresAt?: string;
 };
 
+type DurableObservationConfig = ObservationConfig & {
+    user: unknown;
+    tool?: unknown;
+    child?: unknown;
+    internal?: unknown;
+    env?: unknown;
+};
+
+type DurableObservation = SynthesizeObservation<DurableObservationConfig>;
+type DurableObservationInbox = ObservationInbox<DurableObservationConfig>;
+
 export type SnapshotShape = {
     vars?: Record<string, unknown>;
     pending?: {
         inputs?: Record<string, PendingInputHandler>;
     };
-    inbox?: ObservationInbox | Observation[];
+    inbox?: DurableObservationInbox | Observation[];
     meta?: { turn?: number };
 };
 
-const normalizeInbox = (value: SnapshotShape['inbox']): ObservationInbox => {
+const normalizeInbox = (value: SnapshotShape['inbox']): DurableObservationInbox => {
     if (Array.isArray(value)) {
         const arr = value as Observation[];
-        return { current: [...arr], all: [...arr] };
+        return {
+            current: [...arr] as DurableObservation[],
+            all: [...arr] as DurableObservation[]
+        };
     }
     if (value && typeof value === 'object') {
-        const candidate = value as Partial<ObservationInbox>;
+        const candidate = value as Partial<DurableObservationInbox>;
         const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
         const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
-        return { current, all };
+        return {
+            current: current as DurableObservation[],
+            all: all as DurableObservation[]
+        };
     }
     return { current: [], all: [] };
 };
 
-const addObservationToInbox = (value: SnapshotShape['inbox'], observation: Observation): ObservationInbox => {
+const addObservationToInbox = (value: SnapshotShape['inbox'], observation: DurableObservation): DurableObservationInbox => {
     const inbox = normalizeInbox(value);
     inbox.current.push(observation);
     inbox.all.push(observation);
@@ -72,7 +89,7 @@ export function applyInputProvided(
     inputs[token] = input as unknown;
     vars.__inputs = inputs;
     const snapshotWithVars = { ...snapshot, vars } as SnapshotShape;
-    const observation: Observation = {
+    const observation: DurableObservation = {
         source: 'user',
         kind: 'input.provided',
         payload: { token, value: input },

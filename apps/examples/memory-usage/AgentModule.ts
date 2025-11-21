@@ -1,7 +1,14 @@
 import { createAgent } from '@a2arium/callagent-core';
+import type { ExecErrorPayload, ObservationConfig } from '@a2arium/callagent-core';
+
+type MemoryDemoObservation = {
+    input: unknown;
+    time: string;
+    attention: unknown;
+};
 
 // Loop-first implementation using top-level module sugar
-export default createAgent({
+export default createAgent<Record<string, unknown>, MemoryDemoObservation, unknown, unknown, ExecErrorPayload, ObservationConfig>({
     manifest: { name: 'memory-usage', version: '0.1.0', runMode: 'loop' },
     // Selects focus for this turn.
     // args: mentalState (agent state from previous turn), env (runtime input)

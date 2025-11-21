@@ -18,7 +18,8 @@ import type {
     ExecResult,
     ExecErrorPayload,
     TransitionOut,
-    ProposedAction
+    ProposedAction,
+    ObservationConfig
 } from '@a2arium/callagent-core';
 
 // === Types ===
@@ -52,10 +53,10 @@ type Obs = {
     testResult?: { bug: string; status: 'pass' | 'fail'; details: string };
 };
 
-type InboxPayload = {
-    value?: string | { text?: string };
-    token?: string;
-    result?: unknown;
+type BugObservationConfig = ObservationConfig & {
+    user: string | { text?: string };
+    child: unknown;
+    internal: Record<string, unknown>;
 };
 
 const Vars = {
@@ -166,7 +167,7 @@ const V = {
 
 // === Agent Implementation ===
 
-export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayload, InboxPayload>({
+export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayload, BugObservationConfig>({
     manifest: {
         name: 'aplret-bug-reproduction',
         version: '1.0.0',
@@ -191,7 +192,7 @@ export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayl
     },
 
     // === P - Perception ===
-    perception: (env: EnvironmentState<InboxPayload>): Obs => {
+    perception: (env: EnvironmentState<BugObservationConfig>): Obs => {
         console.log('\n[Perception] Processing inbox:', {
             count: env.inbox.current.length,
             sources: env.inbox.current.map(o => o.source),
@@ -214,7 +215,7 @@ export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayl
         // Priority 2: Check for user input in inbox
         const userObs = env.inbox.current.find(o => o.source === 'user');
         if (userObs) {
-            const value = (userObs.payload as InboxPayload)?.value;
+            const value = userObs.payload.value;
             const text = typeof value === 'string' ? value : value?.text;
             console.log('[Perception] User input detected:', { text });
             return {
@@ -889,10 +890,10 @@ Actual: Second call throws "Session manager not configured" error.
 
     // === T - Transition ===
     transition: (
-        env: EnvironmentState<InboxPayload>,
+        env: EnvironmentState<BugObservationConfig>,
         exec: { action: ExecutableAction; result: ExecResult<unknown> },
         m: MentalState<Sensory>
-    ): TransitionOut<InboxPayload> => {
+    ): TransitionOut<BugObservationConfig> => {
         const stage = (m.memory.vars?.stage as Stage) ?? 'idle';
         
         console.log('[Transition] Stage:', stage, 'Action:', exec.action.kind);
@@ -920,7 +921,9 @@ Actual: Second call throws "Session manager not configured" error.
         const observations = exec.result.status !== 'ok' || exec.result.data ? [{
             source: 'internal' as const,
             kind: `internal.${exec.result.status}` as const,
-            payload: exec.result.data ?? {},
+            payload: (exec.result.data && typeof exec.result.data === 'object')
+                ? { ...(exec.result.data as Record<string, unknown>) }
+                : { value: exec.result.data },
             provenance: {
                 ts: exec.result.ts ?? Date.now(),
                 turn: env.turn

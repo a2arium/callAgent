@@ -9,7 +9,9 @@ import {
     type ExecResult,
     type ExecErrorPayload,
     type Observation,
-    type AttentionSignal
+    type AttentionSignal,
+    type SynthesizeObservation,
+    type ObservationConfig
 } from './oneTurn.js';
 import type { EnvironmentState, MentalState, ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
@@ -21,11 +23,14 @@ type LoopRunnerOptions = {
     latencyMs?: number;
 };
 
-const ensureInbox = <ObservationPayload = unknown>(environment: EnvironmentState<ObservationPayload>): ObservationInbox<ObservationPayload> => {
+const ensureInbox = <ObservationPayload extends ObservationConfig = ObservationConfig>(environment: EnvironmentState<ObservationPayload>): ObservationInbox<ObservationPayload> => {
     const raw = environment.inbox as unknown;
     if (Array.isArray(raw)) {
-        const legacy = raw as Observation<ObservationPayload>[];
-        const converted: ObservationInbox<ObservationPayload> = { current: [...legacy], all: [...legacy] };
+        const legacy = raw as Observation<unknown>[];
+        const converted: ObservationInbox<ObservationPayload> = {
+            current: legacy as unknown as SynthesizeObservation<ObservationPayload>[],
+            all: legacy as unknown as SynthesizeObservation<ObservationPayload>[]
+        };
         environment.inbox = converted;
         return converted;
     }
@@ -43,11 +48,11 @@ const ensureInbox = <ObservationPayload = unknown>(environment: EnvironmentState
 
 export async function runLoop<
     Sensory = unknown,
-    Obs = Observation,
+    Obs = SynthesizeObservation<ObservationConfig>,
     Alpha = AttentionSignal,
     ExecData = unknown,
     ExecError extends import('./oneTurn.js').ExecErrorPayload = import('./oneTurn.js').ExecErrorPayload,
-    ObservationPayload = unknown
+    ObservationPayload extends ObservationConfig = ObservationConfig
 >(
     ctx: TaskContext,
     M: MentalState<Sensory>,
@@ -73,7 +78,7 @@ export async function runLoop<
     // Provide minimal defaults (prefer agent overrides when present)
     const defaults: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload> = {
         attention: modules.attention ?? ((_prev, _env) => ({ kind: 'all' })),
-        perception: modules.perception ?? ((e: EnvironmentState) => {
+        perception: modules.perception ?? ((e: EnvironmentState<ObservationPayload>) => {
             const inboxState = ensureInbox(e);
             const turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
             // Default perception returns inbox observations
@@ -242,7 +247,7 @@ export async function runLoop<
                 result: { ...base, data: { intent: (a as any).intent, done: true }, toolId: 'internal' }
             };
         }),
-        transition: modules.transition ?? ((env, exec, m) => {
+        transition: modules.transition ?? ((env, exec) => {
             const { action, result } = exec;
 
             if (action.kind === 'ask_user' && action.token) {
@@ -258,53 +263,7 @@ export async function runLoop<
                 return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
             }
 
-            const observations: Observation<ObservationPayload>[] = [];
-            const mapSource = (): Observation<ObservationPayload>['source'] => {
-                switch (action.kind) {
-                    case 'tool':
-                        return 'tool';
-                    case 'subagent':
-                        return 'child';
-                    case 'ask_user':
-                        return 'user';
-                    case 'language':
-                        return 'env';
-                    default:
-                        return 'internal';
-                }
-            };
-
-            const payloadValue = (result.data ?? null) as ObservationPayload;
-            const errorValue: ExecErrorPayload | undefined =
-                result.status === 'error'
-                    ? (result.error ?? { code: 'execution_error', message: 'Execution returned error' })
-                    : undefined;
-
-            const baseObservation: Observation<ObservationPayload> = {
-                source: mapSource(),
-                kind: `${action.kind}.${result.status}`,
-                payload: payloadValue,
-                provenance: {
-                    ts: result.ts ?? Date.now(),
-                    turn: (env as any)?.turn ?? 0,
-                    id: result.correlationId ?? undefined,
-                    toolId: result.toolId,
-                    correlationId: result.correlationId
-                },
-                error: errorValue
-            };
-
-            // Only record successful/failed immediates; await branches returned above.
-            observations.push(baseObservation);
-
-            // Enrich env goal stats (best-effort)
-            try {
-                const nodes = ((m as any)?.goalState?.hierarchy?.nodes) || {};
-                const doneCount = Object.values(nodes as any).filter((n: any) => n?.status === 'done').length;
-                (env as any).goalStats = { doneCount };
-            } catch { /* noop */ }
-
-            return { kind: 'continue', observations } as TransitionOut<ObservationPayload>;
+            return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {
             try {
@@ -483,7 +442,7 @@ export async function runLoop<
                 outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
             }
             const observations = Array.isArray((outcome as any).observations)
-                ? ((outcome as any).observations as Observation<ObservationPayload>[])
+                ? ((outcome as any).observations as SynthesizeObservation<ObservationPayload>[])
                 : [];
             if (observations.length > 0) {
                 inbox.all.push(...observations);
@@ -544,5 +503,3 @@ export async function runLoop<
 
     return { M: m, outcome, metrics: timings.length ? { timings, rewards } : undefined };
 }
-
-

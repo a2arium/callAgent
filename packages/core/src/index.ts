@@ -27,7 +27,9 @@ export type {
     ShieldOutcome,
     AttentionSignal,
     Observation,
-    ObservationProvenance
+    ObservationProvenance,
+    ObservationConfig,
+    SynthesizeObservation
 } from './loop/oneTurn.js';
 export type { Modules } from './loop/oneTurn.js';
 export type {

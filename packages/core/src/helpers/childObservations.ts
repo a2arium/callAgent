@@ -1,4 +1,4 @@
-import type { Observation } from '../loop/oneTurn.js';
+import type { ObservationConfig, SynthesizeObservation } from '../loop/oneTurn.js';
 import type {
     ChildCompletedObservation,
     ChildCompletedPayload,
@@ -43,9 +43,16 @@ const getResultFromSnapshot = <Result>(snapshot: InteractiveTaskSnapshot<Result,
 };
 
 export const isChildCompletedObservation = <Result = unknown, Input = unknown>(
-    observation: Observation<unknown>
+    observation: unknown
 ): observation is ChildCompletedObservation<Result, Input> =>
-    !!observation && observation.kind === CHILD_COMPLETED_KIND && observation.source === 'child' && isRecord(observation.payload);
+    !!observation &&
+    isRecord(observation) &&
+    'kind' in observation &&
+    (observation as { kind?: unknown }).kind === CHILD_COMPLETED_KIND &&
+    'source' in observation &&
+    (observation as { source?: unknown }).source === 'child' &&
+    'payload' in observation &&
+    isRecord((observation as { payload?: unknown }).payload);
 
 export const extractChildResult = <Result = unknown, Input = unknown>(
     observation?: ChildCompletedObservation<Result, Input> | null
@@ -63,7 +70,7 @@ export type ChildCompletionDetails<Result = unknown, Input = unknown> = {
 };
 
 export const findChildCompletion = <Result = unknown, Input = unknown>(
-    observations: Observation<unknown>[],
+    observations: Array<SynthesizeObservation<ObservationConfig>>,
     token?: string
 ): ChildCompletionDetails<Result, Input> | undefined => {
     for (const observation of observations) {

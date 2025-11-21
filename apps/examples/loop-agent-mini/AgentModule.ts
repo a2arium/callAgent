@@ -5,21 +5,27 @@ import {
     type ExecErrorPayload,
     type ExecutableAction,
     type MentalState,
-    type Observation,
+    type ObservationConfig,
     type ProposedAction,
+    type SynthesizeObservation,
     type TaskContext,
     type TransitionOut
 } from '@a2arium/callagent-core';
 
 type MiniExecData = { message?: string; status?: 'complete' };
 
-type MiniObservationPayload = {
+type MiniObservationValue = {
     message?: string;
     status: ExecResult['status'];
     toolId?: string;
 };
 
-type MiniObservation = Observation<MiniObservationPayload>;
+type MiniObservationConfig = ObservationConfig & {
+    user: unknown;
+    env: MiniObservationValue;
+};
+
+type MiniObservation = SynthesizeObservation<MiniObservationConfig>;
 
 type MiniPerception = {
     input: unknown;
@@ -54,26 +60,11 @@ const createExecResult = (
     ...overrides
 });
 
-const mapSource = (action: ExecutableAction): MiniObservation['source'] => {
-    switch (action.kind) {
-        case 'ask_user':
-            return 'user';
-        case 'subagent':
-            return 'child';
-        case 'tool':
-            return 'tool';
-        case 'language':
-            return 'env';
-        default:
-            return 'internal';
-    }
-};
-
 const buildObservation = (
-    env: EnvironmentState<MiniObservationPayload>,
+    env: EnvironmentState<MiniObservationConfig>,
     exec: { action: ExecutableAction; result: ExecResult<MiniExecData> }
 ): MiniObservation => ({
-    source: mapSource(exec.action),
+    source: 'env',
     kind: `${exec.action.kind}.${exec.result.status}`,
     payload: {
         message: exec.result.data?.message,
@@ -105,7 +96,7 @@ const buildObservation = (
  * Key Insight: MentalState (including llmState) is saved after EVERY runLoop execution,
  * so history persists across turns even within a single task execution.
  */
-export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, ExecErrorPayload, MiniObservationPayload>({
+export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, ExecErrorPayload, MiniObservationConfig>({
     manifest: {
         name: 'loop-agent-mini',
         version: '0.3.0',
@@ -121,7 +112,7 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         historyMode: 'dynamic'
     },
 
-    perception: (env: EnvironmentState<MiniObservationPayload>): MiniPerception => {
+    perception: (env: EnvironmentState<MiniObservationConfig>): MiniPerception => {
         const drained = env.inbox.current;
         if (drained.length > 0) {
             describe('[Perception] Drained observations', drained);
@@ -131,7 +122,7 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         // Extract input from inbox if available
         const userInput = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
         return {
-            input: (userInput?.payload as any)?.value,
+            input: userInput?.payload.value,
             time: env.time,
             observations: drained
         };
@@ -255,10 +246,10 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
     },
 
     transition: (
-        env: EnvironmentState<MiniObservationPayload>,
+        env: EnvironmentState<MiniObservationConfig>,
         executionResult: { action: ExecutableAction; result: ExecResult<MiniExecData> },
         _mentalState: MiniMentalState
-    ): TransitionOut<MiniObservationPayload> => {
+    ): TransitionOut<MiniObservationConfig> => {
         const { action, result } = executionResult;
 
         if (action.kind === 'internal' && action.done) {

@@ -5,8 +5,9 @@ import {
     type ExecResult,
     type ExecutableAction,
     type MentalState,
-    type Observation,
+    type ObservationConfig,
     type ProposedAction,
+    type SynthesizeObservation,
     type TaskContext,
     type TransitionOut
 } from '@a2arium/callagent-core';
@@ -25,7 +26,14 @@ type ParentObservationPayload = {
     status?: string;
 };
 
-type ParentObservation = Observation<ParentObservationPayload>;
+type ParentObservationConfig = ObservationConfig & {
+    user: { url?: string };
+    child: Record<string, unknown>;
+    internal: ParentObservationPayload;
+    env: ParentObservationPayload;
+};
+
+type ParentObservation = SynthesizeObservation<ParentObservationConfig>;
 
 type ParentPerception = {
     inbox: ParentObservation[];
@@ -61,22 +69,36 @@ const childAgentName = 'loop-await-child-demo-child';
 const readChildObservation = (observations: ParentObservation[]): { html?: string; token?: string; status?: string } => {
     for (const obs of observations) {
         if (!obs) continue;
-        if (obs.source === 'child' || obs.kind === 'child.completed') {
-            const payload = obs.payload ?? {};
-            if (payload) {
-                if (payload.html || (payload as any)?.result) {
-                    const result = (payload as any)?.result;
-                    const html = typeof payload.html === 'string' ? payload.html : result?.data?.html;
-                    const token = typeof payload.token === 'string' ? payload.token : result?.token ?? result?.data?.token;
-                    const status = typeof payload.status === 'string' ? payload.status : result?.status;
-                    return { html, token, status };
-                }
+        if (obs.source === 'child' && obs.kind === 'child.completed') {
+            const payload = obs.payload;
+            const snapshot = payload.result as Record<string, unknown> | undefined;
+            const nestedResult = (snapshot?.result as Record<string, unknown>) || snapshot;
+            const html = typeof (nestedResult?.data as Record<string, unknown> | undefined)?.html === 'string'
+                ? String((nestedResult!.data as Record<string, unknown>).html)
+                : typeof nestedResult?.html === 'string'
+                    ? String(nestedResult.html)
+                    : undefined;
+            const token =
+                typeof payload.result?.id === 'string' ? payload.result.id :
+                typeof payload.childTaskId === 'string' ? payload.childTaskId :
+                typeof nestedResult?.token === 'string' ? nestedResult.token :
+                typeof (nestedResult?.data as Record<string, unknown> | undefined)?.token === 'string'
+                    ? String((nestedResult!.data as Record<string, unknown>).token)
+                    : payload.token;
+            const status = typeof nestedResult?.status === 'string'
+                ? nestedResult.status
+                : typeof (nestedResult?.result as Record<string, unknown> | undefined)?.status === 'string'
+                    ? String((nestedResult!.result as Record<string, unknown>).status)
+                    : undefined;
+            if (html || token || status) {
+                return { html, token, status };
             }
         }
-        if (obs.kind === 'fetch-webpage.result') {
-            const html = typeof obs.payload?.html === 'string' ? obs.payload.html : undefined;
-            const token = typeof obs.payload?.token === 'string' ? obs.payload.token : undefined;
-            const status = typeof obs.payload?.status === 'string' ? obs.payload.status : undefined;
+        if (obs.source === 'internal' && obs.kind === 'fetch-webpage.result') {
+            const payload = obs.payload as ParentObservationPayload;
+            const html = typeof payload?.html === 'string' ? payload.html : undefined;
+            const token = typeof payload?.token === 'string' ? payload.token : undefined;
+            const status = typeof payload?.status === 'string' ? payload.status : undefined;
             if (html || token || status) {
                 return { html, token, status };
             }
@@ -85,7 +107,7 @@ const readChildObservation = (observations: ParentObservation[]): { html?: strin
     return {};
 };
 
-const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, ParentExecData, ExecErrorPayload, ParentObservationPayload>({
+const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, ParentExecData, ExecErrorPayload, ParentObservationConfig>({
     manifest: {
         name: 'loop-await-child-demo-parent',
         version: '0.1.0',
@@ -98,13 +120,13 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
         }
     },
 
-    perception: (env: EnvironmentState<ParentObservationPayload>): ParentPerception => {
+    perception: (env: EnvironmentState<ParentObservationConfig>): ParentPerception => {
         const inbox = Array.isArray(env.inbox?.current) ? env.inbox.current : [];
         const childResult = readChildObservation(inbox);
         
         // Extract input from inbox
         const userInput = inbox.find(o => o.source === 'user' && o.kind === 'input.provided');
-        const inputValue = (userInput?.payload as any)?.value as Record<string, unknown> | undefined;
+        const inputValue = userInput?.payload.value;
         const inputUrl = typeof inputValue?.url === 'string' ? String(inputValue.url) : undefined;
 
         parentLog.info('[Perception] Turn resumed', {
@@ -238,10 +260,10 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
     },
 
     transition: (
-        env: EnvironmentState<ParentObservationPayload>,
+        env: EnvironmentState<ParentObservationConfig>,
         exec: { action: ExecutableAction; result: ExecResult<ParentExecData> },
         m: MentalState<ParentSensory>
-    ): TransitionOut<ParentObservationPayload> => {
+    ): TransitionOut<ParentObservationConfig> => {
         const data = exec.result.data ?? {};
         const html = typeof data.html === 'string'
             ? data.html

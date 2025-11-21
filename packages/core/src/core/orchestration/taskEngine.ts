@@ -21,7 +21,7 @@ import { initialM } from '../../loop/init.js';
 import { logger } from '@a2arium/callagent-utils';
 import { runLoop } from '../../loop/loopRunner.js';
 import type { EnvironmentState, ObservationInbox } from '../../loop/types.js';
-import type { Observation } from '../../loop/oneTurn.js';
+import type { Observation, ObservationConfig, SynthesizeObservation } from '../../loop/oneTurn.js';
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
@@ -34,21 +34,38 @@ type WorkingVarHookRegistrarFn = (hooks?: {
     onClear?: () => void;
 }) => void;
 
-const normalizeInbox = (value: unknown): ObservationInbox => {
+type EngineObservationConfig = ObservationConfig & {
+    user: unknown;
+    tool: unknown;
+    child: unknown;
+    internal?: unknown;
+    env?: unknown;
+};
+
+type EngineObservation = SynthesizeObservation<EngineObservationConfig>;
+type EngineObservationInbox = ObservationInbox<EngineObservationConfig>;
+
+const normalizeInbox = (value: unknown): EngineObservationInbox => {
     if (Array.isArray(value)) {
         const arr = value as Observation[];
-        return { current: [...arr], all: [...arr] };
+        return {
+            current: [...arr] as EngineObservation[],
+            all: [...arr] as EngineObservation[]
+        };
     }
     if (value && typeof value === 'object') {
-        const candidate = value as Partial<ObservationInbox>;
+        const candidate = value as Partial<EngineObservationInbox>;
         const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
         const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
-        return { current, all };
+        return {
+            current: current as EngineObservation[],
+            all: all as EngineObservation[]
+        };
     }
     return { current: [], all: [] };
 };
 
-const addObservationToInbox = (inboxValue: unknown, observation: Observation): ObservationInbox => {
+const addObservationToInbox = (inboxValue: unknown, observation: EngineObservation): EngineObservationInbox => {
     const inbox = normalizeInbox(inboxValue);
     inbox.current.push(observation);
     inbox.all.push(observation);
@@ -57,9 +74,9 @@ const addObservationToInbox = (inboxValue: unknown, observation: Observation): O
 
 const addObservationToInboxIfMissing = (
     inboxValue: unknown,
-    observation: Observation,
-    predicate: (obs: Observation) => boolean
-): ObservationInbox => {
+    observation: EngineObservation,
+    predicate: (obs: EngineObservation) => boolean
+): EngineObservationInbox => {
     const inbox = normalizeInbox(inboxValue);
     const hasInAll = inbox.all.some(predicate);
     const hasInCurrent = inbox.current.some(predicate);
@@ -1641,7 +1658,7 @@ export class TaskEngine {
 
                 // Create initial input observation for new CLI tasks
                 if (ctx.task.input && typeof ctx.task.input === 'object' && Object.keys(ctx.task.input).length > 0) {
-                    const initialObservation: Observation = {
+                    const initialObservation: EngineObservation = {
                         source: 'user',
                         kind: 'input.provided',
                         payload: { token: 'initial-input', value: ctx.task.input },
@@ -1684,14 +1701,14 @@ export class TaskEngine {
                                 );
 
                                 if (completionEvent) {
-                                    const observationPredicate = (obs: Observation) =>
+                                    const observationPredicate = (obs: EngineObservation) =>
                                         obs?.kind === 'child.completed' &&
                                         typeof obs === 'object' &&
                                         obs !== null &&
                                         (obs as any)?.payload &&
                                         (obs as any).payload.token === token;
 
-                                    const childObservation: Observation = {
+                                    const childObservation: EngineObservation = {
                                         source: 'child',
                                         kind: 'child.completed',
                                         payload: {
@@ -2458,7 +2475,7 @@ export class TaskEngine {
         if (!entry) return;
         delete tools[token];
         const next = setPendingTools(base, tools) as Record<string, unknown>;
-        const toolObservation: Observation = {
+        const toolObservation: EngineObservation = {
             source: 'tool',
             kind: 'tool.completed',
             payload: { token, result, tool: entry?.name },
@@ -2548,7 +2565,7 @@ export class TaskEngine {
         if (!entry) return;
         delete events[token];
         const next = setPendingExternalEvents(base, events) as Record<string, unknown>;
-        const externalObservation: Observation = {
+        const externalObservation: EngineObservation = {
             source: 'env',
             kind: 'external.event',
             payload: { token, payload, type: entry?.type },
@@ -2655,7 +2672,7 @@ export class TaskEngine {
                 tokenFound: !!token
             });
 
-            const childObservation: Observation = {
+            const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
                 payload: { token, childTaskId, result, agentId: childAgentId },
@@ -2689,7 +2706,7 @@ export class TaskEngine {
                     const latestBase = (latestSnap.snapshot as Record<string, unknown>) || {};
                     const latestNext = { ...latestBase };
                     const latestInbox = normalizeInbox((latestNext as any)?.inbox);
-                    const observationPredicate = (obs: Observation) =>
+                    const observationPredicate = (obs: EngineObservation) =>
                         obs?.kind === 'child.completed' &&
                         typeof obs === 'object' &&
                         obs !== null &&
@@ -2787,7 +2804,7 @@ export class TaskEngine {
             }
             delete tasks[token];
             const next = setPendingTasks(base, tasks) as Record<string, unknown>;
-            const childObservation: Observation = {
+            const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
                 payload: { token, childTaskId, result, agentId: childAgentId },
@@ -2804,7 +2821,7 @@ export class TaskEngine {
                 resultStatus: (result as any)?.status,
             });
             // Use addObservationToInboxIfMissing to avoid duplicates if observation was already staged synchronously
-            const observationPredicate = (obs: Observation) =>
+            const observationPredicate = (obs: EngineObservation) =>
                 obs?.kind === 'child.completed' &&
                 typeof obs === 'object' &&
                 obs !== null &&
@@ -2866,7 +2883,7 @@ export class TaskEngine {
                 // This handles race conditions where stageChildCompletionObservation saved but
                 // handleChildCompleted loaded an older version
                 const finalInbox = normalizeInbox((baseNow as any)?.inbox);
-                const observationPredicateForCheck = (obs: Observation) =>
+                const observationPredicateForCheck = (obs: EngineObservation) =>
                     obs?.kind === 'child.completed' &&
                     typeof obs === 'object' &&
                     obs !== null &&
@@ -2990,7 +3007,7 @@ export class TaskEngine {
 
                 // ✅ FIX: Always ensure the observation is in the inbox before resuming
                 // This is critical for synchronous completions where the observation must be available immediately
-                const observationPredicate = (obs: Observation) =>
+                const observationPredicate = (obs: EngineObservation) =>
                     obs?.kind === 'child.completed' &&
                     typeof obs === 'object' &&
                     obs !== null &&

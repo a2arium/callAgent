@@ -34,9 +34,9 @@ export const createAgent = <
     Alpha = unknown,
     ExecData = unknown,
     ExecError extends import('../../loop/oneTurn.js').ExecErrorPayload = import('../../loop/oneTurn.js').ExecErrorPayload,
-    ObservationPayload = unknown
+    ObsConfigOrPayload extends import('../../loop/oneTurn.js').ObservationConfig = import('../../loop/oneTurn.js').ObservationConfig
 >(
-    options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>,
+    options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>,
     metaUrl: string
 ): AgentPlugin => {
     // Get caller directory directly from required metaUrl
@@ -134,7 +134,7 @@ export const createAgent = <
     const sugarModules: Record<string, unknown> = {};
     const moduleKeys: Array<
         keyof NonNullable<
-            NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['loop']>['modules']
+            NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['loop']>['modules']
         >
     > = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
     for (const k of moduleKeys) {
@@ -203,4 +203,4 @@ export async function loadPlugins(pluginDir: string): Promise<void> {
     // }
     pluginLogger.info(`Agent discovery placeholder. Directory: ${pluginDir}`);
     pluginLogger.info('Runner should directly import agent files.');
-} 
+}

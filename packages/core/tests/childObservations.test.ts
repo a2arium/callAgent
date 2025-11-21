@@ -1,6 +1,5 @@
 import { extractChildResult, findChildCompletion, isChildCompletedObservation } from '../src/helpers/childObservations.js';
-import type { Observation } from '../src/loop/oneTurn.js';
-import type { ChildCompletedPayload } from '../src/shared/types/observation.js';
+import type { ChildCompletedObservation, ChildCompletedPayload } from '../src/shared/types/observation.js';
 
 type ChildReturn = {
     ok: boolean;
@@ -10,7 +9,9 @@ type ChildReturn = {
     };
 };
 
-const buildObservation = (overrides: Partial<ChildCompletedPayload<ChildReturn>> = {}): Observation<ChildCompletedPayload<ChildReturn>> => ({
+const buildObservation = (
+    overrides: Partial<ChildCompletedPayload<ChildReturn>> = {}
+): ChildCompletedObservation<ChildReturn> => ({
     source: 'child',
     kind: 'child.completed',
     payload: {
@@ -33,7 +34,8 @@ const buildObservation = (overrides: Partial<ChildCompletedPayload<ChildReturn>>
                     }
                 }
             }
-        }
+        },
+        ...overrides
     },
     provenance: {
         ts: Date.now(),

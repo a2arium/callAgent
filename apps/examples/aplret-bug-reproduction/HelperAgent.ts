@@ -14,7 +14,8 @@ import type {
     TransitionOut,
     ExecResult,
     ExecErrorPayload,
-    ProposedAction
+    ProposedAction,
+    ObservationConfig
 } from '@a2arium/callagent-core';
 
 type HelperSensory = {
@@ -25,11 +26,11 @@ type HelperObs = {
     task?: string;
 };
 
-type InboxPayload = {
-    value?: unknown;
+type HelperObservationConfig = ObservationConfig & {
+    user: { task?: string };
 };
 
-export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecErrorPayload, InboxPayload>({
+export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecErrorPayload, HelperObservationConfig>({
     manifest: {
         name: 'helper-agent',
         version: '1.0.0',
@@ -37,9 +38,9 @@ export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecError
         budgets: { maxTurns: 1 }
     },
 
-    perception: (env: EnvironmentState<InboxPayload>): HelperObs => {
+    perception: (env: EnvironmentState<HelperObservationConfig>): HelperObs => {
         const userInput = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
-        const inputValue = userInput?.payload?.value as { task?: string } | undefined;
+        const inputValue = userInput?.payload.value;
         return { task: inputValue?.task };
     },
 
@@ -83,7 +84,7 @@ export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecError
     transition: (
         _env,
         exec
-    ): TransitionOut<InboxPayload> => {
+    ): TransitionOut<HelperObservationConfig> => {
         return {
             kind: 'complete',
             result: exec.result.data ?? { ok: true }

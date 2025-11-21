@@ -1,4 +1,4 @@
-import type { Observation } from '../../loop/oneTurn.js';
+import type { ChildEnvelope, ObservationConfig, SynthesizeObservation } from '../../loop/oneTurn.js';
 import type { Artifact, TaskStatus } from './StreamingEvents.js';
 
 /**
@@ -33,17 +33,19 @@ export type InteractiveTaskSnapshot<Result = unknown, Input = unknown> = {
 /**
  * Observation payload emitted when a child agent completes a task.
  */
-export type ChildCompletedPayload<Result = unknown, Input = unknown> = {
-    token: string;
-    childTaskId?: string;
-    agentId?: string;
-    result: InteractiveTaskSnapshot<Result, Input>;
+export type ChildCompletedPayload<Result = unknown, Input = unknown> = ChildEnvelope<InteractiveTaskSnapshot<Result, Input>>;
+
+type ChildObservationConfig<Result = unknown, Input = unknown> = ObservationConfig & {
+    child: InteractiveTaskSnapshot<Result, Input>;
 };
 
 /**
  * helper alias for child completion observations.
  */
-export type ChildCompletedObservation<Result = unknown, Input = unknown> = Observation<ChildCompletedPayload<Result, Input>>;
+export type ChildCompletedObservation<Result = unknown, Input = unknown> = Extract<
+    SynthesizeObservation<ChildObservationConfig<Result, Input>>,
+    { source: 'child' }
+>;
 
 
 

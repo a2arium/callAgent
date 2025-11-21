@@ -37,7 +37,7 @@ export type CreateAgentPluginOptions<
     Alpha = AttentionSignal,
     ExecData = unknown,
     ExecError extends import('../../loop/oneTurn.js').ExecErrorPayload = import('../../loop/oneTurn.js').ExecErrorPayload,
-    ObservationPayload = unknown
+    ObsConfigOrPayload extends import('../../loop/oneTurn.js').ObservationConfig = import('../../loop/oneTurn.js').ObservationConfig
 > = {
     /** Agent manifest - path to JSON file or direct object, defaults to './agent.json' */
     manifest?: string | AgentManifest;
@@ -51,14 +51,14 @@ export type CreateAgentPluginOptions<
     handleTask?: (ctx: AgentTaskContext) => Promise<unknown>;
     /** Tenant context for multi-tenant isolation */
     tenantId?: string;
-    loop?: { modules?: Partial<import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>> };
+    loop?: { modules?: Partial<import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>> };
     // Sugar: allow defining loop modules at the top level
-    attention?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['attention'];
-    perception?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['perception'];
-    learning?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['learning'];
-    policy?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['policy'];
-    shield?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['shield'];
-    execution?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['execution'];
-    transition?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>['transition'];
+    attention?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['attention'];
+    perception?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['perception'];
+    learning?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['learning'];
+    policy?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['policy'];
+    shield?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['shield'];
+    execution?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['execution'];
+    transition?: import('../../loop/oneTurn.js').Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['transition'];
     // Future hooks: initialize?, shutdown?, etc.
-} 
+}

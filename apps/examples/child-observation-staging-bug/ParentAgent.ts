@@ -5,7 +5,7 @@ import {
     type ExecResult,
     type ExecutableAction,
     type MentalState,
-    type Observation,
+    type ObservationConfig,
     type ProposedAction,
     type TaskContext,
     type TransitionOut
@@ -13,10 +13,9 @@ import {
 
 import { logger } from '@a2arium/callagent-utils';
 
-type ParentObservationPayload = {
-    token?: string;
-    result?: unknown;
-    agentId?: string;
+type ParentObservationConfig = ObservationConfig & {
+    user: unknown;
+    child: unknown;
 };
 
 type ParentPerception = {
@@ -35,7 +34,7 @@ const log = logger.createLogger({ prefix: 'ParentAgent' });
 
 const CHILD_AGENT_NAME = 'child-observation-staging-bug-child';
 
-export default createAgent<ParentSensory, ParentPerception, unknown, unknown, ExecErrorPayload, ParentObservationPayload>({
+export default createAgent<ParentSensory, ParentPerception, unknown, unknown, ExecErrorPayload, ParentObservationConfig>({
     manifest: {
         name: 'child-observation-staging-bug-parent',
         version: '0.1.0',
@@ -46,7 +45,7 @@ export default createAgent<ParentSensory, ParentPerception, unknown, unknown, Ex
         // Removed dependencies for basic testing
     },
 
-    perception: (env: EnvironmentState<ParentObservationPayload>): ParentPerception => {
+    perception: (env: EnvironmentState<ParentObservationConfig>): ParentPerception => {
         const inbox = Array.isArray(env.inbox?.current) ? env.inbox.current : [];
         const inboxCount = inbox.length;
 
@@ -58,8 +57,8 @@ export default createAgent<ParentSensory, ParentPerception, unknown, unknown, Ex
         for (const obs of inbox) {
             if (obs.source === 'child' && obs.kind === 'child.completed') {
                 hasChildCompletion = true;
-                childToken = obs.payload?.token as string;
-                childResult = obs.payload?.result;
+                childToken = obs.payload.token;
+                childResult = obs.payload.result;
                 break;
             }
         }
@@ -166,10 +165,10 @@ export default createAgent<ParentSensory, ParentPerception, unknown, unknown, Ex
     },
 
     transition: (
-        env: EnvironmentState<ParentObservationPayload>,
+        env: EnvironmentState<ParentObservationConfig>,
         exec: { action: ExecutableAction; result: ExecResult },
         _m: MentalState<ParentSensory>
-    ): TransitionOut<ParentObservationPayload> => {
+    ): TransitionOut<ParentObservationConfig> => {
         const data = exec.result.data as any;
 
         if (data?.token) {

@@ -19,6 +19,25 @@ export type ObservationProvenance = {
     correlationId?: string;
 };
 
+export type ObservationConfig = {
+    user?: unknown;
+    tool?: unknown;
+    child?: unknown;
+    internal?: unknown;
+    env?: unknown;
+};
+
+export type UserEnvelope<T> = { token: string; value: T };
+export type ToolEnvelope<T> = { token: string; result: T; tool: string };
+export type ChildEnvelope<T> = { token: string; result: T; agentId?: string; childTaskId?: string };
+
+export type SynthesizeObservation<T extends ObservationConfig> =
+    | (T['user'] extends undefined ? never : { source: 'user'; kind: 'input.provided'; payload: UserEnvelope<T['user']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })
+    | (T['tool'] extends undefined ? never : { source: 'tool'; kind: 'tool.completed'; payload: ToolEnvelope<T['tool']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })
+    | (T['child'] extends undefined ? never : { source: 'child'; kind: 'child.completed'; payload: ChildEnvelope<T['child']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })
+    | (T['internal'] extends undefined ? never : { source: 'internal'; kind: string; payload: T['internal']; provenance?: ObservationProvenance; error?: { code: string; message: string } })
+    | (T['env'] extends undefined ? never : { source: 'env'; kind: string; payload: T['env']; provenance?: ObservationProvenance; error?: { code: string; message: string } });
+
 export type Observation<Payload = unknown> = {
     source: 'tool' | 'child' | 'env' | 'user' | 'internal';
     kind: string;
@@ -59,8 +78,8 @@ export type ShieldOutcome =
     | { action: 'veto'; reason: string }
     | { action: 'defer'; askUser: string };
 
-export type TransitionOut<ObservationPayload = unknown> =
-    | { kind: 'continue'; observations: Observation<ObservationPayload>[] }
+export type TransitionOut<ObservationPayload extends ObservationConfig> =
+    | { kind: 'continue'; observations: SynthesizeObservation<ObservationPayload>[] }
     | { kind: 'await_input'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
@@ -68,7 +87,7 @@ export type TransitionOut<ObservationPayload = unknown> =
     | { kind: 'fail'; reason: string };
 
 // Temporary alias while downstream modules migrate
-export type TurnOutcome<ObservationPayload = unknown> = TransitionOut<ObservationPayload>;
+export type TurnOutcome<ObservationPayload extends ObservationConfig> = TransitionOut<ObservationPayload>;
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
     | ((m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
@@ -81,7 +100,7 @@ export type Modules<
     Alpha = AttentionSignal,
     ExecData = unknown,
     ExecError extends ExecErrorPayload = ExecErrorPayload,
-    ObservationPayload = unknown
+    ObservationPayload extends ObservationConfig = ObservationConfig
 > = {
     attention: (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, llm?: PureLLMPort) => Alpha;
     perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
@@ -105,7 +124,7 @@ export async function oneTurn<
     Alpha = AttentionSignal,
     ExecData = unknown,
     ExecError extends ExecErrorPayload = ExecErrorPayload,
-    ObservationPayload = unknown
+    ObservationPayload extends ObservationConfig = ObservationConfig
 >(
     ctx: TaskContext,
     env: EnvironmentState<ObservationPayload>,
@@ -288,5 +307,3 @@ export async function oneTurn<
 
     return { m: m1, exec, outcome, timings, reward: r };
 }
-
-

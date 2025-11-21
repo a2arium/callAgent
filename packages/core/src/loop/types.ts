@@ -6,11 +6,11 @@
 // - Single source of truth for session cognition (no parallel stores)
 // - migration handled outside this file
 // - Placeholders for future capabilities (world model, emotion, reward)
-import type { Observation } from './oneTurn.js';
+import type { Observation, SynthesizeObservation, ObservationConfig } from './oneTurn.js';
 
-export type ObservationInbox<Payload = unknown> = {
-    current: Observation<Payload>[];
-    all: Observation<Payload>[];
+export type ObservationInbox<Payload extends ObservationConfig = ObservationConfig> = {
+    current: SynthesizeObservation<Payload>[];
+    all: SynthesizeObservation<Payload>[];
 };
 
 export type EpisodicEvent = {
@@ -114,7 +114,7 @@ export type Snapshot = {
 };
 
 // Environment state visible to the loop per turn
-export type EnvironmentState<ObservationPayload = unknown> = {
+export type EnvironmentState<ObservationPayload extends ObservationConfig = ObservationConfig> = {
     time: string; // ISO timestamp
     sessionId?: string; // current session id (task id)
     turn: number; // cumulative loop turn (persisted per session)
@@ -131,5 +131,3 @@ export type EnvironmentState<ObservationPayload = unknown> = {
     goalStats?: { doneCount: number };
     config?: Record<string, unknown>; // manifest-level configuration
 };
-
-
