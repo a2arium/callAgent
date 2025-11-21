@@ -5,7 +5,7 @@ This document describes the loop-first execution model (Attention → Perception
 - MentalState `snapshot.M` is the single source of truth, persisted at turn boundaries and before await exits.
 - LoopRunner runs one turn per invocation; auto-resume triggers additional turns after events.
 - Modules are declared per-agent in `createAgent({ loop: { modules: {...} } })`.
-- Auto-resume eliminates the need for explicit durable handlers by appending event payloads to `env.inbox` (and mirroring them on `env.input` for legacy agents).
+- Auto-resume eliminates the need for explicit durable handlers by appending all event payloads (user input, tool results, child completions) to `env.inbox.current` as observations.
 
 ### EnvironmentState with Auto-Resume
 ```ts

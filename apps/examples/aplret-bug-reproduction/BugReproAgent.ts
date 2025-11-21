@@ -195,7 +195,7 @@ export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayl
         console.log('\n[Perception] Processing inbox:', {
             count: env.inbox.current.length,
             sources: env.inbox.current.map(o => o.source),
-            envInputKind: (env.input as any)?.kind
+            envInputKind: undefined // env.input removed - all inputs via inbox
         });
 
         // Priority 1: Check for child completion in inbox (resume after A2A)
@@ -237,21 +237,8 @@ export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayl
             }
         }
 
-        // Priority 3: Check for initial input from env.input (only on first turn)
-        if (env.input && (env.input as any).kind !== 'child') {
-            // TaskInput can have properties directly or in a 'value' field
-            const directInput = env.input as Record<string, unknown>;
-            const testMode = directInput.testMode || directInput.mode || 
-                           (directInput.value as any)?.testMode || (directInput.value as any)?.mode;
-            const text = typeof testMode === 'string' ? testMode : undefined;
-            
-            console.log('[Perception] Initial input detected:', { text, directInput });
-            
-            return {
-                eventType: 'init',
-                text
-            };
-        }
+        // Priority 3: Fallback - no observations this turn
+        console.log('[Perception] No observations detected - waiting for input');
 
         return { eventType: 'idle' };
     },

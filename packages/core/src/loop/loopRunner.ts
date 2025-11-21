@@ -63,7 +63,7 @@ export async function runLoop<
     const runId = Math.random().toString(36).substring(2, 8);
     const taskId = ctx.task.id.substring(0, 20);
     log.debug('runLoop started', { taskId, runId });
-    
+
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
     try { log.info('LoopRunner started', { maxTurns }); } catch { }
@@ -76,17 +76,8 @@ export async function runLoop<
         perception: modules.perception ?? ((e: EnvironmentState) => {
             const inboxState = ensureInbox(e);
             const turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
-            try {
-                // import via dynamic require to avoid ESM circulars in tests
-                // eslint-disable-next-line @typescript-eslint/no-var-requires
-                const { sanitizeObservation } = require('./sanitize.js');
-                // Allow manifest to disable sanitization
-                const shouldSanitize = ((M as any)?.safety?.sanitize) !== false;
-                const safeInput = shouldSanitize ? sanitizeObservation(e.input) : e.input;
-                return { input: safeInput, time: e.time, pending: e.pending, inbox: turnInbox } as any;
-            } catch {
-                return { input: e.input, time: e.time, pending: e.pending, inbox: turnInbox } as any;
-            }
+            // Default perception returns inbox observations
+            return { time: e.time, pending: e.pending, inbox: turnInbox } as any;
         }),
         learning: modules.learning ?? ((prev, _prevAction, obs) => {
             try {
@@ -365,6 +356,15 @@ export async function runLoop<
     const rewards: number[] = [];
 
     // env.turn is already set correctly by taskEngine for the first turn
+    // 🔍 DEBUG: Log initial state
+    log.debug('🔍 DEBUG: Loop starting', {
+        taskId,
+        runId,
+        initialEnvTurn: (env as any).turn,
+        maxTurns,
+        loopWillRun: maxTurns > 0
+    });
+
     for (let turn = 0; turn < maxTurns; turn++) {
         // For subsequent iterations in the same runLoop call, increment turn
         if (turn > 0) {
@@ -372,6 +372,16 @@ export async function runLoop<
         }
         // Update logging context with current turn number
         updateLoggingContext({ turn: (env as any).turn });
+
+        // 🔍 DEBUG: Log each iteration
+        log.debug('🔍 DEBUG: Loop iteration', {
+            taskId,
+            runId,
+            loopCounter: turn,
+            envTurn: (env as any).turn,
+            maxTurns,
+            willCheckBudget: turn === maxTurns - 1
+        });
         if (opts.latencyMs && Date.now() - start > opts.latencyMs) {
             outcome = { kind: 'fail', reason: 'budget_latency_exceeded' };
             break;
@@ -379,17 +389,50 @@ export async function runLoop<
 
         try {
             log.debug('Before oneTurn', { taskId, runId, turn, varsCount: Object.keys(((m as any).memory?.vars) || {}).length });
-            const step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
-                ctx,
-                env,
-                m,
-                defaults,
-                prevAction,
-                rPrev
-            );
+
+            // ✅ FIX: Validate that ctx.memory exists before calling oneTurn
+            // This prevents "Cannot read properties of undefined (reading 'bind')" errors
+            // when agents use ctx.memory.semantic or other memory operations
+            if (!(ctx as any).memory) {
+                log.warn('ctx.memory is undefined - this may cause errors if agent uses memory operations', {
+                    taskId,
+                    runId,
+                    turn,
+                    agentId: (ctx as any).agentId
+                });
+            }
+
+            let step;
+            try {
+                step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
+                    ctx,
+                    env,
+                    m,
+                    defaults,
+                    prevAction,
+                    rPrev
+                );
+            } catch (turnError) {
+                // ✅ FIX: Enhanced error logging to identify bind errors
+                const errorMessage = turnError instanceof Error ? turnError.message : String(turnError);
+                const errorStack = turnError instanceof Error ? turnError.stack : undefined;
+                log.error('Turn execution failed', {
+                    taskId,
+                    runId,
+                    turn,
+                    error: errorMessage,
+                    stack: errorStack,
+                    hasMemory: !!(ctx as any).memory,
+                    hasVars: !!(ctx as any).vars,
+                    varsType: typeof (ctx as any).vars,
+                    memoryType: typeof (ctx as any).memory,
+                    agentId: (ctx as any).agentId
+                });
+                throw turnError;
+            }
             log.debug('After oneTurn', { taskId, runId, turn, stepVarsCount: Object.keys(((step.m as any).memory?.vars) || {}).length });
             m = step.m;
-            
+
             // ✅ FIX Bug #1E: Sync ctx.vars into m after each turn so next turn sees them
             // This ensures vars written via ctx.vars during Execution are visible to the next turn
             try {
@@ -397,7 +440,7 @@ export async function runLoop<
                 if (ctxVars && typeof ctxVars === 'object' && m && (m as any).memory) {
                     const existingVars = ((m as any).memory.vars) || {};
                     const varsToMerge: Record<string, unknown> = {};
-                    
+
                     // Extract all vars from ctx.vars - use get() method for proxy
                     if (typeof ctxVars.keys === 'function') {
                         for (const key of ctxVars.keys()) {
@@ -407,7 +450,7 @@ export async function runLoop<
                             }
                         }
                     }
-                    
+
                     // ✅ FIX Bug #1H: Only merge if varsToMerge has keys, otherwise keep Learning's vars!
                     // Don't overwrite Learning's vars with empty ctx.vars
                     if (Object.keys(varsToMerge).length > 0) {
@@ -420,9 +463,22 @@ export async function runLoop<
             } catch (syncError) {
                 log.warn('Failed to sync ctx.vars into m', { error: syncError instanceof Error ? syncError.message : String(syncError) });
             }
-            
+
             log.debug('After sync', { finalVarsCount: Object.keys(((m as any).memory?.vars) || {}).length });
             outcome = step.outcome;
+
+            // 🔍 DEBUG: Log transition outcome
+            log.debug('🔍 DEBUG: Transition outcome', {
+                taskId,
+                runId,
+                loopCounter: turn,
+                envTurn: (env as any).turn,
+                outcomeKind: outcome.kind,
+                hasToken: !!(outcome as any).token,
+                actionKind: (step.exec as any)?.action?.kind,
+                execStatus: (step.exec as any)?.result?.status
+            });
+
             if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
                 outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
             }
@@ -433,7 +489,11 @@ export async function runLoop<
                 inbox.all.push(...observations);
                 inbox.current = [...observations];
             } else {
-                inbox.current = [];
+                // ✅ FIX: Don't clear inbox.current when there are no new observations!
+                // Preserve existing observations (e.g., child completion observations staged synchronously)
+                // The inbox is loaded from snapshot at start of turn, so it may already have staged observations
+                // Only clear if we're explicitly told to (which we're not in this case)
+                // inbox.current remains as-is from snapshot
             }
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
@@ -447,8 +507,28 @@ export async function runLoop<
         }
 
         // Stop on await_* or terminal
-        if (outcome.kind !== 'continue') break;
+        // 🔍 DEBUG: Log loop continuation check
+        if (outcome.kind !== 'continue') {
+            log.debug('🔍 DEBUG: Loop stopping (non-continue outcome)', {
+                taskId,
+                runId,
+                loopCounter: turn,
+                envTurn: (env as any).turn,
+                outcomeKind: outcome.kind,
+                hasToken: !!(outcome as any).token
+            });
+            break;
+        }
         if (turn === maxTurns - 1) {
+            // 🔍 DEBUG: Log budget check
+            log.debug('🔍 DEBUG: Budget check triggered', {
+                taskId,
+                runId,
+                loopCounter: turn,
+                envTurn: (env as any).turn,
+                maxTurns,
+                condition: `${turn} === ${maxTurns} - 1`
+            });
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }

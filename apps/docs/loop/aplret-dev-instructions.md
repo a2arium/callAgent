@@ -33,9 +33,10 @@ This document describes a **reusable, production-ready agent architecture** that
 ### Effect → Observation Pipeline
 
 - **Execution always returns `{ action, result }`** where `result` is an `ExecResult<Data>` (you control `Data`) containing status, typed `data`/`error`, provenance (`ts` plus any correlation metadata), and optional receipts.
-- **Transition packages that `ExecResult<Data>` into one or more normalized `Observation<Payload>` objects** (you control `Payload`) and returns them via `TransitionOut.observations` together with the control signal (`continue`, `await_*`, etc.).
+- **Transition packages that `ExecResult<Data>` into one or more normalized `Observation<Payload>` objects** (you control `Payload`) and returns them via `TurnOutcome.observations` together with the control signal (`continue`, `await_*`, etc.).
 - **Runtime handoff:** The loop runner appends every observation to `env.inbox.all` and stages the batch on `env.inbox.current` before the next turn begins. Perception reads the staged slice; history remains in `all` for replay/debugging.
-- **Environment exposes `{ world, inbox: { current, all } }`** to the next turn. `current` holds only the observations for the upcoming turn; `all` keeps the ordered log. Perception treats `current` as read-only, validates each entry, then the runtime clears it when the turn ends.
+- **Environment exposes `{ inbox: { current, all } }`** to the next turn. `current` holds only the observations for the upcoming turn; `all` keeps the ordered log. Perception treats `current` as read-only, validates each entry, then the runtime clears it when the turn ends.
+- **ALL inputs flow through inbox:** Initial CLI inputs and resumed inputs (from `requestInput`, tool completions, child completions) are converted to observations in `env.inbox.current` with `source: 'user'` and `kind: 'input.provided'`. Perception should ONLY read from inbox.
 - **Turn _t+1_ – Perception: Perception validates and annotates inbox entries** (plus any ambient world state). At the start of the next turn, Perception drains the inbox (append-only queue), validates each observation, and hands Learning a structured observation payload. Learning then updates the mental state, making the effects from turn _t_ available to Policy on turn _t+1_.
 - **Learning remains the single writer of MentalState (M)**; all effect outputs must flow via `Observation → Learning → M`, not through ad-hoc state writes.
 - **Continue outcomes always carry `observations: Observation[]`** so downstream tooling/tests can assert what effects occurred, even when the loop stays active.
@@ -256,14 +257,14 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 - Prefer explicit failure with actionable messages over silent assumption.
 
 9) OUTPUT STYLE
-- Be explicit about which module is doing what (e.g., "Perception validated …", "Learning updated M …", "Policy emitted Intent …").
+- Be explicit about which module is doing what (e.g., "Perception validated …", "Learning updated M …", "Policy emitted ProposedAction …").
 - If stage/typestate would be violated, refuse and explain.
 
 Follow this minimal recipe every turn:
 A) Attention: pick focus flags.
 B) Perception: normalize+validate env input → observation {…}.
 C) Learning: M' = f(M, observation) (immutable).
-D) Policy: Intent = π(M').
+D) Policy: ProposedAction = π(M').
 E) Shield: gate = pass/transform/defer/veto. If not pass, stop.
 F) Execution: handle Intent respecting current stage; update ctx.vars only; produce outcome.
 G) Transition: emit await_* or complete or continue.
@@ -286,7 +287,7 @@ import type {
   EnvironmentState,
   AttentionSignal,
   ExecErrorPayload,
-  TransitionOut
+  TurnOutcome
 } from '@a2arium/callagent-core';
 
 // 1. Define typed stages for explicit control flow
@@ -393,7 +394,7 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
   }),
 
   // R - Policy: Decide WHAT to do (pure function of M - NO control state!)
-  policy: (m): Intent => {
+  policy: (m): ProposedAction => {
     // Policy reads ONLY cognitive state, not control state (stage)
     const userText = m.memory?.sensory?.current;
     
@@ -434,7 +435,7 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
     _env: EnvironmentState<InboxPayload>,
     exec,
     ctx
-  ): TransitionOut<InboxPayload> => {
+  ): TurnOutcome<InboxPayload> => {
     if (exec.kind === 'ask_user') {
       return { kind: 'await_input', token: exec.token };
     }
@@ -638,7 +639,7 @@ type Intent =
 policy: (m: MentalState) => Intent
 
 // Execution is the "hands" (effects)
-execution: (intent: Intent, ctx: TaskContext) => Promise<ExecutableAction>
+execution: (intent: ProposedAction, ctx: TaskContext) => Promise<ExecutableAction>
 ```
 
 This prevents drift between Policy and Dispatcher—Policy decides WHAT to do, Dispatcher decides HOW to do it.
@@ -824,7 +825,7 @@ type Intent =
 ### Policy Emits Intent
 
 ```typescript
-policy: (m: MentalState): Intent => {
+policy: (m: MentalState): ProposedAction => {
   const userIntent = m.worldModel.lastUserIntent;
   const userText = m.memory.sensory.current;
   const sentiment = m.worldModel.userSentiment;
@@ -853,7 +854,7 @@ Use **ts-pattern** for exhaustive matching (compile-time safety) — optional up
 ```typescript
 import { match } from 'ts-pattern';
 
-execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<ExecutableAction> => {
+execution: async (intent: ProposedAction, ctx: TaskContext, m: MentalState): Promise<ExecutableAction> => {
   const stage = V.stage(ctx);
   
   return match(intent)
@@ -1167,12 +1168,12 @@ policy: (m) => {
 
 ```typescript
 type ShieldOutcome =
-  | { action: 'pass'; intent: Intent }
-  | { action: 'transform'; intent: Intent }
+  | { action: 'pass'; intent: ProposedAction }
+  | { action: 'transform'; intent: ProposedAction }
   | { action: 'veto'; reason: string }
   | { action: 'defer'; askUser: string };
 
-shield: (m: MentalState, intent: Intent) => ShieldOutcome
+shield: (m: MentalState, intent: ProposedAction) => ShieldOutcome
 ```
 
 **Purpose**: Safety, constraints, budget checks. Can pass, transform, veto, or defer to user.
@@ -1256,7 +1257,7 @@ Note: Examples below assume the upcoming `ShieldOutcome` API (pass/transform/vet
 ### Execution
 
 ```typescript
-execution: (intent: Intent, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>
+execution: (intent: ProposedAction, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>
 ```
 
 **Purpose**: Map intents to effects using the **stage dispatcher** and **runEffect()** for safety.
@@ -1274,7 +1275,7 @@ transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState) => T
 **Example**:
 type InboxPayload = { token?: string; result?: unknown };
 
-transition: (env: EnvironmentState<InboxPayload>, exec, m): TransitionOut<InboxPayload> => {
+transition: (env: EnvironmentState<InboxPayload>, exec, m): TurnOutcome<InboxPayload> => {
   // Await outcomes
   if (exec.kind === 'ask_user') {
     return { kind: 'await_input', token: exec.token };
@@ -1529,7 +1530,7 @@ const INTENT_ALLOWED_STAGES: Record<Intent['kind'], Stage[]> = {
 };
 
 // 2) Assertion function
-function assertIntentAllowedInStage(intent: Intent, stage: Stage): void {
+function assertIntentAllowedInStage(intent: ProposedAction, stage: Stage): void {
   const allowed = INTENT_ALLOWED_STAGES[intent.kind];
   if (!allowed.includes(stage)) {
     throw new Error(
@@ -1540,7 +1541,7 @@ function assertIntentAllowedInStage(intent: Intent, stage: Stage): void {
 }
 
 // 3) Helper composed with createStageFacade
-function assertIntentAllowedHere(ctx: TaskContext, intent: Intent): void {
+function assertIntentAllowedHere(ctx: TaskContext, intent: ProposedAction): void {
   const stage = Stage.getStage(ctx);  // from createStageFacade
   assertIntentAllowedInStage(intent, stage);
 }
@@ -2186,7 +2187,7 @@ export const agent = createAgent({
   },
 
   // === R - Policy (reasoning) ===
-  policy: (m): Intent => {
+  policy: (m): ProposedAction => {
     const userIntent = m.worldModel?.lastUserIntent;
     const userText = m.worldModel?.lastUserText;
     
@@ -2211,7 +2212,7 @@ export const agent = createAgent({
   shield: (_m, a) => a,  // Pass-through for now; add budget/PII checks as needed
 
   // === E - Execution (stage dispatcher with exhaustive matching) ===
-  execution: async (intent: Intent, ctx: TaskContext, m: MentalState): Promise<ExecutableAction> => {
+  execution: async (intent: ProposedAction, ctx: TaskContext, m: MentalState): Promise<ExecutableAction> => {
     // Use ts-pattern for exhaustive intent handling
     return match(intent)
       .with({ kind: 'prompt_user' }, async () => {
@@ -2276,7 +2277,7 @@ export const agent = createAgent({
     _env: EnvironmentState<InboxPayload>,
     exec: { action: ExecutableAction; result: ExecResult<unknown> },
     ctx
-  ): TransitionOut<InboxPayload> => {
+  ): TurnOutcome<InboxPayload> => {
     const action = exec.action ?? exec;
     if (action.kind === 'ask_user') {
       return { kind: 'await_input', token: action.token };
@@ -2427,7 +2428,7 @@ describe('Execution handlers', () => {
     const ctx = createTestContext();
     V.setStage(ctx, 'idle');
     
-    const intent: Intent = { kind: 'prompt_user' };
+    const intent: ProposedAction = { kind: 'prompt_user' };
     await agent.execution(intent, ctx, createEmptyMentalState());
     
     expect(V.stage(ctx)).toBe('awaiting_input');
@@ -2942,7 +2943,7 @@ execution: async (intent, ctx) => {
 
 1. **Policy emits typed Intent, Execution handles exhaustively**
    ```typescript
-   policy: (m): Intent => ({ kind: 'answer_with_llm', query: m.memory.sensory.current })
+   policy: (m): ProposedAction => ({ kind: 'answer_with_llm', query: m.memory.sensory.current })
    execution: async (intent, ctx, m) => match(intent).with(...).exhaustive()
    ```
 

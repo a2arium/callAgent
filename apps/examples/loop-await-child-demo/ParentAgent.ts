@@ -86,9 +86,11 @@ export default createAgent<ParentSensory, ParentPerception, unknown, ParentExecD
     perception: (env: EnvironmentState<ParentObservationPayload>): ParentPerception => {
         const inbox = Array.isArray(env.inbox?.current) ? env.inbox.current : [];
         const childResult = readChildObservation(inbox);
-        const inputUrl = typeof (env.input as Record<string, unknown> | undefined)?.url === 'string'
-            ? String((env.input as Record<string, unknown>).url)
-            : undefined;
+        
+        // Extract input from inbox
+        const userInput = inbox.find(o => o.source === 'user' && o.kind === 'input.provided');
+        const inputValue = (userInput?.payload as any)?.value as Record<string, unknown> | undefined;
+        const inputUrl = typeof inputValue?.url === 'string' ? String(inputValue.url) : undefined;
 
         parentLog.info('[Perception] Turn resumed', {
             turn: env.turn,

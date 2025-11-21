@@ -128,8 +128,10 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         } else {
             console.log('[Perception] Inbox empty');
         }
+        // Extract input from inbox if available
+        const userInput = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
         return {
-            input: env.input,
+            input: (userInput?.payload as any)?.value,
             time: env.time,
             observations: drained
         };

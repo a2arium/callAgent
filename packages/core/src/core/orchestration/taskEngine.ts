@@ -1639,6 +1639,22 @@ export class TaskEngine {
 
                 let envInbox = normalizeInbox((base as any)?.inbox);
 
+                // Create initial input observation for new CLI tasks
+                if (ctx.task.input && typeof ctx.task.input === 'object' && Object.keys(ctx.task.input).length > 0) {
+                    const initialObservation: Observation = {
+                        source: 'user',
+                        kind: 'input.provided',
+                        payload: { token: 'initial-input', value: ctx.task.input },
+                        provenance: {
+                            ts: Date.now(),
+                            turn: 1,
+                            id: 'initial-input',
+                            toolId: 'cli',
+                            correlationId: sessionId
+                        }
+                    };
+                    envInbox = addObservationToInbox(envInbox, initialObservation);
+                }
 
                 // If inbox is empty, check for child completion events that might not be in the snapshot
                 // This handles the case where handleChildCompleted ran but failed to persist the inbox,
@@ -1706,7 +1722,6 @@ export class TaskEngine {
 
                 const env: EnvironmentState = {
                     time: new Date().toISOString(),
-                    input: ctx.task.input,
                     sessionId,
                     turn: startTurnTotal + 1,
                     budget: { maxTurns: Infinity, latencyMs: Infinity }, // we will override this with the actual budgets from the manifest
@@ -2371,9 +2386,9 @@ export class TaskEngine {
             const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
-                input: { kind: 'input', token, value: input },
                 sessionId: taskId,
                 turn: startTurnTotal + 1,
+                budget: { maxTurns: Infinity, latencyMs: Infinity },
                 pending: {
                     inputs: ((baseNow as any)?.pending?.inputs) || {},
                     children: ((baseNow as any)?.pending?.children) || {},
@@ -2383,7 +2398,7 @@ export class TaskEngine {
                 inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
-            } as EnvironmentState;
+            };
             // Ensure input token is reflected in working variables for this resume turn
             try {
                 const st = ((((M as any).memory || {})) || {}) as any;
@@ -2473,9 +2488,9 @@ export class TaskEngine {
             const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
-                input: { kind: 'tool', token, result },
                 sessionId: taskId,
                 turn: startTurnTool + 1,
+                budget: { maxTurns: Infinity, latencyMs: Infinity },
                 pending: {
                     inputs: ((baseNow as any)?.pending?.inputs) || {},
                     children: ((baseNow as any)?.pending?.children) || {},
@@ -2485,7 +2500,7 @@ export class TaskEngine {
                 inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
-            } as EnvironmentState;
+            };
             const overrides = (plugin as any)?.loop?.modules || (plugin as any)?.loop || {};
             let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
             try {
@@ -2562,9 +2577,9 @@ export class TaskEngine {
             const envInbox = normalizeInbox((baseNow as any)?.inbox);
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
-                input: { kind: 'event', token, payload, type: entry?.type },
                 sessionId: taskId,
                 turn: startTurnTotal + 1,
+                budget: { maxTurns: Infinity, latencyMs: Infinity },
                 pending: {
                     inputs: ((baseNow as any)?.pending?.inputs) || {},
                     children: ((baseNow as any)?.pending?.children) || {},
@@ -2574,7 +2589,7 @@ export class TaskEngine {
                 inbox: envInbox,
                 lastExec: (baseNow as any)?.meta?.lastExec || undefined,
                 externalEvents: undefined
-            } as EnvironmentState;
+            };
             const overrides = (plugin as any)?.loop?.modules || {};
             let loopOpts: { maxTurns?: number; latencyMs?: number } = { maxTurns: 1 };
             try {
@@ -3009,9 +3024,9 @@ export class TaskEngine {
                 });
                 const env: EnvironmentState = {
                     time: new Date().toISOString(),
-                    input: { kind: 'child', token, childTaskId, result, agentId: childAgentId },
                     sessionId: parentTaskId,
                     turn: startTurnTotal2 + 1,
+                    budget: { maxTurns: Infinity, latencyMs: Infinity },
                     pending: {
                         inputs: ((latestBase as any)?.pending?.inputs) || {},
                         children: ((latestBase as any)?.pending?.children) || {},
@@ -3021,7 +3036,7 @@ export class TaskEngine {
                     inbox: envInbox,
                     lastExec: (latestBase as any)?.meta?.lastExec || undefined,
                     externalEvents: undefined
-                } as EnvironmentState;
+                };
 
                 const overrides = (plugin as any)?.loop?.modules || {};
 

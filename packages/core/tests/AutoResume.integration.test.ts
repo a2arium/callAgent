@@ -61,10 +61,11 @@ describe('Auto-Resume Integration Tests', () => {
                 loop: {
                     modules: {
                         policy: (M: any, env: any) => {
-                            // Handle auto-resumed input
-                            if (env.input?.kind === 'input') {
-                                resumedInput = env.input.value;
-                                return { kind: 'language', content: `Received: ${env.input.value}` };
+                            // Handle auto-resumed input from inbox
+                            const userInput = env.inbox.current.find((o: any) => o.source === 'user' && o.kind === 'input.provided');
+                            if (userInput) {
+                                resumedInput = userInput.payload.value;
+                                return { kind: 'language', content: `Received: ${userInput.payload.value}` };
                             }
 
                             // Initial turn - ask for input
@@ -148,7 +149,8 @@ describe('Auto-Resume Integration Tests', () => {
                         policy: (M: any, env: any) => {
                             turnCount++;
 
-                            if (env.input?.kind === 'input') {
+                            const userInput = env.inbox.current.find((o: any) => o.source === 'user' && o.kind === 'input.provided');
+                            if (userInput) {
                                 // Verify state preserved from previous turn
                                 expect(M.memory.vars.turnNumber).toBe(1);
                                 M.memory.vars.turnNumber = 2;
@@ -203,9 +205,10 @@ describe('Auto-Resume Integration Tests', () => {
                 loop: {
                     modules: {
                         policy: (M: any, env: any) => {
-                            if (env.input?.kind === 'tool') {
-                                toolResult = env.input.result;
-                                return { kind: 'language', content: `Tool result: ${JSON.stringify(env.input.result)}` };
+                            const toolObs = env.inbox.current.find((o: any) => o.source === 'tool' && o.kind === 'tool.completed');
+                            if (toolObs) {
+                                toolResult = toolObs.payload.result;
+                                return { kind: 'language', content: `Tool result: ${JSON.stringify(toolObs.payload.result)}` };
                             }
                             return { kind: 'tool', name: 'test-tool', args: { query: 'hello' } };
                         },
@@ -277,9 +280,10 @@ describe('Auto-Resume Integration Tests', () => {
                 loop: {
                     modules: {
                         policy: (M: any, env: any) => {
-                            if (env.input?.kind === 'child') {
-                                childOutput = env.input.output;
-                                return { kind: 'language', content: `Child completed: ${JSON.stringify(env.input.output)}` };
+                            const childObs = env.inbox.current.find((o: any) => o.source === 'child' && o.kind === 'child.completed');
+                            if (childObs) {
+                                childOutput = childObs.payload.result;
+                                return { kind: 'language', content: `Child completed: ${JSON.stringify(childObs.payload.result)}` };
                             }
                             return { kind: 'subagent', target: 'child-agent', input: { task: 'process-data' } };
                         },
@@ -350,9 +354,10 @@ describe('Auto-Resume Integration Tests', () => {
                 loop: {
                     modules: {
                         policy: (M: any, env: any) => {
-                            if (env.input?.kind === 'external') {
-                                eventPayload = env.input.payload;
-                                return { kind: 'language', content: `External event: ${JSON.stringify(env.input.payload)}` };
+                            const externalObs = env.inbox.current.find((o: any) => o.source === 'external' && o.kind === 'external.occurred');
+                            if (externalObs) {
+                                eventPayload = externalObs.payload;
+                                return { kind: 'language', content: `External event: ${JSON.stringify(externalObs.payload)}` };
                             }
                             // Register for external event and wait
                             return { kind: 'internal', intent: 'wait-for-external' };

@@ -154,9 +154,9 @@ export const createAgent = <
     };
 
     try {
-        console.log('[createAgent] registering', manifest.name, 'from', metaUrl);
+        // console.log('[createAgent] registering', manifest.name, 'from', metaUrl);
         const lk = Object.keys(((plugin as any).loop?.modules || {}) as Record<string, unknown>);
-        console.log('[createAgent] loop present:', !!(plugin as any).loop, 'module keys:', lk.length ? lk : '(none)');
+        // console.log('[createAgent] loop present:', !!(plugin as any).loop, 'module keys:', lk.length ? lk : '(none)');
     } catch { /* noop */ }
 
     // If llmConfig is provided, create an LLM adapter and store it on the plugin

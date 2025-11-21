@@ -10,7 +10,10 @@ export default createAgent({
     // Converts environment into an observation for this turn.
     // args: env (runner-provided input), attention (from attention)
     // returns: observation consumed by learning and policy
-    perception: (env: any, attention: any) => ({ input: env.input, time: env.time, attention }),
+    perception: (env: any, attention: any) => {
+        const userInput = env.inbox.current.find((o: any) => o.source === 'user' && o.kind === 'input.provided');
+        return { input: userInput?.payload?.value, time: env.time, attention };
+    },
     // Updates long-term memory with the latest observation.
     // args: prevMentalState (previous agent state), prevAction (action chosen last turn), obs (from perception)
     // returns: updated agent state

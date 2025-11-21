@@ -38,8 +38,9 @@ export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecError
     },
 
     perception: (env: EnvironmentState<InboxPayload>): HelperObs => {
-        const input = env.input as { task?: string } | undefined;
-        return { task: input?.task };
+        const userInput = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
+        const inputValue = userInput?.payload?.value as { task?: string } | undefined;
+        return { task: inputValue?.task };
     },
 
     learning: (prev, _action, obs: HelperObs): MentalState<HelperSensory> => ({

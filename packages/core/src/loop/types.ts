@@ -116,7 +116,6 @@ export type Snapshot = {
 // Environment state visible to the loop per turn
 export type EnvironmentState<ObservationPayload = unknown> = {
     time: string; // ISO timestamp
-    input: unknown; // current task input or event payload
     sessionId?: string; // current session id (task id)
     turn: number; // cumulative loop turn (persisted per session)
     budget: { maxTurns: number; latencyMs: number }; // loop constraints from manifest

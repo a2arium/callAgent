@@ -8,8 +8,11 @@ type Sensory = { payload?: unknown };
 type Obs = { payload?: unknown };
 
 const modules: Partial<Modules<Sensory, Obs>> = {
-    attention: (_m: MentalState<Sensory>, env: EnvironmentState) => ({ hasInput: Boolean(env.input) }),
-    perception: (env: EnvironmentState) => ({ payload: env.input }),
+    attention: (_m: MentalState<Sensory>, env: EnvironmentState) => ({ hasInput: env.inbox.current.length > 0 }),
+    perception: (env: EnvironmentState) => {
+        const userInput = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
+        return { payload: (userInput?.payload as any)?.value };
+    },
     learning: (prev: MentalState<Sensory>, _action: ProposedAction | undefined, obs: Obs) => ({
         ...prev,
         memory: { ...prev.memory, sensory: { payload: obs.payload } }

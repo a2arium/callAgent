@@ -2,7 +2,7 @@
 
 ## Overview
 
-The loop-first agent architecture eliminates the need for explicit durable handlers through an "always-auto-resume" model. When agents await events (user input, tool completion, child agent completion), the engine automatically resumes execution by running one additional loop turn after appending an observation to `env.inbox`. (For legacy agents the payload is still mirrored on `env.input`, but new code should read from `env.inbox.current`.) This document covers the technical implementation of auto-resume, MentalState persistence, and event-driven continuation.
+The loop-first agent architecture eliminates the need for explicit durable handlers through an "always-auto-resume" model. When agents await events (user input, tool completion, child agent completion), the engine automatically resumes execution by running one additional loop turn after appending an observation to `env.inbox.current`. All agents should read inputs exclusively from the inbox observation queue. This document covers the technical implementation of auto-resume, MentalState persistence, and event-driven continuation.
 
 ## Auto-Resume Architecture
 
@@ -15,7 +15,7 @@ graph TD
     
     F[User Provides Input] --> G[tasks/input API]
     G --> H[Load MentalState]
-    H --> I[Build EnvironmentState with input]
+    H --> I[Build EnvironmentState with inbox observation]
     I --> J[Auto-Resume Loop Turn]
     J --> K[Process Event in Modules]
     K --> L[Continue or Complete]
@@ -65,35 +65,36 @@ When events occur (input provided, tool completed, child completed), the engine 
 ```typescript
 // Loop turn 1: Policy decides to ask user
 policy: (M, env) => {
-    if (!env.input) return { kind: 'ask_user', prompt: 'What should I recommend?' };
-    // Turn 2+ will have env.input with user's response
-    return { kind: 'language', content: `You chose: ${env.input.value}` };
+    const userInput = env.inbox.current.find(o => o.source === 'user' && o.kind === 'input.provided');
+    if (!userInput) return { kind: 'ask_user', prompt: 'What should I recommend?' };
+    // Turn 2+ will have user input observation in inbox
+    return { kind: 'language', content: `You chose: ${userInput.payload.value}` };
 }
 
 // Execution calls ctx.requestInput, Transition returns await_input
 // → Engine persists M and exits with input-required status
 
-// When user provides input → Engine auto-resumes with:
-// env.input = { kind: 'input', token: '...', value: 'user response' }
+// When user provides input → Engine auto-resumes with observation in env.inbox.current:
+// { source: 'user', kind: 'input.provided', payload: { token: '...', value: 'user response' } }
 // → Policy processes the input and continues
 ```
 
 ### 3. Event Types and Payloads
 
-Auto-resume supports different event types through `env.input`:
+Auto-resume supports different event types through `env.inbox.current` observations:
 
 ```typescript
-// Input events
-env.input = { kind: 'input', token: 'abc123', value: 'user response' }
+// User input events
+{ source: 'user', kind: 'input.provided', payload: { token: 'abc123', value: 'user response' } }
 
 // Tool completion events  
-env.input = { kind: 'tool', token: 'def456', result: { success: true, data: {...} } }
+{ source: 'tool', kind: 'tool.completed', payload: { token: 'def456', result: { success: true, data: {...} } } }
 
 // Child agent completion events
-env.input = { kind: 'child', token: 'ghi789', output: { status: 'completed', result: {...} } }
+{ source: 'child', kind: 'child.completed', payload: { token: 'ghi789', result: {...}, childTaskId: '...', agentId: '...' } }
 
 // External events (custom)
-env.input = { kind: 'external', token: 'jkl012', payload: { type: 'notification', data: {...} } }
+{ source: 'external', kind: 'external.occurred', payload: { token: 'jkl012', type: 'notification', data: {...} } }
 ```
 
 ## Auto-Resume Implementation
