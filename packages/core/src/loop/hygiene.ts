@@ -1,5 +1,6 @@
 import type { MentalState } from './types.js';
 import { logger } from '@a2arium/callagent-utils';
+import { isArtifactMarker } from '../core/orchestration/ArtifactImpl.js';
 
 const log = logger.createLogger({ prefix: 'Hygiene' });
 
@@ -57,4 +58,41 @@ export function pruneMentalState(input: MentalState, cfg: HygieneConfig = {}): M
     return M;
 }
 
+/**
+ * Recursively prune large strings from the object tree, SKIPPING Artifacts.
+ * @param obj Object to prune
+ * @param threshold Size threshold in bytes (default: 50KB)
+ * @param path Current path for logging
+ */
+export function pruneSnapshot(obj: any, threshold = 50 * 1024, path = 'root'): any {
+    if (!obj) return obj;
 
+    // 1. Skip Artifacts entirely - they are already offloaded safe handles
+    if (isArtifactMarker(obj)) {
+        return obj;
+    }
+
+    if (typeof obj === 'string') {
+        if (obj.length > threshold) {
+            const msg = `[PRUNE] Truncated field '${path}' (size ${obj.length} > ${threshold}). Use ctx.artifacts.create() to store large data safely.`;
+            log.warn(msg);
+            console.error(`\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n${msg}\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n`);
+            return obj.substring(0, 1000) + `... [TRUNCATED: Original size ${obj.length} bytes. Use ctx.artifacts.create() for large data!]`;
+        }
+        return obj;
+    }
+
+    if (Array.isArray(obj)) {
+        return obj.map((item, i) => pruneSnapshot(item, threshold, `${path}[${i}]`));
+    }
+
+    if (typeof obj === 'object') {
+        const newObj: any = {};
+        for (const [key, val] of Object.entries(obj)) {
+            newObj[key] = pruneSnapshot(val, threshold, `${path}.${key}`);
+        }
+        return newObj;
+    }
+
+    return obj;
+}

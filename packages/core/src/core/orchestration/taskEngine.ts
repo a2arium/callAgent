@@ -27,12 +27,18 @@ import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEv
 import { PluginManager } from '../plugin/pluginManager.js';
 import { extendContextWithMemory } from '../memory/types/working/context/workingMemoryContext.js';
 import { createMemoryRegistry } from '../memory/createMemoryRegistry.js';
+import { ArtifactImpl } from './ArtifactImpl.js';
+import { AgentResultCache } from '../cache/AgentResultCache.js';
+import { hydrateArtifacts } from '../memory/utils/hydrateArtifacts.js';
+import { offloadArtifacts } from '../memory/utils/offloadArtifacts.js';
+import { pruneSnapshot } from '../../loop/hygiene.js';
 
 type WorkingVarHookRegistrarFn = (hooks?: {
     onChange?: (key: string, value: unknown) => void;
     onDelete?: (key: string) => void;
     onClear?: () => void;
 }) => void;
+
 
 type EngineObservationConfig = ObservationConfig & {
     user: unknown;
@@ -91,6 +97,44 @@ const addObservationToInboxIfMissing = (
     return inbox;
 };
 
+const hydrateInboxArtifacts = (
+    inbox: EngineObservationInbox,
+    prisma: unknown,
+    tenantId: string,
+    contextLabel: string
+): EngineObservationInbox => {
+    if (!prisma) return inbox;
+    try {
+        const cache = new AgentResultCache(prisma as any);
+        return hydrateArtifacts(inbox, cache, tenantId) as EngineObservationInbox;
+    } catch (err) {
+        log.warn('Failed to hydrate inbox artifacts', {
+            context: contextLabel,
+            error: err instanceof Error ? err.message : String(err)
+        });
+        return inbox;
+    }
+};
+
+const hydrateMentalStateArtifacts = (
+    mental: MentalState | undefined,
+    prisma: unknown,
+    tenantId: string,
+    contextLabel: string
+): MentalState | undefined => {
+    if (!prisma || !mental) return mental;
+    try {
+        const cache = new AgentResultCache(prisma as any);
+        return hydrateArtifacts(mental, cache, tenantId) as MentalState;
+    } catch (err) {
+        log.warn('Failed to hydrate mental state artifacts', {
+            context: contextLabel,
+            error: err instanceof Error ? err.message : String(err)
+        });
+        return mental;
+    }
+};
+
 /**
  * Task entity with the necessary properties for the task engine
  */
@@ -143,6 +187,10 @@ export class TaskEngine {
         }
         // Ensure outbox publisher is running
         try { outboxPublisher.start(); } catch { /* noop */ }
+    }
+
+    private getSessionStorePrisma() {
+        return (this.sessionManager as any)?.store?.prisma;
     }
 
     private iterateMentalTargets(
@@ -484,6 +532,29 @@ export class TaskEngine {
         const agentId = params.agentId ?? ((ctx as any).agentId as string) ?? 'default';
         const flushMentalState = params.flushMentalState;
 
+        // Artifacts Factory
+        if (!(ctx as any).artifacts) {
+            (ctx as any).artifacts = {
+                create: async (val: unknown, options?: { mimeType?: string; preview?: string }) => {
+                    const prisma = this.getSessionStorePrisma();
+                    if (!prisma) {
+                        throw new Error("Artifacts not available: no database connection");
+                    }
+                    const cache = new AgentResultCache(prisma);
+                    const art = new ArtifactImpl(undefined, cache, tenantId, options?.mimeType, undefined);
+                    if (val !== undefined) {
+                        await art.set(val);
+                    }
+                    return art;
+                },
+                text: async (val: string) => {
+                    return (ctx as any).artifacts.create(val, { mimeType: "text/plain" });
+                },
+                json: async (val: unknown) => {
+                    return (ctx as any).artifacts.create(val, { mimeType: "application/json" });
+                }
+            };
+        }
         // Goals API facade
         try {
             const goals = await import('../../loop/goals.js');
@@ -945,7 +1016,13 @@ export class TaskEngine {
 
         // ✅ FIX Bug #1 Issue 1A: Load existing vars from snapshot (like startTask does)
         const snapshot = await this.sessionManager.load(tenantId, sessionId);
-        const M = (snapshot?.snapshot as any)?.M;
+        let M = (snapshot?.snapshot as any)?.M;
+        M = (hydrateMentalStateArtifacts(
+            M as MentalState,
+            this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+            tenantId,
+            'attachWorkingMemory'
+        ) as typeof M) || M;
         const currentVars = ((M?.memory as any)?.vars || {}) as Record<string, unknown>;
         const varCache = new Map<string, unknown>(Object.entries(currentVars));
         if (!(ctx as any).__ctxId) (ctx as any).__ctxId = `ctx-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1172,6 +1249,14 @@ export class TaskEngine {
         } catch {
             try { plainVars = { ...(ctx as any).vars } as Record<string, unknown>; } catch { plainVars = {}; }
         }
+        try {
+            const pending = (plainVars as any)?.pendingArtifact;
+            log.info('🧪 [WM VAR TRACE] flushContextSnapshot plainVars', {
+                keys: Object.keys(plainVars),
+                hasPendingArtifact: !!pending,
+                pendingKind: pending && (pending as any).kind
+            });
+        } catch { /* noop */ }
         // Prepare MentalState if available or compose one minimally
         const baseSnap = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
         let M: any = (baseSnap as any).M;
@@ -1184,6 +1269,12 @@ export class TaskEngine {
             const mentalVars = (((mentalFromCtx as any)?.memory as any)?.vars) || {} as Record<string, unknown>;
             const mergedVars = { ...mentalVars, ...snapshotVars, ...plainVars } as Record<string, unknown>;
             M.memory = { ...(M.memory || {}), vars: mergedVars };
+            const pending = (mergedVars as any)?.pendingArtifact;
+            log.info('🧪 [WM VAR TRACE] flushContextSnapshot merged M.memory.vars', {
+                keys: Object.keys(mergedVars),
+                hasPendingArtifact: !!pending,
+                pendingKind: pending && (pending as any).kind
+            });
         } catch { /* noop */ }
         // Attach LLM state into sensory
         try {
@@ -1198,19 +1289,62 @@ export class TaskEngine {
             const sensory = (M.memory as any).sensory || {};
             (M.memory as any).sensory = { ...sensory, llmState };
         } catch { /* ignore */ }
+        const next = { ...(baseSnap as any), M } as Record<string, unknown>;
         try {
             const snap = await this.sessionManager.load(tenantId, sessionId);
             const expected = snap?.wmVersion ?? BigInt(0);
-            const next = { ...(baseSnap as any), M } as Record<string, unknown>;
+
+            // Offload any LocalArtifacts before saving
+            // We need access to prisma for the cache.
+            // Using getSessionStorePrisma() helper method if available or casting
+            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+
+            log.info('DEBUG: Resolving prisma for offloading', {
+                hasPrisma: !!prisma,
+                hasSessionManager: !!this.sessionManager,
+                hasStore: !!(this.sessionManager as any)?.store,
+                storeHasPrisma: !!(this.sessionManager as any)?.store?.prisma
+            });
+
+            if (prisma) {
+                const cache = new AgentResultCache(prisma);
+                log.info('DEBUG: Calling offloadArtifacts');
+                try {
+                    log.info('🧪 [WM VAR TRACE] flushContextSnapshot -> offloadArtifacts', {
+                        pendingKindBeforeOffload: ((M.memory as any)?.vars as any)?.pendingArtifact?.kind
+                    });
+                } catch { /* noop */ }
+                // We need to offload artifacts from M and inbox
+                // Note: offloadArtifacts modifies the object in place for arrays/objects
+                // We are working on 'next' which is a copy of baseSnap + M, so mutation is safe for 'next',
+                // but M might be shared. However, offloadArtifacts only replaces LocalArtifacts,
+                // and next.M is the one being saved.
+                await offloadArtifacts(next, cache, tenantId);
+            } else {
+                log.warn('DEBUG: Skipping offloadArtifacts - No Prisma');
+            }
+
             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot: next });
         } catch (e) {
-            if ((e as Error).message === 'CAS_MISMATCH') {
+            if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                try {
+                    const prunedNext = pruneSnapshot(next);
+                    const snap3 = await this.sessionManager.load(tenantId, sessionId);
+                    const expected3 = snap3?.wmVersion ?? BigInt(0);
+                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected3, snapshot: prunedNext });
+                } catch (err) {
+                    log.error('Failed to save snapshot even after pruning', { error: err });
+                    throw e;
+                }
+            } else if ((e as Error).message === 'CAS_MISMATCH') {
                 try {
                     const snap2 = await this.sessionManager.load(tenantId, sessionId);
                     const expected2 = snap2?.wmVersion ?? BigInt(0);
                     const next2 = { ...(((await this.sessionManager.load(tenantId, sessionId))?.snapshot as any) || {}), M } as Record<string, unknown>;
                     await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot: next2 });
                 } catch { /* ignore */ }
+            } else {
+                throw e;
             }
         }
     }
@@ -1277,6 +1411,10 @@ export class TaskEngine {
         // MentalState load (single source of truth)
         const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
         let M: MentalState = (baseSnap as any).M as MentalState || initialM(ctx);
+
+        // Hydrate any persisted Artifact markers inside the mental state / vars
+        const mentalHydrationPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
+        M = (hydrateMentalStateArtifacts(M, mentalHydrationPrisma, tenantId, 'startTask') as MentalState) || M;
         // Ensure session agentId is correctly set for this task upfront
         try {
             const declaredAgentId = ((ctx as any).agentId || agentId || 'default') as string;
@@ -1331,6 +1469,14 @@ export class TaskEngine {
                 Object.assign(mergedVars, existing);
             });
             Object.assign(mergedVars, varsObject);
+            try {
+                const pending = (mergedVars as any)?.pendingArtifact;
+                log.info('🧪 [WM VAR TRACE] assignVarsIntoMental', {
+                    keys: Object.keys(mergedVars),
+                    hasPendingArtifact: !!pending,
+                    pendingKind: pending && (pending as any).kind
+                });
+            } catch { /* noop */ }
             iterMentalTargets(({ target, memory }) => {
                 try {
                     log.debug('Variable assignment completed', {
@@ -1441,16 +1587,48 @@ export class TaskEngine {
         const flushMentalState = async () => {
             if (!this.sessionManager) return;
             try {
+                try {
+                    log.info('🧪 [WM VAR TRACE] flushMentalState invoked', {
+                        varsDirty: (ctx as any).__varsDirty,
+                        cacheKeys: Array.from(varCache.keys())
+                    });
+                } catch { /* noop */ }
                 assignVarsIntoMental();
                 updateLlmInMental();
                 const snapNow = await this.sessionManager.load(tenantId, sessionId);
                 const base = (snapNow?.snapshot as Record<string, unknown>) || {};
                 const next = { ...base, M } as Record<string, unknown>;
                 const expected = snapNow?.wmVersion ?? BigInt(0);
+
+                // We need access to prisma for the cache.
+                // Using getSessionStorePrisma() helper method if available or casting
+                const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+
+                if (prisma) {
+                    const cache = new AgentResultCache(prisma);
+                    log.info('🧪 [WM VAR TRACE] flushMentalState -> offloadArtifacts', {
+                        pendingKindBeforeOffload: ((M.memory as any)?.vars as any)?.pendingArtifact?.kind
+                    });
+                    await offloadArtifacts(next, cache, tenantId);
+                }
+
                 await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
                 (ctx as any).__varsDirty = false;
             } catch (e) {
-                if ((e as Error).message === 'CAS_MISMATCH') {
+                if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                    try {
+                        const prunedM = pruneSnapshot(M);
+                        const snapNowP = await this.sessionManager.load(tenantId, sessionId);
+                        const baseP = (snapNowP?.snapshot as Record<string, unknown>) || {};
+                        const nextP = { ...baseP, M: prunedM } as Record<string, unknown>;
+                        const expectedP = snapNowP?.wmVersion ?? BigInt(0);
+                        await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedP, snapshot: nextP });
+                        (ctx as any).__varsDirty = false;
+                    } catch (err) {
+                        log.error('Failed to save snapshot even after pruning', { error: err });
+                        throw e;
+                    }
+                } else if ((e as Error).message === 'CAS_MISMATCH') {
                     try {
                         const snapNow2 = await this.sessionManager.load(tenantId, sessionId);
                         const base2 = (snapNow2?.snapshot as Record<string, unknown>) || {};
@@ -1486,6 +1664,14 @@ export class TaskEngine {
                     varCache.set(baseKey, updatedObj);
                 } else {
                     varCache.set(key, value);
+                }
+                if (key === 'pendingArtifact') {
+                    try {
+                        log.info('🧪 [WM VAR TRACE] ctx.vars.set pendingArtifact', {
+                            valueKind: (value as any)?.kind,
+                            varsDirtyBefore: (ctx as any).__varsDirty
+                        });
+                    } catch { /* noop */ }
                 }
                 (ctx as any).__varsDirty = true;
                 // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
@@ -1655,7 +1841,12 @@ export class TaskEngine {
                 });
 
                 let envInbox = normalizeInbox((base as any)?.inbox);
-
+                envInbox = hydrateInboxArtifacts(
+                    envInbox,
+                    this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                    tenantId,
+                    'startTask'
+                );
                 // Create initial input observation for new CLI tasks
                 if (ctx.task.input && typeof ctx.task.input === 'object' && Object.keys(ctx.task.input).length > 0) {
                     const initialObservation: EngineObservation = {
@@ -1708,7 +1899,17 @@ export class TaskEngine {
                                         (obs as any)?.payload &&
                                         (obs as any).payload.token === token;
 
+                                    const childPrisma = this.getSessionStorePrisma();
+                                    if (childPrisma) {
+                                        const p = (completionEvent.payload as any);
+                                        if (p?.result) {
+                                            const cache = new AgentResultCache(childPrisma);
+                                            p.result = hydrateArtifacts(p.result, cache, tenantId);
+                                        }
+                                    }
+
                                     const childObservation: EngineObservation = {
+
                                         source: 'child',
                                         kind: 'child.completed',
                                         payload: {
@@ -1794,7 +1995,32 @@ export class TaskEngine {
                         // Avoid later flush overwriting this save with stale M
                         (ctx as any).__wmSavedThisTurn = true;
                     }
-                } catch { /* noop */ }
+                } catch (e) {
+                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        if (!this.sessionManager) {
+                            throw e;
+                        }
+                        try {
+                            log.warn('Snapshot too large at start of turn, pruning and retrying...');
+                            const mRetry = pruneSnapshot(this.mergeVarsIntoMental(M as any, mNext as any));
+                            const iRetry = pruneSnapshot(normalizeInbox(env.inbox));
+                            const sRetry = await this.sessionManager.load(tenantId, sessionId);
+                            const bRetry = (sRetry?.snapshot as any) || {};
+                            const nRetry = { ...bRetry, M: mRetry, inbox: iRetry, meta: { ...((bRetry as any).meta || {}), turn: Number((env as any).turn) || 1 } };
+                            await this.sessionManager.saveSnapshot({
+                                tenantId,
+                                sessionId,
+                                agentId: ((ctx as any).agentId || 'default') as string,
+                                expectedWmVersion: sRetry?.wmVersion ?? BigInt(0),
+                                snapshot: nRetry
+                            });
+                            (ctx as any).__wmSavedThisTurn = true;
+                        } catch (err) {
+                            log.error('Snapshot save failed after prune (start of turn)', { error: err });
+                        }
+                    }
+                }
+
                 log.debug('RunLoop completed', { outcome: outcome.kind, hasToken: !!(outcome as any).token });
                 // Aggregate metrics for convenience
                 const timingsArray = metrics?.timings || [];
@@ -1839,14 +2065,62 @@ export class TaskEngine {
                             const nextMeta = { ...prevMeta, turn: env.turn };
                             let mNextEffective = mNext;
                             try {
+                                let ctxPending: unknown;
+                                try {
+                                    const varsObj = (ctx as any).vars;
+                                    if (varsObj && typeof varsObj.get === 'function') {
+                                        ctxPending = varsObj.get('pendingArtifact');
+                                    }
+                                } catch { /* noop */ }
                                 const latestVars = (((M as any)?.memory as any)?.vars) || {};
-                                if (latestVars && typeof latestVars === 'object') {
-                                    const mem = ((mNextEffective as any).memory || {}) as Record<string, unknown>;
-                                    (mNextEffective as any).memory = { ...mem, vars: { ...(latestVars as Record<string, unknown>) } };
-                                }
+                                const existingNextVars = ((((mNextEffective as any)?.memory as any)?.vars) || {}) as Record<string, unknown>;
+                                const mergedVars = {
+                                    ...existingNextVars,
+                                    ...(latestVars as Record<string, unknown>)
+                                } as Record<string, unknown>;
+                                try {
+                                    log.info('🧪 [WM VAR TRACE] latestVars prior to merge', {
+                                        sourceKeys: Object.keys(latestVars || {}),
+                                        sourcePendingKind: (latestVars as any)?.pendingArtifact?.kind,
+                                        existingKeys: Object.keys(existingNextVars || {}),
+                                        existingPendingKind: (existingNextVars as any)?.pendingArtifact?.kind,
+                                        ctxHasPending: !!ctxPending,
+                                        ctxPendingKind: ctxPending && (ctxPending as any).kind
+                                    });
+                                } catch { /* noop */ }
+                                const mem = ((mNextEffective as any).memory || {}) as Record<string, unknown>;
+                                (mNextEffective as any).memory = { ...mem, vars: mergedVars };
                             } catch { /* noop merge failure */ }
+                            try {
+                                const pending = (((mNextEffective as any)?.memory as any)?.vars as any)?.pendingArtifact;
+                                log.info('🧪 [WM VAR TRACE] end-of-turn save snapshot', {
+                                    hasPendingArtifact: !!pending,
+                                    pendingKind: pending && (pending as any).kind
+                                });
+                            } catch { /* noop */ }
                             const nextInbox = normalizeInbox(env.inbox);
                             const next = { ...baseNow, M: mNextEffective, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;
+                            try {
+                                const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+                                if (prisma) {
+                                    const cache = new AgentResultCache(prisma);
+                                    log.info('🧪 [WM VAR TRACE] end-of-turn offloadArtifacts', {
+                                        pendingKindBeforeOffload: (((mNextEffective as any)?.memory as any)?.vars as any)?.pendingArtifact?.kind
+                                    });
+                                    await offloadArtifacts(next, cache, tenantId);
+                                    try {
+                                        const afterPending = (((next as any)?.M as any)?.memory as any)?.vars?.pendingArtifact;
+                                        log.info('🧪 [WM VAR TRACE] pendingArtifact after offload', {
+                                            kind: afterPending?.kind,
+                                            type: typeof afterPending
+                                        });
+                                    } catch { /* noop */ }
+                                } else {
+                                    log.warn('🧪 [WM VAR TRACE] Skipping offloadArtifacts at end-of-turn - no Prisma available');
+                                }
+                            } catch (offloadErr) {
+                                log.error('Failed to offload artifacts at end-of-turn', { error: offloadErr instanceof Error ? offloadErr.message : String(offloadErr) });
+                            }
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
                             (ctx as any).__wmSavedThisTurn = true;
                         } else {
@@ -1859,7 +2133,34 @@ export class TaskEngine {
                             const next = { ...baseNow, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
                         }
-                    } catch { /* noop */ }
+                    } catch (e) {
+                        if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                            try {
+                                log.warn('Snapshot too large at end of turn, pruning and retrying...');
+                                const mRetry = pruneSnapshot(mNext);
+                                const iRetry = pruneSnapshot(normalizeInbox(env.inbox));
+                                const sRetry = await this.sessionManager.load(tenantId, sessionId);
+                                const bRetry = (sRetry?.snapshot as any) || {};
+                                const nRetry = {
+                                    ...bRetry,
+                                    M: mRetry,
+                                    inbox: iRetry,
+                                    meta: { ...((bRetry as any).meta || {}), turn: env.turn }
+                                };
+                                await this.sessionManager.saveSnapshot({
+                                    tenantId,
+                                    sessionId,
+                                    agentId: ((ctx as any).agentId || 'default') as string,
+                                    expectedWmVersion: sRetry?.wmVersion ?? BigInt(0),
+                                    snapshot: nRetry
+                                });
+                                (ctx as any).__wmSavedThisTurn = true;
+                            } catch (err) {
+                                log.error('Snapshot save failed after prune (end of turn)', { error: err });
+                            }
+                        }
+                    }
+
                 }
                 log.debug('Processing outcome', { outcome: outcome.kind, isStreaming });
                 if (!isStreaming) {
@@ -2021,6 +2322,14 @@ export class TaskEngine {
             throw e instanceof Error ? e : new Error('INPUT_TOKEN_INVALID');
         }
         const { next } = applyInputProvided(base, token, input);
+        // Hydrate input if it contains artifacts (e.g. from resumeInput)
+        if (input && typeof input === 'object') {
+            const prisma = this.getSessionStorePrisma();
+            if (prisma) {
+                const cache = new AgentResultCache(prisma);
+                hydrateArtifacts(input, cache, tenantId);
+            }
+        }
         const expected = snap?.wmVersion ?? BigInt(0);
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.input_provided', { token });
         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (next as any).meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
@@ -2163,6 +2472,12 @@ export class TaskEngine {
             // Load MentalState and pending for EnvironmentState
             const baseNow = (await this.sessionManager!.load(tenantId, taskId))?.snapshot as Record<string, unknown> || {};
             let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            M = (hydrateMentalStateArtifacts(
+                M,
+                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                tenantId,
+                'requestInput.autoResume'
+            ) as MentalState) || M;
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
@@ -2400,7 +2715,13 @@ export class TaskEngine {
                 } as any;
                 assignVarsIntoMental();
             } catch { /* noop */ }
-            const envInbox = normalizeInbox((baseNow as any)?.inbox);
+            let envInbox = normalizeInbox((baseNow as any)?.inbox);
+            envInbox = hydrateInboxArtifacts(
+                envInbox,
+                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                tenantId,
+                'resumeInput'
+            );
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 sessionId: taskId,
@@ -2502,7 +2823,13 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTool = Number((baseNow as any)?.meta?.turn) || 0;
-            const envInbox = normalizeInbox((baseNow as any)?.inbox);
+            let envInbox = normalizeInbox((baseNow as any)?.inbox);
+            envInbox = hydrateInboxArtifacts(
+                envInbox,
+                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                tenantId,
+                'handleToolCompleted'
+            );
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 sessionId: taskId,
@@ -2591,7 +2918,13 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
             const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
-            const envInbox = normalizeInbox((baseNow as any)?.inbox);
+            let envInbox = normalizeInbox((baseNow as any)?.inbox);
+            envInbox = hydrateInboxArtifacts(
+                envInbox,
+                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                tenantId,
+                'handleExternalEvent'
+            );
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 sessionId: taskId,
@@ -2672,6 +3005,11 @@ export class TaskEngine {
                 tokenFound: !!token
             });
 
+            const stagingPrisma = this.getSessionStorePrisma();
+            if (stagingPrisma && result && typeof result === 'object') {
+                const cache = new AgentResultCache(stagingPrisma);
+                hydrateArtifacts(result, cache, tenantId);
+            }
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
@@ -2804,6 +3142,11 @@ export class TaskEngine {
             }
             delete tasks[token];
             const next = setPendingTasks(base, tasks) as Record<string, unknown>;
+            const parentPrisma = this.getSessionStorePrisma();
+            if (parentPrisma && result && typeof result === 'object') {
+                const cache = new AgentResultCache(parentPrisma);
+                hydrateArtifacts(result, cache, tenantId);
+            }
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
@@ -2883,6 +3226,11 @@ export class TaskEngine {
                 // This handles race conditions where stageChildCompletionObservation saved but
                 // handleChildCompleted loaded an older version
                 const finalInbox = normalizeInbox((baseNow as any)?.inbox);
+                const finalPrisma = this.getSessionStorePrisma();
+                if (finalPrisma) {
+                    const cache = new AgentResultCache(finalPrisma);
+                    hydrateArtifacts(finalInbox, cache, tenantId);
+                }
                 const observationPredicateForCheck = (obs: EngineObservation) =>
                     obs?.kind === 'child.completed' &&
                     typeof obs === 'object' &&
@@ -2990,6 +3338,12 @@ export class TaskEngine {
                 // This ensures we have the most recent MentalState including any updates
                 const latestBase = (absoluteLatestSnap?.snapshot as Record<string, unknown>) || {};
                 let M: MentalState = (latestBase as any).M as MentalState || initialM(ctx);
+                M = (hydrateMentalStateArtifacts(
+                    M,
+                    this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                    tenantId,
+                    'handleChildCompleted'
+                ) as MentalState) || M;
 
                 // Load MentalState from latest snapshot
                 await this.attachAndRestoreLLM(ctx, agentName, M);
@@ -2997,6 +3351,12 @@ export class TaskEngine {
                 const recordedTurn = Number((latestBase as any)?.meta?.turn) || 0;
                 const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn;
                 let envInbox = normalizeInbox((latestBase as any)?.inbox);
+                envInbox = hydrateInboxArtifacts(
+                    envInbox,
+                    this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                    tenantId,
+                    'handleChildCompleted'
+                );
                 log.debug('Child resume before helper', {
                     sessionId: parentTaskId,
                     currentLength: envInbox.current.length,
@@ -3276,7 +3636,18 @@ export class TaskEngine {
                     try {
                         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
                     } catch (e) {
-                        if ((e as Error).message === 'CAS_MISMATCH') {
+                        if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                            try {
+                                const prunedNext2 = pruneSnapshot(next2 as any);
+                                await this.sessionManager?.saveSnapshot({
+                                    tenantId,
+                                    sessionId: parentTaskId,
+                                    agentId: (base2 as any)?.meta?.agentId || 'default',
+                                    expectedWmVersion: snap2.wmVersion ?? BigInt(0),
+                                    snapshot: prunedNext2
+                                });
+                            } catch { /* swallow */ }
+                        } else if ((e as Error).message === 'CAS_MISMATCH') {
                             try {
                                 const snap3 = await this.sessionManager?.load(tenantId, parentTaskId);
                                 const base3 = (snap3?.snapshot as Record<string, unknown>) || {};
@@ -3415,6 +3786,11 @@ export class TaskEngine {
             task: {
                 id: task.id,
                 input: task.input as TaskInput
+            },
+            artifacts: {
+                create: () => { throw new Error('Artifacts factory not attached'); },
+                text: () => { throw new Error('Artifacts factory not attached'); },
+                json: () => { throw new Error('Artifacts factory not attached'); }
             },
             // These will be replaced by the streaming context
             reply: async (parts) => {

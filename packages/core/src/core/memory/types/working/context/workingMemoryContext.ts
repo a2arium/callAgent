@@ -36,62 +36,67 @@ function createSimpleWorkingVariablesProxy(
         agentId
     });
 
-    return new Proxy({} as WorkingVariables, {
-        get(target, prop: string) {
-            // Return cached value synchronously
-            return cache.get(prop);
-        },
+    // Define methods separately to avoid circular references in object literal
+    const get = <T = unknown>(key: string): T | undefined => {
+        return cache.get(key) as T;
+    };
 
-        set(target, prop: string, value: unknown) {
-            // Update cache immediately for synchronous access
-            cache.set(prop, value);
+    const set = <T = unknown>(key: string, value: T): void => {
+        contextLogger.debug('Setting working variable', { key });
+        // Update cache immediately for synchronous access
+        cache.set(key, value);
 
-            // Persist to database in background (fire and forget)
-            unifiedMemory.setWorkingVariable(prop, value, agentId).catch(error => {
-                contextLogger.warn(`Failed to persist working variable ${prop}`, {
-                    agentId,
-                    error
-                });
-                // On failure, we could implement retry logic or revert cache
+        // Persist to database in background (fire and forget)
+        unifiedMemory.setWorkingVariable(key, value, agentId).catch(error => {
+            contextLogger.warn(`Failed to persist working variable ${key}`, {
+                agentId,
+                error
             });
+        });
+    };
 
-            return true;
-        },
+    const has = (key: string): boolean => {
+        return cache.has(key);
+    };
 
-        has(target, prop: string) {
-            return cache.has(prop);
-        },
+    const del = (key: string): void => {
+        // Remove from cache immediately
+        cache.delete(key);
 
-        deleteProperty(target, prop: string) {
-            // Remove from cache immediately
-            cache.delete(prop);
-
-            // Delete from database in background
-            unifiedMemory.setWorkingVariable(prop, undefined, agentId).catch(error => {
-                contextLogger.warn(`Failed to delete working variable ${prop}`, {
-                    agentId,
-                    error
-                });
+        // Delete from database in background
+        unifiedMemory.setWorkingVariable(key, undefined, agentId).catch(error => {
+            contextLogger.warn(`Failed to delete working variable ${key}`, {
+                agentId,
+                error
             });
+        });
+    };
 
-            return true;
-        },
+    const keys = (): string[] => {
+        return Array.from(cache.keys());
+    };
 
-        ownKeys(target) {
-            return Array.from(cache.keys());
-        },
-
-        getOwnPropertyDescriptor(target, prop: string) {
-            if (cache.has(prop)) {
-                return {
-                    enumerable: true,
-                    configurable: true,
-                    value: cache.get(prop)
-                };
-            }
-            return undefined;
+    const merge = (patch: Record<string, unknown>): void => {
+        for (const [k, v] of Object.entries(patch)) {
+            set(k, v);
         }
-    });
+    };
+
+    const update = <T = unknown>(key: string, fn: (prev: T | undefined) => T): void => {
+        const prev = get<T>(key);
+        const next = fn(prev);
+        set(key, next);
+    };
+
+    return {
+        get,
+        set,
+        has,
+        delete: del,
+        keys,
+        merge,
+        update
+    };
 }
 
 
@@ -356,4 +361,4 @@ export function extendContextWithWorkingMemory(
 export function createLegacyWorkingVariablesProxy(wm: unknown): WorkingVariables {
     console.warn('createWorkingVariablesProxy is deprecated. Use extendContextWithMemory instead.');
     return {};
-} 
+}

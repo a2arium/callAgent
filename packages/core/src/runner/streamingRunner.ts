@@ -2,8 +2,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig, type MinimalConfig } from '../config/index.js';
 import { PluginManager } from '../core/plugin/pluginManager.js';
-import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
-import type { TaskStatus, Artifact } from '../shared/types/StreamingEvents.js';
+import type { TaskContext, TaskInput, MessagePart, Artifact as ArtifactHandle } from '../shared/types/index.js';
+import type { TaskStatus, Artifact as StreamArtifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../core/plugin/types.js';
 import { logger, withLoggingContext, type LoggerConfig } from '@a2arium/callagent-utils';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
@@ -24,6 +24,8 @@ import { extendContextWithMemory } from '../core/memory/types/working/context/wo
 import { resolveTenantId } from '../core/plugin/tenantResolver.js';
 import { globalA2AService } from '../core/orchestration/A2AService.js';
 import { AgentResultCache } from '../core/cache/index.js';
+import { ArtifactImpl } from '../core/orchestration/ArtifactImpl.js';
+import type { PrismaClient } from '@prisma/client';
 import { loadAgentIndexIfPresent } from '../core/plugin/AgentIndexLoader.js';
 
 // Create base runner logger
@@ -211,16 +213,30 @@ export async function runAgentWithStreaming(
     const memoryRegistry = await createMemoryRegistry(finalTenantId, agentName);
     const semanticAdapter = memoryRegistry.semantic.backends[config.memory.semantic.default];
 
-    // Create cache service for agent result caching
+    // Create cache service for agent result caching and artifact storage
     let agentResultCache: AgentResultCache | null = null;
-    if (plugin.manifest.cache?.enabled) {
+    let agentResultCachePrisma: PrismaClient | null = null;
+    const cacheEnabled = plugin.manifest.cache?.enabled === true;
+
+    const ensureAgentResultCache = async (): Promise<AgentResultCache> => {
+        if (agentResultCache) return agentResultCache;
         try {
             const { PrismaClient } = await import('@prisma/client');
-            const prisma = new PrismaClient();
-            agentResultCache = new AgentResultCache(prisma);
+            agentResultCachePrisma = new PrismaClient();
+            agentResultCache = new AgentResultCache(agentResultCachePrisma);
+            return agentResultCache;
+        } catch (error) {
+            agentLogger.error('Failed to initialize AgentResultCache', error);
+            throw new Error('Artifacts require a database connection. Please ensure Prisma is configured.');
+        }
+    };
+
+    if (cacheEnabled) {
+        try {
+            await ensureAgentResultCache();
             agentLogger.debug('Agent result cache initialized', {
-                ttlSeconds: plugin.manifest.cache.ttlSeconds,
-                excludePaths: plugin.manifest.cache.excludePaths
+                ttlSeconds: plugin.manifest.cache?.ttlSeconds,
+                excludePaths: plugin.manifest.cache?.excludePaths
             });
         } catch (error) {
             agentLogger.error('Failed to initialize agent result cache, continuing without caching', error);
@@ -228,6 +244,24 @@ export async function runAgentWithStreaming(
     }
 
     // Create basic task context with resolved tenant information (excluding working memory methods)
+    const artifactsFactory: TaskContext['artifacts'] = {
+        create: <T>(val?: T, options?: { mimeType?: string; preview?: string }): ArtifactHandle<T> => {
+            const cachePromise = ensureAgentResultCache();
+            const artifact = new ArtifactImpl<T>(undefined, cachePromise, finalTenantId, options?.mimeType);
+            if (val !== undefined) {
+                // Fire and forget set (handled internally by ArtifactImpl tracking _pendingWrite)
+                artifact.set(val).catch((err: unknown) => {
+                    agentLogger.error('Failed to set artifact value in background', err);
+                });
+            }
+            return artifact;
+        },
+        text: (val?: string): ArtifactHandle<string> =>
+            artifactsFactory.create<string>(val, { mimeType: 'text/plain' }),
+        json: <T>(val?: T): ArtifactHandle<T> =>
+            artifactsFactory.create<T>(val, { mimeType: 'application/json' })
+    };
+
     const partialCtx: PartialTaskContext = {
         tenantId: finalTenantId,
         agentId: agentName,
@@ -250,6 +284,7 @@ export async function runAgentWithStreaming(
         complete: (pct?: number, status?: string) => {
             agentLogger.info(`Agent Complete: ${status || 'completed'} at ${pct ?? 100}%`);
         },
+        artifacts: artifactsFactory,
         llm: plugin.llmAdapter || {
             async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]> {
                 agentLogger.warn(`llm.call is stubbed (no LLM adapter configured)`, { message, options });
@@ -382,63 +417,64 @@ export async function runAgentWithStreaming(
     extendContextWithStreaming(taskCtx, options.isStreaming);
 
     // --- Check Cache Before Agent Execution ---
-    if (agentResultCache) {
-        const cachedResult = await agentResultCache.getCachedResult(
-            plugin.manifest.name,
-            input,
-            plugin.manifest.cache?.excludePaths || [],
-            finalTenantId
-        );
+    if (cacheEnabled) {
+        try {
+            const cache = await ensureAgentResultCache();
+            const cachedResult = await cache.getCachedResult(
+                plugin.manifest.name,
+                input,
+                plugin.manifest.cache?.excludePaths || [],
+                finalTenantId
+            );
 
-        if (cachedResult) {
-            agentLogger.info(`Cache hit - returning cached result for agent ${plugin.manifest.name}`);
+            if (cachedResult) {
+                agentLogger.info(`Cache hit - returning cached result for agent ${plugin.manifest.name}`);
 
-            if (options.isStreaming) {
-                // For streaming mode, replay cached result as stream events
-                try {
-                    // Emit cached artifact
-                    await taskCtx.reply([{
-                        type: 'text',
-                        text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult)
-                    }]);
-                    // Emit final status with cache provenance and zeroed usage
-                    const finalStatus: TaskStatus = {
-                        state: 'completed',
-                        timestamp: new Date().toISOString(),
-                        metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
-                    } as any;
-                    try { eventBus.publish(taskChannel(taskId), { id: taskId, status: finalStatus, final: true } as any); } catch { }
-                } catch (error) {
-                    agentLogger.error('Failed to replay cached result in streaming mode', error);
-                    await taskCtx.fail(error);
-                }
-            } else {
-                // For non-streaming mode, create a proper result structure for cached result
-                const results = {
-                    status: {
-                        state: 'completed' as const,
-                        timestamp: new Date().toISOString(),
-                        metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
-                    },
-                    artifacts: [{
-                        id: 'cached-response',
-                        type: 'text' as const,
-                        title: 'Cached Response',
-                        parts: [{
+                if (options.isStreaming) {
+                    try {
+                        await taskCtx.reply([{
+                            type: 'text',
+                            text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult)
+                        }]);
+                        const finalStatus: TaskStatus = {
+                            state: 'completed',
+                            timestamp: new Date().toISOString(),
+                            metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
+                        } as any;
+                        try { eventBus.publish(taskChannel(taskId), { id: taskId, status: finalStatus, final: true } as any); } catch { }
+                    } catch (error) {
+                        agentLogger.error('Failed to replay cached result in streaming mode', error);
+                        await taskCtx.fail(error);
+                    }
+                } else {
+                    const results = {
+                        status: {
+                            state: 'completed' as const,
+                            timestamp: new Date().toISOString(),
+                            metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
+                        },
+                        artifacts: [{
+                            id: 'cached-response',
                             type: 'text' as const,
-                            text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult, null, 2)
+                            title: 'Cached Response',
+                            parts: [{
+                                type: 'text' as const,
+                                text: typeof cachedResult === 'string' ? cachedResult : JSON.stringify(cachedResult, null, 2)
+                            }]
                         }]
-                    }]
-                };
-                outputResults(results, options);
-                logInfoMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
+                    };
+                    outputResults(results, options);
+                    logInfoMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
+                }
+                return;
             }
-            return;
+        } catch (error) {
+            agentLogger.error('Result cache lookup failed', error);
         }
     }
 
     // If caching enabled, subscribe to final completion to persist result using original input as key
-    if (agentResultCache) {
+    if (cacheEnabled) {
         const channel = taskChannel(taskId);
         const cacheListener = async (event: A2AEvent) => {
             agentLogger.debug(`Cache listener received event`, { hasStatus: 'status' in event, final: (event as any).final, state: (event as any).status?.state });
@@ -447,15 +483,20 @@ export async function runAgentWithStreaming(
                     const resultToCache = (event.status as any)?.metadata?.result;
                     agentLogger.info(`Caching result for agent ${plugin.manifest.name}`, { hasResult: resultToCache !== undefined });
                     if (resultToCache !== undefined) {
-                        await agentResultCache.setCachedResult(
-                            plugin.manifest.name,
-                            input,
-                            resultToCache,
-                            plugin.manifest.cache?.ttlSeconds || 300,
-                            plugin.manifest.cache?.excludePaths || [],
-                            finalTenantId
-                        );
-                        agentLogger.info(`Result cached successfully for agent ${plugin.manifest.name}`);
+                        try {
+                            const cache = await ensureAgentResultCache();
+                            await cache.setCachedResult(
+                                plugin.manifest.name,
+                                input,
+                                resultToCache,
+                                plugin.manifest.cache?.ttlSeconds || 300,
+                                plugin.manifest.cache?.excludePaths || [],
+                                finalTenantId
+                            );
+                            agentLogger.info(`Result cached successfully for agent ${plugin.manifest.name}`);
+                        } catch (error) {
+                            agentLogger.error('Failed to persist cached result', error);
+                        }
                     }
                 } catch (error) {
                     agentLogger.error('Failed to cache agent result on completion', error);
@@ -523,6 +564,9 @@ export async function runAgentWithStreaming(
                     }
                     try { await sessionStore.close(); } catch { }
                     try { EngineLocator.setEngine(null as any); } catch { }
+                    if (agentResultCachePrisma?.$disconnect) {
+                        try { await agentResultCachePrisma.$disconnect(); } catch { }
+                    }
                     try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
                     try { await (await import('../core/memory/prismaSingleton.js')).disconnectMemoryPrismaClient(); } catch { }
                     try { (outboxPublisher as any)?.stop?.(); } catch { }
@@ -711,7 +755,7 @@ function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: Stream
 /**
  * Handle artifact events
  */
-function handleArtifactEvent(artifact: Artifact, options: StreamingOptions): void {
+function handleArtifactEvent(artifact: StreamArtifact, options: StreamingOptions): void {
     const output = {
         type: 'artifact',
         name: artifact.name || 'unnamed',
@@ -768,7 +812,7 @@ function handleArtifactEvent(artifact: Artifact, options: StreamingOptions): voi
  * Output final results for non-streaming mode
  */
 function outputResults(
-    results: { status: TaskStatus | null; artifacts: Artifact[] },
+    results: { status: TaskStatus | null; artifacts: StreamArtifact[] },
     options: StreamingOptions
 ): void {
     if (options.outputType === 'json') {

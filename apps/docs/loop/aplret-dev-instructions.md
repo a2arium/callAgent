@@ -1317,3 +1317,78 @@ transition: (env: EnvironmentState<MyConfig>, exec, m): TurnOutcome<MyConfig> =>
 ```
 
 ---
+
+## 7.5 Handling Large Data (Artifacts)
+
+When an agent needs to handle large payloads (e.g., long HTML, base64 images, big JSONs), storing them directly in `MentalState` or `inbox` can cause snapshot failures (`LIMIT_WM_SNAPSHOT_TOO_LARGE`) and memory bloating.
+
+**Solution: Transparent Offloading (Artifact.create)**
+
+Artifacts are lightweight handles (`Artifact<T>`) that transparently offload data to the `AgentResultCache` (DB/Blob Storage). You can work with them as values in memory, and the framework automatically offloads them when saving the snapshot.
+
+### Usage in Agents
+
+Use the static `Artifact.create(value)` helper. It does NOT require `ctx`.
+
+#### Example: Offloading a Result
+
+**Producer (Any Agent Logic):**
+```typescript
+import { Artifact } from '@a2arium/callagent-core';
+
+execution: async (intent, ctx) => {
+    const hugeHtml = "<html>... 10MB ...</html>";
+    
+    // Wrap the large value. 
+    // In memory, this is just a wrapper holding the string.
+    // When saving the snapshot, the framework detects it and offloads it to DB.
+    const artifact = Artifact.create(hugeHtml, { mimeType: 'text/html' });
+    
+    return { 
+        kind: 'done', 
+        result: { 
+            page: artifact // Pass the wrapper
+        } 
+    };
+}
+```
+
+**Consumer (Parent Agent):**
+```typescript
+perception: (env) => {
+    const childObs = env.inbox.current.find(o => o.source === 'child');
+    if (childObs) {
+        // The artifact is automatically rehydrated by the framework
+        return {
+            pageHandle: childObs.payload.result.page 
+        };
+    }
+    return {};
+},
+
+learning: async (prev, _, obs) => {
+    // Store the handle in M (it's small!)
+    return { ...prev, memory: { ...prev.memory, lastPage: obs.pageHandle } };
+},
+
+policy: async (m) => {
+    // Load content ONLY when needed
+    if (m.memory.lastPage) {
+        // Artifact<T> is a PromiseLike, so you can await it
+        const html = await m.memory.lastPage; 
+        // ...
+    }
+}
+```
+
+### Automatic Safety Net (Pruning)
+
+The framework enforces a size limit (default 50KB) on inline strings in the snapshot to prevent RAM overuse.
+
+If an agent attempts to save a larger string inline (without wrapping it in `Artifact.create`):
+1.  The framework **TRUNCATES** the string in the snapshot.
+2.  It logs a **LOUD WARNING**: `[PRUNE] Truncated field...`.
+3.  The agent continues execution, but the data is lost.
+
+**Rule:** If you see `[PRUNE]` warnings, wrap that field with `Artifact.create()`.
+

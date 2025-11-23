@@ -128,6 +128,49 @@ export class AgentResultCache {
     }
 
     /**
+     * Store a raw artifact directly.
+     * Used by ArtifactImpl and offloadArtifacts to store large blobs.
+     */
+    async storeArtifact(
+        tenantId: string,
+        artifactId: string | undefined,
+        value: unknown,
+        mimeType?: string
+    ): Promise<{ size: number; artifactId: string }> {
+        const id = artifactId || crypto.randomUUID();
+        // We use the virtual agent 'artifact_store' and cacheKey = artifactId
+        // This reuses the existing table structure without changes.
+        const size = JSON.stringify(value).length;
+
+        await this.setCachedResult(
+            'artifact_store',
+            { artifactId: id }, // Mock input
+            value,
+            86400 * 30, // 30 days
+            [],
+            tenantId
+        );
+
+        return { size, artifactId: id };
+    }
+
+    /**
+     * Load a raw artifact directly.
+     */
+    async loadArtifact<T>(tenantId: string, artifactId: string): Promise<T> {
+        const result = await this.getCachedResult<T>(
+            'artifact_store',
+            { artifactId },
+            [],
+            tenantId
+        );
+        if (result === null) {
+            throw new Error(`Artifact ${artifactId} not found`);
+        }
+        return result;
+    }
+
+    /**
      * Generate a consistent cache key from input, excluding specified paths
      */
     private generateCacheKey(input: TaskInput, excludePaths: string[]): string {

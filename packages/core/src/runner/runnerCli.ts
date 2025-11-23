@@ -112,8 +112,8 @@ function parseArgs(): {
             options.isStreaming = true;
         } else if (arg.startsWith('--format=')) {
             const format = arg.split('=')[1];
-            if (format === 'json' || format === 'sse') {
-                options.outputType = format;
+            if (format === 'json' || format === 'sse' || format === 'console') {
+                options.outputType = format as any;
             } else {
                 cliLogger.warn(`Unknown format '${format}', using 'console'`);
             }

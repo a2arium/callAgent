@@ -30,6 +30,7 @@
     "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}' --no-resolve-deps",
     "run:loop-mini": "yarn run-agent apps/examples/loop-agent-mini/dist/AgentModule.js '{}' --stream --format=console",
     "run:loop-mini:dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts apps/examples/loop-agent-mini/AgentModule.ts '{}' --stream --format=console --no-resolve-deps",
+    "run:artifact-demo": "LOG_LEVEL=warn yarn run-agent apps/examples/artifact-demo/dist/agent.js '{\"sizeKB\":256}' --format=console",
     "run:interactive-a2a": "yarn run-agent apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js '{}' --stream --format=console",
     "input": "node packages/core/dist/runner/runnerCli.js input",
     "run:calc": "run-agent apps/examples/calculator-workflow/dist/CoordinatorAgent.js '{\"expression\": \"5 * 2 + 3 - 1\"}'",

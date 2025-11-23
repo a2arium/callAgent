@@ -15,6 +15,7 @@ export { ContextSerializer } from './core/orchestration/ContextSerializer.js';
 export { A2AService, globalA2AService } from './core/orchestration/A2AService.js';
 export { TaskEngine } from './core/orchestration/taskEngine.js';
 export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
+export { Artifact } from './shared/types/index.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
 export type { MentalState, EnvironmentState, ObservationInbox } from './loop/types.js';
 export type {

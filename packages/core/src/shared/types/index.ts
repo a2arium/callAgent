@@ -2,16 +2,24 @@
 import type { ILLMCaller } from './LLMTypes.js';
 import type { ComponentLogger } from '@a2arium/callagent-utils'; // Import ComponentLogger
 // Explicitly import only needed types from StreamingEvents
-import type { TaskStatus, A2AEvent, Artifact } from './StreamingEvents.js';
-// UsageRecord is defined in this file (no dependency on provider-specific Usage)
+import type { TaskStatus, A2AEvent, Artifact as ProtocolArtifact } from './StreamingEvents.js';
 import type { IMemory } from '@a2arium/callagent-types';
 // Import working memory types for TaskContext
 import type { ThoughtEntry, DecisionEntry } from './workingMemory.js';
 import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';
 import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js';
+// Import Artifact types and the static factory
+import { Artifact } from './artifacts.js';
+import type { Artifact as ArtifactType, ArtifactHandle, LocalArtifact } from './artifacts.js';
 
 // Re-export only specific streaming event types needed externally
-export type { A2AEvent, TaskStatus, Artifact };
+// Rename ProtocolArtifact to avoid conflict, but keep Artifact exporting the new type
+export type { A2AEvent, TaskStatus, ProtocolArtifact };
+
+// Export the unified Artifact type and interfaces
+export type { ArtifactType, ArtifactHandle, LocalArtifact };
+// Export the static factory as 'Artifact'
+export { Artifact };
 
 // Re-export LLM types including the pure LLM port for modules
 export type { PureLLMPort, ILLMCaller, LLMConfig } from './LLMTypes.js';
@@ -21,6 +29,7 @@ export { extractPureLLMPort } from './LLMTypes.js';
 export * from './workingMemory.js';
 export * from './memoryLifecycle.js';
 export * from './observation.js';
+export * from './artifacts.js'; // Export artifacts types
 
 // A2A (Agent-to-Agent) Communication Types
 export * from './A2ATypes.js';
@@ -208,6 +217,26 @@ export type TaskContext = {
         has(key: string): boolean;
     };
 
+    // Artifacts factory for offloading large data
+    artifacts: {
+        /**
+         * Create an artifact handle and offload the value to storage.
+         * @param val - The data to offload
+         * @param options - Metadata options (mimeType, preview)
+         */
+        create<T>(val?: T, options?: { mimeType?: string; preview?: string }): ArtifactType<T>;
+
+        /**
+         * Helper to create a text artifact.
+         */
+        text(val?: string): ArtifactType<string>;
+
+        /**
+         * Helper to create a JSON artifact.
+         */
+        json<T>(val?: T): ArtifactType<T>;
+    };
+
     // Namespaced helpers (minimal, ergonomic)
     goals?: {
         add: (g: any) => Promise<string> | string;
@@ -254,10 +283,11 @@ export type TaskContext = {
     services: { get: <T = unknown>(name: string) => T | undefined }; // Placeholder for service registry
     getEnv: (key: string, defaultValue?: string) => string | undefined;
     throw: (code: string, message: string, details?: unknown) => never; // Structured error throw
-
-    /**
-     * Request human or external input. Returns an InputHandle for durable handler chaining.
-     */
+    sendTaskToAgent: (
+        targetAgent: string,
+        taskInput: TaskInput,
+        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string }
+    ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
     requestInput: (
         promptOrParts: string | string[] | MessagePart | MessagePart[],
         opts?: {
@@ -269,28 +299,10 @@ export type TaskContext = {
             setStage?: string
         }
     ) => Promise<import('../../core/orchestration/Handles.js').InputHandle>;
-
-    /**
-     * Group orchestration for running multiple child tasks and joining their results.
-     */
     allTasks?: (
         children: Array<{ agent: string; input: unknown }>,
         opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
     ) => Promise<import('../../core/orchestration/Handles.js').GroupHandle>;
-
-    /**
-     * A2A: Send task to another agent with context inheritance
-     * This method enables agent-to-agent communication with memory context transfer
-     * @param targetAgent - Name of the target agent
-     * @param taskInput - Input data for the target agent
-     * @param options - A2A communication options (memory inheritance, tenant context, etc.)
-     * @returns Promise resolving to task result or interactive task handle
-     */
-    sendTaskToAgent: (
-        targetAgent: string,
-        taskInput: TaskInput,
-        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string }
-    ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
 }
 
 // --- Semantic facade types ---
@@ -323,7 +335,7 @@ export type SemanticItem = {
  * Use this type for agent implementations to avoid "possibly undefined" errors
  */
 export type AgentTaskContext = Required<Pick<TaskContext,
-    'vars' | 'recall' | 'remember' | 'sendTaskToAgent'
+    'vars' | 'recall' | 'remember' | 'sendTaskToAgent' | 'artifacts'
 >> & TaskContext;
 
 /**
@@ -356,6 +368,10 @@ export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
 
     if (!ctx.vars || typeof ctx.vars !== 'object') {
         throw new Error('Agent context is missing required vars object. Ensure the agent is run through the proper runner with memory support.');
+    }
+
+    if (!ctx.artifacts || typeof ctx.artifacts !== 'object') {
+        throw new Error('Agent context is missing required artifacts factory. Ensure the agent is run through the proper runner with memory support.');
     }
 
     return ctx as AgentTaskContext;
