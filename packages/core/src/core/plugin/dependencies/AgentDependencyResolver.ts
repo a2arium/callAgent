@@ -44,7 +44,7 @@ export class AgentDependencyResolver {
      * @throws DependencyResolutionError if resolution fails
      */
     static async resolveDependencies(rootAgent: string, contextPath?: string): Promise<DependencyResolutionResult> {
-        resolverLogger.info('Starting dependency resolution', { rootAgent, contextPath });
+        resolverLogger.debug('Starting dependency resolution', { rootAgent, contextPath });
 
         const visited = new Set<string>();
         const dependencyGraph = new Map<string, string[]>();
@@ -74,7 +74,7 @@ export class AgentDependencyResolver {
                 warnings
             };
 
-            resolverLogger.info('Dependency resolution completed successfully', {
+            resolverLogger.debug('Dependency resolution completed successfully', {
                 rootAgent,
                 loadingOrder,
                 totalAgents: allAgents.length,

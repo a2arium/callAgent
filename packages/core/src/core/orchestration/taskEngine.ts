@@ -792,7 +792,7 @@ export class TaskEngine {
 
                             if (typeof targetStage === 'string' && targetStage.length > 0) {
                                 currentM.control.stage = targetStage;
-                                try { log.info('Auto stage transition', { from: currentStage, to: targetStage, trigger: 'tool_invoked' }); } catch { }
+                                try { log.debug('Auto stage transition', { from: currentStage, to: targetStage, trigger: 'tool_invoked' }); } catch { }
                             }
                         }
 
@@ -936,7 +936,7 @@ export class TaskEngine {
                     streaming: (runOpts?.streaming ?? options?.streaming) === true,
                     awaitCompletion // ✅ Pass awaitCompletion explicitly
                 } as any;
-                try { log.info('A2A dispatch', { tenantId, sessionId, token, agent, awaitCompletion }); } catch { }
+                try { log.debug('A2A dispatch', { tenantId, sessionId, token, agent, awaitCompletion }); } catch { }
                 try {
                     const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
                         ...(options || {}),
@@ -1251,7 +1251,7 @@ export class TaskEngine {
         }
         try {
             const pending = (plainVars as any)?.pendingArtifact;
-            log.info('🧪 [WM VAR TRACE] flushContextSnapshot plainVars', {
+            log.debug('🧪 [WM VAR TRACE] flushContextSnapshot plainVars', {
                 keys: Object.keys(plainVars),
                 hasPendingArtifact: !!pending,
                 pendingKind: pending && (pending as any).kind
@@ -1270,7 +1270,7 @@ export class TaskEngine {
             const mergedVars = { ...mentalVars, ...snapshotVars, ...plainVars } as Record<string, unknown>;
             M.memory = { ...(M.memory || {}), vars: mergedVars };
             const pending = (mergedVars as any)?.pendingArtifact;
-            log.info('🧪 [WM VAR TRACE] flushContextSnapshot merged M.memory.vars', {
+            log.debug('🧪 [WM VAR TRACE] flushContextSnapshot merged M.memory.vars', {
                 keys: Object.keys(mergedVars),
                 hasPendingArtifact: !!pending,
                 pendingKind: pending && (pending as any).kind
@@ -1299,7 +1299,7 @@ export class TaskEngine {
             // Using getSessionStorePrisma() helper method if available or casting
             const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
 
-            log.info('DEBUG: Resolving prisma for offloading', {
+            log.debug('DEBUG: Resolving prisma for offloading', {
                 hasPrisma: !!prisma,
                 hasSessionManager: !!this.sessionManager,
                 hasStore: !!(this.sessionManager as any)?.store,
@@ -1308,9 +1308,9 @@ export class TaskEngine {
 
             if (prisma) {
                 const cache = new AgentResultCache(prisma);
-                log.info('DEBUG: Calling offloadArtifacts');
+                log.debug('DEBUG: Calling offloadArtifacts');
                 try {
-                    log.info('🧪 [WM VAR TRACE] flushContextSnapshot -> offloadArtifacts', {
+                    log.debug('🧪 [WM VAR TRACE] flushContextSnapshot -> offloadArtifacts', {
                         pendingKindBeforeOffload: ((M.memory as any)?.vars as any)?.pendingArtifact?.kind
                     });
                 } catch { /* noop */ }
@@ -1471,7 +1471,7 @@ export class TaskEngine {
             Object.assign(mergedVars, varsObject);
             try {
                 const pending = (mergedVars as any)?.pendingArtifact;
-                log.info('🧪 [WM VAR TRACE] assignVarsIntoMental', {
+                log.debug('🧪 [WM VAR TRACE] assignVarsIntoMental', {
                     keys: Object.keys(mergedVars),
                     hasPendingArtifact: !!pending,
                     pendingKind: pending && (pending as any).kind
@@ -1588,7 +1588,7 @@ export class TaskEngine {
             if (!this.sessionManager) return;
             try {
                 try {
-                    log.info('🧪 [WM VAR TRACE] flushMentalState invoked', {
+                    log.debug('🧪 [WM VAR TRACE] flushMentalState invoked', {
                         varsDirty: (ctx as any).__varsDirty,
                         cacheKeys: Array.from(varCache.keys())
                     });
@@ -1606,7 +1606,7 @@ export class TaskEngine {
 
                 if (prisma) {
                     const cache = new AgentResultCache(prisma);
-                    log.info('🧪 [WM VAR TRACE] flushMentalState -> offloadArtifacts', {
+                    log.debug('🧪 [WM VAR TRACE] flushMentalState -> offloadArtifacts', {
                         pendingKindBeforeOffload: ((M.memory as any)?.vars as any)?.pendingArtifact?.kind
                     });
                     await offloadArtifacts(next, cache, tenantId);
@@ -1667,7 +1667,7 @@ export class TaskEngine {
                 }
                 if (key === 'pendingArtifact') {
                     try {
-                        log.info('🧪 [WM VAR TRACE] ctx.vars.set pendingArtifact', {
+                        log.debug('🧪 [WM VAR TRACE] ctx.vars.set pendingArtifact', {
                             valueKind: (value as any)?.kind,
                             varsDirtyBefore: (ctx as any).__varsDirty
                         });
@@ -1804,7 +1804,7 @@ export class TaskEngine {
 
             // Choose execution path: loop-first (default) or durable handler
             const runMode: 'loop' | 'legacy' = (ctx as any).runMode || 'loop';
-            try { log.info('Task execution start', { runMode, agentId: (ctx as any).agentId }); } catch { }
+            try { log.debug('Task execution start', { runMode, agentId: (ctx as any).agentId }); } catch { }
 
             const runLegacy = async () => {
                 if (isStreaming) {
@@ -2079,7 +2079,7 @@ export class TaskEngine {
                                     ...(latestVars as Record<string, unknown>)
                                 } as Record<string, unknown>;
                                 try {
-                                    log.info('🧪 [WM VAR TRACE] latestVars prior to merge', {
+                                    log.debug('🧪 [WM VAR TRACE] latestVars prior to merge', {
                                         sourceKeys: Object.keys(latestVars || {}),
                                         sourcePendingKind: (latestVars as any)?.pendingArtifact?.kind,
                                         existingKeys: Object.keys(existingNextVars || {}),
@@ -2093,7 +2093,7 @@ export class TaskEngine {
                             } catch { /* noop merge failure */ }
                             try {
                                 const pending = (((mNextEffective as any)?.memory as any)?.vars as any)?.pendingArtifact;
-                                log.info('🧪 [WM VAR TRACE] end-of-turn save snapshot', {
+                                log.debug('🧪 [WM VAR TRACE] end-of-turn save snapshot', {
                                     hasPendingArtifact: !!pending,
                                     pendingKind: pending && (pending as any).kind
                                 });
@@ -2104,13 +2104,13 @@ export class TaskEngine {
                                 const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
                                 if (prisma) {
                                     const cache = new AgentResultCache(prisma);
-                                    log.info('🧪 [WM VAR TRACE] end-of-turn offloadArtifacts', {
+                                    log.debug('🧪 [WM VAR TRACE] end-of-turn offloadArtifacts', {
                                         pendingKindBeforeOffload: (((mNextEffective as any)?.memory as any)?.vars as any)?.pendingArtifact?.kind
                                     });
                                     await offloadArtifacts(next, cache, tenantId);
                                     try {
                                         const afterPending = (((next as any)?.M as any)?.memory as any)?.vars?.pendingArtifact;
-                                        log.info('🧪 [WM VAR TRACE] pendingArtifact after offload', {
+                                        log.debug('🧪 [WM VAR TRACE] pendingArtifact after offload', {
                                             kind: afterPending?.kind,
                                             type: typeof afterPending
                                         });
@@ -2165,12 +2165,12 @@ export class TaskEngine {
                 log.debug('Processing outcome', { outcome: outcome.kind, isStreaming });
                 if (!isStreaming) {
                     if (outcome.kind === 'await_input') {
-                        log.info('Task awaiting input', { token: outcome.token });
+                        log.debug('Task awaiting input', { token: outcome.token });
                         task.status = { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: outcome.token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg } } as any;
                         return task;
                     }
                     if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
-                        log.info('Task awaiting completion', { kind: outcome.kind, token: (outcome as any).token });
+                        log.debug('Task awaiting completion', { kind: outcome.kind, token: (outcome as any).token });
                         const token = (outcome as any).token;
                         const extra = { kind: outcome.kind, token };
                         task.status = { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token, awaitExtra: extra, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg } } as any;
@@ -2997,7 +2997,7 @@ export class TaskEngine {
                 return;
             }
 
-            log.info('🔍 STAGING: Staging child completion observation', {
+            log.debug('🔍 STAGING: Staging child completion observation', {
                 parentTaskId,
                 token,
                 hasResult: !!result,
@@ -3068,7 +3068,7 @@ export class TaskEngine {
                     });
 
                     saved = true;
-                    log.info('✅ STAGING SUCCESS: Staged child completion observation synchronously', {
+                    log.debug('✅ STAGING SUCCESS: Staged child completion observation synchronously', {
                         parentTaskId,
                         token,
                         resultStatus: (result as any)?.status,
@@ -3112,7 +3112,7 @@ export class TaskEngine {
         const inflightKey = `${parentTaskId}:${childToken ?? childTaskId ?? 'n/a'}`;
         const callCount = (this.childCompletionInFlight.get(inflightKey) ?? 0) + 1;
         this.childCompletionInFlight.set(inflightKey, callCount);
-        log.info('Child completion processing started', {
+        log.debug('Child completion processing started', {
             parentTaskId: parentTaskId.substring(0, 25),
             childToken: childToken?.substring(0, 15),
             callCount,

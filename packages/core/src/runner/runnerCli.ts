@@ -133,7 +133,7 @@ function parseArgs(): {
         }
     }
 
-    cliLogger.info(`Running with options`, {
+    cliLogger.debug(`Running with options`, {
         agentFilePath: agentFileArg,
         streaming: options.isStreaming,
         format: options.outputType,

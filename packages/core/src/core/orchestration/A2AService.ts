@@ -99,7 +99,7 @@ export class A2AService implements IA2AService {
         const startTime = Date.now();
         const operationId = `a2a_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-        a2aLogger.info('A2A task initiated', {
+        a2aLogger.debug('A2A task initiated', {
             operationId,
             sourceTaskId: sourceCtx.task.id,
             sourceAgentId: sourceCtx.agentId,
@@ -183,14 +183,14 @@ export class A2AService implements IA2AService {
             }
 
             const duration = Date.now() - startTime;
-            a2aLogger.info('A2A task completed', {
+            a2aLogger.debug('A2A task completed', {
                 operationId,
                 duration,
                 success: true
             });
 
             // Notify parent engine on completion when correlation is provided
-            a2aLogger.info('🔍 A2A: Checking if should notify parent', {
+            a2aLogger.debug('🔍 A2A: Checking if should notify parent', {
                 hasParentTenantId: !!options.parentTenantId,
                 hasParentTaskId: !!options.parentTaskId,
                 hasParentChildToken: !!options.parentChildToken,
@@ -213,7 +213,7 @@ export class A2AService implements IA2AService {
                 // The awaitCompletion value is determined in taskEngine before calling sendTaskToAgent
                 // and passed in a2aOptions, so it should be in options here
                 const awaitCompletionValue = (options as any).awaitCompletion;
-                a2aLogger.info('🔍 A2A: Checking awaitCompletion for staging', {
+                a2aLogger.debug('🔍 A2A: Checking awaitCompletion for staging', {
                     parentTaskId: options.parentTaskId,
                     childToken: options.parentChildToken,
                     awaitCompletionValue,
@@ -223,7 +223,7 @@ export class A2AService implements IA2AService {
                 if (awaitCompletionValue === false) {
                     // ✅ FIX: Stage observation synchronously BEFORE deferring resume
                     // This ensures the observation is available when the parent resumes, even for synchronous completions
-                    a2aLogger.info('Staging child completion observation synchronously', {
+                    a2aLogger.debug('Staging child completion observation synchronously', {
                         parentTaskId: options.parentTaskId,
                         childToken: options.parentChildToken
                     });
@@ -235,7 +235,7 @@ export class A2AService implements IA2AService {
                             result,
                             childAgentId: targetPlugin.manifest.name
                         });
-                        a2aLogger.info('Successfully staged child completion observation', {
+                        a2aLogger.debug('Successfully staged child completion observation', {
                             parentTaskId: options.parentTaskId,
                             childToken: options.parentChildToken
                         });
@@ -464,7 +464,7 @@ export class A2AService implements IA2AService {
 
                     // Now notify parent about input_required
                     const childOnProvided = riOpts?.onProvided;
-                    try { log.info('Child requestInput routed to parent', { childAgent: targetPlugin.manifest.name, childOnProvided, prompt }); } catch { }
+                    try { log.debug('Child requestInput routed to parent', { childAgent: targetPlugin.manifest.name, childOnProvided, prompt }); } catch { }
                     await eng.handleChildInputRequired({
                         tenantId: parentTenantId,
                         parentTaskId,
@@ -573,7 +573,7 @@ export class A2AService implements IA2AService {
      */
     private createTargetComplete(targetPlugin: AgentPlugin) {
         return (pct?: number, status?: string) => {
-            a2aLogger.info('Target agent task marked complete', {
+            a2aLogger.debug('Target agent task marked complete', {
                 targetAgent: targetPlugin.manifest.name,
                 status
             });
@@ -601,7 +601,7 @@ export class A2AService implements IA2AService {
                 a2aLogger.debug(`[${targetPlugin.manifest.name}] ${msg}`, data);
             },
             info: (msg: string, data?: Record<string, unknown>) => {
-                a2aLogger.info(`[${targetPlugin.manifest.name}] ${msg}`, data);
+                a2aLogger.debug(`[${targetPlugin.manifest.name}] ${msg}`, data);
             },
             warn: (msg: string, data?: Record<string, unknown>) => {
                 a2aLogger.warn(`[${targetPlugin.manifest.name}] ${msg}`, data);
@@ -678,7 +678,7 @@ export class A2AService implements IA2AService {
                 );
 
                 if (cachedResult) {
-                    a2aLogger.info('A2A cache hit', {
+                    a2aLogger.debug('A2A cache hit', {
                         operationId,
                         targetAgent: targetPlugin.manifest.name,
                         taskId: targetCtx.task.id

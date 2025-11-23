@@ -136,7 +136,7 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
     loadedPaths.add(normalizedIndexPath);
 
     if (!options.silent) {
-        loaderLogger.info('Agent index loaded', {
+        loaderLogger.debug('Agent index loaded', {
             indexPath,
             loaded: loadedAgents.length,
             skipped: skippedAgents.length

@@ -70,29 +70,29 @@ export async function runAgentWithStreaming(
     const config: MinimalConfig = loadConfig();
 
     // Determine log method based on output format for runner logs
-    const logInfoMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.info;
+    const logTraceMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
 
     let plugin: AgentPlugin | undefined;
 
     // Dependency resolution (if enabled)
     if (options.resolveDeps !== false) {  // Default is true
-        logInfoMethod.call(runnerLogger, `🔍 Resolving agent dependencies...`);
+        logTraceMethod.call(runnerLogger, `🔍 Resolving agent dependencies...`);
 
         try {
             const loadedAgents = await PluginManager.loadAgentWithDependencies(agentFilePath);
 
             if (loadedAgents.length > 1) {
-                logInfoMethod.call(runnerLogger, `📦 Loaded ${loadedAgents.length} agents (including dependencies)`);
+                logTraceMethod.call(runnerLogger, `📦 Loaded ${loadedAgents.length} agents (including dependencies)`);
                 loadedAgents.forEach(agent => {
-                    logInfoMethod.call(runnerLogger, `  ✅ ${agent.manifest.name} (v${agent.manifest.version})`);
+                logTraceMethod.call(runnerLogger, `  ✅ ${agent.manifest.name} (v${agent.manifest.version})`);
                 });
             } else if (loadedAgents.length === 1) {
-                logInfoMethod.call(runnerLogger, `📦 Loaded agent: ${loadedAgents[0].manifest.name} (no dependencies)`);
+                logTraceMethod.call(runnerLogger, `📦 Loaded agent: ${loadedAgents[0].manifest.name} (no dependencies)`);
             }
 
             // The main agent should be the first one loaded (root agent)
             plugin = loadedAgents[0];
-            logInfoMethod.call(runnerLogger, `Plugin loaded successfully via dependency resolution`);
+            logTraceMethod.call(runnerLogger, `Plugin loaded successfully via dependency resolution`);
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : String(error);
 
@@ -117,8 +117,8 @@ export async function runAgentWithStreaming(
             }
         }
     } else {
-        logInfoMethod.call(runnerLogger, `⚠️ Dependency resolution disabled - loading single agent only`);
-        logInfoMethod.call(runnerLogger, `Loading plugin from ${agentFilePath}...`);
+        logTraceMethod.call(runnerLogger, `⚠️ Dependency resolution disabled - loading single agent only`);
+        logTraceMethod.call(runnerLogger, `Loading plugin from ${agentFilePath}...`);
 
         try {
             // Resolve path and convert to file URL
@@ -132,7 +132,7 @@ export async function runAgentWithStreaming(
                 originalError: error
             });
         }
-        logInfoMethod.call(runnerLogger, `Plugin loaded successfully`);
+        logTraceMethod.call(runnerLogger, `Plugin loaded successfully`);
     }
 
     // If dependency resolution was disabled, we need to find the plugin manually
@@ -193,7 +193,7 @@ export async function runAgentWithStreaming(
     const finalTenantId = resolveTenantId(explicitTenantId);
 
     // Use base runner logger here
-    logInfoMethod.call(runnerLogger, `Running agent '${agentName}' (v${plugin.manifest.version}) with streaming=${options.isStreaming} and tenant=${finalTenantId}`);
+    logTraceMethod.call(runnerLogger, `Running agent '${agentName}' (v${plugin.manifest.version}) with streaming=${options.isStreaming} and tenant=${finalTenantId}`);
 
     // --- Create Task Context ---
     const taskId = `local-task-${Date.now()}`;
@@ -271,18 +271,18 @@ export async function runAgentWithStreaming(
         },
         // These methods will be overridden by extendContextWithStreaming
         reply: async (parts: string | string[] | MessagePart | MessagePart[]) => {
-            agentLogger.info(`Agent Reply (stub - overridden by StreamingContext):`, { parts });
+            agentLogger.debug(`Agent Reply (stub - overridden by StreamingContext):`, { parts });
         },
         progress: (pctOrStatus: number | TaskStatus, msg?: string) => {
             if (typeof pctOrStatus === 'number') {
-                agentLogger.info(`Agent Progress: ${pctOrStatus}%${msg ? `: ${msg}` : ''}`);
+                agentLogger.debug(`Agent Progress: ${pctOrStatus}%${msg ? `: ${msg}` : ''}`);
             } else {
                 // Handle TaskStatus object
-                agentLogger.info(`Agent Status: ${pctOrStatus.state}`, pctOrStatus);
+                agentLogger.debug(`Agent Status: ${pctOrStatus.state}`, pctOrStatus);
             }
         },
         complete: (pct?: number, status?: string) => {
-            agentLogger.info(`Agent Complete: ${status || 'completed'} at ${pct ?? 100}%`);
+            agentLogger.debug(`Agent Complete: ${status || 'completed'} at ${pct ?? 100}%`);
         },
         artifacts: artifactsFactory,
         llm: plugin.llmAdapter || {
@@ -329,7 +329,7 @@ export async function runAgentWithStreaming(
             delete: async (key: string): Promise<void> => { agentLogger.warn(`cache.delete is stubbed`, { key }); }
         },
         emitEvent: async (channel: string, payload: unknown): Promise<void> => { agentLogger.warn(`emitEvent is stubbed`, { channel, payload }); },
-        updateStatus: (state: string): void => { agentLogger.info(`Agent Status Update: -> ${state}`); },
+        updateStatus: (state: string): void => { agentLogger.debug(`Agent Status Update: -> ${state}`); },
         services: { get: <T = unknown>(name: string): T | undefined => { agentLogger.warn(`services.get is stubbed`, { name }); return undefined; } },
         getEnv: (key: string, defaultValue?: string): string | undefined => process.env[key] ?? defaultValue,
         throw: (code: string, message: string, details?: unknown): never => {
@@ -345,19 +345,19 @@ export async function runAgentWithStreaming(
 
     // Replace the LLM stub with a real implementation BEFORE creating memory registry
     if (!plugin.llmAdapter && plugin.llmConfig) {
-        logInfoMethod.call(runnerLogger, `Creating LLM using factory for plugin ${plugin.manifest.name}`, {
+        logTraceMethod.call(runnerLogger, `Creating LLM using factory for plugin ${plugin.manifest.name}`, {
             provider: plugin.llmConfig.provider,
             model: plugin.llmConfig.modelAliasOrName
         });
         try {
             partialCtx.llm = createLLMForTask(plugin.llmConfig, partialCtx as any);
-            logInfoMethod.call(runnerLogger, `LLM created successfully for plugin ${plugin.manifest.name}`);
+            logTraceMethod.call(runnerLogger, `LLM created successfully for plugin ${plugin.manifest.name}`);
         } catch (error) {
-            logInfoMethod.call(runnerLogger, `Failed to create LLM for plugin ${plugin.manifest.name}`, { error: error instanceof Error ? error.message : String(error) });
+            logTraceMethod.call(runnerLogger, `Failed to create LLM for plugin ${plugin.manifest.name}`, { error: error instanceof Error ? error.message : String(error) });
             // Keep the stub LLM that was already assigned
         }
     } else if (!plugin.llmAdapter) {
-        logInfoMethod.call(runnerLogger, `Not creating LLM - plugin ${plugin.manifest.name} has no config`, {
+        logTraceMethod.call(runnerLogger, `Not creating LLM - plugin ${plugin.manifest.name} has no config`, {
             hasAdapter: !!plugin.llmAdapter,
             hasConfig: !!plugin.llmConfig
         });
@@ -464,7 +464,7 @@ export async function runAgentWithStreaming(
                         }]
                     };
                     outputResults(results, options);
-                    logInfoMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
+                    logTraceMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
                 }
                 return;
             }
@@ -554,9 +554,9 @@ export async function runAgentWithStreaming(
                     runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
                 }
                 await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx });
-                logInfoMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
+                logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
                 if (!options.isStreaming) {
-                    logInfoMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
+                    logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
                     try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
                         runnerLogger.warn('Failed waiting for pending A2A notifications', {
                             error: err instanceof Error ? err.message : String(err)

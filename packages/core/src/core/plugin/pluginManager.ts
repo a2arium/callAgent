@@ -17,7 +17,7 @@ export class PluginManager {
     static registerAgent(agent: AgentPlugin): void {
         try {
             globalAgentRegistry.register(agent);
-            pluginLogger.info('Agent plugin registered', {
+            pluginLogger.debug('Agent plugin registered', {
                 name: agent.manifest.name,
                 version: agent.manifest.version
             });
@@ -50,7 +50,7 @@ export class PluginManager {
      * @returns Array of loaded agent plugins in dependency order
      */
     static async loadAgentWithDependencies(agentNameOrPath: string): Promise<AgentPlugin[]> {
-        pluginLogger.info('Loading agent with dependencies', { agentNameOrPath });
+        pluginLogger.debug('Loading agent with dependencies', { agentNameOrPath });
 
         try {
             // Determine context path for multi-agent folder discovery
@@ -74,7 +74,7 @@ export class PluginManager {
             const resolution = await AgentDependencyResolver.resolveDependencies(agentName, contextPath);
             const loadedAgents: AgentPlugin[] = [];
 
-            pluginLogger.info('Dependency resolution completed', {
+            pluginLogger.debug('Dependency resolution completed', {
                 agentNameOrPath,
                 agentName,
                 contextPath,
@@ -99,7 +99,7 @@ export class PluginManager {
                 }
             }
 
-            pluginLogger.info('All dependencies loaded successfully', {
+            pluginLogger.debug('All dependencies loaded successfully', {
                 agentNameOrPath,
                 loadedCount: loadedAgents.length
             });
@@ -220,7 +220,7 @@ export class PluginManager {
                     loadedAt: new Date()
                 });
 
-                pluginLogger.info('Agent loaded successfully', {
+                pluginLogger.debug('Agent loaded successfully', {
                     agentName: loadedAgent.manifest.name,
                     version: loadedAgent.manifest.version,
                     path: agentPath
@@ -256,7 +256,7 @@ export class PluginManager {
         if (agent) {
             // Note: AgentRegistry doesn't have unregister method yet
             // This would need to be implemented in AgentRegistry
-            pluginLogger.info('Agent unloaded', { agentName });
+            pluginLogger.debug('Agent unloaded', { agentName });
             return true;
         }
         return false;
