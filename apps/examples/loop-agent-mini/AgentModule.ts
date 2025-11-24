@@ -101,8 +101,7 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         name: 'loop-agent-mini',
         version: '0.3.0',
         runMode: 'loop',
-        budgets: { maxTurns: 5 }
-        // Note: No hitl setting - we want the shield to pass actions through
+        budgets: { maxTurns: 2 }
     },
 
     llmConfig: {

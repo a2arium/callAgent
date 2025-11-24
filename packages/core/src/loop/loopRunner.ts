@@ -329,6 +329,20 @@ export async function runLoop<
         if (turn > 0) {
             try { (env as any).turn += 1; } catch { }
         }
+
+        // Check global budget from env (handles resume cases where local turn count resets)
+        const globalMaxTurns = (env as any).budget?.maxTurns;
+        if (typeof globalMaxTurns === 'number' && (env as any).turn > globalMaxTurns) {
+            log.debug('🔍 DEBUG: Global budget check triggered', {
+                taskId,
+                runId,
+                envTurn: (env as any).turn,
+                globalMaxTurns
+            });
+            outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
+            break;
+        }
+
         // Update logging context with current turn number
         updateLoggingContext({ turn: (env as any).turn });
 
