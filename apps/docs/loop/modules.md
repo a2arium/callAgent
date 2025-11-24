@@ -136,7 +136,7 @@ type Modules<
   attention:  (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, llm?: PureLLMPort) => Alpha;
   perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
   learning:   (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined,
-               obs: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
+               obs: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory> | Promise<MentalState<Sensory>>;
   policy:     (m: MentalState<Sensory>, llm?: PureLLMPort) => ProposedAction;
   shield:     (m: MentalState<Sensory>, intent: ProposedAction, llm?: PureLLMPort) =>
                 | { action: 'pass'; intent: ProposedAction }
@@ -230,6 +230,7 @@ Stage.setStage(ctx, 'completed');
 * **Sensory rule:** only store raw observations (e.g., latest raw user text for this turn) under `memory.sensory`. Do not place cognitive derivations there.
 * **Must not:** touch `ctx.vars` or do side effects.
 * **Pattern:** `next = { ...prev, worldModel: {...}, memory: {...}, reward: {...} }`.
+* **Async:** Learning may be `async` (return `Promise<M>`) to support **lazy-loading artifacts** when content is required for state updates.
 
 > This “pure learning, effectful execution” split mirrors the functional-core / imperative-shell approach and makes tests trivial.
 

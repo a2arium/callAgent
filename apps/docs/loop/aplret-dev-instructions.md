@@ -168,9 +168,10 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 * **Learning (L) — update the mind (only writer of M)**
   * **Purpose:** Turn the new observation into a better **mental state (M_t)**.
   * **Focus on:** immutable update (return a new M), provenance, safe online changes.
-  * **Inputs → Output:** (M_{t-1}, a_{t-1}, o_t) (opt. (r_{t-1})) → **M_t**.
+  * **Inputs → Output:** (M_{t-1}, a_{t-1}, o_t) (opt. (r_{t-1})) → **M_t** | **Promise<M_t>**.
   * **Do:** write episodic/semantic/procedural memory; refine world model; adjust goals, reward weights, and affect.
   * **Don't:** choose external actions.
+  * **Async Policy:** Learning is primarily synchronous/pure. Async is PERMITTED only for lazy-loading Artifacts (data offloaded to DB) required for the mental state update.
 
 * **Policy / Reasoning (R) — what to do next**
   * **Purpose:** Decide **WHAT** to do based on the current mind.
@@ -1052,7 +1053,7 @@ learning: (
   prevAction: ProposedAction | undefined, 
   obs: Observation,
   rPrev?: number
-) => MentalState
+) => MentalState | Promise<MentalState>
 ```
 
 **Purpose**: Pure, immutable updates to MentalState. **This is the ONLY place to update M.**
@@ -1329,6 +1330,35 @@ Artifacts are lightweight handles (`Artifact<T>`) that transparently offload dat
 ### Usage in Agents
 
 Use the static `Artifact.create(value)` helper. It does NOT require `ctx`.
+
+#### Example: Async Learning for Lazy Loading
+
+The Learning module supports `async` execution specifically to allow lazy-loading of artifacts when needed for cognitive updates.
+
+```typescript
+learning: async (prev, _, obs) => {
+    const next = { ...prev };
+
+    // 1. Store the handle (fast, synchronous logic)
+    if (obs.newDoc) {
+        next.memory.docHandle = obs.newDoc; 
+    }
+
+    // 2. Lazy-load content IF needed for immediate cognition
+    // (e.g. to extract keywords for the World Model)
+    if (obs.newDoc && !next.worldModel.docKeywords) {
+        const content = await obs.newDoc; // Lazy load from DB
+        next.worldModel.docKeywords = extractKeywords(content);
+    }
+    
+    return next;
+},
+```
+
+**Best Practice:**
+1. **Store Handles:** Prefer storing the `Artifact<T>` handle in `M.memory` rather than the raw data.
+2. **Load on Demand:** Only `await` the artifact in Learning if you need its content *immediately* to update the World Model or Goal State.
+3. **Execution Loading:** If the content is only needed for an action (e.g., sending to an LLM), let Policy pick the intent and have Execution await the artifact.
 
 #### Example: Offloading a Result
 

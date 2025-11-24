@@ -104,7 +104,7 @@ export type Modules<
 > = {
     attention: (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, llm?: PureLLMPort) => Alpha;
     perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, llm?: PureLLMPort) => Obs | Promise<Obs>;
-    learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory>;
+    learning: (prev: MentalState<Sensory>, prevAction: ProposedAction | undefined, o: Obs, rPrev?: number, llm?: PureLLMPort) => MentalState<Sensory> | Promise<MentalState<Sensory>>;
     policy: PolicyFn<Sensory, Obs>;
     shield: (m: MentalState<Sensory>, a: ProposedAction, llm?: PureLLMPort) => ShieldOutcome;
     execution: (a: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
@@ -168,7 +168,8 @@ export async function oneTurn<
     const tL0 = Date.now();
     let m1: MentalState<Sensory>;
     try {
-        m1 = mods.learning(mPrev, prevAction, o, rPrev, llm);
+        const result = mods.learning(mPrev, prevAction, o, rPrev, llm);
+        m1 = result instanceof Promise ? await result : result;
         log.debug('Learning returned MentalState', { varsCount: Object.keys(((m1 as any).memory?.vars) || {}).length });
     } catch (error) {
         log.error('Learning module error', { error: error instanceof Error ? error.message : String(error) });
