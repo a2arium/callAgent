@@ -1,5 +1,6 @@
 import { extendContextWithMemory, extendContextWithWorkingMemory, createLegacyWorkingVariablesProxy } from '../src/core/memory/types/working/context/workingMemoryContext.js';
 import { TaskContext } from '../src/shared/types/index.js';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 
 describe('workingMemoryContext', () => {
     const tenantId = 'test-tenant';

@@ -332,6 +332,9 @@ export async function runLoop<
 
         // Check global budget from env (handles resume cases where local turn count resets)
         const globalMaxTurns = (env as any).budget?.maxTurns;
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log(`[runLoop] Budget check: env.turn=${(env as any).turn}, globalMaxTurns=${globalMaxTurns}, condition=${(env as any).turn} > ${globalMaxTurns} = ${(env as any).turn > globalMaxTurns}`);
+        }
         if (typeof globalMaxTurns === 'number' && (env as any).turn > globalMaxTurns) {
             log.debug('🔍 DEBUG: Global budget check triggered', {
                 taskId,
@@ -339,6 +342,9 @@ export async function runLoop<
                 envTurn: (env as any).turn,
                 globalMaxTurns
             });
+            if (process.env.DEBUG_BACKGROUND_TASKS) {
+                console.log(`[runLoop] FAILING: budget_turns_exceeded because ${(env as any).turn} > ${globalMaxTurns}`);
+            }
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }
@@ -502,6 +508,9 @@ export async function runLoop<
                 maxTurns,
                 condition: `${turn} === ${maxTurns} - 1`
             });
+            if (process.env.DEBUG_BACKGROUND_TASKS) {
+                console.log(`[runLoop] FAILING at turn ${turn} === ${maxTurns} - 1: budget_turns_exceeded`);
+            }
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }

@@ -1,3 +1,4 @@
+import { jest, describe, it, beforeEach, afterEach, expect } from '@jest/globals';
 import { UnifiedMemoryService } from '../src/core/memory/UnifiedMemoryService.js';
 import type { SemanticMemoryAdapter, EpisodicMemoryAdapter } from '../src/core/memory/UnifiedMemoryService.js';
 import { getMemoryProfile } from '../src/core/memory/lifecycle/config/MemoryProfiles.js';
@@ -39,7 +40,9 @@ describe('UnifiedMemoryService', () => {
     });
 
     afterEach(async () => {
-        await service.shutdown();
+        if (service && typeof service.shutdown === 'function') {
+            await service.shutdown();
+        }
     });
 
     describe('Initialization', () => {

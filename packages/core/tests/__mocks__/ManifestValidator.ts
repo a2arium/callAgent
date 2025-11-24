@@ -1,3 +1,5 @@
+import { jest } from '@jest/globals';
+
 // Manual mock for ManifestValidator
 export const ManifestValidator = {
     validate: jest.fn(),

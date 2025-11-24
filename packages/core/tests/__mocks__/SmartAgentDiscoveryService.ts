@@ -1,4 +1,6 @@
 // Manual mock for SmartAgentDiscoveryService
+import { jest } from '@jest/globals';
+
 export const SmartAgentDiscoveryService = {
     findAgent: jest.fn(),
     findManifest: jest.fn(),

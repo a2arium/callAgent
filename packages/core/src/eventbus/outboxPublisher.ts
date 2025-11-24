@@ -9,8 +9,11 @@ export class OutboxPublisher {
     private prisma: PrismaClient;
     private running = false;
     private lastId: string | null = null;
+    private timeoutId: NodeJS.Timeout | null = null;
+    private ownsPrisma: boolean;
 
     constructor(prisma?: PrismaClient) {
+        this.ownsPrisma = !prisma;
         this.prisma = prisma || new PrismaClient();
     }
 
@@ -18,19 +21,57 @@ export class OutboxPublisher {
         if (this.running) return;
         this.running = true;
         const tick = async () => {
-            if (!this.running) return;
+            if (!this.running) {
+                log.debug('tick() called but running=false, exiting');
+                return;
+            }
             try {
                 await this.publishOnce();
             } catch (e) {
                 log.warn('publishOnce failed', e as any);
             } finally {
-                setTimeout(tick, intervalMs);
+                // Fix race condition: only schedule next tick if still running (Hypothesis 1)
+                if (this.running) {
+                    this.timeoutId = setTimeout(tick, intervalMs);
+                } else {
+                    log.debug('Skipping setTimeout - not running');
+                }
             }
         };
         tick();
     }
 
-    stop(): void { this.running = false; }
+    stop(): void {
+        this.running = false;
+        // Clear any pending timeout
+        if (this.timeoutId) {
+            clearTimeout(this.timeoutId);
+            this.timeoutId = null;
+        }
+    }
+
+    /**
+     * Check if publisher is currently running
+     */
+    isActive(): boolean {
+        return this.running;
+    }
+
+    /**
+     * Disconnect the Prisma client if this instance owns it
+     * This prevents hanging database connections (Hypothesis 3)
+     */
+    async disconnect(): Promise<void> {
+        this.stop();
+        if (this.ownsPrisma) {
+            try {
+                await this.prisma.$disconnect();
+                log.debug('Prisma client disconnected');
+            } catch (error) {
+                log.warn('Error disconnecting Prisma client', error as any);
+            }
+        }
+    }
 
     private async publishOnce(): Promise<void> {
         // Simple polling publisher; production should use NOTIFY/LISTEN or job queue

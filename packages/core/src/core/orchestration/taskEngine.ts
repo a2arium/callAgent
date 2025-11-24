@@ -167,6 +167,8 @@ export class TaskEngine {
     private sessionManager?: SessionManager;
     private handlerInvoker?: DurableHandlerInvoker;
     private readonly childCompletionInFlight = new Map<string, number>();
+    // Track background task promises for cleanup (especially in tests)
+    private readonly backgroundTaskPromises = new Set<Promise<unknown>>();
 
     constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
         if (opts?.sessionStore) {
@@ -185,8 +187,11 @@ export class TaskEngine {
             // Default basic invoker using local restoreCtx
             this.handlerInvoker = new DurableHandlerInvokerCore(this.restoreCtx.bind(this));
         }
-        // Ensure outbox publisher is running
-        try { outboxPublisher.start(); } catch { /* noop */ }
+        // Ensure outbox publisher is running (unless disabled for tests)
+        // In test environments, we don't want background services running
+        if (!process.env.DISABLE_OUTBOX_PUBLISHER) {
+            try { outboxPublisher.start(); } catch { /* noop */ }
+        }
     }
 
     private getSessionStorePrisma() {
@@ -974,25 +979,45 @@ export class TaskEngine {
             children: Array<{ agent: string; input: unknown }>,
             opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
         ) => {
+            if (process.env.DEBUG_BACKGROUND_TASKS) {
+                console.log(`[TaskEngine.allTasks] Called with ${children.length} children`);
+            }
             if (!this.sessionManager) throw new Error('Session manager not configured');
             const maxGroup = 50; // TODO: make configurable
             if (children.length > maxGroup) throw new Error('LIMIT_MAX_GROUP_CHILDREN_EXCEEDED');
             const childTokens: string[] = [];
             for (const child of children) {
+                if (process.env.DEBUG_BACKGROUND_TASKS) {
+                    console.log(`[TaskEngine.allTasks] Dispatching child: ${child.agent}`);
+                }
                 const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, child.agent);
                 childTokens.push(token);
-                globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
+                // Track background task promise for cleanup
+                // NOTE: sendTaskToAgent is called WITHOUT awaitCompletion option, so it defaults to true
+                // This means children execute synchronously even though we don't await them here
+                const taskPromise = globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
                     tenantId,
                     parentTenantId: tenantId,
                     parentTaskId: sessionId,
-                    parentChildToken: token
+                    parentChildToken: token,
+                    awaitCompletion: false // ✅ Explicitly set to false for background execution
                 } as any).catch(async (e) => {
                     await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
                         taskId: sessionId,
                         childAgent: child.agent,
                         error: e instanceof Error ? e.message : String(e)
                     });
+                }).finally(() => {
+                    // Remove from tracking set when done
+                    const removed = this.backgroundTaskPromises.delete(taskPromise);
+                    if (process.env.DEBUG_BACKGROUND_TASKS) {
+                        console.log(`[TaskEngine] Background task promise completed for ${child.agent}, removed=${removed}, remaining=${this.backgroundTaskPromises.size}`);
+                    }
                 });
+                this.backgroundTaskPromises.add(taskPromise);
+                if (process.env.DEBUG_BACKGROUND_TASKS) {
+                    console.log(`[TaskEngine] Background task promise added for ${child.agent}, total=${this.backgroundTaskPromises.size}`);
+                }
             }
             const { handle: groupHandle, groupToken } = await createGroupHandle(this.sessionManager, tenantId, sessionId, childTokens);
             const snap = await this.sessionManager.load(tenantId, sessionId);
@@ -1353,6 +1378,9 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log('[TaskEngine.startTask] Entry', { taskId: params.task.id, isStreaming: params.isStreaming, agentId: params.agentId });
+        }
         const { task, isStreaming, agentId, tenantId: startTenantId, initialContext } = params;
 
         // Use provided context if present, otherwise create a basic one
@@ -1803,8 +1831,15 @@ export class TaskEngine {
             });
 
             // Choose execution path: loop-first (default) or durable handler
-            const runMode: 'loop' | 'legacy' = (ctx as any).runMode || 'loop';
+            // Check manifest for runMode, then ctx, then default to 'loop'
+            const agentId = (ctx as any).agentId;
+            const plugin = agentId ? PluginManager.findAgent(agentId) : null;
+            const manifestRunMode = (plugin?.manifest as any)?.runMode;
+            const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
             try { log.debug('Task execution start', { runMode, agentId: (ctx as any).agentId }); } catch { }
+            if (process.env.DEBUG_BACKGROUND_TASKS) {
+                console.log('[TaskEngine.startTask] About to execute, runMode=', runMode, 'isStreaming=', isStreaming);
+            }
 
             const runLegacy = async () => {
                 if (isStreaming) {
@@ -1975,7 +2010,20 @@ export class TaskEngine {
                     try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
                 } catch { /* ignore */ }
                 log.debug('Loop options configured', loopOpts);
+                if (process.env.DEBUG_BACKGROUND_TASKS) {
+                    console.log('[TaskEngine.startTask] About to call runLoop', {
+                        maxTurns: loopOpts.maxTurns,
+                        envTurn: env.turn,
+                        envBudgetMaxTurns: (env as any).budget?.maxTurns
+                    });
+                }
                 const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
+                if (process.env.DEBUG_BACKGROUND_TASKS) {
+                    console.log('[TaskEngine.startTask] runLoop returned', {
+                        outcome: outcome.kind,
+                        reason: (outcome as any).reason
+                    });
+                }
                 // Ensure meta.turn is persisted after initial runLoop
                 try {
                     if (this.sessionManager) {
@@ -1984,7 +2032,7 @@ export class TaskEngine {
                         const baseAfterStart = ((snapAfterStart?.snapshot as Record<string, unknown>) || {}) as Record<string, unknown>;
                         const prevMetaAfterStart = ((baseAfterStart as any).meta || {}) as Record<string, unknown>;
                         const turnToSave = Number((env as any).turn) || 1;
-                        const nextMetaAfterStart = { ...prevMetaAfterStart, turn: turnToSave } as Record<string, unknown>;
+                        const nextMetaAfterStart = { ...prevMetaAfterStart, turn: turnToSave, budgets: loopOpts } as Record<string, unknown>;
                         // Merge latest ctx.vars (written via proxy to M.memory.vars) into mNext before saving
                         // This addresses cases where runLoop returns a new MentalState instance that
                         // does not share object identity with M updated by assignVarsIntoMental()
@@ -2751,12 +2799,27 @@ export class TaskEngine {
             // Budgets
             let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
             try {
-                const b = (plugin?.manifest as any)?.budgets;
+                // Restore budgets from snapshot first, then fallback to manifest
+                const persistedBudgets = (baseNow as any)?.meta?.budgets;
+                const manifestBudgets = (plugin?.manifest as any)?.budgets;
                 const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-                if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
-                try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
-            } catch { }
+
+                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
+                    loopOpts = persistedBudgets;
+                } else if (manifestBudgets && typeof manifestBudgets === 'object') {
+                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                } else {
+                    loopOpts = { maxTurns: 1 }; // Safety default
+                }
+
+                // Only set env.budget if loopOpts has valid values to prevent implicit Infinity default
+                if (typeof loopOpts.maxTurns === 'number') {
+                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                }
+            } catch (err) {
+                try { (ctx as any).logger?.warn?.('Failed to restore budgets in resumeInput', { error: err }); } catch { }
+            }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             // Persist updated M with latest ctx.vars merged into mNext
             try {
@@ -2765,7 +2828,7 @@ export class TaskEngine {
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 const prevMeta = ((baseSnap as any).meta || {}) as Record<string, unknown>;
-                const nextMeta = { ...prevMeta, turn: env.turn } as Record<string, unknown>;
+                const nextMeta = { ...prevMeta, turn: env.turn, budgets: loopOpts } as Record<string, unknown>;
                 const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
@@ -2848,13 +2911,26 @@ export class TaskEngine {
             const overrides = (plugin as any)?.loop?.modules || (plugin as any)?.loop || {};
             let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
             try {
-                const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
+                // Restore budgets from snapshot first, then fallback to manifest
+                const persistedBudgets = (baseNow as any)?.meta?.budgets;
+                const manifestBudgets = (plugin?.manifest as any)?.budgets;
+                const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-                if (b && typeof b === 'object') {
-                    loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
-                    try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
+
+                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
+                    loopOpts = persistedBudgets;
+                } else if (manifestBudgets && typeof manifestBudgets === 'object') {
+                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                } else {
+                    loopOpts = { maxTurns: 1 }; // Safety default
                 }
-            } catch { }
+
+                if (typeof loopOpts.maxTurns === 'number') {
+                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                }
+            } catch (err) {
+                try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleToolCompleted', { error: err }); } catch { }
+            }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             // Persist and emit status (merge latest vars)
             try {
@@ -2863,7 +2939,7 @@ export class TaskEngine {
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 const prevMeta = ((baseSnap as any).meta || {}) as Record<string, unknown>;
-                const nextMeta = { ...prevMeta, turn: env.turn } as Record<string, unknown>;
+                const nextMeta = { ...prevMeta, turn: env.turn, budgets: loopOpts } as Record<string, unknown>;
                 const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
@@ -2941,13 +3017,28 @@ export class TaskEngine {
                 externalEvents: undefined
             };
             const overrides = (plugin as any)?.loop?.modules || {};
-            let loopOpts: { maxTurns?: number; latencyMs?: number } = { maxTurns: 1 };
+            let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
             try {
-                const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
+                // Restore budgets from snapshot first, then fallback to manifest
+                const persistedBudgets = (baseNow as any)?.meta?.budgets;
+                const manifestBudgets = (plugin?.manifest as any)?.budgets;
+                const hitl = (plugin?.manifest as any)?.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-                if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns ?? 1, latencyMs: (b as any).latencyMs };
-                try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
-            } catch { }
+
+                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
+                    loopOpts = persistedBudgets;
+                } else if (manifestBudgets && typeof manifestBudgets === 'object') {
+                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                } else {
+                    loopOpts = { maxTurns: 1 }; // Safety default
+                }
+
+                if (typeof loopOpts.maxTurns === 'number') {
+                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                }
+            } catch (err) {
+                try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleExternalEventOccurred', { error: err }); } catch { }
+            }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             try {
                 const snapAfter = await this.sessionManager!.load(tenantId, taskId);
@@ -2955,7 +3046,7 @@ export class TaskEngine {
                 const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                 const executedTurns = 1;
                 const prevMeta = (baseSnap as any).meta || {};
-                const nextMeta = { ...prevMeta, turnTotal: (Number(prevMeta.turnTotal) || 0) + executedTurns };
+                const nextMeta = { ...prevMeta, turnTotal: (Number(prevMeta.turnTotal) || 0) + executedTurns, budgets: loopOpts };
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
@@ -3417,20 +3508,35 @@ export class TaskEngine {
 
                 const overrides = (plugin as any)?.loop?.modules || {};
 
-                let loopOpts: { maxTurns?: number; latencyMs?: number } = { maxTurns: 1 };
+                let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
                 try {
-                    const b = (plugin?.manifest as any)?.budgets; const hitl = (plugin?.manifest as any)?.hitl;
+                    // Restore budgets from snapshot first, then fallback to manifest
+                    const persistedBudgets = (latestBase as any)?.meta?.budgets;
+                    const manifestBudgets = (plugin?.manifest as any)?.budgets;
+                    const hitl = (plugin?.manifest as any)?.hitl;
                     if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-                    if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns ?? 1, latencyMs: (b as any).latencyMs };
-                    try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
-                } catch { }
+
+                    if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
+                        loopOpts = persistedBudgets;
+                    } else if (manifestBudgets && typeof manifestBudgets === 'object') {
+                        loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                    } else {
+                        loopOpts = { maxTurns: 1 }; // Safety default
+                    }
+
+                    if (typeof loopOpts.maxTurns === 'number') {
+                        (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                    }
+                } catch (err) {
+                    try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
+                }
                 const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
                 try {
                     const snapAfter = await this.sessionManager!.load(tenantId, parentTaskId);
                     const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
                     const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
                     const prevMeta = (baseSnap as any).meta || {};
-                    const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token };
+                    const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token, budgets: loopOpts };
 
                     // ✅ FIX: Merge ctx.vars into mNext before saving (same as startTask does)
                     const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
@@ -3463,14 +3569,23 @@ export class TaskEngine {
             if (snap2) {
                 const base2 = (snap2.snapshot as Record<string, unknown>) || {};
                 const groups = getPendingGroups(base2);
+                if (process.env.DEBUG_BACKGROUND_TASKS) {
+                    console.log(`[TaskEngine.handleChildCompleted] Checking groups, token=${token}, groups=${Object.keys(groups).length}`);
+                }
                 let mutated = false;
                 for (const [gToken, g] of Object.entries(groups)) {
                     if (g.childTokens?.includes(token)) {
+                        if (process.env.DEBUG_BACKGROUND_TASKS) {
+                            console.log(`[TaskEngine.handleChildCompleted] Found group ${gToken} with token ${token}, childTokens=${g.childTokens.length}`);
+                        }
                         g.results = g.results || {} as any;
                         (g.results as any)[token] = { ok: true, value: result };
                         mutated = true;
                         // Check if all children have results recorded
                         const allDone = g.childTokens.every(ct => (g.results as any)[ct] !== undefined);
+                        if (process.env.DEBUG_BACKGROUND_TASKS) {
+                            console.log(`[TaskEngine.handleChildCompleted] Group ${gToken} allDone=${allDone}, results=${Object.keys((g.results as any) || {}).length}/${g.childTokens.length}`);
+                        }
                         if (allDone) {
                             // invoke group allCompleted handler if set
                             const handler = g.handlers?.allCompleted;
@@ -3478,6 +3593,9 @@ export class TaskEngine {
                             delete groups[gToken];
                             const next2 = setPendingGroups(base2, groups);
                             await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
+                            if (process.env.DEBUG_BACKGROUND_TASKS) {
+                                console.log(`[TaskEngine.handleChildCompleted] Firing group_completed event for group ${gToken}`);
+                            }
                             await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_completed', { groupToken: gToken });
                             if (handler && this.handlerInvoker) {
                                 await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName: handler, input: g.results });
@@ -4134,5 +4252,50 @@ export class TaskEngine {
             };
         } catch { /* noop */ }
         return ctx;
+    }
+
+    /**
+     * Wait for all background task promises to complete
+     * Useful for tests to ensure all background work finishes before test cleanup
+     * @param timeoutMs Maximum time to wait (default: 5000ms)
+     */
+    async waitForBackgroundTasks(timeoutMs: number = 5000): Promise<void> {
+        const initialCount = this.backgroundTaskPromises.size;
+        if (initialCount === 0) {
+            if (process.env.DEBUG_BACKGROUND_TASKS) {
+                console.log('[TaskEngine] No background tasks to wait for');
+            }
+            return;
+        }
+
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log(`[TaskEngine] Waiting for ${initialCount} background task(s), timeout=${timeoutMs}ms`);
+            console.log(`[TaskEngine] Active handles before wait: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
+            console.log(`[TaskEngine] Active requests before wait: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
+        }
+
+        const promises = Array.from(this.backgroundTaskPromises);
+        const startTime = Date.now();
+        await Promise.race([
+            Promise.allSettled(promises),
+            new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
+        ]);
+        const elapsed = Date.now() - startTime;
+
+        const remainingCount = this.backgroundTaskPromises.size;
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log(`[TaskEngine] Wait completed after ${elapsed}ms, remaining promises=${remainingCount}`);
+            console.log(`[TaskEngine] Active handles after wait: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
+            console.log(`[TaskEngine] Active requests after wait: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
+        }
+
+        // Give a bit more time for async cleanup after promises resolve
+        // This ensures resources like Prisma connections are closed
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log(`[TaskEngine] Active handles after cleanup delay: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
+            console.log(`[TaskEngine] Active requests after cleanup delay: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
+        }
     }
 }

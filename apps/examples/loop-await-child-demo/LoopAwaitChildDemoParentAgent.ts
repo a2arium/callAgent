@@ -80,11 +80,11 @@ const readChildObservation = (observations: ParentObservation[]): { html?: strin
                     : undefined;
             const token =
                 typeof payload.result?.id === 'string' ? payload.result.id :
-                typeof payload.childTaskId === 'string' ? payload.childTaskId :
-                typeof nestedResult?.token === 'string' ? nestedResult.token :
-                typeof (nestedResult?.data as Record<string, unknown> | undefined)?.token === 'string'
-                    ? String((nestedResult!.data as Record<string, unknown>).token)
-                    : payload.token;
+                    typeof payload.childTaskId === 'string' ? payload.childTaskId :
+                        typeof nestedResult?.token === 'string' ? nestedResult.token :
+                            typeof (nestedResult?.data as Record<string, unknown> | undefined)?.token === 'string'
+                                ? String((nestedResult!.data as Record<string, unknown>).token)
+                                : payload.token;
             const status = typeof nestedResult?.status === 'string'
                 ? nestedResult.status
                 : typeof (nestedResult?.result as Record<string, unknown> | undefined)?.status === 'string'
@@ -123,7 +123,7 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
     perception: (env: EnvironmentState<ParentObservationConfig>): ParentPerception => {
         const inbox = Array.isArray(env.inbox?.current) ? env.inbox.current : [];
         const childResult = readChildObservation(inbox);
-        
+
         // Extract input from inbox
         const userInput = inbox.find(o => o.source === 'user' && o.kind === 'input.provided');
         const inputValue = userInput?.payload.value;

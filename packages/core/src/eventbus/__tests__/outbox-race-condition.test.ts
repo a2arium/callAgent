@@ -1,11 +1,14 @@
+import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import { PrismaClient } from '@prisma/client';
 import { OutboxPublisher } from '../outboxPublisher.js';
+
+type OutboxRow = { id: string; tenantId: string; topic: string; key: string; payload: any; createdAt: Date };
 
 // Mock Prisma to simulate race conditions
 const mockPrisma = {
   outbox: {
-    findMany: jest.fn(),
-    delete: jest.fn(),
+    findMany: jest.fn() as jest.MockedFunction<() => Promise<OutboxRow[]>>,
+    delete: jest.fn() as jest.MockedFunction<(args: { where: { id: string } }) => Promise<{ id: string }>>,
   },
 };
 

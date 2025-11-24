@@ -12,10 +12,13 @@ describe('External events registry integration', () => {
         await (engine as any).sessionManager.saveSnapshot({ tenantId, sessionId: taskId, agentId: 'agent', expectedWmVersion: BigInt(0), snapshot: { M: { memory: { vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } }, sensory: {} }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [1], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 0.99 }, policyParams: { theta: null, stochastic: false } } } });
 
         // Add a pending external event manually
-        const snap = await (engine as any).sessionManager.load(tenantId, taskId);
+        // Reload snapshot right before writing to avoid CAS_MISMATCH
+        let snap = await (engine as any).sessionManager.load(tenantId, taskId);
         const base = (snap?.snapshot as any) || {};
         base.pending = base.pending || {};
         base.pending.events = { 'tok-1': { type: 'test', handlers: { occurred: 'onOccurred' } } };
+        // Reload to get latest version before writing
+        snap = await (engine as any).sessionManager.load(tenantId, taskId);
         await (engine as any).sessionManager.saveSnapshot({ tenantId, sessionId: taskId, agentId: 'agent', expectedWmVersion: snap?.wmVersion ?? BigInt(0), snapshot: base });
 
         // Mock handler invoker

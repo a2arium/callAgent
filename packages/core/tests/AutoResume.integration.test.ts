@@ -113,11 +113,13 @@ describe('Auto-Resume Integration Tests', () => {
             PluginManager.registerAgent(testAgent);
 
             // Start task - should result in await_input
+            // Use isStreaming: false to get return value with status
             const entity: TaskEntity = { id: taskId, input: {}, agentId: 'auto-resume-test-agent' };
-            const result1 = await engine.startTask({ task: entity, isStreaming: true, tenantId, agentId: 'auto-resume-test-agent' });
+            const result1 = await engine.startTask({ task: entity, isStreaming: false, tenantId, agentId: 'auto-resume-test-agent' });
 
-            expect(result1.status).toBe('input-required');
-            expect(result1.metadata?.token).toBeDefined();
+            expect(result1).toBeDefined();
+            expect((result1 as any)?.status?.state).toBe('input-required');
+            expect((result1 as any)?.status?.metadata?.token).toBeDefined();
 
             // Verify MentalState was persisted with vars
             const snap1 = await store.getSessionSnapshot(tenantId, taskId);
@@ -126,7 +128,7 @@ describe('Auto-Resume Integration Tests', () => {
             expect(M1.memory?.vars?.testVar).toBe('initial-value');
 
             // Resume with input - should auto-resume and process input
-            const token = result1.metadata?.token as string;
+            const token = (result1 as any)?.status?.metadata?.token as string;
             await engine.resumeInput({ tenantId, taskId, token, input: 'user-provided-value' });
 
             // Verify auto-resume processed the input
@@ -177,13 +179,13 @@ describe('Auto-Resume Integration Tests', () => {
 
             // Initial turn
             const entity: TaskEntity = { id: taskId, input: {}, agentId: 'mental-state-test-agent' };
-            const result1 = await engine.startTask({ task: entity, isStreaming: true, tenantId, agentId: 'mental-state-test-agent' });
+            const result1 = await engine.startTask({ task: entity, isStreaming: false, tenantId, agentId: 'mental-state-test-agent' });
 
-            expect(result1.status).toBe('input-required');
+            expect((result1 as any)?.status?.state).toBe('input-required');
             expect(turnCount).toBe(1);
 
             // Auto-resume turn
-            const token = result1.metadata?.token as string;
+            const token = (result1 as any)?.status?.metadata?.token as string;
             await engine.resumeInput({ tenantId, taskId, token, input: 'yes' });
 
             expect(turnCount).toBe(2);
@@ -255,10 +257,10 @@ describe('Auto-Resume Integration Tests', () => {
 
             // Start task - should result in await_tool
             const entity: TaskEntity = { id: taskId, input: {}, agentId: 'tool-resume-test-agent' };
-            const result1 = await engine.startTask({ task: entity, isStreaming: true, tenantId, agentId: 'tool-resume-test-agent' });
+            const result1 = await engine.startTask({ task: entity, isStreaming: false, tenantId, agentId: 'tool-resume-test-agent' });
 
-            expect(result1.status).toBe('working');
-            expect(result1.metadata?.awaiting).toBe('tool');
+            expect((result1 as any)?.status?.state).toBe('working');
+            expect((result1 as any)?.status?.metadata?.awaiting).toBe('await_tool');
 
             // Simulate tool completion and auto-resume
             const token = 'tool-token-123';
@@ -329,10 +331,10 @@ describe('Auto-Resume Integration Tests', () => {
 
             // Start task - should result in await_child
             const entity: TaskEntity = { id: taskId, input: {}, agentId: 'parent-resume-test-agent' };
-            const result1 = await engine.startTask({ task: entity, isStreaming: true, tenantId, agentId: 'parent-resume-test-agent' });
+            const result1 = await engine.startTask({ task: entity, isStreaming: false, tenantId, agentId: 'parent-resume-test-agent' });
 
-            expect(result1.status).toBe('working');
-            expect(result1.metadata?.awaiting).toBe('child');
+            expect((result1 as any)?.status?.state).toBe('working');
+            expect((result1 as any)?.status?.metadata?.awaiting).toBe('await_child');
 
             // Simulate child completion and auto-resume
             const token = 'child-token-456';
@@ -404,7 +406,7 @@ describe('Auto-Resume Integration Tests', () => {
 
             // Start task - should result in await_external
             const entity: TaskEntity = { id: taskId, input: {}, agentId: 'external-event-test-agent' };
-            const result1 = await engine.startTask({ task: entity, isStreaming: true, tenantId, agentId: 'external-event-test-agent' });
+            await engine.startTask({ task: entity, isStreaming: false, tenantId, agentId: 'external-event-test-agent' });
 
             // Note: This test assumes await_external is a valid outcome type
             // If not implemented yet, this would be part of the external events feature

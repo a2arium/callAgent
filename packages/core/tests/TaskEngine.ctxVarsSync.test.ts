@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { TaskEngine, type TaskEntity } from '../src/core/orchestration/taskEngine.js';
 import { createAgent } from '../src/index.js';
 import { globalAgentRegistry } from '../src/core/plugin/AgentRegistry.js';
+import { eventBus } from '../src/eventbus/inMemoryEventBus.js';
 
 describe('TaskEngine ctx.vars + MentalState synchronization', () => {
     beforeEach(() => {
@@ -14,13 +15,15 @@ describe('TaskEngine ctx.vars + MentalState synchronization', () => {
         const registry = globalAgentRegistry as unknown as { agents: Map<string, unknown>; aliases: Map<string, string> };
         registry.agents.clear();
         registry.aliases.clear();
+        // Clean up event listeners to prevent hanging
+        eventBus.removeAllListeners?.();
     });
 
     it('propagates ctx.vars writes from execution to the next turn mental state', async () => {
         const seenSelectors: Array<unknown> = [];
 
         createAgent({
-            manifest: { name: 'ctx-vars-sync-agent', version: '1.0.0', runMode: 'loop' },
+            manifest: { name: 'ctx-vars-sync-agent', version: '1.0.0', runMode: 'loop', budgets: { maxTurns: 3 } },
             loop: {
                 modules: {
                     attention: (prev) => {
@@ -41,9 +44,20 @@ describe('TaskEngine ctx.vars + MentalState synchronization', () => {
                             result: { status: 'ok', ts: Date.now(), toolId: 'ctx-vars-sync' }
                         };
                     },
-                    transition: (_env: any, exec: any, _m: any) => (exec.action?.kind === 'language'
-                        ? { kind: 'complete', result: 'done' } as const
-                        : { kind: 'continue', observations: [] } as const)
+                    transition: (_env: any, exec: any, _m: any) => {
+                        // Complete after second turn (when selectors are set and we've seen it in attention)
+                        if (exec.action?.kind === 'language') {
+                            return { kind: 'complete', result: 'done' } as const;
+                        }
+                        // Complete after second turn (check turn count from environment)
+                        // We need 2 turns: first to set vars, second to see them in attention
+                        const turnCount = (_env as any)?.turn ?? 0;
+                        if (exec.action?.kind === 'internal' && turnCount >= 2) {
+                            return { kind: 'complete', result: 'done' } as const;
+                        }
+                        // Continue for first turn and after setting vars
+                        return { kind: 'continue', observations: [] } as const;
+                    }
                 }
             },
             async handleTask() { /* noop */ }

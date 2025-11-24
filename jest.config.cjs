@@ -69,6 +69,8 @@ const config = {
     
     // Setup
     setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
+    // Global teardown runs ONCE after all tests
+    globalTeardown: '<rootDir>/jest.teardown.js',
     verbose: true,
 };
 

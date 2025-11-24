@@ -1,6 +1,18 @@
 import { TaskEngine, type TaskEntity } from '../src/core/orchestration/taskEngine.js';
 import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/core/memory/stores/SessionStore.js';
-import { registerHandler, clearHandlers } from '../src/core/orchestration/HandlerRegistry.js';
+import { registerHandler, unregisterHandler, invokeHandler } from '../src/core/orchestration/HandlerRegistry.js';
+
+// Helper to clear all handlers (for test cleanup)
+function clearHandlers() {
+    // Note: HandlerRegistry doesn't expose a clearHandlers function
+    // We'll unregister known handlers in beforeEach
+    try {
+        unregisterHandler('handleTask');
+        unregisterHandler('onProvided');
+    } catch {
+        // Ignore if handlers don't exist
+    }
+}
 
 class MockSessionStore implements IWorkingMemorySessionStore {
     private snapshots = new Map<string, { wmVersion: bigint; snapshot: Record<string, unknown>; agentId: string; updatedAt: string }>();
@@ -60,7 +72,7 @@ describe('MentalState persistence and resume', () => {
         expect(snap1).not.toBeNull();
         const M1 = (snap1!.snapshot as any).M;
         expect(M1).toBeDefined();
-        expect(M1.memory ??.vars?.foo).toBe('bar');
+        expect(M1.memory?.vars?.foo).toBe('bar');
         const goals = M1.goalState?.hierarchy?.nodes || {};
         expect(Object.keys(goals).length).toBeGreaterThan(0);
 

@@ -1,4 +1,3 @@
-import { setModuleOverrides } from '../src/loop/ModuleOverrideRegistry.js';
 import { runLoop } from '../src/loop/loopRunner.js';
 import type { EnvironmentState } from '../src/loop/types.js';
 
@@ -14,7 +13,14 @@ describe('Example agent overrides (docs parity)', () => {
             policyParams: { theta: null, stochastic: false }
         };
         (ctx as any).agentId = 'docs-mini';
-        setModuleOverrides('docs-mini', {
+        const env: EnvironmentState = {
+            time: new Date().toISOString(),
+            input: {},
+            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
+            inbox: { current: [], all: [] }
+        } as any;
+        const { outcome } = await runLoop(ctx, M, env, {
+            policy: () => ({ kind: 'tool', name: 'dummy', args: {} }),
             execution: async (a, c, m) => {
                 if ((a as any).kind === 'tool') {
                     return {
@@ -22,7 +28,11 @@ describe('Example agent overrides (docs parity)', () => {
                         result: { status: 'ok', ts: Date.now(), toolId: (a as any).name, correlationId: 'tool-xyz' }
                     } as any;
                 }
-                return c.defaults.execution(a, c, m);
+                // Default execution for non-tool actions
+                return {
+                    action: a as any,
+                    result: { status: 'ok', ts: Date.now() }
+                } as any;
             },
             transition: (_env, exec) => {
                 const action = exec?.action || exec;
@@ -31,15 +41,6 @@ describe('Example agent overrides (docs parity)', () => {
                 }
                 return { kind: 'continue', observations: [] } as any;
             }
-        });
-        const env: EnvironmentState = {
-            time: new Date().toISOString(),
-            input: {},
-            pending: { inputs: {}, children: {}, tools: {}, groups: {} },
-            inbox: { current: [], all: [] }
-        } as any;
-        const { outcome } = await runLoop(ctx, M, env, {
-            policy: () => ({ kind: 'tool', name: 'dummy', args: {} })
         });
         expect(outcome.kind).toBe('await_tool');
         expect((outcome as any).token).toBe('tool-xyz');

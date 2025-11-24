@@ -23,7 +23,7 @@ describe('LoopRunner basic', () => {
         } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'ask_user', prompt: 'enter value' })
-        });
+        }, { maxTurns: 1 });
         expect(outcome.kind).toBe('await_input');
         expect((outcome as any).token).toBe('tok-123');
         expect(env.inbox.current).toEqual([]);
@@ -50,7 +50,7 @@ describe('LoopRunner basic', () => {
         } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'language', content: 'hi' })
-        });
+        }, { maxTurns: 1 });
         expect(outcome.kind).toBe('continue');
         expect(replied).toBe(true);
         expect(env.inbox.all.length).toBeGreaterThanOrEqual(1);
@@ -77,7 +77,7 @@ describe('LoopRunner basic', () => {
         } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'subagent', target: 'child', input: { y: 1 }, awaitCompletion: true })
-        });
+        }, { maxTurns: 1 });
         expect(outcome.kind).toBe('await_child');
         expect((outcome as any).token).toBe('child-1');
         expect(env.inbox.current).toEqual([]);
@@ -102,7 +102,7 @@ describe('LoopRunner basic', () => {
         } as any;
         const { outcome } = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'tool', name: 'syncTool', args: {} })
-        });
+        }, { maxTurns: 1 });
         expect(outcome.kind).toBe('continue');
         expect(env.inbox.all.length).toBeGreaterThanOrEqual(1);
         expect(env.inbox.current.length).toBeGreaterThanOrEqual(1);
@@ -138,7 +138,7 @@ describe('LoopRunner basic', () => {
                 return [];
             },
             policy: () => ({ kind: 'complete', result: { success: true } })
-        });
+        }, { maxTurns: 1 });
 
         expect(outcome.kind).toBe('complete');
         expect(receivedConfig).toBeDefined();

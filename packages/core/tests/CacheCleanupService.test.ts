@@ -1,5 +1,6 @@
 import { CacheCleanupService, type CacheStats } from '../src/core/cache/CacheCleanupService.js';
 import type { PrismaClient } from '@prisma/client';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 
 // Mock PrismaClient
 const mockPrismaClient = {

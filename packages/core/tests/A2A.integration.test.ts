@@ -2,9 +2,16 @@ import { createTestContext } from '../test-utils.js';
 import { PluginManager } from '../src/core/plugin/pluginManager.js';
 import { createAgent } from '../src/index.js';
 import { globalA2AService } from '../src/core/orchestration/A2AService.js';
+import { TaskEngine } from '../src/core/orchestration/taskEngine.js';
+import { EngineLocator } from '../src/core/orchestration/EngineLocator.js';
 
 describe('A2A Integration Tests', () => {
+    let engine: TaskEngine;
+
     beforeAll(() => {
+        // Register TaskEngine with EngineLocator for A2A to work
+        engine = new TaskEngine();
+        EngineLocator.setEngine(engine);
         // Register test agents
         const childAgent = createAgent({
             manifest: { name: 'test-child-agent', version: '1.0.0' },
@@ -33,6 +40,10 @@ describe('A2A Integration Tests', () => {
 
         PluginManager.registerAgent(childAgent);
         PluginManager.registerAgent(parentAgent);
+    });
+
+    afterAll(() => {
+        EngineLocator.setEngine(null as any);
     });
 
     test('should successfully call child agent from parent', async () => {
@@ -118,7 +129,7 @@ describe('A2A Integration Tests', () => {
         const ctx = await createTestContext('test-tenant', {}, 'test-agent');
 
         await expect(ctx.sendTaskToAgent?.('nonexistent-agent', {}))
-            .rejects.toThrow("Agent 'nonexistent-agent' not found");
+            .rejects.toThrow(/Local agent not found: 'nonexistent-agent'/);
     });
 
     test('should handle task execution errors gracefully', async () => {

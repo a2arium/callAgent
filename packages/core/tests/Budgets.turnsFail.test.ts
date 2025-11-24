@@ -2,7 +2,10 @@ import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('Budgets - turns fail', () => {
     it('returns fail when maxTurns is exceeded without terminal outcome', async () => {
-        const ctx: any = { reply: async () => { } };
+        const ctx: any = { 
+            reply: async () => { },
+            task: { id: 'test-task-id' }
+        };
         const M: any = {
             memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },

@@ -56,8 +56,10 @@ describe('Streaming Mode Caching', () => {
 
         // Create a temporary agent file for testing
         testAgentPath = path.join(process.cwd(), 'test-streaming-cache-agent.mjs');
+        // Use a package-relative import that should work from project root
+        // The agent file will be at project root, so we can import from packages/core
         const agentContent = `
-import { createAgent } from './packages/core/dist/index.js';
+import { createAgent } from './packages/core/src/index.js';
 
 export default createAgent({
     manifest: {
@@ -98,9 +100,11 @@ export default createAgent({
             mockPrismaInstance.agentResultCache.upsert.mockResolvedValueOnce({});
 
             // First execution should miss cache and store result
+            // Use resolveDeps: false to use registered agent instead of loading from file
             await runAgentWithStreaming(testAgentPath, input, {
                 isStreaming: false,
-                outputType: 'json'
+                outputType: 'json',
+                resolveDeps: false
             });
 
             // Verify cache was checked
@@ -149,7 +153,8 @@ export default createAgent({
             // First execution should miss cache and store result
             await runAgentWithStreaming(testAgentPath, input, {
                 isStreaming: true,
-                outputType: 'json'
+                outputType: 'json',
+                resolveDeps: false
             });
 
             // Allow background caching to complete
@@ -205,7 +210,8 @@ export default createAgent({
             const startTime = Date.now();
             await runAgentWithStreaming(testAgentPath, input, {
                 isStreaming: true,
-                outputType: 'json'
+                outputType: 'json',
+                resolveDeps: false
             });
             const executionTime = Date.now() - startTime;
 
@@ -234,7 +240,8 @@ export default createAgent({
             // Run in streaming mode with same input
             await runAgentWithStreaming(testAgentPath, input, {
                 isStreaming: true,
-                outputType: 'json'
+                outputType: 'json',
+                resolveDeps: false
             });
 
             // Allow background processing

@@ -9,6 +9,7 @@
     "@a2arium/callagent-utils": "workspace:"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test:turn-reset": "yarn build && node dist/reproduce-turn-reset-bug.js"
   }
 }

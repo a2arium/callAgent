@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { ArtifactImpl, isArtifactMarker } from '../src/core/orchestration/ArtifactImpl.js';
 import { AgentResultCache } from '../src/core/cache/AgentResultCache.js';
 import { hydrateArtifacts } from '../src/core/memory/utils/hydrateArtifacts.js';
-import { getMemoryPrismaClient } from '../src/core/memory/prisma.js';
+import { getMemoryPrismaClient } from '../src/core/memory/prismaSingleton.js';
 
 import { Artifact, LOCAL_ARTIFACT_KIND } from '../src/shared/types/artifacts.js';
 import { LocalArtifactImpl } from '../src/core/orchestration/LocalArtifactImpl.js';

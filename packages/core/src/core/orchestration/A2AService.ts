@@ -389,6 +389,13 @@ export class A2AService implements IA2AService {
             await (await import('../memory/prismaSingleton.js')).getMemoryPrismaClient()
         ) as FullTaskContext;
 
+        // Initialize MentalState if not present (required for goals/thoughts APIs)
+        // This ensures child agents have a valid MentalState even when using the fast path (direct handleTask)
+        if (!(targetCtx as any).__mental && !(targetCtx as any).M) {
+            const { initialM } = await import('../../loop/init.js');
+            (targetCtx as any).__mental = initialM(targetCtx);
+        }
+
         // Record manifest config on child context for propagation
         if (targetPlugin.manifest.config) {
             if (!targetCtx.config || typeof targetCtx.config !== 'object') {

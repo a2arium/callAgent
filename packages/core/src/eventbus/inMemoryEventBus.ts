@@ -71,6 +71,30 @@ export class InMemoryEventBus implements IEventBus {
         } catch { /* noop */ }
         this.handlers.get(channel)?.delete(handler);
     }
+
+    /**
+     * Get total count of active listeners across all channels
+     * Useful for debugging and cleanup (Hypothesis 4)
+     */
+    listenerCount(): number {
+        let total = 0;
+        for (const handlers of this.handlers.values()) {
+            total += handlers.size;
+        }
+        return total;
+    }
+
+    /**
+     * Remove all listeners from all channels
+     * Useful for test cleanup to prevent event loop from staying alive
+     */
+    removeAllListeners(): void {
+        const count = this.listenerCount();
+        if (count > 0) {
+            log.debug(`Removing ${count} listeners from ${this.handlers.size} channels`);
+        }
+        this.handlers.clear();
+    }
 }
 
 // Singleton instance
