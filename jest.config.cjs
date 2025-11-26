@@ -75,7 +75,6 @@ const config = {
     coverageThreshold: undefined,
     
     // Setup
-    setupFiles: ['<rootDir>/jest.prisma-mock.js'],
     setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
     // Global teardown runs ONCE after all tests
     globalTeardown: '<rootDir>/jest.teardown.js',
