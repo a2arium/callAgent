@@ -190,15 +190,17 @@ export class A2AService implements IA2AService {
             });
 
             // Notify parent engine on completion when correlation is provided
+            const skipNotification = (options as any).skipParentNotification;
             a2aLogger.debug('🔍 A2A: Checking if should notify parent', {
                 hasParentTenantId: !!options.parentTenantId,
                 hasParentTaskId: !!options.parentTaskId,
                 hasParentChildToken: !!options.parentChildToken,
                 parentTaskId: options.parentTaskId,
                 parentChildToken: options.parentChildToken,
-                awaitCompletion: (options as any).awaitCompletion
+                awaitCompletion: (options as any).awaitCompletion,
+                skipParentNotification: skipNotification
             });
-            if (options.parentTenantId && options.parentTaskId && options.parentChildToken) {
+            if (options.parentTenantId && options.parentTaskId && options.parentChildToken && !skipNotification) {
                 const deliverCompletion = async () => {
                     await eng.handleChildCompleted({
                         tenantId: options.parentTenantId!,

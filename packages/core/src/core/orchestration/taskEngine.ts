@@ -31,6 +31,7 @@ import { ArtifactImpl } from './ArtifactImpl.js';
 import { AgentResultCache } from '../cache/AgentResultCache.js';
 import { hydrateArtifacts } from '../memory/utils/hydrateArtifacts.js';
 import { offloadArtifacts } from '../memory/utils/offloadArtifacts.js';
+import { serializeVars } from '../memory/utils/serialization.js';
 import { pruneSnapshot } from '../../loop/hygiene.js';
 
 type WorkingVarHookRegistrarFn = (hooks?: {
@@ -95,6 +96,66 @@ const addObservationToInboxIfMissing = (
     }
 
     return inbox;
+};
+
+/**
+ * Merge remote inbox items into local inbox to preserve concurrent child completions.
+ * This prevents the "Lost Update" bug where parent overwrites child completion observations.
+ * 
+ * @param localInbox - The local inbox from env (what the parent saw during execution)
+ * @param remoteInbox - The remote inbox from DB (may contain concurrent updates)
+ * @param pendingChildren - Map of pending child tokens (only merge observations for these)
+ * @returns Merged inbox with all child completion observations preserved
+ */
+const mergeInboxes = (
+    localInbox: EngineObservationInbox,
+    remoteInbox: EngineObservationInbox,
+    pendingChildren: Record<string, unknown>
+): EngineObservationInbox => {
+    const merged = normalizeInbox(localInbox);
+    const remoteAll = remoteInbox?.all ?? [];
+
+    log.debug('mergeInboxes: Starting merge', {
+        localAllCount: merged.all.length,
+        remoteAllCount: remoteAll.length,
+        remoteKinds: remoteAll.map(o => o.kind),
+        pendingChildrenKeys: Object.keys(pendingChildren)
+    });
+
+    // Add child completion observations from remote that we don't have locally
+    for (const obs of remoteAll) {
+        if (obs.kind === 'child.completed') {
+            const token = (obs.payload as any)?.token;
+            log.debug('mergeInboxes: Found child.completed in remote', { token, hasToken: !!token });
+            // Only merge if this is a pending child AND not already in local
+            if (token) {
+                const alreadyHasInAll = merged.all.some(
+                    o => o.kind === 'child.completed' && (o.payload as any)?.token === token
+                );
+                if (!alreadyHasInAll) {
+                    merged.all.push(obs);
+                    // Also add to current so it gets processed on next turn
+                    const alreadyHasInCurrent = merged.current.some(
+                        o => o.kind === 'child.completed' && (o.payload as any)?.token === token
+                    );
+                    if (!alreadyHasInCurrent) {
+                        merged.current.push(obs);
+                    }
+                    log.info('mergeInboxes: ✅ Preserved concurrent child completion', { token });
+                } else {
+                    log.debug('mergeInboxes: Already has observation in local', { token });
+                }
+            }
+        }
+    }
+
+    log.debug('mergeInboxes: Merge complete', {
+        finalAllCount: merged.all.length,
+        finalCurrentCount: merged.current.length,
+        finalKinds: merged.all.map(o => o.kind)
+    });
+
+    return merged;
 };
 
 const hydrateInboxArtifacts = (
@@ -495,14 +556,34 @@ export class TaskEngine {
 
     private mergeVarsIntoMental(source: MentalState, target: MentalState): MentalState {
         try {
+            // ✅ FIX: Strip out function properties (from proxy wrappers) to ensure JSON-serializable
+            // This must be applied to BOTH memory.vars AND top-level vars
+            const stripFunctions = (obj: Record<string, unknown>): Record<string, unknown> => {
+                const result: Record<string, unknown> = {};
+                for (const [key, value] of Object.entries(obj)) {
+                    if (typeof value !== 'function') {
+                        result[key] = value;
+                    }
+                }
+                return result;
+            };
+
             const sourceVars = (((source as any)?.memory as any)?.vars) || {};
             const targetVars = (((target as any)?.memory as any)?.vars) || {};
             if ((sourceVars && typeof sourceVars === 'object') || (targetVars && typeof targetVars === 'object')) {
                 const mem = (((target as any).memory) || {}) as Record<string, unknown>;
                 // ✅ FIX: MERGE vars from both source and target, don't overwrite
                 // target (mNext) has Learning's changes, source (M) has ctx.vars changes
-                const merged = { ...(targetVars as Record<string, unknown>), ...(sourceVars as Record<string, unknown>) };
+                const cleanSourceVars = stripFunctions(sourceVars as Record<string, unknown>);
+                const cleanTargetVars = stripFunctions(targetVars as Record<string, unknown>);
+                const merged = { ...cleanTargetVars, ...cleanSourceVars };
                 (target as any).memory = { ...mem, vars: merged };
+            }
+
+            // ✅ FIX v3.5: Also clean top-level vars (MentalState has both memory.vars AND vars)
+            // The Prisma error shows both locations containing function properties
+            if ((target as any).vars && typeof (target as any).vars === 'object') {
+                (target as any).vars = stripFunctions((target as any).vars as Record<string, unknown>);
             }
         } catch { /* noop */ }
         return target;
@@ -928,7 +1009,6 @@ export class TaskEngine {
                 try { await flushMentalState(); } catch { /* best-effort */ }
 
                 // ✅ FIX: Determine awaitCompletion BEFORE calling sendTaskToAgent
-                // This is critical so A2AService can stage the observation synchronously
                 const snapBefore = await this.sessionManager!.load(tenantId, sessionId);
                 const baseBefore = (snapBefore?.snapshot as Record<string, unknown>) || {};
                 const tasksBefore = getPendingTasks(baseBefore) as any;
@@ -936,12 +1016,35 @@ export class TaskEngine {
                 const hasCompleted = !!entryBefore?.handlers?.completed;
                 const awaitCompletion = runOpts?.awaitCompletion ?? options?.awaitCompletion ?? (!hasCompleted);
 
+                // ✅ RADICAL FIX: Detect active loop
+                const activeLoopInbox = (ctx as any).__activeLoopInbox;
+                const activeLoopEnv = (ctx as any).__activeLoopEnv;
+                const inActiveLoop = !!(activeLoopInbox && activeLoopEnv);
+
+                // ✅ FIX: Add child to pending immediately so transition module sees it
+                if (inActiveLoop && activeLoopEnv) {
+                    if (!activeLoopEnv.pending) activeLoopEnv.pending = { children: {}, inputs: {}, tools: {}, groups: {} };
+                    if (!activeLoopEnv.pending.children) activeLoopEnv.pending.children = {};
+                    // Only add if not already present (to be safe)
+                    if (!activeLoopEnv.pending.children[token]) {
+                        activeLoopEnv.pending.children[token] = { agentId: agent, timestamp: Date.now() };
+                        try {
+                            log.debug('Updated activeLoopEnv.pending.children with new child', { token, agent });
+                        } catch { }
+                    }
+                }
+
                 const a2aOptions = {
                     tenantId,
                     streaming: (runOpts?.streaming ?? options?.streaming) === true,
-                    awaitCompletion // ✅ Pass awaitCompletion explicitly
+                    awaitCompletion,
+                    // ✅ FIX: If in active loop, SKIP parent notification from A2A
+                    // We will handle injection manually if it's a sync completion (cache hit),
+                    // or let the child notify async if it's a task start.
+                    skipParentNotification: inActiveLoop ? true : (options as any)?.skipParentNotification
                 } as any;
-                try { log.debug('A2A dispatch', { tenantId, sessionId, token, agent, awaitCompletion }); } catch { }
+
+                try { log.debug('A2A dispatch', { tenantId, sessionId, token, agent, awaitCompletion, inActiveLoop }); } catch { }
                 try {
                     const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
                         ...(options || {}),
@@ -950,12 +1053,58 @@ export class TaskEngine {
                         parentTaskId: sessionId,
                         parentChildToken: token
                     } as any);
+
                     if (result && typeof result === 'object' && (result as any).status === 'input_required') {
                         (ctx as any).logger?.info?.('Child input_required', { parentTaskId: sessionId, childAgent: agent, token });
                         return;
                     }
-                    // awaitCompletion already determined above
-                    if (awaitCompletion) {
+
+                    // Helper to detect if result is a TaskEntity (async start) or a final result (sync completion)
+                    const isTaskEntity = (r: any) => r && typeof r === 'object' && typeof r.id === 'string' && typeof r.status === 'string' && typeof r.agentId === 'string';
+                    const isAsyncStart = isTaskEntity(result);
+
+                    if (inActiveLoop && !isAsyncStart) {
+                        // Synchronous Completion (Cache Hit or Sync Agent)
+                        // Inject directly into active loop inbox regardless of awaitCompletion flag
+                        log.info('✅ SYNC CHILD: Injecting completion into active loop inbox', {
+                            taskId: sessionId,
+                            childAgent: agent,
+                            token: token?.substring(0, 15),
+                            awaitCompletionFlag: awaitCompletion
+                        });
+
+                        const childTaskId = (result as any)?.id || (result as any)?.task?.id || `cached-${token}`;
+                        const observation = {
+                            kind: 'child.completed',
+                            payload: {
+                                token,
+                                result,
+                                childTaskId
+                            },
+                            docId: token
+                        };
+
+                        // Inject into inbox
+                        activeLoopInbox.all.push(observation);
+                        activeLoopInbox.current.push(observation);
+
+                        // Remove from pending children to keep state clean
+                        // ✅ FIX: Don't remove from pending here! 
+                        // If we remove it, the agent's policy might see "no pending children" and return 'complete'
+                        // instead of 'await_child'. We want the agent to return 'await_child' so that LoopRunner
+                        // can detect the synchronous completion and force a 'continue' (Turn 2).
+                        // LoopRunner will handle removing it from pending when it processes the completion.
+                        /*
+                        if (activeLoopEnv.pending?.children) {
+                            delete activeLoopEnv.pending.children[token];
+                        }
+                        */
+
+                        return result;
+                    }
+
+                    // If not injected (not in loop OR async start), fallback to standard behavior
+                    if (!inActiveLoop && awaitCompletion) {
                         await this.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
                         return result;
                     }
@@ -1270,9 +1419,19 @@ export class TaskEngine {
         if (!this.sessionManager) return;
         let plainVars: Record<string, unknown> = {};
         try {
-            plainVars = JSON.parse(JSON.stringify((ctx as any).vars || {}));
-        } catch {
+            // Get database access for offloading artifacts
+            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+            if (prisma) {
+                const cache = new AgentResultCache(prisma);
+                // Use proper deep serialization that handles/offloads artifacts
+                plainVars = (await serializeVars((ctx as any).vars || {}, cache, tenantId)) as Record<string, unknown>;
+            } else {
+                // Fallback for no-DB cases (mostly tests)
+                plainVars = JSON.parse(JSON.stringify((ctx as any).vars || {}));
+            }
+        } catch (err) {
             try { plainVars = { ...(ctx as any).vars } as Record<string, unknown>; } catch { plainVars = {}; }
+            log.warn('Error serializing vars in flushContextSnapshot', { error: err instanceof Error ? err.message : String(err) });
         }
         try {
             const pending = (plainVars as any)?.pendingArtifact;
@@ -1378,6 +1537,7 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
+        log.info('TaskEngine: startTask called (Radical Fix Version 3.5)', { taskId: params.task.id });
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log('[TaskEngine.startTask] Entry', { taskId: params.task.id, isStreaming: params.isStreaming, agentId: params.agentId });
         }
@@ -2033,17 +2193,49 @@ export class TaskEngine {
                         const prevMetaAfterStart = ((baseAfterStart as any).meta || {}) as Record<string, unknown>;
                         const turnToSave = Number((env as any).turn) || 1;
                         const nextMetaAfterStart = { ...prevMetaAfterStart, turn: turnToSave, budgets: loopOpts } as Record<string, unknown>;
+                        // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                        // This ensures the parent's waiting state is persisted before returning
+                        if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                            (nextMetaAfterStart as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                        } else {
+                            // ✅ FIX: Clear awaiting when not awaiting (prevents stale awaiting from being preserved)
+                            delete (nextMetaAfterStart as any).awaiting;
+                        }
                         // Merge latest ctx.vars (written via proxy to M.memory.vars) into mNext before saving
                         // This addresses cases where runLoop returns a new MentalState instance that
                         // does not share object identity with M updated by assignVarsIntoMental()
                         let mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
-                        const nextInboxAfterStart = normalizeInbox(env.inbox);
+                        // ✅ FIX: Merge remote inbox to preserve concurrent child completions (prevents Lost Update bug)
+                        const remoteInboxAfterStart = normalizeInbox((baseAfterStart as any)?.inbox);
+                        const pendingChildrenAfterStart = env.pending?.children ?? {};
+                        const nextInboxAfterStart = mergeInboxes(normalizeInbox(env.inbox), remoteInboxAfterStart, pendingChildrenAfterStart);
                         const nextAfterStart = { ...baseAfterStart, M: mNextWithVars, meta: nextMetaAfterStart, inbox: nextInboxAfterStart } as Record<string, unknown>;
+                        // ✅ FIX: Offload artifacts BEFORE saving to prevent Prisma serialization errors
+                        try {
+                            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+                            if (prisma) {
+                                const cache = new AgentResultCache(prisma);
+                                await offloadArtifacts(nextAfterStart, cache, tenantId);
+                            }
+                        } catch (offloadErr) {
+                            log.error('Failed to offload artifacts at afterStart', { error: offloadErr instanceof Error ? offloadErr.message : String(offloadErr) });
+                        }
+                        log.debug('afterStart: About to save snapshot', { sessionId, expectedAfterStart: expectedAfterStart.toString() });
                         await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: ((ctx as any).agentId || 'default') as string, expectedWmVersion: expectedAfterStart, snapshot: nextAfterStart });
+                        log.debug('afterStart: Snapshot saved successfully', { sessionId });
                         // Avoid later flush overwriting this save with stale M
                         (ctx as any).__wmSavedThisTurn = true;
+
+                        // NOTE: Self-correction removed - loopRunner now handles synchronous child completions
+                        // by continuing the loop instead of returning await_child when child result is already in inbox.
+                        // This eliminates the race condition that caused turn resets and duplicate handleChildCompleted calls.
                     }
                 } catch (e) {
+                    log.warn('afterStart block caught exception', {
+                        error: (e as Error).message,
+                        sessionId,
+                        outcomeKind: outcome.kind
+                    });
                     if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
                         if (!this.sessionManager) {
                             throw e;
@@ -2051,10 +2243,21 @@ export class TaskEngine {
                         try {
                             log.warn('Snapshot too large at start of turn, pruning and retrying...');
                             const mRetry = pruneSnapshot(this.mergeVarsIntoMental(M as any, mNext as any));
-                            const iRetry = pruneSnapshot(normalizeInbox(env.inbox));
                             const sRetry = await this.sessionManager.load(tenantId, sessionId);
                             const bRetry = (sRetry?.snapshot as any) || {};
-                            const nRetry = { ...bRetry, M: mRetry, inbox: iRetry, meta: { ...((bRetry as any).meta || {}), turn: Number((env as any).turn) || 1 } };
+                            const retryMeta = { ...((bRetry as any).meta || {}), turn: Number((env as any).turn) || 1 };
+                            // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                            if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                                (retryMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                            } else {
+                                // ✅ FIX: Clear awaiting when not awaiting
+                                delete (retryMeta as any).awaiting;
+                            }
+                            // ✅ FIX: Merge remote inbox to preserve concurrent child completions
+                            const remoteInboxRetry = normalizeInbox((bRetry as any)?.inbox);
+                            const pendingChildrenRetry = env.pending?.children ?? {};
+                            const iRetry = pruneSnapshot(mergeInboxes(normalizeInbox(env.inbox), remoteInboxRetry, pendingChildrenRetry));
+                            const nRetry = { ...bRetry, M: mRetry, inbox: iRetry, meta: retryMeta };
                             await this.sessionManager.saveSnapshot({
                                 tenantId,
                                 sessionId,
@@ -2111,6 +2314,13 @@ export class TaskEngine {
                             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
                             const prevMeta = (baseNow as any).meta || {};
                             const nextMeta = { ...prevMeta, turn: env.turn };
+                            // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                            if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                                (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                            } else {
+                                // ✅ FIX: Clear awaiting when not awaiting
+                                delete (nextMeta as any).awaiting;
+                            }
                             let mNextEffective = mNext;
                             try {
                                 let ctxPending: unknown;
@@ -2146,7 +2356,10 @@ export class TaskEngine {
                                     pendingKind: pending && (pending as any).kind
                                 });
                             } catch { /* noop */ }
-                            const nextInbox = normalizeInbox(env.inbox);
+                            // ✅ FIX: Merge remote inbox to preserve concurrent child completions (prevents Lost Update bug)
+                            const remoteInbox = normalizeInbox((baseNow as any)?.inbox);
+                            const pendingChildren = env.pending?.children ?? {};
+                            const nextInbox = mergeInboxes(normalizeInbox(env.inbox), remoteInbox, pendingChildren);
                             const next = { ...baseNow, M: mNextEffective, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;
                             try {
                                 const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
@@ -2171,6 +2384,9 @@ export class TaskEngine {
                             }
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
                             (ctx as any).__wmSavedThisTurn = true;
+
+                            // NOTE: Self-correction removed - loopRunner now handles synchronous child completions
+                            // by continuing the loop instead of returning await_child when child result is already in inbox.
                         } else {
                             // Even if M was saved earlier in the turn, increment turnTotal meta
                             const snapNow = await this.sessionManager.load(tenantId, sessionId);
@@ -2178,8 +2394,22 @@ export class TaskEngine {
                             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
                             const prevMeta = (baseNow as any).meta || {};
                             const nextMeta = { ...prevMeta, turn: env.turn };
-                            const next = { ...baseNow, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
+                            // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                            if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                                (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                            } else {
+                                // ✅ FIX: Clear awaiting when not awaiting
+                                delete (nextMeta as any).awaiting;
+                            }
+                            // ✅ FIX: Merge remote inbox to preserve concurrent child completions
+                            const remoteInbox = normalizeInbox((baseNow as any)?.inbox);
+                            const pendingChildren = env.pending?.children ?? {};
+                            const nextInbox = mergeInboxes(normalizeInbox(env.inbox), remoteInbox, pendingChildren);
+                            const next = { ...baseNow, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;
                             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+
+                            // NOTE: Self-correction removed - loopRunner now handles synchronous child completions
+                            // by continuing the loop instead of returning await_child when child result is already in inbox.
                         }
                     } catch (e) {
                         if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
@@ -2189,11 +2419,19 @@ export class TaskEngine {
                                 const iRetry = pruneSnapshot(normalizeInbox(env.inbox));
                                 const sRetry = await this.sessionManager.load(tenantId, sessionId);
                                 const bRetry = (sRetry?.snapshot as any) || {};
+                                const retryMetaEnd = { ...((bRetry as any).meta || {}), turn: env.turn };
+                                // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                                if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                                    (retryMetaEnd as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                                } else {
+                                    // ✅ FIX: Clear awaiting when not awaiting
+                                    delete (retryMetaEnd as any).awaiting;
+                                }
                                 const nRetry = {
                                     ...bRetry,
                                     M: mRetry,
                                     inbox: iRetry,
-                                    meta: { ...((bRetry as any).meta || {}), turn: env.turn }
+                                    meta: retryMetaEnd
                                 };
                                 await this.sessionManager.saveSnapshot({
                                     tenantId,
@@ -2822,6 +3060,7 @@ export class TaskEngine {
             }
             const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
             // Persist updated M with latest ctx.vars merged into mNext
+            let nextInboxForResume: EngineObservationInbox | undefined;
             try {
                 const snapAfter = await this.sessionManager!.load(tenantId, taskId);
                 const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
@@ -2829,8 +3068,22 @@ export class TaskEngine {
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 const prevMeta = ((baseSnap as any).meta || {}) as Record<string, unknown>;
                 const nextMeta = { ...prevMeta, turn: env.turn, budgets: loopOpts } as Record<string, unknown>;
-                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
+                // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                    (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                } else {
+                    // ✅ FIX: Clear awaiting when not awaiting
+                    delete (nextMeta as any).awaiting;
+                }
+                // ✅ FIX: Merge remote inbox to preserve concurrent child completions
+                const remoteInbox = normalizeInbox((baseSnap as any)?.inbox);
+                const pendingChildren = env.pending?.children ?? {};
+                nextInboxForResume = mergeInboxes(normalizeInbox(env.inbox), remoteInbox, pendingChildren);
+                const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: nextInboxForResume } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
+
+                // NOTE: Self-correction removed - loopRunner now handles synchronous child completions
+                // by continuing the loop instead of returning await_child when child result is already in inbox.
             } catch { /* noop */ }
             // Emit status event for the resumed turn
             const channel = taskChannel(taskId);
@@ -2940,6 +3193,13 @@ export class TaskEngine {
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 const prevMeta = ((baseSnap as any).meta || {}) as Record<string, unknown>;
                 const nextMeta = { ...prevMeta, turn: env.turn, budgets: loopOpts } as Record<string, unknown>;
+                // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                    (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                } else {
+                    // ✅ FIX: Clear awaiting when not awaiting
+                    delete (nextMeta as any).awaiting;
+                }
                 const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
             } catch { /* noop */ }
@@ -3047,6 +3307,13 @@ export class TaskEngine {
                 const executedTurns = 1;
                 const prevMeta = (baseSnap as any).meta || {};
                 const nextMeta = { ...prevMeta, turnTotal: (Number(prevMeta.turnTotal) || 0) + executedTurns, budgets: loopOpts };
+                // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                    (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                } else {
+                    // ✅ FIX: Clear awaiting when not awaiting
+                    delete (nextMeta as any).awaiting;
+                }
                 const mNextEffective = this.mergeVarsIntoMental(M as any, mNext as any);
                 const nextSnap = { ...baseSnap, M: mNextEffective, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
                 await this.sessionManager!.saveSnapshot({ tenantId, sessionId: taskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
@@ -3307,252 +3574,383 @@ export class TaskEngine {
                 ctx = this.createContext({ id: parentTaskId, input: {} });
                 (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
                 try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
-                // OPTION 1: Version Coordination in Parent Resume
-                // After ALL saves in handleChildCompleted, load the final snapshot
-                // ✅ FIX: Load the latest snapshot AFTER staging observation to ensure we have it
-                const finalSnap = await this.sessionManager!.load(tenantId, parentTaskId);
-                let baseNow = (finalSnap?.snapshot as Record<string, unknown>) || {};
+                // --- START RETRY LOOP ---
+                let resumeSuccess = false;
+                let resumeRetryCount = 0;
+                const resumeMaxRetries = 3;
 
-                // ✅ FIX: Always ensure inbox has the observation, even if snapshotSaved is true
-                // This handles race conditions where stageChildCompletionObservation saved but
-                // handleChildCompleted loaded an older version
-                const finalInbox = normalizeInbox((baseNow as any)?.inbox);
-                const finalPrisma = this.getSessionStorePrisma();
-                if (finalPrisma) {
-                    const cache = new AgentResultCache(finalPrisma);
-                    hydrateArtifacts(finalInbox, cache, tenantId);
-                }
-                const observationPredicateForCheck = (obs: EngineObservation) =>
-                    obs?.kind === 'child.completed' &&
-                    typeof obs === 'object' &&
-                    obs !== null &&
-                    (obs as any)?.payload &&
-                    (obs as any).payload.token === token;
-                const hasObservation = finalInbox.all.some(observationPredicateForCheck);
-
-                if (!snapshotSaved || !hasObservation) {
-                    // Merge next (which has the observation) with baseNow to ensure observation is present
-                    baseNow = {
-                        ...baseNow,
-                        pending: (next as any).pending,
-                        inbox: (next as any).inbox
-                    } as Record<string, unknown>;
-                }
-
-                const prevMetaCheck = (baseNow as any).meta || {};
-                if (prevMetaCheck.lastChildToken === token) {
-                    return;
-                }
-
-                // CRITICAL: Store the FINAL version in context for coordination
-                // This ensures all subsequent operations use the correct expected version
-                (ctx as any).__coordinatedVersion = finalSnap?.wmVersion ?? BigInt(0);
-
-
-                // ✅ FIX: Only extend context with memory if it doesn't already exist
-                // This prevents creating multiple PrismaClient instances and exhausting DB connections
-                // The context should already have memory set up from the initial task start
-                if (!(ctx as any).memory) {
+                while (!resumeSuccess && resumeRetryCount < resumeMaxRetries) {
                     try {
-                        // ✅ FIX: Always use singleton PrismaClient to prevent connection exhaustion
-                        const { getMemoryPrismaClient, setMemoryPrismaClient } = await import('../memory/prismaSingleton.js');
-                        const singletonPrisma = await getMemoryPrismaClient();
+                        // OPTION 1: Version Coordination in Parent Resume
+                        // After ALL saves in handleChildCompleted, load the final snapshot
+                        // ✅ FIX: Load the latest snapshot AFTER staging observation to ensure we have it
+                        const finalSnap = await this.sessionManager!.load(tenantId, parentTaskId);
+                        let baseNow = (finalSnap?.snapshot as Record<string, unknown>) || {};
 
-                        // Try to reuse existing PrismaClient from session store if available, otherwise use singleton
-                        const existingPrisma = (this.sessionManager as any)?.store?.prisma || singletonPrisma;
+                        // ✅ FIX: Always ensure inbox has the observation, even if snapshotSaved is true
+                        // This handles race conditions where stageChildCompletionObservation saved but
+                        // handleChildCompleted loaded an older version
+                        const finalInbox = normalizeInbox((baseNow as any)?.inbox);
+                        const finalPrisma = this.getSessionStorePrisma();
+                        if (finalPrisma) {
+                            const cache = new AgentResultCache(finalPrisma);
+                            hydrateArtifacts(finalInbox, cache, tenantId);
+                        }
+                        const observationPredicateForCheck = (obs: EngineObservation) =>
+                            obs?.kind === 'child.completed' &&
+                            typeof obs === 'object' &&
+                            obs !== null &&
+                            (obs as any)?.payload &&
+                            (obs as any).payload.token === token;
+                        const hasObservation = finalInbox.all.some(observationPredicateForCheck);
 
-                        // If we got PrismaClient from session store, set it as singleton for future use
-                        if ((this.sessionManager as any)?.store?.prisma && !singletonPrisma) {
-                            setMemoryPrismaClient((this.sessionManager as any).store.prisma);
+                        if (!snapshotSaved || !hasObservation) {
+                            // Merge next (which has the observation) with baseNow to ensure observation is present
+                            baseNow = {
+                                ...baseNow,
+                                pending: (next as any).pending,
+                                inbox: (next as any).inbox
+                            } as Record<string, unknown>;
                         }
 
-                        const memoryRegistry = await createMemoryRegistry(
-                            tenantId,
-                            agentName || 'default',
-                            ctx,
-                            existingPrisma ? { database: { prismaClient: existingPrisma } } : undefined
-                        );
-                        // Extract semantic adapter from the registry - it's a MemoryRegistry object with backends
-                        const semanticBackends = (memoryRegistry.semantic as any)?.backends;
-                        const semanticAdapter = semanticBackends?.sql || semanticBackends?.mlo || undefined;
-
-                        log.debug('Extending context with memory in handleChildCompleted', {
-                            parentTaskId,
-                            agentName,
-                            hasSemanticAdapter: !!semanticAdapter,
-                            hasMemoryRegistry: !!memoryRegistry,
-                            reusedPrisma: !!existingPrisma
-                        });
-
-                        await extendContextWithMemory(
-                            ctx,
-                            tenantId,
-                            agentName || 'default',
-                            plugin?.manifest || {},
-                            semanticAdapter,
-                            existingPrisma // ✅ FIX: Always pass PrismaClient to reuse it
-                        );
-
-                        log.debug('Context extended with memory successfully', {
-                            parentTaskId,
-                            agentName,
-                            hasMemory: !!(ctx as any).memory,
-                            hasVars: !!(ctx as any).vars
-                        });
-                    } catch (memoryError) {
-                        log.error('Failed to extend context with memory in handleChildCompleted', {
-                            error: memoryError instanceof Error ? memoryError.message : String(memoryError),
-                            stack: memoryError instanceof Error ? memoryError.stack : undefined,
-                            parentTaskId,
-                            agentName
-                        });
-                        // Continue without memory extension - ctx.memory will be undefined but loop should still work
-                    }
-                } else {
-                    log.debug('Context already has memory setup, skipping extendContextWithMemory', {
-                        parentTaskId,
-                        agentName,
-                        hasMemory: !!(ctx as any).memory,
-                        hasVars: !!(ctx as any).vars
-                    });
-                }
-
-                // Attach working memory AFTER extendContextWithMemory to ensure ctx.vars is set up correctly
-                // This also sets up orchestration APIs (sendTaskToAgent, requestInput, etc.)
-                await this.attachWorkingMemory(ctx, tenantId, parentTaskId, agentName || 'default');
-
-                // FINAL VERSION COORDINATION: Load the absolute latest version right before execution
-                const absoluteLatestSnap = await this.sessionManager!.load(tenantId, parentTaskId);
-                (ctx as any).__coordinatedVersion = absoluteLatestSnap?.wmVersion ?? BigInt(0);
-
-                // ✅ FIX: Use the ABSOLUTE LATEST snapshot for MentalState loading
-                // This ensures we have the most recent MentalState including any updates
-                const latestBase = (absoluteLatestSnap?.snapshot as Record<string, unknown>) || {};
-                let M: MentalState = (latestBase as any).M as MentalState || initialM(ctx);
-                M = (hydrateMentalStateArtifacts(
-                    M,
-                    this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
-                    tenantId,
-                    'handleChildCompleted'
-                ) as MentalState) || M;
-
-                // Load MentalState from latest snapshot
-                await this.attachAndRestoreLLM(ctx, agentName, M);
-
-                const recordedTurn = Number((latestBase as any)?.meta?.turn) || 0;
-                const startTurnTotal2 = recordedTurn === 0 ? 1 : recordedTurn;
-                let envInbox = normalizeInbox((latestBase as any)?.inbox);
-                envInbox = hydrateInboxArtifacts(
-                    envInbox,
-                    this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
-                    tenantId,
-                    'handleChildCompleted'
-                );
-                log.debug('Child resume before helper', {
-                    sessionId: parentTaskId,
-                    currentLength: envInbox.current.length,
-                    allLength: envInbox.all.length,
-                    currentKinds: envInbox.current.map(o => o.kind),
-                    allKinds: envInbox.all.map(o => o.kind),
-                });
-
-                // ✅ FIX: Always ensure the observation is in the inbox before resuming
-                // This is critical for synchronous completions where the observation must be available immediately
-                const observationPredicate = (obs: EngineObservation) =>
-                    obs?.kind === 'child.completed' &&
-                    typeof obs === 'object' &&
-                    obs !== null &&
-                    (obs as any)?.payload &&
-                    (obs as any).payload.token === token;
-                envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
-
-                // ✅ FIX: Ensure observation is in current inbox - critical for preventing infinite loops
-                // If current is empty but observation exists in all, move it to current
-                if (envInbox.current.length === 0) {
-                    const obsInAll = envInbox.all.find(observationPredicate);
-                    if (obsInAll) {
-                        envInbox.current = [obsInAll];
-                        log.debug('Fixed: Moved observation from all to current inbox', { token });
-                    } else {
-                        // Last resort: add it directly
-                        envInbox.current = [childObservation];
-                        if (!envInbox.all.some(observationPredicate)) {
-                            envInbox.all.push(childObservation);
+                        const prevMetaCheck = (baseNow as any).meta || {};
+                        if (prevMetaCheck.lastChildToken === token) {
+                            return;
                         }
-                        log.warn('CRITICAL: Had to add observation directly - this indicates a bug!', { token });
+
+                        // CRITICAL: Store the FINAL version in context for coordination
+                        // This ensures all subsequent operations use the correct expected version
+                        (ctx as any).__coordinatedVersion = finalSnap?.wmVersion ?? BigInt(0);
+
+                        // ✅ FIX: Only extend context with memory if it doesn't already exist
+                        // This prevents creating multiple PrismaClient instances and exhausting DB connections
+                        // The context should already have memory set up from the initial task start
+                        if (!(ctx as any).memory) {
+                            try {
+                                // ✅ FIX: Always use singleton PrismaClient to prevent connection exhaustion
+                                const { getMemoryPrismaClient, setMemoryPrismaClient } = await import('../memory/prismaSingleton.js');
+                                const singletonPrisma = await getMemoryPrismaClient();
+
+                                // Try to reuse existing PrismaClient from session store if available, otherwise use singleton
+                                const existingPrisma = (this.sessionManager as any)?.store?.prisma || singletonPrisma;
+
+                                // If we got PrismaClient from session store, set it as singleton for future use
+                                if ((this.sessionManager as any)?.store?.prisma && !singletonPrisma) {
+                                    setMemoryPrismaClient((this.sessionManager as any).store.prisma);
+                                }
+
+                                const memoryRegistry = await createMemoryRegistry(
+                                    tenantId,
+                                    agentName || 'default',
+                                    ctx,
+                                    existingPrisma ? { database: { prismaClient: existingPrisma } } : undefined
+                                );
+                                // Extract semantic adapter from the registry - it's a MemoryRegistry object with backends
+                                const semanticBackends = (memoryRegistry.semantic as any)?.backends;
+                                const semanticAdapter = semanticBackends?.sql || semanticBackends?.mlo || undefined;
+
+                                log.debug('Extending context with memory in handleChildCompleted', {
+                                    parentTaskId,
+                                    agentName,
+                                    hasSemanticAdapter: !!semanticAdapter,
+                                    hasMemoryRegistry: !!memoryRegistry,
+                                    reusedPrisma: !!existingPrisma
+                                });
+
+                                await extendContextWithMemory(
+                                    ctx,
+                                    tenantId,
+                                    agentName || 'default',
+                                    plugin?.manifest || {},
+                                    semanticAdapter,
+                                    existingPrisma // ✅ FIX: Always pass PrismaClient to reuse it
+                                );
+
+                                log.debug('Context extended with memory successfully', {
+                                    parentTaskId,
+                                    agentName,
+                                    hasMemory: !!(ctx as any).memory,
+                                    hasVars: !!(ctx as any).vars
+                                });
+                            } catch (memoryError) {
+                                log.error('Failed to extend context with memory in handleChildCompleted', {
+                                    error: memoryError instanceof Error ? memoryError.message : String(memoryError),
+                                    stack: memoryError instanceof Error ? memoryError.stack : undefined,
+                                    parentTaskId,
+                                    agentName
+                                });
+                                // Continue without memory extension - ctx.memory will be undefined but loop should still work
+                            }
+                        } else {
+                            log.debug('Context already has memory setup, skipping extendContextWithMemory', {
+                                parentTaskId,
+                                agentName,
+                                hasMemory: !!(ctx as any).memory,
+                                hasVars: !!(ctx as any).vars
+                            });
+                        }
+
+                        // Attach working memory AFTER extendContextWithMemory to ensure ctx.vars is set up correctly
+                        // This also sets up orchestration APIs (sendTaskToAgent, requestInput, etc.)
+                        await this.attachWorkingMemory(ctx, tenantId, parentTaskId, agentName || 'default');
+
+                        // FINAL VERSION COORDINATION: Load the absolute latest version right before execution
+                        const absoluteLatestSnap = await this.sessionManager!.load(tenantId, parentTaskId);
+                        (ctx as any).__coordinatedVersion = absoluteLatestSnap?.wmVersion ?? BigInt(0);
+
+                        // ✅ FIX: Use the ABSOLUTE LATEST snapshot for MentalState loading
+                        // This ensures we have the most recent MentalState including any updates
+                        const latestBase = (absoluteLatestSnap?.snapshot as Record<string, unknown>) || {};
+                        let M: MentalState = (latestBase as any).M as MentalState || initialM(ctx);
+                        M = (hydrateMentalStateArtifacts(
+                            M,
+                            this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                            tenantId,
+                            'handleChildCompleted'
+                        ) as MentalState) || M;
+
+                        // Load MentalState from latest snapshot
+                        await this.attachAndRestoreLLM(ctx, agentName, M);
+
+                        // ✅ FIX: Verify snapshot agentId to prevent cross-agent contamination
+                        const snapshotAgentId = (latestBase as any)?.meta?.agentId || (finalSnap as any)?.agentId;
+                        if (snapshotAgentId && agentName && snapshotAgentId !== agentName && snapshotAgentId !== 'default') {
+                            log.warn('CRITICAL: Resume loaded snapshot with mismatched Agent ID', {
+                                expected: agentName,
+                                actual: snapshotAgentId,
+                                parentTaskId
+                            });
+                            // In production, we might want to abort here, but for now we log heavily
+                        }
+
+                        const recordedTurn = Number((latestBase as any)?.meta?.turn) || 0;
+
+                        // Log detailed state for debugging the "reset to turn 1" issue
+                        log.debug('🔍 RESUME: Determining parent turn', {
+                            parentTaskId,
+                            metaTurn: (latestBase as any)?.meta?.turn,
+                            recordedTurn,
+                            nextTurn: recordedTurn + 1,
+                            token,
+                            snapshotAgentId,
+                            snapshotKeys: Object.keys(latestBase),
+                            wmVersion: finalSnap?.wmVersion?.toString()
+                        });
+
+                        const startTurnTotal2 = recordedTurn;
+                        let envInbox = normalizeInbox((latestBase as any)?.inbox);
+                        envInbox = hydrateInboxArtifacts(
+                            envInbox,
+                            this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                            tenantId,
+                            'handleChildCompleted'
+                        );
+                        log.debug('Child resume before helper', {
+                            sessionId: parentTaskId,
+                            currentLength: envInbox.current.length,
+                            allLength: envInbox.all.length,
+                            currentKinds: envInbox.current.map(o => o.kind),
+                            allKinds: envInbox.all.map(o => o.kind),
+                        });
+
+                        // ✅ FIX: Always ensure the observation is in the inbox before resuming
+                        // This is critical for synchronous completions where the observation must be available immediately
+                        const observationPredicate = (obs: EngineObservation) =>
+                            obs?.kind === 'child.completed' &&
+                            typeof obs === 'object' &&
+                            obs !== null &&
+                            (obs as any)?.payload &&
+                            (obs as any).payload.token === token;
+                        envInbox = addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
+
+                        // ✅ FIX: Ensure observation is in current inbox - critical for preventing infinite loops
+                        // If current is empty but observation exists in all, move it to current
+                        if (envInbox.current.length === 0) {
+                            const obsInAll = envInbox.all.find(observationPredicate);
+                            if (obsInAll) {
+                                envInbox.current = [obsInAll];
+                                log.debug('Fixed: Moved observation from all to current inbox', { token });
+                            } else {
+                                // Last resort: add it directly
+                                envInbox.current = [childObservation];
+                                if (!envInbox.all.some(observationPredicate)) {
+                                    envInbox.all.push(childObservation);
+                                }
+                                log.warn('CRITICAL: Had to add observation directly - this indicates a bug!', { token });
+                            }
+                        }
+
+                        log.debug('Child resume after helper', {
+                            sessionId: parentTaskId,
+                            currentLength: envInbox.current.length,
+                            allLength: envInbox.all.length,
+                            currentKinds: envInbox.current.map(o => o.kind),
+                            allKinds: envInbox.all.map(o => o.kind),
+                        });
+
+                        // ✅ FIX: ONLY resume if parent has explicitly saved await_child state for THIS token
+                        // This prevents the race condition where:
+                        // 1. Parent is at turn 3, dispatches child with awaitCompletion: false
+                        // 2. Child completes synchronously (cached) during parent's turn
+                        // 3. handleChildCompleted is called BEFORE parent saves its turn 3 snapshot
+                        // 4. If we resume now, we'd read stale state (turn 0) and reset the turn counter
+                        //
+                        // The fix: Only resume if meta.awaiting.kind === 'await_child' AND meta.awaiting.token === token
+                        // If awaiting is undefined/null, the parent either:
+                        //   - Hasn't saved its await state yet (still mid-turn) -> don't resume, let parent continue
+                        //   - Dispatched with awaitCompletion: false and doesn't want auto-resume -> don't resume
+                        // In both cases, the observation is already staged in the inbox, and the parent will
+                        // pick it up on its next turn or when it checks the inbox.
+                        const awaiting = (latestBase as any)?.meta?.awaiting;
+                        const awaitingKind = (awaiting as any)?.kind;
+                        const awaitingToken = (awaiting as any)?.token;
+
+                        // Only resume if explicitly awaiting THIS child
+                        if (awaitingKind !== 'await_child' || awaitingToken !== token) {
+                            log.debug('handleChildCompleted: Not resuming parent - not explicitly awaiting this child', {
+                                parentTaskId,
+                                childToken: token,
+                                awaiting: awaiting ? { kind: awaitingKind, token: awaitingToken } : 'undefined',
+                                reason: awaiting === undefined ? 'awaiting is undefined (parent may be mid-turn or using awaitCompletion:false)' : 'awaiting different token'
+                            });
+                            // The observation is already staged in the inbox
+                            // The parent will pick it up when it finishes its current turn
+                            detach();
+                            return;
+                        }
+
+                        log.debug('handleChildCompleted: Resuming parent - explicitly awaiting this child', {
+                            parentTaskId,
+                            childToken: token,
+                            recordedTurn,
+                            nextTurn: recordedTurn + 1
+                        });
+
+                        const env: EnvironmentState = {
+                            time: new Date().toISOString(),
+                            sessionId: parentTaskId,
+                            turn: recordedTurn + 1,
+                            budget: { maxTurns: Infinity, latencyMs: Infinity },
+                            pending: {
+                                inputs: ((latestBase as any)?.pending?.inputs) || {},
+                                children: ((latestBase as any)?.pending?.children) || {},
+                                tools: ((latestBase as any)?.pending?.tools) || {},
+                                groups: ((latestBase as any)?.pending?.groups) || {}
+                            },
+                            inbox: envInbox,
+                            lastExec: (latestBase as any)?.meta?.lastExec || undefined,
+                            externalEvents: undefined
+                        };
+
+                        const overrides = (plugin as any)?.loop?.modules || {};
+
+                        let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
+                        try {
+                            // Restore budgets from snapshot first, then fallback to manifest
+                            const persistedBudgets = (latestBase as any)?.meta?.budgets;
+                            const manifestBudgets = (plugin?.manifest as any)?.budgets;
+                            const hitl = (plugin?.manifest as any)?.hitl;
+                            if (hitl) { try { (M as any).hitl = hitl; } catch { } }
+
+                            if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
+                                loopOpts = persistedBudgets;
+                            }
+
+                            // ✅ FIX: Force reload budgets from manifest if missing or Infinity (regression fix)
+                            if ((!loopOpts.maxTurns || loopOpts.maxTurns === Infinity) && manifestBudgets && typeof manifestBudgets === 'object') {
+                                loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                                log.debug('Resume restored budgets from manifest', loopOpts);
+                            } else if (!loopOpts.maxTurns) {
+                                loopOpts = { maxTurns: 1 }; // Safety default
+                            }
+
+                            if (typeof loopOpts.maxTurns === 'number') {
+                                (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                            }
+                        } catch (err) {
+                            try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
+                        }
+                        const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
+                        let nextInboxForChildResume: EngineObservationInbox | undefined;
+                        try {
+                            const snapAfter = await this.sessionManager!.load(tenantId, parentTaskId);
+                            const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
+                            const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
+                            const prevMeta = (baseSnap as any).meta || {};
+                            const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token, budgets: loopOpts };
+                            // ✅ FIX: Add awaiting metadata if outcome is await_child or await_tool
+                            if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+                                (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                            } else {
+                                // Clear awaiting if we're no longer waiting
+                                delete (nextMeta as any).awaiting;
+                            }
+
+                            // ✅ FIX: Merge ctx.vars into mNext before saving (same as startTask does)
+                            const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
+
+                            // ✅ FIX: Merge remote inbox to preserve concurrent child completions (nested children)
+                            const remoteInbox = normalizeInbox((baseSnap as any)?.inbox);
+                            const pendingChildren = env.pending?.children ?? {};
+                            nextInboxForChildResume = mergeInboxes(normalizeInbox(env.inbox), remoteInbox, pendingChildren);
+
+                            // ✅ FIX: Turn regression prevention - validate turn before saving
+                            // This prevents the bug where CAS retry reads stale data and saves a lower turn
+                            const currentDbTurn = Number((baseSnap as any)?.meta?.turn) || 0;
+                            if (env.turn < currentDbTurn) {
+                                log.warn('handleChildCompleted: Preventing turn regression', {
+                                    parentTaskId,
+                                    envTurn: env.turn,
+                                    dbTurn: currentDbTurn,
+                                    action: 'skipping save, another resume already advanced turn'
+                                });
+                                // Another concurrent resume already advanced the turn
+                                // Our work is redundant - exit gracefully
+                                resumeSuccess = true;
+                                break;
+                            }
+
+                            const nextSnap = { ...baseSnap, M: mNextWithVars, meta: nextMeta, inbox: nextInboxForChildResume } as Record<string, unknown>;
+                            await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
+
+                            // NOTE: Self-correction removed - loopRunner now handles synchronous child completions
+                            // by continuing the loop instead of returning await_child when child result is already in inbox.
+                        } catch (e) {
+                            if ((e as Error).message === 'CAS_MISMATCH') {
+                                // Allow outer retry loop to handle it
+                                throw e;
+                            }
+                            /* noop for other save errors */
+                        }
+                        const channel = taskChannel(parentTaskId);
+                        const status: TaskStatus = (() => {
+                            if (outcome.kind === 'await_input') return { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: (outcome as any).token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards } } as any;
+                            if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') return { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token: (outcome as any).token, awaitExtra: { kind: outcome.kind } } } as any;
+                            if (outcome.kind === 'fail') return { state: 'failed', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }] }, metadata: { reason: outcome.reason } } as any;
+                            if (outcome.kind === 'complete') return { state: 'completed', timestamp: new Date().toISOString(), metadata: { result: (outcome as any).result } } as any;
+                            return { state: 'working', timestamp: new Date().toISOString() } as any;
+                        })();
+                        try { eventBus.publish(channel, { id: parentTaskId, status, final: status.state === 'completed' || status.state === 'failed' } as any); } catch { }
+
+                        resumeSuccess = true;
+                    } catch (e) {
+                        if ((e as Error).message === 'CAS_MISMATCH') {
+                            resumeRetryCount++;
+                            log.warn('handleChildCompleted: CAS Mismatch during parent resume, retrying with FRESH state...', {
+                                parentTaskId,
+                                retry: resumeRetryCount,
+                                note: 'Will reload snapshot and recalculate turn on next iteration'
+                            });
+                            // Backoff before retry - the retry will reload fresh snapshot at line 3614
+                            await new Promise(r => setTimeout(r, 50 * resumeRetryCount));
+                            // IMPORTANT: The `continue` here goes back to the top of the while loop
+                            // which reloads `finalSnap` and recalculates `recordedTurn` from fresh data
+                            continue;
+                        }
+                        throw e; // Re-throw other errors
                     }
                 }
-
-                log.debug('Child resume after helper', {
-                    sessionId: parentTaskId,
-                    currentLength: envInbox.current.length,
-                    allLength: envInbox.all.length,
-                    currentKinds: envInbox.current.map(o => o.kind),
-                    allKinds: envInbox.all.map(o => o.kind),
-                });
-                const env: EnvironmentState = {
-                    time: new Date().toISOString(),
-                    sessionId: parentTaskId,
-                    turn: startTurnTotal2 + 1,
-                    budget: { maxTurns: Infinity, latencyMs: Infinity },
-                    pending: {
-                        inputs: ((latestBase as any)?.pending?.inputs) || {},
-                        children: ((latestBase as any)?.pending?.children) || {},
-                        tools: ((latestBase as any)?.pending?.tools) || {},
-                        groups: ((latestBase as any)?.pending?.groups) || {}
-                    },
-                    inbox: envInbox,
-                    lastExec: (latestBase as any)?.meta?.lastExec || undefined,
-                    externalEvents: undefined
-                };
-
-                const overrides = (plugin as any)?.loop?.modules || {};
-
-                let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
-                try {
-                    // Restore budgets from snapshot first, then fallback to manifest
-                    const persistedBudgets = (latestBase as any)?.meta?.budgets;
-                    const manifestBudgets = (plugin?.manifest as any)?.budgets;
-                    const hitl = (plugin?.manifest as any)?.hitl;
-                    if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-
-                    if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                        loopOpts = persistedBudgets;
-                    } else if (manifestBudgets && typeof manifestBudgets === 'object') {
-                        loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
-                    } else {
-                        loopOpts = { maxTurns: 1 }; // Safety default
-                    }
-
-                    if (typeof loopOpts.maxTurns === 'number') {
-                        (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
-                    }
-                } catch (err) {
-                    try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
-                }
-                const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
-                try {
-                    const snapAfter = await this.sessionManager!.load(tenantId, parentTaskId);
-                    const expectedNow = snapAfter?.wmVersion ?? BigInt(0);
-                    const baseSnap = (snapAfter?.snapshot as Record<string, unknown>) || {};
-                    const prevMeta = (baseSnap as any).meta || {};
-                    const nextMeta = { ...prevMeta, turn: env.turn, lastChildToken: token, budgets: loopOpts };
-
-                    // ✅ FIX: Merge ctx.vars into mNext before saving (same as startTask does)
-                    const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
-
-                    const nextSnap = { ...baseSnap, M: mNextWithVars, meta: nextMeta, inbox: normalizeInbox(env.inbox) } as Record<string, unknown>;
-                    await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
-                } catch (e) { /* noop */ }
-                const channel = taskChannel(parentTaskId);
-                const status: TaskStatus = (() => {
-                    if (outcome.kind === 'await_input') return { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: (outcome as any).token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards } } as any;
-                    if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') return { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token: (outcome as any).token, awaitExtra: { kind: outcome.kind } } } as any;
-                    if (outcome.kind === 'fail') return { state: 'failed', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }] }, metadata: { reason: outcome.reason } } as any;
-                    if (outcome.kind === 'complete') return { state: 'completed', timestamp: new Date().toISOString(), metadata: { result: (outcome as any).result } } as any;
-                    return { state: 'working', timestamp: new Date().toISOString() } as any;
-                })();
-                try { eventBus.publish(channel, { id: parentTaskId, status, final: status.state === 'completed' || status.state === 'failed' } as any); } catch { }
+                // --- END RETRY LOOP ---
             } catch (resumeError) {
                 // If resume fails (e.g., database connection closed), log the error
                 // This is expected when deferred notifications run after parent task completes
@@ -3898,7 +4296,7 @@ export class TaskEngine {
     private createContext(task: TaskEntity): TaskContext {
         // This is a simplified version - a real implementation would
         // inject all required dependencies like LLM, tools, etc.
-        return {
+        const ctx: TaskContext = {
             tenantId: 'default', // TODO: Get from agent/task context
             agentId: 'default', // TODO: Get from agent/task context
             task: {
@@ -3999,6 +4397,12 @@ export class TaskEngine {
             recall: async () => { throw new Error('Memory not available in basic task engine'); },
             remember: async () => { throw new Error('Memory not available in basic task engine'); }
         };
+
+        // ✅ FIX: Attach session manager reference for loop to reload inbox on await_child
+        // This enables the synchronous child completion detection in loopRunner
+        (ctx as any)._sessionManager = this.sessionManager;
+
+        return ctx;
     }
 
     private async restoreCtx(tenantId: string, taskId: string): Promise<TaskContext> {
@@ -4221,12 +4625,31 @@ export class TaskEngine {
                 const minimalCtx = ctx as any;
                 const a2aOptions = { tenantId, streaming: (options?.streaming) === true } as any;
                 try {
+                    log.info('sendTaskToAgent: Sending task', {
+                        agent,
+                        skipParentNotification: true,
+                        hasActiveLoopInbox: !!(ctx as any).__activeLoopInbox
+                    });
+
+                    // ✅ FIX: Add child to pending immediately so transition module sees it
+                    if ((ctx as any).__activeLoopInbox && (ctx as any).__activeLoopEnv) {
+                        const env = (ctx as any).__activeLoopEnv;
+                        if (!env.pending) env.pending = { children: {}, inputs: {}, tools: {}, groups: {} };
+                        if (!env.pending.children) env.pending.children = {};
+                        if (!env.pending.children[token]) {
+                            env.pending.children[token] = { agentId: agent, timestamp: Date.now() };
+                        }
+                    }
+
+                    // ✅ FIX: Pass skipParentNotification: true to prevent A2A from calling handleChildCompleted
+                    // We will handle the completion locally to avoid race conditions with the running loop
                     const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
                         ...(options || {}),
                         ...a2aOptions,
                         parentTenantId: tenantId,
                         parentTaskId: sessionId,
-                        parentChildToken: token
+                        parentChildToken: token,
+                        skipParentNotification: true
                     } as any);
 
                     // If child requested input, do not synthesize completion
@@ -4237,7 +4660,43 @@ export class TaskEngine {
                     // For durable handlers, default to awaiting completion
                     const awaitCompletion = options?.awaitCompletion !== false;
                     if (awaitCompletion) {
-                        await engine.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
+                        // ✅ FIX: Inject result directly into active loop inbox if available
+                        // This prevents the race condition where handleChildCompleted starts a new loop
+                        // while the current loop is still running
+                        if ((ctx as any).__activeLoopInbox) {
+                            const env = (ctx as any).__activeLoopEnv;
+                            const childObservation: EngineObservation = {
+                                source: 'child',
+                                kind: 'child.completed',
+                                payload: { token, result, agentId: agent },
+                                provenance: {
+                                    ts: Date.now(),
+                                    turn: Number(env?.turn ?? 0),
+                                    id: token,
+                                    correlationId: token
+                                }
+                            };
+                            const inbox = (ctx as any).__activeLoopInbox as EngineObservationInbox;
+                            // Add to current inbox so loop sees it immediately
+                            inbox.current.push(childObservation);
+                            if (!inbox.all.some(o => o.kind === 'child.completed' && (o.payload as any)?.token === token)) {
+                                inbox.all.push(childObservation);
+                            }
+
+                            // Remove from pending tasks in the active loop environment
+                            // This ensures the next snapshot saved by the loop doesn't include this child as pending
+                            // ✅ FIX: Don't remove from pending here!
+                            /*
+                            if (env && env.pending && env.pending.children) {
+                                delete env.pending.children[token];
+                            }
+                            */
+
+                            log.info('✅ SYNC CHILD: Injected completion into active loop inbox', { token });
+                        } else {
+                            // Fallback: if no active loop inbox, use standard handleChildCompleted
+                            await engine.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
+                        }
                         return result;
                     }
                     return result;

@@ -75,6 +75,14 @@ export async function runLoop<
 
     const inbox = ensureInbox(env);
 
+    // ✅ FIX: Store inbox reference on context so handleChildCompleted can update it directly
+    // This allows synchronous child completions to be visible to the loop's await_child check
+    (ctx as any).__activeLoopInbox = inbox;
+    // ✅ FIX: Store env reference so synchronous completions can update pending state
+    (ctx as any).__activeLoopEnv = env;
+
+    log.info('LoopRunner: Attached __activeLoopInbox to context (v3.5)', { taskId, hasInbox: !!inbox, inboxLen: inbox.current.length });
+
     // Provide minimal defaults (prefer agent overrides when present)
     const defaults: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload> = {
         attention: modules.attention ?? ((_prev, _env) => ({ kind: 'all' })),
@@ -261,6 +269,18 @@ export async function runLoop<
 
             if (action.kind === 'tool' && action.token) {
                 return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
+            }
+
+            // ✅ FIX v3.5: Check if there are pending children even if action.kind !== 'subagent'
+            // This handles cases where custom execution modules dispatch children but return { kind: 'internal' }
+            const pendingChildren = env.pending?.children;
+            if (pendingChildren && typeof pendingChildren === 'object') {
+                const tokens = Object.keys(pendingChildren);
+                if (tokens.length > 0) {
+                    const firstToken = tokens[0];
+                    try { log.info('Default transition: detected pending child, returning await_child', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
+                    return { kind: 'await_child', token: firstToken } as TransitionOut<ObservationPayload>;
+                }
             }
 
             return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
@@ -488,6 +508,87 @@ export async function runLoop<
         // Stop on await_* or terminal
         // 🔍 DEBUG: Log loop continuation check
         if (outcome.kind !== 'continue') {
+            // ✅ RADICAL FIX: If await_child but child result is ALREADY in inbox, continue instead of exiting!
+            // This prevents the race condition where:
+            // 1. Turn dispatches child with await_child
+            // 2. Child completes synchronously (from cache)
+            // 3. handleChildCompleted stages observation in inbox (in database)
+            // 4. Loop would normally exit on await_child
+            // 5. startTask saves await_child state
+            // 6. Self-correction calls handleChildCompleted AGAIN (race!)
+            // By continuing the loop, we process the child result in the SAME loop, avoiding the race.
+            if (outcome.kind === 'await_child' && (outcome as any).token) {
+                const awaitToken = (outcome as any).token;
+
+                // First check local inbox
+                let childResultInInbox = inbox.all.some(
+                    (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                );
+
+                // If not in local inbox, reload from database
+                // (handleChildCompleted may have staged it during execution)
+                if (!childResultInInbox) {
+                    try {
+                        const sessionManager = (ctx as any)._sessionManager;
+                        const tenantId = (ctx as any).tenantId || 'default';
+                        if (sessionManager && taskId) {
+                            const freshSnap = await sessionManager.load(tenantId, taskId);
+                            if (freshSnap) {
+                                const freshInbox = (freshSnap.snapshot as any)?.inbox;
+                                if (freshInbox && Array.isArray(freshInbox.all)) {
+                                    childResultInInbox = freshInbox.all.some(
+                                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                                    );
+                                    if (childResultInInbox) {
+                                        log.debug('🔄 SYNC CHILD: Found child result in database inbox', {
+                                            taskId,
+                                            awaitToken: awaitToken?.substring(0, 15)
+                                        });
+                                        // Merge fresh inbox into local inbox
+                                        for (const obs of freshInbox.all) {
+                                            if (!inbox.all.some((o: any) => o.kind === obs.kind && o.payload?.token === obs.payload?.token)) {
+                                                inbox.all.push(obs);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        log.debug('Failed to reload inbox from database', { error: (e as Error).message });
+                    }
+                }
+
+                if (childResultInInbox) {
+                    log.info('🔄 SYNC CHILD: Child result already in inbox, continuing loop instead of awaiting', {
+                        taskId,
+                        runId,
+                        loopCounter: turn,
+                        envTurn: (env as any).turn,
+                        awaitToken: awaitToken?.substring(0, 15)
+                    });
+                    // Move child completion to current inbox for next turn
+                    const childObs = inbox.all.find(
+                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                    );
+                    if (childObs) {
+                        inbox.current = [childObs];
+                    }
+
+                    // ✅ FIX: Remove from pending children so next turn doesn't await again
+                    // We deferred this removal from TaskEngine (injection) to here
+                    if (env.pending && env.pending.children && awaitToken) {
+                        delete env.pending.children[awaitToken];
+                        log.debug('🔄 SYNC CHILD: Removed child from pending', { awaitToken: awaitToken?.substring(0, 15) });
+                    }
+
+                    // Convert await_child to continue so loop proceeds
+                    outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
+                    // Don't break - continue to next turn
+                    continue;
+                }
+            }
+
             log.debug('🔍 DEBUG: Loop stopping (non-continue outcome)', {
                 taskId,
                 runId,

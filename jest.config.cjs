@@ -41,16 +41,22 @@ const config = {
     },
     
     // Critical: Tell Jest to treat .ts files as ESM
+    // Note: .mjs files are always treated as ESM by Jest
     extensionsToTreatAsEsm: ['.ts'],
-    moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+    moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'json', 'node'],
     
     // Transform settings
+    // Don't ignore workspace packages - they need to be transformed
     transformIgnorePatterns: [
-        'node_modules/(?!(jest-mock-extended|ts-essentials)/)',
+        'node_modules/(?!(jest-mock-extended|ts-essentials|@a2arium)/)',
+        // Transform workspace packages
+        '!packages/',
+        '!apps/',
     ],
     
     // Coverage settings
-    collectCoverage: true,
+    // Only collect coverage when explicitly requested with --coverage flag
+    collectCoverage: false,
     coverageProvider: 'v8',
     collectCoverageFrom: [
         'packages/**/src/**/*.{ts,tsx}',
