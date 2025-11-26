@@ -39,6 +39,24 @@ await ctx.reply([{ type: 'text', text: `Sum: ${result.sum}` }]);
 ctx.complete(100, 'completed');
 ```
 
+### Per-call Cache Overrides
+
+Agents can adjust result caching on a per-dispatch basis without touching the target manifest. Use the `cache` option to toggle caching or override TTL/exclude paths for a specific call while inheriting unspecified values from the manifest.
+
+```typescript
+await ctx.sendTaskToAgent('pricing-agent', payload, {
+  cache: {
+    enabled: true,          // force cache even if manifest disabled it
+    ttlSeconds: 120,        // optional override; falls back to manifest when omitted
+    excludePaths: ['time']  // optional override for cache key generation
+  }
+});
+
+await ctx.sendTaskToAgent('live-agent', payload, {
+  cache: { enabled: false }  // bypass cache for this invocation only
+});
+```
+
 ## Execution Model and Persistence
 
 - **sendTaskToAgent (auto-dispatch)**: If `onCompleted` is provided in options, the call returns immediately and completion is delivered to the durable handler. If no `onCompleted` is provided, the call resolves with the child's result (blocking tool-like behavior).

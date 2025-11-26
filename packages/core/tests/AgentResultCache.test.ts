@@ -1,7 +1,7 @@
 import { AgentResultCache } from '../src/core/cache/AgentResultCache.js';
 import type { PrismaClient } from '@prisma/client';
 import type { TaskInput } from '../src/shared/types/index.js';
-import { describe, it, expect, beforeEach, jest } from '@jest/globals';
+import { jest } from '@jest/globals';
 
 // Mock PrismaClient
 const mockPrismaClient = {

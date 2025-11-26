@@ -1,29 +1,18 @@
-import fs from 'fs';
-import path from 'path';
 import { MemorySQLAdapter } from '../src/MemorySQLAdapter.js';
 import { storeImage, getImage, listImages, deleteImage } from '../src/BlobStorageHelpers.js';
-
-// Only run integration tests if database is available
-const hasDatabase = process.env.MEMORY_DATABASE_URL && process.env.MEMORY_DATABASE_URL.includes('localhost');
+import { PrismaClient } from '@prisma/client';
 
 describe('BlobStorage Integration Tests', () => {
     let adapter: MemorySQLAdapter;
-
-    // Skip if no database available
-    if (!hasDatabase) {
-        it.skip('Database not available - skipping integration tests', () => { });
-        return;
-    }
+    let prisma: PrismaClient;
 
     beforeAll(async () => {
-        // Import Prisma client after confirming database is available
-        const { PrismaClient } = await import('@prisma/client');
-        const prisma = new PrismaClient();
+        prisma = new PrismaClient();
         adapter = new MemorySQLAdapter(prisma);
     });
 
     afterAll(async () => {
-        // Cleanup test data
+        // Cleanup test data and disconnect
         if (adapter) {
             try {
                 await adapter.deleteBlob('test-image-1', 'test-integration');
@@ -31,6 +20,9 @@ describe('BlobStorage Integration Tests', () => {
             } catch (error) {
                 // Ignore cleanup errors
             }
+        }
+        if (prisma?.$disconnect) {
+            await prisma.$disconnect();
         }
     });
 

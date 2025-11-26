@@ -2,7 +2,10 @@ import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('Goal progress extrinsic reward', () => {
     it('rewards when done count increases', async () => {
-        const ctx: any = { reply: async () => { } };
+        const ctx: any = {
+            reply: async () => { },
+            task: { id: 'goal-reward-test-task' }
+        };
         const M: any = {
             memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: {},
@@ -12,12 +15,16 @@ describe('Goal progress extrinsic reward', () => {
             policyParams: { theta: null, stochastic: false }
         };
         const env: any = { time: new Date().toISOString(), input: {}, pending: { inputs: {}, children: {}, tools: {}, groups: {} } };
+        const modules = {
+            policy: () => ({ kind: 'language', content: 'x' }),
+            intrinsicReward: () => 0
+        };
         // First turn: no done goals → reward 0
-        const r1 = await runLoop(ctx, M, env, { policy: () => ({ kind: 'language', content: 'x' }) }, { maxTurns: 1 });
+        const r1 = await runLoop(ctx, M, env, modules, { maxTurns: 1 });
         expect((r1.metrics?.rewards?.[0] ?? 0)).toBe(0);
         // Mark goal as done
         (M.goalState.hierarchy.nodes as any).g1.status = 'done';
-        const r2 = await runLoop(ctx, M, env, { policy: () => ({ kind: 'language', content: 'y' }) }, { maxTurns: 1 });
+        const r2 = await runLoop(ctx, M, env, modules, { maxTurns: 1 });
         expect((r2.metrics?.rewards?.[0] ?? 0)).toBe(1);
     });
 });

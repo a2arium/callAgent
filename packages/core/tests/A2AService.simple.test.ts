@@ -76,4 +76,32 @@ describe('A2AService Simple Tests', () => {
             expect(typeof service.findLocalAgent).toBe('function');
         });
     });
+
+    describe('cache override resolution', () => {
+        const createPlugin = (manifestCache?: { enabled?: boolean; ttlSeconds?: number; excludePaths?: string[] }) => ({
+            manifest: {
+                name: 'test-agent',
+                version: '1.0.0',
+                cache: manifestCache
+            }
+        } as any);
+
+        it('should reuse manifest ttl when override only enables cache', () => {
+            const service = new A2AService();
+            const plugin = createPlugin({ enabled: false, ttlSeconds: 45, excludePaths: ['meta'] });
+            const config = (service as any).resolveEffectiveCacheConfig(plugin, { cache: { enabled: true } });
+            expect(config.enabled).toBe(true);
+            expect(config.ttlSeconds).toBe(45);
+            expect(config.excludePaths).toEqual(['meta']);
+        });
+
+        it('should disable caching when override sets enabled false', () => {
+            const service = new A2AService();
+            const plugin = createPlugin({ enabled: true, ttlSeconds: 30 });
+            const config = (service as any).resolveEffectiveCacheConfig(plugin, { cache: { enabled: false } });
+            expect(config.enabled).toBe(false);
+            // ttl fallback still aligns with manifest for potential future re-enable
+            expect(config.ttlSeconds).toBe(30);
+        });
+    });
 }); 

@@ -2,7 +2,10 @@ import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('Metrics aggregates in metadata', () => {
     it('computes timingsAgg and rewardsAgg arrays', async () => {
-        const ctx: any = { reply: async () => { } };
+        const ctx: any = {
+            reply: async () => { },
+            task: { id: 'metrics-test-task' }
+        };
         const M: any = {
             memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },

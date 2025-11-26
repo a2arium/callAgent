@@ -26,15 +26,18 @@ The OutboxPublisher processes outbox records sequentially, but in production env
 - Tests cleanup effectiveness
 - Provides alerting thresholds
 
+> **Note:** By default the Jest suite uses an in-memory Prisma mock so no real database is touched. Set `ENABLE_DB_TESTS=true` if you want to exercise the Postgres-backed integration/monitoring suites.
+
 ## Running the Tests
 
 ### Prerequisites
 ```bash
-# Set up test database
-export TEST_DATABASE_URL="postgresql://test:test@localhost:5432/test_db"
-
 # Install dependencies
 yarn install
+
+# (Optional) enable real database integration tests
+export ENABLE_DB_TESTS=true
+export TEST_DATABASE_URL="postgresql://test:test@localhost:5432/test_db"
 ```
 
 ### Run Unit Tests
@@ -45,12 +48,13 @@ yarn test packages/core/src/eventbus/__tests__/outbox-race-condition.test.ts
 
 ### Run Integration Tests
 ```bash
-# Requires running PostgreSQL test database
+# Requires ENABLE_DB_TESTS=true and a reachable PostgreSQL database
 yarn test packages/core/src/eventbus/__tests__/outbox-concurrency.integration.test.ts
 ```
 
 ### Run Monitoring Tests
 ```bash
+# Requires ENABLE_DB_TESTS=true and a reachable PostgreSQL database
 yarn test packages/core/src/eventbus/__tests__/outbox-monitoring.test.ts
 ```
 

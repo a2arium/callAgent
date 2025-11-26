@@ -1,8 +1,14 @@
+import { jest } from '@jest/globals';
 import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('ReAct-style planner (feature flag)', () => {
     it('selects tool based on regex pattern over last observation', async () => {
-        const ctx: any = { reply: async () => { } };
+        const toolInvoke = jest.fn().mockResolvedValue('ok');
+        const ctx: any = {
+            reply: async () => { },
+            task: { id: 'react-planner-test-task' },
+            tools: { invoke: toolInvoke }
+        };
         const M: any = {
             memory: { sensory: { lastObservation: 'Search for cats near Boston' }, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: {},
@@ -12,9 +18,16 @@ describe('ReAct-style planner (feature flag)', () => {
             policyParams: { theta: null, stochastic: false, reactPlanner: { enabled: true, patterns: [{ regex: 'search for (.+)', tool: 'search', argKey: 'q' }] } }
         };
         const env: any = { time: new Date().toISOString(), input: 'Search for cats near Boston', pending: { inputs: {}, children: {}, tools: {}, groups: {} } };
-        const { outcome } = await runLoop(ctx, M, env, {}, { maxTurns: 1 });
-        // execution is default; tool is sync → continue
-        expect(outcome.kind).toBe('continue');
+        const modules = {
+            perception: (e: any) => ({
+                time: e.time,
+                input: e.input,
+                pending: e.pending,
+                inbox: []
+            })
+        };
+        await runLoop(ctx, M, env, modules, { maxTurns: 1 });
+        expect(toolInvoke).toHaveBeenCalledWith('search', { q: 'cats near Boston', context: undefined });
     });
 });
 

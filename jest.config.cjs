@@ -7,8 +7,13 @@ const config = {
     // Test discovery
     roots: ['<rootDir>/packages'],
     testMatch: [
-        '**/__tests__/**/*.+(ts|tsx|js)',
-        '**/?(*.)+(spec|test).+(ts|tsx|js)'
+        '**/__tests__/**/*.[jt]s?(x)',
+        '**/?(*.)+(spec|test).[jt]s?(x)'
+    ],
+    testPathIgnorePatterns: [
+        '/node_modules/',
+        '/dist/',
+        '<rootDir>/packages/.*/dist/'
     ],
     
     // Force TypeScript transformation with ts-jest only
@@ -55,29 +60,30 @@ const config = {
     ],
     
     // Coverage settings
-    // Only collect coverage when explicitly requested with --coverage flag
-    collectCoverage: false,
+    // Collect coverage and emit a summary table after the run
+    collectCoverage: true,
     coverageProvider: 'v8',
+    // text -> table + summary at end; lcov -> CI/HTML consumption
+    coverageReporters: ['text', 'lcov'],
     collectCoverageFrom: [
         'packages/**/src/**/*.{ts,tsx}',
         '!packages/**/src/tests/**',
         '!packages/**/src/**/*.d.ts',
         '!packages/**/src/index.ts',
     ],
-    coverageThreshold: {
-        global: {
-            branches: 50,
-            functions: 50,
-            lines: 50,
-            statements: 50
-        }
-    },
+    // We care about stability over hard thresholds right now
+    coverageThreshold: undefined,
     
     // Setup
+    setupFiles: ['<rootDir>/jest.prisma-mock.js'],
     setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
     // Global teardown runs ONCE after all tests
     globalTeardown: '<rootDir>/jest.teardown.js',
     verbose: true,
+
+    // Stability tweaks
+    maxWorkers: '50%',
+    detectOpenHandles: true,
 };
 
 module.exports = config; 

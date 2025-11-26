@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { jest } from '@jest/globals';
 import { OutboxPublisher } from '../../src/eventbus/outboxPublisher.js';
 
 describe('OutboxPublisher Race Condition Tests', () => {
@@ -6,20 +6,22 @@ describe('OutboxPublisher Race Condition Tests', () => {
     let setTimeoutSpy: jest.SpiedFunction<typeof setTimeout>;
     let clearTimeoutSpy: jest.SpiedFunction<typeof clearTimeout>;
     let scheduledTimeouts: Set<NodeJS.Timeout>;
+    const realSetTimeout = global.setTimeout;
+    const realClearTimeout = global.clearTimeout;
 
     beforeEach(() => {
         scheduledTimeouts = new Set();
         
         // Spy on setTimeout/clearTimeout to track scheduled timers
-        setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((fn, delay) => {
-            const id = setTimeout(fn, delay) as unknown as NodeJS.Timeout;
+        setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((fn: any, delay?: number) => {
+            const id = realSetTimeout(fn as TimerHandler, delay) as unknown as NodeJS.Timeout;
             scheduledTimeouts.add(id);
             return id;
         });
         
-        clearTimeoutSpy = jest.spyOn(global, 'clearTimeout').mockImplementation((id) => {
+        clearTimeoutSpy = jest.spyOn(global, 'clearTimeout').mockImplementation((id: any) => {
             scheduledTimeouts.delete(id as NodeJS.Timeout);
-            return clearTimeout(id);
+            return realClearTimeout(id as any);
         });
 
         publisher = new OutboxPublisher();
@@ -59,8 +61,11 @@ describe('OutboxPublisher Race Condition Tests', () => {
         expect(publisher.isActive?.() || (publisher as any).running).toBe(false);
     });
 
-    it('should clear pending timeout when stop() is called', () => {
+    it('should clear pending timeout when stop() is called', async () => {
         publisher.start(100);
+
+        // Allow first tick to schedule its timeout
+        await new Promise(resolve => realSetTimeout(resolve, 20));
         
         const timeoutsBeforeStop = scheduledTimeouts.size;
         expect(timeoutsBeforeStop).toBeGreaterThan(0);
@@ -83,4 +88,3 @@ describe('OutboxPublisher Race Condition Tests', () => {
         expect(publisher.isActive?.() || (publisher as any).running).toBe(false);
     });
 });
-

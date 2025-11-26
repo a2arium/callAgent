@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { globalAgentRegistry } from '../src/core/plugin/AgentRegistry.js';
 import { PluginManager } from '../src/core/plugin/pluginManager.js';
 import type { AgentPlugin } from '../src/core/plugin/types.js';

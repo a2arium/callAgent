@@ -24,7 +24,7 @@
     "start": "node packages/core/dist/runner/runnerCli.js",
     "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+    "test": "node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "run:llm": "yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{\"prompt\": \"Tell me a joke about AI.\"}'",
     "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream --tenant=customer-123",
     "run:hello": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}'",
@@ -62,6 +62,7 @@
   "author": "Your Name <your.email@example.com>",
   "license": "ISC",
   "devDependencies": {
+    "@jest/test-sequencer": "29.7.0",
     "@types/aws-lambda": "^8.10.152",
     "@types/express": "^5.0.1",
     "@types/jest": "^29.5.14",

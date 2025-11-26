@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, jest } from '@jest/globals';
+import { jest } from '@jest/globals';
 import { MemorySQLAdapter } from '../src/MemorySQLAdapter.js';
 import { prismaMock } from './__mocks__/prisma.js';
 import type { EnrichmentOptions } from '@a2arium/types';

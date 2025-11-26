@@ -2,7 +2,10 @@ import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('Rewards hooks', () => {
     it('aggregates rewards in metrics and exposes in metadata', async () => {
-        const ctx: any = { reply: async () => { } };
+        const ctx: any = {
+            reply: async () => { },
+            task: { id: 'rewards-hooks-test-task' }
+        };
         const M: any = {
             memory: { sensory: {}, vars: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
             worldModel: { implicit: null, explicit: null, simulator: null },
