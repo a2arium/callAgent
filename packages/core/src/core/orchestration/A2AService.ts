@@ -140,7 +140,7 @@ export class A2AService implements IA2AService {
             // Attach WM proxy so child ctx.vars writes persist
             try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
 
-            const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId);
+            const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, options);
 
             // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
             if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
@@ -674,15 +674,18 @@ export class A2AService implements IA2AService {
     private async executeTargetAgent(
         targetPlugin: AgentPlugin,
         targetCtx: FullTaskContext,
-        operationId: string
+        operationId: string,
+        options: A2ACallOptions
     ): Promise<unknown> {
         try {
-            // Check cache if enabled for target agent
-            if (this.agentResultCache && targetPlugin.manifest.cache?.enabled) {
+            const effectiveCache = this.resolveEffectiveCacheConfig(targetPlugin, options);
+
+            // Check cache if enabled (manifest or override)
+            if (this.agentResultCache && effectiveCache.enabled) {
                 const cachedResult = await this.agentResultCache.getCachedResult(
                     targetPlugin.manifest.name,
                     targetCtx.task.input,
-                    targetPlugin.manifest.cache.excludePaths || [],
+                    effectiveCache.excludePaths,
                     targetCtx.tenantId
                 );
 
@@ -727,14 +730,14 @@ export class A2AService implements IA2AService {
                     })());
 
             // Cache the result if caching is enabled
-            if (this.agentResultCache && targetPlugin.manifest.cache?.enabled) {
+            if (this.agentResultCache && effectiveCache.enabled) {
                 try {
                     await this.agentResultCache.setCachedResult(
                         targetPlugin.manifest.name,
                         targetCtx.task.input,
                         result,
-                        targetPlugin.manifest.cache.ttlSeconds || 300,
-                        targetPlugin.manifest.cache.excludePaths || [],
+                        effectiveCache.ttlSeconds,
+                        effectiveCache.excludePaths,
                         targetCtx.tenantId
                     );
                 } catch (cacheError) {
@@ -761,6 +764,16 @@ export class A2AService implements IA2AService {
             });
             throw error;
         }
+    }
+
+    private resolveEffectiveCacheConfig(targetPlugin: AgentPlugin, options: A2ACallOptions) {
+        const manifestCache = targetPlugin.manifest.cache ?? {};
+        const overrideCache = options.cache;
+        return {
+            enabled: overrideCache?.enabled ?? manifestCache.enabled ?? false,
+            ttlSeconds: overrideCache?.ttlSeconds ?? manifestCache.ttlSeconds ?? 300,
+            excludePaths: overrideCache?.excludePaths ?? manifestCache.excludePaths ?? []
+        };
     }
 }
 

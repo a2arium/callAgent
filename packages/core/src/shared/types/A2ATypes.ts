@@ -45,6 +45,15 @@ export type A2ACallOptions = {
     streaming?: boolean;
     /** When false, child result arrives via inbox on next turn (even from cache). When true, parent receives result immediately (blocking). */
     awaitCompletion?: boolean;
+    /** Override cache behavior for this call */
+    cache?: {
+        /** Enable/disable caching for this call (overrides manifest when set) */
+        enabled?: boolean;
+        /** Override TTL in seconds; falls back to manifest when omitted */
+        ttlSeconds?: number;
+        /** Override excludePaths; falls back to manifest when omitted */
+        excludePaths?: string[];
+    };
     /** Automatically store child token in ctx.vars when child requests input */
     setToken?: boolean;
     /** Path in ctx.vars where token is stored (default: 'child.token') */

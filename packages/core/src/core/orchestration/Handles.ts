@@ -151,7 +151,7 @@ export class TaskHandle {
     async onFailed(handlerName: string): Promise<this> { return this.setHandler('failed', handlerName); }
     async onInputRequired(handlerName: string): Promise<this> { return this.setHandler('inputRequired', handlerName); }
 
-    async run(opts?: { awaitCompletion?: boolean; streaming?: boolean }): Promise<unknown | void> {
+    async run(opts?: { awaitCompletion?: boolean; streaming?: boolean; cache?: { enabled?: boolean; ttlSeconds?: number; excludePaths?: string[] } }): Promise<unknown | void> {
         if (this.dispatcher) {
             return this.dispatcher(opts);
         }
@@ -175,7 +175,8 @@ export class TaskHandle {
                 parentTenantId: this.tenantId,
                 parentTaskId: this.sessionId,
                 parentChildToken: this.childToken,
-                streaming: opts?.streaming === true
+                streaming: opts?.streaming === true,
+                cache: opts?.cache
             } as any);
             if (awaitCompletion && engine) {
                 await engine.handleChildCompleted({ tenantId: this.tenantId, parentTaskId: this.sessionId, childToken: this.childToken, result });

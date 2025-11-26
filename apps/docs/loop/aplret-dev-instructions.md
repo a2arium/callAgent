@@ -581,6 +581,25 @@ When one agent invokes another via `ctx.sendTaskToAgent()`, each agent receives 
 
 This allows you to configure agent behavior without hardcoded constants, making agents more flexible and easier to test with different configurations.
 
+## Per-call Cache Overrides
+
+Agents can adjust result caching on a per-dispatch basis without touching the target manifest. Use the `cache` option to toggle caching or override TTL/exclude paths for a specific call while inheriting unspecified values from the manifest.
+
+```typescript
+await ctx.sendTaskToAgent('pricing-agent', payload, {
+  cache: {
+    enabled: true,          // force cache even if manifest disabled it
+    ttlSeconds: 120,        // optional override; falls back to manifest when omitted
+    excludePaths: ['time']  // optional override for cache key generation
+  }
+});
+
+await ctx.sendTaskToAgent('live-agent', payload, {
+  cache: { enabled: false }  // bypass cache for this invocation only
+});
+```
+
+
 
 ## Table of Contents
 

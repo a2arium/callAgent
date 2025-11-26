@@ -932,6 +932,7 @@ export class TaskEngine {
                 tokenPath?: string;
                 autoClearToken?: boolean;
                 setStage?: string;
+                cache?: { enabled?: boolean; ttlSeconds?: number; excludePaths?: string[] };
             }
         ) => {
             if (!this.sessionManager) throw new Error('Session manager not configured');
@@ -4577,6 +4578,7 @@ export class TaskEngine {
                 tokenPath?: string;
                 autoClearToken?: boolean;
                 setStage?: string;
+                cache?: { enabled?: boolean; ttlSeconds?: number; excludePaths?: string[] };
             }) => {
                 if (!engine.sessionManager) throw new Error('Session manager not configured');
                 const tenantId = (ctx as any).tenantId;
