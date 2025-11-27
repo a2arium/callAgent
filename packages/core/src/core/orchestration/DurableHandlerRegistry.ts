@@ -1,5 +1,5 @@
 import type { Observation, ObservationConfig, SynthesizeObservation } from '../../loop/oneTurn.js';
-import type { ObservationInbox } from '../../loop/types.js';
+import { normalizeObservationInbox, type ObservationInbox } from '../../loop/types.js';
 
 export type PendingInputHandler = {
     // optional metadata like schema, expiresAt, etc.
@@ -28,23 +28,7 @@ export type SnapshotShape = {
 };
 
 const normalizeInbox = (value: SnapshotShape['inbox']): DurableObservationInbox => {
-    if (Array.isArray(value)) {
-        const arr = value as Observation[];
-        return {
-            current: [...arr] as DurableObservation[],
-            all: [...arr] as DurableObservation[]
-        };
-    }
-    if (value && typeof value === 'object') {
-        const candidate = value as Partial<DurableObservationInbox>;
-        const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
-        const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
-        return {
-            current: current as DurableObservation[],
-            all: all as DurableObservation[]
-        };
-    }
-    return { current: [], all: [] };
+    return normalizeObservationInbox<DurableObservationConfig>(value);
 };
 
 const addObservationToInbox = (value: SnapshotShape['inbox'], observation: DurableObservation): DurableObservationInbox => {
@@ -106,5 +90,4 @@ export function applyInputProvided(
     const next = { ...nextSnapshot, inbox: nextInbox } as Record<string, unknown>;
     return { next };
 }
-
 

@@ -8,9 +8,45 @@
 // - Placeholders for future capabilities (world model, emotion, reward)
 import type { Observation, SynthesizeObservation, ObservationConfig } from './oneTurn.js';
 
+export type ObservationBySource<Payload extends ObservationConfig, Source> = Extract<
+    SynthesizeObservation<Payload>,
+    { source: Source }
+>;
+
+const findUser = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
+    observations.find((o): o is ObservationBySource<Payload, 'user'> => (o as { source?: unknown })?.source === 'user');
+const findTool = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
+    observations.find((o): o is ObservationBySource<Payload, 'tool'> => (o as { source?: unknown })?.source === 'tool');
+const findChild = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
+    observations.find((o): o is ObservationBySource<Payload, 'child'> => (o as { source?: unknown })?.source === 'child');
+const findInternal = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
+    observations.find((o): o is ObservationBySource<Payload, 'internal'> => (o as { source?: unknown })?.source === 'internal');
+const findEnv = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
+    observations.find((o): o is ObservationBySource<Payload, 'env'> => (o as { source?: unknown })?.source === 'env');
+
+const attachInboxAccessors = <Payload extends ObservationConfig>(
+    inbox: Pick<ObservationInbox<Payload>, 'current' | 'all'> & Partial<ObservationInbox<Payload>>
+): ObservationInbox<Payload> => {
+    const casted = inbox as ObservationInbox<Payload>;
+    const define = <K extends keyof ObservationInbox<Payload>>(key: K, fn: ObservationInbox<Payload>[K]) => {
+        Object.defineProperty(casted, key, { value: fn, enumerable: false, writable: true, configurable: true });
+    };
+    define('user', () => findUser(inbox.current));
+    define('tool', () => findTool(inbox.current));
+    define('child', () => findChild(inbox.current));
+    define('internal', () => findInternal(inbox.current));
+    define('env', () => findEnv(inbox.current));
+    return casted;
+};
+
 export type ObservationInbox<Payload extends ObservationConfig = ObservationConfig> = {
     current: SynthesizeObservation<Payload>[];
     all: SynthesizeObservation<Payload>[];
+    user(): ObservationBySource<Payload, 'user'> | undefined;
+    tool(): ObservationBySource<Payload, 'tool'> | undefined;
+    child(): ObservationBySource<Payload, 'child'> | undefined;
+    internal(): ObservationBySource<Payload, 'internal'> | undefined;
+    env(): ObservationBySource<Payload, 'env'> | undefined;
 };
 
 export type EpisodicEvent = {
@@ -130,4 +166,32 @@ export type EnvironmentState<ObservationPayload extends ObservationConfig = Obse
     externalEvents?: unknown[]; // future: bus events since last turn
     goalStats?: { doneCount: number };
     config?: Record<string, unknown>; // manifest-level configuration
+};
+
+export const normalizeObservationInbox = <ObservationPayload extends ObservationConfig = ObservationConfig>(
+    value: unknown
+): ObservationInbox<ObservationPayload> => {
+    if (Array.isArray(value)) {
+        const arr = value as SynthesizeObservation<ObservationPayload>[];
+        return attachInboxAccessors({
+            current: [...arr],
+            all: [...arr]
+        });
+    }
+    if (value && typeof value === 'object') {
+        const candidate = value as Partial<ObservationInbox<ObservationPayload>>;
+        const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
+        const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
+        const inbox = {
+            current,
+            all,
+            user: candidate.user,
+            tool: candidate.tool,
+            child: candidate.child,
+            internal: candidate.internal,
+            env: candidate.env
+        };
+        return attachInboxAccessors(inbox);
+    }
+    return attachInboxAccessors({ current: [], all: [] });
 };

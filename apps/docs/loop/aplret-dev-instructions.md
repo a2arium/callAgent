@@ -35,7 +35,7 @@ This document describes a **reusable, production-ready agent architecture** that
 - **Execution always returns `{ action, result }`** where `result` is an `ExecResult<Data>` (you control `Data`) containing status, typed `data`/`error`, provenance (`ts` plus any correlation metadata), and optional receipts.
 - **Transition packages that `ExecResult<Data>` into one or more normalized `Observation<Payload>` objects** (you control `Payload`) and returns them via `TurnOutcome.observations` together with the control signal (`continue`, `await_*`, etc.).
 - **Runtime handoff:** The loop runner appends every observation to `env.inbox.all` and stages the batch on `env.inbox.current` before the next turn begins. Perception reads the staged slice; history remains in `all` for replay/debugging.
-- **Environment exposes `{ inbox: { current, all } }`** to the next turn. `current` holds only the observations for the upcoming turn; `all` keeps the ordered log. Perception treats `current` as read-only, validates each entry, then the runtime clears it when the turn ends.
+- **Environment exposes `{ inbox: { current, all } }`** to the next turn. `current` holds only the observations for the upcoming turn; `all` keeps the ordered log. Perception treats `current` as read-only, validates each entry, then the runtime clears it when the turn ends. Use `env.inbox.user()` / `.tool()` / `.child()` to grab the first current observation of that source with type narrowing (e.g., `const caseId = env.inbox.user()?.payload.value.caseId;`).
 - **ALL inputs flow through inbox:** Initial CLI inputs and resumed inputs (from `requestInput`, tool completions, child completions) are converted to observations in `env.inbox.current` with `source: 'user'` and `kind: 'input.provided'`. Perception should ONLY read from inbox.
 - **Turn _t+1_ – Perception: Perception validates and annotates inbox entries** (plus any ambient world state). At the start of the next turn, Perception drains the inbox (append-only queue), validates each observation, and hands Learning a structured observation payload. Learning then updates the mental state, making the effects from turn _t_ available to Policy on turn _t+1_.
 - **Learning remains the single writer of MentalState (M)**; all effect outputs must flow via `Observation → Learning → M`, not through ad-hoc state writes.
@@ -1440,4 +1440,3 @@ If an agent attempts to save a larger string inline (without wrapping it in `Art
 3.  The agent continues execution, but the data is lost.
 
 **Rule:** If you see `[PRUNE]` warnings, wrap that field with `Artifact.create()`.
-

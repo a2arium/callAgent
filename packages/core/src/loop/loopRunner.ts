@@ -8,12 +8,11 @@ import {
     type ExecutableAction,
     type ExecResult,
     type ExecErrorPayload,
-    type Observation,
     type AttentionSignal,
     type SynthesizeObservation,
     type ObservationConfig
 } from './oneTurn.js';
-import type { EnvironmentState, MentalState, ObservationInbox } from './types.js';
+import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
@@ -24,26 +23,9 @@ type LoopRunnerOptions = {
 };
 
 const ensureInbox = <ObservationPayload extends ObservationConfig = ObservationConfig>(environment: EnvironmentState<ObservationPayload>): ObservationInbox<ObservationPayload> => {
-    const raw = environment.inbox as unknown;
-    if (Array.isArray(raw)) {
-        const legacy = raw as Observation<unknown>[];
-        const converted: ObservationInbox<ObservationPayload> = {
-            current: legacy as unknown as SynthesizeObservation<ObservationPayload>[],
-            all: legacy as unknown as SynthesizeObservation<ObservationPayload>[]
-        };
-        environment.inbox = converted;
-        return converted;
-    }
-    if (raw && typeof raw === 'object') {
-        const candidate = raw as ObservationInbox<ObservationPayload>;
-        if (!Array.isArray(candidate.current)) candidate.current = [];
-        if (!Array.isArray(candidate.all)) candidate.all = [];
-        environment.inbox = candidate;
-        return candidate;
-    }
-    const initialized: ObservationInbox<ObservationPayload> = { current: [], all: [] };
-    environment.inbox = initialized;
-    return initialized;
+    const normalized = normalizeObservationInbox<ObservationPayload>(environment.inbox);
+    environment.inbox = normalized;
+    return normalized;
 };
 
 export async function runLoop<

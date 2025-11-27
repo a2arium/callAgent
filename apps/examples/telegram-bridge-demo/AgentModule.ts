@@ -8,6 +8,7 @@ import type {
     ProposedAction,
     ShieldOutcome,
     ExecResult,
+    ObservationConfig,
 } from '@a2arium/callagent-core';
 import { match, P } from 'ts-pattern';
 
@@ -119,14 +120,14 @@ createAgent<Sensory, Obs>({
     },
 
     // T — Transition
-    transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, _m: MentalState<Sensory>): TurnOutcome => {
+    transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult }, _m: MentalState<Sensory>): TurnOutcome<ObservationConfig> => {
         return match(exec.action)
             .with({ kind: 'ask_user' }, (action) => (
-                { kind: 'await_input', token: action.token } as TurnOutcome
+                { kind: 'await_input', token: action.token } as TurnOutcome<ObservationConfig>
             ))
             .with({ kind: 'internal', done: true }, () => (
-                { kind: 'complete', result: exec.result.data ?? { ok: true } } as TurnOutcome
+                { kind: 'complete', result: exec.result.data ?? { ok: true } } as TurnOutcome<ObservationConfig>
             ))
-            .otherwise(() => ({ kind: 'continue', observations: [] } as TurnOutcome));
+            .otherwise(() => ({ kind: 'continue', observations: [] } as TurnOutcome<ObservationConfig>));
     }
 }, import.meta.url);

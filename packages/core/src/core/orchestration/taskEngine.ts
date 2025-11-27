@@ -20,7 +20,7 @@ import type { MentalState } from '../../loop/types.js';
 import { initialM } from '../../loop/init.js';
 import { logger } from '@a2arium/callagent-utils';
 import { runLoop } from '../../loop/loopRunner.js';
-import type { EnvironmentState, ObservationInbox } from '../../loop/types.js';
+import { normalizeObservationInbox, type EnvironmentState, type ObservationInbox } from '../../loop/types.js';
 import type { Observation, ObservationConfig, SynthesizeObservation } from '../../loop/oneTurn.js';
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
@@ -53,23 +53,7 @@ type EngineObservation = SynthesizeObservation<EngineObservationConfig>;
 type EngineObservationInbox = ObservationInbox<EngineObservationConfig>;
 
 const normalizeInbox = (value: unknown): EngineObservationInbox => {
-    if (Array.isArray(value)) {
-        const arr = value as Observation[];
-        return {
-            current: [...arr] as EngineObservation[],
-            all: [...arr] as EngineObservation[]
-        };
-    }
-    if (value && typeof value === 'object') {
-        const candidate = value as Partial<EngineObservationInbox>;
-        const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
-        const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
-        return {
-            current: current as EngineObservation[],
-            all: all as EngineObservation[]
-        };
-    }
-    return { current: [], all: [] };
+    return normalizeObservationInbox<EngineObservationConfig>(value);
 };
 
 const addObservationToInbox = (inboxValue: unknown, observation: EngineObservation): EngineObservationInbox => {
