@@ -57,6 +57,14 @@ export async function runLoop<
 
     const inbox = ensureInbox(env);
 
+    // Initialize control snapshot on env for modules that need control signals
+    try {
+        (env as any).control = {
+            pendingSnapshot: env.pending,
+            lastExec: env.lastExec
+        };
+    } catch { /* noop */ }
+
     // ✅ FIX: Store inbox reference on context so handleChildCompleted can update it directly
     // This allows synchronous child completions to be visible to the loop's await_child check
     (ctx as any).__activeLoopInbox = inbox;
@@ -65,30 +73,201 @@ export async function runLoop<
 
     log.info('LoopRunner: Attached __activeLoopInbox to context (v3.5)', { taskId, hasInbox: !!inbox, inboxLen: inbox.current.length });
 
+    const createMemoryReader = (mState: MentalState<Sensory>): import('./types.js').MemoryReader => {
+        const semanticRegistry = (ctx as any).memory?.semantic;
+        const normalizeSemantic = (raw: any): import('./types.js').SemanticConcept => ({
+            id: raw?.id ?? raw?.key ?? '',
+            data: raw?.value ?? raw?.data,
+            embedding: (raw as any)?.embedding,
+            source: (raw as any)?.source
+        });
+        return {
+            semantic: {
+                read: async (q) => {
+                    if (semanticRegistry?.read) {
+                        const res = await semanticRegistry.read(q);
+                        return Array.isArray(res) ? res.map(normalizeSemantic) : [];
+                    }
+                    const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
+                    if (!q || (!q.id && !q.tag && !q.tags)) return concepts;
+                    const ids = q.id ? (Array.isArray(q.id) ? q.id : [q.id]) : undefined;
+                    return concepts.filter((c: any) => (!ids || ids.includes(c.id)));
+                },
+                get: async (id) => {
+                    const res = await (semanticRegistry?.read ? semanticRegistry.read(id) : undefined);
+                    if (Array.isArray(res) && res.length > 0) return normalizeSemantic(res[0]);
+                    const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
+                    return concepts.find((c: any) => c.id === id) || null;
+                }
+            },
+            episodic: {
+                range: async (opts) => {
+                    const events = (mState as any)?.memory?.longTerm?.episodic || [];
+                    if (!opts) return events;
+                    const filtered = events.filter((e: any) => {
+                        const okFrom = opts.from === undefined || e.t >= opts.from;
+                        const okTo = opts.to === undefined || e.t <= opts.to;
+                        return okFrom && okTo;
+                    });
+                    return typeof opts.limit === 'number' ? filtered.slice(-opts.limit) : filtered;
+                }
+            },
+            procedural: { list: async () => (mState as any)?.memory?.longTerm?.procedural?.skills || [] },
+            world: { get: async () => (mState as any)?.worldModel },
+            goals: { get: async () => (mState as any)?.goalState?.hierarchy || { nodes: {}, roots: [] } },
+            policy: { getParams: async () => (mState as any)?.policyParams },
+            reward: { getParams: async () => (mState as any)?.rewardParams }
+        };
+    };
+
+    const createMemoryWriter = () => {
+        const patches = {
+            semanticUpserts: new Map<string, import('./types.js').SemanticConcept>(),
+            semanticDeletes: new Set<string>(),
+            episodicAppends: [] as import('./types.js').EpisodicEvent[],
+            proceduralReplace: undefined as import('./types.js').Skill[] | undefined,
+            worldReplace: undefined as import('./types.js').WorldModel | undefined,
+            goalsReplace: undefined as import('./types.js').GoalHierarchy | undefined,
+            policyParamsReplace: undefined as import('./types.js').MentalState['policyParams'] | undefined,
+            rewardParamsReplace: undefined as import('./types.js').MentalState['rewardParams'] | undefined
+        };
+
+        const writer: import('./types.js').MemoryWriter & {
+            __drain: () => typeof patches;
+            __applyToMental: (m: MentalState<Sensory>) => MentalState<Sensory>;
+        } = {
+            semantic: {
+                add: (item) => {
+                    patches.semanticDeletes.delete(item.id);
+                    patches.semanticUpserts.set(item.id, item);
+                },
+                delete: (id) => {
+                    patches.semanticUpserts.delete(id);
+                    patches.semanticDeletes.add(id);
+                }
+            },
+            episodic: { append: (e) => { patches.episodicAppends.push(e); } },
+            procedural: { set: (skills) => { patches.proceduralReplace = skills; } },
+            world: { set: (wm) => { patches.worldReplace = wm; } },
+            goals: {
+                set: (g) => { patches.goalsReplace = g; },
+                add: (node) => {
+                    const current = patches.goalsReplace;
+                    if (current) {
+                        const nodes = { ...current.nodes, [node.id]: node };
+                        const roots = current.roots.includes(node.id) ? current.roots : [...current.roots, node.id];
+                        patches.goalsReplace = { ...current, nodes, roots };
+                    }
+                },
+                update: (id, patch) => {
+                    const current = patches.goalsReplace;
+                    if (current?.nodes?.[id]) {
+                        patches.goalsReplace = {
+                            ...current,
+                            nodes: { ...current.nodes, [id]: { ...current.nodes[id], ...patch } }
+                        };
+                    }
+                },
+                remove: (id) => {
+                    const current = patches.goalsReplace;
+                    if (current?.nodes?.[id]) {
+                        const nodes = { ...current.nodes };
+                        delete nodes[id];
+                        const roots = current.roots.filter(r => r !== id);
+                        patches.goalsReplace = { ...current, nodes, roots };
+                    }
+                },
+                clear: (predicate) => {
+                    const current = patches.goalsReplace;
+                    if (current) {
+                        const nodes = Object.fromEntries(Object.entries(current.nodes).filter(([_, v]) => predicate ? predicate(v as any) : false));
+                        const roots = current.roots.filter(r => !!nodes[r]);
+                        patches.goalsReplace = { ...current, nodes, roots };
+                    }
+                }
+            },
+            policy: { setParams: (p) => { patches.policyParamsReplace = p; } },
+            reward: { setParams: (p) => { patches.rewardParamsReplace = p; } },
+            __applyToMental: (m: MentalState<Sensory>) => {
+                const next = { ...(m as any) } as MentalState<Sensory>;
+                next.memory = { ...(next as any).memory };
+                next.memory.longTerm = { ...(next as any).memory.longTerm };
+                // Episodic
+                const episodic = Array.isArray((next as any).memory.longTerm.episodic)
+                    ? [...(next as any).memory.longTerm.episodic]
+                    : [];
+                patches.episodicAppends.forEach(e => episodic.push(e));
+                (next as any).memory.longTerm.episodic = episodic;
+                // Semantic
+                const existingSem = Array.isArray((next as any).memory.longTerm.semantic?.concepts)
+                    ? [...(next as any).memory.longTerm.semantic.concepts]
+                    : [];
+                const semMap = new Map<string, any>(existingSem.map((c: any) => [c.id, c]));
+                patches.semanticUpserts.forEach((val, key) => semMap.set(key, val));
+                patches.semanticDeletes.forEach((id) => semMap.delete(id));
+                (next as any).memory.longTerm.semantic = { concepts: Array.from(semMap.values()) };
+                // Procedural/world/goals/policy/reward
+                if (patches.proceduralReplace) {
+                    (next as any).memory.longTerm.procedural = { skills: patches.proceduralReplace };
+                }
+                if (patches.worldReplace) (next as any).worldModel = patches.worldReplace;
+                if (patches.goalsReplace) (next as any).goalState = { ...(next as any).goalState, hierarchy: patches.goalsReplace };
+                if (patches.policyParamsReplace) (next as any).policyParams = patches.policyParamsReplace;
+                if (patches.rewardParamsReplace) (next as any).rewardParams = patches.rewardParamsReplace;
+                return next;
+            },
+            __drain: () => patches
+        };
+        return writer;
+    };
+
+    const flushMemoryPatches = async (patches: ReturnType<ReturnType<typeof createMemoryWriter>['__drain']>) => {
+        const semantic = (ctx as any).memory?.semantic;
+        if (semantic) {
+            try {
+                for (const [id, item] of patches.semanticUpserts.entries()) {
+                    await semantic.set?.(id, item.data ?? item, { tags: (item as any).tags, entities: (item as any).entities });
+                }
+                for (const id of patches.semanticDeletes.values()) {
+                    await semantic.delete?.(id);
+                }
+            } catch (err) {
+                log.warn('Failed to flush semantic patches', { error: err instanceof Error ? err.message : String(err) });
+            }
+        }
+        // Episodic/procedural/world/goals/policy/reward are persisted via MentalState snapshot
+    };
+
     // Provide minimal defaults (prefer agent overrides when present)
     const defaults: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload> = {
-        attention: modules.attention ?? ((_prev, _env) => ({ kind: 'all' })),
-        perception: modules.perception ?? ((e: EnvironmentState<ObservationPayload>) => {
+        attention: modules.attention ?? ((_prev, _env, _mem) => ({ kind: 'all' })),
+        perception: modules.perception ?? ((e: EnvironmentState<ObservationPayload>, _alpha: Alpha, _mem) => {
             const inboxState = ensureInbox(e);
             const turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
             // Default perception returns inbox observations
             return { time: e.time, pending: e.pending, inbox: turnInbox } as any;
         }),
-        learning: modules.learning ?? ((prev, _prevAction, obs) => {
+        learning: modules.learning ?? ((prev, _prevAction, obs, _mem, writer) => {
+            const next = { ...(prev as any) } as MentalState<Sensory>;
             try {
-                const episodic = (prev.memory.longTerm.episodic || []);
-                episodic.push({ t: Date.now(), obs, act: undefined });
-                (prev.memory.longTerm as any).episodic = episodic;
+                const episodic = Array.isArray((next as any).memory?.longTerm?.episodic)
+                    ? [...(next as any).memory.longTerm.episodic]
+                    : [];
+                const event = { t: Date.now(), obs, act: undefined } as any;
+                episodic.push(event);
+                ((next as any).memory.longTerm as any).episodic = episodic;
+                (writer as any).episodic?.append?.(event);
             } catch { /* noop */ }
             // Update lastObservation for ReAct patterns
             try {
                 const input = (obs as any)?.input;
                 const asString = typeof input === 'string' ? input : JSON.stringify(input);
-                (prev.memory as any).sensory = { ...((prev.memory as any).sensory || {}), lastObservation: asString };
+                (next as any).memory = (next as any).memory || ({} as any);
+                (next as any).memory.sensory = { ...((next as any).memory.sensory || {}), lastObservation: asString };
             } catch { /* noop */ }
-            return prev;
+            return next;
         }),
-        policy: modules.policy ?? ((m: MentalState) => {
+        policy: modules.policy ?? ((m: MentalState, _mem) => {
             const react = (m as any)?.policyParams?.reactPlanner;
             const sensory = ((m as any)?.memory?.sensory || {}) as any;
             const lastObs = (sensory?.lastObservation) ?? undefined;
@@ -109,7 +288,7 @@ export async function runLoop<
             }
             return { kind: 'language', content: 'Ok.' } as any;
         }),
-        shield: modules.shield ?? ((m, a) => {
+        shield: modules.shield ?? ((m, a, _mem) => {
             try {
                 const level = (m as any)?.hitl || (m as any)?.policyParams?.hitl;
                 const safety = (m as any)?.safety || {};
@@ -151,7 +330,7 @@ export async function runLoop<
                 return { action: 'pass', intent: a } as any;
             } catch { return { action: 'pass', intent: a } as any; }
         }),
-        execution: modules.execution ?? (async (a, ctx) => {
+        execution: modules.execution ?? (async (a, ctx, _mem) => {
             const kind = (a as any).kind;
             const base: ExecResult = { status: 'ok', ts: Date.now() };
 
@@ -237,7 +416,7 @@ export async function runLoop<
                 result: { ...base, data: { intent: (a as any).intent, done: true }, toolId: 'internal' }
             };
         }),
-        transition: modules.transition ?? ((env, exec) => {
+        transition: modules.transition ?? ((env, exec, _m, _mem) => {
             const { action, result } = exec;
 
             if (action.kind === 'ask_user' && action.token) {
@@ -276,20 +455,33 @@ export async function runLoop<
                 return Math.max(0, done - prevDone);
             } catch { return 0; }
         }),
-        intrinsicReward: modules.intrinsicReward ?? ((m, obs) => {
+        intrinsicReward: modules.intrinsicReward ?? ((m, obs, _mem) => {
             try {
-                const s = JSON.stringify(obs);
+                // Opt-in only: if intrinsic.novelty is falsy, skip tracking entirely.
+                const noveltyWeight = Number((m as any)?.rewardParams?.intrinsic?.novelty ?? 0);
+                if (!noveltyWeight) return 0;
+
                 const st = (m.memory as any);
                 st.scratch = st.scratch || {};
                 const scratch = st.scratch as any;
                 scratch.__novelty = scratch.__novelty || [];
                 const arr: string[] = scratch.__novelty as string[];
+
+                // Hard-truncate the serialized observation to keep snapshot size small.
+                const serialized = JSON.stringify(obs) ?? '';
+                const maxLen = 512;
+                const key = serialized.length > maxLen
+                    ? `${serialized.slice(0, maxLen)}::len=${serialized.length}`
+                    : serialized;
+
                 const seen = new Set(arr);
-                const isNew = !seen.has(s);
+                const isNew = !seen.has(key);
                 if (isNew) {
-                    arr.push(s);
-                    if (arr.length > 128) arr.splice(0, arr.length - 128);
-                    return 0.1;
+                    arr.push(key);
+                    // Keep the novelty ring buffer small to avoid snapshot bloat.
+                    const maxEntries = 64;
+                    if (arr.length > maxEntries) arr.splice(0, arr.length - maxEntries);
+                    return 0.1 * noveltyWeight;
                 }
                 return 0;
             } catch { return 0; }
@@ -369,11 +561,9 @@ export async function runLoop<
         }
 
         try {
-            log.debug('Before oneTurn', { taskId, runId, turn, varsCount: Object.keys(((m as any).memory?.vars) || {}).length });
+            log.debug('Before oneTurn', { taskId, runId, turn });
 
             // ✅ FIX: Validate that ctx.memory exists before calling oneTurn
-            // This prevents "Cannot read properties of undefined (reading 'bind')" errors
-            // when agents use ctx.memory.semantic or other memory operations
             if (!(ctx as any).memory) {
                 log.warn('ctx.memory is undefined - this may cause errors if agent uses memory operations', {
                     taskId,
@@ -383,6 +573,9 @@ export async function runLoop<
                 });
             }
 
+            const memReader = createMemoryReader(m);
+            const writer = createMemoryWriter();
+
             let step;
             try {
                 step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
@@ -390,11 +583,12 @@ export async function runLoop<
                     env,
                     m,
                     defaults,
+                    memReader,
+                    writer,
                     prevAction,
                     rPrev
                 );
             } catch (turnError) {
-                // ✅ FIX: Enhanced error logging to identify bind errors
                 const errorMessage = turnError instanceof Error ? turnError.message : String(turnError);
                 const errorStack = turnError instanceof Error ? turnError.stack : undefined;
                 log.error('Turn execution failed', {
@@ -404,48 +598,23 @@ export async function runLoop<
                     error: errorMessage,
                     stack: errorStack,
                     hasMemory: !!(ctx as any).memory,
-                    hasVars: !!(ctx as any).vars,
-                    varsType: typeof (ctx as any).vars,
                     memoryType: typeof (ctx as any).memory,
                     agentId: (ctx as any).agentId
                 });
                 throw turnError;
             }
-            log.debug('After oneTurn', { taskId, runId, turn, stepVarsCount: Object.keys(((step.m as any).memory?.vars) || {}).length });
             m = step.m;
 
-            // ✅ FIX Bug #1E: Sync ctx.vars into m after each turn so next turn sees them
-            // This ensures vars written via ctx.vars during Execution are visible to the next turn
+            // Flush writer patches to adapters (semantic) and rely on snapshot for the rest
             try {
-                const ctxVars = (ctx as any).vars;
-                if (ctxVars && typeof ctxVars === 'object' && m && (m as any).memory) {
-                    const existingVars = ((m as any).memory.vars) || {};
-                    const varsToMerge: Record<string, unknown> = {};
-
-                    // Extract all vars from ctx.vars - use get() method for proxy
-                    if (typeof ctxVars.keys === 'function') {
-                        for (const key of ctxVars.keys()) {
-                            const value = typeof ctxVars.get === 'function' ? ctxVars.get(key) : ctxVars[key];
-                            if (value !== undefined) {
-                                varsToMerge[key] = value;
-                            }
-                        }
-                    }
-
-                    // ✅ FIX Bug #1H: Only merge if varsToMerge has keys, otherwise keep Learning's vars!
-                    // Don't overwrite Learning's vars with empty ctx.vars
-                    if (Object.keys(varsToMerge).length > 0) {
-                        (m as any).memory.vars = { ...existingVars, ...varsToMerge };
-                        log.debug('Synced ctx.vars into m.memory.vars', { syncedVars: Object.keys(varsToMerge) });
-                    } else {
-                        log.debug('No ctx.vars to sync, keeping Learning vars', { learningVarsCount: Object.keys(existingVars).length });
-                    }
+                const patches = (writer as any).__drain?.();
+                if (patches) {
+                    await flushMemoryPatches(patches);
                 }
-            } catch (syncError) {
-                log.warn('Failed to sync ctx.vars into m', { error: syncError instanceof Error ? syncError.message : String(syncError) });
+            } catch (flushErr) {
+                log.warn('Failed to flush memory patches', { error: flushErr instanceof Error ? flushErr.message : String(flushErr) });
             }
 
-            log.debug('After sync', { finalVarsCount: Object.keys(((m as any).memory?.vars) || {}).length });
             outcome = step.outcome;
 
             // 🔍 DEBUG: Log transition outcome
@@ -478,6 +647,14 @@ export async function runLoop<
             }
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
+
+            // Update control snapshot for downstream modules
+            try {
+                (env as any).control = {
+                    pendingSnapshot: env.pending,
+                    lastExec: step.exec
+                };
+            } catch { /* noop */ }
         } catch (error) {
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {

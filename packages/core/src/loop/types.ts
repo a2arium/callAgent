@@ -111,16 +111,51 @@ export type GoalState = {
     _index?: { byStatus?: Record<GoalStatus, GoalId[]> }; // optional, computed at load
 };
 
+// Read-only memory facade made available to all cognitive modules
+export type MemoryReader = {
+    semantic: {
+        read: (q: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number; filters?: unknown[] }) => Promise<SemanticConcept[]>;
+        get: (id: string) => Promise<SemanticConcept | null>;
+    };
+    episodic: { range: (opts?: { from?: number; to?: number; limit?: number }) => Promise<EpisodicEvent[]> };
+    procedural: { list: () => Promise<Skill[]> };
+    world: { get: () => Promise<WorldModel> };
+    goals: { get: () => Promise<GoalHierarchy> };
+    policy: { getParams: () => Promise<MentalState['policyParams']> };
+    reward: { getParams: () => Promise<MentalState['rewardParams']> };
+};
+
+// Learning-only writer that accumulates durable patches for this turn
+export type MemoryWriter = {
+    semantic: {
+        add: (item: SemanticConcept) => void;
+        delete: (id: string) => void;
+    };
+    episodic: { append: (e: EpisodicEvent) => void };
+    procedural: { set: (skills: Skill[]) => void };
+    world: { set: (wm: WorldModel) => void };
+    goals: {
+        set: (g: GoalHierarchy) => void;
+        add?: (node: GoalNode) => void;
+        update?: (id: GoalId, patch: Partial<GoalNode>) => void;
+        remove?: (id: GoalId) => void;
+        clear?: (predicate?: (g: GoalNode) => boolean) => void;
+    };
+    policy: { setParams: (p: MentalState['policyParams']) => void };
+    reward: { setParams: (p: MentalState['rewardParams']) => void };
+};
+
 export type MentalState<Sensory = unknown> = {
-    // Shortcut alias (read-mostly) to short-term vars; points to memory.vars
+    // Deprecated: short-term vars alias (kept optional for compatibility)
     vars?: Record<string, unknown>;
     memory: {
         sensory: Sensory;        // e.g., { llmState, lastObservation }
-        vars: Record<string, unknown>;
+        // Deprecated: short-term vars bag (kept optional for compatibility)
+        vars?: Record<string, unknown>;
         thoughts?: import('../shared/types/workingMemory.js').ThoughtEntry[];
         decisions?: Record<string, import('../shared/types/workingMemory.js').DecisionEntry>;
-        scratch?: unknown;
-        window?: unknown;
+        scratch?: unknown;       // Optional ephemeral working set (Learning-owned)
+        window?: unknown;        // Optional ephemeral window (Learning-owned)
         longTerm: {
             episodic: EpisodicEvent[];
             semantic: { concepts: SemanticConcept[] };
@@ -145,8 +180,22 @@ export type Snapshot = {
         children?: Record<string, unknown>;
         tools?: Record<string, unknown>;
         groups?: Record<string, unknown>;
+        controlVars?: Record<string, unknown>;
     };
     meta?: { agentId?: string; traceparent?: string };
+};
+
+export type ControlPendingState = {
+    inputs?: Record<string, unknown>;
+    children?: Record<string, { token?: string } & Record<string, unknown>>;
+    tools?: Record<string, unknown>;
+    groups?: Record<string, unknown>;
+    controlVars?: Record<string, unknown>;
+};
+
+export type ControlState = {
+    pendingSnapshot?: ControlPendingState;
+    lastExec?: unknown;
 };
 
 // Environment state visible to the loop per turn
@@ -162,6 +211,8 @@ export type EnvironmentState<ObservationPayload extends ObservationConfig = Obse
         tools: Record<string, unknown>;
         groups: Record<string, unknown>;
     };
+    // Optional control surface for modules needing control signals without ctx.vars
+    control?: ControlState;
     lastExec?: unknown; // optional description of last execution result
     externalEvents?: unknown[]; // future: bus events since last turn
     goalStats?: { doneCount: number };

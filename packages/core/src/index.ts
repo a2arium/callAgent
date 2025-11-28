@@ -17,7 +17,9 @@ export { TaskEngine } from './core/orchestration/taskEngine.js';
 export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
-export type { MentalState, EnvironmentState, ObservationInbox } from './loop/types.js';
+export type { MentalState, EnvironmentState, ObservationInbox, MemoryReader, MemoryWriter } from './loop/types.js';
+export type { ControlState, ControlPendingState } from './loop/types.js';
+export { getPendingToken, controlSnapshot } from './loop/controlHelpers.js';
 export type {
     ProposedAction,
     ExecutableAction,

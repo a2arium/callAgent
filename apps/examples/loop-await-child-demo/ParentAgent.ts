@@ -5,6 +5,7 @@ import {
     type ExecResult,
     type ExecutableAction,
     type MentalState,
+    type MemoryReader,
     type ObservationConfig,
     type ProposedAction,
     type SynthesizeObservation,
@@ -152,7 +153,7 @@ export default createAgent<ParentSensory, ParentPerception, unknown, ParentExecD
         };
     },
 
-    policy: (m: MentalState<ParentSensory>): ProposedAction => {
+    policy: (m: MentalState<ParentSensory>, _mem: MemoryReader): ProposedAction => {
         const vars = (m.memory?.vars ?? {}) as Record<string, unknown>;
         const html = typeof vars.childHtml === 'string' ? vars.childHtml : undefined;
 
@@ -171,9 +172,9 @@ export default createAgent<ParentSensory, ParentPerception, unknown, ParentExecD
         return { kind: 'internal', intent: 'fetch_child' };
     },
 
-    shield: (_m, action) => ({ action: 'pass', intent: action }),
+    shield: (_m, action, _mem: MemoryReader) => ({ action: 'pass', intent: action }),
 
-    execution: async (action: ProposedAction, ctx: TaskContext, m: MentalState<ParentSensory>) => {
+    execution: async (action: ProposedAction, ctx: TaskContext, _mem: MemoryReader, m: MentalState<ParentSensory>) => {
         const vars = (m.memory?.vars ?? {}) as Record<string, unknown>;
 
         if (action.kind === 'internal' && action.intent === 'fetch_child') {
@@ -263,4 +264,3 @@ export default createAgent<ParentSensory, ParentPerception, unknown, ParentExecD
         return { kind: 'fail', reason: 'no_html_available' };
     }
 }, import.meta.url);
-

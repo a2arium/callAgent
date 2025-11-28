@@ -127,16 +127,28 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         };
     },
 
-    learning: (prevMentalState: MiniMentalState, _prevAction: ProposedAction | undefined, obs: MiniPerception) => {
-        prevMentalState.memory.sensory = {
-            ...prevMentalState.memory.sensory,
-            lastObservation: obs
+    learning: (prevMentalState: MiniMentalState, prevAction: ProposedAction | undefined, obs: MiniPerception, _mem: any, writer: any) => {
+        const nextTurn = typeof (prevAction as any)?.nextTurn === 'number'
+            ? (prevAction as any).nextTurn
+            : ((prevMentalState as any).memory?.scratch?.turn ?? 0);
+
+        const nextState: MiniMentalState = {
+            ...prevMentalState,
+            memory: {
+                ...prevMentalState.memory,
+                sensory: {
+                    ...prevMentalState.memory.sensory,
+                    lastObservation: obs
+                },
+                scratch: { ...(prevMentalState.memory as any).scratch, turn: nextTurn }
+            }
         };
-        return prevMentalState;
+        writer.episodic?.append?.({ t: Date.now(), obs, act: prevAction });
+        return nextState;
     },
 
-    policy: (mentalState: MiniMentalState): ProposedActionWithNextTurn => {
-        const turn = Number(mentalState.vars?.turn ?? 0);
+    policy: (mentalState: MiniMentalState, _mem: any): ProposedActionWithNextTurn => {
+        const turn = Number((mentalState as any).memory?.scratch?.turn ?? 0);
 
         console.log(`\n📍 [Policy] Turn ${turn}`);
 
@@ -167,14 +179,14 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         return { kind: 'internal', intent: 'complete' } satisfies ProposedActionWithNextTurn;
     },
 
-    shield: (_mentalState: MiniMentalState, action: ProposedActionWithNextTurn) => {
+    shield: (_mentalState: MiniMentalState, action: ProposedActionWithNextTurn, _mem: any) => {
         describe('[Shield] Received action from policy:', action);
         const result = { action: 'pass' as const, intent: action };
         describe('[Shield] Returning:', result);
         return result;
     },
 
-    execution: async (action: ProposedActionWithNextTurn, ctx: TaskContext, _mentalState: MiniMentalState) => {
+    execution: async (action: ProposedActionWithNextTurn, ctx: TaskContext, _mem: any, _mentalState: MiniMentalState) => {
         describe('\n[Execution] Received action:', action);
 
         if (action.kind === 'language') {
@@ -198,10 +210,6 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
 
                 console.log(`🤖 [Assistant]: ${response}`);
                 await ctx.reply(`\n🤖 ${response}\n`);
-
-                if (action.nextTurn !== undefined) {
-                    ctx.vars.set('turn', action.nextTurn);
-                }
 
                 return {
                     action: { kind: 'language', echoed: true },
@@ -266,6 +274,4 @@ export default createAgent<MiniSensory, MiniPerception, unknown, MiniExecData, E
         return { kind: 'continue', observations: [] };
     }
 }, import.meta.url);
-
-
 

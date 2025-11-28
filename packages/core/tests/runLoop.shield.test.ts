@@ -38,7 +38,7 @@ describe('runLoop shield safety branches', () => {
 
         expect(capturedAction?.kind).toBe('ask_user');
         expect(String(capturedAction?.prompt || '')).toContain('PII');
-        expect(M.lastAdvise).toEqual({ flagged: 'pii' });
+        expect(result.M.lastAdvise).toEqual({ flagged: 'pii' });
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('pii-token');
     });
@@ -67,7 +67,7 @@ describe('runLoop shield safety branches', () => {
 
         expect(capturedAction?.kind).toBe('ask_user');
         expect(String(capturedAction?.prompt || '')).toContain('cost');
-        expect(M.lastAdvise).toEqual({ blocked: 'cost', cost: 10, limit: 5 });
+        expect(result.M.lastAdvise).toEqual({ blocked: 'cost', cost: 10, limit: 5 });
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('cost-token');
     });

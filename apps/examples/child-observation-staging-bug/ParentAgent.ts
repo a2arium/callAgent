@@ -102,22 +102,21 @@ export default createAgent<ParentSensory, ParentPerception, unknown, unknown, Ex
         };
     },
 
-    policy: (m: MentalState<ParentSensory>): ProposedAction => {
+    policy: (m: MentalState<ParentSensory>, _mem: import('@a2arium/callagent-core').MemoryReader): ProposedAction => {
         // For testing the fix: just complete immediately
         // This verifies that the framework works without hanging
         log.info('[POLICY] Completing immediately for framework testing');
         return { kind: 'internal', intent: 'complete' };
     },
 
-    shield: (_m, action) => ({ action: 'pass', intent: action }),
+    shield: (_m, action, _mem: any) => ({ action: 'pass', intent: action }),
 
-    execution: async (action: ProposedAction, ctx: TaskContext, _m: MentalState<ParentSensory>) => {
+    execution: async (action: ProposedAction, ctx: TaskContext, _mem: any, _m: MentalState<ParentSensory>) => {
         if (action.kind === 'internal' && action.intent === 'call_child') {
             log.info('[EXECUTION] Simulating child agent call (skipping actual call for testing)');
 
             // Simulate what would happen - set stage and return a fake token
             const token = 'fake-token-' + Date.now();
-            ctx.vars.set('stage', 'awaiting_child');
 
             log.info('[EXECUTION] Simulated child agent called', { token });
 

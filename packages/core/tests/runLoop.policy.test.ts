@@ -76,7 +76,7 @@ describe('runLoop default policy and shield branches', () => {
         expect(execution).toHaveBeenCalled();
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('guardrails-token');
-        expect(M.lastAdvise).toMatchObject({ kind: 'tool', policy: 'guardrails' });
+        expect(result.M.lastAdvise).toMatchObject({ kind: 'tool', policy: 'guardrails' });
     });
 
     it('asks consent before running tool actions', async () => {
@@ -103,7 +103,7 @@ describe('runLoop default policy and shield branches', () => {
         expect(execution).toHaveBeenCalled();
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('consent-token');
-        expect(M.lastAdvise).toMatchObject({ kind: 'tool', tool: 'db-write', policy: 'consent' });
+        expect(result.M.lastAdvise).toMatchObject({ kind: 'tool', tool: 'db-write', policy: 'consent' });
     });
 
     it('returns await_child when pending children exist even if execution returned internal', async () => {

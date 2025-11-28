@@ -60,6 +60,7 @@ export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecError
     execution: async (
         _action,
         ctx: TaskContext,
+        _mem: any,
         m: MentalState<HelperSensory>
     ): Promise<{ action: ExecutableAction; result: ExecResult<unknown> }> => {
         const task = m.memory.sensory?.input;
@@ -91,4 +92,3 @@ export default createAgent<HelperSensory, HelperObs, unknown, unknown, ExecError
         };
     }
 }, import.meta.url);
-

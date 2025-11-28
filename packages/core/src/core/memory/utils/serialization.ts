@@ -23,6 +23,11 @@ export async function serializeVars(
         return obj;
     }
 
+    // Functions cannot be persisted to Prisma/JSON; drop them.
+    if (typeof obj === 'function') {
+        return undefined;
+    }
+
     // 2. Handle Circular References
     if (visited.has(obj as object)) {
         // Return undefined or a placeholder for circular refs to avoid [Circular] string
@@ -93,4 +98,3 @@ export async function serializeVars(
 
     return result;
 }
-

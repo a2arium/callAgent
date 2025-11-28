@@ -58,10 +58,9 @@ createAgent<Sensory, Obs>({
     },
 
     // L — Learning 
-    learning: (prev: MentalState<Sensory>, _prevAction: ProposedAction | undefined, obs: Obs): MentalState<Sensory> => {
+    learning: (prev: MentalState<Sensory>, _prevAction: ProposedAction | undefined, obs: Obs, _mem: import('@a2arium/callagent-core').MemoryReader, writer: import('@a2arium/callagent-core').MemoryWriter): MentalState<Sensory> => {
         const text = obs.text || undefined;
-
-        return {
+        const next = {
             ...prev,
             memory: {
                 ...prev.memory,
@@ -70,10 +69,13 @@ createAgent<Sensory, Obs>({
                 }
             }
         };
+        // Example: record episodic event
+        writer.episodic.append({ t: Date.now(), obs, act: _prevAction });
+        return next;
     },
 
     // R — Policy (pure): map state to ProposedAction
-    policy: (m: MentalState<Sensory>): ProposedAction => {
+    policy: (m: MentalState<Sensory>, _mem: import('@a2arium/callagent-core').MemoryReader): ProposedAction => {
         const currentInputText = m.memory.sensory.current?.trim();
 
         return currentInputText && currentInputText.length > 0
@@ -82,11 +84,11 @@ createAgent<Sensory, Obs>({
     },
 
     // S — Shield: receives ProposedAction, returns ShieldOutcome
-    shield: (_m: MentalState<Sensory>, a: ProposedAction): ShieldOutcome =>
+    shield: (_m: MentalState<Sensory>, a: ProposedAction, _mem: import('@a2arium/callagent-core').MemoryReader): ShieldOutcome =>
         ({ action: 'pass', intent: a } as const),
 
     // E — Execution: perform action by kind/intent (no policy decisions here)
-    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState<Sensory>): Promise<{ action: ExecutableAction; result: ExecResult }> => {
+    execution: async (a: ProposedAction, ctx: TaskContext, _mem: import('@a2arium/callagent-core').MemoryReader, _m: MentalState<Sensory>): Promise<{ action: ExecutableAction; result: ExecResult }> => {
         const baseResult = (): ExecResult => ({ status: 'ok', ts: Date.now(), toolId: 'telegram-bridge' });
 
         return await match(a)

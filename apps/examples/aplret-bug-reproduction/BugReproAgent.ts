@@ -435,7 +435,7 @@ export default createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayl
     },
 
     // === E - Execution ===
-    execution: async (action: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>): Promise<{
+    execution: async (action: ProposedAction, ctx: TaskContext, _mem: any, m: MentalState<Sensory>): Promise<{
         action: ExecutableAction;
         result: ExecResult<unknown>;
     }> => {
@@ -936,4 +936,3 @@ Actual: Second call throws "Session manager not configured" error.
         };
     }
 }, import.meta.url);
-

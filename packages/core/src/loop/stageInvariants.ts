@@ -16,18 +16,30 @@ export function assertStageInvariants<TStage extends string>(
     const inv = invariants[stage];
     if (!inv) return;
 
+    const controlVars = (ctx as any).controlVars
+        || (ctx as any).__activeLoopEnv?.pending?.controlVars
+        || (ctx as any).env?.control?.pendingSnapshot?.controlVars;
+    const hasVar = (key: string): boolean => {
+        if (controlVars) {
+            if (typeof (controlVars as any).has === 'function') return (controlVars as any).has(key);
+            if (Object.prototype.hasOwnProperty.call(controlVars, key)) return true;
+        }
+        const memoryVars = (ctx.M as any)?.memory?.vars;
+        return memoryVars ? Object.prototype.hasOwnProperty.call(memoryVars, key) : false;
+    };
+
     if (Array.isArray(inv.required)) {
         for (const key of inv.required) {
-            if (!ctx.vars.has(key)) {
-                throw new Error(`[StageInvariant] ${String(stage)} requires ctx.vars.${key}`);
+            if (!hasVar(key)) {
+                throw new Error(`[StageInvariant] ${String(stage)} requires control.${key}`);
             }
         }
     }
 
     if (Array.isArray(inv.forbidden)) {
         for (const key of inv.forbidden) {
-            if (ctx.vars.has(key)) {
-                throw new Error(`[StageInvariant] ${String(stage)} forbids ctx.vars.${key}`);
+            if (hasVar(key)) {
+                throw new Error(`[StageInvariant] ${String(stage)} forbids control.${key}`);
             }
         }
     }
@@ -36,5 +48,4 @@ export function assertStageInvariants<TStage extends string>(
         inv.validate(ctx);
     }
 }
-
 

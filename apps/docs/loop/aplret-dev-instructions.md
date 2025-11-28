@@ -17,7 +17,7 @@ This document describes a **reusable, production-ready agent architecture** that
 1. **Brain-inspired cognitive loop** (A-P-L-R-E-T): Attention → Perception → Learning → Reasoning/Policy → Shield → Execution → Transition
 2. **Typed intent system**: Policy emits discriminated unions, Dispatcher handles exhaustively
 3. **Stage dispatcher pattern**: Explicit control flow using typed stages and handler maps
-4. **Separation of concerns**: MentalState (M) for cognition, `ctx.vars` for control state
+4. **Separation of concerns**: MentalState (M) for cognition, control via loop env (pending/inbox/control snapshot)
 5. **Effect safety**: Budget-aware, timeout-protected, retryable effects
 6. **Future-proof design**: Clear upgrade path to pattern matching (ts-pattern) or statecharts (XState)
 
@@ -61,14 +61,14 @@ This document describes a **reusable, production-ready agent architecture** that
 * [ ] **Learning**: the **only** place to immutably update **M** (belief/world model, goals, reward). No effects. (Belief update.) 
 * [ ] **Policy**: choose **typed Intent** purely from **M** (π(M) → Intent). No env/ctx reads here.
 * [ ] **Shield**: enforce constraints/budgets/PII; **pass/transform/defer/veto** before acting. (Constrained MDP + shielding.) 
-* [ ] **Execution**: implement **HOW** (effects only). Use timeouts/retries + **idempotency keys**. Write **control** to `ctx.vars` only. 
+* [ ] **Execution**: implement **HOW** (effects only). Use timeouts/retries + **idempotency keys**. Control is managed via loop env/pending/inbox. 
 * [ ] **Transition**: emit `continue | await_* | complete | fail`; bookkeeping only.
 
 ## 2) State separation (never mix these)
 
 * [ ] **Cognitive & persistent** → **M** via Learning (user intent/entities, validated tool results to be reasoned on).
-* [ ] **Control & ephemeral** → **`ctx.vars`** (stage, tokens, prompted flags, step indices).
-* [ ] Never write to **M** outside Learning; never persist cognition in `ctx.vars`. (Mirrors belief vs. control in POMDP/state patterns.) 
+* [ ] **Control & ephemeral** → **loop env** (pending tokens, awaiting, budgets) + **inbox** observations.
+* [ ] Never write to **M** outside Learning; never persist cognition in control surfaces. (Mirrors belief vs. control in POMDP/state patterns.) 
 
 ## 3) Typed safety (prevent drift at compile time)
 
@@ -80,7 +80,7 @@ This document describes a **reusable, production-ready agent architecture** that
 
 * [ ] **Gather data via tool**
 
-  * Turn N: Policy(Intent=fetch) → Shield → Execution(call tool, store token in `ctx.vars`) → Transition(`await_tool`).
+  * Turn N: Policy(Intent=fetch) → Shield → Execution(call tool, return token) → Transition(`await_tool`).
   * Turn N+1: Perception(validates tool result) → Learning(write to M) → Policy(decide next).
 * [ ] **User input**
 
@@ -97,7 +97,7 @@ This document describes a **reusable, production-ready agent architecture** that
 ## 6) Logging & observability (make debugging easy)
 
 * [ ] Log **{turn, stage, intent, token, shield_action, effect_cost, latency}** every turn.
-* [ ] On invariant/typestate failures, include **required/forbidden keys** and current `ctx.vars` diff.
+* [ ] On invariant/typestate failures, include **required/forbidden keys** and current control snapshot (pending/inbox/awaiting).
 * [ ] For each effect, log **idempotency key** and retry count.
 
 ## 7) Debugging playbook (quick triage → deep fix)
@@ -120,8 +120,8 @@ This document describes a **reusable, production-ready agent architecture** that
 
 **D. Control vs cognition mix-ups**
 
-* [ ] Cognitive facts in `ctx.vars`? Move to **M** via Learning.
-* [ ] Control flags in M? Move to **`ctx.vars`**.
+* [ ] Cognitive facts in control surfaces? Move to **M** via Learning.
+* [ ] Control flags in M? Move to **env.pending/control/inbox**.
 
 **E. Complex branching**
 
@@ -222,9 +222,9 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
   * **Transition:** time in await states, completion rate.
 
 3) STATE SEPARATION
-- Put mechanical/control state in ctx.vars (stage, token, flags, subtask indices).
+- Put mechanical/control state in env.pending/control (tokens, awaiting flags) and inbox observations.
 - Put cognitive facts in M via Learning (user intent, belief/estimates, tool results to reason about).
-- Never write to M outside Learning. Never persist cognition in ctx.vars.
+- Never write to M outside Learning. Never persist cognition in control surfaces.
 
 4) STAGE & TYPE SAFETY
 - Always maintain the current stage and obey stage invariants.
@@ -238,20 +238,20 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 
 6) HOW TO THINK (TURN TEMPLATES)
 - If you need data from a tool/API:
-  Turn N: Policy→Intent(fetch), Shield, Execution→invoke tool, store token in ctx.vars, Transition→await_tool(token).
-  Turn N+1: Perception validates tool result; Learning writes validated result to M; Policy chooses next Intent (e.g., fetch more if invalid/incomplete; otherwise proceed).
+  Turn N: Policy→Intent(fetch), Shield, Execution→invoke tool, Transition→await_tool(exec.action.token).
+  Turn N+1: Perception validates tool result from inbox; Learning writes validated result to M; Policy chooses next Intent (e.g., fetch more if invalid/incomplete; otherwise proceed).
 - For user input:
-  Turn N: prompt + requestInput(setStage='awaiting_input') → await_input(token).
+  Turn N: prompt + requestInput → await_input(exec.action.token).
   Turn N+1: Perception validates input; Learning updates M; Policy decides next step.
 - For sub-agent delegation:
-  Turn N: Execution→sendTaskToAgent(agent, input, {setStage, awaitCompletion:false}) → await_child(token). Token stored at ctx.vars.child.token automatically.
+  Turn N: Execution→sendTaskToAgent(agent, input, {awaitCompletion:false}) → await_child(exec.action.token). Pending state is tracked in env.pending/control.
   Turn N+1: Perception validates child observation from env.inbox.current; Learning writes result to M; Policy decides next Intent.
   (With awaitCompletion:true, result arrives immediately in same turn—use for tool-like blocking calls.)
 
 7) I/O CONTRACTS (examples)
 - Perception must produce normalized observation objects (e.g., {text, eventType, resumeToken?, meta?}).
 - Learning must return a NEW M (immutable update) that includes everything Policy will need next turn.
-- Execution returns either ask_user/tool/subagent/internal and may set ctx.vars.*. Execution never mutates M.
+- Execution returns either ask_user/tool/subagent/internal and may include tokens in exec.action/result; control is tracked via env.pending/env.control. Execution never mutates M.
 
 8) WHEN IN DOUBT
 - Prefer gathering/validating in a FUTURE TURN rather than mixing steps.
@@ -267,141 +267,58 @@ B) Perception: normalize+validate env input → observation {…}.
 C) Learning: M' = f(M, observation) (immutable).
 D) Policy: ProposedAction = π(M').
 E) Shield: gate = pass/transform/defer/veto. If not pass, stop.
-F) Execution: handle Intent respecting current stage; update ctx.vars only; produce outcome.
-G) Transition: emit await_* or complete or continue.
+F) Execution: handle Intent respecting current control state; produce outcome (tokens, receipts).
+G) Transition: emit await_* or complete or continue using exec tokens and env.pending/inbox.
 
-Your single source of truth for cognition is M. Your single source of truth for control is ctx.vars. Effects are only in Execution. Data needed later must flow Perception→Learning→M first.
+Your single source of truth for cognition is M. Your single source of truth for control is env.pending/control/inbox. Effects are only in Execution. Data needed later must flow Perception→Learning→M first.
 
 
 ---
 
 ## Quick Start
 
-**New to A-P-L-R-E-T?** Start here with a minimal but production-ready agent:
+**New to A-P-L-R-E-T?** Start here with a minimal loop-aligned agent (control via env/pending/inbox, cognition in M, durable writes via Learning/writer): 
 
 ```typescript
 import { createAgent } from '@a2arium/callagent-core';
 import type {
   TaskContext,
   MentalState,
-  ExecutableAction,
-  EnvironmentState,
   AttentionSignal,
   ExecErrorPayload,
   TurnOutcome
 } from '@a2arium/callagent-core';
 
-// 1. Define typed stages for explicit control flow
-type Stage = 'idle' | 'awaiting_input' | 'completed';
-
-// 2. Define typed intents (Policy decides WHAT to do)
-type Intent =
-  | { kind: 'prompt_user' }
-  | { kind: 'answer_with_llm'; query: string };
-
-// 3. Minimal, reusable stage helpers
-import { createStageFacade } from '@a2arium/callagent-core';
-
-const Stage = createStageFacade<Stage>({
-  initial: 'idle',
-  invariants: {
-    awaiting_input: { require: ['token'], forbid: ['completed.called'] },
-    completed: { require: ['awaiting_input.called'] }
-  },
-  // Optional: automatically mark flags when entering a stage
-  autoMarks: {
-    completed: { 'completed.called': true },
-    awaiting_input: { 'awaiting_input.called': true }
-  },
-  onEnter: {
-    executing: (ctx) => ctx.progress(50, 'running'),
-    completed: (ctx) => ctx.complete(100, 'done')
-  }
-});
-
-// Tip: Stage facade reads both ctx.vars and m.memory.vars, so mirroring stage flags into
-// memory keeps invariants working even when you persist them.
-// Optional `onEnter` hooks let you centralize progress/complete side-effects that should occur
-// whenever a stage is entered; omit them if you prefer to drive status updates manually.
-
-// 4. Stage dispatcher (Execution decides HOW to do it)
 type Sensory = { current?: string };
 type Obs = { text?: string; eventType: 'user_message' | 'idle' };
 
-// 🔥 NEW: Define Observation Config (Source-Mapped Payloads)
-// Map each source to the actual data type you expect
 type ObservationConfig = {
-  user: string | { text: string };  // user input payload
-  tool: unknown;                    // tool result payload
-  child: unknown;                   // child result payload
+  user: string | { text: string };
+  tool: unknown;
+  child: unknown;
 };
 
-const handlers: Record<Stage, (ctx: TaskContext, m: MentalState<Sensory>) => Promise<ExecutableAction>> = {
-  idle: async (ctx, m) => {
-    await ctx.reply('How can I help you today?');
-
-    // ✅ NEW: Input-first approach with automatic token and stage management
-    const handle = await ctx.requestInput('Your message', {
-      setStage: 'awaiting_input'  // Automatically sets stage and token
-    });
-    const token = handle.token;
-  
-    return { kind: 'ask_user', token };
-  },
-  
-  awaiting_input: async (ctx, m) => {
-    // Read cognitive state from M (not from env!)
-    const userText = m.memory?.sensory?.current;
-    if (!userText) return { kind: 'internal', done: true };
-    
-    // Call LLM (framework method - already safe)
-    const result = await ctx.llm.call(userText);
-    await ctx.reply(result[0].content);
-    
-    // Mark complete (set completion flag before stage transition for invariant check)
-    ctx.vars.set('completed.called', true);
-    Stage.setStage(ctx, 'completed'); // autoMarks sets 'completed.called'
-    
-    return { kind: 'internal', done: true };
-  },
-  
-  completed: async () => {
-    return { kind: 'internal', done: true };
-  }
-};
-
-// 5. Create agent with all modules
+// Create agent with loop modules
 export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErrorPayload, ObservationConfig>({
   manifest: 'agent.json',
   llmConfig: { provider: 'openai', modelAliasOrName: 'fast' },
 
-  // A - Attention: What to focus on
-  attention: (m, env) => {
-    // env.inbox.current is typed based on ObservationConfig
+  attention: (_m, env) => {
     const hasUserObservation = env.inbox.current.some(o => o.source === 'user');
     return { wantPrompt: !hasUserObservation };
   },
 
-  // P - Perception: Normalize inbox payloads
   perception: (env): Obs => {
     const latestInput = env.inbox.current.find(o => o.source === 'user');
-    
-    // 🔥 Automatic Narrowing:
-    // If source is 'user', payload is automatically { token: string; value: string | { text: string } }
     if (latestInput) {
-      const value = latestInput.payload.value; // Typed as string | { text: string }
+      const value = latestInput.payload.value;
       const text = typeof value === 'string' ? value : value?.text;
-      return {
-        text,
-        eventType: 'user_message'
-      };
+      return { text, eventType: 'user_message' };
     }
-    
     return { eventType: 'idle' };
   },
 
-  // L - Learning: Update M (immutable, pure)
-  learning: (prev, _action, obs: Obs): MentalState<Sensory> => ({
+  learning: (prev, _action, obs): MentalState<Sensory> => ({
     ...prev,
     memory: {
       ...prev.memory,
@@ -409,84 +326,41 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
     }
   }),
 
-  // R - Policy: Decide WHAT to do (pure function of M - NO control state!)
-  policy: (m): ProposedAction => {
-    // Policy reads ONLY cognitive state, not control state (stage)
+  policy: (m) => {
     const userText = m.memory?.sensory?.current;
-    
-    // Decision based on cognition
-    if (userText) {
-      return { kind: 'answer_with_llm', query: userText };
-    }
-    
-    return { kind: 'prompt_user' };
+    return userText
+      ? ({ kind: 'answer_with_llm', query: userText } as const)
+      : ({ kind: 'prompt_user' } as const);
   },
 
-  // S - Shield: Safety checks (required)
-  shield: (m, intent) => {
-    // Basic pass-through (add budget/PII checks in production)
-    return { action: 'pass', intent };
+  shield: (_m, intent) => ({ action: 'pass', intent }),
+
+  execution: async (intent, ctx) => {
+    if (intent.kind === 'prompt_user') {
+      const handle = await ctx.requestInput('Your message');
+      return { action: { kind: 'ask_user', token: handle.token }, result: { status: 'ok', toolId: 'user' } };
+    }
+    if (intent.kind === 'answer_with_llm') {
+      const res = await ctx.llm.call(intent.query);
+      await ctx.reply(res[0]?.content ?? 'Ok.');
+      return { action: { kind: 'internal', done: true }, result: { status: 'ok', toolId: 'language' } };
+    }
+    return { action: { kind: 'internal', done: true }, result: { status: 'ok', toolId: 'internal' } };
   },
 
-  // E - Execution: Dispatch to stage handlers (respect stage AND intent)
-  execution: async (intent, ctx, m) => {
-    const stage = V.stage(ctx);
-    
-    if (stage === 'idle' && intent.kind === 'prompt_user') {
-      return handlers.idle(ctx, m);
-    }
-    if (stage === 'awaiting_input' && intent.kind === 'answer_with_llm') {
-      return handlers.awaiting_input(ctx, m);
-    }
-    if (stage === 'completed') {
-      return handlers.completed(ctx, m as any);
-    }
-    
-    // Fallback: do nothing
-    return { kind: 'internal', done: true };
-  },
-
-  // T - Transition: Control loop flow (based on control state)
-  transition: (
-    _env,
-    exec,
-    ctx
-  ): TurnOutcome<ObservationConfig> => {
-    if (exec.kind === 'ask_user') {
-      return { kind: 'await_input', token: exec.token };
-    }
-    if (V.completeCalled(ctx as TaskContext)) {
-      return { kind: 'complete', result: { ok: true } };
-    }
-    return { kind: 'continue', observations: [] };
+  transition: (_env, exec): TurnOutcome<ObservationConfig> => {
+    if (exec.action.kind === 'ask_user') return { kind: 'await_input', token: exec.action.token };
+    return { kind: 'complete', result: { ok: true } };
   }
 }, import.meta.url);
 ```
 
 **Best Practices Included:**
 
-✅ **Typed stages** - Explicit control flow states  
-✅ **Typed intents** - Policy outputs are type-safe  
-✅ **Typed façade (V)** - Type-safe access to `ctx.vars`  
-✅ **Stage dispatcher** - Clean separation: Policy → Intent → Handler  
-✅ **Pure Policy** - Reads only from M, not from env  
-✅ **Immutable Learning** - Uses spread operators, no mutation  
-✅ **State separation** - M for cognition, ctx.vars for control  
-
-**What's happening:**
-
-1. **Policy** (R) reads M and decides to `prompt_user` or `answer`
-2. **Execution** (E) uses dispatcher to delegate to stage handlers
-3. **Handlers** perform effects and update control state (V.setStage, V.setToken)
-4. **Learning** (L) keeps M immutable - only updates worldModel
-5. **Transition** (T) manages async flow (await_input) and completion
-
-**Next steps:**
-
-- Add stage invariants ([Section 5](#5-stage-dispatcher-pattern))
-- Add exhaustive intent matching with ts-pattern ([Section 3](#3-typed-intent-system))
-- Wrap external calls with `runEffect()` ([Section 7](#7-effect-safety-and-budgets))
-- Write golden path test ([Section 9](#9-testing-strategy))
+✅ Cognition in M; control via exec tokens + env.pending/inbox  
+✅ Durable writes go through Learning; Policy/Shield/Execution are read-only on memory  
+✅ Transition uses exec action to signal await/complete  
+✅ Perception reads only inbox (typed by ObservationConfig)  
 
 
 ## Manifest Structure
@@ -683,20 +557,6 @@ This prevents drift between Policy and Dispatcher—Policy decides WHAT to do, D
 
 Use the **State pattern** via a dispatcher map to avoid if-pyramids:
 
-```typescript
-type Stage = 'idle' | 'awaiting_input' | 'planning' | 'executing' | 'completed';
-
-const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>> = {
-  idle: async (ctx, m) => { /* ... */ },
-  awaiting_input: async (ctx, m) => { /* ... */ },
-  planning: async (ctx, m) => { /* ... */ },
-  executing: async (ctx, m) => { /* ... */ },
-  completed: async (ctx, m) => ({ kind: 'internal', done: true })
-};
-```
-
----
-
 ## 2. Core Concepts
 
 ### MentalState (M_t) - The Cognitive Brain
@@ -705,17 +565,12 @@ const handlers: Record<Stage, (ctx: TaskContext, m: MentalState) => Promise<Exec
 
 ```typescript
 type MentalState = {
-  // NOTE: vars? is a read-only alias to memory.vars
-  // ALWAYS use ctx.vars for writes; treat M.vars as framework-internal
-  vars?: Record<string, unknown>;
-  
   memory: {
     sensory: unknown;
-    vars: Record<string, unknown>;
     thoughts?: ThoughtEntry[];
     decisions?: Record<string, DecisionEntry>;
-    scratch?: unknown;
-    window?: unknown;
+    scratch?: unknown;   // Optional ephemeral working set (Learning-owned)
+    window?: unknown;    // Optional ephemeral working set (Learning-owned)
     longTerm: {
       episodic: EpisodicEvent[];
       semantic: { concepts: SemanticConcept[] };
@@ -735,110 +590,19 @@ type MentalState = {
 - **Read-only in most modules**: Only Learning should update M
 - **Pure cognition**: Derived features, beliefs, goals live here
 - **Persistent**: Saved at turn boundaries, restored on resume
-- **M.vars is read-only**: Framework internal; always use `ctx.vars` for writes
+- **Control is outside M**: tokens/pending/awaiting live in env.pending/env.control/inbox, not in M
 
-### ctx.vars - The Control State
+### Control surface (env)
 
-`ctx.vars` is a **writable cache** for ephemeral control state (current stage, pending tokens, flags).
-
+- Use `exec.action.token` / `exec.result.correlationId` for tokens produced this turn.
+- Use `env.pending` / `env.control?.pendingSnapshot` for pending inputs/children/tools/groups; use `env.inbox.current` for staged/resumed observations.
+- `tokenPath` writes into `env.pending.controlVars` (never `ctx.vars`). Prefer `handle.token` or `env.pending.children` as the source of truth.
+- Use `env.control?.lastExec` if a module needs to inspect the last execution result.
+- Helper (optional):
 ```typescript
-// ✅ Use ctx.vars for control state
-ctx.vars.set('stage', 'awaiting_input');
-ctx.vars.set('token', handle.token);
-ctx.vars.set('prompted', true);
-
-// ❌ Never write to M directly (except in Learning)
-m.memory.vars.stage = 'awaiting_input';  // Violates immutability
-
-// ⚠️ M.vars is read-only convenience; prefer ctx.vars always
-const stage = m.vars?.stage;  // OK to read
-m.vars.stage = 'idle';        // ❌ Don't write to M.vars
+import { getPendingToken } from '@a2arium/callagent-core';
+const childToken = getPendingToken(env, 'children', 'child-id');
 ```
-
-**Why separate?**
-
-- M is cognitive; vars is mechanical
-- M persists across sessions; vars is ephemeral per turn
-- Keeps Learning pure and testable
-
-### Nested Path Support
-
-`ctx.vars` supports automatic nested path creation for complex control state:
-
-```typescript
-// Alternative approaches for structured control state
-
-// Approach 1: Build nested structure step by step
-ctx.vars.set('workflow.stage', 'data_processing');
-ctx.vars.set('workflow.currentStep', 3);
-ctx.vars.set('workflow.errors', []);
-ctx.vars.set('user.session.id', 'sess_123');
-ctx.vars.set('user.session.preferences', { theme: 'dark' });
-
-// Approach 2: Set complete nested objects directly
-ctx.vars.set('workflow', {
-    stage: 'data_processing',
-    currentStep: 3,
-    errors: []
-});
-
-ctx.vars.set('user', {
-    session: {
-        id: 'sess_123',
-        preferences: { theme: 'dark' }
-    }
-});
-
-// Both approaches create the same nested structure:
-// {
-//   workflow: { stage: 'data_processing', currentStep: 3, errors: [] },
-//   user: { session: { id: 'sess_123', preferences: { theme: 'dark' } } }
-// }
-
-// Update with access to current value
-ctx.vars.update('workflow.currentStep', (current) => (current || 0) + 1);
-
-// Access nested values (same for both approaches)
-const currentStage = ctx.vars.get('workflow.stage');
-const stepNumber = ctx.vars.get('workflow.currentStep');
-const userId = ctx.vars.get('user.session.id');
-
-// Check if nested path exists
-if (ctx.vars.has('workflow.errors')) {
-    // Handle workflow errors
-}
-
-// Delete nested property
-ctx.vars.delete('user.session.preferences');
-```
-
-> 💡 **Chat bridge tip**: Tasks triggered via the chat bridge receive a typed `BridgeTaskInput`. You can read the originating channel metadata (including `userId`) directly from the task input and mirror anything you need into control state:
->
-> ```typescript
-> import type { BridgeTaskInput } from '@a2arium/callagent-chat-bridge';
->
-> const input = ctx.task.input as BridgeTaskInput;
-> const { route } = input;
-> if (route.userId) {
->     ctx.vars.set('user.session.id', route.userId);
-> }
-> ctx.vars.set('session.route', route); // optional: keep network/conversationId handy for logs
-> ```
-
-#### **Key Methods:**
-
-| Method | Description | Use Case |
-|--------|-------------|----------|
-| `set('path.to.prop', value)` | Direct assignment, creates nested structure | Setting control state |
-| `update('path.to.prop', fn)` | Update with access to current value | Conditional state updates |
-| `get('path.to.prop')` | Get nested value | Reading control state |
-| `has('path.to.prop')` | Check if nested path exists | State validation |
-| `delete('path.to.prop')` | Delete nested property | Cleanup control state |
-| `merge(patch)` | Merge objects (dots are keys, not paths) | Batch updates |
-
-**Best Practice:** Use nested paths to organize related control state logically, keeping the same separation between cognitive data (M) and control data (ctx.vars).
-
----
 
 ## 3. Typed Intent System
 
@@ -1318,7 +1082,9 @@ transition: (env: EnvironmentState<MyConfig>, exec, m): TurnOutcome<MyConfig> =>
   }
   
   // Terminal outcomes
-  const stage = (m.vars?.stage as Stage) || 'idle';
+  const stage = (env.pending?.controlVars as any)?.stage
+    ?? (env.control?.pendingSnapshot?.controlVars as any)?.stage
+    ?? 'idle';
   if (stage === 'completed') {
     return { kind: 'complete', result: { ok: true } };
   }

@@ -5,6 +5,7 @@ import {
     type ExecResult,
     type ExecutableAction,
     type MentalState,
+    type MemoryReader,
     type ObservationConfig,
     type ProposedAction,
     type SynthesizeObservation,
@@ -107,7 +108,7 @@ const readChildObservation = (observations: ParentObservation[]): { html?: strin
     return {};
 };
 
-const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, ParentExecData, ExecErrorPayload, ParentObservationConfig>({
+const parentAgent = createAgent({
     manifest: {
         name: 'loop-await-child-demo-parent',
         version: '0.1.0',
@@ -135,7 +136,7 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
             htmlPresent: Boolean(childResult.html),
             token: childResult.token,
             inputUrl
-        });
+} as any);
 
         console.log('[LoopAwaitChildDemo][Perception]', {
             turn: env.turn,
@@ -175,7 +176,7 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
         };
     },
 
-    policy: (m: MentalState<ParentSensory>): ProposedAction => {
+    policy: (m: MentalState<ParentSensory>, _mem: MemoryReader): ProposedAction => {
         const vars = (m.memory?.vars ?? {}) as Record<string, unknown>;
         const html = typeof vars.childHtml === 'string' ? vars.childHtml : undefined;
 
@@ -194,9 +195,9 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
         return { kind: 'internal', intent: 'fetch_child' };
     },
 
-    shield: (_m, action) => ({ action: 'pass', intent: action }),
+    shield: (_m, action, _mem: MemoryReader) => ({ action: 'pass', intent: action }),
 
-    execution: async (action: ProposedAction, ctx: TaskContext, m: MentalState<ParentSensory>) => {
+    execution: async (action: ProposedAction, ctx: TaskContext, _mem: MemoryReader, m: MentalState<ParentSensory>) => {
         const vars = (m.memory?.vars ?? {}) as Record<string, unknown>;
 
         if (action.kind === 'internal' && action.intent === 'fetch_child') {
@@ -294,4 +295,3 @@ const parentAgent = createAgent<ParentSensory, ParentPerception, unknown, Parent
 (parentAgent as unknown as { llmAdapter?: unknown }).llmAdapter = noopLLMAdapter;
 
 export default parentAgent;
-

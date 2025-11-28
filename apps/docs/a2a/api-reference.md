@@ -63,14 +63,14 @@ type A2AOptions = {
 - **streaming** (`boolean`, optional): Forward child streaming progress back to the parent task stream.
 - **onCompleted / onFailed / onInputRequired** (`string`, optional): Durable handler names fired when the child finishes, fails, or requests more input. Supplying `onCompleted` implicitly sets `awaitCompletion=false`.
 - **setToken** (`boolean`, optional): Automatically persist the child token to working memory. Default: `true`.
-- **tokenPath** (`string`, optional): Path inside `ctx.vars` where the token is stored when `setToken` is enabled. Default: `child.token`.
+- **tokenPath** (`string`, optional): Path inside `pending.controlVars` where the token is stored when `setToken` is enabled. Default: `child.token`.
 - **autoClearToken** (`boolean`, optional): Remove the stored token once the child completes. Default: `true`.
 - **setStage** (`string`, optional): Convenience helper to set the parent's stage immediately after dispatch (e.g., `'awaiting_child'`).
 - **inheritWorkingMemory** (`boolean`, optional): Whether to transfer working memory (goals, thoughts, decisions, variables) to the target agent. Default: `false`.
 - **inheritMemory** (`boolean`, optional): Whether to transfer long-term memory (semantic, episodic) to the target agent. Default: `false`.
 - **tenantId** (`string`, optional): Override the tenant ID for the target agent. Default: uses source agent's tenant.
 
-> **Token defaults**: With no overrides, the engine writes the generated token to `ctx.vars.child.token` and clears it automatically after the child delivers a terminal observation. Provide your own `tokenPath` (or `setToken:false`) if you need bespoke control-state layout.
+> **Token defaults**: With no overrides, the engine writes the generated token to `pending.controlVars.child.token` and clears it automatically after the child delivers a terminal observation. Provide your own `tokenPath` (or `setToken:false`) if you need bespoke control-state layout. You can always access the token directly from `handle.token` and `env.pending.children`.
 
 ### TaskHandle
 

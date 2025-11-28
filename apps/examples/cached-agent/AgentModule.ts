@@ -45,14 +45,14 @@ const modules: Partial<Modules<Sensory, InboxObservation, unknown, unknown, Exec
             memory: { ...prev.memory, sensory: { payload } }
         };
     },
-    policy: (m: MentalState<Sensory>): ProposedAction => {
+    policy: (m: MentalState<Sensory>, _mem: any): ProposedAction => {
         const hasPayload = typeof m.memory?.sensory?.payload !== 'undefined';
         return hasPayload
             ? ({ kind: 'internal', intent: 'process', data: { ok: true } } as const)
             : ({ kind: 'internal', intent: 'no_input' } as const);
     },
-    shield: (_m: MentalState<Sensory>, a: ProposedAction) => ({ action: 'pass', intent: a } as const),
-    execution: async (a: ProposedAction, ctx: TaskContext, _m: MentalState<Sensory>) => {
+    shield: (_m: MentalState<Sensory>, a: ProposedAction, _mem: any) => ({ action: 'pass', intent: a } as const),
+    execution: async (a: ProposedAction, ctx: TaskContext, _mem: any, _m: MentalState<Sensory>) => {
         const baseResult = (): ExecResult => ({ status: 'ok', ts: Date.now(), toolId: 'cached-agent' });
 
         return await match(a)
