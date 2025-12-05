@@ -16,7 +16,7 @@ import type { ObservationConfig } from '../src/loop/oneTurn.js';
 import { mergeInboxes } from '../src/core/orchestration/taskEngine.js';
 
 // --- Module mocks (must be defined before imports run) ---
-const runLoopMock = jest.fn();
+const runLoopMock = jest.fn<any, any>();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -201,7 +201,7 @@ describe('TaskEngine orchestration coverage', () => {
     test('stages child completion with CAS retry and deduplication', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-        const pending = setPendingTasks({}, { 'tok-1': { childTaskId: 'child-1', handlers: {} } });
+        const pending = setPendingTasks({}, { 'tok-1': { handlers: {} } });
         const base = { ...pending, meta: { turn: 0 }, inbox: { current: [], all: [] } } as Record<string, unknown>;
         store.seed('t', 'parent', base, BigInt(0), 'parent-agent');
         store.failNextSave = true; // force first save to throw CAS_MISMATCH
@@ -270,7 +270,7 @@ describe('TaskEngine orchestration coverage', () => {
             meta: { turn: 0, agentId: 'agent-a' },
             pending: {},
             inbox: { current: [], all: [] }
-        } as any, { 'child-err': { childTaskId: 'child-task', handlers: { failed: 'onFail' } } });
+        } as any, { 'child-err': { handlers: { failed: 'onFail' } } });
 
         const withGroup = setPendingGroups(withTask as any, {
             grp1: { childTokens: ['child-err'], results: {}, handlers: { anyFailed: 'onGroupFail' } }
@@ -404,7 +404,6 @@ describe('TaskEngine orchestration coverage', () => {
             inbox: { current: [], all: [] }
         } as any, {
             'child-req': {
-                childTaskId: 'child-task',
                 handlers: {},
                 options: { setToken: true, tokenPath: 'child.token' }
             }
@@ -606,7 +605,7 @@ describe('TaskEngine orchestration coverage', () => {
             pending: {},
             inbox: { current: [], all: [] },
             M: { memory: { vars: {} } }
-        } as any, { 'child-err': { childTaskId: 'child-task', handlers: { failed: 'onFail' } } });
+        } as any, { 'child-err': { handlers: { failed: 'onFail' } } });
         const withGroup = setPendingGroups(base as any, {
             g1: { childTokens: ['child-err'], results: {}, handlers: { anyFailed: 'onGroupFail' } }
         });
@@ -742,7 +741,7 @@ describe('TaskEngine orchestration coverage', () => {
 
         const snap = store.getSnapshot('t', 'parent');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
-        expect((saved.pending as any)?.children?.['child-1']).toBeUndefined();
+        expect((saved.pending as any)?.tasks?.['child-1']).toBeUndefined();
         expect(((saved.pending as any)?.controlVars as any)?.child?.token).toBe('child-1');
 
         const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox);
@@ -874,7 +873,7 @@ describe('TaskEngine orchestration coverage', () => {
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
         const obs = buildObservation('child-dup');
         const base = setPendingTasks({ meta: { turn: 0 }, pending: {}, inbox: { current: [], all: [obs] } } as any, {
-            'child-dup': { childTaskId: 'child-dup' }
+            'child-dup': {}
         });
         store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
 
@@ -931,7 +930,7 @@ describe('TaskEngine orchestration coverage', () => {
         expect(handleChildSpy).not.toHaveBeenCalled();
         const saved = store.getSnapshot('t', 'session')?.snapshot as any;
         const token = Object.keys((saved?.pending as any)?.tasks || {})[0];
-        expect(ctx.__activeLoopInbox.current.some(o => (o as any)?.payload?.token === token)).toBe(true);
+        expect(ctx.__activeLoopInbox.current.some((o: any) => o?.payload?.token === token)).toBe(true);
         expect(ctx.__activeLoopEnv.pending.children[token]).toBeDefined();
     });
 
