@@ -91,7 +91,7 @@ const addObservationToInboxIfMissing = (
  * @param pendingChildren - Map of pending child tokens (only merge observations for these)
  * @returns Merged inbox with all child completion observations preserved
  */
-const mergeInboxes = (
+export const mergeInboxes = (
     localInbox: EngineObservationInbox,
     remoteInbox: EngineObservationInbox,
     pendingChildren: Record<string, unknown>
@@ -207,6 +207,9 @@ export type StartTaskParams = {
  */
 
 const log = logger.createLogger({ prefix: 'TaskEngine' });
+export type TaskEngineTestOverrides = {
+    attachAndRestoreLLM?: (ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined) => Promise<void>;
+};
 const setNestedControlVar = (target: Record<string, unknown> | undefined, path: string, value: unknown): Record<string, unknown> => {
     const next = { ...(target || {}) } as Record<string, unknown>;
     if (!path) return next;
@@ -281,6 +284,7 @@ const clearControlVarInActiveLoop = (ctx: TaskContext, path: string): void => {
 };
 
 export class TaskEngine {
+    static testOverrides?: TaskEngineTestOverrides;
     private sessionManager?: SessionManager;
     private handlerInvoker?: DurableHandlerInvoker;
     private readonly childCompletionInFlight = new Map<string, number>();
@@ -4119,6 +4123,9 @@ export class TaskEngine {
      * Helper to attach and restore LLM for a context from persisted MentalState
      */
     private async attachAndRestoreLLM(ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined): Promise<void> {
+        if (TaskEngine.testOverrides?.attachAndRestoreLLM) {
+            return TaskEngine.testOverrides.attachAndRestoreLLM(ctx, agentName, M);
+        }
         if (!agentName) return;
 
         try {
