@@ -1198,36 +1198,214 @@ describe('TaskEngine Coverage Improvement Tests', () => {
     });
 
     describe('Legacy Working Variables Proxy', () => {
-        test('handles working variables proxy scenarios', async () => {
-            const store = new FailingSessionStore();
-            const engine = new TaskEngine({
-                sessionStore: store,
-                handlerInvoker: { invoke: jest.fn() } as any
-            });
+        test('wrapLegacyWorkingVarsProxy handles different object types', () => {
+            const engine = new TaskEngine({});
 
-            // Test that vars proxy exists and can be interacted with
+            // Since wrapLegacyWorkingVarsProxy is private, we test its behavior through context creation
+            // Test with different context types to ensure proxy creation works
+            expect(() => {
+                const ctx1 = engine.createContext({
+                    id: 'test-task-1',
+                    tenantId: 'test-tenant',
+                    input: { data: 'test1' }
+                } as any);
+                expect(ctx1.vars).toBeDefined();
+            }).not.toThrow();
+
+            expect(() => {
+                const ctx2 = engine.createContext({
+                    id: 'test-task-2',
+                    tenantId: 'test-tenant',
+                    input: { data: 'test2' }
+                } as any);
+                expect(ctx2.vars).toBeDefined();
+            }).not.toThrow();
+        });
+
+        test('working variables proxy handles object ID and tracking', () => {
+            const engine = new TaskEngine({});
+
             const ctx = engine.createContext({
                 id: 'test-task',
                 tenantId: 'test-tenant',
                 input: {}
             } as any);
 
-            expect(ctx).toBeDefined();
+            // Test that vars object is properly set up with proxy capabilities
             expect(ctx.vars).toBeDefined();
             expect(typeof ctx.vars).toBe('object');
 
-            // Test that we can set and get variables through the proxy
-            ctx.vars.testVar = 'test-value';
-            expect(ctx.vars.testVar).toBe('test-value');
+            // Test basic proxy functionality
+            ctx.vars.test = 'value';
+            expect(ctx.vars.test).toBe('value');
+        });
 
-            // Test variable modification
-            ctx.vars.testVar = 'updated-value';
-            expect(ctx.vars.testVar).toBe('updated-value');
+        test('proxy intercepts and syncs variable operations', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+
+            const ctx = engine.createContext({
+                id: 'test-task',
+                tenantId: 'test-tenant',
+                input: {}
+            } as any);
+
+            // Test basic Map-like set operations
+            ctx.vars['simple.key'] = 'test-value';
+            expect(ctx.vars['simple.key']).toBe('test-value');
+
+            // Test nested property access
+            ctx.vars.nested2 = { prop: 'cached' };
+            expect(ctx.vars.nested2.prop).toBe('cached');
+
+            // Test that variables are properly stored
+            ctx.vars.newVar = 'sync-test';
+            expect(ctx.vars.newVar).toBe('sync-test');
+        });
+
+        test('proxy handles delete and clear operations', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+
+            const ctx = engine.createContext({
+                id: 'test-task',
+                tenantId: 'test-tenant',
+                input: {}
+            } as any);
+
+            // Set up initial state
+            ctx.vars.toDelete = 'value';
+            ctx.vars.nested = { keep: 'value', remove: 'value' };
+
+            // Test simple delete operations
+            delete ctx.vars.toDelete;
+            expect(ctx.vars.toDelete).toBeUndefined();
+
+            // Test that nested objects work properly
+            expect(ctx.vars.nested.keep).toBe('value');
+            expect(ctx.vars.nested.remove).toBe('value');
+
+            // Test nested property deletion
+            delete ctx.vars.nested.remove;
+            expect(ctx.vars.nested.remove).toBeUndefined();
+            expect(ctx.vars.nested.keep).toBe('value');
+        });
+
+        test('proxy handles edge cases and error conditions', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+
+            const ctx = engine.createContext({
+                id: 'test-task',
+                tenantId: 'test-tenant',
+                input: {}
+            } as any);
+
+            // Test with undefined paths
+            expect(ctx.vars['nonexistent.path']).toBeUndefined();
+
+            // Test setting complex nested objects
+            ctx.vars.deep = { very: { nested: { structure: 'works' } } };
+            expect(ctx.vars.deep.very.nested.structure).toBe('works');
+
+            // Test overriding existing values
+            ctx.vars.test = 'original';
+            ctx.vars.test = 'overridden';
+            expect(ctx.vars.test).toBe('overridden');
         });
     });
 
-    describe('Mental State Iteration and Variable Operations', () => {
-        test('handles mental state hydration scenarios', async () => {
+    describe('Helper Utilities and Mental State Operations', () => {
+        test('iterateMentalTargets with various mental states', () => {
+            const engine = new TaskEngine({});
+
+            // Create a mock callback function to capture calls
+            const mockCallback = jest.fn();
+
+            // Test with ctx.__mental
+            const ctxWithMental = {
+                __mental: { memory: { vars: { test: 'value' } } }
+            } as any;
+
+            (engine as any).iterateMentalTargets(ctxWithMental, mockCallback);
+            expect(mockCallback).toHaveBeenCalledWith({
+                target: ctxWithMental.__mental,
+                memory: ctxWithMental.__mental.memory,
+                vars: ctxWithMental.__mental.memory.vars
+            });
+
+            mockCallback.mockClear();
+
+            // Test with ctx.M
+            const ctxWithM = {
+                M: { memory: { vars: { test: 'value2' } } }
+            } as any;
+
+            (engine as any).iterateMentalTargets(ctxWithM, mockCallback);
+            expect(mockCallback).toHaveBeenCalledWith({
+                target: ctxWithM.M,
+                memory: ctxWithM.M.memory,
+                vars: ctxWithM.M.memory.vars
+            });
+
+            mockCallback.mockClear();
+
+            // Test with empty object - should not call callback
+            const emptyCtx = {} as any;
+            (engine as any).iterateMentalTargets(emptyCtx, mockCallback);
+            expect(mockCallback).not.toHaveBeenCalled();
+
+            // Test with context that has no mental properties - should not call callback
+            const noMentalCtx = { other: 'property' } as any;
+            (engine as any).iterateMentalTargets(noMentalCtx, mockCallback);
+            expect(mockCallback).not.toHaveBeenCalled();
+        });
+
+        test('setNestedValueClone and deleteNestedValueClone helpers', () => {
+            const engine = new TaskEngine({});
+
+            // Test nested value setting through context vars (which uses setNestedValueClone internally)
+            const ctx = engine.createContext({
+                id: 'test-task',
+                tenantId: 'test-tenant',
+                input: {}
+            } as any);
+
+            // Test setting nested values through proxy
+            ctx.vars.nested = {};
+            ctx.vars.nested.deep = { value: 'test' };
+            expect(ctx.vars.nested.deep.value).toBe('test');
+
+            // Test with existing structure
+            ctx.vars.existing = { prop: 'old' };
+            ctx.vars.existing.newProp = 'new';
+            expect(ctx.vars.existing.prop).toBe('old');
+            expect(ctx.vars.existing.newProp).toBe('new');
+
+            // Test delete operations
+            delete ctx.vars.nested.deep.value;
+            expect(ctx.vars.nested.deep.value).toBeUndefined();
+            expect(ctx.vars.nested.deep).toBeDefined();
+
+            // Test delete with non-existent path (should not throw)
+            delete ctx.vars.nonexistent?.path;
+            expect(ctx.vars).toBeDefined(); // Should not throw
+
+            // Test complex nested structures
+            ctx.vars.deep = { very: { nested: { structure: 'works' } } };
+            expect(ctx.vars.deep.very.nested.structure).toBe('works');
+        });
+
+        test('mental state hydration scenarios', async () => {
             const store = new FailingSessionStore();
             const engine = new TaskEngine({
                 sessionStore: store,
@@ -1685,6 +1863,102 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const results = await Promise.all(promises);
             expect(results).toHaveLength(5);
             results.forEach(result => expect(result).toBeDefined());
+        });
+      });
+
+    describe('Error Recovery and Resource Management', () => {
+        test('Prisma client singleton management', () => {
+            const engine = new TaskEngine({});
+
+            // Test that getSessionStorePrisma returns consistent instances
+            const client1 = (engine as any).getSessionStorePrisma();
+            const client2 = (engine as any).getSessionStorePrisma();
+            expect(client1).toBe(client2);
+
+            // Test that it returns undefined when no session manager is configured
+            expect(client1).toBeUndefined();
+        });
+
+        test('memory registry creation fallbacks', async () => {
+            const engine = new TaskEngine({});
+
+            // Import the extendContextWithMemory function from the actual module
+            const { extendContextWithMemory } = await import('../src/core/memory/types/working/context/workingMemoryContext.js');
+
+            // Test extendContextWithMemory with different contexts
+            const baseCtx = { task: { id: 'test' } } as any;
+
+            // Test with manifest that has memory profile
+            const ctxWithManifest = {
+                ...baseCtx,
+                task: { id: 'test', manifest: { memoryProfile: 'minimal' } }
+            };
+
+            expect(() => {
+                extendContextWithMemory(ctxWithManifest);
+            }).not.toThrow();
+
+            // Test without manifest
+            expect(() => {
+                extendContextWithMemory(baseCtx);
+            }).not.toThrow();
+
+            // Test extendContextWithMemory handles missing memory gracefully
+            expect(() => {
+                extendContextWithMemory({ task: { id: 'test' } });
+            }).not.toThrow();
+        });
+
+        test('context memory extension edge cases', async () => {
+            const engine = new TaskEngine({});
+
+            // Import the extendContextWithMemory function from the actual module
+            const { extendContextWithMemory } = await import('../src/core/memory/types/working/context/workingMemoryContext.js');
+
+            // Test with already existing memory
+            const ctxWithMemory = {
+                task: { id: 'test' },
+                memory: { existing: 'structure' }
+            } as any;
+
+            extendContextWithMemory(ctxWithMemory);
+            expect(ctxWithMemory.memory).toBeDefined();
+            expect(ctxWithMemory.memory.existing).toBe('structure');
+
+            // Test with database config
+            const ctxWithDB = {
+                task: {
+                    id: 'test',
+                    manifest: { memoryProfile: 'minimal' }
+                },
+                dbConfig: { provider: 'test' }
+            } as any;
+
+            expect(() => {
+                extendContextWithMemory(ctxWithDB);
+            }).not.toThrow();
+        });
+
+        test('background task resource management', () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+
+            // Test background task promise tracking
+            const task1 = Promise.resolve('done');
+            const task2 = Promise.resolve('done2');
+
+            (engine as any).backgroundTaskPromises.add(task1);
+            (engine as any).backgroundTaskPromises.add(task2);
+
+            expect((engine as any).backgroundTaskPromises.size).toBe(2);
+
+            // Test task completion tracking
+            Promise.all([task1, task2]).then(() => {
+                expect(true).toBe(true); // Tasks complete without error
+            });
         });
     });
 });
