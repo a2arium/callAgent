@@ -12,63 +12,75 @@ const log = logger.createLogger({ prefix: 'offloadArtifacts' });
  * This function mutates the object tree in place if it's an array or object,
  * but returns the new value for primitives or the root object.
  */
+const MAX_DEPTH = 20;
+
+async function offloadArtifactsInternal(
+    obj: unknown,
+    cache: AgentResultCache,
+    tenantId: string,
+    depth: number,
+    seenArtifacts: WeakMap<object, Promise<unknown>>
+): Promise<unknown> {
+    if (!obj || typeof obj !== 'object' || depth > MAX_DEPTH) {
+        return obj;
+    }
+
+    if ((obj as any).kind === LOCAL_ARTIFACT_KIND) {
+        log.info('Found LocalArtifact, offloading...', { mimeType: (obj as any).mimeType });
+        if (seenArtifacts.has(obj as object)) {
+            return seenArtifacts.get(obj as object);
+        }
+        const local = obj as LocalArtifact;
+        const upload = (async () => {
+            const { size, artifactId } = await cache.storeArtifact(
+                tenantId,
+                undefined,
+                local.value,
+                local.mimeType
+            );
+
+            const handle = new ArtifactImpl(
+                artifactId,
+                cache,
+                tenantId,
+                local.mimeType,
+                size
+            );
+
+            log.info('Offloaded artifact', { id: artifactId, size });
+            const marker = handle.toJSON();
+            return {
+                kind: ARTIFACT_MARKER_KIND,
+                id: marker.id,
+                mimeType: marker.mimeType,
+                estimatedSize: marker.estimatedSize
+            };
+        })();
+        seenArtifacts.set(obj as object, upload);
+        return upload;
+    }
+
+    if (Array.isArray(obj)) {
+        await Promise.all(obj.map(async (item, index) => {
+            obj[index] = await offloadArtifactsInternal(item, cache, tenantId, depth + 1, seenArtifacts);
+        }));
+        return obj;
+    }
+
+    const entries = Object.entries(obj);
+    await Promise.all(entries.map(async ([key, value]) => {
+        (obj as any)[key] = await offloadArtifactsInternal(value, cache, tenantId, depth + 1, seenArtifacts);
+    }));
+
+    return obj;
+}
+
 export async function offloadArtifacts(
     obj: unknown,
     cache: AgentResultCache,
     tenantId: string,
     depth = 0
 ): Promise<unknown> {
-    if (!obj || typeof obj !== 'object' || depth > 20) {
-        return obj;
-    }
-
-    // Check if it is a LocalArtifact
-    // We check for the kind property explicitly
-    if ((obj as any).kind === LOCAL_ARTIFACT_KIND) {
-        log.info('Found LocalArtifact, offloading...', { mimeType: (obj as any).mimeType });
-        const local = obj as LocalArtifact;
-        const { size, artifactId } = await cache.storeArtifact(
-            tenantId,
-            undefined, // Let cache generate ID
-            local.value,
-            local.mimeType
-        );
-
-        // Create a proper handle that can be awaited
-        const handle = new ArtifactImpl(
-            artifactId,
-            cache, // Pass cache instance directly
-            tenantId,
-            local.mimeType,
-            size
-        );
-
-        log.info('Offloaded artifact', { id: artifactId, size });
-        // Persist the lightweight marker (non-thenable) to avoid Promise assimilation
-        const marker = handle.toJSON();
-        return {
-            kind: ARTIFACT_MARKER_KIND,
-            id: marker.id,
-            mimeType: marker.mimeType,
-            estimatedSize: marker.estimatedSize
-        };
-    }
-
-    // Handle Arrays
-    if (Array.isArray(obj)) {
-        await Promise.all(obj.map(async (item, index) => {
-            obj[index] = await offloadArtifacts(item, cache, tenantId, depth + 1);
-        }));
-        return obj;
-    }
-
-    // Handle Objects
-    // We use Object.entries to iterate and wait for all promises
-    const entries = Object.entries(obj);
-    await Promise.all(entries.map(async ([key, value]) => {
-        (obj as any)[key] = await offloadArtifacts(value, cache, tenantId, depth + 1);
-    }));
-
-    return obj;
+    const seenArtifacts = new WeakMap<object, Promise<unknown>>();
+    return offloadArtifactsInternal(obj, cache, tenantId, depth, seenArtifacts);
 }
-

@@ -62,6 +62,13 @@ export class WorkingMemorySessionStore {
         await this.disconnect();
     }
 
+    /**
+     * Establish a connection immediately so callers can detect connectivity issues early.
+     */
+    async connect(): Promise<void> {
+        await this.ensureConnected();
+    }
+
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<SessionSnapshot | null> {
         await this.ensureConnected();
         const rec = await this.runWithReconnect(() => this.prisma.wMSession.findUnique({
@@ -164,5 +171,4 @@ export class WorkingMemorySessionStore {
         await this.runWithReconnect(() => this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as any } }));
     }
 }
-
 

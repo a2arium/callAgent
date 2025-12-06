@@ -32,7 +32,7 @@ export default createAgent<Record<string, unknown>, MemoryDemoObservation, unkno
     // Optional policy-guard/safety layer to adjust or veto actions.
     // args: mentalState (current state), action (from policy)
     // returns: final action passed to execution
-    shield: (_M: any, action: any) => action,
+    shield: (_M: any, action: any) => ({ action: 'pass', intent: action }),
     // Performs side effects for the chosen action.
     // args: action (from shield), ctx (runner exec context with helpers)
     // returns: execution result consumed by transition

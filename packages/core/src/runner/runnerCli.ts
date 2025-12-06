@@ -200,6 +200,7 @@ async function main(): Promise<void> {
             }
         }
         const store = new WorkingMemorySessionStore();
+        await store.connect();
         const engine = new TaskEngine({ sessionStore: store });
         try { EngineLocator.setEngine(engine as any); } catch { }
         // If handlersFile provided, also load agent and its dependencies so ctx.sendTaskToAgent can find children

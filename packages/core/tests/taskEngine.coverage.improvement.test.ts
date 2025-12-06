@@ -467,4 +467,60 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             expect(backgroundTaskResolved).toBe(true);
         });
     });
+
+    describe('Await-child parent resume', () => {
+        test('starts awaiting child and resumes once completion arrives', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+
+            const base = {
+                M: { memory: { vars: {} } },
+                meta: { turn: 0, agentId: 'agent-a' },
+                pending: {
+                    tasks: {
+                        'child-1': { agentId: 'child-agent', input: { query: 'hi' } }
+                    }
+                },
+                inbox: { current: [], all: [] }
+            };
+            store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
+
+            runLoopMock
+                .mockResolvedValueOnce({
+                    M: { memory: { vars: {} } },
+                    outcome: { kind: 'await_child', token: 'child-1' },
+                    metrics: {}
+                })
+                .mockResolvedValueOnce({
+                    M: { memory: { vars: {} } },
+                    outcome: { kind: 'complete', result: { ok: true } },
+                    metrics: {}
+                });
+
+            const task = await engine.startTask({
+                task: { id: 'parent', input: {} },
+                isStreaming: false,
+                tenantId: 't'
+            });
+            expect(task.status.state).toBe('working');
+            expect(runLoopMock).toHaveBeenCalledTimes(1);
+
+            const afterStart = store.getSnapshot('t', 'parent');
+            expect(((afterStart?.snapshot as any)?.meta as any)?.awaiting?.token).toBe('child-1');
+
+            await engine.handleChildCompleted({
+                tenantId: 't',
+                parentTaskId: 'parent',
+                childToken: 'child-1',
+                result: { status: 'ok', data: { value: 42 } }
+            });
+
+            expect(runLoopMock).toHaveBeenCalledTimes(2);
+            const afterResume = store.getSnapshot('t', 'parent');
+            expect(((afterResume?.snapshot as any)?.meta as any)?.awaiting).toBeUndefined();
+        });
+    });
 });

@@ -545,6 +545,7 @@ export async function runAgentWithStreaming(
                 }
 
                 const sessionStore = new WorkingMemorySessionStore();
+                await sessionStore.connect();
                 const engine = new TaskEngine({ sessionStore });
                 try { EngineLocator.setEngine(engine as any); } catch { }
                 const entity: TaskEntity = { id: taskCtx.task.id, input };

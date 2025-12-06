@@ -25,6 +25,7 @@ import type { Observation, ObservationConfig, SynthesizeObservation } from '../.
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
+import type { AgentPlugin } from '../plugin/types.js';
 import { extendContextWithMemory } from '../memory/types/working/context/workingMemoryContext.js';
 import { createMemoryRegistry } from '../memory/createMemoryRegistry.js';
 import { ArtifactImpl } from './ArtifactImpl.js';
@@ -3379,21 +3380,20 @@ export class TaskEngine {
             const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
             if (!token) return;
             const entry = tasks[token] as any;
+            const hadPendingEntry = Boolean(entry);
+            const opts = entry?.options ?? {};
+            const shouldSetToken = opts.setToken !== false;
+            const shouldAutoClear = opts.autoClearToken !== false;
+            const childTokenPath = opts.tokenPath ?? 'child.token';
+            const shouldClearControlVar = shouldSetToken && shouldAutoClear;
             // If this child was awaited synchronously by the parent, skip auto-resume (already handled in-turn)
             if (entry && entry.handlers && entry.handlers.completed === undefined && entry.handlers.failed === undefined && entry.handlers.inputRequired === undefined && (result as any)?.status?.state !== 'input-required') {
                 // Default await path: no handlers set and result is terminal -> no extra resume needed
                 // Fall through to cleanup mapping only
             }
-            delete tasks[token];
-            let next = setPendingTasks(base, tasks) as Record<string, unknown>;
-
-            const opts = entry?.options ?? {};
-            const shouldSetToken = opts.setToken !== false;
-            const shouldAutoClear = opts.autoClearToken !== false;
-            const childTokenPath = opts.tokenPath ?? 'child.token';
-            if (shouldSetToken && shouldAutoClear) {
-                next = removeControlVarFromSnapshot(next, childTokenPath);
-            }
+            const nextSnapshot = setPendingTasks(base, tasks) as Record<string, unknown> | undefined;
+            let next = nextSnapshot ?? ({ ...(base || {}) } as Record<string, unknown>);
+            (next as any).inbox = (next as any).inbox || { current: [], all: [] };
             const parentPrisma = this.getSessionStorePrisma();
             if (parentPrisma && result && typeof result === 'object') {
                 const cache = new AgentResultCache(parentPrisma);
@@ -3415,7 +3415,20 @@ export class TaskEngine {
                 token,
                 resultStatus: (result as any)?.status,
             });
-            // Use addObservationToInboxIfMissing to avoid duplicates if observation was already staged synchronously
+            const cleanupSnapshotForChild = (snapshot: Record<string, unknown>): Record<string, unknown> => {
+                let updatedSnapshot = snapshot;
+                if (hadPendingEntry) {
+                    const tasksMap = getPendingTasks(updatedSnapshot);
+                    if (tasksMap[token]) {
+                        delete tasksMap[token];
+                        updatedSnapshot = setPendingTasks(updatedSnapshot, tasksMap);
+                    }
+                }
+                if (shouldClearControlVar) {
+                    updatedSnapshot = removeControlVarFromSnapshot(updatedSnapshot, childTokenPath);
+                }
+                return updatedSnapshot;
+            };
             const observationPredicate = (obs: EngineObservation) =>
                 obs?.kind === 'child.completed' &&
                 typeof obs === 'object' &&
@@ -3464,14 +3477,35 @@ export class TaskEngine {
 
             try {
                 const agentName = (snap as any)?.agentId;
-                const plugin = agentName ? PluginManager.findAgent(agentName) : null;
+                let plugin: AgentPlugin | null = null;
+                if (agentName) {
+                    const findAgent = (PluginManager as any)?.findAgent;
+                    if (typeof findAgent === 'function') {
+                        try {
+                            plugin = findAgent.call(PluginManager, agentName);
+                        } catch (pluginError) {
+                            log.warn('Failed to resolve plugin before resuming child completion', {
+                                error: pluginError instanceof Error ? pluginError.message : String(pluginError),
+                                parentTaskId,
+                                agentName
+                            });
+                        }
+                    } else {
+                        log.debug('PluginManager.findAgent unavailable while handling child completion', { agentName });
+                    }
+                }
                 ctx = this.createContext({ id: parentTaskId, input: {} });
                 (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
+                if (!(ctx as any).task) {
+                    (ctx as any).task = { id: parentTaskId, input: {} };
+                }
                 try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
                 // --- START RETRY LOOP ---
                 let resumeSuccess = false;
                 let resumeRetryCount = 0;
                 const resumeMaxRetries = 3;
+                let shouldResumeParent = false;
+                let resumeReason: string | undefined;
 
                 while (!resumeSuccess && resumeRetryCount < resumeMaxRetries) {
                     try {
@@ -3683,29 +3717,27 @@ export class TaskEngine {
                         });
 
                         // ✅ FIX: ONLY resume if parent has explicitly saved await_child state for THIS token
-                        // This prevents the race condition where:
-                        // 1. Parent is at turn 3, dispatches child with awaitCompletion: false
-                        // 2. Child completes synchronously (cached) during parent's turn
-                        // 3. handleChildCompleted is called BEFORE parent saves its turn 3 snapshot
-                        // 4. If we resume now, we'd read stale state (turn 0) and reset the turn counter
-                        //
-                        // The fix: Only resume if meta.awaiting.kind === 'await_child' AND meta.awaiting.token === token
-                        // If awaiting is undefined/null, the parent either:
-                        //   - Hasn't saved its await state yet (still mid-turn) -> don't resume, let parent continue
-                        //   - Dispatched with awaitCompletion: false and doesn't want auto-resume -> don't resume
-                        // In both cases, the observation is already staged in the inbox, and the parent will
-                        // pick it up on its next turn or when it checks the inbox.
+                        //     OR we detected a pending entry before awaiting metadata could be persisted.
                         const awaiting = (latestBase as any)?.meta?.awaiting;
                         const awaitingKind = (awaiting as any)?.kind;
                         const awaitingToken = (awaiting as any)?.token;
+                        const hasAwaitingMetadata = Boolean(awaitingKind || awaitingToken);
+                        const resumeDueToMetadata = awaitingKind === 'await_child' && awaitingToken === token;
+                        const resumeDueToPendingOnly = !hasAwaitingMetadata && hadPendingEntry;
+                        const resumeReasonText = resumeDueToMetadata
+                            ? 'awaiting metadata matched this child'
+                            : resumeDueToPendingOnly
+                                ? 'pending entry observed before awaiting metadata persisted'
+                                : undefined;
+                        shouldResumeParent = resumeDueToMetadata || resumeDueToPendingOnly;
+                        resumeReason = resumeReasonText;
 
-                        // Only resume if explicitly awaiting THIS child
-                        if (awaitingKind !== 'await_child' || awaitingToken !== token) {
+                        if (!shouldResumeParent) {
                             log.debug('handleChildCompleted: Not resuming parent - not explicitly awaiting this child', {
                                 parentTaskId,
                                 childToken: token,
                                 awaiting: awaiting ? { kind: awaitingKind, token: awaitingToken } : 'undefined',
-                                reason: awaiting === undefined ? 'awaiting is undefined (parent may be mid-turn or using awaitCompletion:false)' : 'awaiting different token'
+                                reason: awaiting ? 'awaiting different token' : 'awaiting metadata missing'
                             });
                             // The observation is already staged in the inbox
                             // The parent will pick it up when it finishes its current turn
@@ -3717,7 +3749,8 @@ export class TaskEngine {
                             parentTaskId,
                             childToken: token,
                             recordedTurn,
-                            nextTurn: recordedTurn + 1
+                            nextTurn: recordedTurn + 1,
+                            reason: resumeReasonText
                         });
 
                         const env: EnvironmentState = {
@@ -3784,13 +3817,17 @@ export class TaskEngine {
                             const mNextWithVars = this.mergeVarsIntoMental(M as any, mNext as any);
 
                             // ✅ FIX: Merge remote inbox to preserve concurrent child completions (nested children)
-                            const remoteInbox = normalizeInbox((baseSnap as any)?.inbox);
+                            let baseSnapForSave = baseSnap;
+                            if (shouldResumeParent) {
+                                baseSnapForSave = cleanupSnapshotForChild(baseSnapForSave);
+                            }
+                            const remoteInbox = normalizeInbox((baseSnapForSave as any)?.inbox);
                             const pendingChildren = env.pending?.children ?? {};
                             nextInboxForChildResume = mergeInboxes(normalizeInbox(env.inbox), remoteInbox, pendingChildren);
 
                             // ✅ FIX: Turn regression prevention - validate turn before saving
                             // This prevents the bug where CAS retry reads stale data and saves a lower turn
-                            const currentDbTurn = Number((baseSnap as any)?.meta?.turn) || 0;
+                            const currentDbTurn = Number((baseSnapForSave as any)?.meta?.turn) || 0;
                             if (env.turn < currentDbTurn) {
                                 log.warn('handleChildCompleted: Preventing turn regression', {
                                     parentTaskId,
@@ -3804,7 +3841,7 @@ export class TaskEngine {
                                 break;
                             }
 
-                            const nextSnap = { ...baseSnap, M: mNextWithVars, meta: nextMeta, inbox: nextInboxForChildResume } as Record<string, unknown>;
+                            const nextSnap = { ...baseSnapForSave, M: mNextWithVars, meta: nextMeta, inbox: nextInboxForChildResume } as Record<string, unknown>;
                             await this.sessionManager!.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: agentName || 'default', expectedWmVersion: expectedNow, snapshot: nextSnap });
 
                             // NOTE: Self-correction removed - loopRunner now handles synchronous child completions
@@ -3860,12 +3897,12 @@ export class TaskEngine {
             const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);
             if (snap2) {
                 const base2 = (snap2.snapshot as Record<string, unknown>) || {};
-                const groups = getPendingGroups(base2);
+                const groups = getPendingGroups(base2) || {};
                 if (process.env.DEBUG_BACKGROUND_TASKS) {
                     console.log(`[TaskEngine.handleChildCompleted] Checking groups, token=${token}, groups=${Object.keys(groups).length}`);
                 }
                 let mutated = false;
-                for (const [gToken, g] of Object.entries(groups)) {
+                for (const [gToken, g] of Object.entries(groups || {})) {
                     if (g.childTokens?.includes(token)) {
                         if (process.env.DEBUG_BACKGROUND_TASKS) {
                             console.log(`[TaskEngine.handleChildCompleted] Found group ${gToken} with token ${token}, childTokens=${g.childTokens.length}`);

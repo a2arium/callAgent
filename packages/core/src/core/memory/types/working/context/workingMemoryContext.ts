@@ -277,6 +277,51 @@ export async function extendContextWithMemory(
         mlo: unifiedMemory,
     };
 
+    // Legacy semantic facades for backward compatibility
+    const semanticRegistryAccessor = () => (context.memory as any)?.semantic;
+
+    context.semantic = {
+        add: async (item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
+            const registry = semanticRegistryAccessor();
+            try {
+                await registry?.set?.(item.id, item.value, { tags: item.tags, entities: item.entities });
+            } catch (err) {
+                /* noop */
+            }
+        },
+        remove: async (idOrPredicate: string | ((entry: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
+            const registry = semanticRegistryAccessor();
+            if (!registry) return;
+            try {
+                if (typeof idOrPredicate === 'string') {
+                    await registry.delete?.(idOrPredicate);
+                    return;
+                }
+                const all = await registry.read?.('*');
+                if (Array.isArray(all)) {
+                    for (const item of all) {
+                        const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities };
+                        if ((idOrPredicate as any)(mapped)) {
+                            await registry.delete?.(mapped.id);
+                        }
+                    }
+                }
+            } catch { /* noop */ }
+        },
+        read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number } | any) => {
+            const registry = semanticRegistryAccessor();
+            if (!registry?.read) return [];
+            try {
+                if (!filter) {
+                    return registry.read?.('*') as Promise<any>;
+                }
+                return registry.read(filter);
+            } catch {
+                return [];
+            }
+        }
+    };
+
     // registry constructed
 
     return context;

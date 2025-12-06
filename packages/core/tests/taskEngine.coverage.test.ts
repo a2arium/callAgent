@@ -14,6 +14,8 @@ import { normalizeObservationInbox } from '../src/loop/types.js';
 import type { SynthesizeObservation } from '../src/loop/oneTurn.js';
 import type { ObservationConfig } from '../src/loop/oneTurn.js';
 import { mergeInboxes } from '../src/core/orchestration/taskEngine.js';
+import { offloadArtifacts } from '../src/core/memory/utils/offloadArtifacts.js';
+import { LocalArtifactImpl } from '../src/core/orchestration/LocalArtifactImpl.js';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
@@ -194,6 +196,7 @@ beforeAll(() => {
 afterEach(() => {
     runLoopMock.mockReset();
     jest.clearAllMocks();
+    jest.restoreAllMocks();
     TaskEngine.testOverrides = undefined;
 });
 
@@ -594,6 +597,236 @@ describe('TaskEngine orchestration coverage', () => {
         expect(((saved.pending as any)?.controlVars || {}).child?.token).toBe(token);
         expect(((saved.pending as any)?.controlVars || {}).stage).toBe('child-await');
         expect(store.writeCount).toBeGreaterThanOrEqual(1);
+    });
+
+    test('await_child resumes after fetch when awaitCompletion=false', async () => {
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const base = {
+            meta: { turn: 1, agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-1' } },
+            pending: { tasks: { 'child-1': {} } },
+            inbox: { current: [], all: [] },
+            M: { memory: { vars: {} } }
+        };
+        store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
+
+        const initialSnap = store.getSnapshot('t', 'parent');
+        const initialTurn = Number(((initialSnap?.snapshot as any)?.meta?.turn) ?? 0);
+
+        runLoopMock.mockImplementation(async () => {
+            console.log('runLoopMock invoked');
+            return {
+                M: { memory: { vars: {} } },
+                outcome: { kind: 'complete', result: {} },
+                metrics: {}
+            };
+        });
+
+        await engine.handleChildCompleted({
+            tenantId: 't',
+            parentTaskId: 'parent',
+            childToken: 'child-1',
+            result: { status: 'ok' }
+        });
+
+        const afterSnap = store.getSnapshot('t', 'parent');
+        const savedPending = ((afterSnap?.snapshot as any)?.pending || {}) as Record<string, unknown>;
+        const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
+        const afterTurn = Number(savedMeta.turn ?? 0);
+
+        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect((savedPending as any)?.tasks?.['child-1']).toBeUndefined();
+        expect((savedMeta as any)?.awaiting).toBeUndefined();
+    });
+
+    test('resumes parent even when awaiting metadata not persisted yet', async () => {
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        jest.spyOn(engine as any, 'createContext').mockReturnValue({ memory: {}, vars: {} } as any);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+
+        runLoopMock.mockResolvedValue({
+            M: { memory: { vars: {} } },
+            outcome: { kind: 'complete', result: {} },
+            metrics: {}
+        });
+
+        const pending = setPendingTasks({
+            meta: { turn: 2, agentId: 'agent-a' },
+            pending: {},
+            inbox: { current: [], all: [] },
+            M: { memory: { vars: {} } }
+        } as any, {
+            'child-early': {
+                childTaskId: 'child-task',
+                handlers: {},
+                options: { tokenPath: 'child.token', setToken: true, autoClearToken: true }
+            }
+        });
+        const base = { ...pending };
+        store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
+
+        const initialSnap = store.getSnapshot('t', 'parent');
+        const initialTurn = Number(((initialSnap?.snapshot as any)?.meta?.turn) ?? 0);
+
+        await engine.handleChildCompleted({
+            tenantId: 't',
+            parentTaskId: 'parent',
+            childToken: 'child-early',
+            result: { status: 'ok' },
+            childAgentId: 'child-agent'
+        });
+
+        const afterSnap = store.getSnapshot('t', 'parent');
+        const savedPending = ((afterSnap?.snapshot as any)?.pending || {}) as Record<string, unknown>;
+        const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
+        const afterTurn = Number(savedMeta.turn ?? 0);
+
+        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect((savedPending as any)?.tasks?.['child-early']).toBeUndefined();
+        expect((savedMeta as any)?.awaiting).toBeUndefined();
+    });
+
+    test('await_child resumes when pending entry removed before metadata saved', async () => {
+        class EntryClearingStore extends FakeSessionStore {
+            private loadCount = 0;
+            async load(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+                const snap = await super.load(tenantId, sessionId);
+                this.loadCount++;
+                if (this.loadCount === 1 && snap) {
+                    const mutated = JSON.parse(JSON.stringify(snap.snapshot));
+                    if (mutated.pending?.tasks) {
+                        delete mutated.pending.tasks['child-early'];
+                    }
+                    const agentId = snap.agentId || (snap.snapshot as any)?.meta?.agentId || 'agent-a';
+                    this.seed(tenantId, sessionId, mutated, (snap.wmVersion ?? BigInt(0)) + BigInt(1), agentId);
+                }
+                return snap;
+            }
+        }
+
+        const store = new EntryClearingStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        jest.spyOn(engine as any, 'createContext').mockReturnValue({ memory: {}, vars: {} } as any);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+
+        runLoopMock.mockResolvedValue({
+            M: { memory: { vars: {} } },
+            outcome: { kind: 'complete', result: {} },
+            metrics: {}
+        });
+
+        const pending = setPendingTasks({
+            meta: { turn: 2, agentId: 'agent-a' },
+            pending: {},
+            inbox: { current: [], all: [] },
+            M: { memory: { vars: {} } }
+        } as any, {
+            'child-early': {
+                childTaskId: 'child-task',
+                handlers: {},
+                options: { tokenPath: 'child.token', setToken: true, autoClearToken: true }
+            }
+        });
+        const base = { ...pending };
+        store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
+
+        const initialSnap = store.getSnapshot('t', 'parent');
+        const initialTurn = Number(((initialSnap?.snapshot as any)?.meta?.turn) ?? 0);
+
+        await engine.handleChildCompleted({
+            tenantId: 't',
+            parentTaskId: 'parent',
+            childToken: 'child-early',
+            result: { status: 'ok' },
+            childAgentId: 'child-agent'
+        });
+
+        const afterSnap = store.getSnapshot('t', 'parent');
+        const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
+        const afterTurn = Number(savedMeta.turn ?? 0);
+
+        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect((afterSnap?.snapshot as any)?.pending?.tasks?.['child-early']).toBeUndefined();
+        expect((savedMeta as any)?.awaiting).toBeUndefined();
+    });
+
+    test('await_child resumes even when awaiting metadata and pending entry removed', async () => {
+        class AwaitingDroppingStore extends FakeSessionStore {
+            private loadCount = 0;
+            async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+                const snap = await super.getSessionSnapshot(tenantId, sessionId);
+                if (!snap) return snap;
+                this.loadCount++;
+                console.log('AwaitingDroppingStore snapshot load', this.loadCount);
+                if (this.loadCount === 2) {
+                    const mutated = JSON.parse(JSON.stringify(snap.snapshot));
+                    if (mutated.meta) {
+                        delete mutated.meta.awaiting;
+                    }
+                    if (!mutated.pending) mutated.pending = {};
+                    mutated.pending.tasks = {};
+                    const agentId = snap.agentId || (snap.snapshot as any)?.meta?.agentId || 'agent-a';
+                    const newVersion = (snap.wmVersion ?? BigInt(0)) + BigInt(1);
+                    this.seed(tenantId, sessionId, mutated, newVersion, agentId);
+                    return { ...snap, snapshot: mutated, wmVersion: newVersion };
+                }
+                return snap;
+            }
+        }
+
+        const store = new AwaitingDroppingStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        jest.spyOn(engine as any, 'createContext').mockReturnValue({ memory: {}, vars: {} } as any);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+
+        runLoopMock.mockResolvedValue({
+            M: { memory: { vars: {} } },
+            outcome: { kind: 'complete', result: {} },
+            metrics: {}
+        });
+
+        const base = {
+            meta: { turn: 2, agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-1' } },
+            pending: { tasks: { 'child-1': {} } },
+            inbox: { current: [], all: [] },
+            M: { memory: { vars: {} } }
+        };
+        store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
+
+        const initialSnap = store.getSnapshot('t', 'parent');
+        const initialTurn = Number(((initialSnap?.snapshot as any)?.meta?.turn) ?? 0);
+
+        await engine.handleChildCompleted({
+            tenantId: 't',
+            parentTaskId: 'parent',
+            childToken: 'child-1',
+            result: { status: 'ok' }
+        });
+
+        const afterSnap = store.getSnapshot('t', 'parent');
+        const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
+        const afterTurn = Number(savedMeta.turn ?? 0);
+
+        expect(afterTurn).toBeGreaterThan(initialTurn);
+    });
+
+    test('offloadArtifacts deduplicates repeated LocalArtifacts', async () => {
+        const spy = jest.fn().mockResolvedValue({ artifactId: 'art-1', size: 123 });
+        const cache = { storeArtifact: spy };
+        const artifact = new LocalArtifactImpl('<html>1</html>', 'text/html');
+        const payload = {
+            first: artifact,
+            second: artifact
+        };
+
+        await offloadArtifacts(payload, cache as any, 'default');
+
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(payload.first).toEqual(payload.second);
     });
 
     test('handleChildFailed invokes anyFailed group handler and removes group', async () => {
