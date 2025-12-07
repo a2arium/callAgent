@@ -28,7 +28,7 @@ import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentPlugin } from '../plugin/types.js';
 import { extendContextWithMemory } from '../memory/types/working/context/workingMemoryContext.js';
 import { createMemoryRegistry } from '../memory/createMemoryRegistry.js';
-import { ArtifactImpl } from './ArtifactImpl.js';
+import { ArtifactImpl, isArtifactMarker, type ArtifactMarker } from './ArtifactImpl.js';
 import { AgentResultCache } from '../cache/AgentResultCache.js';
 import { hydrateArtifacts } from '../memory/utils/hydrateArtifacts.js';
 import { offloadArtifacts } from '../memory/utils/offloadArtifacts.js';
@@ -161,6 +161,74 @@ const hydrateInboxArtifacts = (
         return inbox;
     }
 };
+
+const ARTIFACT_HYDRATION_DEPTH_LIMIT = 12;
+const HYDRATED_ARTIFACT_HANDLE_SYMBOL = Symbol('hydratedArtifactHandle');
+
+const annotateArtifactMarker = (marker: ArtifactMarker, cache: AgentResultCache, tenantId: string): ArtifactImpl => {
+    const existing = (marker as any)[HYDRATED_ARTIFACT_HANDLE_SYMBOL] as ArtifactImpl | undefined;
+    if (existing) return existing;
+
+    const handle = new ArtifactImpl(marker.id, cache, tenantId, marker.mimeType, marker.estimatedSize);
+    const descriptor = { enumerable: false, configurable: true, writable: false };
+    Object.defineProperty(marker, HYDRATED_ARTIFACT_HANDLE_SYMBOL, { ...descriptor, value: handle });
+    Object.defineProperty(marker, 'then', { ...descriptor, value: handle.then.bind(handle) });
+    Object.defineProperty(marker, 'load', { ...descriptor, value: handle.load.bind(handle) });
+    Object.defineProperty(marker, 'set', { ...descriptor, value: handle.set.bind(handle) });
+    return handle;
+};
+
+const attachHydratedArtifactHandles = (
+    obj: unknown,
+    cache: AgentResultCache,
+    tenantId: string,
+    depth = 0,
+    visited = new WeakSet<object>()
+): void => {
+    if (!obj || typeof obj !== 'object' || depth > ARTIFACT_HYDRATION_DEPTH_LIMIT) {
+        return;
+    }
+
+    if (visited.has(obj as object)) {
+        return;
+    }
+
+    visited.add(obj as object);
+
+    if (isArtifactMarker(obj)) {
+        annotateArtifactMarker(obj as ArtifactMarker, cache, tenantId);
+        return;
+    }
+
+    if (Array.isArray(obj)) {
+        for (const item of obj) {
+            attachHydratedArtifactHandles(item, cache, tenantId, depth + 1, visited);
+        }
+        return;
+    }
+
+const record = obj as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+        attachHydratedArtifactHandles(record[key], cache, tenantId, depth + 1, visited);
+    }
+};
+
+export { attachHydratedArtifactHandles, HYDRATED_ARTIFACT_HANDLE_SYMBOL };
+
+function tryHydrateChildResult(result: unknown, cache: AgentResultCache | undefined, tenantId: string) {
+    if (!cache || !result || typeof result !== 'object') {
+        return;
+    }
+
+    try {
+        attachHydratedArtifactHandles(result, cache, tenantId);
+    } catch (error) {
+        log.warn('hydrateArtifacts failed for child result', {
+            error: error instanceof Error ? error.message : String(error),
+            tenantId
+        });
+    }
+}
 
 const hydrateMentalStateArtifacts = (
     mental: MentalState | undefined,
@@ -1161,9 +1229,20 @@ export class TaskEngine {
                             awaitCompletionFlag: awaitCompletion
                         });
 
+                        if (result && typeof result === 'object') {
+                            const childSyncPrisma = this.getSessionStorePrisma();
+                            if (childSyncPrisma) {
+                                log.debug('hydrating child result inside early sync branch', { token, tenantId });
+                                const cache = new AgentResultCache(childSyncPrisma);
+                                tryHydrateChildResult(result, cache, tenantId);
+                            } else {
+                                log.warn('hydrateArtifacts skipped inside early sync branch: no Prisma client', { token, tenantId });
+                            }
+                        }
+
                         // Extract clean result from potentially wrapped TaskEntity
-                    // This fixes the confusing nested structure where result might be a TaskEntity wrapper
-                    const cleanChildResult = extractCleanChildResult(result);
+                        // This fixes the confusing nested structure where result might be a TaskEntity wrapper
+                        const cleanChildResult = extractCleanChildResult(result);
                     const childTaskId = cleanChildResult.childTaskId || (result as any)?.task?.id || `cached-${token}`;
                         const observation: EngineObservation = {
                             source: 'child',
@@ -3315,8 +3394,9 @@ export class TaskEngine {
 
             const stagingPrisma = this.getSessionStorePrisma();
             if (stagingPrisma && result && typeof result === 'object') {
+                log.debug('hydrating child result while staging observation', { parentTaskId, token });
                 const cache = new AgentResultCache(stagingPrisma);
-                hydrateArtifacts(result, cache, tenantId);
+                tryHydrateChildResult(result, cache, tenantId);
             }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
@@ -3326,7 +3406,7 @@ export class TaskEngine {
                 kind: 'child.completed',
                 payload: {
                     token,
-                    childTaskId: cleanChildResult.childTaskId || childTaskId,
+                    childTaskId: cleanChildResult.childTaskId || childTaskId || token,
                     result: cleanChildResult.result, // Use clean extracted result
                     agentId: childAgentId,
                     executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
@@ -3468,8 +3548,9 @@ export class TaskEngine {
             (next as any).inbox = (next as any).inbox || { current: [], all: [] };
             const parentPrisma = this.getSessionStorePrisma();
             if (parentPrisma && result && typeof result === 'object') {
+                log.debug('hydrating child result in handleChildCompleted', { parentTaskId, token });
                 const cache = new AgentResultCache(parentPrisma);
-                hydrateArtifacts(result, cache, tenantId);
+                tryHydrateChildResult(result, cache, tenantId);
             }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
@@ -3479,7 +3560,7 @@ export class TaskEngine {
                 kind: 'child.completed',
                 payload: {
                     token,
-                    childTaskId: cleanChildResult.childTaskId || childTaskId,
+                    childTaskId: cleanChildResult.childTaskId || childTaskId || token,
                     result: cleanChildResult.result, // Use clean extracted result
                     agentId: childAgentId,
                     executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
@@ -4660,6 +4741,16 @@ export class TaskEngine {
                         // while the current loop is still running
                         if ((ctx as any).__activeLoopInbox) {
                             const env = (ctx as any).__activeLoopEnv;
+                            if (result && typeof result === 'object') {
+                                const childPrisma = engine.getSessionStorePrisma();
+                                if (childPrisma) {
+                                    log.debug('hydrating child result before injecting into active loop inbox', { token, tenantId });
+                                    const cache = new AgentResultCache(childPrisma);
+                                    tryHydrateChildResult(result, cache, tenantId);
+                                } else {
+                                    log.warn('hydrateArtifacts skipped for active loop injection: no Prisma client', { token, tenantId });
+                                }
+                            }
                             // Extract clean result from potentially wrapped TaskEntity
                             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
                             const cleanChildResult = extractCleanChildResult(result);

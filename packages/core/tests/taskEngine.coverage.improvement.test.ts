@@ -45,7 +45,8 @@ await jest.unstable_mockModule(outboxPath, () => ({
 
 await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class {} }), { virtual: true });
 
-const { TaskEngine } = await import(taskEnginePath);
+const { TaskEngine, HYDRATED_ARTIFACT_HANDLE_SYMBOL, attachHydratedArtifactHandles } = await import(taskEnginePath);
+const { AgentResultCache } = await import('../src/core/cache/AgentResultCache.js');
 
 class FailingSessionStore implements IWorkingMemorySessionStore {
     private shouldFailLoad = false;
@@ -1666,6 +1667,25 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 // Should NOT have docId field
                 expect(childObservation?.docId).toBeUndefined();
             }
+        });
+    });
+
+    describe('Artifact hydration helper', () => {
+        test('annotates artifact markers with promise-like handles without mutating enumerable payload', () => {
+            const fakePrisma = {} as any;
+            const cache = new AgentResultCache(fakePrisma);
+            const marker = { kind: 'artifact', id: 'artifact-1', mimeType: 'text/html', estimatedSize: 64 };
+
+            attachHydratedArtifactHandles(marker, cache, 'tenant-1');
+
+            const descriptor = Object.getOwnPropertyDescriptor(marker, 'then');
+
+            expect(typeof (marker as any).then).toBe('function');
+            expect(descriptor).toBeDefined();
+            expect(descriptor?.enumerable).toBe(false);
+            expect((marker as any)[HYDRATED_ARTIFACT_HANDLE_SYMBOL]).toBeDefined();
+            expect((marker as any)[HYDRATED_ARTIFACT_HANDLE_SYMBOL]?.id).toBe('artifact-1');
+            expect(JSON.stringify(marker)).toContain('"kind":"artifact"');
         });
     });
 
