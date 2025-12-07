@@ -29,7 +29,18 @@ export type ObservationConfig = {
 
 export type UserEnvelope<T> = { token: string; value: T };
 export type ToolEnvelope<T> = { token: string; result: T; tool: string };
-export type ChildEnvelope<T> = { token: string; result: T; agentId?: string; childTaskId?: string };
+export type ChildEnvelope<T> = {
+    token: string;
+    result: T;
+    agentId?: string;
+    childTaskId?: string;
+    executionMetadata?: {
+        timings?: unknown;
+        rewards?: unknown;
+        state?: string;
+        timestamp?: string;
+    };
+};
 
 export type SynthesizeObservation<T extends ObservationConfig> =
     | (T['user'] extends undefined ? never : { source: 'user'; kind: 'input.provided'; payload: UserEnvelope<T['user']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })

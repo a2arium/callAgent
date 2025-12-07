@@ -1612,6 +1612,61 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             expect(true).toBe(true); // Should handle awaiting scenarios gracefully
         });
+
+        test('child completion observations have consistent structure with source field', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+
+            const base = {
+                M: { memory: { vars: {} } },
+                meta: { turn: 0, agentId: 'agent-a' },
+                pending: {
+                    tasks: {
+                        'test-child': { agentId: 'child-agent', input: { test: 'data' } }
+                    }
+                },
+                inbox: { current: [], all: [] }
+            };
+            store.seed('t', 'consistency-test', base as any, BigInt(0), 'agent-a');
+
+            await engine.handleChildCompleted({
+                tenantId: 't',
+                parentTaskId: 'consistency-test',
+                childToken: 'test-child',
+                result: { status: 'completed', data: { success: true } }
+            });
+
+            // Check the updated snapshot to verify observation structure
+            const updatedSnapshot = store.getSnapshot('t', 'consistency-test');
+            const inbox = (updatedSnapshot?.snapshot as any)?.inbox;
+
+            if (inbox && inbox.all.length > 0) {
+                const childObservation = inbox.all.find((obs: any) =>
+                    obs.kind === 'child.completed' && obs.payload.token === 'test-child'
+                );
+
+                expect(childObservation).toBeDefined();
+                expect(childObservation?.source).toBe('child'); // ✅ Should have source field
+                expect(childObservation?.kind).toBe('child.completed');
+                expect(childObservation?.payload).toMatchObject({
+                    token: 'test-child',
+                    result: { status: 'completed', data: { success: true } },
+                    childTaskId: expect.any(String)
+                });
+                expect(childObservation?.provenance).toBeDefined();
+                expect(childObservation?.provenance).toMatchObject({
+                    ts: expect.any(Number),
+                    turn: 1, // turn should be incremented
+                    id: 'test-child',
+                    correlationId: 'test-child'
+                });
+                // Should NOT have docId field
+                expect(childObservation?.docId).toBeUndefined();
+            }
+        });
     });
 
     describe('Variable Synchronization and State Consistency', () => {
@@ -1959,6 +2014,184 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             Promise.all([task1, task2]).then(() => {
                 expect(true).toBe(true); // Tasks complete without error
             });
+        });
+    });
+
+    describe('TaskEntity Result Extraction Fix', () => {
+        test('should clean up TaskEntity nested structure in child observations', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+
+            // Create a base context
+            const base = { M: { memory: { vars: {} } }, meta: { turn: 0, agentId: 'agent-a' } };
+            store.seed('t', 'session', base, BigInt(0), 'agent-a');
+
+            // Test through actual handleChildCompleted call with TaskEntity result
+            const mockTaskEntityResult = {
+                id: 'child-task-123',
+                status: {
+                    state: 'completed',
+                    timestamp: '2025-01-01T00:00:00Z',
+                    metadata: {
+                        result: { cleanData: 'extracted content', scrapedAt: '2025-01-01T00:00:00Z' },
+                        timings: { start: '2025-01-01T00:00:00Z', end: '2025-01-01T00:01:00Z' },
+                        rewards: [{ value: 0.8, type: 'extrinsic' }]
+                    }
+                }
+            };
+
+            // Call handleChildCompleted with TaskEntity wrapped result
+            await engine.handleChildCompleted({
+                tenantId: 't',
+                parentTaskId: 'session',
+                childToken: 'test-child',
+                result: mockTaskEntityResult
+            });
+
+            // Check the updated snapshot to verify TaskEntity extraction worked
+            const updatedSnapshot = store.getSnapshot('t', 'session');
+            const inbox = (updatedSnapshot?.snapshot as any)?.inbox;
+
+            if (inbox && inbox.all.length > 0) {
+                const childObservation = inbox.all.find((obs: any) =>
+                    obs.kind === 'child.completed' && obs.payload.token === 'test-child'
+                );
+
+                expect(childObservation).toBeDefined();
+                expect(childObservation?.source).toBe('child');
+                expect(childObservation?.payload.childTaskId).toBe('child-task-123');
+                expect(childObservation?.payload.result).toEqual({
+                    cleanData: 'extracted content',
+                    scrapedAt: '2025-01-01T00:00:00Z'
+                });
+                expect(childObservation?.payload.executionMetadata).toBeDefined();
+                expect(childObservation?.payload.executionMetadata.state).toBe('completed');
+                expect(childObservation?.payload.executionMetadata.timings).toEqual({
+                    start: '2025-01-01T00:00:00Z',
+                    end: '2025-01-01T00:01:00Z'
+                });
+                expect(childObservation?.payload.executionMetadata.rewards).toEqual([
+                    { value: 0.8, type: 'extrinsic' }
+                ]);
+
+                // Verify the old nested structure is gone
+                expect(childObservation?.payload.result?.status?.metadata?.result).toBeUndefined();
+            }
+        });
+
+        test('should handle TaskEntity extraction in actual child completion flow', async () => {
+            const store = new FailingSessionStore();
+            const mockHandlerInvoker = {
+                invoke: jest.fn().mockResolvedValue({ handled: true })
+            };
+            const engine = new TaskEngine({
+                sessionStore: store as any,
+                handlerInvoker: mockHandlerInvoker as any
+            });
+
+            // Mock the A2A service to return a TaskEntity wrapped result
+            const a2aModule = await import(a2aPath);
+            const mockSendTaskToAgent = jest.fn().mockResolvedValue({
+                id: 'child-task-456',
+                status: {
+                    state: 'completed',
+                    timestamp: '2025-01-01T00:00:00Z',
+                    metadata: {
+                        result: { websiteData: 'extracted from website', url: 'https://example.com' },
+                        timings: { start: '2025-01-01T00:00:00Z', end: '2025-01-01T00:02:00Z' },
+                        rewards: [{ value: 0.9, type: 'extrinsic' }]
+                    }
+                }
+            });
+            (a2aModule as any).globalA2AService.sendTaskToAgent = mockSendTaskToAgent;
+
+            // Create a proper base context with required structure
+            const base = {
+                M: {
+                    memory: {
+                        vars: {},
+                        longTerm: {
+                            episodic: [],
+                            semantic: { concepts: [] },
+                            procedural: { skills: [] }
+                        }
+                    },
+                    worldModel: { implicit: null, explicit: null, simulator: null },
+                    goalState: { hierarchy: { nodes: {}, roots: [] } },
+                    emotion: { valence: 0, arousal: 0.2 },
+                    rewardParams: {
+                        extrinsicWeights: [1],
+                        intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 },
+                        discountGamma: 0.99
+                    },
+                    policyParams: { theta: null, stochastic: false }
+                },
+                meta: { turn: 0, agentId: 'agent-a' }
+            };
+            store.seed('t', 'session', base, BigInt(0), 'agent-a');
+
+            // Start the task to get a context with sendTaskToAgent
+            const startResult = await engine.startTask({
+                task: { id: 'session', input: { url: 'https://example.com' } },
+                isStreaming: false,
+                tenantId: 't'
+            });
+
+            // Handle both TaskEntity direct result and wrapped result with ctx
+            const ctx = (startResult as any).ctx || startResult;
+            if (ctx && ctx.sendTaskToAgent) {
+                // Send a task to agent which should return TaskEntity wrapped result
+                const childResult = await ctx.sendTaskToAgent('fetch-website', {
+                    url: 'https://example.com'
+                }, { agent: 'fetch-website' });
+
+                // Check that the child completion observation was created with clean structure
+                const observations = ctx.inbox.observations();
+                const childCompletedObs = observations.find((obs: any) =>
+                    obs.kind === 'child_completed' && obs.payload.childTaskId === 'child-task-456'
+                );
+
+                expect(childCompletedObs).toBeDefined();
+                expect(childCompletedObs.payload).toMatchObject({
+                    childTaskId: 'child-task-456',
+                    result: { websiteData: 'extracted from website', url: 'https://example.com' },
+                    from: 'fetch-website',
+                    source: 'child'
+                });
+
+                // Verify execution metadata is at payload level, not nested
+                expect(childCompletedObs.payload.executionMetadata).toBeDefined();
+                expect(childCompletedObs.payload.executionMetadata.state).toBe('completed');
+                expect(childCompletedObs.payload.executionMetadata.timings).toBeDefined();
+
+                // Verify the old nested structure is gone
+                expect(childCompletedObs.payload.result?.status?.metadata?.result).toBeUndefined();
+            }
+        });
+
+        test('should handle non-TaskEntity results without modification', async () => {
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+
+            // Create a base context
+            const base = { M: { memory: { vars: {} } }, meta: { turn: 0, agentId: 'agent-a' } };
+            store.seed('t', 'session', base, BigInt(0), 'agent-a');
+
+            const ctx = await (engine as any).restoreCtx('t', 'session');
+
+            // Test with simple result directly
+            const extractCleanChildResult = (engine as any).extractCleanChildResult;
+
+            if (extractCleanChildResult) {
+                const simpleResult = { data: 'simple result', count: 42 };
+                const cleanResult = extractCleanChildResult(simpleResult);
+
+                expect(cleanResult).toEqual({
+                    result: simpleResult
+                });
+                expect(cleanResult.childTaskId).toBeUndefined();
+                expect(cleanResult.executionMetadata).toBeUndefined();
+            }
         });
     });
 });

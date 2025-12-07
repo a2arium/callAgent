@@ -714,7 +714,7 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
 The framework automatically wraps your data types into the standard observation envelope:
 - `user` → `{ token: string; value: T }`
 - `tool` → `{ token: string; result: T; tool: string }`
-- `child` → `{ token: string; result: T; agentId?: string; childTaskId?: string }`
+- `child` → `{ token: string; result: T; agentId?: string; childTaskId?: string; executionMetadata?: { timings?: unknown; rewards?: unknown; state?: string; timestamp?: string; } }`
 
 This gives you **automatic type narrowing** in Perception:
 
@@ -735,6 +735,19 @@ perception: (env: EnvironmentState<ObservationConfig>) => {
     // 1. obs.kind is 'tool.completed'
     // 2. obs.payload is { token: string; result: { summary: string }; tool: string }
     console.log(obs.payload.result.summary); // Safe access!
+  }
+
+  if (obs.source === 'child') {
+    // TypeScript KNOWS:
+    // 1. obs.kind is 'child.completed'
+    // 2. obs.payload contains: token, result, agentId, childTaskId, and optional executionMetadata
+    console.log(obs.payload.result); // Clean result data (no nested TaskEntity structure)
+    console.log(obs.payload.childTaskId); // Child task identifier
+    console.log(obs.payload.executionMetadata?.state); // Execution state metadata
+
+    if (obs.payload.executionMetadata?.timings) {
+      console.log(`Duration: ${obs.payload.executionMetadata.timings.end - obs.payload.executionMetadata.timings.start}ms`);
+    }
   }
 }
 ```
@@ -849,7 +862,7 @@ learning: (prev, prevAction, obs, rPrev) => {
     const intent = extractIntent(obs.text);
     const sentiment = analyzeSentiment(obs.text);
     const entities = extractEntities(obs.text);
-    
+
     return {
       ...prev,
       memory: {
@@ -895,11 +908,53 @@ learning: (prev, prevAction, obs, rPrev) => {
       }
     };
   }
-  
+
+  // ✅ Process child task results with clean result extraction
+  if (obs.eventType === 'child_completed' && obs.childResult) {
+    // childResult is already extracted from TaskEntity wrapper
+    const { result, childTaskId, executionMetadata } = obs.childResult;
+
+    return {
+      ...prev,
+      memory: {
+        ...prev.memory,
+        longTerm: {
+          ...prev.memory.longTerm,
+          episodic: [
+            ...prev.memory.longTerm.episodic,
+            {
+              t: Date.now(),
+              obs: {
+                ...obs,
+                childTaskId,
+                childExecutionState: executionMetadata?.state,
+                childTimings: executionMetadata?.timings
+              },
+              act: prevAction,
+              rew: rPrev
+            }
+          ]
+        }
+      },
+      worldModel: {
+        ...prev.worldModel,
+        // Store child result data without nested TaskEntity structure
+        childOutcomes: {
+          ...(prev.worldModel.childOutcomes || {}),
+          [childTaskId]: {
+            result,  // Clean result data
+            completedAt: executionMetadata?.timestamp,
+            executionState: executionMetadata?.state
+          }
+        }
+      }
+    };
+  }
+
   // ❌ NEVER do this:
   // prev.memory.vars.userText = obs.text;  // Mutation!
   // prev.vars.stage = 'idle';  // Control in cognition!
-  
+
   return prev;
 }
 ```
@@ -1206,3 +1261,242 @@ If an agent attempts to save a larger string inline (without wrapping it in `Art
 3.  The agent continues execution, but the data is lost.
 
 **Rule:** If you see `[PRUNE]` warnings, wrap that field with `Artifact.create()`.
+
+---
+
+## Child Task Observation Pattern
+
+When working with child agents through `ctx.sendTaskToAgent()`, the framework provides a clean, structured way to handle child task results in observations. This eliminates the confusing nested TaskEntity wrapper structures and provides direct access to result data and execution metadata.
+
+### Clean Result Structure
+
+Child observations automatically include:
+
+- **`result`**: The clean result data from the child task (no TaskEntity wrapper)
+- **`childTaskId`**: Unique identifier for the child task
+- **`agentId`**: ID of the child agent that executed the task
+- **`executionMetadata`**: Optional execution information including:
+  - `timings`: Start/end timestamps for performance analysis
+  - `rewards`: Reward signals from the child execution
+  - `state`: Final execution state of the child task
+  - `timestamp`: Completion timestamp
+
+### Pattern: End-to-End Child Task Handling
+
+```typescript
+// 1. Define your observation config to include child results
+type ObservationConfig = {
+  user: string;
+  tool: { status: string; data?: unknown };
+  child: {
+    result: unknown;           // Clean result data
+    childTaskId: string;       // Child task identifier
+    executionMetadata?: {      // Optional execution details
+      timings?: unknown;
+      rewards?: unknown;
+      state?: string;
+      timestamp?: string;
+    };
+  };
+};
+
+// 2. Delegate work to child agent in Execution
+execution: async (intent, ctx) => {
+  if (intent.kind === 'delegate_to_child') {
+    const result = await ctx.sendTaskToAgent(intent.childAgentId, intent.input, {
+      awaitCompletion: false  // Async execution
+    });
+
+    return {
+      kind: 'subagent',
+      token: result.taskId
+    };
+  }
+}
+
+// 3. Handle child completion in Perception with clean structure
+perception: (env) => {
+  const childObs = env.inbox.current.find(o => o.source === 'child');
+  if (childObs) {
+    // ✅ Direct access to clean result data
+    const { result, childTaskId, executionMetadata } = childObs.payload;
+
+    return {
+      eventType: 'child_completed',
+      childResult: {
+        result,                    // Clean result (no TaskEntity wrapper)
+        childTaskId,              // Task identifier
+        agentId: childObs.payload.agentId,
+        executionMetadata         // Timing, state, reward info
+      }
+    };
+  }
+
+  return {};
+}
+
+// 4. Store child outcomes in Learning for policy reasoning
+learning: (prev, _, obs) => {
+  if (obs.eventType === 'child_completed' && obs.childResult) {
+    const { result, childTaskId, executionMetadata } = obs.childResult;
+
+    return {
+      ...prev,
+      worldModel: {
+        ...prev.worldModel,
+        // Store clean child results for policy access
+        childOutcomes: {
+          ...(prev.worldModel.childOutcomes || {}),
+          [childTaskId]: {
+            result,                    // Direct result data
+            completedAt: executionMetadata?.timestamp,
+            executionState: executionMetadata?.state,
+            agentId: obs.childResult.agentId
+          }
+        }
+      },
+      memory: {
+        ...prev.memory,
+        longTerm: {
+          ...prev.memory.longTerm,
+          episodic: [
+            ...prev.memory.longTerm.episodic,
+            {
+              t: Date.now(),
+              obs: {
+                ...obs,
+                childTaskId,
+                executionState: executionMetadata?.state,
+                executionTimings: executionMetadata?.timings
+              },
+              act: undefined, // Will be set by framework
+              rew: executionMetadata?.rewards
+            }
+          ]
+        }
+      }
+    };
+  }
+
+  return prev;
+}
+
+// 5. Make decisions based on child results in Policy
+policy: (m) => {
+  const childOutcomes = m.worldModel.childOutcomes || {};
+
+  // Analyze completed child tasks
+  const completedTasks = Object.entries(childOutcomes)
+    .filter(([_, outcome]) =>
+      outcome.executionState === 'completed' ||
+      outcome.executionState === 'success'
+    );
+
+  if (completedTasks.length > 0) {
+    // ✅ Direct access to clean result data
+    const analysis = completedTasks.reduce((acc, [taskId, outcome]) => {
+      return {
+        ...acc,
+        [taskId]: {
+          data: outcome.result,        // Clean result, no wrapper
+          agent: outcome.agentId,
+          completedAt: outcome.completedAt
+        }
+      };
+    }, {});
+
+    return {
+      kind: 'process_child_results',
+      analysis
+    };
+  }
+
+  // Check for failed child tasks
+  const failedTasks = Object.entries(childOutcomes)
+    .filter(([_, outcome]) =>
+      outcome.executionState === 'failed' ||
+      outcome.executionState === 'error'
+    );
+
+  if (failedTasks.length > 0) {
+    return {
+      kind: 'handle_child_failures',
+      failedTasks: failedTasks.map(([id]) => id)
+    };
+  }
+
+  return { kind: 'wait_for_children' };
+}
+```
+
+### Benefits of Clean Child Observations
+
+1. **No Nested Wrapper Confusion**: Direct access to result data without navigating `result.status.metadata.result` structures
+2. **Rich Execution Context**: Built-in access to timing, state, and reward information
+3. **Type Safety**: Automatic TypeScript narrowing for child observation payloads
+4. **Consistent Structure**: Standardized format across all child agent interactions
+5. **Performance Tracking**: Built-in timing information for optimizing child task execution
+
+### Error Handling with Clean Structure
+
+```typescript
+perception: (env) => {
+  const childObs = env.inbox.current.find(o => o.source === 'child');
+  if (childObs) {
+    const { result, childTaskId, executionMetadata } = childObs.payload;
+
+    // Handle execution failures gracefully
+    if (executionMetadata?.state === 'failed' || executionMetadata?.state === 'error') {
+      return {
+        eventType: 'child_failed',
+        childResult: {
+          result,                    // May contain error details
+          childTaskId,
+          error: true,
+          executionMetadata
+        }
+      };
+    }
+
+    return {
+      eventType: 'child_completed',
+      childResult: { result, childTaskId, executionMetadata }
+    };
+  }
+
+  return {};
+}
+```
+
+### Performance Analysis Example
+
+```typescript
+learning: (prev, _, obs) => {
+  if (obs.eventType === 'child_completed' && obs.childResult?.executionMetadata?.timings) {
+    const { childTaskId, executionMetadata } = obs.childResult;
+    const { timings } = executionMetadata;
+
+    // Calculate performance metrics
+    const duration = timings.end - timings.start;
+
+    return {
+      ...prev,
+      worldModel: {
+        ...prev.worldModel,
+        performanceMetrics: {
+          ...(prev.worldModel.performanceMetrics || {}),
+          [childTaskId]: {
+            duration,
+            completedAt: executionMetadata.timestamp,
+            rewards: executionMetadata.rewards
+          }
+        }
+      }
+    };
+  }
+
+  return prev;
+}
+```
+
+This pattern provides a robust foundation for building sophisticated multi-agent systems with clean observation handling, rich execution metadata, and seamless integration with the A-P-L-R-E-T cognitive architecture.

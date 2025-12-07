@@ -192,6 +192,55 @@ export type TaskEntity = {
 };
 
 /**
+ * Clean child task result extracted from TaskEntity wrapper
+ */
+interface CleanChildResult {
+    result: unknown;
+    childTaskId?: string;
+    executionMetadata?: {
+        timings?: unknown;
+        rewards?: unknown;
+        state?: string;
+        timestamp?: string;
+    };
+}
+
+/**
+ * Helper function to detect if a result is a TaskEntity (wrapped child task result)
+ */
+const isTaskEntityResult = (result: unknown): result is TaskEntity => {
+    return result !== null && result !== undefined && typeof result === 'object' &&
+           typeof (result as any).id === 'string' &&
+           typeof (result as any).status === 'object' &&
+           (result as any).status !== null;
+};
+
+/**
+ * Extract clean result from potentially wrapped TaskEntity
+ * This fixes the confusing nested structure where TaskEntity.status.metadata.result contains the actual agent result
+ */
+const extractCleanChildResult = (result: unknown): CleanChildResult => {
+    if (!isTaskEntityResult(result)) {
+        // Return as-is if not a TaskEntity wrapper
+        return { result };
+    }
+
+    const taskEntity = result as TaskEntity;
+    const cleanResult: CleanChildResult = {
+        childTaskId: taskEntity.id,
+        result: taskEntity.status?.metadata?.result ?? result,
+        executionMetadata: {
+            timings: taskEntity.status?.metadata?.timings,
+            rewards: taskEntity.status?.metadata?.rewards,
+            state: taskEntity.status?.state,
+            timestamp: taskEntity.status?.timestamp
+        }
+    };
+
+    return cleanResult;
+};
+
+/**
  * Parameters for starting a task
  */
 export type StartTaskParams = {
@@ -1112,15 +1161,25 @@ export class TaskEngine {
                             awaitCompletionFlag: awaitCompletion
                         });
 
-                        const childTaskId = (result as any)?.id || (result as any)?.task?.id || `cached-${token}`;
-                        const observation = {
+                        // Extract clean result from potentially wrapped TaskEntity
+                    // This fixes the confusing nested structure where result might be a TaskEntity wrapper
+                    const cleanChildResult = extractCleanChildResult(result);
+                    const childTaskId = cleanChildResult.childTaskId || (result as any)?.task?.id || `cached-${token}`;
+                        const observation: EngineObservation = {
+                            source: 'child',
                             kind: 'child.completed',
                             payload: {
                                 token,
-                                result,
-                                childTaskId
+                                result: cleanChildResult.result, // Use clean extracted result
+                                childTaskId,
+                                executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
                             },
-                            docId: token
+                            provenance: {
+                                ts: Date.now(),
+                                turn: Number((ctx as any)?.M?.meta?.turn ?? 0) + 1,
+                                id: token,
+                                correlationId: token
+                            }
                         };
 
                         // Inject into inbox
@@ -1980,15 +2039,19 @@ export class TaskEngine {
                                         }
                                     }
 
+                                    // Extract clean result from potentially wrapped TaskEntity
+                                    // This fixes the confusing nested structure where result might be a TaskEntity wrapper
+                                    const completionResult = (completionEvent.payload as any)?.result;
+                                    const cleanChildResult = extractCleanChildResult(completionResult);
                                     const childObservation: EngineObservation = {
-
                                         source: 'child',
                                         kind: 'child.completed',
                                         payload: {
                                             token,
-                                            childTaskId: (completionEvent.payload as any)?.childTaskId,
-                                            result: (completionEvent.payload as any)?.result,
-                                            agentId: (completionEvent.payload as any)?.agentId
+                                            childTaskId: cleanChildResult.childTaskId || (completionEvent.payload as any)?.childTaskId,
+                                            result: cleanChildResult.result, // Use clean extracted result
+                                            agentId: (completionEvent.payload as any)?.agentId,
+                                            executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
                                         },
                                         provenance: {
                                             ts: new Date(completionEvent.createdAt).getTime(),
@@ -3255,10 +3318,19 @@ export class TaskEngine {
                 const cache = new AgentResultCache(stagingPrisma);
                 hydrateArtifacts(result, cache, tenantId);
             }
+            // Extract clean result from potentially wrapped TaskEntity
+            // This fixes the confusing nested structure where result might be a TaskEntity wrapper
+            const cleanChildResult = extractCleanChildResult(result);
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
-                payload: { token, childTaskId, result, agentId: childAgentId },
+                payload: {
+                    token,
+                    childTaskId: cleanChildResult.childTaskId || childTaskId,
+                    result: cleanChildResult.result, // Use clean extracted result
+                    agentId: childAgentId,
+                    executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
+                },
                 provenance: {
                     ts: Date.now(),
                     turn: Number((base as any)?.meta?.turn ?? 0) + 1,
@@ -3399,10 +3471,19 @@ export class TaskEngine {
                 const cache = new AgentResultCache(parentPrisma);
                 hydrateArtifacts(result, cache, tenantId);
             }
+            // Extract clean result from potentially wrapped TaskEntity
+            // This fixes the confusing nested structure where result might be a TaskEntity wrapper
+            const cleanChildResult = extractCleanChildResult(result);
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
-                payload: { token, childTaskId, result, agentId: childAgentId },
+                payload: {
+                    token,
+                    childTaskId: cleanChildResult.childTaskId || childTaskId,
+                    result: cleanChildResult.result, // Use clean extracted result
+                    agentId: childAgentId,
+                    executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
+                },
                 provenance: {
                     ts: Date.now(),
                     turn: Number((base as any)?.meta?.turn ?? 0) + 1,
@@ -4579,10 +4660,18 @@ export class TaskEngine {
                         // while the current loop is still running
                         if ((ctx as any).__activeLoopInbox) {
                             const env = (ctx as any).__activeLoopEnv;
+                            // Extract clean result from potentially wrapped TaskEntity
+                            // This fixes the confusing nested structure where result might be a TaskEntity wrapper
+                            const cleanChildResult = extractCleanChildResult(result);
                             const childObservation: EngineObservation = {
                                 source: 'child',
                                 kind: 'child.completed',
-                                payload: { token, result, agentId: agent },
+                                payload: {
+                                    token,
+                                    result: cleanChildResult.result, // Use clean extracted result
+                                    agentId: agent,
+                                    executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
+                                },
                                 provenance: {
                                     ts: Date.now(),
                                     turn: Number(env?.turn ?? 0),
