@@ -3,7 +3,7 @@ const config = {
     // Use proper ts-jest preset for ESM
     preset: 'ts-jest/presets/default-esm',
     testEnvironment: 'node',
-    
+
     // Test discovery
     roots: ['<rootDir>/packages'],
     testMatch: [
@@ -15,7 +15,7 @@ const config = {
         '/dist/',
         '<rootDir>/packages/.*/dist/'
     ],
-    
+
     // Force TypeScript transformation with ts-jest only
     transform: {
         '^.+\\.tsx?$': [
@@ -34,7 +34,7 @@ const config = {
             },
         ],
     },
-    
+
     // Module resolution
     moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
@@ -44,12 +44,12 @@ const config = {
         // Handle .js imports that should resolve to .ts files
         '^(\\.{1,2}/.*)\\.js$': '$1',
     },
-    
+
     // Critical: Tell Jest to treat .ts files as ESM
     // Note: .mjs files are always treated as ESM by Jest
     extensionsToTreatAsEsm: ['.ts'],
     moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'json', 'node'],
-    
+
     // Transform settings
     // Don't ignore workspace packages - they need to be transformed
     transformIgnorePatterns: [
@@ -58,7 +58,7 @@ const config = {
         '!packages/',
         '!apps/',
     ],
-    
+
     // Coverage settings
     // Collect coverage and emit a summary table after the run
     collectCoverage: true,
@@ -73,9 +73,9 @@ const config = {
     ],
     // We care about stability over hard thresholds right now
     coverageThreshold: undefined,
-    
+
     // Setup
-    setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
+    setupFilesAfterEnv: ['<rootDir>/jest.setup.mjs'],
     // Global teardown runs ONCE after all tests
     globalTeardown: '<rootDir>/jest.teardown.js',
     verbose: true,

@@ -51,11 +51,11 @@ await jest.unstable_mockModule(handlesPath, () => ({
     setPendingTasks: mockSetPendingTasks,
     getPendingGroups: jest.fn(),
     setPendingGroups: jest.fn(),
-    InputHandle: class {},
+    InputHandle: class { },
     TaskHandle: class {
         __injectDispatcher = jest.fn();
     },
-    GroupHandle: class {}
+    GroupHandle: class { }
 }));
 
 await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
@@ -378,8 +378,9 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                     handlerName: 'testHandler'
                 });
 
-                // Should return undefined for input_required status (line 4534)
-                expect(result).toBeUndefined();
+                // Should return token object even for input_required status (fallback path)
+                expect(result).toBeDefined();
+                expect(result.token).toBe('test-token');
                 expect(mockCreateTaskHandle).toHaveBeenCalled();
             }
         });

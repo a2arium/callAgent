@@ -207,7 +207,7 @@ const attachHydratedArtifactHandles = (
         return;
     }
 
-const record = obj as Record<string, unknown>;
+    const record = obj as Record<string, unknown>;
     for (const key of Object.keys(record)) {
         attachHydratedArtifactHandles(record[key], cache, tenantId, depth + 1, visited);
     }
@@ -278,9 +278,9 @@ interface CleanChildResult {
  */
 const isTaskEntityResult = (result: unknown): result is TaskEntity => {
     return result !== null && result !== undefined && typeof result === 'object' &&
-           typeof (result as any).id === 'string' &&
-           typeof (result as any).status === 'object' &&
-           (result as any).status !== null;
+        typeof (result as any).id === 'string' &&
+        typeof (result as any).status === 'object' &&
+        (result as any).status !== null;
 };
 
 /**
@@ -1243,7 +1243,7 @@ export class TaskEngine {
                         // Extract clean result from potentially wrapped TaskEntity
                         // This fixes the confusing nested structure where result might be a TaskEntity wrapper
                         const cleanChildResult = extractCleanChildResult(result);
-                    const childTaskId = cleanChildResult.childTaskId || (result as any)?.task?.id || `cached-${token}`;
+                        const childTaskId = cleanChildResult.childTaskId || (result as any)?.task?.id || `cached-${token}`;
                         const observation: EngineObservation = {
                             source: 'child',
                             kind: 'child.completed',
@@ -1298,7 +1298,12 @@ export class TaskEngine {
             };
 
             const result = await dispatch({});
-            return result ?? handle;
+            if (result && typeof result === 'object') {
+                const merged = { ...result, ...handle } as any;
+                merged.token = token; // Explicitly assign the token string (not from getter)
+                return merged;
+            }
+            return result ?? { token };
         };
 
         (ctx as any).allTasks = async (
@@ -4791,9 +4796,17 @@ export class TaskEngine {
                             // Fallback: if no active loop inbox, use standard handleChildCompleted
                             await engine.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
                         }
-                        return result;
+                        if (result && typeof result === 'object') {
+                            const mergedWithToken = { ...result, ...handle } as any;
+                            mergedWithToken.token = handle.token; // Explicitly assign to ensure getter is captured
+                            return mergedWithToken;
+                        }
+                        return { token };
                     }
-                    return result;
+                    if (result && typeof result === 'object') {
+                        return { ...result, ...handle };
+                    }
+                    return { token };
                 } catch (e) {
                     await engine.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
                         taskId: sessionId,

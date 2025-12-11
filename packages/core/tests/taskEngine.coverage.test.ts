@@ -1154,7 +1154,7 @@ describe('TaskEngine orchestration coverage', () => {
 
         const result = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { awaitCompletion: true, setStage: 'child-await' });
 
-        expect(result).toEqual({ status: 'completed', value: 5 });
+        expect(result).toMatchObject({ status: 'completed', value: 5 });
         expect(sendMock).toHaveBeenCalledWith(
             expect.any(Object),
             'child-agent',
