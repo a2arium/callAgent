@@ -1,32 +1,36 @@
 import path from 'node:path';
+import { agentLoader } from './AgentLoader.js';
+import { RunnerStateService } from './RunnerStateService.js';
+import { ToolExecutionService } from './ToolExecutionService.js';
+import { StreamTransport } from './StreamTransport.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig, type MinimalConfig } from '../config/index.js';
-import { PluginManager } from '../core/plugin/pluginManager.js';
+import { PluginManager } from '../plugin/pluginManager.js';
 import type { TaskContext, TaskInput, MessagePart, Artifact as ArtifactHandle } from '../shared/types/index.js';
 import type { TaskStatus, Artifact as StreamArtifact } from '../shared/types/StreamingEvents.js';
-import type { AgentPlugin } from '../core/plugin/types.js';
+import type { AgentPlugin } from '../plugin/types.js';
 import { logger, withLoggingContext, type LoggerConfig } from '@a2arium/callagent-utils';
 import { AgentError, TaskExecutionError } from '../utils/errors.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { outboxPublisher } from '../eventbus/outboxPublisher.js';
-import { extendContextWithStreaming } from '../core/context/StreamingContext.js';
+import { extendContextWithStreaming } from '../context/StreamingContext.js';
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
-import { createLLMForTask } from '../core/llm/LLMFactory.js';
-import { TaskEngine, type TaskEntity } from '../core/orchestration/taskEngine.js';
-import { EngineLocator } from '../core/orchestration/EngineLocator.js';
+import { createLLMForTask } from '../llm/LLMFactory.js';
+import { TaskEngine, type TaskEntity } from '../orchestration/taskEngine.js';
+import { EngineLocator } from '../orchestration/EngineLocator.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
-import { registerHandler } from '../core/orchestration/HandlerRegistry.js';
-import { createMemoryRegistry } from '../core/memory/createMemoryRegistry.js';
-import { extendContextWithMemory } from '../core/memory/types/working/context/workingMemoryContext.js';
-import { resolveTenantId } from '../core/plugin/tenantResolver.js';
-import { globalA2AService } from '../core/orchestration/A2AService.js';
-import { AgentResultCache } from '../core/cache/index.js';
-import { ArtifactImpl } from '../core/orchestration/ArtifactImpl.js';
+import { registerHandler } from '../orchestration/HandlerRegistry.js';
+import { createMemoryRegistry } from '@a2arium/callagent-memory-engine';
+import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
+import { resolveTenantId } from '../plugin/tenantResolver.js';
+import { globalA2AService } from '../orchestration/A2AService.js';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
+import { ArtifactImpl } from '@a2arium/callagent-memory-engine';
 import type { PrismaClient } from '@prisma/client';
-import { loadAgentIndexIfPresent } from '../core/plugin/AgentIndexLoader.js';
+import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -72,116 +76,10 @@ export async function runAgentWithStreaming(
     // Determine log method based on output format for runner logs
     const logTraceMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
 
-    let plugin: AgentPlugin | undefined;
-
-    // Dependency resolution (if enabled)
-    if (options.resolveDeps !== false) {  // Default is true
-        logTraceMethod.call(runnerLogger, `🔍 Resolving agent dependencies...`);
-
-        try {
-            const loadedAgents = await PluginManager.loadAgentWithDependencies(agentFilePath);
-
-            if (loadedAgents.length > 1) {
-                logTraceMethod.call(runnerLogger, `📦 Loaded ${loadedAgents.length} agents (including dependencies)`);
-                loadedAgents.forEach(agent => {
-                logTraceMethod.call(runnerLogger, `  ✅ ${agent.manifest.name} (v${agent.manifest.version})`);
-                });
-            } else if (loadedAgents.length === 1) {
-                logTraceMethod.call(runnerLogger, `📦 Loaded agent: ${loadedAgents[0].manifest.name} (no dependencies)`);
-            }
-
-            // The main agent should be the first one loaded (root agent)
-            plugin = loadedAgents[0];
-            logTraceMethod.call(runnerLogger, `Plugin loaded successfully via dependency resolution`);
-        } catch (error: unknown) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-
-            if (errorMessage.includes('Circular dependency')) {
-                runnerLogger.error('❌ Circular dependency detected:', error);
-                throw new TaskExecutionError(`Circular dependency detected: ${errorMessage}`, {
-                    path: agentFilePath,
-                    originalError: error
-                });
-            } else if (errorMessage.includes('not found')) {
-                runnerLogger.error('❌ Missing dependency:', error);
-                throw new TaskExecutionError(`Missing dependency: ${errorMessage}`, {
-                    path: agentFilePath,
-                    originalError: error
-                });
-            } else {
-                runnerLogger.error('❌ Dependency resolution failed:', error);
-                throw new TaskExecutionError(`Dependency resolution failed: ${errorMessage}`, {
-                    path: agentFilePath,
-                    originalError: error
-                });
-            }
-        }
-    } else {
-        logTraceMethod.call(runnerLogger, `⚠️ Dependency resolution disabled - loading single agent only`);
-        logTraceMethod.call(runnerLogger, `Loading plugin from ${agentFilePath}...`);
-
-        try {
-            // Resolve path and convert to file URL
-            const agentModulePath = path.resolve(agentFilePath);
-            const agentModuleUrl = pathToFileURL(agentModulePath).href;
-            await import(agentModuleUrl);
-        } catch (error: unknown) {
-            runnerLogger.error(`Failed to load agent file`, error, { path: agentFilePath });
-            throw new TaskExecutionError(`Failed to load agent module from ${agentFilePath}`, {
-                path: agentFilePath,
-                originalError: error
-            });
-        }
-        logTraceMethod.call(runnerLogger, `Plugin loaded successfully`);
-    }
-
-    // If dependency resolution was disabled, we need to find the plugin manually
-    if (options.resolveDeps === false || !plugin) {
-        // Get all registered agents from the unified registry
-        const registeredAgents = PluginManager.listAgents();
-        if (registeredAgents.length === 0) {
-            runnerLogger.error(`No plugin registered by file`, null, { path: agentFilePath });
-            throw new TaskExecutionError(
-                `No plugin registered by file ${agentFilePath}. Ensure the file exports the result of createAgent.`,
-                { path: agentFilePath }
-            );
-        }
-
-        // Heuristic: try to find the plugin whose file path roughly matches the input
-        const filename = path.basename(agentFilePath);
-
-        // Try to find plugin by matching names in the path
-        plugin = PluginManager.findAgent(path.basename(agentFilePath, '.js').replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')) || undefined;
-
-        // If not found, try fuzzy matching with the file name
-        if (!plugin) {
-            const baseName = path.basename(agentFilePath, '.js');
-            plugin = PluginManager.findAgent(baseName) || undefined;
-        }
-
-        // If still not found and only one agent, use that
-        if (!plugin && registeredAgents.length === 1) {
-            plugin = PluginManager.findAgent(registeredAgents[0].name) || undefined;
-            if (plugin) {
-                runnerLogger.warn(`Could not definitively match plugin by name in path, using the only registered plugin`, {
-                    name: registeredAgents[0].name,
-                    path: agentFilePath
-                });
-            }
-        }
-
-        if (!plugin) {
-            const availablePlugins = registeredAgents.map(a => a.name).join(', ');
-            runnerLogger.error(`Could not determine which plugin to run`, null, {
-                path: agentFilePath,
-                availablePlugins
-            });
-            throw new TaskExecutionError(
-                `Could not determine which plugin to run from ${agentFilePath}. Found: ${availablePlugins}`,
-                { path: agentFilePath, availablePlugins }
-            );
-        }
-    }
+    // Use AgentLoader to resolve the plugin
+    const plugin = await agentLoader.loadAgent(agentFilePath, {
+        resolveDeps: options.resolveDeps
+    });
 
     // Plugin is already registered in the unified registry via createAgent()
 
@@ -198,19 +96,64 @@ export async function runAgentWithStreaming(
     // --- Create Task Context ---
     const taskId = `local-task-${Date.now()}`;
 
-    // Set up event listeners for streaming output if needed
-    if (options.isStreaming) {
-        setupStreamListeners(taskId, options);
-    } else {
-        // Even in non-streaming mode, we want to see progress events in real-time
-        setupProgressListeners(taskId);
-    }
+    // Initialize Services
+    const runnerState = new RunnerStateService();
+    const toolService = new ToolExecutionService(); // Can be populated with durable handlers later?
+
+    // Durable handlers will be registered to HandlerRegistry, but ToolExecutionService 
+    // is ready for context-level tool execution if we decide to move it there.
+    // For now we keep it empty or initialize with defaults.
+
+    // Initialize stream transport
+    const transport = new StreamTransport({
+        outputType: options.outputType || 'console',
+        outputFile: options.outputFile
+    });
+
+    // Set up event listeners for streaming output
+    const channel = taskChannel(taskId);
+
+    // Determine log method for debug logs (debug -> stdout, warn -> stderr)
+    const logDebugMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
+
+    eventBus.subscribe(channel, (event: A2AEvent) => {
+        // If not streaming, we might only want progress updates?
+        // Original logic:
+        // isStreaming -> handleStatusEvent & handleArtifactEvent
+        // !isStreaming -> setupProgressListeners (which only logs status if it's input-required or debug-like)
+
+        if (options.isStreaming) {
+            if ('status' in event) {
+                transport.handleStatus(event.status, !!event.final);
+            } else if ('artifact' in event) {
+                transport.handleArtifact(event.artifact);
+            }
+        } else {
+            // Non-streaming logic (progress only)
+            if ('status' in event) {
+                const s = event.status;
+                // Filter what we show in non-streaming mode to match legacy setupProgressListeners
+                if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
+                    transport.handleStatus(s, false); // Input required is important
+                } else if (s.state === 'working') {
+                    // Show progress dots/messages? Legacy setupProgressListeners showed them.
+                    transport.handleStatus(s, false);
+                }
+            }
+        }
+    });
+
+    logDebugMethod.call(runnerLogger, `Set up event listeners for task channel: ${channel}`);
 
     // Create the agent-specific logger using the nested createLogger method
     const agentLogger = runnerLogger.createLogger({ prefix: agentName });
 
+    // Create embedding function from LLMFactory
+    const { createEmbeddingFunction, isEmbeddingAvailable } = await import('../llm/LLMFactory.js');
+    const embeddingFunction = isEmbeddingAvailable() ? await createEmbeddingFunction() : undefined;
+
     // Get the memory registry instance with resolved tenant context
-    const memoryRegistry = await createMemoryRegistry(finalTenantId, agentName);
+    const memoryRegistry = await createMemoryRegistry(finalTenantId, agentName, undefined, { embeddingFunction });
     const semanticAdapter = memoryRegistry.semantic.backends[config.memory.semantic.default];
 
     // Create cache service for agent result caching and artifact storage
@@ -308,12 +251,7 @@ export async function runAgentWithStreaming(
                 agentLogger.warn(`llm.updateSettings is stubbed (no LLM adapter configured)`, { settings });
             }
         },
-        tools: {
-            invoke: async <T = unknown>(toolName: string, args: unknown): Promise<T> => {
-                agentLogger.warn(`tools.invoke is stubbed`, { toolName, args });
-                return Promise.resolve({ success: true, output: "Stubbed tool result" } as T);
-            }
-        },
+        tools: toolService.asContextCapability(),
         cognitive: {
             loadWorkingMemory: (e: unknown): void => { agentLogger.warn(`cognitive.loadWorkingMemory is stubbed`, { e }); },
             plan: async (prompt: string, options?: unknown): Promise<unknown> => { agentLogger.warn(`cognitive.plan is stubbed`, { prompt, options }); return { steps: [] }; },
@@ -370,13 +308,13 @@ export async function runAgentWithStreaming(
         agentName,
         plugin.manifest, // Agent config for memory profile
         semanticAdapter, // Existing semantic adapter for backward compatibility
-        await (await import('../core/memory/prismaSingleton.js')).getMemoryPrismaClient()
+        await (await import('@a2arium/callagent-memory-engine')).getMemoryPrismaClient()
     );
 
     // memory registry constructed
 
     // Add A2A capability - contextWithMemory is already a complete TaskContext
-    contextWithMemory.sendTaskToAgent = async (targetAgent, taskInput, options) => {
+    (contextWithMemory as any).sendTaskToAgent = async (targetAgent: string, taskInput: TaskInput, options?: any) => {
         return globalA2AService.sendTaskToAgent(contextWithMemory as any, targetAgent, taskInput, options);
     };
 
@@ -463,7 +401,15 @@ export async function runAgentWithStreaming(
                             }]
                         }]
                     };
-                    outputResults(results, options);
+
+                    // Use transport to output results
+                    if (results.status) {
+                        transport.handleStatus(results.status as any, true);
+                    }
+                    for (const artifact of results.artifacts) {
+                        transport.handleArtifact(artifact);
+                    }
+
                     logTraceMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
                 }
                 return;
@@ -569,7 +515,7 @@ export async function runAgentWithStreaming(
                         try { await agentResultCachePrisma.$disconnect(); } catch { }
                     }
                     try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
-                    try { await (await import('../core/memory/prismaSingleton.js')).disconnectMemoryPrismaClient(); } catch { }
+                    try { await (await import('@a2arium/callagent-memory-engine')).disconnectMemoryPrismaClient(); } catch { }
                     try { (outboxPublisher as any)?.stop?.(); } catch { }
                 }
             } catch (error: unknown) {
@@ -604,154 +550,13 @@ export async function runAgentWithStreaming(
         }); // End of withLoggingContext
 }
 
-/**
- * Set up listeners for streaming events
- */
-function setupStreamListeners(taskId: string, options: StreamingOptions): void {
-    const channel = taskChannel(taskId);
 
-    // Determine log method for debug logs (debug -> stdout, warn -> stderr)
-    const logDebugMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
 
-    // Add event listener for this task channel
-    eventBus.subscribe(channel, (event: A2AEvent) => {
-        if ('status' in event) {
-            handleStatusEvent(event.status, event.final, options);
-        } else if ('artifact' in event) {
-            handleArtifactEvent(event.artifact, options);
-        }
-    });
-
-    logDebugMethod.call(runnerLogger, `Set up event listeners for task channel: ${channel}`);
-}
 
 /**
  * Handle task status events
  */
-function handleStatusEvent(status: TaskStatus, isFinal: boolean, options: StreamingOptions): void {
-    const output = {
-        type: 'status',
-        status: status.state,
-        timestamp: status.timestamp || new Date().toISOString(),
-        final: isFinal,
-        metadata: status.metadata ?? undefined // Include metadata if present
-    };
 
-    if (options.outputType === 'json') {
-        // Pretty-print JSON status event
-        const jsonOutput = JSON.stringify(output, null, 2);
-        console.log(jsonOutput);
-
-        // If outputFile is specified, append to file
-        if (options.outputFile) {
-            appendToFile(options.outputFile, jsonOutput + '\n');
-        }
-        return;
-    } else if (options.outputType === 'sse') {
-        const sseOutput = `data: ${JSON.stringify(output)}\n\n`;
-        console.log(sseOutput);
-
-        // If outputFile is specified, append to file
-        if (options.outputFile) {
-            appendToFile(options.outputFile, sseOutput);
-        }
-    } else {
-        // Default console output
-        if (status.state === 'input-required' || (status.state as any) === 'waiting_input') {
-            console.log(`Status: waiting_input`);
-            const promptText = status.message?.parts
-                ?.filter(part => part.type === 'text')
-                .map(part => (part as { text?: string }).text)
-                .filter(Boolean)
-                .join(' ');
-            if (promptText) console.log(`Prompt: ${promptText}`);
-            const token = (status as any).metadata?.token;
-            if (token) console.log(`Token: ${token}`);
-            // Session id is not passed into this function, so print a hint
-            console.log(`Session: (see earlier log: Starting TaskEngine.startTask { taskId: ... })`);
-        } else if (isFinal) {
-            // Suppress noisy terminal budget messages not relevant to the current session flow
-            const reason = (status as any)?.metadata?.reason;
-            if (status.state === 'failed' && reason === 'budget_turns_exceeded') {
-                return; // don't print this case
-            }
-            console.log(`Status: ${status.state} (FINAL)`);
-            const md: any = status.metadata || {};
-            const agg: any = md.timingsAgg || {};
-            const rewAgg: any = md.rewardsAgg || {};
-            const hasAgg = Object.keys(agg || {}).length > 0 || (rewAgg && (typeof rewAgg.sum === 'number'));
-            if (hasAgg) {
-                console.log('Aggregates:');
-                if (agg && Object.keys(agg).length > 0) {
-                    console.log('  Timings:');
-                    for (const [k, v] of Object.entries(agg)) {
-                        const vv: any = v;
-                        console.log(`    ${k}: sum=${vv.sum}ms avg=${vv.avg.toFixed(2)}ms`);
-                    }
-                }
-                if (rewAgg && typeof rewAgg.sum === 'number') {
-                    console.log(`  Rewards: sum=${rewAgg.sum.toFixed(3)} avg=${rewAgg.avg.toFixed(3)}`);
-                }
-            }
-        } else if (status.state === 'working') {
-            // Display progress messages for working states
-            if (status.message?.parts) {
-                const textParts = status.message.parts
-                    .filter(part => part.type === 'text')
-                    .map(part => (part as { text?: string }).text)
-                    .filter(Boolean);
-
-                if (textParts.length > 0) {
-                    // Check if there's a progress percentage
-                    const progressPercentage = status.metadata?.progress;
-                    if (typeof progressPercentage === 'number') {
-                        console.log(`Progress: ${progressPercentage}% - ${textParts.join(' ')}`);
-                    } else {
-                        console.log(`Progress: ${textParts.join(' ')}`);
-                    }
-                }
-            } else {
-                // Check if there's just a progress percentage without message
-                const progressPercentage = status.metadata?.progress;
-                if (typeof progressPercentage === 'number') {
-                    console.log(`Progress: ${progressPercentage}%`);
-                } else {
-                    console.log(`Status: ${status.state}`);
-                }
-            }
-        } else {
-            console.log(`Status: ${status.state}`);
-        }
-
-        // If outputFile is specified, append to file in a human-readable format
-        if (options.outputFile) {
-            const statusText = isFinal ? `Status: ${status.state} (FINAL)` : `Status: ${status.state}`;
-            appendToFile(options.outputFile, statusText + '\n');
-        }
-    }
-
-    // If there's a message in the status, print it too (for all output types)
-    if (status.message && status.message.parts && status.message.parts.length > 0) {
-        // Skip printing the failure message for budget_turns_exceeded to avoid confusion
-        const reason = (status as any)?.metadata?.reason;
-        if (status.state === 'failed' && reason === 'budget_turns_exceeded') {
-            return;
-        }
-        const textParts = status.message.parts
-            .filter(part => part.type === 'text')
-            .map(part => (part as { text?: string }).text)
-            .filter(Boolean);
-
-        if (textParts.length > 0) {
-            console.log(`Message: ${textParts.join('\n')}`);
-
-            // If outputFile is specified, append to file
-            if (options.outputFile) {
-                appendToFile(options.outputFile, `Message: ${textParts.join('\n')}\n`);
-            }
-        }
-    }
-}
 
 /**
  * Handle artifact events

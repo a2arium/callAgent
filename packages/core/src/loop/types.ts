@@ -152,8 +152,8 @@ export type MentalState<Sensory = unknown> = {
         sensory: Sensory;        // e.g., { llmState, lastObservation }
         // Deprecated: short-term vars bag (kept optional for compatibility)
         vars?: Record<string, unknown>;
-        thoughts?: import('../shared/types/workingMemory.js').ThoughtEntry[];
-        decisions?: Record<string, import('../shared/types/workingMemory.js').DecisionEntry>;
+        thoughts?: import('../shared/types/index.js').ThoughtEntry[];
+        decisions?: Record<string, import('../shared/types/index.js').DecisionEntry>;
         scratch?: unknown;       // Optional ephemeral working set (Learning-owned)
         window?: unknown;        // Optional ephemeral window (Learning-owned)
         longTerm: {

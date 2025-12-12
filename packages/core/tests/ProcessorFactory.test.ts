@@ -1,4 +1,4 @@
-import { ProcessorFactory } from '../src/core/memory/lifecycle/ProcessorFactory.js';
+import { ProcessorFactory } from '@a2arium/callagent-memory-engine';
 
 describe('ProcessorFactory', () => {
     let factory: ProcessorFactory;

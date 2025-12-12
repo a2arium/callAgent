@@ -9,14 +9,14 @@
 import { jest } from '@jest/globals';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/core/memory/stores/SessionStore.js';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/memory/stores/SessionStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const a2aPath = path.resolve(__dirname, '../src/core/orchestration/A2AService.ts');
+const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
 const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
 const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const taskEnginePath = path.resolve(__dirname, '../src/core/orchestration/taskEngine.ts');
+const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
 
 await jest.unstable_mockModule(a2aPath, () => ({
     globalA2AService: {
@@ -154,7 +154,7 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
 
             // The context should have semantic memory read function attached
             if (ctx.memory?.semantic?.read) {
-                const result = await ctx.memory.semantic.read();
+                const result = await ctx.memory.semantic.read({});
                 expect(Array.isArray(result)).toBe(true);
             }
         });
@@ -250,8 +250,10 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
             // Call sendTaskToAgent which should exercise lines 4533-4535
             const result = await ctx.sendTaskToAgent('test-agent', { test: 'input' }, {});
 
-            // Should return early without processing further (line 4534) - returns undefined
-            expect(result).toBeUndefined();
+            // New API returns { handle, token } instead of undefined for input_required
+            expect(result).toBeDefined();
+            expect(result.token).toBeDefined();
+            expect(result.handle).toBeDefined();
             expect(mockSendTaskToAgent).toHaveBeenCalled();
         });
     });

@@ -4,7 +4,7 @@
  */
 
 import { jest } from '@jest/globals';
-import { TaskEngine } from '../src/core/orchestration/taskEngine.js';
+import { TaskEngine } from '../src/orchestration/taskEngine.js';
 
 describe('TaskEngine Additional Coverage Tests', () => {
     beforeEach(() => {

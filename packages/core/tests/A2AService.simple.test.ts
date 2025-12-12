@@ -1,5 +1,5 @@
-import { A2AService, globalA2AService } from '../src/core/orchestration/A2AService.js';
-import { InteractiveTaskHandler } from '../src/core/orchestration/InteractiveTaskResult.js';
+import { A2AService, globalA2AService } from '../src/orchestration/A2AService.js';
+import { InteractiveTaskHandler } from '../src/orchestration/InteractiveTaskResult.js';
 
 describe('A2AService Simple Tests', () => {
     describe('constructor', () => {

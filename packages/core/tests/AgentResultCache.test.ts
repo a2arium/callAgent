@@ -1,4 +1,4 @@
-import { AgentResultCache } from '../src/core/cache/AgentResultCache.js';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import type { PrismaClient } from '@prisma/client';
 import type { TaskInput } from '../src/shared/types/index.js';
 import { jest } from '@jest/globals';

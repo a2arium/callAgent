@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { eventBus } from '../../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 import type { A2AEvent } from '../../shared/types/StreamingEvents.js';
-import type { IWorkingMemorySessionStore } from '../../core/memory/stores/SessionStore.js';
+import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engine';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 
 /**

@@ -7,7 +7,8 @@ import {
     isCompatibleWithProfile,
     ConfigProfile,
     MemoryLifecycleConfig,
-} from '../src/core/memory/lifecycle/config/index.js';
+    MemoryLifecycleConfig,
+} from '@a2arium/callagent-memory-engine';
 
 describe('MLO Configuration System', () => {
     describe('Default Configurations', () => {

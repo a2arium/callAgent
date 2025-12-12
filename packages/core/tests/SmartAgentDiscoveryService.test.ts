@@ -1,4 +1,4 @@
-import { SmartAgentDiscoveryService } from '../src/core/plugin/dependencies/SmartAgentDiscoveryService.js';
+import { SmartAgentDiscoveryService } from '../src/plugin/dependencies/SmartAgentDiscoveryService.js';
 
 describe('SmartAgentDiscoveryService', () => {
     beforeEach(() => {

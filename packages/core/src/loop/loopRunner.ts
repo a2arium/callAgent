@@ -353,6 +353,18 @@ export async function runLoop<
             }
 
             if (kind === 'subagent') {
+                // FLUSH BEFORE DISPATCH: Ensure DB has current state (including M) so child creation (which loads parent) sees valid data.
+                if (typeof (ctx as any).flushSnapshot === 'function') {
+                    try {
+                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: (a as any).target });
+                        await (ctx as any).flushSnapshot({ M, env });
+                    } catch (e) {
+                        log.warn('Failed to flush snapshot before subagent dispatch', { error: (e as Error).message });
+                    }
+                } else {
+                    log.warn('LoopRunner: flushSnapshot not available on context for subagent dispatch');
+                }
+
                 const res = await (ctx as any).sendTaskToAgent((a as any).target, (a as any).input, {
                     onCompleted: '__onChildCompleted'
                 });
@@ -371,6 +383,19 @@ export async function runLoop<
 
             if (kind === 'tool') {
                 const toolName = (a as any).name;
+
+                // FLUSH BEFORE TOOL: Some tools might inspect agent state via DB or side-channels
+                if (typeof (ctx as any).flushSnapshot === 'function') {
+                    try {
+                        log.debug('LoopRunner: calling flushSnapshot before tool', { toolId: toolName });
+                        await (ctx as any).flushSnapshot({ M, env });
+                    } catch (e) {
+                        log.warn('Failed to flush snapshot before tool execution', { error: (e as Error).message });
+                    }
+                } else {
+                    log.debug('LoopRunner: flushSnapshot not available on context for tool execution', { toolId: toolName });
+                }
+
                 if ((a as any).awaitCallback) {
                     const handle = await (ctx as any).requestTool(toolName, (a as any).args, {
                         onCompleted: '__onToolCompleted'

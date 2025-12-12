@@ -1,4 +1,4 @@
-import { globalA2AService } from '../src/core/orchestration/A2AService.js';
+import { globalA2AService } from '../src/orchestration/A2AService.js';
 
 describe('LocalRunner A2A Integration', () => {
     describe('globalA2AService availability', () => {

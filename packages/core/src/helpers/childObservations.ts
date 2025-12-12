@@ -5,7 +5,7 @@ import type {
     InteractiveTaskSnapshot,
     TaskStatusMetadataWithResult,
     TaskStatusWithResult
-} from '../shared/types/observation.js';
+} from '../shared/types/index.js';
 
 const CHILD_COMPLETED_KIND = 'child.completed';
 

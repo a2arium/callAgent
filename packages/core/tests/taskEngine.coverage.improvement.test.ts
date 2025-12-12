@@ -12,13 +12,14 @@
 import { jest } from '@jest/globals';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/core/memory/stores/SessionStore.js';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 
+// Shim restored for ESM environment
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const taskEnginePath = path.resolve(__dirname, '../src/core/orchestration/taskEngine.ts');
+const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
 const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const a2aPath = path.resolve(__dirname, '../src/core/orchestration/A2AService.ts');
+const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
 const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
 
 // Mock dependencies
@@ -43,10 +44,12 @@ await jest.unstable_mockModule(outboxPath, () => ({
     outboxPublisher: { start: jest.fn(), stop: jest.fn() }
 }));
 
-await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class {} }), { virtual: true });
+await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
 
-const { TaskEngine, HYDRATED_ARTIFACT_HANDLE_SYMBOL, attachHydratedArtifactHandles } = await import(taskEnginePath);
-const { AgentResultCache } = await import('../src/core/cache/AgentResultCache.js');
+const { TaskEngine, HYDRATED_ARTIFACT_HANDLE_SYMBOL } = await import(taskEnginePath);
+const { ArtifactHydrationService } = await import('../src/orchestration/ArtifactHydrationService.js');
+const attachHydratedArtifactHandles = ArtifactHydrationService.attachHydratedArtifactHandles.bind(ArtifactHydrationService);
+const { AgentResultCache } = await import('@a2arium/callagent-memory-engine');
 
 class FailingSessionStore implements IWorkingMemorySessionStore {
     private shouldFailLoad = false;
@@ -382,7 +385,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             (engine as any).backgroundTaskTimeoutMs = 50; // 50ms
 
             // Add a background task that never resolves
-            const neverResolves = new Promise(() => {});
+            const neverResolves = new Promise(() => { });
             (engine as any).backgroundTaskPromises.add(neverResolves);
 
             const base = {
@@ -1939,7 +1942,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             expect(results).toHaveLength(5);
             results.forEach(result => expect(result).toBeDefined());
         });
-      });
+    });
 
     describe('Error Recovery and Resource Management', () => {
         test('Prisma client singleton management', () => {
@@ -1958,7 +1961,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const engine = new TaskEngine({});
 
             // Import the extendContextWithMemory function from the actual module
-            const { extendContextWithMemory } = await import('../src/core/memory/types/working/context/workingMemoryContext.js');
+            const { extendContextWithMemory } = await import('@a2arium/callagent-memory-engine');
 
             // Test extendContextWithMemory with different contexts
             const baseCtx = { task: { id: 'test' } } as any;
@@ -1988,7 +1991,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const engine = new TaskEngine({});
 
             // Import the extendContextWithMemory function from the actual module
-            const { extendContextWithMemory } = await import('../src/core/memory/types/working/context/workingMemoryContext.js');
+            const { extendContextWithMemory } = await import('@a2arium/callagent-memory-engine');
 
             // Test with already existing memory
             const ctxWithMemory = {

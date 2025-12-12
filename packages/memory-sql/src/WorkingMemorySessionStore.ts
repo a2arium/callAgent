@@ -74,7 +74,25 @@ export class WorkingMemorySessionStore {
         const rec = await this.runWithReconnect(() => this.prisma.wMSession.findUnique({
             where: { tenantId_sessionId: { tenantId, sessionId } }
         }));
-        if (!rec) return null;
+        if (!rec) {
+            this.log.debug?.('getSessionSnapshot: not found', { tenantId, sessionId });
+            return null;
+        }
+
+        // DEBUG: Deep log for diagnosis
+        if ((rec.snapshot as any)?.meta?.turn || (rec.snapshot as any)?.M) {
+            // it looks valid
+        } else {
+            this.log.warn?.('getSessionSnapshot: CAUTION - Loaded snapshot might be empty/partial', {
+                tenantId,
+                sessionId,
+                wmVersion: rec.wmVersion.toString(),
+                hasMeta: !!(rec.snapshot as any)?.meta,
+                hasM: !!(rec.snapshot as any)?.M,
+                rawKeys: Object.keys(rec.snapshot as any || {})
+            });
+        }
+
         return {
             wmVersion: rec.wmVersion,
             snapshot: (rec.snapshot as unknown) as Record<string, unknown>,

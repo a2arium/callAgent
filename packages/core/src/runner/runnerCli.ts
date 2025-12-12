@@ -1,10 +1,10 @@
 import 'dotenv/config';
 import { runAgentWithStreaming } from './streamingRunner.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
-import { TaskEngine } from '../core/orchestration/taskEngine.js';
-import { registerHandler } from '../core/orchestration/HandlerRegistry.js';
-import { PluginManager } from '../core/plugin/pluginManager.js';
-import { EngineLocator } from '../core/orchestration/EngineLocator.js';
+import { TaskEngine } from '../orchestration/taskEngine.js';
+import { registerHandler } from '../orchestration/HandlerRegistry.js';
+import { PluginManager } from '../plugin/pluginManager.js';
+import { EngineLocator } from '../orchestration/EngineLocator.js';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { A2AEvent } from '../shared/types/StreamingEvents.js';

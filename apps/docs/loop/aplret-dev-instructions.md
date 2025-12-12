@@ -244,8 +244,8 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
   Turn N: prompt + requestInput → await_input(exec.action.token).
   Turn N+1: Perception validates input; Learning updates M; Policy decides next step.
 - For sub-agent delegation:
-  Turn N: Execution→sendTaskToAgent(agent, input, {awaitCompletion:false}) → await_child(exec.action.token). Pending state is tracked in env.pending/control.
-  Turn N+1: Perception validates child observation from env.inbox.current; Learning writes result to M; Policy decides next Intent.
+  Turn N: Execution→`handle = sendTaskToAgent(agent, input, {awaitCompletion:false})`, extract `token = handle.token` immediately, return token in exec result, Transition→`await_child(token)`. Parent loop pauses; pending state tracked in env.pending/control.
+  Turn N+1: Child completion auto-injected into env.inbox.current; Perception validates child observation; Learning writes result to M; Policy decides next Intent.
   (With awaitCompletion:true, result arrives immediately in same turn—use for tool-like blocking calls.)
 
 7) I/O CONTRACTS (examples)
@@ -1281,6 +1281,75 @@ Child observations automatically include:
   - `state`: Final execution state of the child task
   - `timestamp`: Completion timestamp
 
+### TaskHandle API and Token Extraction
+
+When calling `ctx.sendTaskToAgent()` with `awaitCompletion: false`, the function returns a `TaskHandle` object:
+
+```typescript
+import type { TaskHandle } from '@a2arium/callagent-core';
+
+const handle: TaskHandle = await ctx.sendTaskToAgent('child-agent', input, {
+  awaitCompletion: false
+});
+
+// ✅ CORRECT: Access token via getter property
+const token = handle.token;  // TypeScript knows this exists!
+
+// ❌ WRONG: Don't pass handle directly - token is lost on serialization
+return {
+  action: { kind: 'subagent', token: handle.token },  // Works here
+  result: { status: 'ok', data: { handle } }  // ❌ Token lost!
+};
+```
+
+**TaskHandle has a `.token` getter** that returns the internal `childToken` property. Always extract it immediately as a primitive string:
+
+```typescript
+// ✅ CORRECT PATTERN
+const handle = await ctx.sendTaskToAgent('fetch-webpage', { url }, {
+  awaitCompletion: false,
+  tokenPath: 'fetch.token'  // Optional: stores token in env.pending.controlVars
+});
+
+const token = handle.token;  // Extract immediately
+
+return {
+  action: { kind: 'subagent', token },
+  result: { status: 'ok', data: { kind: 'fetch_requested', token } }
+};
+```
+
+**Why this matters:**
+- `handle.token` is a **getter property** (maps to internal `childToken`)
+- TypeScript now properly types the return value based on `awaitCompletion`
+- No need for `as any` casts - proper types are exported
+- Extracting immediately ensures the token survives serialization
+- The token is needed in `transition` to return `{ kind: 'await_child', token }`
+
+**Type Safety:**
+```typescript
+import type { TaskHandle } from '@a2arium/callagent-core';
+
+// TypeScript knows this returns TaskHandle
+const handle = await ctx.sendTaskToAgent('agent', input, {
+  awaitCompletion: false  // TypeScript enforces this returns TaskHandle
+});
+
+handle.token;  // ✅ TypeScript knows this property exists
+
+// With awaitCompletion: true (or default)
+const result = await ctx.sendTaskToAgent('agent', input);
+// TypeScript knows this returns InteractiveTaskResult | unknown
+```
+
+**Flow:**
+1. Execution: extract `token = handle.token` and return it in result data
+2. Transition: read token from `exec.result.data.token` and return `{ kind: 'await_child', token }`
+3. Parent loop **pauses** (no CPU usage while waiting)
+4. Child completes → `handleChildCompleted` auto-injects into parent inbox
+5. Parent **resumes** with result in `env.inbox.current`
+
+
 ### Pattern: End-to-End Child Task Handling
 
 ```typescript
@@ -1303,18 +1372,34 @@ type ObservationConfig = {
 // 2. Delegate work to child agent in Execution
 execution: async (intent, ctx) => {
   if (intent.kind === 'delegate_to_child') {
-    const result = await ctx.sendTaskToAgent(intent.childAgentId, intent.input, {
-      awaitCompletion: false  // Async execution
+    const handle = await ctx.sendTaskToAgent(intent.childAgentId, intent.input, {
+      awaitCompletion: false  // Async execution - parent will pause
     });
 
+    // Extract token immediately - it's a getter property on TaskHandle
+    const token = handle.token;
+
     return {
-      kind: 'subagent',
-      token: result.taskId
+      action: { kind: 'subagent', token },
+      result: { status: 'ok', data: { kind: 'child_requested', token } }
     };
   }
 }
 
-// 3. Handle child completion in Perception with clean structure
+// 3. Pause parent loop until child completes
+transition: (env, exec) => {
+  const result = exec.result;
+  
+  // Pause parent - child will auto-inject completion into inbox when done
+  if (result.status === 'ok' && result.data?.kind === 'child_requested') {
+    return { kind: 'await_child', token: result.data.token };
+  }
+  
+  // Other transitions...
+  return { kind: 'continue', observations: [] };
+}
+
+// 4. Handle child completion in Perception with clean structure
 perception: (env) => {
   const childObs = env.inbox.current.find(o => o.source === 'child');
   if (childObs) {
@@ -1335,7 +1420,7 @@ perception: (env) => {
   return {};
 }
 
-// 4. Store child outcomes in Learning for policy reasoning
+// 5. Store child outcomes in Learning for policy reasoning
 learning: (prev, _, obs) => {
   if (obs.eventType === 'child_completed' && obs.childResult) {
     const { result, childTaskId, executionMetadata } = obs.childResult;

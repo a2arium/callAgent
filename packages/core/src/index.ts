@@ -1,20 +1,20 @@
 export * from './config/index.js';
-export * from './core/plugin/types.js';
-export * from './core/plugin/createAgent.js';
+export * from './plugin/types.js';
+export * from './plugin/createAgent.js';
 export * from './runner/streamingRunner.js';
 export {
     buildAgentIndex,
     type AgentIndexBuildResult,
     type AgentIndexEntry,
     DEFAULT_AGENT_INDEX_PATH
-} from './core/plugin/AgentIndexBuilder.js';
-export { loadAgentIndex, loadAgentIndexIfPresent, type LoadAgentIndexOptions } from './core/plugin/AgentIndexLoader.js';
-export { AgentRegistry, globalAgentRegistry } from './core/plugin/AgentRegistry.js';
-export { PluginManager } from './core/plugin/pluginManager.js';
-export { ContextSerializer } from './core/orchestration/ContextSerializer.js';
-export { A2AService, globalA2AService } from './core/orchestration/A2AService.js';
-export { TaskEngine } from './core/orchestration/taskEngine.js';
-export { InteractiveTaskHandler } from './core/orchestration/InteractiveTaskResult.js';
+} from './plugin/AgentIndexBuilder.js';
+export { loadAgentIndex, loadAgentIndexIfPresent, type LoadAgentIndexOptions } from './plugin/AgentIndexLoader.js';
+export { AgentRegistry, globalAgentRegistry } from './plugin/AgentRegistry.js';
+export { PluginManager } from './plugin/pluginManager.js';
+export { ContextSerializer } from './orchestration/ContextSerializer.js';
+export { A2AService, globalA2AService } from './orchestration/A2AService.js';
+export { TaskEngine } from './orchestration/taskEngine.js';
+export { InteractiveTaskHandler } from './orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
 export type { MentalState, EnvironmentState, ObservationInbox, MemoryReader, MemoryWriter } from './loop/types.js';
@@ -41,7 +41,7 @@ export type {
     InteractiveTaskSnapshot,
     TaskStatusWithResult,
     TaskStatusMetadataWithResult
-} from './shared/types/observation.js';
+} from './shared/types/index.js';
 export {
     isChildCompletedObservation,
     extractChildResult,
@@ -69,11 +69,11 @@ export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse } from '
 // Removed build utilities - use simple copying instead:
 // "build": "tsc && copyfiles agent.json dist" or "tsc && cp agent.json dist/"
 // Add other exports as needed for the public API 
-export { createEmbeddingFunction, createEmbeddingFunctionWithTracking, isEmbeddingAvailable, getEmbeddingModel } from './core/llm/LLMFactory.js';
+export { createEmbeddingFunction, createEmbeddingFunctionWithTracking, isEmbeddingAvailable, getEmbeddingModel } from './llm/LLMFactory.js';
 
 // Memory system exports
-export { createMemoryRegistry } from './core/memory/createMemoryRegistry.js';
-export type { ExtendedIMemory } from './core/memory/createMemoryRegistry.js';
+export { createMemoryRegistry } from '@a2arium/callagent-memory-engine';
+export type { ExtendedIMemory } from '@a2arium/callagent-memory-engine';
 
 // Tenant management exports
 export {
@@ -91,7 +91,7 @@ export {
     isDefaultTenant,
     sanitizeTenantId,
     type TenantValidationConfig
-} from './core/plugin/tenantValidator.js';
+} from './plugin/tenantValidator.js';
 
 // Tenant context management
 export {
@@ -100,7 +100,7 @@ export {
     withTenant,
     withSystemPrivileges,
     getCurrentTenant
-} from './core/plugin/TenantContext.js';
+} from './plugin/TenantContext.js';
 
 // Tenant metrics and monitoring
 export {
@@ -108,7 +108,7 @@ export {
     tenantMetricsManager,
     trackTenantOperation,
     type TenantMetrics
-} from './core/plugin/TenantMetrics.js';
+} from './plugin/TenantMetrics.js';
 // Event bus and task channel helpers
 export { eventBus } from './eventbus/inMemoryEventBus.js';
 export { taskChannel } from './eventbus/taskEventEmitter.js';

@@ -1,5 +1,10 @@
-import type { TaskInput, TaskStatus, Artifact } from './index.js'; // Presumed to be safe if index.ts doesn't import A2ATypes.ts directly for TaskContext augmentation
-import type { ThoughtEntry, DecisionEntry } from './workingMemory.js';
+import type { TaskInput, TaskStatus, Artifact } from './index.js'; // From core index
+import type { ThoughtEntry, DecisionEntry } from '@a2arium/callagent-memory-engine'; // From memory-engine
+import type { SerializedAgentContext } from '@a2arium/callagent-memory-engine'; // Serialization types from memory-engine
+
+// Re-export serialization types for convenience
+export type { SerializedAgentContext };
+export type { SerializedWorkingMemory, SerializedMemoryContext, RecalledMemoryItem } from '@a2arium/callagent-memory-engine';
 
 /**
  * Minimal TaskContext interface needed by IA2AService to avoid circular dependencies.
@@ -65,55 +70,6 @@ export type A2ACallOptions = {
 };
 
 /**
- * Serialized working memory state for transfer between agents
- */
-export type SerializedWorkingMemory = {
-    goal?: string;
-    thoughts: ThoughtEntry[];
-    decisions: Record<string, DecisionEntry>;
-    variables: Record<string, unknown>;
-};
-
-/**
- * Represents a single recalled memory item for transfer.
- */
-export type RecalledMemoryItem = {
-    id: string; // Or a unique key for the memory item
-    type: 'semantic' | 'episodic' | string; // Type of memory
-    data: unknown; // The actual memory content
-    metadata?: Record<string, unknown>; // Any associated metadata
-};
-
-/**
- * Memory context keys and snapshot for transfer
- */
-export type SerializedMemoryContext = {
-    /** 
-     * Optional high-level semantic keys or topics representing the context.
-     * Further clarification needed during implementation on its exact role 
-     * if memorySnapshot is comprehensive.
-     */
-    semanticKeys?: string[];
-    episodicEventCount?: number; // Or a more direct representation of episodic context
-    /** 
-     * A snapshot of recalled memory items, preserving their structure and type.
-     */
-    memorySnapshot: RecalledMemoryItem[];
-};
-
-/**
- * Complete context package for agent transfer
- */
-export type SerializedAgentContext = {
-    tenantId: string;
-    sourceTaskId: string;
-    sourceAgentId: string; // Ensure this is correctly populated
-    timestamp: string;
-    workingMemory?: SerializedWorkingMemory;
-    memoryContext?: SerializedMemoryContext;
-};
-
-/**
  * Result interface for interactive agent communication
  */
 export type InteractiveTaskResult = {
@@ -144,6 +100,6 @@ export type IA2AService = {
         options?: A2ACallOptions
     ) => Promise<InteractiveTaskResult | unknown>;
 
-    findLocalAgent: (agentName: string) => Promise<import('../../core/plugin/types.js').AgentPlugin | null>;
+    findLocalAgent: (agentName: string) => Promise<import('../../plugin/types.js').AgentPlugin | null>;
     waitForPendingNotifications: () => Promise<void>;
-}; 
+};

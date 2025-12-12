@@ -42,7 +42,7 @@ import {
     IRAGOrchestrator,
     ILongContextManager,
     IHallucinationMitigator,
-} from '../src/core/memory/lifecycle/interfaces/index.js';
+} from '@a2arium/callagent-memory-engine';
 
 describe('MLO Interfaces', () => {
     describe('Interface Compilation', () => {

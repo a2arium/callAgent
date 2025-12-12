@@ -1,7 +1,7 @@
 // src/api/rpc/tasksSubscribe.ts
 import type { Request, Response } from 'express';
-import { EngineLocator } from '../../core/orchestration/EngineLocator.js';
-import type { TaskEngine, TaskEntity } from '../../core/orchestration/taskEngine.js';
+import { EngineLocator } from '../../orchestration/EngineLocator.js';
+import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 

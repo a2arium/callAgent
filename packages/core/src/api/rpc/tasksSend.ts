@@ -1,7 +1,7 @@
 // src/api/rpc/tasksSend.ts
 import type { Request, Response } from 'express';
-import { EngineLocator } from '../../core/orchestration/EngineLocator.js';
-import type { TaskEngine, TaskEntity } from '../../core/orchestration/taskEngine.js';
+import { EngineLocator } from '../../orchestration/EngineLocator.js';
+import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 
 /**
  * Handler for the tasks/send method

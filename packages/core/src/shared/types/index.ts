@@ -3,14 +3,26 @@ import type { ILLMCaller } from './LLMTypes.js';
 import type { ComponentLogger } from '@a2arium/callagent-utils'; // Import ComponentLogger
 // Explicitly import only needed types from StreamingEvents
 import type { TaskStatus, A2AEvent, Artifact as ProtocolArtifact } from './StreamingEvents.js';
+
+// A2A (Agent-to-Agent) Communication Types
+export * from './A2ATypes.js';
 import type { IMemory } from '@a2arium/callagent-types';
-// Import working memory types for TaskContext
-import type { ThoughtEntry, DecisionEntry } from './workingMemory.js';
-import type { RecallOptions, RememberOptions } from './memoryLifecycle.js';
 import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js';
-// Import Artifact types and the static factory
-import { Artifact } from './artifacts.js';
-import type { Artifact as ArtifactType, ArtifactHandle, LocalArtifact } from './artifacts.js';
+
+// Import from memory-engine to satisfy local usage in TaskContext
+import { Artifact } from '@a2arium/callagent-memory-engine';
+import type {
+    Artifact as ArtifactType,
+    ArtifactHandle,
+    LocalArtifact,
+    ThoughtEntry,
+    DecisionEntry,
+    RecallOptions,
+    RememberOptions
+} from '@a2arium/callagent-memory-engine';
+
+// Export Handle types for typed A2A interactions
+export type { TaskHandle, InputHandle, GroupHandle } from '../../orchestration/Handles.js';
 
 // Re-export only specific streaming event types needed externally
 // Rename ProtocolArtifact to avoid conflict, but keep Artifact exporting the new type
@@ -25,20 +37,8 @@ export { Artifact };
 export type { PureLLMPort, ILLMCaller, LLMConfig } from './LLMTypes.js';
 export { extractPureLLMPort } from './LLMTypes.js';
 
-// Working Memory Types
-export * from './workingMemory.js';
-export * from './memoryLifecycle.js';
-export * from './observation.js';
-export * from './artifacts.js'; // Export artifacts types
-
-// A2A (Agent-to-Agent) Communication Types
-export * from './A2ATypes.js';
-
-// MLO Configuration Types
-export * from '../../core/memory/lifecycle/config/types.js';
-
-// MLO Interface Types
-export * from '../../core/memory/lifecycle/interfaces/index.js';
+// MLO Configuration & Interface Types & Shared Types (WorkingMemory, Artifacts, A2ATypes, etc.)
+export * from '@a2arium/callagent-memory-engine';
 
 // --- Agent Card (Enhanced for A2A) ---
 /**
@@ -283,11 +283,25 @@ export type TaskContext = {
     services: { get: <T = unknown>(name: string) => T | undefined }; // Placeholder for service registry
     getEnv: (key: string, defaultValue?: string) => string | undefined;
     throw: (code: string, message: string, details?: unknown) => never; // Structured error throw
-    sendTaskToAgent: (
-        targetAgent: string,
-        taskInput: TaskInput,
-        options?: import('./A2ATypes.js').A2ACallOptions & { onCompleted?: string; onFailed?: string; onInputRequired?: string }
-    ) => Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
+    sendTaskToAgent: {
+        /**
+         * Send a task to another agent.
+         * @param targetAgent - Name of the target agent
+         * @param taskInput - Input data for the task
+         * @param options - A2A call options
+         * @returns TaskHandle with .token getter when awaitCompletion=false, or the actual result when awaitCompletion=true
+         */
+        (
+            targetAgent: string,
+            taskInput: TaskInput,
+            options: import('./A2ATypes.js').A2ACallOptions & { awaitCompletion: false; onCompleted?: string; onFailed?: string; onInputRequired?: string }
+        ): Promise<import('../../orchestration/Handles.js').TaskHandle>;
+        (
+            targetAgent: string,
+            taskInput: TaskInput,
+            options?: import('./A2ATypes.js').A2ACallOptions & { awaitCompletion?: true; onCompleted?: string; onFailed?: string; onInputRequired?: string }
+        ): Promise<import('./A2ATypes.js').InteractiveTaskResult | unknown>;
+    };
     requestInput: (
         promptOrParts: string | string[] | MessagePart | MessagePart[],
         opts?: {
@@ -298,11 +312,11 @@ export type TaskContext = {
             setToken?: boolean;
             setStage?: string
         }
-    ) => Promise<import('../../core/orchestration/Handles.js').InputHandle>;
+    ) => Promise<import('../../orchestration/Handles.js').InputHandle>;
     allTasks?: (
         children: Array<{ agent: string; input: unknown }>,
         opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
-    ) => Promise<import('../../core/orchestration/Handles.js').GroupHandle>;
+    ) => Promise<import('../../orchestration/Handles.js').GroupHandle>;
 }
 
 // --- Semantic facade types ---

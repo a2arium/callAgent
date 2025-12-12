@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import path from 'node:path';
-import { buildAgentIndex, DEFAULT_AGENT_INDEX_PATH } from '../core/plugin/AgentIndexBuilder.js';
-import { loadAgentIndex } from '../core/plugin/AgentIndexLoader.js';
+import { buildAgentIndex, DEFAULT_AGENT_INDEX_PATH } from '../plugin/AgentIndexBuilder.js';
+import { loadAgentIndex } from '../plugin/AgentIndexLoader.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const cliLogger = logger.createLogger({ prefix: 'AgentsCLI' });

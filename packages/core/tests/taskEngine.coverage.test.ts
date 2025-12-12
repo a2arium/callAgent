@@ -4,28 +4,21 @@
  */
 
 import { jest } from '@jest/globals';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/core/memory/stores/SessionStore.js';
-import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/core/orchestration/Handles.js';
-import { setPendingTools, getPendingTools } from '../src/core/orchestration/ToolsRegistry.js';
-import { setPendingExternalEvents, getPendingExternalEvents } from '../src/core/orchestration/ExternalEventsRegistry.js';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
+import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
+import { setPendingExternalEvents, getPendingExternalEvents } from '../src/orchestration/ExternalEventsRegistry.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
 import type { SynthesizeObservation } from '../src/loop/oneTurn.js';
 import type { ObservationConfig } from '../src/loop/oneTurn.js';
-import { mergeInboxes } from '../src/core/orchestration/taskEngine.js';
-import { offloadArtifacts } from '../src/core/memory/utils/offloadArtifacts.js';
-import { LocalArtifactImpl } from '../src/core/orchestration/LocalArtifactImpl.js';
+import { InboxManager } from '../src/orchestration/InboxManager.js';
+import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
+import { LocalArtifactImpl } from '../src/orchestration/LocalArtifactImpl.js';
+import { TaskEngine } from '../src/orchestration/taskEngine.js';
+import { globalA2AService } from '../src/orchestration/A2AService.js';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const a2aPath = path.resolve(__dirname, '../src/core/orchestration/A2AService.ts');
-const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
-const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const taskEnginePath = path.resolve(__dirname, '../src/core/orchestration/taskEngine.ts');
 
 // Create properly typed mocks
 const mockFindLocalAgent = jest.fn() as jest.MockedFunction<(agentName: string) => Promise<any>>;
@@ -35,25 +28,6 @@ mockFindLocalAgent.mockResolvedValue({
     llmAdapter: {},
     tenantId: 'test-tenant'
 });
-
-await jest.unstable_mockModule(a2aPath, () => ({
-    globalA2AService: {
-        sendTaskToAgent: jest.fn() as any,
-        findLocalAgent: mockFindLocalAgent
-    }
-} as any));
-
-await jest.unstable_mockModule(outboxPath, () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
-}));
-
-await jest.unstable_mockModule(loopRunnerPath, () => ({
-    runLoop: (...args: any[]) => runLoopMock(...args)
-}));
-
-await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
-
-const { TaskEngine } = await import(taskEnginePath);
 
 type EngineObservation = SynthesizeObservation<ObservationConfig & { user: unknown; tool: unknown; child: unknown; internal?: unknown; env?: unknown }>;
 
@@ -77,7 +51,13 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        return this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        const snap = this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        if (snap?.snapshot?.pending && (snap.snapshot.pending as any).tasks) {
+            console.log('FakeStore: getSnapshot', `${tenantId}:${sessionId}`, 'tasks keys:', Object.keys((snap.snapshot.pending as any).tasks));
+        } else {
+            console.log('FakeStore: getSnapshot', `${tenantId}:${sessionId}`, 'NO pending.tasks', snap ? 'snapshot found' : 'snapshot null');
+        }
+        return snap;
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -119,6 +99,15 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         }
 
         const newVersion = currentVersion + BigInt(1);
+        if (params.snapshot?.pending && (params.snapshot.pending as any).tasks) {
+            console.log('FakeStore: writeSnapshotCAS', key, 'tasks keys:', Object.keys((params.snapshot.pending as any).tasks));
+        } else {
+            console.log('FakeStore: writeSnapshotCAS', key, 'NO pending.tasks');
+            if (key.includes('session') && !key.includes('a2a_task')) {
+                console.log('STACK TRACE for empty tasks write:', new Error().stack);
+            }
+        }
+
         this.snapshots.set(key, {
             wmVersion: newVersion,
             snapshot: params.snapshot,
@@ -153,6 +142,9 @@ const buildObservation = (token: string): EngineObservation => ({
 });
 
 const createCtx = (overrides: Record<string, unknown> = {}) => ({
+    task: { id: 'test-task-id', input: {} },
+    tenantId: 'test-tenant',
+    agentId: 'test-agent',
     memory: {},
     vars: {},
     reply: jest.fn(),
@@ -172,18 +164,18 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         llmAdapter: {},
         tenantId: 'test-tenant'
     });
-    await jest.unstable_mockModule(a2aPath, () => ({
+    await jest.unstable_mockModule('../src/orchestration/A2AService.js', () => ({
         globalA2AService: { sendTaskToAgent: sendMock, findLocalAgent: findMock }
     } as any));
-    await jest.unstable_mockModule(outboxPath, () => ({
+    await jest.unstable_mockModule('../src/eventbus/outboxPublisher.js', () => ({
         outboxPublisher: { start: jest.fn(), stop: jest.fn() }
     }));
-    await jest.unstable_mockModule(loopRunnerPath, () => ({
+    await jest.unstable_mockModule('../src/loop/loopRunner.js', () => ({
         runLoop: (...args: any[]) => runLoopMock(...args)
     }));
     await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
-    const mod = await import(taskEnginePath);
-    const a2aModule = await import(a2aPath);
+    const mod = await import('../src/orchestration/taskEngine.js');
+    const a2aModule = await import('../src/orchestration/A2AService.js');
     (a2aModule as any).globalA2AService.sendTaskToAgent = sendMock;
     (a2aModule as any).globalA2AService.findLocalAgent = findMock;
     return { TaskEngine: (mod as any).TaskEngine, sendMock, findMock };
@@ -191,6 +183,17 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
 
 beforeAll(() => {
     process.env.DISABLE_OUTBOX_PUBLISHER = '1';
+});
+
+beforeEach(() => {
+    // Mock globalA2AService.findLocalAgent to return a fake agent
+    jest.spyOn(globalA2AService, 'findLocalAgent').mockResolvedValue({
+        manifest: { name: 'mock-agent', version: '1.0.0' },
+        handleTask: jest.fn<any>().mockResolvedValue({ status: 'completed' }),
+        loop: {} as any,
+        llmAdapter: undefined,
+        llmConfig: undefined
+    } as any);
 });
 
 afterEach(() => {
@@ -213,7 +216,7 @@ describe('TaskEngine orchestration coverage', () => {
             tenantId: 't',
             parentTaskId: 'parent',
             childToken: 'tok-1',
-            childTaskId: 'child-1',
+            target: 'child-1',
             result: { ok: true },
             childAgentId: 'child-agent'
         });
@@ -245,7 +248,7 @@ describe('TaskEngine orchestration coverage', () => {
             pending: { controlVars: { child: { token: 'child-1' } } },
             inbox: { current: [], all: [] },
             M: { memory: { vars: {} } }
-        } as any, { 'child-1': { childTaskId: 'child-task', handlers: {}, options: { tokenPath: 'child.token', setToken: true, autoClearToken: true } } });
+        } as any, { 'child-1': { target: 'child-task', handlers: {}, options: { tokenPath: 'child.token', setToken: true, autoClearToken: true } } });
         store.seed('t', 'parent', pending as any, BigInt(0), 'agent-a');
 
         await engine.handleChildCompleted({
@@ -266,7 +269,7 @@ describe('TaskEngine orchestration coverage', () => {
 
     test('handles child failure, cleans mappings, groups, and invokes handler', async () => {
         const store = new FakeSessionStore();
-        const handlerInvoker = { invoke: jest.fn().mockResolvedValue(undefined) };
+        const handlerInvoker = { invoke: jest.fn<any>().mockResolvedValue(undefined) };
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: handlerInvoker as any });
 
         const withTask = setPendingTasks({
@@ -324,10 +327,10 @@ describe('TaskEngine orchestration coverage', () => {
 
     test('routes child input required through handlers and resumes child', async () => {
         const store = new FakeSessionStore();
-        const resumeInputMock = jest.fn().mockResolvedValue(undefined);
+        const resumeInputMock = jest.fn<any>().mockResolvedValue(undefined);
         const handleChildCompletedMock = jest.spyOn(TaskEngine.prototype as any, 'handleChildCompleted').mockResolvedValue(undefined);
         const handlerInvoker = {
-            invoke: jest.fn()
+            invoke: jest.fn<any>()
                 // parent handler result
                 .mockResolvedValueOnce({ provided: true })
                 // child onProvided result
@@ -342,7 +345,7 @@ describe('TaskEngine orchestration coverage', () => {
             inbox: { current: [], all: [] }
         } as any, {
             'child-req': {
-                childTaskId: 'child-task',
+                target: 'child-task',
                 handlers: { inputRequired: 'parentHandler' },
                 options: { setToken: true, tokenPath: 'child.token', setStage: 'awaiting' }
             }
@@ -419,7 +422,7 @@ describe('TaskEngine orchestration coverage', () => {
             childToken: 'child-req',
             prompt: 'need input',
             schema: { type: 'string' },
-            childTaskId: 'child-task'
+            target: 'child-task'
         });
 
         const snap = store.getSnapshot('t', 'parent');
@@ -543,6 +546,10 @@ describe('TaskEngine orchestration coverage', () => {
         // First write (createTaskHandle) succeeds; second write (control vars) fails once
         store.failOnWriteNumber = 2;
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        // Register engine with EngineLocator for A2AService
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
         const ctx: any = createCtx();
         const base = { meta: { agentId: 'agent-a' }, pending: {}, inbox: { current: [], all: [] }, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
@@ -551,9 +558,12 @@ describe('TaskEngine orchestration coverage', () => {
         const { token } = await ctx.sendTaskToAgent('agent-b', { input: 1 }, { setToken: true, tokenPath: 'child.token', setStage: 'child-await', autoClearToken: false });
         expect(token).toBeDefined();
 
-        const snap = store.getSnapshot('t', 'session');
+        const snap = store.getSnapshot('test-tenant', 'session');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
         const tasks = (saved.pending as any)?.tasks || {};
+        console.log('DEBUG TEST: token:', token);
+        console.log('DEBUG TEST: tasks keys:', Object.keys(tasks));
+        console.log('DEBUG TEST: pending keys:', Object.keys((saved.pending as any) || {}));
         expect(tasks[token]).toMatchObject({ input: { input: 1 } });
         expect(((saved.pending as any)?.controlVars || {}).child?.token).toBe(token);
         expect(((saved.pending as any)?.controlVars || {}).stage).toBe('child-await');
@@ -568,10 +578,10 @@ describe('TaskEngine orchestration coverage', () => {
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
         await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
 
-        const { token } = await ctx.sendTaskToAgent('agent-b', { input: 2 }, { setToken: false, setStage: 'child-await' });
+        const { token } = await ctx.sendTaskToAgent('agent-b', { input: 2 }, { setToken: false, setStage: 'child-await', autoClearToken: false });
         expect(token).toBeDefined();
 
-        const snap = store.getSnapshot('t', 'session');
+        const snap = store.getSnapshot('test-tenant', 'session');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
         const tasks = (saved.pending as any)?.tasks || {};
         expect(tasks[token]).toBeDefined();
@@ -590,7 +600,7 @@ describe('TaskEngine orchestration coverage', () => {
         const { token } = await ctx.sendTaskToAgent('agent-b', { input: 1 }, { setToken: true, tokenPath: 'child.token', setStage: 'child-await', autoClearToken: false });
         expect(token).toBeDefined();
 
-        const snap = store.getSnapshot('t', 'session');
+        const snap = store.getSnapshot('test-tenant', 'session');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
         const tasks = (saved.pending as any)?.tasks || {};
         expect(tasks[token]).toMatchObject({ input: { input: 1 } });
@@ -659,7 +669,7 @@ describe('TaskEngine orchestration coverage', () => {
             M: { memory: { vars: {} } }
         } as any, {
             'child-early': {
-                childTaskId: 'child-task',
+                target: 'child-task',
                 handlers: {},
                 options: { tokenPath: 'child.token', setToken: true, autoClearToken: true }
             }
@@ -691,8 +701,8 @@ describe('TaskEngine orchestration coverage', () => {
     test('await_child resumes when pending entry removed before metadata saved', async () => {
         class EntryClearingStore extends FakeSessionStore {
             private loadCount = 0;
-            async load(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
-                const snap = await super.load(tenantId, sessionId);
+            async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+                const snap = await super.getSessionSnapshot(tenantId, sessionId);
                 this.loadCount++;
                 if (this.loadCount === 1 && snap) {
                     const mutated = JSON.parse(JSON.stringify(snap.snapshot));
@@ -725,7 +735,7 @@ describe('TaskEngine orchestration coverage', () => {
             M: { memory: { vars: {} } }
         } as any, {
             'child-early': {
-                childTaskId: 'child-task',
+                target: 'child-task',
                 handlers: {},
                 options: { tokenPath: 'child.token', setToken: true, autoClearToken: true }
             }
@@ -815,7 +825,7 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     test('offloadArtifacts deduplicates repeated LocalArtifacts', async () => {
-        const spy = jest.fn().mockResolvedValue({ artifactId: 'art-1', size: 123 });
+        const spy = jest.fn<any>().mockResolvedValue({ artifactId: 'art-1', size: 123 });
         const cache = { storeArtifact: spy };
         const artifact = new LocalArtifactImpl('<html>1</html>', 'text/html');
         const payload = {
@@ -826,12 +836,16 @@ describe('TaskEngine orchestration coverage', () => {
         await offloadArtifacts(payload, cache as any, 'default');
 
         expect(spy).toHaveBeenCalledTimes(1);
-        expect(payload.first).toEqual(payload.second);
+        // After offloading, both should be artifact objects (offload only happens once)
+        expect(payload.first).toHaveProperty('kind', 'artifact');
+        expect(payload.second).toHaveProperty('kind', 'artifact');
+        expect((payload.first as any).id).toBe('art-1');
+        expect(payload.second).toEqual(payload.first);
     });
 
     test('handleChildFailed invokes anyFailed group handler and removes group', async () => {
         const store = new FakeSessionStore();
-        const handlerInvoker = { invoke: jest.fn().mockResolvedValue(undefined) };
+        const handlerInvoker = { invoke: jest.fn<any>().mockResolvedValue(undefined) };
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: handlerInvoker as any });
         const base = setPendingTasks({
             meta: { agentId: 'agent-a' },
@@ -909,22 +923,22 @@ describe('TaskEngine orchestration coverage', () => {
         const local = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
         const remoteObs = buildObservation('remote-1');
         const remote = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [remoteObs] });
-        const merged = mergeInboxes(local, remote, { 'remote-1': true });
+        const merged = InboxManager.mergeInboxes(local, remote, { 'remote-1': true });
         expect(merged.current.some(o => (o as any)?.payload?.token === 'remote-1')).toBe(true);
         expect(merged.all.filter(o => (o as any)?.payload?.token === 'remote-1')).toHaveLength(1);
 
         // Add local duplicate and ensure it doesn't double count
-        const merged2 = mergeInboxes(merged, remote, { 'remote-1': true });
+        const merged2 = InboxManager.mergeInboxes(merged, remote, { 'remote-1': true });
         expect(merged2.all.filter(o => (o as any)?.payload?.token === 'remote-1')).toHaveLength(1);
     });
 
-    test('mergeInboxes merges multiple remote child completions', () => {
+    test('InboxManager.mergeInboxes merges multiple remote child completions', () => {
         const local = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
         const remote = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({
             current: [],
             all: [buildObservation('a'), buildObservation('b')]
         });
-        const merged = mergeInboxes(local, remote, { b: true });
+        const merged = InboxManager.mergeInboxes(local, remote, { b: true });
         expect(merged.all.some(o => (o as any)?.payload?.token === 'b')).toBe(true);
         expect(merged.current.some(o => (o as any)?.payload?.token === 'b')).toBe(true);
     });
@@ -960,7 +974,7 @@ describe('TaskEngine orchestration coverage', () => {
             meta: { turn: 3, awaiting: { kind: 'await_child', token: 'other-token' } },
             pending: { controlVars: { child: { token: 'child-1' } } },
             inbox: { current: [], all: [preStaged] }
-        } as any, { 'child-1': { childTaskId: 'child-task', handlers: {}, options: { tokenPath: 'child.token', setToken: true, autoClearToken: true } } });
+        } as any, { 'child-1': { target: 'child-task', handlers: {}, options: { tokenPath: 'child.token', setToken: true, autoClearToken: true } } });
         const base = { ...pending, M: { memory: { vars: {} } } };
         store.seed('t', 'parent', base, BigInt(0), 'parent-agent');
 
@@ -974,9 +988,10 @@ describe('TaskEngine orchestration coverage', () => {
 
         const snap = store.getSnapshot('t', 'parent');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
-        //expect((saved.pending as any)?.tasks?.['child-1']).toBeUndefined();
-        expect((saved.pending as any)?.tasks?.['child-1']).toMatchObject({ "childTaskId": "child-task", "handlers": {}, "options": { "autoClearToken": true, "setToken": true, "tokenPath": "child.token" } });
-        expect(((saved.pending as any)?.controlVars as any)?.child?.token).toBe('child-1');
+        // Task should be deleted since autoClearToken: true
+        expect((saved.pending as any)?.tasks?.['child-1']).toBeUndefined();
+        // Control var should also be deleted since setToken: true && autoClearToken: true
+        expect(((saved.pending as any)?.controlVars as any)?.child?.token).toBeUndefined();
 
         const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox);
         const matching = inbox.all.filter(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'child-1');
@@ -989,13 +1004,13 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     describe('helper internals', () => {
-        test('mergeVarsIntoMental strips functions and merges source vars', () => {
-            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+        test('mergeVarsIntoMental strips functions and merges source vars', async () => {
+            const { TaskExecutor } = await import('../src/orchestration/TaskExecutor.js');
             const source = { memory: { vars: { a: 1, fn: () => 1 } }, vars: { b: 2, fn2: () => 2 } };
             const target = { memory: { vars: { c: 3 } }, vars: { d: 4, fn3: () => 3 } };
-            const result = (engine as any).mergeVarsIntoMental(source, target);
+            const result = TaskExecutor.mergeVarsIntoMental(source as any, target as any);
             expect(result.memory.vars).toEqual({ c: 3, a: 1 });
-            expect(result.vars).toEqual({ d: 4 });
+            expect((result as any).vars).toEqual({ d: 4 });
         });
 
         test('setNestedValueClone and deleteNestedValueClone handle dotted paths', () => {
@@ -1094,11 +1109,11 @@ describe('TaskEngine orchestration coverage', () => {
     test('stageChildCompletionObservation no-ops when snapshot or token missing', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'missing', childToken: 'tok', childTaskId: 'child', result: {} });
+        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'missing', childToken: 'tok', target: 'child', result: {} });
         expect(store.writeCount).toBe(0);
 
         store.seed('t', 'parent', { pending: { tasks: {} }, inbox: { current: [], all: [] } } as any, BigInt(0), 'agent-a');
-        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', childTaskId: 'unknown', result: {} });
+        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', target: 'unknown', result: {} });
         expect(store.writeCount).toBe(0);
     });
 
@@ -1111,7 +1126,7 @@ describe('TaskEngine orchestration coverage', () => {
         });
         store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
 
-        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', childTaskId: 'child-dup', result: { ok: true } });
+        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', target: 'child-dup', result: { ok: true } });
 
         const snap = store.getSnapshot('t', 'parent');
         const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>((snap?.snapshot as any)?.inbox);
@@ -1140,21 +1155,27 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     test('restoreCtx durable sendTaskToAgent injects child completion into active loop', async () => {
-        const { TaskEngine: LocalTaskEngine, sendMock } = await loadEngineWithA2AMock({ status: 'completed', value: 5 });
+        // Use spyOn instead of module mocking to avoid Jest ESM issues
+        const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });
+
         const store = new FakeSessionStore();
-        const engine = new LocalTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
         const base = { meta: { agentId: 'agent-a' }, inbox: { current: [], all: [] }, pending: {}, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
         const ctx: any = await (engine as any).restoreCtx('t', 'session');
         ctx.__activeLoopInbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
         ctx.__activeLoopEnv = { turn: 1, pending: { children: {}, inputs: {}, tools: {}, groups: {} } };
         const handleChildSpy = jest.spyOn(engine as any, 'handleChildCompleted');
-        const a2aModule = await import(a2aPath);
-        expect(jest.isMockFunction((a2aModule as any).globalA2AService.sendTaskToAgent)).toBe(true);
 
         const result = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { awaitCompletion: true, setStage: 'child-await' });
 
-        expect(result).toMatchObject({ status: 'completed', value: 5 });
+        // New API returns { handle, token } where result is in handle
+        expect(result.handle).toBeDefined();
+        expect(result.handle.status).toBe('completed');
+        expect(result.handle.value).toBe(5);
         expect(sendMock).toHaveBeenCalledWith(
             expect.any(Object),
             'child-agent',
@@ -1169,9 +1190,14 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     test('restoreCtx durable sendTaskToAgent falls back to handleChildCompleted when no active inbox', async () => {
-        const { TaskEngine: LocalTaskEngine, sendMock } = await loadEngineWithA2AMock({ status: 'completed', value: 5 });
+        // Use spyOn instead of module mocking to avoid Jest ESM issues
+        const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });
+
         const store = new FakeSessionStore();
-        const engine = new LocalTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
         const base = { meta: { agentId: 'agent-a' }, inbox: { current: [], all: [] }, pending: {}, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
         const ctx: any = await (engine as any).restoreCtx('t', 'session');

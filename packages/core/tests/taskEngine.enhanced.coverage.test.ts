@@ -6,25 +6,25 @@
 import { jest } from '@jest/globals';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/core/memory/stores/SessionStore.js';
-import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/core/orchestration/Handles.js';
-import { setPendingTools, getPendingTools } from '../src/core/orchestration/ToolsRegistry.js';
-import { setPendingExternalEvents, getPendingExternalEvents } from '../src/core/orchestration/ExternalEventsRegistry.js';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/memory/stores/SessionStore.js';
+import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
+import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
+import { setPendingExternalEvents, getPendingExternalEvents } from '../src/orchestration/ExternalEventsRegistry.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
 import type { SynthesizeObservation } from '../src/loop/oneTurn.js';
 import type { ObservationConfig } from '../src/loop/oneTurn.js';
-import { mergeInboxes } from '../src/core/orchestration/taskEngine.js';
+import { mergeInboxes } from '../src/orchestration/taskEngine.js';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const a2aPath = path.resolve(__dirname, '../src/core/orchestration/A2AService.ts');
+const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
 const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
 const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const taskEnginePath = path.resolve(__dirname, '../src/core/orchestration/taskEngine.ts');
-const pluginManagerPath = path.resolve(__dirname, '../src/core/plugin/pluginManager.ts');
+const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
+const pluginManagerPath = path.resolve(__dirname, '../src/plugin/pluginManager.ts');
 
 // Create properly typed mocks
 const mockFindLocalAgent = jest.fn() as jest.MockedFunction<(agentName: string) => Promise<any>>;

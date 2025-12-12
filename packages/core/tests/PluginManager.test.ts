@@ -1,6 +1,6 @@
-import { PluginManager } from '../src/core/plugin/pluginManager.js';
-import { globalAgentRegistry } from '../src/core/plugin/AgentRegistry.js';
-import type { AgentPlugin } from '../src/core/plugin/types.js';
+import { PluginManager } from '../src/plugin/pluginManager.js';
+import { globalAgentRegistry } from '../src/plugin/AgentRegistry.js';
+import type { AgentPlugin } from '../src/plugin/types.js';
 
 describe('PluginManager', () => {
     beforeEach(() => {

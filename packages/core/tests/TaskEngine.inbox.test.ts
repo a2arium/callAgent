@@ -1,6 +1,6 @@
-import { TaskEngine } from '../src/core/orchestration/taskEngine.js';
-import { InMemorySessionManager } from '../src/core/orchestration/InMemorySessionManager.js';
-import { getPendingTasks, setPendingTasks } from '../src/core/orchestration/Handles.js';
+import { TaskEngine } from '../src/orchestration/taskEngine.js';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
+import { getPendingTasks, setPendingTasks } from '../src/orchestration/Handles.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
 
 describe('TaskEngine inbox coordination', () => {
@@ -12,7 +12,7 @@ describe('TaskEngine inbox coordination', () => {
         const store = new InMemorySessionManager();
         const engine = new TaskEngine({ sessionStore: store });
         // Access sessionManager for assertions; it's a private field at type level only
-        const sessionManager = (engine as any).sessionManager as import('../src/core/orchestration/SessionManager.js').SessionManager;
+        const sessionManager = (engine as any).sessionManager as import('../src/orchestration/SessionManager.js').SessionManager;
         return { engine, sessionManager };
     };
 

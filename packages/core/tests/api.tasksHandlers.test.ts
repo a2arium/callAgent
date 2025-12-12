@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { EngineLocator } from '../src/core/orchestration/EngineLocator.js';
+import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 import { handleTasksSend } from '../src/api/rpc/tasksSend.js';
 import { handleTasksInput } from '../src/api/rpc/tasksInput.js';
 

@@ -3,19 +3,19 @@
 import { jest } from '@jest/globals';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/core/memory/stores/SessionStore.js';
-import { setPendingTasks } from '../src/core/orchestration/Handles.js';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/memory/stores/SessionStore.js';
+import { setPendingTasks } from '../src/orchestration/Handles.js';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const a2aPath = path.resolve(__dirname, '../src/core/orchestration/A2AService.ts');
+const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
 const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
 const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const handlesPath = path.resolve(__dirname, '../src/core/orchestration/Handles.ts');
-const taskEnginePath = path.resolve(__dirname, '../src/core/orchestration/taskEngine.ts');
+const handlesPath = path.resolve(__dirname, '../src/orchestration/Handles.ts');
+const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
 
 await jest.unstable_mockModule(a2aPath, () => ({
     globalA2AService: {
@@ -195,7 +195,7 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
 
             // Test that the real TaskEngine wireContext added the read function (lines 4398-4407)
             if ((ctx as any).memory.semantic && (ctx as any).memory.semantic.read) {
-                const result = await (ctx as any).memory.semantic.read();
+                const result = await (ctx as any).memory.semantic.read({});
                 expect(Array.isArray(result)).toBe(true);
                 // The semantic memory read function was added by TaskEngine wireContext (line 4397)
                 // and executed lines 4398-4407. The function exists and was called, which means
@@ -234,7 +234,7 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
 
             // Test error handling when getMany is missing (line 4406)
             if ((ctx as any).memory.semantic && (ctx as any).memory.semantic.read) {
-                const result = await (ctx as any).memory.semantic.read();
+                const result = await (ctx as any).memory.semantic.read({});
                 expect(result).toEqual([]);
             }
         });

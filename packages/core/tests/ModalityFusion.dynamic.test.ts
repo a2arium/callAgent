@@ -1,5 +1,4 @@
-import { ModalityFusion } from '../src/core/memory/lifecycle/2-encoding/implementations/fusion/ModalityFusion.js';
-import { createMemoryItem } from '../src/shared/types/memoryLifecycle.js';
+import { ModalityFusion, createMemoryItem } from '@a2arium/callagent-memory-engine';
 
 describe('ModalityFusion Dynamic Modality Support', () => {
     let modalityFusion: ModalityFusion;

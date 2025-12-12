@@ -1,6 +1,6 @@
 import type { MentalState } from './types.js';
 import { logger } from '@a2arium/callagent-utils';
-import { isArtifactMarker } from '../core/orchestration/ArtifactImpl.js';
+import { isArtifactMarker } from '@a2arium/callagent-memory-engine';
 
 const log = logger.createLogger({ prefix: 'Hygiene' });
 

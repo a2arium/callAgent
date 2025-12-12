@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import { logger } from '@a2arium/callagent-utils';
-import { AgentResultCache, CacheCleanupService } from '../core/cache/index.js';
+import { AgentResultCache, CacheCleanupService } from '@a2arium/callagent-memory-engine';
+// import { CacheCleanupService } from '../cache/index.js'; // TODO: locate CacheCleanupService
 
 // Create CLI logger
 const cliLogger = logger.createLogger({ prefix: 'CacheCLI' });
@@ -173,7 +174,7 @@ async function executeStats(): Promise<void> {
         if (Object.keys(stats.agentBreakdown).length > 0) {
             console.log('\n🤖 By Agent:');
             Object.entries(stats.agentBreakdown)
-                .sort(([, a], [, b]) => b - a)
+                .sort(([, a], [, b]) => (b as number) - (a as number))
                 .forEach(([agentName, count]) => {
                     console.log(`  ${agentName}: ${count} entries`);
                 });

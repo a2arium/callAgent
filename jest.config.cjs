@@ -41,6 +41,12 @@ const config = {
         '^@a2arium/core/(.*)$': '<rootDir>/packages/core/src/$1',
         '^@a2arium/types/(.*)$': '<rootDir>/packages/types/src/$1',
         '^@a2arium/memory-sql/(.*)$': '<rootDir>/packages/memory-sql/src/$1',
+        '^@a2arium/callagent-memory-engine$': '<rootDir>/packages/memory-engine/src/index.ts',
+        '^@a2arium/callagent-memory-engine/(.*)$': '<rootDir>/packages/memory-engine/src/$1',
+        '^@a2arium/callagent-utils/(.*)$': '<rootDir>/packages/utils/src/$1',
+        '^@a2arium/callagent-utils$': '<rootDir>/packages/utils/src/index.ts',
+        '^@a2arium/callagent-types/(.*)$': '<rootDir>/packages/types/src/$1',
+        '^@a2arium/callagent-types$': '<rootDir>/packages/types/src/index.ts',
         // Handle .js imports that should resolve to .ts files
         '^(\\.{1,2}/.*)\\.js$': '$1',
     },

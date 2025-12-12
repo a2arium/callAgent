@@ -1,7 +1,7 @@
 // src/api/rpc/tasksInput.ts
 import type { Request, Response } from 'express';
-import { EngineLocator } from '../../core/orchestration/EngineLocator.js';
-import type { TaskEngine } from '../../core/orchestration/taskEngine.js';
+import { EngineLocator } from '../../orchestration/EngineLocator.js';
+import type { TaskEngine } from '../../orchestration/taskEngine.js';
 import { getIdempotent, setIdempotent } from './IdempotencyStore.js';
 
 /**

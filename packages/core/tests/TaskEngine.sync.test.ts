@@ -1,6 +1,6 @@
-import { TaskEngine } from '../src/core/orchestration/taskEngine.js';
-import { InMemorySessionManager } from '../src/core/orchestration/InMemorySessionManager.js';
-import { globalA2AService } from '../src/core/orchestration/A2AService.js';
+import { TaskEngine } from '../src/orchestration/taskEngine.js';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
+import { globalA2AService } from '../src/orchestration/A2AService.js';
 import { jest } from '@jest/globals';
 
 describe('TaskEngine sync completion', () => {
@@ -21,15 +21,30 @@ describe('TaskEngine sync completion', () => {
         // Create context using private method
         const ctx = (engine as any).createContext(taskEntity);
 
-        // Ensure session data exists
+        // Ensure session data exists with complete mental state structure
         await sessionManager.saveSnapshot({
             tenantId,
             sessionId: parentTaskId,
             agentId: 'parent-agent',
             expectedWmVersion: BigInt(0),
             snapshot: {
-                meta: { agentId: 'parent-agent' },
-                M: { memory: { vars: {} } }
+                meta: { agentId: 'parent-agent', turn: 0 },
+                M: {
+                    memory: {
+                        vars: {},
+                        sensory: { llmState: undefined },
+                        longTerm: { semantic: {}, episodic: [], procedural: {} }
+                    },
+                    worldModel: { explicit: null, implicit: null, simulator: null },
+                    goalState: { hierarchy: { roots: [], nodes: {} } },
+                    emotion: { valence: 0, arousal: 0.2 },
+                    policyParams: { theta: null, stochastic: false },
+                    rewardParams: {
+                        discountGamma: 0.99,
+                        extrinsicWeights: [1],
+                        intrinsic: { exploration: 0, curiosity: 0, competence: 0, novelty: 0 }
+                    }
+                }
             }
         });
 
@@ -68,7 +83,10 @@ describe('TaskEngine sync completion', () => {
         expect(result).toBeDefined();
         // The fix ensures token is present even if spread failed or A2A returned undefined
         expect(result.token).toBeDefined();
-        expect(result).toMatchObject(mockResult);
+        // New API returns { handle, token } where result fields are in handle
+        expect(result.handle).toBeDefined();
+        expect(result.handle.status).toEqual(mockResult.status);
+        expect(result.handle.data).toEqual(mockResult.data);
 
         sendSpy.mockRestore();
     });
