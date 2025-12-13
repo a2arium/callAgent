@@ -71,7 +71,7 @@ export async function runLoop<
     // ✅ FIX: Store env reference so synchronous completions can update pending state
     (ctx as any).__activeLoopEnv = env;
 
-    log.info('LoopRunner: Attached __activeLoopInbox to context (v3.5)', { taskId, hasInbox: !!inbox, inboxLen: inbox.current.length });
+    // log.info('LoopRunner: Attached __activeLoopInbox to context (v3.5)', { taskId, hasInbox: !!inbox, inboxLen: inbox.current.length });
 
     const createMemoryReader = (mState: MentalState<Sensory>): import('./types.js').MemoryReader => {
         const semanticRegistry = (ctx as any).memory?.semantic;

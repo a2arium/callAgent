@@ -46,8 +46,8 @@ await jest.unstable_mockModule(outboxPath, () => ({
 
 await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
 
-const { TaskEngine, HYDRATED_ARTIFACT_HANDLE_SYMBOL } = await import(taskEnginePath);
-const { ArtifactHydrationService } = await import('../src/orchestration/ArtifactHydrationService.js');
+const { TaskEngine } = await import(taskEnginePath);
+const { ArtifactHydrationService, HYDRATED_ARTIFACT_HANDLE_SYMBOL } = await import('../src/orchestration/ArtifactHydrationService.js');
 const attachHydratedArtifactHandles = ArtifactHydrationService.attachHydratedArtifactHandles.bind(ArtifactHydrationService);
 const { AgentResultCache } = await import('@a2arium/callagent-memory-engine');
 
@@ -70,7 +70,14 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        return this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        const snap = this.snapshots.get(`${tenantId}:${sessionId}`);
+        if (!snap) return null;
+        const clone = JSON.parse(JSON.stringify(snap, (key, value) =>
+            typeof value === 'bigint' ? value.toString() : value
+        ));
+        // Restore BigInt type for wmVersion as TaskEngine expects it
+        if (clone) clone.wmVersion = snap.wmVersion;
+        return clone;
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -99,6 +106,7 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
 
         const key = `${params.tenantId}:${params.sessionId}`;
         const current = this.snapshots.get(key);
+        // Compare with stored version (no need to clone current for this check)
         const currentVersion = current?.wmVersion ?? BigInt(0);
 
         if (current && current.wmVersion !== params.expectedWmVersion) {
@@ -106,13 +114,19 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
         }
 
         const newVersion = currentVersion + BigInt(1);
+        // Store a CLONE to prevent mutation from outside affecting store
         this.snapshots.set(key, {
             wmVersion: newVersion,
-            snapshot: params.snapshot,
+            snapshot: JSON.parse(JSON.stringify(params.snapshot)),
             agentId: params.agentId,
             updatedAt: new Date().toISOString()
         });
+
         return { newVersion };
+    }
+
+    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }) {
+        return [];
     }
 
     async appendEvent(): Promise<{ eventId: string; seq: number }> {
@@ -1023,6 +1037,14 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const ctx = await engine.restoreCtx('t', 'parent');
 
             // Attempt to persist child context - should handle CAS error gracefully
+            if ((engine as any).apiBinder) {
+                try {
+                    await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
+                } catch (e: any) {
+                    // Ignore "TaskEngine requires a configured session manager" if it's expected
+                    if (!e.message.includes('configured session manager')) throw e;
+                }
+            }
             if (ctx.persistChildContext) {
                 try {
                     await ctx.persistChildContext('child-1', { vars: { childData: 'test' } });

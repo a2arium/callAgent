@@ -60,7 +60,8 @@ describe('TaskEngine Async Persistence Race', () => {
         });
 
         // Initialize orchestration APIs on ctx
-        await (engine as any).attachOrchestrationAPIs(ctx, {
+        // Initialize orchestration APIs on ctx
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
             sessionId: parentTaskId,
             agentId: 'parent',

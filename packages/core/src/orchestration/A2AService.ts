@@ -225,40 +225,53 @@ export class A2AService implements IA2AService {
                     shouldStage: awaitCompletionValue === false
                 });
                 if (awaitCompletionValue === false) {
-                    // ✅ FIX: Stage observation synchronously BEFORE deferring resume
-                    // This ensures the observation is available when the parent resumes, even for synchronous completions
-                    a2aLogger.debug('Staging child completion observation synchronously', {
-                        parentTaskId: options.parentTaskId,
-                        childToken: options.parentChildToken
-                    });
-                    try {
-                        await eng.stageChildCompletionObservation({
-                            tenantId: options.parentTenantId!,
-                            parentTaskId: options.parentTaskId!,
-                            childToken: options.parentChildToken!,
-                            result,
-                            childAgentId: targetPlugin.manifest.name
-                        });
-                        a2aLogger.debug('Successfully staged child completion observation', {
+                    // ✅ FIX: Check if active loop already handles this via ApiBinder sync injection
+                    // If so, we MUST NOT trigger handleChildCompleted, as it would restart the task (Phantom Restart)
+                    const hasActiveLoopInbox = !!(sourceCtx as any)?.__activeLoopInbox;
+
+                    if (hasActiveLoopInbox) {
+                        a2aLogger.info('Skipping child completion notification - active loop handles via inbox injection', {
                             parentTaskId: options.parentTaskId,
                             childToken: options.parentChildToken
                         });
-                    } catch (stageError) {
-                        a2aLogger.warn('Failed to stage child completion observation synchronously', {
-                            error: stageError instanceof Error ? stageError.message : String(stageError),
-                            parentTaskId: options.parentTaskId
+                        // Do nothing - ApiBinder logic took care of it
+                    } else {
+                        // Original behavior: Stage synchronously + defer notification
+                        // ✅ FIX: Stage observation synchronously BEFORE deferring resume
+                        // This ensures the observation is available when the parent resumes, even for synchronous completions
+                        a2aLogger.debug('Staging child completion observation synchronously', {
+                            parentTaskId: options.parentTaskId,
+                            childToken: options.parentChildToken
                         });
-                    }
-
-                    // Defer the resume to next turn to ensure observation is available
-                    queueMicrotask(() => {
-                        const notifyPromise = deliverCompletion().catch(notifyError => {
-                            a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
+                        try {
+                            await eng.stageChildCompletionObservation({
+                                tenantId: options.parentTenantId!,
+                                parentTaskId: options.parentTaskId!,
+                                childToken: options.parentChildToken!,
+                                result,
+                                childAgentId: targetPlugin.manifest.name
+                            });
+                            a2aLogger.debug('Successfully staged child completion observation', {
+                                parentTaskId: options.parentTaskId,
+                                childToken: options.parentChildToken
+                            });
+                        } catch (stageError) {
+                            a2aLogger.warn('Failed to stage child completion observation synchronously', {
+                                error: stageError instanceof Error ? stageError.message : String(stageError),
                                 parentTaskId: options.parentTaskId
                             });
+                        }
+
+                        // Defer the resume to next turn to ensure observation is available
+                        queueMicrotask(() => {
+                            const notifyPromise = deliverCompletion().catch(notifyError => {
+                                a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
+                                    parentTaskId: options.parentTaskId
+                                });
+                            });
+                            this.trackNotification(notifyPromise);
                         });
-                        this.trackNotification(notifyPromise);
-                    });
+                    }
                 } else {
                     try {
                         await deliverCompletion();
@@ -699,9 +712,22 @@ export class A2AService implements IA2AService {
                         taskId: targetCtx.task.id
                     });
                     console.log(`⚡ ${targetPlugin.manifest.name} (cached result)\n`);
+
+                    // Debug: Log the full cached result to inspect content/errors
+                    try {
+                        const resultSummary = JSON.stringify(cachedResult, (key, value) => {
+                            if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
+                            return value;
+                        }, 2);
+                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result:\n${resultSummary}\n`);
+                    } catch (err) {
+                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result (non-serializable):`, cachedResult);
+                    }
+
                     return cachedResult;
                 }
             }
+
 
             console.log(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
 
@@ -731,6 +757,18 @@ export class A2AService implements IA2AService {
                         const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
                         return started ?? { status: 'started' } as any;
                     })());
+
+            // Debug: Log the full result from the target agent to inspect content/errors
+            try {
+                const resultSummary = JSON.stringify(result, (key, value) => {
+                    if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
+                    return value;
+                }, 2);
+                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result:\n${resultSummary}\n`);
+            } catch (err) {
+                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result (non-serializable):`, result);
+            }
+
 
             // Cache the result if caching is enabled
             if (this.agentResultCache && effectiveCache.enabled) {

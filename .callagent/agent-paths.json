@@ -1,0 +1,78 @@
+{
+  "create": {
+    "module": "../apps/examples/interactive-a2a-demo/dist/packages/core/src/plugin/createAgent.js",
+    "manifest": "../apps/examples/interactive-a2a-demo/dist/packages/core/src/plugin/createAgent.js"
+  },
+  "telegram-bridge-demo": {
+    "module": "../apps/examples/telegram-bridge-demo/dist/apps/examples/telegram-bridge-demo/AgentModule.js",
+    "manifest": "../apps/examples/telegram-bridge-demo/dist/apps/examples/telegram-bridge-demo/AgentModule.js"
+  },
+  "bug-repro": {
+    "module": "../apps/examples/aplret-bug-reproduction/dist/BugReproAgent.js",
+    "manifest": "../apps/examples/aplret-bug-reproduction/dist/BugReproAgent.js"
+  },
+  "helper": {
+    "module": "../apps/examples/aplret-bug-reproduction/dist/HelperAgent.js",
+    "manifest": "../apps/examples/aplret-bug-reproduction/dist/HelperAgent.js"
+  },
+  "dist": {
+    "module": "../apps/examples/artifact-demo/dist/agent.js",
+    "manifest": "../apps/examples/artifact-demo/dist/agent.js"
+  },
+  "child-agent": {
+    "module": "../apps/examples/artifact-demo/dist/child-agent.js",
+    "manifest": "../apps/examples/artifact-demo/dist/child-agent.js"
+  },
+  "arithmetic": {
+    "module": "../apps/examples/calculator-workflow/dist/ArithmeticAgent.js",
+    "manifest": "../apps/examples/calculator-workflow/dist/ArithmeticAgent.js"
+  },
+  "coordinator": {
+    "module": "../apps/examples/calculator-workflow/dist/CoordinatorAgent.js",
+    "manifest": "../apps/examples/calculator-workflow/dist/CoordinatorAgent.js"
+  },
+  "multiplication": {
+    "module": "../apps/examples/calculator-workflow/dist/MultiplicationAgent.js",
+    "manifest": "../apps/examples/calculator-workflow/dist/MultiplicationAgent.js"
+  },
+  "subtraction": {
+    "module": "../apps/examples/calculator-workflow/dist/SubtractionAgent.js",
+    "manifest": "../apps/examples/calculator-workflow/dist/SubtractionAgent.js"
+  },
+  "subtraction-agent": {
+    "module": "../apps/examples/calculator-workflow/dist/SubtractionAgent.js",
+    "manifest": "../apps/examples/calculator-workflow/dist/subtraction-agent.json"
+  },
+  "child": {
+    "module": "../apps/examples/child-observation-staging-bug/dist/ChildAgent.js",
+    "manifest": "../apps/examples/child-observation-staging-bug/dist/ChildAgent.js"
+  },
+  "parent": {
+    "module": "../apps/examples/child-observation-staging-bug/dist/ParentAgent.js",
+    "manifest": "../apps/examples/child-observation-staging-bug/dist/ParentAgent.js"
+  },
+  "analyzer": {
+    "module": "../apps/examples/interactive-a2a-demo/dist/AnalyzerAgent.js",
+    "manifest": "../apps/examples/interactive-a2a-demo/dist/AnalyzerAgent.js"
+  },
+  "extractor": {
+    "module": "../apps/examples/interactive-a2a-demo/dist/ExtractorAgent.js",
+    "manifest": "../apps/examples/interactive-a2a-demo/dist/ExtractorAgent.js"
+  },
+  "orchestrator": {
+    "module": "../apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js",
+    "manifest": "../apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js"
+  },
+  "simple-orchestrator": {
+    "module": "../apps/examples/interactive-a2a-demo/dist/SimpleOrchestratorAgent.js",
+    "manifest": "../apps/examples/interactive-a2a-demo/dist/SimpleOrchestratorAgent.js"
+  },
+  "loop-await-child-demo-child": {
+    "module": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoChildAgent.js",
+    "manifest": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoChildAgent.js"
+  },
+  "loop-await-child-demo-parent": {
+    "module": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoParentAgent.js",
+    "manifest": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoParentAgent.js"
+  }
+}

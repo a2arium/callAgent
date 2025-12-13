@@ -52,77 +52,23 @@ type WorkingVarHookRegistrarFn = (hooks?: {
 
 
 
-export { HYDRATED_ARTIFACT_HANDLE_SYMBOL };
+import {
+    TaskEntity,
+    StartTaskParams,
+    CleanChildResult
+} from './types.js';
 
-/**
- * Task entity with the necessary properties for the task engine
- */
-export type TaskEntity = {
-    id: string;
-    input: unknown;
-    status?: TaskStatus;
-    artifacts?: Artifact[];
+export type {
+    TaskEntity,
+    StartTaskParams,
+    CleanChildResult
 };
 
-/**
- * Clean child task result extracted from TaskEntity wrapper
- */
-interface CleanChildResult {
-    result: unknown;
-    childTaskId?: string;
-    executionMetadata?: {
-        timings?: unknown;
-        rewards?: unknown;
-        state?: string;
-        timestamp?: string;
-    };
-}
 
-/**
- * Helper function to detect if a result is a TaskEntity (wrapped child task result)
- */
-const isTaskEntityResult = (result: unknown): result is TaskEntity => {
-    return result !== null && result !== undefined && typeof result === 'object' &&
-        typeof (result as any).id === 'string' &&
-        typeof (result as any).status === 'object' &&
-        (result as any).status !== null;
-};
 
-/**
- * Extract clean result from potentially wrapped TaskEntity
- * This fixes the confusing nested structure where TaskEntity.status.metadata.result contains the actual agent result
- */
-const extractCleanChildResult = (result: unknown): CleanChildResult => {
-    if (!isTaskEntityResult(result)) {
-        // Return as-is if not a TaskEntity wrapper
-        return { result };
-    }
 
-    const taskEntity = result as TaskEntity;
-    const cleanResult: CleanChildResult = {
-        childTaskId: taskEntity.id,
-        result: taskEntity.status?.metadata?.result ?? result,
-        executionMetadata: {
-            timings: taskEntity.status?.metadata?.timings,
-            rewards: taskEntity.status?.metadata?.rewards,
-            state: taskEntity.status?.state,
-            timestamp: taskEntity.status?.timestamp
-        }
-    };
 
-    return cleanResult;
-};
 
-/**
- * Parameters for starting a task
- */
-export type StartTaskParams = {
-    task: TaskEntity;
-    isStreaming: boolean;
-    agentId?: string;
-    tenantId?: string;
-    initialContext?: TaskContext; // use prebuilt context when provided
-};
 
 /**
  * A minimal task engine that handles task execution
@@ -133,141 +79,18 @@ const log = logger.createLogger({ prefix: 'TaskEngine' });
 export type TaskEngineTestOverrides = {
     attachAndRestoreLLM?: (ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined) => Promise<void>;
 };
-const setNestedControlVar = (target: Record<string, unknown> | undefined, path: string, value: unknown): Record<string, unknown> => {
-    const next = { ...(target || {}) } as Record<string, unknown>;
-    if (!path) return next;
-    const parts = path.split('.');
-    let cursor: Record<string, unknown> = next;
-    for (let i = 0; i < parts.length - 1; i++) {
-        const part = parts[i];
-        const existing = cursor[part];
-        if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
-            cursor[part] = {};
-        }
-        cursor = cursor[part] as Record<string, unknown>;
-    }
-    cursor[parts[parts.length - 1]] = value;
-    return next;
-};
+// Re-export or use the extracted class
+// Re-export or use the extracted class
+import { FlushScheduler } from './engine/FlushScheduler.js';
+import { PathUtils } from './utils/PathUtils.js';
+import { SnapshotRepository } from './persistence/SnapshotRepository.js';
+import { ApiBinder } from './api/ApiBinder.js';
+import { TaskStateUtils } from './utils/TaskStateUtils.js';
+import { VarsSync } from './synchronization/VarsSync.js';
+import { TurnRunner } from './TurnRunner.js';
+// Legacy adapters to maintain internal calls if needed, or replace usages.
 
-const deleteNestedControlVar = (target: Record<string, unknown> | undefined, path: string): Record<string, unknown> => {
-    if (!path) return { ...(target || {}) };
-    const parts = path.split('.');
-    const next = { ...(target || {}) } as Record<string, unknown>;
-    let cursor: Record<string, unknown> | undefined = next;
-    for (let i = 0; i < parts.length - 1; i++) {
-        if (!cursor) break;
-        const part = parts[i];
-        const child = cursor[part];
-        if (!child || typeof child !== 'object' || Array.isArray(child)) {
-            return next;
-        }
-        cursor = child as Record<string, unknown>;
-    }
-    if (!cursor) return next;
-    delete cursor[parts[parts.length - 1]];
-    return next;
-};
-
-const applyControlVarToSnapshot = (snapshot: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-    if (!path) return snapshot;
-    const next: any = { ...(snapshot as any) };
-    next.pending = { ...(next.pending || {}) };
-    console.log('DEBUG applyControlVarToSnapshot: before modify', 'pending.tasks keys:', Object.keys((next.pending as any).tasks || {}));
-    next.pending.controlVars = setNestedControlVar(next.pending.controlVars, path, value);
-    console.log('DEBUG applyControlVarToSnapshot: after modify', 'pending.tasks keys:', Object.keys((next.pending as any).tasks || {}));
-    return next as Record<string, unknown>;
-};
-
-const removeControlVarFromSnapshot = (snapshot: Record<string, unknown>, path: string): Record<string, unknown> => {
-    if (!path) return snapshot;
-    const next: any = { ...(snapshot as any) };
-    next.pending = { ...(next.pending || {}) };
-    next.pending.controlVars = deleteNestedControlVar(next.pending.controlVars, path);
-    return next as Record<string, unknown>;
-};
-
-const syncControlVarIntoActiveLoop = (ctx: TaskContext, path: string, value: unknown): void => {
-    if (!path) return;
-    const env = (ctx as any).__activeLoopEnv;
-    if (!env) return;
-    env.pending = env.pending || { inputs: {}, children: {}, tools: {}, groups: {} };
-    (env.pending as any).controlVars = setNestedControlVar((env.pending as any).controlVars, path, value);
-    (ctx as any).controlVars = setNestedControlVar((ctx as any).controlVars, path, value);
-};
-
-const clearControlVarInActiveLoop = (ctx: TaskContext, path: string): void => {
-    if (!path) return;
-    const env = (ctx as any).__activeLoopEnv;
-    if (env) {
-        env.pending = env.pending || { inputs: {}, children: {}, tools: {}, groups: {} };
-        (env.pending as any).controlVars = deleteNestedControlVar((env.pending as any).controlVars, path);
-    }
-    if ((ctx as any).controlVars) {
-        (ctx as any).controlVars = deleteNestedControlVar((ctx as any).controlVars, path);
-    }
-};
-
-class FlushScheduler {
-    private pendingFlushes = new Map<string, { promise: Promise<void>; resolve: () => void; reject: (err: Error) => void }>();
-    private lastFlushTime = new Map<string, number>();
-    private readonly MIN_FLUSH_INTERVAL_MS = 50; // Minimum interval between flushes for the same key
-
-    async coalesce(key: string, flushFn: () => Promise<void>, ctx: TaskContext, agentId: string): Promise<void> {
-        const now = Date.now();
-        const lastFlush = this.lastFlushTime.get(key) || 0;
-
-        // If a flush is already pending for this key, return its promise
-        if (this.pendingFlushes.has(key)) {
-            log.debug(`FlushScheduler: Coalescing flush for key ${key}. Returning existing promise.`);
-            return this.pendingFlushes.get(key)!.promise;
-        }
-
-        // If it's too soon since the last flush, schedule a debounced flush
-        if (now - lastFlush < this.MIN_FLUSH_INTERVAL_MS) {
-            log.debug(`FlushScheduler: Debouncing flush for key ${key}. Last flush ${now - lastFlush}ms ago.`);
-            return new Promise<void>((resolve, reject) => {
-                const timeout = setTimeout(async () => {
-                    try {
-                        await this._executeFlush(key, flushFn, ctx, agentId);
-                        resolve();
-                    } catch (err: any) {
-                        reject(err);
-                    }
-                }, this.MIN_FLUSH_INTERVAL_MS - (now - lastFlush));
-                // Store the promise for this debounced flush
-                this.pendingFlushes.set(key, { promise: new Promise((res, rej) => { /* noop, handled by timeout */ }), resolve: () => clearTimeout(timeout), reject: (err) => { clearTimeout(timeout); reject(err); } });
-            });
-        }
-
-        // Otherwise, execute immediately
-        log.debug(`FlushScheduler: Executing immediate flush for key ${key}.`);
-        return this._executeFlush(key, flushFn, ctx, agentId);
-    }
-
-    private async _executeFlush(key: string, flushFn: () => Promise<void>, ctx: TaskContext, agentId: string): Promise<void> {
-        let resolve: () => void;
-        let reject: (err: Error) => void;
-        const promise = new Promise<void>((res, rej) => {
-            resolve = res;
-            reject = rej;
-        });
-        this.pendingFlushes.set(key, { promise, resolve: resolve!, reject: reject! });
-
-        try {
-            log.debug(`FlushScheduler: Starting flush for key ${key}`);
-            await flushFn();
-            this.lastFlushTime.set(key, Date.now());
-            log.debug(`FlushScheduler: Completed flush for key ${key}`);
-            resolve!();
-        } catch (err: any) {
-            log.error(`FlushScheduler: Flush failed for key ${key}: ${err.message}`);
-            reject!(err);
-        } finally {
-            this.pendingFlushes.delete(key);
-        }
-    }
-}
+// FlushScheduler extracted to ./engine/FlushScheduler.ts
 
 class KeyedMutex {
     private mutexes = new Map<string, Promise<void>>();
@@ -300,13 +123,16 @@ class KeyedMutex {
 export class TaskEngine {
     static testOverrides?: TaskEngineTestOverrides;
     private sessionManager?: SessionManager;
+    private snapshotRepo?: SnapshotRepository;
     private taskExecutorInitialized = false;
     private readonly childCompletionInFlight = new Map<string, number>();
     private flushScheduler = new FlushScheduler();
     private taskCreationMutex = new KeyedMutex();
     private handlerInvoker?: DurableHandlerInvoker;
     // Track background task promises for cleanup (especially in tests)
-    private readonly backgroundTaskPromises = new Set<Promise<unknown>>();
+    private readonly backgroundTaskPromises = new Set<Promise<void>>();
+    private apiBinder: ApiBinder;
+    private turnRunner: TurnRunner;
 
     constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
         if (opts?.sessionStore) {
@@ -318,6 +144,23 @@ export class TaskEngine {
             log.warn('For production, configure a database-backed SessionStore');
             this.sessionManager = new SessionManager(new InMemorySessionManager());
         }
+        this.snapshotRepo = new SnapshotRepository(this.sessionManager);
+
+        this.apiBinder = new ApiBinder({
+            sessionManager: this.sessionManager,
+            snapshotRepo: this.snapshotRepo,
+            getTraceContext: () => ({}), // Dummy for now, or fetch from context if generic
+            getSessionStorePrisma: () => this.getSessionStorePrisma(),
+            taskCreationMutex: this.taskCreationMutex,
+            backgroundTaskPromises: this.backgroundTaskPromises,
+            handleChildCompleted: (p) => this.handleChildCompleted(p)
+        });
+
+        this.turnRunner = new TurnRunner(
+            this.sessionManager!,
+            this.apiBinder,
+            () => this.getSessionStorePrisma()
+        );
 
         if (opts?.handlerInvoker) {
             this.handlerInvoker = opts.handlerInvoker;
@@ -658,658 +501,6 @@ export class TaskEngine {
         }
     }
 
-    private async attachOrchestrationAPIs(
-        ctx: TaskContext,
-        params: { tenantId: string; sessionId: string; agentId?: string; flushMentalState: () => Promise<void> }
-    ): Promise<void> {
-        if (!this.sessionManager) {
-            throw new Error('TaskEngine requires a configured session manager for orchestration APIs');
-        }
-
-        const { tenantId, sessionId } = params;
-        const agentId = params.agentId ?? ((ctx as any).agentId as string) ?? 'default';
-        const flushMentalState = params.flushMentalState;
-
-        // Artifacts Factory
-        if (!(ctx as any).artifacts) {
-            (ctx as any).artifacts = {
-                create: async (val: unknown, options?: { mimeType?: string; preview?: string }) => {
-                    const prisma = this.getSessionStorePrisma();
-                    if (!prisma) {
-                        throw new Error("Artifacts not available: no database connection");
-                    }
-                    const cache = new AgentResultCache(prisma);
-                    const art = new ArtifactImpl(undefined, cache, tenantId, options?.mimeType, undefined);
-                    if (val !== undefined) {
-                        await art.set(val);
-                    }
-                    return art;
-                },
-                text: async (val: string) => {
-                    return (ctx as any).artifacts.create(val, { mimeType: "text/plain" });
-                },
-                json: async (val: unknown) => {
-                    return (ctx as any).artifacts.create(val, { mimeType: "application/json" });
-                }
-            };
-        }
-        // Goals API facade
-        try {
-            const goals = await import('../loop/goals.js');
-            (ctx as any).addGoal = (node: any) => goals.addGoal(ctx as any, node);
-            (ctx as any).updateGoal = (id: any, patch: any) => goals.updateGoal(ctx as any, id, patch);
-            (ctx as any).moveGoal = (id: any, parentId?: any, order?: any) => goals.moveGoal(ctx as any, id, parentId, order);
-            (ctx as any).completeGoal = (id: any, opts?: any) => goals.completeGoal(ctx as any, id, opts);
-            (ctx as any).failGoal = (id: any) => goals.failGoal(ctx as any, id);
-            (ctx as any).listGoals = (filter?: any) => goals.listGoals(ctx as any, filter);
-            (ctx as any).goals = {
-                add: (g: any) => goals.addGoal(ctx as any, g),
-                update: (goalId: string, patch: any) => goals.updateGoal(ctx as any, goalId, patch),
-                remove: (goalId: string) => goals.failGoal(ctx as any, goalId),
-                clear: async (predicate?: (g: any) => boolean) => {
-                    const all = await goals.listGoals(ctx as any, {});
-                    for (const g of all) {
-                        if (!predicate || predicate(g as any)) {
-                            await goals.failGoal(ctx as any, (g as any).id);
-                        }
-                    }
-                },
-                read: (filter?: any) => goals.listGoals(ctx as any, filter)
-            };
-        } catch { /* noop */ }
-
-        const hasPreservedRequestInput = (ctx as any).__a2aParent || (ctx as any).__preserveRequestInput;
-        if (!hasPreservedRequestInput) {
-            (ctx as any).requestInput = async (
-                promptOrParts: string | string[] | import('../shared/types/index.js').MessagePart | import('../shared/types/index.js').MessagePart[],
-                opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }
-            ) => {
-                if (!this.sessionManager) throw new Error('Session manager not configured');
-                const maxPrompts = 100; // TODO: configurable
-                const snapL = await this.sessionManager.load(tenantId, sessionId);
-                const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
-                const pendingNow = getPendingInputs(baseL);
-                if (Object.keys(pendingNow).length >= maxPrompts) {
-                    throw new Error('LIMIT_MAX_PROMPTS_EXCEEDED');
-                }
-                const snap = await this.sessionManager.load(tenantId, sessionId);
-                const base = (snap?.snapshot as Record<string, unknown>) || {};
-                const baseAny = base as any;
-                const token = opts?.__existingToken || uuidv4();
-                const controlUpdates: Array<[string, unknown]> = [];
-                const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
-                const pending = { ...getPendingInputs(base) };
-
-                const normalizeParts = (
-                    p: string | string[] | import('../shared/types/index.js').MessagePart | import('../shared/types/index.js').MessagePart[]
-                ): import('../shared/types/index.js').MessagePart[] => {
-                    if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' } as any];
-                    if (Array.isArray(p) && p.length > 0 && typeof p[0] === 'string') {
-                        return (p as string[]).map(t => ({ type: 'text', text: t, format: 'markdown' } as any));
-                    }
-                    if (Array.isArray(p)) {
-                        return (p as any[]).map(part => (part?.type === 'text' && !part?.format ? { ...part, format: 'markdown' } : part));
-                    }
-                    const one = p as any;
-                    return [one?.type === 'text' && !one?.format ? { ...one, format: 'markdown' } : one];
-                };
-
-                const parts = normalizeParts(promptOrParts);
-                const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
-
-                try { await ctx.reply(parts as any); } catch { /* best-effort */ }
-
-                if (!opts?.__existingToken) {
-                    pending[token] = {
-                        schema: opts?.schema,
-                        expiresAt,
-                        handlerName: opts?.onProvided,
-                        expiredHandlerName: opts?.onExpired
-                    } as any;
-                }
-
-                if (opts?.setToken !== false) {
-                    controlUpdates.push(['token', token]);
-                    baseAny.pending = baseAny.pending || {};
-                    baseAny.pending.controlVars = setNestedControlVar(baseAny.pending.controlVars, 'token', token);
-                    syncControlVarIntoActiveLoop(ctx as any, 'token', token);
-                }
-
-                if (opts?.setStage) {
-                    const stagePath = 'stage';
-                    controlUpdates.push([stagePath, opts.setStage]);
-                    baseAny.pending = baseAny.pending || {};
-                    baseAny.pending.controlVars = setNestedControlVar(baseAny.pending.controlVars, stagePath, opts.setStage);
-                    syncControlVarIntoActiveLoop(ctx as any, stagePath, opts.setStage);
-                }
-
-                const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
-                    try { await flushMentalState(); } catch { /* best-effort */ }
-                    const latest = await this.sessionManager!.load(tenantId, sessionId);
-                    const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
-                    let nextSnapshot = setPendingInputs(latestBase, pending);
-                    if (controlUpdates.length > 0) {
-                        for (const [path, value] of controlUpdates) {
-                            nextSnapshot = applyControlVarToSnapshot(nextSnapshot, path, value);
-                        }
-                    }
-                    const expectedNext = latest?.wmVersion ?? expectedVer;
-                    await this.sessionManager!.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedNext, snapshot: nextSnapshot });
-                    await this.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
-                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
-                };
-                try {
-                    const expected = snap?.wmVersion ?? BigInt(0);
-                    await writeOnce(base, expected);
-                } catch (e) {
-                    if ((e as Error).message === 'CAS_MISMATCH') {
-                        try {
-                            const snap2 = await this.sessionManager.load(tenantId, sessionId);
-                            const base2 = (snap2?.snapshot as Record<string, unknown>) || {};
-                            const pending2 = { ...getPendingInputs(base2), [token]: { schema: opts?.schema, expiresAt } } as any;
-                            const expected2 = snap2?.wmVersion ?? BigInt(0);
-                            let next2 = setPendingInputs(base2, pending2);
-                            if (controlUpdates.length > 0) {
-                                for (const [path, value] of controlUpdates) {
-                                    next2 = applyControlVarToSnapshot(next2, path, value);
-                                }
-                            }
-                            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
-                            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
-                            await this.sessionManager.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
-                        } catch { /* swallow second failure */ }
-                    } else {
-                        throw e;
-                    }
-                }
-                try { (ctx as any).logger?.info?.('requestInput: input_required emitted', { token, prompt, expiresAt }); } catch { }
-                try {
-                    ctx.progress({
-                        state: 'input-required',
-                        message: {
-                            role: 'agent',
-                            parts
-                        },
-                        timestamp: new Date().toISOString(),
-                        metadata: { token }
-                    } as any);
-                } catch { /* noop */ }
-
-                (ctx as any).__wmSavedThisTurn = true;
-                const handle = new InputHandle(this.sessionManager, tenantId, sessionId, token);
-                return handle;
-            };
-        }
-
-        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => {
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const token = uuidv4();
-            const toolsNow = getPendingTools(base) as any;
-            toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
-
-            if (opts?.setToken || opts?.setStage) {
-                toolsNow[token].options = {
-                    setToken: opts.setToken,
-                    setStage: opts.setStage
-                };
-            }
-
-            try { await flushMentalState(); } catch { /* best-effort */ }
-            const expected = snap?.wmVersion ?? BigInt(0);
-            const next = setPendingTools(base, toolsNow);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
-            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
-
-            if (opts?.setToken || opts?.setStage) {
-                try {
-                    const currentSnap = await this.sessionManager.load(tenantId, sessionId);
-                    if (currentSnap) {
-                        const currentBase = (currentSnap.snapshot as Record<string, unknown>) || {};
-                        const currentM = currentBase.M as any;
-
-                        if (opts.setToken && token && currentM?.vars) {
-                            const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-                                const pathParts = path.split('.');
-                                let current = obj;
-                                for (let i = 0; i < pathParts.length - 1; i++) {
-                                    const part = pathParts[i];
-                                    if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
-                                        current[part] = {};
-                                    }
-                                    current = current[part] as Record<string, unknown>;
-                                }
-                                current[pathParts[pathParts.length - 1]] = value;
-                                return obj;
-                            };
-
-                            const updatedVars = setNestedValue(
-                                { ...(currentM.vars as Record<string, unknown> || {}) },
-                                'toolToken',
-                                token
-                            );
-                            currentM.vars = updatedVars;
-                            (currentM.memory as any) = { ...((currentM.memory as any) || {}), vars: updatedVars };
-                        }
-
-                        if (opts.setStage && currentM?.control) {
-                            const currentStage = currentM.control.stage;
-                            const targetStage = opts.setStage;
-
-                            if (typeof targetStage === 'string' && targetStage.length > 0) {
-                                currentM.control.stage = targetStage;
-                                try { log.debug('Auto stage transition', { from: currentStage, to: targetStage, trigger: 'tool_invoked' }); } catch { }
-                            }
-                        }
-
-                        const expectedWmVersion = currentSnap?.wmVersion ?? BigInt(0);
-                        await this.sessionManager.saveSnapshot({
-                            tenantId,
-                            sessionId,
-                            agentId: (currentSnap as any)?.agentId || 'default',
-                            expectedWmVersion,
-                            snapshot: currentBase
-                        });
-                    }
-                } catch (error) {
-                    try { log.warn('Failed to apply tool auto token/stage options', { error: error instanceof Error ? error.message : String(error) }); } catch { }
-                }
-            }
-
-            try {
-                ctx.progress({ state: 'working', timestamp: new Date().toISOString(), metadata: { token, toolName, awaiting: 'tool' } } as any);
-            } catch { /* noop */ }
-            (ctx as any).__wmSavedThisTurn = true;
-            return { token } as any;
-        };
-
-        (ctx as any).registerExternalEvent = async (eventType: string, data: unknown, opts?: { onOccurred: string }) => {
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const token = uuidv4();
-            const eventsNow = getPendingExternalEvents(base) as any;
-            eventsNow[token] = { type: eventType, data, handlers: { occurred: opts?.onOccurred } };
-            try { await flushMentalState(); } catch { /* best-effort */ }
-            const expected = snap?.wmVersion ?? BigInt(0);
-            const next = setPendingExternalEvents(base, eventsNow);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
-            await this.sessionManager.appendEvent(tenantId, sessionId, 'task.external_event_registered', { token, eventType });
-            (ctx as any).__wmSavedThisTurn = true;
-            return { token } as any;
-        };
-
-        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: {
-            awaitCompletion?: boolean;
-            streaming?: boolean;
-            onCompleted?: string;
-            onFailed?: string;
-            onInputRequired?: string;
-            setToken?: boolean;
-            tokenPath?: string;
-            autoClearToken?: boolean;
-            setStage?: string;
-            cache?: { enabled?: boolean; ttlSeconds?: number; excludePaths?: string[] };
-            skipFlush?: boolean;
-        }) => {
-            // DEBUG: Trace entry
-            log.debug('[sendTaskToAgent] START', { agent, taskId: sessionId });
-            if (!this.sessionManager) {
-                log.error('sendTaskToAgent: NO SESSION MANAGER!');
-                throw new Error('Session manager not configured');
-            }
-            const tenantId = (ctx as any).tenantId;
-            // sessionId is already captured from closure
-
-
-
-            // Use the same logic as the main TaskEngine implementation
-            // ✅ FIX: Force flush local mental state to DB before creating child, so child loading parent sees fresh state!
-            // Optimization: Skip if explicitly requested (e.g. broadcasting multiple tasks)
-            if (options?.skipFlush !== true) {
-                if (typeof (ctx as any).flushSnapshot === 'function') {
-                    try {
-                        log.debug('[sendTaskToAgent] invoking internal flushSnapshot');
-                        await (ctx as any).flushSnapshot({ M: (ctx as any).M, env: (ctx as any).env });
-                    } catch (e) {
-                        log.warn('sendTaskToAgent flushSnapshot failed', { error: e });
-                    }
-                } else if (flushMentalState) {
-                    // If the ctx wrapper didn't expose it but we have it in scope
-                    try {
-                        log.debug('[sendTaskToAgent] invoking scoped flushMentalState');
-                        await flushMentalState();
-                    } catch (e) {
-                        log.warn('sendTaskToAgent scoped flushMentalState failed', { error: e });
-                    }
-                } else {
-                    log.debug('[sendTaskToAgent] NO flush mechanism available');
-                }
-            } else {
-                log.debug('[sendTaskToAgent] SKIPPING flushSnapshot (requested)');
-            }
-
-            // SERIALIZE creation to prevent OOM/Conflicts on parent snapshot
-            log.debug(`[sendTaskToAgent] Requesting mutex for ${tenantId}:${sessionId}`);
-            const { handle, token } = await this.taskCreationMutex.runExclusive(
-                `${tenantId}:${sessionId}`,
-                async () => {
-                    log.debug(`[sendTaskToAgent] Mutex acquired for ${tenantId}:${sessionId}, creating task handle`);
-                    const result = await createTaskHandle(this.sessionManager!, tenantId, sessionId, agent, childInput);
-                    log.debug(`[sendTaskToAgent] Task handle created`);
-                    return result;
-                }
-            );
-            log.debug('[sendTaskToAgent] createTaskHandle done', { token });
-
-            const tokenPath = options?.tokenPath ?? 'child.token';
-            const shouldSetToken = options?.setToken !== false;
-            const autoClearToken = options?.autoClearToken !== false;
-            const controlUpdates: Array<[string, unknown]> = [];
-
-            try {
-                log.debug('syncControlVars starting', { controlUpdates });
-                if (shouldSetToken) {
-                    controlUpdates.push([tokenPath, token]);
-                    syncControlVarIntoActiveLoop(ctx as any, tokenPath, token);
-                }
-                if (options?.setStage) {
-                    controlUpdates.push(['stage', options.setStage]);
-                    syncControlVarIntoActiveLoop(ctx as any, 'stage', options.setStage);
-                }
-                log.debug('syncControlVars done');
-            } catch (e) {
-                log.error('syncControlVars FAILED', e);
-            }
-
-            const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
-                const tasks = getPendingTasks(baseSnap);
-
-                // ✅ FIX: Verify snapshot integrity before writing!
-                // If we loaded an empty snapshot (due to read failure/race), DO NOT OVERWRITE!
-                // EXCEPT: Allow early session versions (< 3) for initialization
-                const hasMeta = !!(baseSnap as any).meta;
-                const hasM = !!(baseSnap as any).M;
-                const isEstablished = expectedVer >= BigInt(3);
-
-                if (!hasMeta && !hasM && isEstablished) {
-                    log.error('CRITICAL: writeOnce attempted to save corrupted/empty snapshot! Aborting to protect state.', { sessionId, token, version: expectedVer });
-                    throw new Error('SNAPSHOT_INTEGRITY_CHECK_FAILED: Loaded snapshot appears empty (missing meta/M). Aborting save to prevent data loss.');
-                }
-
-                if (tasks[token]) {
-                    tasks[token].options = {
-                        setToken: shouldSetToken,
-                        tokenPath,
-                        autoClearToken,
-                        setStage: options?.setStage
-                    };
-                    let next = setPendingTasks(baseSnap, tasks);
-                    if (controlUpdates.length > 0) {
-                        for (const [path, value] of controlUpdates) {
-                            next = applyControlVarToSnapshot(next, path, value);
-                        }
-                    }
-                    await this.sessionManager!.saveSnapshot({
-                        tenantId,
-                        sessionId,
-                        agentId: (baseSnap as any)?.meta?.agentId || 'default',
-                        expectedWmVersion: expectedVer,
-                        snapshot: next
-                    });
-                }
-            };
-
-            try {
-                // Retry loop for loading snapshot to handle potential races/read-after-write consistency
-                let attempts = 0;
-                const maxAttempts = 3;
-                let saved = false;
-
-                while (attempts < maxAttempts) {
-                    attempts++;
-                    const snapOptions = await this.sessionManager.load(tenantId, sessionId);
-                    const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
-                    const expected = snapOptions?.wmVersion ?? BigInt(0);
-
-                    // Integrity Check inside the loop
-                    const hasMeta = !!(baseOptions as any).meta;
-                    const hasM = !!(baseOptions as any).M;
-                    const isVersionZero = expected === BigInt(0);
-
-                    // If it looks valid OR it's a genuine new session (v0), proceed to write
-                    // But for async dispatch, we usually expect existing session.
-                    if (hasMeta || hasM || isVersionZero) {
-                        await writeOnce(baseOptions, expected);
-                        saved = true;
-                        break; // Success, break loop to continue function
-                    }
-
-                    // If we are here, it's missing data AND version > 0 (corruption/partial read candidate)
-                    log.warn(`[TaskEngine] writeOnce loaded empty/partial snapshot (attempt ${attempts}/${maxAttempts}). Retrying...`, { sessionId, version: expected });
-                    if (attempts < maxAttempts) {
-                        await new Promise(resolve => setTimeout(resolve, 200 * attempts)); // Backoff
-                    }
-                }
-
-                // If we exhausted retries without success, verify one last time inside writeOnce or let it fail
-                // We re-load one last time to pass to writeOnce which has the final check
-                if (!saved) {
-                    const snapFinal = await this.sessionManager.load(tenantId, sessionId);
-                    const baseFinal = (snapFinal?.snapshot as Record<string, unknown>) || {};
-                    const expectedFinal = snapFinal?.wmVersion ?? BigInt(0);
-                    await writeOnce(baseFinal, expectedFinal);
-                }
-
-            } catch (e) {
-                if ((e as Error).message === 'CAS_MISMATCH') {
-                    // Existing CAS retry logic...
-                    try {
-                        const snapRetry = await this.sessionManager.load(tenantId, sessionId);
-                        const baseRetry = (snapRetry?.snapshot as Record<string, unknown>) || {};
-                        const expectedRetry = snapRetry?.wmVersion ?? BigInt(0);
-                        await writeOnce(baseRetry, expectedRetry);
-                    } catch { /* swallow second failure */ }
-                } else if ((e as Error).message.includes('SNAPSHOT_INTEGRITY_CHECK_FAILED')) {
-                    throw e;
-                } else {
-                    try { (ctx as any).logger?.warn('Failed to update task options', { error: e }); } catch { }
-                }
-            }
-
-            // If handler names provided, register them atomically before dispatch
-            if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
-            if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
-            if (options?.onFailed) { try { await (handle as any).onFailed(options.onFailed); } catch { } }
-
-            const minimalCtx = ctx as any;
-            const a2aOptions = { tenantId, streaming: (options?.streaming) === true } as any;
-            try {
-                (ctx as any).logger?.info('sendTaskToAgent: Sending task', {
-                    agent,
-                    skipParentNotification: true,
-                    hasActiveLoopInbox: !!(ctx as any).__activeLoopInbox
-                });
-
-                // ✅ FIX: Add child to pending immediately so transition module sees it
-                if ((ctx as any).__activeLoopInbox && (ctx as any).__activeLoopEnv) {
-                    const env = (ctx as any).__activeLoopEnv;
-                    if (!env.pending) env.pending = { children: {}, inputs: {}, tools: {}, groups: {} };
-                    if (!env.pending.children) env.pending.children = {};
-                    if (!env.pending.children[token]) {
-                        env.pending.children[token] = { agentId: agent, timestamp: Date.now() };
-                    }
-                }
-
-                // For durable handlers, default to awaiting completion
-                const awaitCompletion = options?.awaitCompletion !== false;
-
-                // ✅ FIX: Pass skipParentNotification: true ONLY if awaiting completion synchronously (awaitCompletion: true)
-                // If async (awaitCompletion: false), we MUST NOT skip notification so A2A triggers handleChildCompleted.
-                // This resolves the race condition without breaking async resumption.
-                const result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
-                    ...(options || {}),
-                    ...a2aOptions,
-                    parentTenantId: tenantId,
-                    parentTaskId: sessionId,
-                    parentChildToken: token,
-                    skipParentNotification: awaitCompletion
-                } as any);
-
-                // If child requested input, do not synthesize completion
-                if (result && typeof result === 'object' && (result as any).status === 'input_required') {
-                    // ✅ FIX: Return handle even if input required, so parent has reference to child
-                    // Return object with token to satisfy destructuring in caller
-                    return { handle, token };
-                }
-                if (awaitCompletion) {
-                    // ✅ FIX: Inject result directly into active loop inbox if available
-                    // This prevents the race condition where handleChildCompleted starts a new loop
-                    // while the current loop is still running
-                    if ((ctx as any).__activeLoopInbox) {
-                        const env = (ctx as any).__activeLoopEnv;
-                        if (result && typeof result === 'object') {
-                            const childPrisma = this.getSessionStorePrisma();
-                            if (childPrisma) {
-                                (ctx as any).logger?.debug('hydrating child result before injecting into active loop inbox', { token, tenantId });
-                                const cache = new AgentResultCache(childPrisma);
-                                ArtifactHydrationService.tryHydrateChildResult(result, cache, tenantId);
-                            } else {
-                                (ctx as any).logger?.warn('hydrateArtifacts skipped for active loop injection: no Prisma client', { token, tenantId });
-                            }
-                        }
-                        // Extract clean result from potentially wrapped TaskEntity
-                        // This fixes the confusing nested structure where result might be a TaskEntity wrapper
-                        const cleanChildResult = extractCleanChildResult(result);
-                        const childObservation: EngineObservation = {
-                            source: 'child',
-                            kind: 'child.completed',
-                            payload: {
-                                token,
-                                result: cleanChildResult.result, // Use clean extracted result
-                                agentId: agent,
-                                executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
-                            },
-                            provenance: {
-                                ts: Date.now(),
-                                turn: Number(env?.turn ?? 0),
-                                id: token,
-                                correlationId: token
-                            }
-                        };
-                        const inbox = (ctx as any).__activeLoopInbox as EngineObservationInbox;
-                        // Add to current inbox so loop sees it immediately
-                        inbox.current.push(childObservation);
-                        if (!inbox.all.some((o: any) => o.kind === 'child.completed' && (o.payload as any)?.token === token)) {
-                            inbox.all.push(childObservation);
-                        }
-
-                        // Remove from pending tasks in the active loop environment
-                        // This ensures the next snapshot saved by the loop doesn't include this child as pending
-                        // ✅ FIX: Don't remove from pending here!
-                        /*
-                        if (env && env.pending && env.pending.children) {
-                            delete env.pending.children[token];
-                        }
-                        */
-
-                        (ctx as any).logger?.info('✅ SYNC CHILD: Injected completion into active loop inbox', { token });
-                    } else {
-                        // Fallback: if no active loop inbox, use standard handleChildCompleted
-                        await this.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
-                    }
-                    if (result && typeof result === 'object') {
-                        Object.assign(handle, result);
-                        return { handle, token };
-                    }
-                    return { handle, token };
-                }
-
-                if (result && typeof result === 'object') {
-                    Object.assign(handle, result);
-                    return { handle, token };
-                }
-                return { handle, token };
-            } catch (e) {
-                await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
-                    taskId: sessionId,
-                    childAgent: agent,
-                    error: e instanceof Error ? e.message : String(e)
-                });
-                throw e;
-            }
-        };
-
-        (ctx as any).allTasks = async (
-            children: Array<{ agent: string; input: unknown }>,
-            opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }
-        ) => {
-            if (process.env.DEBUG_BACKGROUND_TASKS) {
-                console.log(`[TaskEngine.allTasks] Called with ${children.length} children`);
-            }
-            if (!this.sessionManager) throw new Error('Session manager not configured');
-            const maxGroup = 50; // TODO: make configurable
-            if (children.length > maxGroup) throw new Error('LIMIT_MAX_GROUP_CHILDREN_EXCEEDED');
-            const childTokens: string[] = [];
-
-            // ✅ OPTIMIZATION: Flush ONCE before dispatching batch to prevent OOM
-            if (typeof (ctx as any).flushSnapshot === 'function') {
-                try {
-                    log.debug('allTasks pre-flushing snapshot');
-                    await (ctx as any).flushSnapshot({ M: (ctx as any).M, env: (ctx as any).env });
-                } catch (e) { log.warn('allTasks pre-flush failed', { error: e }); }
-            }
-
-            for (const child of children) {
-                if (process.env.DEBUG_BACKGROUND_TASKS) {
-                    console.log(`[TaskEngine.allTasks] Dispatching child: ${child.agent}`);
-                }
-                const { handle, token } = await createTaskHandle(this.sessionManager, tenantId, sessionId, child.agent);
-                childTokens.push(token);
-                // Track background task promise for cleanup
-                // NOTE: sendTaskToAgent is called WITHOUT awaitCompletion option, so it defaults to true
-                // This means children execute synchronously even though we don't await them here
-                const taskPromise = globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
-                    tenantId,
-                    parentTenantId: tenantId,
-                    parentTaskId: sessionId,
-                    parentChildToken: token,
-                    awaitCompletion: false, // ✅ Explicitly set to false for background execution
-                    skipFlush: true // ✅ Skip individual flushes since we pre-flushed
-                } as any).catch(async (e) => {
-                    await this.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
-                        taskId: sessionId,
-                        childAgent: child.agent,
-                        error: e instanceof Error ? e.message : String(e)
-                    });
-                }).finally(() => {
-                    // Remove from tracking set when done
-                    const removed = this.backgroundTaskPromises.delete(taskPromise);
-                    if (process.env.DEBUG_BACKGROUND_TASKS) {
-                        console.log(`[TaskEngine] Background task promise completed for ${child.agent}, removed=${removed}, remaining=${this.backgroundTaskPromises.size}`);
-                    }
-                });
-                this.backgroundTaskPromises.add(taskPromise);
-                if (process.env.DEBUG_BACKGROUND_TASKS) {
-                    console.log(`[TaskEngine] Background task promise added for ${child.agent}, total=${this.backgroundTaskPromises.size}`);
-                }
-            }
-            const { handle: groupHandle, groupToken } = await createGroupHandle(this.sessionManager, tenantId, sessionId, childTokens);
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const groups = getPendingGroups(base);
-            const g = groups[groupToken] || { childTokens: childTokens, results: {}, handlers: {} };
-            if (opts?.withTimeoutMs) g.timeoutMs = opts.withTimeoutMs;
-            if (opts?.cancelRemaining !== undefined) g.cancelRemaining = opts.cancelRemaining;
-            if (opts?.onAllCompleted) { g.handlers = g.handlers || {}; (g.handlers as any).allCompleted = opts.onAllCompleted; }
-            if (opts?.onAnyFailed) { g.handlers = g.handlers || {}; (g.handlers as any).anyFailed = opts.onAnyFailed; }
-            groups[groupToken] = g;
-            const next = setPendingGroups(base, groups);
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap?.wmVersion ?? BigInt(0), snapshot: next });
-            return groupHandle as GroupHandle;
-        };
-    }
 
     // Attach working memory var proxy to an existing context so that writes are CAS-persisted
     public async attachWorkingMemory(ctx: TaskContext, tenantId: string, sessionId: string, agentId: string, loadedMentalState?: MentalState): Promise<void> {
@@ -1329,7 +520,7 @@ export class TaskEngine {
             ) as typeof M) || M;
         }
         const currentVars = ((M?.memory as any)?.vars || {}) as Record<string, unknown>;
-        const varCache = new Map<string, unknown>(Object.entries(currentVars));
+
         if (!(ctx as any).__ctxId) (ctx as any).__ctxId = `ctx-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const ensureVarsId = () => {
             const varsObj = (ctx as any).vars;
@@ -1338,13 +529,28 @@ export class TaskEngine {
             }
         };
         ensureVarsId();
-        log.debug('attachWorkingMemory loaded vars', {
-            sessionId,
-            agentId,
-            count: varCache.size,
-            keys: Array.from(varCache.keys())
-        });
 
+        // Define onUpdate/onDelete handlers for synchronization
+        const onUpdate = (key: string, value: unknown) => {
+            // We can optimize strict sync if needed, but for now rely on flushMentalState or similar if attached?
+            // Actually, attachWorkingMemory sets up the initial facade. 
+            // The persistence is handled via M referencing the same object if we keep them in sync.
+            // But the proxy writes to 'cache' (Map). We need to sync back to 'M.memory.vars'.
+            // VarsSync.assignVarsIntoMental handles bulk sync.
+            // Let's implement active sync here to keep M updated in real-time.
+            const mental = (ctx as any).__mental;
+            if (mental?.memory?.vars) {
+                mental.memory.vars[key] = value;
+            }
+            (ctx as any).__varsDirty = true;
+        };
+        const onDelete = (key: string) => {
+            const mental = (ctx as any).__mental;
+            if (mental?.memory?.vars) {
+                delete mental.memory.vars[key];
+            }
+            (ctx as any).__varsDirty = true;
+        };
 
         if (!(ctx as any).tenantId) (ctx as any).tenantId = tenantId;
         if (!(ctx as any).agentId) (ctx as any).agentId = agentId;
@@ -1353,18 +559,18 @@ export class TaskEngine {
         }
 
         if (!(ctx as any).vars) {
-            const cache = new Map<string, unknown>();
-            (ctx as any).vars = {
-                get: <T = unknown>(key: string) => cache.get(key) as T | undefined,
-                set: (key: string, value: unknown) => { cache.set(key, value); },
-                merge: (patch: Record<string, unknown>) => { Object.entries(patch).forEach(([k, v]) => cache.set(k, v)); },
-                update: <T = unknown>(key: string, fn: (prev: T | undefined) => T) => { cache.set(key, fn(cache.get(key) as T | undefined)); },
-                delete: (key: string) => { cache.delete(key); },
-                keys: () => cache.keys()
-            } as any;
+            (ctx as any).vars = VarsSync.createVarsProxy(currentVars, onUpdate, onDelete);
+
+            // Log loaded vars
+            log.debug('attachWorkingMemory loaded vars', {
+                sessionId,
+                agentId,
+                count: Object.keys(currentVars).length,
+                keys: Object.keys(currentVars)
+            });
         }
 
-        await this.attachOrchestrationAPIs(ctx, {
+        await this.apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
             sessionId,
             agentId,
@@ -1627,61 +833,15 @@ export class TaskEngine {
             }
         };
 
+        // Helper to sync vars into mental state
         const assignVarsIntoMental = () => {
-            const varsObject = Object.fromEntries(varCache) as Record<string, unknown>;
-            const mergedVars: Record<string, unknown> = {};
-            iterMentalTargets(({ existing }) => {
-                Object.assign(mergedVars, existing);
-            });
-            Object.assign(mergedVars, varsObject);
-            try {
-                const pending = (mergedVars as any)?.pendingArtifact;
-                log.debug('🧪 [WM VAR TRACE] assignVarsIntoMental', {
-                    keys: Object.keys(mergedVars),
-                    hasPendingArtifact: !!pending,
-                    pendingKind: pending && (pending as any).kind
-                });
-            } catch { /* noop */ }
-            iterMentalTargets(({ target, memory }) => {
-                try {
-                    log.debug('Variable assignment completed', {
-                        mergedKeysCount: Object.keys(mergedVars).length
-                    });
-                } catch { /* noop */ }
-                (memory as Record<string, unknown>).vars = { ...mergedVars };
-                target.vars = { ...mergedVars };
-            });
+            // Pass M explicitly to ensure it updates the local reference used in flush
+            VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
         };
 
         const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
-            const pathParts = path.split('.');
-            if (pathParts.length === 0) {
-                return { next: { ...obj }, changed: false };
-            }
-
-            const clone = { ...obj } as Record<string, unknown>;
-            let currentClone: Record<string, unknown> = clone;
-            let currentOrig: Record<string, unknown> | undefined = obj;
-
-            for (let i = 0; i < pathParts.length - 1; i++) {
-                const part = pathParts[i];
-                const nextOrig = currentOrig?.[part];
-                if (!nextOrig || typeof nextOrig !== 'object' || Array.isArray(nextOrig)) {
-                    return { next: clone, changed: false };
-                }
-                const nextClone = { ...(nextOrig as Record<string, unknown>) };
-                currentClone[part] = nextClone;
-                currentClone = nextClone;
-                currentOrig = nextOrig as Record<string, unknown>;
-            }
-
-            const leafKey = pathParts[pathParts.length - 1];
-            if (!currentOrig || !Object.prototype.hasOwnProperty.call(currentOrig, leafKey)) {
-                return { next: clone, changed: false };
-            }
-
-            delete currentClone[leafKey];
-            return { next: clone, changed: true };
+            const next = PathUtils.deletePathImmutable(obj, path);
+            return { next, changed: next !== obj };
         };
 
         const removeKeyFromMental = (key: string): void => {
@@ -1689,51 +849,31 @@ export class TaskEngine {
                 let updated: Record<string, unknown> | undefined;
 
                 if (key.includes('.')) {
-                    const { next, changed } = deleteNestedValue(existing, key);
-                    if (!changed) return;
-                    updated = next;
+                    if (existing) {
+                        const next = PathUtils.deletePathImmutable(existing, key);
+                        if (next !== existing) updated = next;
+                    }
                 } else {
-                    if (!Object.prototype.hasOwnProperty.call(existing, key)) return;
-                    updated = { ...existing };
-                    delete updated[key];
+                    if (Object.prototype.hasOwnProperty.call(existing, key)) {
+                        updated = { ...existing };
+                        delete updated[key];
+                    }
                 }
 
-                (memory as Record<string, unknown>).vars = updated;
-                target.vars = updated;
+                if (updated) {
+                    (memory as Record<string, unknown>).vars = updated;
+                    target.vars = updated;
+                }
             });
         };
 
         // Helper function to handle nested paths
         const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-            const pathParts = path.split('.');
-            let current = obj;
-
-            // Navigate to parent of the target
-            for (let i = 0; i < pathParts.length - 1; i++) {
-                const part = pathParts[i];
-                if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
-                    current[part] = {};
-                }
-                current = current[part] as Record<string, unknown>;
-            }
-
-            // Set the final value
-            current[pathParts[pathParts.length - 1]] = value;
-            return obj;
+            return PathUtils.setPathImmutable(obj, path, value);
         };
 
         const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
-            const pathParts = path.split('.');
-            let current = obj;
-
-            for (const part of pathParts) {
-                if (!current || typeof current !== 'object' || Array.isArray(current)) {
-                    return undefined;
-                }
-                current = (current as Record<string, unknown>)[part] as Record<string, unknown>;
-            }
-
-            return current;
+            return PathUtils.getPath(obj, path);
         };
         const updateLlmInMental = () => {
             try {
@@ -1750,7 +890,23 @@ export class TaskEngine {
             } catch { /* ignore */ }
         };
         const flushMentalState = async () => {
-            if (!this.sessionManager) return;
+            if (!this.snapshotRepo) return;
+            // Capture dependencies for mutate function
+            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+
+            // Logic to execute inside retry loop
+            const mutateFn = async (baseSnap: Record<string, unknown>) => {
+                assignVarsIntoMental();
+                updateLlmInMental();
+                const next = { ...baseSnap, M } as Record<string, unknown>;
+
+                if (prisma) {
+                    const cache = new AgentResultCache(prisma);
+                    await offloadArtifacts(next, cache, tenantId);
+                }
+                return next;
+            };
+
             try {
                 try {
                     log.debug('🧪 [WM VAR TRACE] flushMentalState invoked', {
@@ -1758,176 +914,57 @@ export class TaskEngine {
                         cacheKeys: Array.from(varCache.keys())
                     });
                 } catch { /* noop */ }
-                assignVarsIntoMental();
-                updateLlmInMental();
-                const snapNow = await this.sessionManager.load(tenantId, sessionId);
-                const base = (snapNow?.snapshot as Record<string, unknown>) || {};
-                const next = { ...base, M } as Record<string, unknown>;
-                const expected = snapNow?.wmVersion ?? BigInt(0);
 
-                // We need access to prisma for the cache.
-                // Using getSessionStorePrisma() helper method if available or casting
-                const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
-
-                if (prisma) {
-                    const cache = new AgentResultCache(prisma);
-                    log.debug('🧪 [WM VAR TRACE] flushMentalState -> offloadArtifacts', {
-                        pendingKindBeforeOffload: ((M.memory as any)?.vars as any)?.pendingArtifact?.kind
-                    });
-                    await offloadArtifacts(next, cache, tenantId);
-                }
-
-                await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+                await this.snapshotRepo.saveWithRetry({
+                    tenantId,
+                    sessionId,
+                    agentId: (ctx as any).agentId || 'default',
+                    mutate: mutateFn
+                });
                 (ctx as any).__varsDirty = false;
             } catch (e) {
                 if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
                     try {
                         const prunedM = pruneSnapshot(M);
-                        const snapNowP = await this.sessionManager.load(tenantId, sessionId);
-                        const baseP = (snapNowP?.snapshot as Record<string, unknown>) || {};
-                        const nextP = { ...baseP, M: prunedM } as Record<string, unknown>;
-                        const expectedP = snapNowP?.wmVersion ?? BigInt(0);
-                        await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expectedP, snapshot: nextP });
+                        // Update local M with pruned version so future saves use it
+                        M = prunedM;
+                        // Retry with pruned M
+                        await this.snapshotRepo.saveWithRetry({
+                            tenantId,
+                            sessionId,
+                            agentId: (ctx as any).agentId || 'default',
+                            mutate: async (baseSnap) => {
+                                // M is already pruned and updated locally
+                                const next = { ...baseSnap, M };
+                                // Re-run offload? Pruned M might still have artifacts?
+                                if (prisma) {
+                                    const cache = new AgentResultCache(prisma);
+                                    await offloadArtifacts(next, cache, tenantId);
+                                }
+                                return next;
+                            }
+                        });
                         (ctx as any).__varsDirty = false;
-                    } catch (err) {
-                        log.error('Failed to save snapshot even after pruning', { error: err });
-                        throw e;
+                    } catch (retryErr) {
+                        // ...
+                        throw retryErr;
                     }
-                } else if ((e as Error).message === 'CAS_MISMATCH') {
-                    try {
-                        const snapNow2 = await this.sessionManager.load(tenantId, sessionId);
-                        const base2 = (snapNow2?.snapshot as Record<string, unknown>) || {};
-                        const next2 = { ...base2, M } as Record<string, unknown>;
-                        const expected2 = snapNow2?.wmVersion ?? BigInt(0);
-                        await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
-                        (ctx as any).__varsDirty = false;
-                    } catch { /* ignore second failure */ }
                 } else {
                     throw e;
                 }
             }
         };
-        (ctx as any).vars = {
-            get: (key: string) => {
-                // Handle nested paths
-                if (key.includes('.')) {
-                    const baseKey = key.split('.')[0];
-                    const baseObj = varCache.get(baseKey) as Record<string, unknown>;
-                    if (baseObj && typeof baseObj === 'object' && !Array.isArray(baseObj)) {
-                        return getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
-                    }
-                    return undefined;
-                }
-                return varCache.get(key);
-            },
-            set: (key: string, value: unknown) => {
-                // Handle nested paths
-                if (key.includes('.')) {
-                    const baseKey = key.split('.')[0];
-                    const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                    const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), value);
-                    varCache.set(baseKey, updatedObj);
-                } else {
-                    varCache.set(key, value);
-                }
-                if (key === 'pendingArtifact') {
-                    try {
-                        log.debug('🧪 [WM VAR TRACE] ctx.vars.set pendingArtifact', {
-                            valueKind: (value as any)?.kind,
-                            varsDirtyBefore: (ctx as any).__varsDirty
-                        });
-                    } catch { /* noop */ }
-                }
-                (ctx as any).__varsDirty = true;
-                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
-                // assignVarsIntoMental will be called at end of turn in mergeVarsIntoMental
-            },
-            merge: (patch: Record<string, unknown>) => {
-                for (const [k, v] of Object.entries(patch)) {
-                    // For merge, we don't treat dots as paths - it's for object merging
-                    const current = varCache.get(k);
-                    if (current && typeof current === 'object' && !Array.isArray(current) &&
-                        v && typeof v === 'object' && !Array.isArray(v)) {
-                        // Deep merge objects
-                        const merged = { ...(current as Record<string, unknown>), ...(v as Record<string, unknown>) };
-                        varCache.set(k, merged);
-                    } else {
-                        varCache.set(k, v);
-                    }
-                }
-                (ctx as any).__varsDirty = true;
-                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
-            },
-            update: (key: string, fn: (prev: unknown) => unknown) => {
-                let currentValue: unknown;
 
-                // Handle nested paths
-                if (key.includes('.')) {
-                    const baseKey = key.split('.')[0];
-                    const baseObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                    currentValue = getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
-                } else {
-                    currentValue = varCache.get(key);
-                }
+        (ctx as any).vars = VarsSync.createVarsProxy(
+            varCache,
+            (key: string, value: unknown) => { (ctx as any).__varsDirty = true; },
+            (key: string) => { (ctx as any).__varsDirty = true; removeKeyFromMental(key); }
+        );      // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
 
-                const next = fn(currentValue);
-
-                // Set the updated value
-                if (key.includes('.')) {
-                    const baseKey = key.split('.')[0];
-                    const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                    const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), next);
-                    varCache.set(baseKey, updatedObj);
-                } else {
-                    varCache.set(key, next);
-                }
-
-                (ctx as any).__varsDirty = true;
-                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
-            },
-            delete: (key: string) => {
-                // Handle nested paths
-                if (key.includes('.')) {
-                    const baseKey = key.split('.')[0];
-                    const currentObj = (varCache.get(baseKey) as Record<string, unknown>);
-                    if (currentObj && typeof currentObj === 'object' && !Array.isArray(currentObj)) {
-                        const updatedObj = { ...currentObj };
-                        const pathParts = key.substring(key.indexOf('.') + 1).split('.');
-                        let current = updatedObj;
-
-                        // Navigate to parent of the target
-                        for (let i = 0; i < pathParts.length - 1; i++) {
-                            const part = pathParts[i];
-                            if (current[part] && typeof current[part] === 'object' && !Array.isArray(current[part])) {
-                                current = current[part] as Record<string, unknown>;
-                            }
-                        }
-
-                        // Delete the target property
-                        delete current[pathParts[pathParts.length - 1]];
-                        varCache.set(baseKey, updatedObj);
-                        removeKeyFromMental(key);
-                    }
-                } else {
-                    varCache.delete(key);
-                    removeKeyFromMental(key);
-                }
-                (ctx as any).__varsDirty = true;
-                // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
-            },
-            keys: () => Array.from(varCache.keys()),
-            has: (key: string) => {
-                // Handle nested paths
-                if (key.includes('.')) {
-                    return (ctx as any).vars.get(key) !== undefined;
-                }
-                return varCache.has(key);
-            }
-        } as any;
         // Ensure alias is initialized before loop modules read mentalState.vars
         try { assignVarsIntoMental(); } catch { /* noop */ }
 
-        await this.attachOrchestrationAPIs(ctx, {
+        await this.apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
             sessionId,
             agentId: (ctx as any).agentId || 'default',
@@ -1996,243 +1033,42 @@ export class TaskEngine {
             if (runMode === 'legacy') {
                 await runLegacy();
             } else {
-                // Build EnvironmentState from snapshot and context
-                const base = (session?.snapshot as any) || {};
-                const startTurnTotal = Number(base?.meta?.turn) || 0;
-
-                // 🔍 DEBUG: Check turn initialization
-                const agentIdForDebug = (ctx as any).agentId;
-                const pluginForDebug = agentIdForDebug ? PluginManager.findAgent(agentIdForDebug) : null;
-                log.debug('🔍 DEBUG: Turn initialization', {
-                    sessionId,
+                const taskResult = await this.turnRunner.runTurn(ctx, {
                     tenantId,
-                    baseMetaTurn: base?.meta?.turn,
-                    startTurnTotal,
-                    envTurnWillBe: startTurnTotal + 1,
-                    maxTurns: (pluginForDebug?.manifest as any)?.budgets?.maxTurns
-                });
-
-                let envInbox = InboxManager.normalizeInbox((base as any)?.inbox);
-                envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
-                    envInbox,
-                    this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
-                    tenantId,
-                    'startTask'
-                );
-                // Create initial input observation for new CLI tasks
-                if (ctx.task.input && typeof ctx.task.input === 'object' && Object.keys(ctx.task.input).length > 0) {
-                    const initialObservation: EngineObservation = {
-                        source: 'user',
-                        kind: 'input.provided',
-                        payload: { token: 'initial-input', value: ctx.task.input },
-                        provenance: {
-                            ts: Date.now(),
-                            turn: 1,
-                            id: 'initial-input',
-                            toolId: 'cli',
-                            correlationId: sessionId
-                        }
-                    };
-                    envInbox = InboxManager.addObservationToInbox(envInbox, initialObservation);
-                }
-
-                // If inbox is empty, check for child completion events that might not be in the snapshot
-                // This handles the case where handleChildCompleted ran but failed to persist the inbox,
-                // or where the deferred notification hasn't run yet but the child has completed
-                if (envInbox.current.length === 0 && this.sessionManager) {
-                    try {
-                        // Check meta.lastChildToken first (set by handleChildCompleted after processing)
-                        const lastChildToken = (base?.meta as any)?.lastChildToken;
-                        const pendingChildren = (base?.pending?.children) || {};
-                        const pendingChildTokens = Object.keys(pendingChildren);
-
-                        // Collect all potential child tokens to check
-                        const tokensToCheck = new Set<string>();
-                        if (lastChildToken) tokensToCheck.add(lastChildToken);
-                        pendingChildTokens.forEach(t => tokensToCheck.add(t));
-
-
-                        if (tokensToCheck.size > 0) {
-                            // Check for child_completed events that might not be in the snapshot inbox
-                            const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: 0 });
-                            const childCompletedEvents = events.filter(e => e.type === 'task.child_completed');
-
-                            // For each token, check if there's a completion event
-                            for (const token of tokensToCheck) {
-                                const completionEvent = childCompletedEvents.find(e =>
-                                    (e.payload as any)?.token === token
-                                );
-
-                                if (completionEvent) {
-                                    const observationPredicate = (obs: EngineObservation) =>
-                                        obs?.kind === 'child.completed' &&
-                                        typeof obs === 'object' &&
-                                        obs !== null &&
-                                        (obs as any)?.payload &&
-                                        (obs as any).payload.token === token;
-
-                                    const childPrisma = this.getSessionStorePrisma();
-                                    if (childPrisma) {
-                                        const p = (completionEvent.payload as any);
-                                        if (p?.result) {
-                                            const cache = new AgentResultCache(childPrisma);
-                                            p.result = hydrateArtifacts(p.result, cache, tenantId);
-                                        }
-                                    }
-
-                                    // Extract clean result from potentially wrapped TaskEntity
-                                    // This fixes the confusing nested structure where result might be a TaskEntity wrapper
-                                    const completionResult = (completionEvent.payload as any)?.result;
-                                    const cleanChildResult = extractCleanChildResult(completionResult);
-                                    const childObservation: EngineObservation = {
-                                        source: 'child',
-                                        kind: 'child.completed',
-                                        payload: {
-                                            token,
-                                            childTaskId: cleanChildResult.childTaskId || (completionEvent.payload as any)?.childTaskId,
-                                            result: cleanChildResult.result, // Use clean extracted result
-                                            agentId: (completionEvent.payload as any)?.agentId,
-                                            executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
-                                        },
-                                        provenance: {
-                                            ts: new Date(completionEvent.createdAt).getTime(),
-                                            turn: startTurnTotal + 1,
-                                            id: token,
-                                            correlationId: token
-                                        }
-                                    };
-                                    envInbox = InboxManager.addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
-                                }
-                            }
-                        }
-                    } catch (error) {
-                        // If event lookup fails, continue with empty inbox (better than crashing)
-                        log.warn('Failed to check for child completion events on resume', {
-                            error: error instanceof Error ? error.message : String(error),
-                            sessionId
-                        });
-                    }
-                }
-
-                const env: EnvironmentState = {
-                    time: new Date().toISOString(),
-                    sessionId,
-                    turn: startTurnTotal + 1,
-                    budget: { maxTurns: Infinity, latencyMs: Infinity }, // we will override this with the actual budgets from the manifest
-                    inbox: envInbox,
-                    pending: {
-                        inputs: (base?.pending?.inputs) || {},
-                        children: (base?.pending?.children) || {},
-                        tools: (base?.pending?.tools) || {},
-                        groups: (base?.pending?.groups) || {}
-                    },
-                    lastExec: (base?.meta?.lastExec) || undefined,
-                    externalEvents: undefined
-                };
-                // Load agent plugin and get agent-local loop module overrides
-                const agentId = (ctx as any).agentId;
-                const plugin = agentId ? PluginManager.findAgent(agentId) : null;
-                const overrides = (plugin as any)?.loop?.modules || {};
-                try {
-                    log.debug('Plugin loaded', {
-                        pluginKeys: Object.keys((plugin as any) || {}),
-                        hasLoop: !!(plugin as any)?.loop,
-                        agentId,
-                        loopOverrides: Object.keys(overrides)
-                    });
-                } catch { }
-                // Derive default budgets and hitl from manifest if available
-                let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
-                try {
-                    const b = (plugin?.manifest as any)?.budgets;
-                    const hitl = (plugin?.manifest as any)?.hitl;
-                    if (hitl) { try { (M as any).hitl = hitl; } catch { /* noop */ } }
-                    if (b && typeof b === 'object') loopOpts = { maxTurns: (b as any).maxTurns, latencyMs: (b as any).latencyMs };
-                    try { (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs }; } catch { }
-                } catch { /* ignore */ }
-                log.debug('Loop options configured', loopOpts);
-                if (process.env.DEBUG_BACKGROUND_TASKS) {
-                    console.log('[TaskEngine.startTask] About to call runLoop', {
-                        maxTurns: loopOpts.maxTurns,
-                        envTurn: env.turn,
-                        envBudgetMaxTurns: (env as any).budget?.maxTurns
-                    });
-                }
-                const { M: mNext, outcome, metrics } = await TaskExecutor.executeTurn({
-                    ctx, M, env, overrides, loopOpts,
-                    sessionManager: this.sessionManager,
-                    tenantId, sessionId, agentId: (ctx as any).agentId || 'default',
+                    sessionId: task.id,
+                    trigger: 'start',
                     isStreaming,
-                    getSessionStorePrisma: () => this.getSessionStorePrisma()
+                    input: task.input
+                }, {
+                    initialM: M,
+                    snapshot: baseSnap
                 });
 
-                // Aggregate metrics for convenience
-                const timingsArray = metrics?.timings || [];
-                const rewardsArray = metrics?.rewards || [];
-                const timingsAgg = (() => {
-                    if (!timingsArray.length) return undefined;
-                    const keys = new Set<string>();
-                    for (const t of timingsArray) Object.keys(t).forEach(k => keys.add(k));
-                    const result: Record<string, { sum: number; avg: number }> = {};
-                    for (const k of keys) {
-                        let s = 0; let c = 0;
-                        for (const t of timingsArray) {
-                            const v = (t as any)[k];
-                            if (typeof v === 'number' && Number.isFinite(v)) { s += v; c += 1; }
-                        }
-                        if (c > 0) result[k] = { sum: s, avg: s / c };
-                    }
-                    return result;
-                })();
-                const rewardsAgg = (() => {
-                    if (!rewardsArray.length) return undefined;
-                    const sum = rewardsArray.reduce((a: number, b: number) => a + (Number.isFinite(b) ? b : 0), 0);
-                    const avg = sum / rewardsArray.length;
-                    return { sum, avg };
-                })();
-                log.debug('Processing outcome', { outcome: outcome.kind, isStreaming });
-                if (!isStreaming) {
-                    if (outcome.kind === 'await_input') {
-                        log.debug('Task awaiting input', { token: outcome.token });
-                        task.status = { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: outcome.token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg } } as any;
-                        return task;
-                    }
-                    if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
-                        log.debug('Task awaiting completion', { kind: outcome.kind, token: (outcome as any).token });
-                        const token = (outcome as any).token;
-                        const extra = { kind: outcome.kind, token };
-                        task.status = { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token, awaitExtra: extra, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg } } as any;
-                        return task;
-                    }
-                    if (outcome.kind === 'fail') {
-                        log.warn('Task failed', { reason: outcome.reason });
-                        task.status = {
-                            state: 'failed',
-                            timestamp: new Date().toISOString(),
-                            message: { role: 'agent', parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }] },
-                            metadata: { reason: outcome.reason, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg }
-                        } as any;
-                        return task;
-                    }
-                    if (outcome.kind === 'complete') {
-                        log.info('Task completed successfully');
-                        task.status = {
-                            state: 'completed',
-                            timestamp: new Date().toISOString(),
-                            metadata: { result: outcome.result, timings: metrics?.timings, rewards: metrics?.rewards, timingsAgg, rewardsAgg }
-                        } as any;
-                        // Publish final completion event for cache listener and other subscribers
-                        try {
-                            eventBus.publish(taskChannel(task.id), {
-                                id: task.id,
-                                status: task.status,
-                                final: true
-                            } as any);
-                        } catch { }
-                        return task;
-                    }
+                if (taskResult) {
+                    task.status = taskResult.status;
+                    task.artifacts = taskResult.artifacts;
+                    task.input = taskResult.input;
                 }
-                // Fall through to completion artifacts handling below
+
+                if (task.status?.state === 'completed') {
+                    await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.completed', {
+                        taskId: sessionId,
+                        artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
+                        traceparent
+                    });
+                    await this.sessionManager?.enqueueOutbox(tenantId, 'task.status', sessionId, {
+                        taskId: sessionId,
+                        status: { state: 'completed', timestamp: new Date().toISOString() },
+                        final: true,
+                        traceparent
+                    });
+                }
+
+                if (isStreaming) {
+                    // Even in streaming mode, we return the task entity so the caller has the ID and handle.
+                    // The runTurn call above is awaited, so we have initial state.
+                }
+                return task;
             }
 
             // After handler: flush MentalState once (skip if already flushed earlier in this turn)
@@ -2440,7 +1276,7 @@ export class TaskEngine {
                         let nextSnapshot = setPendingInputs(latestBase, pending);
                         if (controlUpdates.length > 0) {
                             for (const [path, value] of controlUpdates) {
-                                nextSnapshot = applyControlVarToSnapshot(nextSnapshot, path, value);
+                                nextSnapshot = TaskStateUtils.applyControlVarToSnapshot(nextSnapshot, path, value);
                             }
                         }
                         const expectedNext = latest?.wmVersion ?? expectedVer;
@@ -2461,7 +1297,7 @@ export class TaskEngine {
                                 let next2 = setPendingInputs(base2, pending2);
                                 if (controlUpdates.length > 0) {
                                     for (const [path, value] of controlUpdates) {
-                                        next2 = applyControlVarToSnapshot(next2, path, value);
+                                        next2 = TaskStateUtils.applyControlVarToSnapshot(next2, path, value);
                                     }
                                 }
                                 await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected2, snapshot: next2 });
@@ -2489,14 +1325,14 @@ export class TaskEngine {
                     // Automatic token management (default: true)
                     if (opts?.setToken !== false) {
                         controlUpdates.push(['token', token]);
-                        syncControlVarIntoActiveLoop(ctx as any, 'token', token);
+                        TaskStateUtils.syncControlVarIntoActiveLoop(ctx as any, 'token', token);
                     }
 
                     // Automatic stage management
                     if (opts?.setStage) {
                         try {
                             controlUpdates.push(['stage', opts.setStage]);
-                            syncControlVarIntoActiveLoop(ctx as any, 'stage', opts.setStage);
+                            TaskStateUtils.syncControlVarIntoActiveLoop(ctx as any, 'stage', opts.setStage);
                         } catch (error) {
                             (ctx as any).logger?.warn?.('Failed to auto-set stage', { stage: opts.setStage, error });
                         }
@@ -2548,85 +1384,12 @@ export class TaskEngine {
                 };
 
                 const assignVarsIntoMental = () => {
-                    const varsObject = Object.fromEntries(varCache) as Record<string, unknown>;
-                    const mergedVars: Record<string, unknown> = {};
-                    iterMentalTargets(({ existing }) => {
-                        Object.assign(mergedVars, existing);
-                    });
-                    Object.assign(mergedVars, varsObject);
-                    iterMentalTargets(({ target, memory }) => {
-                        try {
-                            log.debug('Resume variable assignment', {
-                                mergedKeys: Object.keys(mergedVars)
-                            });
-                        } catch { /* noop */ }
-                        (memory as Record<string, unknown>).vars = { ...mergedVars };
-                        target.vars = { ...mergedVars };
-                    });
+                    VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
                 };
 
                 const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
-                    const pathParts = path.split('.');
-                    if (pathParts.length === 0) {
-                        return { next: { ...obj }, changed: false };
-                    }
-
-                    const clone = { ...obj } as Record<string, unknown>;
-                    let currentClone: Record<string, unknown> = clone;
-                    let currentOrig: Record<string, unknown> | undefined = obj;
-
-                    for (let i = 0; i < pathParts.length - 1; i++) {
-                        const part = pathParts[i];
-                        const nextOrig = currentOrig?.[part];
-                        if (!nextOrig || typeof nextOrig !== 'object' || Array.isArray(nextOrig)) {
-                            return { next: clone, changed: false };
-                        }
-                        const nextClone = { ...(nextOrig as Record<string, unknown>) };
-                        currentClone[part] = nextClone;
-                        currentClone = nextClone;
-                        currentOrig = nextOrig as Record<string, unknown>;
-                    }
-
-                    const leafKey = pathParts[pathParts.length - 1];
-                    if (!currentOrig || !Object.prototype.hasOwnProperty.call(currentOrig, leafKey)) {
-                        return { next: clone, changed: false };
-                    }
-
-                    delete currentClone[leafKey];
-                    return { next: clone, changed: true };
-                };
-
-                // Helper function to handle nested paths
-                const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-                    const pathParts = path.split('.');
-                    let current = obj;
-
-                    // Navigate to parent of the target
-                    for (let i = 0; i < pathParts.length - 1; i++) {
-                        const part = pathParts[i];
-                        if (!current[part] || typeof current[part] !== 'object' || Array.isArray(current[part])) {
-                            current[part] = {};
-                        }
-                        current = current[part] as Record<string, unknown>;
-                    }
-
-                    // Set the final value
-                    current[pathParts[pathParts.length - 1]] = value;
-                    return obj;
-                };
-
-                const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
-                    const pathParts = path.split('.');
-                    let current = obj;
-
-                    for (const part of pathParts) {
-                        if (!current || typeof current !== 'object' || Array.isArray(current)) {
-                            return undefined;
-                        }
-                        current = (current as Record<string, unknown>)[part] as Record<string, unknown>;
-                    }
-
-                    return current;
+                    const next = PathUtils.deletePathImmutable(obj, path);
+                    return { next, changed: next !== obj };
                 };
 
                 const removeKeyFromMental = (key: string): void => {
@@ -2634,191 +1397,60 @@ export class TaskEngine {
                         let updated: Record<string, unknown> | undefined;
 
                         if (key.includes('.')) {
-                            const { next, changed } = deleteNestedValue(existing, key);
-                            if (!changed) return;
-                            updated = next;
+                            if (existing) {
+                                const next = PathUtils.deletePathImmutable(existing, key);
+                                if (next !== existing) updated = next;
+                            }
                         } else {
-                            if (!Object.prototype.hasOwnProperty.call(existing, key)) return;
-                            updated = { ...existing };
-                            delete updated[key];
+                            if (Object.prototype.hasOwnProperty.call(existing, key)) {
+                                updated = { ...existing };
+                                delete updated[key];
+                            }
                         }
 
-                        (memory as Record<string, unknown>).vars = updated;
-                        target.vars = updated;
+                        if (updated) {
+                            (memory as Record<string, unknown>).vars = updated;
+                            target.vars = updated;
+                        }
                     });
                 };
-                (ctx as any).vars = {
-                    get: (key: string) => {
-                        // Handle nested paths
-                        if (key.includes('.')) {
-                            const baseKey = key.split('.')[0];
-                            const baseObj = varCache.get(baseKey) as Record<string, unknown>;
-                            if (baseObj && typeof baseObj === 'object' && !Array.isArray(baseObj)) {
-                                return getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
-                            }
-                            return undefined;
-                        }
-                        return varCache.get(key);
-                    },
-                    set: (key: string, value: unknown) => {
-                        // Handle nested paths
-                        if (key.includes('.')) {
-                            const baseKey = key.split('.')[0];
-                            const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                            const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), value);
-                            varCache.set(baseKey, updatedObj);
-                        } else {
-                            varCache.set(key, value);
-                        }
-                        assignVarsIntoMental();
-                    },
-                    merge: (patch: Record<string, unknown>) => {
-                        for (const [k, v] of Object.entries(patch)) {
-                            // For merge, we don't treat dots as paths - it's for object merging
-                            const current = varCache.get(k);
-                            if (current && typeof current === 'object' && !Array.isArray(current) &&
-                                v && typeof v === 'object' && !Array.isArray(v)) {
-                                // Deep merge objects
-                                const merged = { ...(current as Record<string, unknown>), ...(v as Record<string, unknown>) };
-                                varCache.set(k, merged);
-                            } else {
-                                varCache.set(k, v);
-                            }
-                        }
-                        assignVarsIntoMental();
-                    },
-                    update: (key: string, fn: (prev: unknown) => unknown) => {
-                        let currentValue: unknown;
 
-                        // Handle nested paths
-                        if (key.includes('.')) {
-                            const baseKey = key.split('.')[0];
-                            const baseObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                            currentValue = getNestedValue(baseObj, key.substring(key.indexOf('.') + 1));
-                        } else {
-                            currentValue = varCache.get(key);
-                        }
+                const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+                    return PathUtils.setPathImmutable(obj, path, value);
+                };
 
-                        const next = fn(currentValue);
+                const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
+                    return PathUtils.getPath(obj, path);
+                };
 
-                        // Set the updated value
-                        if (key.includes('.')) {
-                            const baseKey = key.split('.')[0];
-                            const currentObj = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                            const updatedObj = setNestedValue({ ...currentObj }, key.substring(key.indexOf('.') + 1), next);
-                            varCache.set(baseKey, updatedObj);
-                        } else {
-                            varCache.set(key, next);
-                        }
-
-                        assignVarsIntoMental();
-                    },
-                    delete: (key: string) => {
-                        // Handle nested paths
-                        if (key.includes('.')) {
-                            const baseKey = key.split('.')[0];
-                            const currentObj = (varCache.get(baseKey) as Record<string, unknown>);
-                            if (currentObj && typeof currentObj === 'object' && !Array.isArray(currentObj)) {
-                                const updatedObj = { ...currentObj };
-                                const pathParts = key.substring(key.indexOf('.') + 1).split('.');
-                                let current = updatedObj;
-
-                                // Navigate to parent of the target
-                                for (let i = 0; i < pathParts.length - 1; i++) {
-                                    const part = pathParts[i];
-                                    if (current[part] && typeof current[part] === 'object' && !Array.isArray(current[part])) {
-                                        current = current[part] as Record<string, unknown>;
-                                    }
-                                }
-
-                                // Delete the target property
-                                delete current[pathParts[pathParts.length - 1]];
-                                varCache.set(baseKey, updatedObj);
-                                removeKeyFromMental(key);
-                            }
-                        } else {
-                            varCache.delete(key);
-                            removeKeyFromMental(key);
-                        }
-                        assignVarsIntoMental();
-                    },
-                    keys: () => Array.from(varCache.keys()),
-                    has: (key: string) => {
-                        // Handle nested paths
-                        if (key.includes('.')) {
-                            return (ctx as any).vars.get(key) !== undefined;
-                        }
-                        return varCache.has(key);
-                    }
-                } as any;
+                (ctx as any).vars = VarsSync.createVarsProxy(
+                    varCache,
+                    (key: string, value: unknown) => { (ctx as any).__varsDirty = true; },
+                    (key: string) => { (ctx as any).__varsDirty = true; removeKeyFromMental(key); }
+                );
                 assignVarsIntoMental();
             } catch { /* noop */ }
-            let envInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
-            envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
-                envInbox,
-                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+            const taskResult = await this.turnRunner.runTurn(ctx, {
                 tenantId,
-                'resumeInput'
-            );
-            const env: EnvironmentState = {
-                time: new Date().toISOString(),
                 sessionId: taskId,
-                turn: startTurnTotal + 1,
-                budget: { maxTurns: Infinity, latencyMs: Infinity },
-                pending: {
-                    inputs: ((baseNow as any)?.pending?.inputs) || {},
-                    children: ((baseNow as any)?.pending?.children) || {},
-                    tools: ((baseNow as any)?.pending?.tools) || {},
-                    groups: ((baseNow as any)?.pending?.groups) || {}
-                },
-                inbox: envInbox,
-                lastExec: (baseNow as any)?.meta?.lastExec || undefined,
-                externalEvents: undefined
-            };
-            // Ensure input token is reflected in working variables for this resume turn
-            try {
-                const st = ((((M as any).memory || {})) || {}) as any;
-                const v = { ...(st.vars || {}) } as Record<string, unknown>;
-                if (typeof v.inputToken === 'undefined') {
-                    v.inputToken = token;
-                    if ((M as any).memory) (M as any).memory = { ...st, vars: v };
-                    (ctx as any).vars?.set?.('inputToken', token);
-                }
-            } catch { /* noop */ }
-            const overrides = (plugin as any)?.loop?.modules || (plugin as any)?.loop || {};
-            // Budgets
-            let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
-            try {
-                // Restore budgets from snapshot first, then fallback to manifest
-                const persistedBudgets = (baseNow as any)?.meta?.budgets;
-                const manifestBudgets = (plugin?.manifest as any)?.budgets;
-                const hitl = (plugin?.manifest as any)?.hitl;
-                if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-
-                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                    loopOpts = persistedBudgets;
-                } else if (manifestBudgets && typeof manifestBudgets === 'object') {
-                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
-                } else {
-                    loopOpts = { maxTurns: 1 }; // Safety default
-                }
-
-                // Only set env.budget if loopOpts has valid values to prevent implicit Infinity default
-                if (typeof loopOpts.maxTurns === 'number') {
-                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
-                }
-            } catch (err) {
-                try { (ctx as any).logger?.warn?.('Failed to restore budgets in resumeInput', { error: err }); } catch { }
-            }
-            const { taskStatus } = await TaskExecutor.executeTurn({
-                ctx, M, env, overrides, loopOpts,
-                sessionManager: this.sessionManager,
-                tenantId, sessionId: taskId, agentId: agentName || 'default',
+                trigger: 'resume',
                 isStreaming: false,
-                getSessionStorePrisma: () => this.getSessionStorePrisma()
+                input: { token } // Reflect input token in result if needed
+            }, {
+                initialM: M,
+                snapshot: baseNow
             });
+
             const channel = taskChannel(taskId);
-            try { eventBus.publish(channel, { id: taskId, status: taskStatus, final: taskStatus.state === 'completed' || taskStatus.state === 'failed' } as any); } catch { }
+            try {
+                if (taskResult.status) {
+                    eventBus.publish(channel, {
+                        id: taskId,
+                        status: taskResult.status,
+                        final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
+                    } as any);
+                }
+            } catch { }
         } catch { /* swallow resume errors to avoid blocking ack */ }
         return { acknowledged: true };
     }
@@ -2854,69 +1486,37 @@ export class TaskEngine {
         // Always auto-resume one loop turn to consume the tool result
         try {
             const agentName = (snap as any)?.agentId;
-            const plugin = agentName ? PluginManager.findAgent(agentName) : null;
             const ctx = this.createContext({ id: taskId, input: {} });
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
+
             const snapNow = await this.sessionManager!.load(tenantId, taskId);
             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
-            let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            const M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
-            const startTurnTool = Number((baseNow as any)?.meta?.turn) || 0;
-            let envInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
-            envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
-                envInbox,
-                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+
+            const taskResult = await this.turnRunner.runTurn(ctx, {
                 tenantId,
-                'handleToolCompleted'
-            );
-            const env: EnvironmentState = {
-                time: new Date().toISOString(),
                 sessionId: taskId,
-                turn: startTurnTool + 1,
-                budget: { maxTurns: Infinity, latencyMs: Infinity },
-                pending: {
-                    inputs: ((baseNow as any)?.pending?.inputs) || {},
-                    children: ((baseNow as any)?.pending?.children) || {},
-                    tools: ((baseNow as any)?.pending?.tools) || {},
-                    groups: ((baseNow as any)?.pending?.groups) || {}
-                },
-                inbox: envInbox,
-                lastExec: (baseNow as any)?.meta?.lastExec || undefined,
-                externalEvents: undefined
-            };
-            const overrides = (plugin as any)?.loop?.modules || (plugin as any)?.loop || {};
-            let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
-            try {
-                // Restore budgets from snapshot first, then fallback to manifest
-                const persistedBudgets = (baseNow as any)?.meta?.budgets;
-                const manifestBudgets = (plugin?.manifest as any)?.budgets;
-                const hitl = (plugin?.manifest as any)?.hitl;
-                if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-
-                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                    loopOpts = persistedBudgets;
-                } else if (manifestBudgets && typeof manifestBudgets === 'object') {
-                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
-                } else {
-                    loopOpts = { maxTurns: 1 }; // Safety default
-                }
-
-                if (typeof loopOpts.maxTurns === 'number') {
-                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
-                }
-            } catch (err) {
-                try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleToolCompleted', { error: err }); } catch { }
-            }
-            const { taskStatus } = await TaskExecutor.executeTurn({
-                ctx, M, env, overrides, loopOpts,
-                sessionManager: this.sessionManager,
-                tenantId, sessionId: taskId, agentId: agentName || 'default',
-                isStreaming: false,
-                getSessionStorePrisma: () => this.getSessionStorePrisma()
+                trigger: 'tool',
+                toolToken: token,
+                toolResult: result,
+                isStreaming: false
+            }, {
+                initialM: M,
+                snapshot: baseNow
             });
+
             const channel = taskChannel(taskId);
-            try { eventBus.publish(channel, { id: taskId, status: taskStatus, final: taskStatus.state === 'completed' || taskStatus.state === 'failed' } as any); } catch { }
+            try {
+                if (taskResult.status) {
+                    eventBus.publish(channel, {
+                        id: taskId,
+                        status: taskResult.status,
+                        final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
+                    } as any);
+                }
+            } catch { }
         } catch { /* ignore resume errors */ }
     }
 
@@ -2950,69 +1550,38 @@ export class TaskEngine {
         // Always auto-resume one loop turn to consume the external event
         try {
             const agentName = (snap as any)?.agentId;
-            const plugin = agentName ? PluginManager.findAgent(agentName) : null;
             const ctx = this.createContext({ id: taskId, input: {} });
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
+
             const snapNow = await this.sessionManager!.load(tenantId, taskId);
             const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
-            let M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
+            const M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
-            const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
-            let envInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
-            envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
-                envInbox,
-                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+
+            const taskResult = await this.turnRunner.runTurn(ctx, {
                 tenantId,
-                'handleExternalEvent'
-            );
-            const env: EnvironmentState = {
-                time: new Date().toISOString(),
                 sessionId: taskId,
-                turn: startTurnTotal + 1,
-                budget: { maxTurns: Infinity, latencyMs: Infinity },
-                pending: {
-                    inputs: ((baseNow as any)?.pending?.inputs) || {},
-                    children: ((baseNow as any)?.pending?.children) || {},
-                    tools: ((baseNow as any)?.pending?.tools) || {},
-                    groups: ((baseNow as any)?.pending?.groups) || {}
-                },
-                inbox: envInbox,
-                lastExec: (baseNow as any)?.meta?.lastExec || undefined,
-                externalEvents: undefined
-            };
-            const overrides = (plugin as any)?.loop?.modules || {};
-            let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
-            try {
-                // Restore budgets from snapshot first, then fallback to manifest
-                const persistedBudgets = (baseNow as any)?.meta?.budgets;
-                const manifestBudgets = (plugin?.manifest as any)?.budgets;
-                const hitl = (plugin?.manifest as any)?.hitl;
-                if (hitl) { try { (M as any).hitl = hitl; } catch { } }
-
-                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                    loopOpts = persistedBudgets;
-                } else if (manifestBudgets && typeof manifestBudgets === 'object') {
-                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
-                } else {
-                    loopOpts = { maxTurns: 1 }; // Safety default
-                }
-
-                if (typeof loopOpts.maxTurns === 'number') {
-                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
-                }
-            } catch (err) {
-                try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleExternalEventOccurred', { error: err }); } catch { }
-            }
-            const { taskStatus } = await TaskExecutor.executeTurn({
-                ctx, M, env, overrides, loopOpts,
-                sessionManager: this.sessionManager,
-                tenantId, sessionId: taskId, agentId: agentName || 'default',
-                isStreaming: false,
-                getSessionStorePrisma: () => this.getSessionStorePrisma()
+                trigger: 'event',
+                eventToken: token,
+                eventType: entry?.type,
+                eventPayload: payload,
+                isStreaming: false
+            }, {
+                initialM: M,
+                snapshot: baseNow
             });
+
             const channel = taskChannel(taskId);
-            try { eventBus.publish(channel, { id: taskId, status: taskStatus, final: taskStatus.state === 'completed' || taskStatus.state === 'failed' } as any); } catch { }
+            try {
+                if (taskResult.status) {
+                    eventBus.publish(channel, {
+                        id: taskId,
+                        status: taskResult.status,
+                        final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
+                    } as any);
+                }
+            } catch { }
         } catch { }
     }
 
@@ -3031,7 +1600,7 @@ export class TaskEngine {
             const base = (snap.snapshot as Record<string, unknown>) || {};
             const tasks = getPendingTasks(base);
             const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
-            if (!token) {
+            if (!token || (childToken && !tasks[childToken])) {
                 log.warn('Cannot stage observation: token not found', {
                     parentTaskId,
                     childToken,
@@ -3057,7 +1626,7 @@ export class TaskEngine {
             }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
-            const cleanChildResult = extractCleanChildResult(result);
+            const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
@@ -3211,7 +1780,7 @@ export class TaskEngine {
             }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
-            const cleanChildResult = extractCleanChildResult(result);
+            const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
@@ -3244,7 +1813,7 @@ export class TaskEngine {
                     }
                 }
                 if (shouldClearControlVar) {
-                    updatedSnapshot = removeControlVarFromSnapshot(updatedSnapshot, childTokenPath);
+                    updatedSnapshot = TaskStateUtils.removeControlVarFromSnapshot(updatedSnapshot, childTokenPath);
                 }
                 return updatedSnapshot;
             };
@@ -3259,30 +1828,95 @@ export class TaskEngine {
             const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
             let snapshotSaved = false;
 
-            try {
-                await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-                snapshotSaved = true;
-            } catch (snapshotError) {
-                if ((snapshotError as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                    try {
-                        const { pruneMentalState } = await import('../loop/hygiene.js');
-                        pruneMentalState((next as any).M);
-                        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId, expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-                        snapshotSaved = true;
-                    } catch (retryError) {
-                        log.warn('Failed to save snapshot with child completion observation even after pruning', {
-                            error: (retryError as Error).message,
+            // ✅ FIX: Add CAS retry loop to handle race conditions with parent's concurrent save
+            const maxSaveRetries = 5;
+            let saveAttempt = 0;
+            let currentSnap = snap;
+            let currentNext = next;
+
+            while (!snapshotSaved && saveAttempt < maxSaveRetries) {
+                saveAttempt++;
+                try {
+                    await this.sessionManager?.saveSnapshot({
+                        tenantId,
+                        sessionId: parentTaskId,
+                        agentId: parentAgentId,
+                        expectedWmVersion: currentSnap.wmVersion ?? BigInt(0),
+                        snapshot: currentNext
+                    });
+                    snapshotSaved = true;
+                } catch (snapshotError) {
+                    if ((snapshotError as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        try {
+                            const { pruneMentalState } = await import('../loop/hygiene.js');
+                            pruneMentalState((currentNext as any).M);
+                            await this.sessionManager?.saveSnapshot({
+                                tenantId,
+                                sessionId: parentTaskId,
+                                agentId: parentAgentId,
+                                expectedWmVersion: currentSnap.wmVersion ?? BigInt(0),
+                                snapshot: currentNext
+                            });
+                            snapshotSaved = true;
+                        } catch (retryError) {
+                            log.warn('Failed to save snapshot with child completion observation even after pruning', {
+                                error: (retryError as Error).message,
+                                parentTaskId,
+                                childToken: token
+                            });
+                        }
+                    } else if ((snapshotError as Error).message === 'CAS_MISMATCH' && saveAttempt < maxSaveRetries) {
+                        // ✅ FIX: Reload snapshot and re-add observation on CAS conflict
+                        log.debug('CAS_MISMATCH in handleChildCompleted, retrying', {
+                            parentTaskId,
+                            childToken: token,
+                            attempt: saveAttempt
+                        });
+                        await new Promise(resolve => setTimeout(resolve, 20 * saveAttempt)); // Backoff
+
+                        // Reload latest snapshot
+                        const latestSnap = await this.sessionManager?.load(tenantId, parentTaskId);
+                        if (!latestSnap) {
+                            log.warn('Snapshot not found on CAS retry in handleChildCompleted', { parentTaskId });
+                            break;
+                        }
+                        currentSnap = latestSnap;
+                        const latestBase = (latestSnap.snapshot as Record<string, unknown>) || {};
+
+                        // Re-build next with the observation added to latest snapshot
+                        let latestNext = cleanupSnapshotForChild({ ...latestBase });
+                        const latestInbox = InboxManager.normalizeInbox((latestNext as any)?.inbox);
+
+                        // Check if observation already exists (maybe another path added it)
+                        if (latestInbox.all.some(observationPredicate)) {
+                            log.debug('Observation already exists in snapshot after CAS retry', { parentTaskId, token });
+                            snapshotSaved = true;
+                            break;
+                        }
+
+                        (latestNext as any).inbox = InboxManager.addObservationToInboxIfMissing(
+                            (latestNext as any).inbox,
+                            childObservation,
+                            observationPredicate
+                        );
+                        currentNext = latestNext;
+                    } else {
+                        log.warn('Failed to save snapshot during child completion', {
+                            error: (snapshotError as Error).message,
                             parentTaskId,
                             childToken: token
                         });
+                        break;
                     }
-                } else {
-                    log.warn('Failed to save snapshot during child completion', {
-                        error: (snapshotError as Error).message,
-                        parentTaskId,
-                        childToken: token
-                    });
                 }
+            }
+
+            if (!snapshotSaved) {
+                log.error('Failed to save child completion observation after all retries', {
+                    parentTaskId,
+                    childToken: token,
+                    attempts: saveAttempt
+                });
             }
 
             try {
@@ -3333,6 +1967,26 @@ export class TaskEngine {
                         // After ALL saves in handleChildCompleted, load the final snapshot
                         // ✅ FIX: Load the latest snapshot AFTER staging observation to ensure we have it
                         const finalSnap = await this.sessionManager!.load(tenantId, parentTaskId);
+
+                        // ✅ FIX: Guard against empty/missing snapshot to prevent phantom restarts (Turn 1 resets)
+                        // ✅ FIX: Guard against empty/missing snapshot to prevent phantom restarts (Turn 1 resets)
+                        if (!finalSnap || !finalSnap.snapshot) {
+                            log.warn('handleChildCompleted: Final snapshot is empty. Aborting resume to prevent state corruption (phantom loop).', {
+                                parentTaskId,
+                                hasSnap: !!finalSnap,
+                                hasData: !!finalSnap?.snapshot,
+                                wmVersion: finalSnap?.wmVersion?.toString()
+                            });
+                            return;
+                        }
+
+                        if (!(finalSnap.snapshot as any).meta) {
+                            log.warn('handleChildCompleted: Snapshot missing meta. Proceeding with caution (might be first turn or migration).', {
+                                parentTaskId,
+                                wmVersion: finalSnap?.wmVersion?.toString()
+                            });
+                        }
+
                         let baseNow = (finalSnap?.snapshot as Record<string, unknown>) || {};
 
                         // ✅ FIX: Always ensure inbox has the observation, even if snapshotSaved is true
@@ -3753,11 +2407,11 @@ export class TaskEngine {
                     const childTokenPath = entry.options.tokenPath ?? 'child.token';
 
                     if (entry.options.setToken && token) {
-                        parentBase = applyControlVarToSnapshot(parentBase, childTokenPath, token);
+                        parentBase = TaskStateUtils.applyControlVarToSnapshot(parentBase, childTokenPath, token);
                     }
 
                     if (entry.options.setStage) {
-                        parentBase = applyControlVarToSnapshot(parentBase, 'stage', entry.options.setStage);
+                        parentBase = TaskStateUtils.applyControlVarToSnapshot(parentBase, 'stage', entry.options.setStage);
                     }
 
                     // Save the updated parent state
@@ -4198,24 +2852,10 @@ export class TaskEngine {
                     vars: varsState
                 }
             };
-            (ctx as any).vars = {
-                get: (key: string) => varsState[key],
-                set: (key: string, value: unknown) => { varsState[key] = value; },
-                merge: (patch: Record<string, unknown>) => {
-                    for (const [k, v] of Object.entries(patch)) {
-                        varsState[k] = v;
-                    }
-                },
-                update: (key: string, fn: (prev: unknown) => unknown) => {
-                    varsState[key] = fn(varsState[key]);
-                },
-                delete: (key: string) => { delete varsState[key]; },
-                keys: () => Object.keys(varsState),
-                has: (key: string) => Object.prototype.hasOwnProperty.call(varsState, key)
-            } as TaskContext['vars'];
+            VarsSync.ensureVarsFacade(ctx, varsState);
         };
         ensureVarsFacade();
-        await this.attachOrchestrationAPIs(ctx, {
+        await this.apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
             sessionId: taskId,
             agentId: (ctx as any).agentId || snap?.agentId || 'default',

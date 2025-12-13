@@ -43,7 +43,9 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
 
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
-        this.snapshots.set(key, { wmVersion, snapshot, agentId, updatedAt: new Date().toISOString() });
+        // Clone on seed
+        const cloned = JSON.parse(JSON.stringify(snapshot));
+        this.snapshots.set(key, { wmVersion, snapshot: cloned, agentId, updatedAt: new Date().toISOString() });
     }
 
     getEvents(tenantId: string, sessionId: string) {
@@ -52,12 +54,12 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
         const snap = this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
-        if (snap?.snapshot?.pending && (snap.snapshot.pending as any).tasks) {
-            console.log('FakeStore: getSnapshot', `${tenantId}:${sessionId}`, 'tasks keys:', Object.keys((snap.snapshot.pending as any).tasks));
-        } else {
-            console.log('FakeStore: getSnapshot', `${tenantId}:${sessionId}`, 'NO pending.tasks', snap ? 'snapshot found' : 'snapshot null');
-        }
-        return snap;
+        if (!snap) return null;
+        // Clone on read
+        return {
+            ...snap,
+            snapshot: JSON.parse(JSON.stringify(snap.snapshot))
+        };
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -71,46 +73,41 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         expectedWmVersion: bigint;
         snapshot: Record<string, unknown>;
     }): Promise<{ newVersion: bigint }> {
-        this.writeCount++;
-        if (this.failNextSave) {
-            this.failNextSave = false;
-            throw new Error('CAS_MISMATCH');
-        }
-        if (this.failNextSaveWithSizeError) {
-            this.failNextSaveWithSizeError = false;
-            throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
-        }
-        if (this.failNextSaveTooLarge) {
-            this.failNextSaveTooLarge = false;
-            throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
-        }
-        if (this.failOnWriteNumber && this.writeCount === this.failOnWriteNumber) {
-            // single-shot failure at specific write number
-            this.failOnWriteNumber = null;
-            throw new Error('CAS_MISMATCH');
-        }
-
         const key = `${params.tenantId}:${params.sessionId}`;
         const current = this.snapshots.get(key);
         const currentVersion = current?.wmVersion ?? BigInt(0);
 
+        if (this.failNextSave || (this.failOnWriteNumber && this.writeCount + 1 === this.failOnWriteNumber)) {
+            this.writeCount++;
+            this.failNextSave = false; // Reset failNextSave if it was triggered
+            this.failOnWriteNumber = null; // Reset failOnWriteNumber if it was triggered
+            throw new Error('CAS_MISMATCH');
+        }
+
+        if (this.failNextSaveWithSizeError) {
+            this.writeCount++;
+            this.failNextSaveWithSizeError = false;
+            throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
+        }
+        if (this.failNextSaveTooLarge) {
+            this.writeCount++;
+            this.failNextSaveTooLarge = false;
+            throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
+        }
+
         if (current && current.wmVersion !== params.expectedWmVersion) {
+            this.writeCount++;
             throw new Error('CAS_MISMATCH');
         }
 
         const newVersion = currentVersion + BigInt(1);
-        if (params.snapshot?.pending && (params.snapshot.pending as any).tasks) {
-            console.log('FakeStore: writeSnapshotCAS', key, 'tasks keys:', Object.keys((params.snapshot.pending as any).tasks));
-        } else {
-            console.log('FakeStore: writeSnapshotCAS', key, 'NO pending.tasks');
-            if (key.includes('session') && !key.includes('a2a_task')) {
-                console.log('STACK TRACE for empty tasks write:', new Error().stack);
-            }
-        }
 
+        this.writeCount++;
+        // Clone on write
+        const cloned = JSON.parse(JSON.stringify(params.snapshot));
         this.snapshots.set(key, {
             wmVersion: newVersion,
-            snapshot: params.snapshot,
+            snapshot: cloned,
             agentId: params.agentId,
             updatedAt: new Date().toISOString()
         });
@@ -216,7 +213,6 @@ describe('TaskEngine orchestration coverage', () => {
             tenantId: 't',
             parentTaskId: 'parent',
             childToken: 'tok-1',
-            target: 'child-1',
             result: { ok: true },
             childAgentId: 'child-agent'
         });
@@ -421,8 +417,7 @@ describe('TaskEngine orchestration coverage', () => {
             parentTaskId: 'parent',
             childToken: 'child-req',
             prompt: 'need input',
-            schema: { type: 'string' },
-            target: 'child-task'
+            schema: { type: 'string' }
         });
 
         const snap = store.getSnapshot('t', 'parent');
@@ -440,7 +435,7 @@ describe('TaskEngine orchestration coverage', () => {
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
         store.failNextSave = true; // force retry path
 
-        await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState });
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
         const handle = await ctx.requestInput('need info', { ttlMs: 10, onProvided: 'onProvided', setStage: 'awaiting' });
 
         const snap = store.getSnapshot('t', 'session');
@@ -463,7 +458,7 @@ describe('TaskEngine orchestration coverage', () => {
         const pendingInputs = Object.fromEntries(Array.from({ length: 100 }).map((_, i) => [`tok-${i}`, { handlerName: 'h' }] as const));
         const base = { meta: { agentId: 'agent-a' }, pending: { inputs: pendingInputs }, inbox: { current: [], all: [] }, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-        await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
 
         await expect(ctx.requestInput('blocked')).rejects.toThrow('LIMIT_MAX_PROMPTS_EXCEEDED');
     });
@@ -525,13 +520,42 @@ describe('TaskEngine orchestration coverage', () => {
         await expect(engine.resumeInput({ tenantId: 't', taskId: 'task', token: 'tok', input: {} })).rejects.toThrow('INPUT_TOKEN_EXPIRED');
     });
 
+    test('requestTool calls attachOrchestrationAPIs requestTool', async () => {
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const ctx: any = { goals: {} };
+        const mockFn = jest.fn() as any;
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't',
+            sessionId: 'session',
+            agentId: 'a',
+            flushMentalState: undefined as any,
+            requestTool: mockFn
+        });
+        // Seed initial state
+        store.seed('t', 'session', { pending: { tools: {} }, meta: { turn: 0 } }, BigInt(0), 'a');
+        await ctx.requestTool('search', { q: 'hi' }, { setToken: true, setStage: 'tooling', onCompleted: 'done' });
+
+        // Check side effect in store instead of mock call
+        const snap = store.getSnapshot('t', 'session');
+        const tools = (snap?.snapshot?.pending as any)?.tools || {};
+        const token = Object.keys(tools)[0];
+        expect(token).toBeDefined();
+        expect(tools[token]).toMatchObject({
+            name: 'search',
+            args: { q: 'hi' },
+            handlers: { completed: 'done' },
+            options: { setToken: true, setStage: 'tooling' }
+        });
+    });
+
     test('attachOrchestrationAPIs.requestTool stores pending tool with options', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
         const ctx: any = createCtx();
         const base = { meta: { agentId: 'agent-a' }, pending: {}, inbox: { current: [], all: [] }, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-        await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
 
         const { token } = await ctx.requestTool('search', { q: 'hi' }, { setToken: true, setStage: 'tooling', onCompleted: 'done' });
 
@@ -553,17 +577,14 @@ describe('TaskEngine orchestration coverage', () => {
         const ctx: any = createCtx();
         const base = { meta: { agentId: 'agent-a' }, pending: {}, inbox: { current: [], all: [] }, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-        await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
 
         const { token } = await ctx.sendTaskToAgent('agent-b', { input: 1 }, { setToken: true, tokenPath: 'child.token', setStage: 'child-await', autoClearToken: false });
         expect(token).toBeDefined();
 
-        const snap = store.getSnapshot('test-tenant', 'session');
+        const snap = store.getSnapshot('t', 'session');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
         const tasks = (saved.pending as any)?.tasks || {};
-        console.log('DEBUG TEST: token:', token);
-        console.log('DEBUG TEST: tasks keys:', Object.keys(tasks));
-        console.log('DEBUG TEST: pending keys:', Object.keys((saved.pending as any) || {}));
         expect(tasks[token]).toMatchObject({ input: { input: 1 } });
         expect(((saved.pending as any)?.controlVars || {}).child?.token).toBe(token);
         expect(((saved.pending as any)?.controlVars || {}).stage).toBe('child-await');
@@ -576,12 +597,12 @@ describe('TaskEngine orchestration coverage', () => {
         const ctx: any = createCtx();
         const base = { meta: { agentId: 'agent-a' }, pending: {}, inbox: { current: [], all: [] }, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-        await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
 
         const { token } = await ctx.sendTaskToAgent('agent-b', { input: 2 }, { setToken: false, setStage: 'child-await', autoClearToken: false });
         expect(token).toBeDefined();
 
-        const snap = store.getSnapshot('test-tenant', 'session');
+        const snap = store.getSnapshot('t', 'session');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
         const tasks = (saved.pending as any)?.tasks || {};
         expect(tasks[token]).toBeDefined();
@@ -595,12 +616,12 @@ describe('TaskEngine orchestration coverage', () => {
         const ctx: any = createCtx();
         const base = { meta: { agentId: 'agent-a' }, pending: {}, inbox: { current: [], all: [] }, M: { memory: { vars: {} } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-        await (engine as any).attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
 
         const { token } = await ctx.sendTaskToAgent('agent-b', { input: 1 }, { setToken: true, tokenPath: 'child.token', setStage: 'child-await', autoClearToken: false });
         expect(token).toBeDefined();
 
-        const snap = store.getSnapshot('test-tenant', 'session');
+        const snap = store.getSnapshot('t', 'session');
         const saved = (snap?.snapshot || {}) as Record<string, unknown>;
         const tasks = (saved.pending as any)?.tasks || {};
         expect(tasks[token]).toMatchObject({ input: { input: 1 } });
@@ -1109,11 +1130,11 @@ describe('TaskEngine orchestration coverage', () => {
     test('stageChildCompletionObservation no-ops when snapshot or token missing', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'missing', childToken: 'tok', target: 'child', result: {} });
+        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'missing', childToken: 'tok', result: {} });
         expect(store.writeCount).toBe(0);
 
         store.seed('t', 'parent', { pending: { tasks: {} }, inbox: { current: [], all: [] } } as any, BigInt(0), 'agent-a');
-        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', target: 'unknown', result: {} });
+        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', childToken: 'unknown', result: {} });
         expect(store.writeCount).toBe(0);
     });
 
@@ -1126,7 +1147,7 @@ describe('TaskEngine orchestration coverage', () => {
         });
         store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
 
-        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', target: 'child-dup', result: { ok: true } });
+        await engine.stageChildCompletionObservation({ tenantId: 't', parentTaskId: 'parent', childToken: 'child-dup', result: { ok: true } });
 
         const snap = store.getSnapshot('t', 'parent');
         const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>((snap?.snapshot as any)?.inbox);
@@ -1170,7 +1191,7 @@ describe('TaskEngine orchestration coverage', () => {
         ctx.__activeLoopEnv = { turn: 1, pending: { children: {}, inputs: {}, tools: {}, groups: {} } };
         const handleChildSpy = jest.spyOn(engine as any, 'handleChildCompleted');
 
-        const result = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { awaitCompletion: true, setStage: 'child-await' });
+        const result = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { setToken: true, setStage: 'child-await', autoClearToken: false });
 
         // New API returns { handle, token } where result is in handle
         expect(result.handle).toBeDefined();
@@ -1208,6 +1229,47 @@ describe('TaskEngine orchestration coverage', () => {
         await ctx.sendTaskToAgent('child-agent', { input: 'test' }, { setToken: 'child-1' });
 
         expect(handleChildSpy).toHaveBeenCalled();
+    });
+
+    test('startTask injects initial input into inbox for agent perception', async () => {
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+
+        // Capture the environment by spying on TurnRunner's runTurn
+        let capturedParams: any = null;
+        const originalRunTurn = (engine as any).turnRunner.runTurn.bind((engine as any).turnRunner);
+        jest.spyOn((engine as any).turnRunner, 'runTurn').mockImplementation(async (ctx: any, params: any, overrides: any) => {
+            capturedParams = params;
+            // Call the original to get the environment setup
+            return originalRunTurn(ctx, params, overrides);
+        });
+
+        // Mock runLoop to return immediately after we've captured the env
+        runLoopMock.mockResolvedValue({
+            M: { memory: { vars: {} } },
+            outcome: { kind: 'complete', result: { ok: true } },
+            metrics: { timings: {} }
+        });
+
+        const initialInput = { caseId: 'CASE-123', priority: 'high' };
+        const task = {
+            id: 'task-with-input',
+            input: initialInput,
+            status: { state: 'submitted' as const, timestamp: new Date().toISOString() }
+        };
+
+        await engine.startTask({
+            task,
+            isStreaming: false,
+            agentId: 'test-agent',
+            tenantId: 't'
+        });
+
+        // Verify that TurnRunner received the input parameter
+        expect(capturedParams).not.toBeNull();
+        expect(capturedParams.input).toBeDefined();
+        expect(capturedParams.input).toEqual(initialInput);
+        expect(capturedParams.trigger).toBe('start');
     });
 
     // Note: executeTaskHandler tests removed as they test internal implementation details

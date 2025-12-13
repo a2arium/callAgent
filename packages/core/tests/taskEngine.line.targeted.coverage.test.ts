@@ -7,44 +7,32 @@
  */
 
 import { jest } from '@jest/globals';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+
+// Mock Prisma Client BEFORE importing any modules that use it
+await jest.unstable_mockModule('@prisma/client', () => ({
+    PrismaClient: class {
+        constructor() { }
+        $disconnect() { return Promise.resolve(); }
+        outbox = {
+            findMany: jest.fn().mockResolvedValue([]),
+            delete: jest.fn().mockResolvedValue({})
+        };
+    }
+}), { virtual: true });
+
+// Import system under test dynamically to ensure mocks are applied
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/memory/stores/SessionStore.js';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
 const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
 const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
-const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
-
-await jest.unstable_mockModule(a2aPath, () => ({
-    globalA2AService: {
-        sendTaskToAgent: jest.fn() as any,
-        findLocalAgent: jest.fn().mockResolvedValue({
-            manifest: { name: 'mock-agent' },
-            loop: {},
-            llmAdapter: {},
-            tenantId: 'test-tenant'
-        })
-    }
-} as any));
-
-await jest.unstable_mockModule(outboxPath, () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
-}));
-
-await jest.unstable_mockModule(loopRunnerPath, () => ({
-    runLoop: jest.fn().mockResolvedValue({
-        M: { memory: { vars: {} } },
-        outcome: { kind: 'complete', result: {} },
-        metrics: {}
-    })
-}));
-
-await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
 
 const { TaskEngine } = await import(taskEnginePath);
+const { globalA2AService } = await import(a2aPath);
+const { outboxPublisher } = await import(outboxPath);
 
 class FakeSessionStore implements IWorkingMemorySessionStore {
     private snapshots = new Map<string, WMSessionSnapshot>();
@@ -56,7 +44,14 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        return this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        const snap = this.snapshots.get(`${tenantId}:${sessionId}`);
+        if (!snap) return null;
+        const clone = JSON.parse(JSON.stringify(snap, (key, value) =>
+            typeof value === 'bigint' ? value.toString() : value
+        ));
+        // Restore BigInt type for wmVersion
+        if (clone) clone.wmVersion = snap.wmVersion;
+        return clone;
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -81,7 +76,10 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         const newVersion = currentVersion + BigInt(1);
         this.snapshots.set(key, {
             wmVersion: newVersion,
-            snapshot: params.snapshot,
+            // Handle BigInt serialization if needed, or structured clone
+            snapshot: JSON.parse(JSON.stringify(params.snapshot, (key, value) =>
+                typeof value === 'bigint' ? value.toString() : value
+            )),
             agentId: params.agentId,
             updatedAt: new Date().toISOString()
         });
@@ -112,6 +110,10 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         // Mock implementation
     }
 
+    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }) {
+        return [];
+    }
+
     close(): void {
         // Mock implementation
     }
@@ -119,10 +121,13 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
 
 beforeAll(() => {
     process.env.DISABLE_OUTBOX_PUBLISHER = '1';
+    // Spy on outboxPublisher to prevent actual activity if it leaks
+    jest.spyOn(outboxPublisher, 'start').mockImplementation(() => { });
+    jest.spyOn(outboxPublisher, 'stop').mockImplementation(() => { });
 });
 
 afterEach(() => {
-    jest.clearAllMocks();
+    jest.restoreAllMocks(); // Restores spies
     TaskEngine.testOverrides = undefined;
 });
 
@@ -216,13 +221,11 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            // Mock A2A service to return input_required status
-            const a2aModule = await import(a2aPath);
-            const mockSendTaskToAgent = jest.fn().mockResolvedValue({
+            // Spy on A2A service to return input_required status
+            const mockSendTaskToAgent = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
                 status: 'input_required',
                 prompt: 'Need input'
             });
-            (a2aModule as any).globalA2AService.sendTaskToAgent = mockSendTaskToAgent;
 
             const base = {
                 M: {
@@ -255,6 +258,8 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
             expect(result.token).toBeDefined();
             expect(result.handle).toBeDefined();
             expect(mockSendTaskToAgent).toHaveBeenCalled();
+
+            mockSendTaskToAgent.mockRestore();
         });
     });
 
@@ -264,9 +269,7 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
             // Mock A2A service to throw an error (lines 4580-4587)
-            const a2aModule = await import(a2aPath);
-            const mockSendTaskToAgent = jest.fn().mockRejectedValue(new Error('Handler failed'));
-            (a2aModule as any).globalA2AService.sendTaskToAgent = mockSendTaskToAgent;
+            const mockSendTaskToAgent = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockRejectedValue(new Error('Handler failed'));
 
             const base = {
                 M: {
@@ -307,6 +310,8 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
                 childAgent: 'test-agent',
                 error: 'Handler failed'
             });
+
+            mockSendTaskToAgent.mockRestore();
         });
 
         test('sendTaskToAgent handles string errors', async () => {
@@ -314,9 +319,7 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
             // Mock A2A service to throw a string error as an Error object with string message
-            const a2aModule = await import(a2aPath);
-            const mockSendTaskToAgent = jest.fn().mockRejectedValue(new Error('String error message'));
-            (a2aModule as any).globalA2AService.sendTaskToAgent = mockSendTaskToAgent;
+            const mockSendTaskToAgent = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockRejectedValue(new Error('String error message'));
 
             const base = {
                 M: {
@@ -356,6 +359,8 @@ describe('TaskEngine Targeted Line Coverage Tests', () => {
                 childAgent: 'test-agent',
                 error: 'String error message'
             });
+
+            mockSendTaskToAgent.mockRestore();
         });
     });
 });

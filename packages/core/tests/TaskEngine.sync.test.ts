@@ -2,6 +2,7 @@ import { TaskEngine } from '../src/orchestration/taskEngine.js';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { globalA2AService } from '../src/orchestration/A2AService.js';
 import { jest } from '@jest/globals';
+import type { TaskContext } from '../src/shared/types/index.js';
 
 describe('TaskEngine sync completion', () => {
     const tenantId = 'tenant-test';
@@ -19,7 +20,7 @@ describe('TaskEngine sync completion', () => {
     const setupContext = async (engine: TaskEngine, sessionManager: any) => {
         const taskEntity = { id: parentTaskId, input: {} };
         // Create context using private method
-        const ctx = (engine as any).createContext(taskEntity);
+        const ctx: TaskContext = (engine as any).createContext(taskEntity);
 
         // Ensure session data exists with complete mental state structure
         await sessionManager.saveSnapshot({
@@ -48,8 +49,8 @@ describe('TaskEngine sync completion', () => {
             }
         });
 
-        // Attach orchestration APIs using private method
-        await (engine as any).attachOrchestrationAPIs(ctx, {
+        // Attach orchestration APIs using private method (via apiBinder)
+        await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
             sessionId: parentTaskId,
             agentId: 'parent-agent',
@@ -78,7 +79,7 @@ describe('TaskEngine sync completion', () => {
 
 
         // Call context API
-        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' });
+        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }) as any;
 
         expect(result).toBeDefined();
         // The fix ensures token is present even if spread failed or A2A returned undefined
@@ -98,24 +99,74 @@ describe('TaskEngine sync completion', () => {
         // Spy with input_required scenario where it returns undefined
         const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent')
             .mockImplementation(async (params: any) => {
-                const token = params.handle?.token;
-                if (token) {
-                    await engine.handleChildCompleted({
-                        tenantId,
-                        parentTaskId,
-                        childToken: token,
-                        childTaskId: 'child-task-id',
-                        result: undefined // Simulate empty result/undefined
-                    });
-                }
+                // Return undefined to simulate async start (input_required or just started)
                 return undefined;
             });
 
-        const result = await ctx.sendTaskToAgent('child-agent-2', {});
+        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }) as any;
 
         expect(result).toBeDefined();
-        // The fix ensures we return { token } at minimum
         expect(result.token).toBeDefined();
+        // Handle should not be empty, but should not have status/data from result
+        expect(result.handle).toBeDefined();
+        // Since result was undefined, these properties wouldn't be assigned
+        expect((result.handle as any).status).toBeUndefined();
+        expect((result.handle as any).data).toBeUndefined();
+
+        sendSpy.mockRestore();
+    });
+
+    it('injects flattened child result into active loop inbox (Payload Consistency Fix)', async () => {
+        const { engine, sessionManager } = buildEngine();
+        const ctx = await setupContext(engine, sessionManager);
+
+        // Mock __activeLoopInbox on context
+        const mockInbox: any = { current: [], all: [] };
+        (ctx as any).__activeLoopInbox = mockInbox;
+        (ctx as any).__activeLoopEnv = { turn: 5 };
+
+        // Mock a TaskEntity result (wrapped)
+        const mockChildTaskEntity = {
+            id: 'child-task-123',
+            status: {
+                state: 'completed',
+                timestamp: 123456,
+                metadata: {
+                    result: { data: 'actual-result' }, // standard result wrapper
+                    timings: { start: 1, end: 2 }
+                }
+            }
+        };
+
+        const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent')
+            .mockImplementation(async (params: any) => {
+                // Return the TaskEntity object
+                return mockChildTaskEntity;
+            });
+
+        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: false }) as any;
+
+        expect(result.token).toBeDefined();
+
+        // Verify inbox injection
+        expect(mockInbox.current.length).toBe(1);
+        const obs = mockInbox.current[0];
+
+        // CHECK PAYLOAD CONSISTENCY FIX
+        // Should have unnested result, id, and executionMetadata at top level of payload
+        expect(obs.source).toBe('child');
+        expect(obs.kind).toBe('child.completed');
+        expect(obs.payload).toBeDefined();
+
+        // 1. Flattened ID
+        expect(obs.payload.childTaskId).toBe('child-task-123');
+
+        // 2. Extracted Result (should NOT be undefined, should be { data: 'actual-result' })
+        expect(obs.payload.result).toEqual({ data: 'actual-result' });
+
+        // 3. Execution Metadata (should be populated)
+        expect(obs.payload.executionMetadata).toBeDefined();
+        expect(obs.payload.executionMetadata?.timings).toEqual({ start: 1, end: 2 });
 
         sendSpy.mockRestore();
     });
