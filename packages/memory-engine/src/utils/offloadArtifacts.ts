@@ -33,7 +33,7 @@ async function offloadArtifactsInternal(
     // Check for LocalArtifacts BEFORE checking visited
     // This allows duplicate references to the same artifact to be properly replaced
     if ((obj as any).kind === LOCAL_ARTIFACT_KIND) {
-        log.info('Found LocalArtifact, offloading...', { mimeType: (obj as any).mimeType });
+        // log.info('Found LocalArtifact, offloading...', { mimeType: (obj as any).mimeType });
         if (seenArtifacts.has(obj as object)) {
             return seenArtifacts.get(obj as object);
         }

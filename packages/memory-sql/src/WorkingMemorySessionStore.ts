@@ -83,7 +83,7 @@ export class WorkingMemorySessionStore {
         if ((rec.snapshot as any)?.meta?.turn || (rec.snapshot as any)?.M) {
             // it looks valid
         } else {
-            this.log.warn?.('getSessionSnapshot: CAUTION - Loaded snapshot might be empty/partial', {
+            this.log.debug?.('getSessionSnapshot: CAUTION - Loaded snapshot might be empty/partial', {
                 tenantId,
                 sessionId,
                 wmVersion: rec.wmVersion.toString(),

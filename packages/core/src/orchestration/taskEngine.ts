@@ -720,10 +720,6 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
-        log.info('TaskEngine: startTask called (Radical Fix Version 3.5)', { taskId: params.task.id });
-        if (process.env.DEBUG_BACKGROUND_TASKS) {
-            console.log('[TaskEngine.startTask] Entry', { taskId: params.task.id, isStreaming: params.isStreaming, agentId: params.agentId });
-        }
         const { task, isStreaming, agentId, tenantId: startTenantId, initialContext } = params;
 
         // Use provided context if present, otherwise create a basic one
