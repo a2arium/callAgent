@@ -399,6 +399,11 @@ The agent manifest defines metadata and configuration for your agent. You can pr
     "costLimit": 10.0,          // Cost threshold in USD
     "piiPatterns": ["\\b\\d{3}-\\d{2}-\\d{4}\\b"]  // Regex patterns for sensitive data
   },
+
+  // Optional: Agent dependencies
+  "dependencies": {
+    "agents": ["weather-agent", "calculator-agent"] // List of other agents this agent depends on
+  },
   
   // Optional: Agent result caching
   "cache": {

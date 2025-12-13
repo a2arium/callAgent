@@ -60,6 +60,8 @@ export type AgentManifest = {
     hitl?: 'advise' | 'consent' | 'guardrails';
     /** Safety configuration */
     safety?: { sanitize?: boolean; costLimit?: number; piiPatterns?: string[] };
+    /** Agent dependencies */
+    dependencies?: { agents: string[] };
     /** Memory configuration for A2A context inheritance */
     memory?: {
         /** Memory profile (e.g., 'basic', 'advanced', 'custom') */
