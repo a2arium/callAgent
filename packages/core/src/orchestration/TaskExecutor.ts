@@ -77,19 +77,25 @@ export class TaskExecutor {
 
             try {
                 // We use a simplified save here - explicitly NOT pruning, just flushing current state
-                await TaskExecutor.saveSnapshot({
-                    sessionManager,
-                    tenantId,
-                    sessionId,
-                    agentId,
-                    env: envToUse,
-                    M: mToUse,
-                    mNext: mToUse, // snapshot "now" implies next is same as current 
-                    outcome: { kind: 'continue', observations: [] }, // intermediate flush implies continue
-                    loopOpts,
-                    ctx,
-                    getSessionStorePrisma
-                });
+                // ✅ FIX: Prevent event loop drain during async offload (Prisma/Network might yield too aggressively)
+                const keepAlive = setInterval(() => { }, 1000);
+                try {
+                    await TaskExecutor.saveSnapshot({
+                        sessionManager,
+                        tenantId,
+                        sessionId,
+                        agentId,
+                        env: envToUse,
+                        M: mToUse,
+                        mNext: mToUse, // snapshot "now" implies next is same as current 
+                        outcome: { kind: 'continue', observations: [] }, // intermediate flush implies continue
+                        loopOpts,
+                        ctx,
+                        getSessionStorePrisma
+                    });
+                } finally {
+                    clearInterval(keepAlive);
+                }
                 // Mark as saved so we don't worry about duplicate saves if loop finishes comfortably?
                 (ctx as any).__wmSavedThisTurn = true;
             } catch (e) {
@@ -142,7 +148,25 @@ export class TaskExecutor {
         }
 
         // Run the loop
-        const { M: mNext, outcome, metrics } = await runLoop(ctx, M, env, overrides, loopOpts);
+        let outcome: LoopOutcome;
+        let mNext: MentalState;
+        let metrics: any;
+
+        // ✅ FIX: Prevent event loop drain during runLoop execution (e.g. async artifact hydration, LLM calls)
+        const loopKeepAlive = setInterval(() => { }, 1000);
+
+        try {
+            const result = await runLoop(ctx, M, env, overrides, loopOpts);
+            mNext = result.M;
+            outcome = result.outcome;
+            metrics = result.metrics;
+        } catch (loopError) {
+            console.error('[TaskExecutor] runLoop threw an error:', loopError);
+            log.error('runLoop exception', { error: loopError instanceof Error ? loopError.message : String(loopError) });
+            throw loopError;
+        } finally {
+            clearInterval(loopKeepAlive);
+        }
 
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log('[TaskExecutor.executeTurn] runLoop returned', {
@@ -162,19 +186,26 @@ export class TaskExecutor {
                 // If the loop saved internally (rare?), we might double save or need that flag.
                 // TaskEngine checks: if (this.sessionManager) ...
 
-                await TaskExecutor.saveSnapshot({
-                    sessionManager,
-                    tenantId,
-                    sessionId,
-                    agentId,
-                    env,
-                    M,
-                    mNext,
-                    outcome,
-                    loopOpts,
-                    ctx,
-                    getSessionStorePrisma
-                });
+                // ✅ FIX: Prevent event loop drain during async offload at end of turn
+                const keepAlive = setInterval(() => { }, 1000);
+
+                try {
+                    await TaskExecutor.saveSnapshot({
+                        sessionManager,
+                        tenantId,
+                        sessionId,
+                        agentId,
+                        env,
+                        M,
+                        mNext,
+                        outcome,
+                        loopOpts,
+                        ctx,
+                        getSessionStorePrisma
+                    });
+                } finally {
+                    clearInterval(keepAlive);
+                }
 
                 (ctx as any).__wmSavedThisTurn = true;
             } catch (e) {

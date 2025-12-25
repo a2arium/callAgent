@@ -54,6 +54,7 @@ export async function runLoop<
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
     try { log.info('LoopRunner started', { maxTurns }); } catch { }
+    console.log(`[LoopRunner] STARTED. MaxTurns: ${maxTurns}, LatencyMs: ${opts.latencyMs}, TaskId: ${taskId}`);
 
     const inbox = ensureInbox(env);
 
@@ -67,7 +68,12 @@ export async function runLoop<
 
     // ✅ FIX: Store inbox reference on context so handleChildCompleted can update it directly
     // This allows synchronous child completions to be visible to the loop's await_child check
-    (ctx as any).__activeLoopInbox = inbox;
+    // ✅ FIX: Use a getter for __activeLoopInbox so it always reflects the current env.inbox
+    // This allows ApiBinder to inject results into the fresh inbox even if perception replaces the object identity.
+    Object.defineProperty(ctx, '__activeLoopInbox', {
+        get: () => env.inbox,
+        configurable: true
+    });
     // ✅ FIX: Store env reference so synchronous completions can update pending state
     (ctx as any).__activeLoopEnv = env;
 
@@ -551,9 +557,6 @@ export async function runLoop<
 
         // Check global budget from env (handles resume cases where local turn count resets)
         const globalMaxTurns = (env as any).budget?.maxTurns;
-        if (process.env.DEBUG_BACKGROUND_TASKS) {
-            console.log(`[runLoop] Budget check: env.turn=${(env as any).turn}, globalMaxTurns=${globalMaxTurns}, condition=${(env as any).turn} > ${globalMaxTurns} = ${(env as any).turn > globalMaxTurns}`);
-        }
         if (typeof globalMaxTurns === 'number' && (env as any).turn > globalMaxTurns) {
             log.debug('🔍 DEBUG: Global budget check triggered', {
                 taskId,
@@ -561,9 +564,6 @@ export async function runLoop<
                 envTurn: (env as any).turn,
                 globalMaxTurns
             });
-            if (process.env.DEBUG_BACKGROUND_TASKS) {
-                console.log(`[runLoop] FAILING: budget_turns_exceeded because ${(env as any).turn} > ${globalMaxTurns}`);
-            }
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }
@@ -572,15 +572,8 @@ export async function runLoop<
         updateLoggingContext({ turn: (env as any).turn });
 
         // 🔍 DEBUG: Log each iteration
-        log.debug('🔍 DEBUG: Loop iteration', {
-            taskId,
-            runId,
-            loopCounter: turn,
-            envTurn: (env as any).turn,
-            maxTurns,
-            willCheckBudget: turn === maxTurns - 1
-        });
         if (opts.latencyMs && Date.now() - start > opts.latencyMs) {
+            console.log(`[LoopRunner] ⏰ Latency budget exceeded! Limit: ${opts.latencyMs}ms, Elapsed: ${Date.now() - start}ms`);
             outcome = { kind: 'fail', reason: 'budget_latency_exceeded' };
             break;
         }
@@ -681,6 +674,7 @@ export async function runLoop<
                 };
             } catch { /* noop */ }
         } catch (error) {
+            console.error(`[LoopRunner] 🛑 FATAL: Turn ${turn} failed with exception!`, error);
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {
                 kind: 'fail',
@@ -691,6 +685,7 @@ export async function runLoop<
 
         // Stop on await_* or terminal
         // 🔍 DEBUG: Log loop continuation check
+        console.log(`[LoopRunner] Checking outcome. Kind: ${outcome.kind}`);
         if (outcome.kind !== 'continue') {
             // ✅ RADICAL FIX: If await_child but child result is ALREADY in inbox, continue instead of exiting!
             // This prevents the race condition where:
@@ -704,8 +699,10 @@ export async function runLoop<
             if (outcome.kind === 'await_child' && (outcome as any).token) {
                 const awaitToken = (outcome as any).token;
 
-                // First check local inbox
+                // First check local inbox OR the current env.inbox (which might be fresh/replaced)
                 let childResultInInbox = inbox.all.some(
+                    (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                ) || env.inbox.all.some(
                     (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
                 );
 
@@ -753,6 +750,8 @@ export async function runLoop<
                     });
                     // Move child completion to current inbox for next turn
                     const childObs = inbox.all.find(
+                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                    ) || env.inbox.all.find(
                         (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
                     );
                     if (childObs) {
