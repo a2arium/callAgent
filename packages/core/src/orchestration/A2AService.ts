@@ -22,6 +22,7 @@ import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js'
 import { v4 as uuidv4 } from 'uuid';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { TaskEngine } from './taskEngine.js';
+import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -724,6 +725,21 @@ export class A2AService implements IA2AService {
                         console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result (non-serializable):`, cachedResult);
                     }
 
+                    // Hydrate artifacts in cached result before returning
+                    try {
+                        ArtifactHydrationService.attachHydratedArtifactHandles(
+                            cachedResult,
+                            this.agentResultCache,
+                            targetCtx.tenantId
+                        );
+                    } catch (hydrationError) {
+                        a2aLogger.error('Failed to hydrate artifacts in cached result', hydrationError, {
+                            operationId,
+                            targetAgent: targetPlugin.manifest.name
+                        });
+                        // Continue even if hydration fails, returning the raw result
+                    }
+
                     return cachedResult;
                 }
             }
@@ -783,6 +799,24 @@ export class A2AService implements IA2AService {
                     );
                 } catch (cacheError) {
                     a2aLogger.error('Failed to cache A2A result', cacheError, {
+                        operationId,
+                        targetAgent: targetPlugin.manifest.name
+                    });
+                }
+            }
+
+            // Hydrate artifacts in the LIVE result before returning
+            // This ensures that if the agent returned markers (from its own memory/cache),
+            // the parent receives functional artifacts.
+            if (this.agentResultCache) {
+                try {
+                    ArtifactHydrationService.attachHydratedArtifactHandles(
+                        result,
+                        this.agentResultCache,
+                        targetCtx.tenantId
+                    );
+                } catch (hydrationError) {
+                    a2aLogger.error('Failed to hydrate artifacts in live result', hydrationError, {
                         operationId,
                         targetAgent: targetPlugin.manifest.name
                     });

@@ -156,6 +156,64 @@ export default createAgent({
 
 The memory system is automatically injected into the context and ready to use in any agent that needs persistent storage.
 
+## Usage in A-P-L-R-E-T Loop Agents
+
+When building agents with the **A-P-L-R-E-T architecture** (Attention, Perception, Learning, Reasoning, Execution, Transition), the memory system is integrated directly into the cognitive loop.
+
+### Writes: The Role of the Learning Module
+
+In the A-P-L-R-E-T architecture, the **Learning** module is the **only** module authorized to write to the agent's mental state and long-term memory. This ensures a single source of truth and prevents side effects in other modules.
+
+The `learning` function receives a `MemoryWriter` instance as its **5th argument**. You must use this writer to persist semantic concepts.
+
+```typescript
+import { createAgent, type MemoryWriter } from '@a2arium/callagent-core';
+
+export default createAgent({
+  // ...
+  learning: (
+    prevMentalState, // Current mental state
+    prevAction,      // Action taken in the previous turn
+    observation,     // New observation from Perception
+    memoryReader,    // Read-only access to memory
+    writer: MemoryWriter // <-- WRITER ACCESS
+  ) => {
+    // 1. Persist new information to Semantic Memory
+    if (observation.kind === 'user_preference') {
+      writer.semantic.add({
+        id: 'user-pref-theme',
+        value: { theme: observation.payload.theme },
+        tags: ['preference']
+      });
+    }
+
+    // 2. Update and return the new MentalState (Internal Cognition)
+    // This state is what Policy will see in the next step.
+    return {
+      ...prevMentalState,
+      memory: {
+        ...prevMentalState.memory,
+        lastTheme: observation.payload.theme
+      }
+    };
+  },
+  // ...
+});
+```
+
+### Reads: Access in Other Modules
+
+All other modules (Policy, Shield, Execution) receive a **Read-Only** memory interface (usually key `mem` or `memory`). They should never attempt to write to memory.
+
+```typescript
+policy: (mentalState, memoryReader) => {
+  // ✅ Correct: Read from memory to inform decisions
+  // Note: Ideally, relevant information should be pre-loaded into 'mentalState'
+  // by the Learning module, but direct reads are permitted.
+  return { kind: 'act' };
+}
+```
+
 ## Setting Up MemorySQLAdapter
 
 ### Prerequisites

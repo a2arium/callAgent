@@ -62,6 +62,7 @@ export type SemanticConcept = {
     embedding?: number[];
     data: unknown;
     source?: string;           // provenance
+    tags?: string[];
 };
 
 export type Skill = {
