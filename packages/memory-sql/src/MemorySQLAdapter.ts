@@ -1961,7 +1961,7 @@ new MemorySQLAdapter({
             },
             data: {
                 blobData: null,
-                blobMetadata: Prisma.JsonNull,
+                blobMetadata: null as any,
                 updatedAt: new Date()
             }
         });
