@@ -194,10 +194,10 @@ export class TurnRunner {
 
                     if (tokensToCheck.size > 0) {
                         const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: 0 });
-                        const childCompletedEvents = events.filter(e => e.type === 'task.child_completed');
+                        const childCompletedEvents = events.filter((e: any) => e.type === 'task.child_completed');
 
                         for (const token of tokensToCheck) {
-                            const completionEvent = childCompletedEvents.find(e =>
+                            const completionEvent = childCompletedEvents.find((e: any) =>
                                 (e.payload as any)?.token === token
                             );
 

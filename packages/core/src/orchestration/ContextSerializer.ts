@@ -4,10 +4,10 @@ import type {
     A2ACallOptions,
     SerializedAgentContext,
     SerializedWorkingMemory,
-    SerializedMemoryContext
+    SerializedMemoryContext,
+    DecisionEntry,
+    TaskContext
 } from '../shared/types/index.js';
-import type { DecisionEntry } from '../shared/types/index.js';
-import type { TaskContext } from '../shared/types/index.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const serializerLogger = logger.createLogger({ prefix: 'ContextSerializer' });

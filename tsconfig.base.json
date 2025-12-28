@@ -11,11 +11,42 @@
     "outDir": "dist",
     "baseUrl": ".",
     "paths": {
-      "@a2arium/callagent-core": ["packages/core/src"],
-      "@a2arium/callagent-core/*": ["packages/core/src/*"],
-      "@a2arium/core": ["packages/core/src"],
-      "@a2arium/types": ["packages/types/src"],
-      "@a2arium/memory-sql": ["packages/memory-sql/src"]
+      "@a2arium/callagent-core": [
+        "packages/core/src"
+      ],
+      "@a2arium/callagent-core/*": [
+        "packages/core/src/*"
+      ],
+      "@a2arium/callagent-memory-engine": [
+        "packages/memory-engine/src"
+      ],
+      "@a2arium/callagent-memory-engine/*": [
+        "packages/memory-engine/src/*"
+      ],
+      "@a2arium/callagent-memory-sql": [
+        "packages/memory-sql/src"
+      ],
+      "@a2arium/callagent-memory-sql/*": [
+        "packages/memory-sql/src/*"
+      ],
+      "@a2arium/callagent-types": [
+        "packages/types/src"
+      ],
+      "@a2arium/callagent-types/*": [
+        "packages/types/src/*"
+      ],
+      "@a2arium/callagent-utils": [
+        "packages/utils/src"
+      ],
+      "@a2arium/callagent-utils/*": [
+        "packages/utils/src/*"
+      ],
+      "@a2arium/callagent-chat-bridge": [
+        "packages/chat-bridge/src"
+      ],
+      "@a2arium/callagent-chat-bridge/*": [
+        "packages/chat-bridge/src/*"
+      ]
     }
   }
-} 
+}

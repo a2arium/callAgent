@@ -18,7 +18,12 @@ import type {
     ThoughtEntry,
     DecisionEntry,
     RecallOptions,
-    RememberOptions
+    RememberOptions,
+    ChildCompletedObservation,
+    ChildCompletedPayload,
+    InteractiveTaskSnapshot,
+    TaskStatusMetadataWithResult,
+    TaskStatusWithResult
 } from '@a2arium/callagent-memory-engine';
 
 // Export Handle types for typed A2A interactions
@@ -29,7 +34,18 @@ export type { TaskHandle, InputHandle, GroupHandle } from '../../orchestration/H
 export type { A2AEvent, TaskStatus, ProtocolArtifact };
 
 // Export the unified Artifact type and interfaces
-export type { ArtifactType, ArtifactHandle, LocalArtifact };
+export type {
+    ArtifactType,
+    ArtifactHandle,
+    LocalArtifact,
+    ThoughtEntry,
+    DecisionEntry,
+    ChildCompletedObservation,
+    ChildCompletedPayload,
+    InteractiveTaskSnapshot,
+    TaskStatusMetadataWithResult,
+    TaskStatusWithResult
+};
 // Export the static factory as 'Artifact'
 export { Artifact };
 
