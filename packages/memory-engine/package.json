@@ -23,9 +23,9 @@
     "description": "Memory Engine for CallAgent",
     "license": "MIT",
     "dependencies": {
-        "@a2arium/callagent-memory-sql": "0.2.0",
-        "@a2arium/callagent-types": "0.2.0",
-        "@a2arium/callagent-utils": "0.2.0",
+        "@a2arium/callagent-memory-sql": "workspace:*",
+        "@a2arium/callagent-types": "workspace:*",
+        "@a2arium/callagent-utils": "workspace:*",
         "@prisma/client": "^6.7.0",
         "callllm": "portal:../../../callLLM",
         "dotenv": "^16.4.5",

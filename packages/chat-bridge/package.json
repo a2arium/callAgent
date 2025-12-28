@@ -28,5 +28,14 @@
     "agent"
   ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-memory-sql": "workspace:*",
+    "@a2arium/callagent-types": "workspace:*",
+    "@a2arium/callagent-utils": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
 }

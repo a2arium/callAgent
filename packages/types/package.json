@@ -32,5 +32,8 @@
     "errors",
     "callagent"
   ],
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
 }
