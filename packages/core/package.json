@@ -38,8 +38,7 @@
     "@a2arium/callagent-memory-sql": "0.2.0",
     "@a2arium/callagent-types": "0.2.0",
     "@a2arium/callagent-utils": "0.2.0",
-    "@prisma/client": "^6.7.0",
-    "callllm": "portal:/Users/maximantonov/Work/_lab/callllm",
+    "callllm": "portal:../../../callllm",
     "dotenv": "^16.4.5",
     "uuid": "^11.1.0"
   },
