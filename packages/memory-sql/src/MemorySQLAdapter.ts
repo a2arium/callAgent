@@ -731,7 +731,7 @@ new MemorySQLAdapter({
     async delete(key: string, opts?: { backend?: string; tenantId?: string }): Promise<void> {
         const tenantId = opts?.tenantId || this.defaultTenantId;
         // Delete memory and associated alignments
-        await this.prisma.$transaction(async (tx) => {
+        await this.prisma.$transaction(async (tx: any) => {
             await tx.$executeRaw`
                 DELETE FROM entity_alignment WHERE memory_key = ${key} AND tenant_id = ${tenantId}
             `;
@@ -759,7 +759,7 @@ new MemorySQLAdapter({
         const keysToDelete = entriesToDelete.map(entry => entry.key);
 
         // Delete in transaction to ensure consistency
-        const deletedCount = await this.prisma.$transaction(async (tx) => {
+        const deletedCount = await this.prisma.$transaction(async (tx: any) => {
             // Delete entity alignments for all keys
             await tx.$executeRaw`
                 DELETE FROM entity_alignment 
@@ -789,7 +789,7 @@ new MemorySQLAdapter({
     }
 
     async clear(): Promise<void> {
-        await this.prisma.$transaction(async (tx) => {
+        await this.prisma.$transaction(async (tx: any) => {
             await tx.$executeRaw`DELETE FROM entity_alignment`;
             await tx.$executeRaw`DELETE FROM agent_memory_store`;
         });
@@ -1961,7 +1961,7 @@ new MemorySQLAdapter({
             },
             data: {
                 blobData: null,
-                blobMetadata: Prisma.DbNull,
+                blobMetadata: Prisma.JsonNull,
                 updatedAt: new Date()
             }
         });

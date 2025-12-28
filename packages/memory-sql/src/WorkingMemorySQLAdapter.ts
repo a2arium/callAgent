@@ -434,7 +434,7 @@ new WorkingMemorySQLAdapter({
         const resolvedTenantId = tenantId || this.defaultTenantId;
 
         try {
-            await this.prisma.$transaction(async (tx) => {
+            await this.prisma.$transaction(async (tx: any) => {
                 // Delete all working memory data for this agent
                 await tx.workingMemoryVariable.deleteMany({
                     where: { tenantId: resolvedTenantId, agentId }

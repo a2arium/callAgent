@@ -29,7 +29,7 @@ export class WorkingMemorySessionStore {
             await this.connecting;
             return;
         }
-        this.connecting = this.prisma.$connect().catch((err) => {
+        this.connecting = this.prisma.$connect().catch((err: any) => {
             // Reset so a later call can retry
             this.connecting = null;
             throw err;
@@ -73,7 +73,7 @@ export class WorkingMemorySessionStore {
         await this.ensureConnected();
         const rec = await this.runWithReconnect(() => this.prisma.wMSession.findUnique({
             where: { tenantId_sessionId: { tenantId, sessionId } }
-        }));
+        })) as any;
         if (!rec) {
             this.log.debug?.('getSessionSnapshot: not found', { tenantId, sessionId });
             return null;
@@ -115,7 +115,7 @@ export class WorkingMemorySessionStore {
         const { tenantId, sessionId, agentId, expectedWmVersion, snapshot } = params;
 
         await this.ensureConnected();
-        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
+        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx: any) => {
             const existing = await tx.wMSession.findUnique({
                 where: { tenantId_sessionId: { tenantId, sessionId } },
                 select: { wmVersion: true }
@@ -155,7 +155,7 @@ export class WorkingMemorySessionStore {
         const { tenantId, sessionId, type, payload } = params;
 
         await this.ensureConnected();
-        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
+        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx: any) => {
             const last = await tx.wMEvent.findFirst({
                 where: { tenantId, sessionId },
                 orderBy: { seq: 'desc' },
