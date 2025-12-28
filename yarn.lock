@@ -550,21 +550,21 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@callmessenger/adapter-telegram@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram::locator=callagent%40workspace%3A.":
+"@callmessenger/adapter-telegram@link:../callMessenger/packages/adapter-telegram::locator=callagent%40workspace%3A.":
   version: 0.0.0-use.local
-  resolution: "@callmessenger/adapter-telegram@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram::locator=callagent%40workspace%3A."
+  resolution: "@callmessenger/adapter-telegram@link:../callMessenger/packages/adapter-telegram::locator=callagent%40workspace%3A."
   languageName: node
   linkType: soft
 
-"@callmessenger/adapter-web@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web::locator=callagent%40workspace%3A.":
+"@callmessenger/adapter-web@link:../callMessenger/packages/adapter-web::locator=callagent%40workspace%3A.":
   version: 0.0.0-use.local
-  resolution: "@callmessenger/adapter-web@link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web::locator=callagent%40workspace%3A."
+  resolution: "@callmessenger/adapter-web@link:../callMessenger/packages/adapter-web::locator=callagent%40workspace%3A."
   languageName: node
   linkType: soft
 
-"@callmessenger/core@link:/Users/maximantonov/Work/_lab/callMessenger/packages/core::locator=callagent%40workspace%3A.":
+"@callmessenger/core@link:../callMessenger/packages/core::locator=callagent%40workspace%3A.":
   version: 0.0.0-use.local
-  resolution: "@callmessenger/core@link:/Users/maximantonov/Work/_lab/callMessenger/packages/core::locator=callagent%40workspace%3A."
+  resolution: "@callmessenger/core@link:../callMessenger/packages/core::locator=callagent%40workspace%3A."
   languageName: node
   linkType: soft
 
@@ -815,9 +815,9 @@ __metadata:
   resolution: "@examples/telegram-bridge-demo@workspace:apps/examples/telegram-bridge-demo"
   dependencies:
     "@a2arium/callagent-chat-bridge": "workspace:*"
-    "@callmessenger/adapter-telegram": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-telegram"
-    "@callmessenger/adapter-web": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/adapter-web"
-    "@callmessenger/core": "link:/Users/maximantonov/Work/_lab/callMessenger/packages/core"
+    "@callmessenger/adapter-telegram": "link:../../../../callMessenger/packages/adapter-telegram"
+    "@callmessenger/adapter-web": "link:../../../../callMessenger/packages/adapter-web"
+    "@callmessenger/core": "link:../../../../callMessenger/packages/core"
     "@types/ws": "npm:^8"
     ts-pattern: "npm:^5.8.0"
     tsx: "npm:^4.19.0"
