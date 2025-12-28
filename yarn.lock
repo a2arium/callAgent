@@ -8,6 +8,12 @@ __metadata:
 "@a2arium/callagent-chat-bridge@workspace:*, @a2arium/callagent-chat-bridge@workspace:packages/chat-bridge":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-chat-bridge@workspace:packages/chat-bridge"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-memory-sql": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*"
+    typescript: "npm:^5.8.3"
   languageName: unknown
   linkType: soft
 
@@ -16,11 +22,10 @@ __metadata:
   resolution: "@a2arium/callagent-core@workspace:packages/core"
   dependencies:
     "@a2arium/callagent-memory-engine": "workspace:*"
-    "@a2arium/callagent-memory-sql": "npm:0.2.0"
-    "@a2arium/callagent-types": "npm:0.2.0"
-    "@a2arium/callagent-utils": "npm:0.2.0"
-    "@prisma/client": "npm:^6.7.0"
-    callllm: "portal:/Users/maximantonov/Work/_lab/callllm"
+    "@a2arium/callagent-memory-sql": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*"
+    callllm: "portal:../../../callLLM"
     dotenv: "npm:^16.4.5"
     jest: "npm:^29.7.0"
     ts-jest: "npm:^29.3.2"
@@ -33,11 +38,11 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-memory-engine@workspace:packages/memory-engine"
   dependencies:
-    "@a2arium/callagent-memory-sql": "npm:0.2.0"
-    "@a2arium/callagent-types": "npm:0.2.0"
-    "@a2arium/callagent-utils": "npm:0.2.0"
+    "@a2arium/callagent-memory-sql": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*"
     "@prisma/client": "npm:^6.7.0"
-    callllm: "portal:/Users/maximantonov/Work/_lab/callllm"
+    callllm: "portal:../../../callLLM"
     dotenv: "npm:^16.4.5"
     jest: "npm:^29.7.0"
     ts-jest: "npm:^29.3.2"
@@ -46,12 +51,12 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@a2arium/callagent-memory-sql@npm:0.2.0, @a2arium/callagent-memory-sql@workspace:*, @a2arium/callagent-memory-sql@workspace:packages/memory-sql":
+"@a2arium/callagent-memory-sql@workspace:*, @a2arium/callagent-memory-sql@workspace:packages/memory-sql":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-memory-sql@workspace:packages/memory-sql"
   dependencies:
-    "@a2arium/callagent-types": "npm:0.2.0"
-    "@a2arium/callagent-utils": "npm:0.2.0"
+    "@a2arium/callagent-types": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*"
     "@prisma/client": "npm:^6.7.0"
     jest: "npm:^29.7.0"
     jest-mock-extended: "npm:^4.0.0-beta1"
@@ -64,13 +69,15 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@a2arium/callagent-types@npm:0.2.0, @a2arium/callagent-types@workspace:*, @a2arium/callagent-types@workspace:packages/types":
+"@a2arium/callagent-types@workspace:*, @a2arium/callagent-types@workspace:packages/types":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-types@workspace:packages/types"
+  dependencies:
+    typescript: "npm:^5.8.3"
   languageName: unknown
   linkType: soft
 
-"@a2arium/callagent-utils@npm:0.2.0, @a2arium/callagent-utils@workspace:, @a2arium/callagent-utils@workspace:*, @a2arium/callagent-utils@workspace:packages/utils":
+"@a2arium/callagent-utils@workspace:, @a2arium/callagent-utils@workspace:*, @a2arium/callagent-utils@workspace:packages/utils":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-utils@workspace:packages/utils"
   dependencies:
@@ -2480,9 +2487,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"callllm@portal:/Users/maximantonov/Work/_lab/callllm::locator=%40a2arium%2Fcallagent-core%40workspace%3Apackages%2Fcore":
+"callllm@portal:../../../callLLM::locator=%40a2arium%2Fcallagent-core%40workspace%3Apackages%2Fcore":
   version: 0.0.0-use.local
-  resolution: "callllm@portal:/Users/maximantonov/Work/_lab/callllm::locator=%40a2arium%2Fcallagent-core%40workspace%3Apackages%2Fcore"
+  resolution: "callllm@portal:../../../callLLM::locator=%40a2arium%2Fcallagent-core%40workspace%3Apackages%2Fcore"
   dependencies:
     "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
     "@dqbd/tiktoken": "npm:^1.0.18"
@@ -2506,9 +2513,9 @@ __metadata:
   languageName: node
   linkType: soft
 
-"callllm@portal:/Users/maximantonov/Work/_lab/callllm::locator=%40a2arium%2Fcallagent-memory-engine%40workspace%3Apackages%2Fmemory-engine":
+"callllm@portal:../../../callLLM::locator=%40a2arium%2Fcallagent-memory-engine%40workspace%3Apackages%2Fmemory-engine":
   version: 0.0.0-use.local
-  resolution: "callllm@portal:/Users/maximantonov/Work/_lab/callllm::locator=%40a2arium%2Fcallagent-memory-engine%40workspace%3Apackages%2Fmemory-engine"
+  resolution: "callllm@portal:../../../callLLM::locator=%40a2arium%2Fcallagent-memory-engine%40workspace%3Apackages%2Fmemory-engine"
   dependencies:
     "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
     "@dqbd/tiktoken": "npm:^1.0.18"
