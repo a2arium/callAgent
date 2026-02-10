@@ -10,6 +10,7 @@ This document provides an index of all documentation in the CallAgent framework,
 - [Monorepo Overview](./monorepo-overview.md) - Project structure and setup
 - [Agent Runner](./runner.md) - CLI tool for running agents (with auto-resume support)
 - [Usage Tracking](./usage-tracking.md) - Usage metrics and monitoring
+- [Telemetry & Observability](./telemetry.md) - Tracing, Opik integration, and zero-code configuration
 
 ### Loop-First Architecture
 - [Loop Overview](./loop/overview.md) - Loop execution model with auto-resume

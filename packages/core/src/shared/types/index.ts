@@ -161,6 +161,11 @@ export type TaskContext = {
     // Read-only accessor for current aggregated usage
     getUsage?: () => { totalCost: number; byKind: Record<string, number> };
 
+    // Telemetry Context
+    telemetry?: {
+        nodeId?: string; // Current node ID (AgentNode or TurnNode)
+    };
+
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 

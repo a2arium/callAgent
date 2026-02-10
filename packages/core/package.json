@@ -34,6 +34,7 @@
     "callagent"
   ],
   "dependencies": {
+    "@prisma/client": "*",
     "@a2arium/callagent-memory-engine": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
     "@a2arium/callagent-types": "workspace:*",

@@ -14,6 +14,10 @@ import { AgentResultCache, hydrateArtifacts } from '@a2arium/callagent-memory-en
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
+import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { TurnNode } from '../telemetry/nodes/TurnNode.js';
+import { AgentNode } from '../telemetry/nodes/AgentNode.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // Re-export type for convenience
 export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event';
@@ -59,6 +63,11 @@ export class TurnRunner {
         }
     ): Promise<TaskEntity> {
         const { tenantId, sessionId, trigger, isStreaming } = params;
+
+        // Telemetry state
+        let turnNode: TurnNode | undefined;
+        let tempAgentNode: AgentNode | undefined;
+        let prevNodeId: string | undefined;
 
         try {
             // 1. Load Snapshot
@@ -153,6 +162,7 @@ export class TurnRunner {
 
             // 5. Environment & Inbox Setup
             const startTurnTotal = Number((base as any)?.meta?.turn) || 0;
+
             let envInbox = InboxManager.normalizeInbox((base as any)?.inbox);
             // Hydrate
             envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
@@ -180,6 +190,28 @@ export class TurnRunner {
                 };
                 envInbox = InboxManager.addObservationToInbox(envInbox, inputObservation);
             }
+
+            // --- TELEMETRY START ---
+            try {
+                let parentId = ctx.telemetry?.nodeId;
+                if (!parentId) {
+                    const tempId = uuidv4();
+                    tempAgentNode = new AgentNode((ctx as any).agentId || 'unknown-agent', tempId, undefined, tempId);
+                    tempAgentNode.start();
+                    telemetry.registerNode(tempAgentNode);
+                    parentId = tempAgentNode.id;
+                }
+
+                // Note: TurnNodes are now created by loopRunner (one per loop iteration)
+                // We maintain the AgentNode as the session context here.
+
+                if (!ctx.telemetry) ctx.telemetry = {};
+                prevNodeId = ctx.telemetry.nodeId;
+                if (parentId) {
+                    ctx.telemetry.nodeId = parentId;
+                }
+            } catch { }
+            // -----------------------
 
             // If inbox is empty, check for child completion events that might not be in the snapshot
             if (envInbox.current.length === 0 && this.sessionManager) {
@@ -248,6 +280,7 @@ export class TurnRunner {
                     });
                 }
             }
+
 
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
@@ -361,6 +394,15 @@ export class TurnRunner {
         } catch (error) {
             log.error('TurnRunner error', { error });
             throw error;
+        } finally {
+            if (prevNodeId && ctx.telemetry) ctx.telemetry.nodeId = prevNodeId;
+            if (tempAgentNode) {
+                try {
+                    tempAgentNode.end();
+                    // Do we want to broadcast end for temp node too? Probably yes.
+                    if (tempAgentNode) telemetry.endNode(tempAgentNode);
+                } catch { }
+            }
         }
     }
 }

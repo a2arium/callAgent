@@ -14,6 +14,7 @@ export { PluginManager } from './plugin/pluginManager.js';
 export { ContextSerializer } from './orchestration/ContextSerializer.js';
 export { A2AService, globalA2AService } from './orchestration/A2AService.js';
 export { TaskEngine } from './orchestration/taskEngine.js';
+export { EngineLocator } from './orchestration/EngineLocator.js';
 export { InteractiveTaskHandler } from './orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
 export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
@@ -65,7 +66,7 @@ export {
     isExternalEventInput
 } from './shared/types/index.js';
 export { ensureAgentContext } from './shared/types/index.js';
-export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse } from './shared/types/LLMTypes.js';
+export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse, ToolDefinition } from './shared/types/LLMTypes.js';
 // Removed build utilities - use simple copying instead:
 // "build": "tsc && copyfiles agent.json dist" or "tsc && cp agent.json dist/"
 // Add other exports as needed for the public API 
@@ -112,3 +113,16 @@ export {
 // Event bus and task channel helpers
 export { eventBus } from './eventbus/inMemoryEventBus.js';
 export { taskChannel } from './eventbus/taskEventEmitter.js';
+
+// Telemetry exports
+export { telemetry, TelemetryCollector } from './telemetry/TelemetryCollector.js';
+export { TelemetryNode } from './telemetry/nodes/TelemetryNode.js';
+export { AgentNode } from './telemetry/nodes/AgentNode.js';
+export { TurnNode } from './telemetry/nodes/TurnNode.js';
+export { ModuleNode } from './telemetry/nodes/ModuleNode.js';
+export { ToolNode } from './telemetry/nodes/ToolNode.js';
+export { LLMNode } from './telemetry/nodes/LLMNode.js';
+export { ConsoleProvider } from './telemetry/providers/ConsoleProvider.js';
+export { OpikProvider } from './telemetry/providers/OpikProvider.js';
+export { CallagentBridgeProvider } from './telemetry/providers/CallagentBridgeProvider.js';
+export type { TelemetryProvider } from './telemetry/Provider.js';

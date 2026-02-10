@@ -19,6 +19,8 @@ import { outboxPublisher } from '../eventbus/outboxPublisher.js';
 import { createTraceparent } from '../tracing/Tracing.js';
 import type { MentalState } from '../loop/types.js';
 import { initialM } from '../loop/init.js';
+import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 
 
 import { logger } from '@a2arium/callagent-utils';
@@ -720,10 +722,30 @@ export class TaskEngine {
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
-        const { task, isStreaming, agentId, tenantId: startTenantId, initialContext } = params;
+        const { task, isStreaming, agentId, tenantId: startTenantId, initialContext, parentTelemetryNodeId } = params;
+
+        // Automatic Telemetry: specific Agent Node for this task execution
+        let agentNode: AgentNode | undefined;
+        try {
+            // Root agent node acts as the trace container
+            const rootTraceId = uuidv4();
+            agentNode = new AgentNode(agentId || 'default', rootTraceId, parentTelemetryNodeId, rootTraceId);
+            const inputPayload = (typeof task.input === 'object' && task.input !== null)
+                ? { ...task.input, originalTaskId: task.id }
+                : { value: task.input, originalTaskId: task.id };
+            agentNode.start(inputPayload);
+            telemetry.registerNode(agentNode);
+        } catch { /* ignore telemetry errors to prevent blockers */ }
 
         // Use provided context if present, otherwise create a basic one
         const ctx = initialContext ?? this.createContext(task);
+
+        // Inject telemetry context
+        if (agentNode) {
+            if (!ctx.telemetry) ctx.telemetry = {};
+            ctx.telemetry.nodeId = agentNode.id;
+        }
+
         // Preserve A2A requestInput override if provided on initialContext
         try {
             if ((initialContext as any)?.__preserveRequestInput && (initialContext as any).requestInput) {
@@ -1047,6 +1069,10 @@ export class TaskEngine {
                 }
 
                 if (task.status?.state === 'completed') {
+                    try {
+                        agentNode?.end(task.status);
+                        if (agentNode) telemetry.endNode(agentNode);
+                    } catch { }
                     await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.completed', {
                         taskId: sessionId,
                         artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
@@ -1105,8 +1131,20 @@ export class TaskEngine {
             });
 
             // Return the updated task
+            if (agentNode && !agentNode.endTime) {
+                try {
+                    const status = task.status?.state === 'failed' ? 'failure' : 'success';
+                    agentNode.end(task.status, status);
+                    telemetry.endNode(agentNode);
+                } catch { }
+            }
             return task;
         } catch (error) {
+            try {
+                const err = error instanceof Error ? error : new Error(String(error));
+                agentNode?.fail(err);
+                if (agentNode) telemetry.failNode(agentNode, err);
+            } catch { }
             log.error('Task engine error', { error: error instanceof Error ? error.message : String(error) });
 
             // Set failure status for non-streaming mode

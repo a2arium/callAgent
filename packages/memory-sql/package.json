@@ -37,6 +37,7 @@
     "callagent"
   ],
   "dependencies": {
+    "@prisma/client": "*",
     "@a2arium/callagent-types": "workspace:*",
     "@a2arium/callagent-utils": "workspace:*",
     "@prisma/client": "^6.7.0"

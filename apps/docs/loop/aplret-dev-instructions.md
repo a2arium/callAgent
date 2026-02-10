@@ -2,6 +2,8 @@
 
 **Production-Ready Agent Architecture for callagent Framework**
 
+TODO: define recordUsage method
+
 ---
 
 > **👥 Audience**: Agent developers using callagent  

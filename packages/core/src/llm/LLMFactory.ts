@@ -21,7 +21,8 @@ export function createLLMForTask(config: LLMConfig, ctx: TaskContext): LLMCaller
     // Create the adapter with the recordUsage function from the context
     return new LLMCallerAdapter(
         config,
-        (cost: number | { cost: number }) => ctx.recordUsage(cost as any)
+        (cost: number | { cost: number }) => ctx.recordUsage(cost as any),
+        ctx
     );
 }
 
@@ -142,7 +143,7 @@ function getEmbeddingConfigFromEnv(): EmbeddingConfig | null {
     return {
         provider,
         model,
-        apiKey: process.env.OPENAI_API_KEY, // Could be extended for other providers
+        apiKey: process.env.EMBEDDING_API_KEY || process.env.VENICE_API_KEY || process.env.OPENAI_API_KEY,
         dimensions: process.env.EMBEDDING_DIMENSIONS ?
             parseInt(process.env.EMBEDDING_DIMENSIONS) : undefined,
         encodingFormat: (process.env.EMBEDDING_FORMAT as 'float' | 'base64') || 'float'

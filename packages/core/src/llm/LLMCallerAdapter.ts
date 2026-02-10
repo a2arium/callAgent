@@ -1,4 +1,7 @@
-import { LLMCaller } from 'callllm';
+import { LLMCaller, TelemetryCollector as CallLLMTelemetryCollector } from 'callllm';
+import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { CallagentBridgeProvider } from '../telemetry/providers/CallagentBridgeProvider.js';
+import type { TaskContext } from '../shared/types/index.js';
 import type {
     UniversalChatResponse,
     UniversalStreamResponse,
@@ -20,9 +23,12 @@ export class LLMCallerAdapter implements ILLMCaller {
     private recordUsage?: RecordUsageFunction;
     private provider?: string;
     private modelName?: string;
+    private ctx?: TaskContext;
+    private bridgeProvider?: CallagentBridgeProvider;
 
-    constructor(config: LLMConfig, recordUsage?: RecordUsageFunction) {
+    constructor(config: LLMConfig, recordUsage?: RecordUsageFunction, ctx?: TaskContext) {
         // Store the recordUsage function for later use
+        this.ctx = ctx;
         this.recordUsage = recordUsage;
         this.provider = config.provider;
         this.modelName = config.modelAliasOrName;
@@ -43,6 +49,16 @@ export class LLMCallerAdapter implements ILLMCaller {
                 }
             } : undefined);
 
+        // Create bridge provider for telemetry integration
+        // The bridge forwards callLLM telemetry events to callagent's telemetry system
+        this.bridgeProvider = new CallagentBridgeProvider('root');
+
+        const callllmTelemetryCollector = new CallLLMTelemetryCollector({
+            providers: [this.bridgeProvider],
+            env: {} as any // Prevent auto-loading Opik/OTel - callagent handles telemetry export
+        });
+
+
         // Initialize the LLMCaller from the callllm library
         // Note: Cast to 'any' to bypass TypeScript's strict checking on the constructor
         // In a real implementation, we would need to ensure our types exactly match callllm
@@ -53,7 +69,8 @@ export class LLMCallerAdapter implements ILLMCaller {
             {
                 apiKey: config.apiKey, // If undefined, callllm will use environment variables
                 historyMode: config.historyMode, // Pass the historyMode setting if provided
-                usageCallback // Set the usageCallback if provided to automatically track usage
+                usageCallback, // Set the usageCallback if provided to automatically track usage
+                telemetryCollector: callllmTelemetryCollector // Use bridge for telemetry
             }
         );
 
@@ -72,9 +89,17 @@ export class LLMCallerAdapter implements ILLMCaller {
      * Make a non-streaming LLM call
      */
     async call<T = unknown>(
-        message: string,
+        message: string | any,
         options?: Record<string, any>
     ): Promise<UniversalChatResponse<T>[]> {
+        // Set the parent node ID for telemetry - bridge will create LLMNode as child
+        try {
+            const parentId = options?.telemetryNodeId || this.ctx?.telemetry?.nodeId;
+            if (parentId && this.bridgeProvider) {
+                this.bridgeProvider.setParentNodeId(parentId);
+            }
+        } catch (e) { /* ignore telemetry setup errors */ }
+
         try {
             // Pass through to the callllm library
             // Return the full array of responses from call()
@@ -120,15 +145,23 @@ export class LLMCallerAdapter implements ILLMCaller {
      * Make a streaming LLM call
      */
     async *stream<T = unknown>(
-        message: string,
+        message: string | any,
         options?: Record<string, any>
     ): AsyncIterable<UniversalStreamResponse<T>> {
+        // Set the parent node ID for telemetry - bridge will create LLMNode as child
+        try {
+            const parentId = options?.telemetryNodeId || this.ctx?.telemetry?.nodeId;
+            if (parentId && this.bridgeProvider) {
+                this.bridgeProvider.setParentNodeId(parentId);
+            }
+        } catch (e) { /* ignore */ }
+
         try {
             // Call the underlying library's stream method
             for await (const chunk of this.caller.stream(message, options)) {
                 // If this is the final chunk and we're not using callbacks, record the usage
                 if (chunk.isComplete && !options?.usageCallback && this.recordUsage &&
-                    chunk.metadata?.usage?.costs?.total) {
+                    (chunk.metadata?.usage?.costs?.total)) {
                     const record: UsageRecord = {
                         cost: chunk.metadata.usage.costs.total,
                         kind: 'llm',
@@ -163,13 +196,13 @@ export class LLMCallerAdapter implements ILLMCaller {
         this.caller.updateSettings(settings);
     }
 
-    getMessages?(includeSystem?: boolean): unknown {
+    getMessages(includeSystem?: boolean): unknown {
         const anyCaller = this.caller as any;
         if (typeof anyCaller.getMessages === 'function') return anyCaller.getMessages(includeSystem === true);
         return undefined;
     }
 
-    setMessages?(messages: unknown): void {
+    setMessages(messages: unknown): void {
         const anyCaller = this.caller as any;
         try {
             const normalized = this.normalizeMessages(messages);
@@ -198,7 +231,7 @@ export class LLMCallerAdapter implements ILLMCaller {
     }
 
     // Persistence uses provider-native messages only
-    exportState?(): unknown {
+    exportState(): unknown {
         try {
             const anyCaller = this.caller as any;
             if (typeof anyCaller.getMessages === 'function') {
@@ -210,7 +243,7 @@ export class LLMCallerAdapter implements ILLMCaller {
         return undefined;
     }
 
-    importState?(state: unknown): void {
+    importState(state: unknown): void {
         try {
             const anyCaller = this.caller as any;
             if ((state as any)?.messages) {
@@ -253,4 +286,4 @@ export class LLMCallerAdapter implements ILLMCaller {
             return messages as any;
         }
     }
-} 
+}

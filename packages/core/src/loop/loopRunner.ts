@@ -14,6 +14,8 @@ import {
 } from './oneTurn.js';
 import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
+import { TurnNode } from '../telemetry/nodes/TurnNode.js';
+import { telemetry } from '../telemetry/TelemetryCollector.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -578,6 +580,12 @@ export async function runLoop<
             break;
         }
 
+        // Create explicit TurnNode for this iteration
+        // This ensures tracking of individual turns even within a multi-turn runLoop
+        let iterationTurnNode: TurnNode | undefined;
+        let prevCtxTurnNodeId: string | undefined;
+        let prevCtxTelemetryNodeId: string | undefined;
+
         try {
             log.debug('Before oneTurn', { taskId, runId, turn });
 
@@ -590,6 +598,43 @@ export async function runLoop<
                     agentId: (ctx as any).agentId
                 });
             }
+
+            // --- TELEMETRY START ---
+            try {
+                // Capture previous state for restoration
+                prevCtxTurnNodeId = (ctx as any).currentTurnNodeId;
+                prevCtxTelemetryNodeId = ctx.telemetry?.nodeId;
+
+                const OuterTurnNodeId = (ctx as any).currentTurnNodeId; // ID from TurnRunner (execution session)
+                const turnIndex = (env as any).turn;
+                // If there's no outer ID, we might be root or detached.
+                // We create a new TurnNode child of whatever is current in ctx.telemetry?
+                // Or child of OuterTurnNodeId if available.
+                // If OuterTurnNodeId is set, it means TurnRunner already made a node.
+                // If we also make a node, we get nested turns: Execution -> Turn X. This is desired.
+
+                const parentId = OuterTurnNodeId || ctx.telemetry?.nodeId;
+                const parentNode = telemetry.getNode(parentId);
+                const traceId = parentNode?.traceId;
+                iterationTurnNode = new TurnNode(turnIndex, parentId, undefined, traceId);
+
+                // Track input for this specific turn (the inbox contents)
+                iterationTurnNode.start({
+                    turnIndex,
+                    inbox: env.inbox.current
+                });
+                telemetry.registerNode(iterationTurnNode);
+
+                // Update context so modules attach to THIS turn
+
+                (ctx as any).currentTurnNodeId = iterationTurnNode.id;
+                if (ctx.telemetry) {
+                    ctx.telemetry.nodeId = iterationTurnNode.id;
+                }
+            } catch (err) {
+                log.warn('Failed to start iteration TurnNode', { error: err });
+            }
+            // -----------------------
 
             const memReader = createMemoryReader(m);
             const writer = createMemoryWriter();
@@ -619,6 +664,12 @@ export async function runLoop<
                     memoryType: typeof (ctx as any).memory,
                     agentId: (ctx as any).agentId
                 });
+
+                if (iterationTurnNode) {
+                    iterationTurnNode.fail(turnError instanceof Error ? turnError : new Error(errorMessage));
+                    telemetry.failNode(iterationTurnNode, turnError instanceof Error ? turnError : new Error(errorMessage));
+                }
+
                 throw turnError;
             }
             m = step.m;
@@ -647,6 +698,12 @@ export async function runLoop<
                 execStatus: (step.exec as any)?.result?.status
             });
 
+            // Telemetry: Success End
+            if (iterationTurnNode) {
+                iterationTurnNode.end({ outcome });
+                telemetry.endNode(iterationTurnNode);
+            }
+
             if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
                 outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
             }
@@ -658,10 +715,6 @@ export async function runLoop<
                 inbox.current = [...observations];
             } else {
                 // ✅ FIX: Don't clear inbox.current when there are no new observations!
-                // Preserve existing observations (e.g., child completion observations staged synchronously)
-                // The inbox is loaded from snapshot at start of turn, so it may already have staged observations
-                // Only clear if we're explicitly told to (which we're not in this case)
-                // inbox.current remains as-is from snapshot
             }
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
@@ -680,7 +733,19 @@ export async function runLoop<
                 kind: 'fail',
                 reason: `turn_${turn}_error: ${error instanceof Error ? error.message : String(error)}`
             };
+            if (iterationTurnNode) {
+                try {
+                    iterationTurnNode.fail(error instanceof Error ? error : new Error(String(error)));
+                    telemetry.failNode(iterationTurnNode, error instanceof Error ? error : new Error(String(error)));
+                } catch { }
+            }
             break;
+        } finally {
+            // restore context
+            if (ctx.telemetry) {
+                ctx.telemetry.nodeId = prevCtxTelemetryNodeId || ''; //Restore previous node (e.g. AgentNode)
+            }
+            (ctx as any).currentTurnNodeId = prevCtxTurnNodeId;
         }
 
         // Stop on await_* or terminal

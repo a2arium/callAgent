@@ -172,6 +172,14 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@a2arium/tool-agent@workspace:apps/examples/tool-agent":
+  version: 0.0.0-use.local
+  resolution: "@a2arium/tool-agent@workspace:apps/examples/tool-agent"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+  languageName: unknown
+  linkType: soft
+
 "@a2arium/working-memory-demo@workspace:apps/examples/working-memory-demo":
   version: 0.0.0-use.local
   resolution: "@a2arium/working-memory-demo@workspace:apps/examples/working-memory-demo"

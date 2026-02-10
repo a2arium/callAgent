@@ -153,7 +153,8 @@ export async function oneTurn<
     mem: MemoryReader,
     writer: MemoryWriter,
     prevAction?: ProposedAction,
-    rPrev?: number
+    rPrev?: number,
+    llm?: PureLLMPort // Added llm parameter here
 ): Promise<{
     m: MentalState<Sensory>;
     outcome: TransitionOut<ObservationPayload>;
@@ -163,14 +164,76 @@ export async function oneTurn<
 }> {
     const timings: Record<string, number> = {};
 
-    // Extract pure LLM port for use in pure modules
-    const { extractPureLLMPort } = await import('../shared/types/LLMTypes.js');
-    const llm = ctx.llm ? extractPureLLMPort(ctx) : undefined;
+    // Telemetry: Current Turn Node ID should be in ctx (set by TurnRunner or TaskEngine)
+    // If not, we can't attach modules, so we skip.
+    const { telemetry } = await import('../telemetry/TelemetryCollector.js');
+    const { ModuleNode } = await import('../telemetry/nodes/ModuleNode.js');
+
+
+
+    // Logical clock to ensure sequential module ordering in telemetry
+    // Even if modules execute in the same millisecond, they'll have distinct start times
+    let moduleSequence = 0;
+
+    // Helper to instrument module execution
+    // Uses real wall-clock time with logical sequence offset for ordering
+    const runWithTelemetry = async <T>(name: string, fn: () => T | Promise<T>, input?: unknown): Promise<T> => {
+        const turnNodeId = (ctx as any).currentTurnNodeId;
+        let node: InstanceType<typeof ModuleNode> | undefined;
+        let prevNodeId: string | undefined;
+
+        // Use logical clock: base time + sequence offset ensures correct ordering
+        const baseTime = Date.now();
+        const startTs = baseTime + moduleSequence++;
+
+        if (turnNodeId) {
+            const parentNode = telemetry.getNode(turnNodeId);
+            const traceId = parentNode?.traceId;
+            node = new ModuleNode(name, turnNodeId, undefined, traceId);
+            node.status = 'active';
+            node.input = input;
+            node.startTime = startTs;
+            telemetry.registerNode(node);
+
+            // Set ctx.telemetry.nodeId to module ID so any LLM calls inside this module
+            // will have this module as their parent (not the turn)
+            if ((ctx as any).telemetry) {
+                prevNodeId = (ctx as any).telemetry.nodeId;
+                (ctx as any).telemetry.nodeId = node.id;
+            }
+        }
+
+        try {
+            const result = await Promise.resolve(fn());
+
+            if (node) {
+                node.output = result;
+                // End time must be >= start time; use max of real time and startTs+1
+                node.endTime = Math.max(Date.now(), startTs + 1);
+                node.status = 'success';
+                telemetry.endNode(node);
+            }
+            return result;
+        } catch (error) {
+            if (node) {
+                node.output = { error: error instanceof Error ? error.message : String(error) };
+                node.endTime = Math.max(Date.now(), startTs + 1);
+                node.status = 'failure';
+                telemetry.failNode(node, error instanceof Error ? error : new Error(String(error)));
+            }
+            throw error;
+        } finally {
+            // Restore previous node ID
+            if (prevNodeId !== undefined && (ctx as any).telemetry) {
+                (ctx as any).telemetry.nodeId = prevNodeId;
+            }
+        }
+    };
 
     const tA0 = Date.now();
     let alpha: Alpha;
     try {
-        alpha = mods.attention(mPrev, env, mem, llm);
+        alpha = await runWithTelemetry('attention', () => mods.attention(mPrev, env, mem, llm), { mPrev, env });
     } catch (error) {
         log.error('Attention module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Attention module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -180,7 +243,7 @@ export async function oneTurn<
     const tP0 = Date.now();
     let o: Obs;
     try {
-        o = await Promise.resolve(mods.perception(env, alpha, mem, llm));
+        o = await runWithTelemetry('perception', () => mods.perception(env, alpha, mem, llm), { env, alpha });
     } catch (error) {
         log.error('Perception module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Perception module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -190,7 +253,7 @@ export async function oneTurn<
     const tL0 = Date.now();
     let m1: MentalState<Sensory>;
     try {
-        const result = mods.learning(mPrev, prevAction, o, mem, writer, rPrev, llm);
+        const result = await runWithTelemetry('learning', () => mods.learning(mPrev, prevAction, o, mem, writer, rPrev, llm), { mPrev, prevAction, o });
         m1 = result instanceof Promise ? await result : result;
         // Apply in-memory patches (if writer exposes an apply hook) so Policy sees updates
         const applyFn = (writer as any)?.__applyToMental;
@@ -212,20 +275,30 @@ export async function oneTurn<
     const arity = typeof policyFn === 'function' ? policyFn.length : 1;
     let pi: ProposedAction | Array<{ action: ProposedAction; prob: number }>;
     try {
-        if (arity >= 5) {
-            pi = (policyFn as any)(m1, mPrev, o, mem, llm);
-        } else if (arity === 4) {
-            pi = (policyFn as any)(m1, o, mem, llm);
-        } else if (arity === 3) {
-            pi = (policyFn as any)(m1, mem, llm);
-        } else {
-            pi = (policyFn as any)(m1, mem);
-        }
+        // Wrap policy execution
+        pi = await runWithTelemetry('policy', () => {
+            if (arity >= 5) {
+                return (policyFn as any)(m1, mPrev, o, mem, llm);
+            } else if (arity === 4) {
+                return (policyFn as any)(m1, o, mem, llm);
+            } else if (arity === 3) {
+                return (policyFn as any)(m1, mem, llm);
+            } else {
+                return (policyFn as any)(m1, mem);
+            }
+        }, { m1, o });
     } catch (error) {
         log.error('Policy module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Policy module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     timings.policyMs = Date.now() - tPol0;
+
+    // Store Policy Output (ProposedAction) in local var for Shield Input
+    const policyOutput = pi;
+
+    // ... (omitted selection logic, assuming deterministic for telemetry correctness or updated later) ...
+    // Note: The selection logic below modifies `chosen`, so we need to instrument Shield with the *selected* action.
+
     let chosen = Array.isArray(pi) ? pi[0].action : pi;
     if (Array.isArray(pi)) {
         const eps = m1.policyParams?.explorationEpsilon ?? 0;
@@ -262,7 +335,7 @@ export async function oneTurn<
     }
     let sh: ShieldOutcome;
     try {
-        sh = mods.shield(m1, chosen, mem, llm);
+        sh = await runWithTelemetry('shield', () => mods.shield(m1, chosen, mem, llm), { m1, chosen });
     } catch (error) {
         log.error('Shield module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Shield module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -287,7 +360,7 @@ export async function oneTurn<
     const tE0 = Date.now();
     let exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     try {
-        exec = await mods.execution(toExecute!, ctx, mem, m1);
+        exec = await runWithTelemetry('execution', () => mods.execution(toExecute!, ctx, mem, m1), { toExecute, ctx: 'ctx-redacted' });
     } catch (error) {
         log.error('Execution module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Execution module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -297,7 +370,7 @@ export async function oneTurn<
     const tT0 = Date.now();
     let outcome: TransitionOut<ObservationPayload>;
     try {
-        outcome = await Promise.resolve(mods.transition(env, exec, m1, mem, llm));
+        outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem, llm), { env: 'env-redacted', exec });
     } catch (error) {
         log.error('Transition module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Transition module failed: ${error instanceof Error ? error.message : String(error)}`);
