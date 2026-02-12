@@ -1,5 +1,6 @@
 
-import { v4 as uuidv4 } from 'uuid';
+import * as uuid from 'uuid';
+const uuidv4 = uuid.v4;
 
 export type NodeType = 'agent' | 'turn' | 'module' | 'tool' | 'llm' | 'workflow';
 export type NodeStatus = 'pending' | 'active' | 'success' | 'failure';

@@ -1,4 +1,6 @@
-import { PrismaClient, Prisma } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType, Prisma } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 import { logger } from '@a2arium/callagent-utils';
 
 export type SessionSnapshot = {
@@ -9,17 +11,17 @@ export type SessionSnapshot = {
 };
 
 export class WorkingMemorySessionStore {
-    private readonly prisma: PrismaClient;
+    private readonly prisma: PrismaClientType;
     private readonly ownsPrisma: boolean;
     private readonly log = logger.createLogger({ prefix: 'WMSessionStore' });
     private connecting: Promise<void> | null = null;
 
-    constructor(prisma?: PrismaClient) {
+    constructor(prisma?: PrismaClientType) {
         if (prisma) {
             this.prisma = prisma;
             this.ownsPrisma = false;
         } else {
-            this.prisma = new PrismaClient();
+            this.prisma = new (PrismaClient as any)();
             this.ownsPrisma = true;
         }
     }

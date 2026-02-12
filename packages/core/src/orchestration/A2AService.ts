@@ -19,7 +19,8 @@ import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { EngineLocator } from './EngineLocator.js';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
-import { v4 as uuidv4 } from 'uuid';
+import * as uuid from 'uuid';
+const uuidv4 = uuid.v4;
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { TaskEngine } from './taskEngine.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
@@ -61,7 +62,8 @@ export class A2AService implements IA2AService {
      */
     private async initializeCacheService(): Promise<void> {
         try {
-            const { PrismaClient } = await import('@prisma/client');
+            const PrismaClientPkg = await import('@prisma/client');
+            const { PrismaClient } = PrismaClientPkg.default || PrismaClientPkg;
             const prisma = new PrismaClient();
             this.agentResultCache = new AgentResultCache(prisma);
             a2aLogger.debug('A2A cache service initialized successfully');

@@ -1,4 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'OutboxPublisher' });
@@ -6,15 +8,15 @@ const log = logger.createLogger({ prefix: 'OutboxPublisher' });
 type OutboxRow = { id: string; tenantId: string; topic: string; key: string; payload: any; createdAt: Date };
 
 export class OutboxPublisher {
-    private prisma: PrismaClient;
+    private prisma: PrismaClientType;
     private running = false;
     private lastId: string | null = null;
     private timeoutId: NodeJS.Timeout | null = null;
     private ownsPrisma: boolean;
 
-    constructor(prisma?: PrismaClient) {
+    constructor(prisma?: PrismaClientType) {
         this.ownsPrisma = !prisma;
-        this.prisma = prisma || new PrismaClient();
+        this.prisma = prisma || new (PrismaClient as any)();
     }
 
     start(intervalMs = 500): void {

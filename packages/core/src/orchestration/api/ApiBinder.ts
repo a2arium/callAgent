@@ -1,5 +1,6 @@
 
-import { v4 as uuidv4 } from 'uuid';
+import * as uuid from 'uuid';
+const uuidv4 = uuid.v4;
 import { logger } from '@a2arium/callagent-utils';
 import type { TaskContext } from '../../shared/types/index.js';
 import { ArtifactHydrationService } from '../ArtifactHydrationService.js';

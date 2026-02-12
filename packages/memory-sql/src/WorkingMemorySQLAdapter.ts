@@ -1,4 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 import { logger } from '@a2arium/callagent-utils';
 import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
 
@@ -7,7 +9,7 @@ import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState }
  */
 export interface WorkingMemorySQLConfig {
     /** Pre-configured Prisma client instance */
-    prismaClient?: PrismaClient;
+    prismaClient?: PrismaClientType;
     /** Database connection URL (used if prismaClient not provided) */
     databaseUrl?: string;
     /** Default tenant ID for operations */
@@ -31,13 +33,13 @@ export interface WorkingMemorySQLConfig {
  */
 export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
     private logger = logger.createLogger({ prefix: 'WorkingMemorySQL' });
-    private prisma: PrismaClient;
+    private prisma: PrismaClientType;
     private ownsPrisma: boolean = false;
     private defaultTenantId: string;
 
     // Support both old and new constructor signatures for backward compatibility
     constructor(
-        configOrPrisma?: WorkingMemorySQLConfig | PrismaClient,
+        configOrPrisma?: WorkingMemorySQLConfig | PrismaClientType,
         options: { defaultTenantId?: string } = {}
     ) {
         let config: WorkingMemorySQLConfig;
@@ -46,7 +48,7 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
         if (configOrPrisma && typeof (configOrPrisma as any).$connect === 'function') {
             // Old signature: constructor(prisma, options?)
             config = {
-                prismaClient: configOrPrisma as PrismaClient,
+                prismaClient: configOrPrisma as PrismaClientType,
                 defaultTenantId: options.defaultTenantId
             };
         } else {
@@ -56,16 +58,16 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
 
         // Initialize Prisma client
         if (config.prismaClient) {
-            this.prisma = config.prismaClient;
+            this.prisma = config.prismaClient as PrismaClientType;
             this.ownsPrisma = false;
         } else if (config.databaseUrl) {
-            this.prisma = new PrismaClient({
+            this.prisma = new (PrismaClient as any)({
                 datasources: { db: { url: config.databaseUrl } }
             });
             this.ownsPrisma = true;
         } else if (process.env.MEMORY_DATABASE_URL) {
             const dbUrl = process.env.MEMORY_DATABASE_URL;
-            this.prisma = new PrismaClient({
+            this.prisma = new (PrismaClient as any)({
                 datasources: { db: { url: dbUrl } }
             });
             this.ownsPrisma = true;

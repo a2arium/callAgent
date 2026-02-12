@@ -1,4 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 import { EntityMatch, EntityAlignment, ParsedEntityField, EntityAlignmentOptions, VectorEmbedding } from './types.js';
 import { logger } from '@a2arium/callagent-utils';
 
@@ -6,7 +8,7 @@ const alignmentLogger = logger.createLogger({ prefix: 'EntityAlignment' });
 
 export class EntityAlignmentService {
     constructor(
-        private prisma: PrismaClient,
+        private prisma: PrismaClientType,
         private embedFunction: (text: string) => Promise<number[]>,
         private options: EntityAlignmentOptions = {
             defaultThreshold: 0.6

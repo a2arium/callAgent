@@ -14,7 +14,7 @@ export class CacheCleanupService {
     private intervalId?: NodeJS.Timeout;
     private isRunning = false;
 
-    constructor(private prisma: PrismaClient) { }
+    constructor(private prisma: PrismaClient | any) { }
 
     /**
      * Remove all expired cache entries

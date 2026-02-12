@@ -1,4 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
@@ -6,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 async function setupVectorSupport() {
-    const prisma = new PrismaClient();
+    const prisma = new (PrismaClient as any)();
 
     try {
         console.log('🔧 Setting up vector support...');

@@ -1,5 +1,7 @@
-import { PrismaClient, Prisma } from '@prisma/client';
-import { SemanticMemoryBackend, MemoryQueryOptions, MemoryQueryResult, MemoryFilter, FilterOperator, MemoryError } from '@a2arium/callagent-types';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType, Prisma } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
+import { SemanticMemoryBackend, MemoryQueryOptions, MemoryQueryResult, MemoryFilter, FilterOperator, MemoryError, RecognitionOptions, RecognitionResult, EnrichmentOptions, EnrichmentResult } from '@a2arium/callagent-types';
 import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetManyOptions, GetManyQuery } from './types.js';
 import { EntityFieldParser } from './EntityFieldParser.js';
 import { EntityAlignmentService } from './EntityAlignmentService.js';
@@ -14,7 +16,7 @@ import { TagNormalizer } from '@a2arium/callagent-utils';
  */
 export interface MemorySQLConfig {
     /** Pre-configured Prisma client instance */
-    prismaClient?: PrismaClient;
+    prismaClient?: PrismaClientType;
     /** Database connection URL (used if prismaClient not provided) */
     databaseUrl?: string;
     /** Default tenant ID for operations */
@@ -31,7 +33,7 @@ const DEFAULT_ENTITY_ALIGNMENT_THRESHOLD = 0.7;
 const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT;
 
 export class MemorySQLAdapter implements SemanticMemoryBackend {
-    private prisma: PrismaClient;
+    private prisma: PrismaClientType;
     private ownsPrisma: boolean = false;
     private embedFunction?: (text: string) => Promise<number[]>;
     private entityService?: EntityAlignmentService;
@@ -42,7 +44,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
 
     // Support both old and new constructor signatures for backward compatibility
     constructor(
-        configOrPrisma?: MemorySQLConfig | PrismaClient,
+        configOrPrisma?: MemorySQLConfig | PrismaClientType,
         embedFunction?: (text: string) => Promise<number[]>,
         options: { defaultTenantId?: string; defaultQueryLimit?: number } = {}
     ) {
@@ -52,7 +54,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         if (configOrPrisma && typeof (configOrPrisma as any).$connect === 'function') {
             // Old signature: constructor(prisma, embedFunction?, options?)
             config = {
-                prismaClient: configOrPrisma as PrismaClient,
+                prismaClient: configOrPrisma as PrismaClientType,
                 embedFunction,
                 defaultTenantId: options.defaultTenantId,
                 defaultQueryLimit: options.defaultQueryLimit
@@ -64,18 +66,18 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
         // Initialize Prisma client
         if (config.prismaClient) {
             // Use provided client
-            this.prisma = config.prismaClient;
+            this.prisma = config.prismaClient as PrismaClientType;
             this.ownsPrisma = false;
         } else if (config.databaseUrl) {
             // Create client with provided URL
-            this.prisma = new PrismaClient({
+            this.prisma = new (PrismaClient as any)({
                 datasources: { db: { url: config.databaseUrl } }
             });
             this.ownsPrisma = true;
         } else if (process.env.MEMORY_DATABASE_URL) {
             // Fallback to MEMORY_DATABASE_URL only
             const dbUrl = process.env.MEMORY_DATABASE_URL;
-            this.prisma = new PrismaClient({
+            this.prisma = new (PrismaClient as any)({
                 datasources: { db: { url: dbUrl } }
             });
             this.ownsPrisma = true;
@@ -324,7 +326,7 @@ new MemorySQLAdapter({
         }
     }
 
-    async get(key: string, opts?: { backend?: string; tenantId?: string }): Promise<any> {
+    async get<T>(key: string, opts?: { backend?: string; tenantId?: string }): Promise<T | null> {
         const tenantId = opts?.tenantId || this.defaultTenantId;
         // select by key
 
@@ -351,7 +353,7 @@ new MemorySQLAdapter({
                 dataType: blobData.metadata.dataType || 'buffer',
                 originalUrl: blobData.metadata.originalUrl,
                 downloadedAt: blobData.metadata.downloadedAt
-            };
+            } as any as T;
         }
 
         // Fall back to regular JSON storage
@@ -368,7 +370,7 @@ new MemorySQLAdapter({
         `;
 
         if (!result || result.length === 0) {
-            return undefined;
+            return null;
         }
 
         const memory = result[0];
@@ -391,7 +393,7 @@ new MemorySQLAdapter({
             }
         }
 
-        return value;
+        return value as T;
     }
 
     private async getAlignmentsForMemory(memoryKey: string, tenantId?: string): Promise<Record<string, EntityAlignment>> {
@@ -1764,7 +1766,7 @@ new MemorySQLAdapter({
     /**
      * Recognize if a candidate object exists in memory using entity alignment and LLM disambiguation
      */
-    async recognize<T>(candidateData: T, options: any = {}): Promise<any> {
+    async recognize<T>(candidateData: T, options: RecognitionOptions = {}): Promise<RecognitionResult<T>> {
         if (!this.recognitionService) {
             throw new Error('Recognition service not available. Entity alignment with embedFunction required.');
         }
@@ -1776,7 +1778,7 @@ new MemorySQLAdapter({
             throw new Error('TaskContext is required for recognition');
         }
 
-        return await this.recognitionService.recognize(candidateData, taskContext, recognitionOptions);
+        return await this.recognitionService.recognize(candidateData, taskContext, recognitionOptions) as RecognitionResult<T>;
     }
 
     /**
@@ -1784,7 +1786,7 @@ new MemorySQLAdapter({
      * By default, the enriched data is automatically saved back to memory.
      * Use dryRun: true to preview enrichment without saving.
      */
-    async enrich<T>(key: string, additionalData: T[], options: any = {}): Promise<any> {
+    async enrich<T>(key: string, additionalData: T[], options: EnrichmentOptions = {}): Promise<EnrichmentResult<T>> {
         if (!this.enrichmentService) {
             throw new Error('Enrichment service not available. Entity alignment with embedFunction required.');
         }
@@ -1797,7 +1799,7 @@ new MemorySQLAdapter({
         }
 
         // Get the existing data and its metadata
-        const existingData = await this.get(key, { tenantId: taskContext.tenantId });
+        const existingData = await this.get<T>(key, { tenantId: taskContext.tenantId });
 
         if (!existingData) {
             throw new Error(`Memory entry with key "${key}" not found`);
@@ -1819,7 +1821,7 @@ new MemorySQLAdapter({
         const originalMetadata = originalMemoryEntry[0];
 
         // Get enriched data from the enrichment service
-        const enrichmentResult = await this.enrichmentService.enrich(key, existingData, additionalData, taskContext, enrichmentOptions);
+        const enrichmentResult = await (this.enrichmentService as any).enrich(key, existingData, additionalData, taskContext, enrichmentOptions);
 
         // If not a dry run, save the enriched data back to memory
         if (!dryRun) {
@@ -1838,7 +1840,7 @@ new MemorySQLAdapter({
         return {
             ...enrichmentResult,
             saved: !dryRun
-        };
+        } as EnrichmentResult<T>;
     }
 
     // ========================================
@@ -1872,7 +1874,7 @@ new MemorySQLAdapter({
             },
             update: {
                 value: { type: 'blob', message: 'Binary data stored in blobData field' },
-                blobData: buffer,
+                blobData: buffer as any,
                 blobMetadata: blobMetadata,
                 tags: normalizedTags,
                 updatedAt: new Date()
@@ -1881,7 +1883,7 @@ new MemorySQLAdapter({
                 tenantId,
                 key,
                 value: { type: 'blob', message: 'Binary data stored in blobData field' },
-                blobData: buffer,
+                blobData: buffer as any,
                 blobMetadata: blobMetadata,
                 tags: normalizedTags
             }

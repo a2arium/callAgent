@@ -1,4 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 
 /**
  * A dedicated service for finding matching entities using a progressive cascade of strategies.
@@ -6,7 +8,7 @@ import { PrismaClient } from '@prisma/client';
  */
 export class EntityFinder {
     constructor(
-        private prisma: PrismaClient,
+        private prisma: PrismaClientType,
         private embedFunction?: (text: string) => Promise<number[]>
     ) { }
 

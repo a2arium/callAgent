@@ -92,8 +92,8 @@ async function initializeCacheServices(): Promise<{
     try {
         const { PrismaClient } = await import('@prisma/client');
         const prisma = new PrismaClient();
-        const cache = new AgentResultCache(prisma);
-        const cleanup = new CacheCleanupService(prisma);
+        const cache = new AgentResultCache(prisma as any);
+        const cleanup = new CacheCleanupService(prisma as any);
 
         return { cache, cleanup, prisma };
     } catch (error) {

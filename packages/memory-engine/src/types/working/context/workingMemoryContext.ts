@@ -291,10 +291,11 @@ export async function extendContextWithMemory(
     const semanticRegistryAccessor = () => (context.memory as any)?.semantic;
 
     context.semantic = {
-        add: async (item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
+        add: async (item: { id: string; value?: unknown; data?: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
             const registry = semanticRegistryAccessor();
+            const val = item.value !== undefined ? item.value : item.data;
             try {
-                await registry?.set?.(item.id, item.value, { tags: item.tags, entities: item.entities });
+                await registry?.set?.(item.id, val, { tags: item.tags, entities: item.entities });
             } catch (err) {
                 /* noop */
             }

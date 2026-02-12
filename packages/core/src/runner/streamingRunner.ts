@@ -166,7 +166,7 @@ export async function runAgentWithStreaming(
         try {
             const { PrismaClient } = await import('@prisma/client');
             agentResultCachePrisma = new PrismaClient();
-            agentResultCache = new AgentResultCache(agentResultCachePrisma);
+            agentResultCache = new AgentResultCache(agentResultCachePrisma as any);
             return agentResultCache;
         } catch (error) {
             agentLogger.error('Failed to initialize AgentResultCache', error);

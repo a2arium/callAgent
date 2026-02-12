@@ -1,21 +1,23 @@
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 
-let singletonPrismaClient: PrismaClient | null = null;
+let singletonPrismaClient: PrismaClientType | null = null;
 
 /**
  * Get the singleton PrismaClient instance, creating it if it doesn't exist
  */
-export async function getMemoryPrismaClient(): Promise<PrismaClient> {
+export async function getMemoryPrismaClient(): Promise<PrismaClientType> {
     if (!singletonPrismaClient) {
-        singletonPrismaClient = new PrismaClient();
+        singletonPrismaClient = new (PrismaClient as any)();
     }
-    return singletonPrismaClient;
+    return singletonPrismaClient!;
 }
 
 /**
  * Set the singleton PrismaClient instance
  */
-export function setMemoryPrismaClient(client: PrismaClient): void {
+export function setMemoryPrismaClient(client: PrismaClientType): void {
     singletonPrismaClient = client;
 }
 

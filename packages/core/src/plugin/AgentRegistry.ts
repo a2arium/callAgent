@@ -97,5 +97,10 @@ export class AgentRegistry {
     }
 }
 
-// Global registry instance
-export const globalAgentRegistry = new AgentRegistry(); 
+// Global registry instance with ESM-safe singleton pattern
+const REGISTRY_KEY = Symbol.for('callagent.agentRegistry');
+export const globalAgentRegistry: AgentRegistry = (globalThis as any)[REGISTRY_KEY] || new AgentRegistry();
+
+if (!(globalThis as any)[REGISTRY_KEY]) {
+    (globalThis as any)[REGISTRY_KEY] = globalAgentRegistry;
+}

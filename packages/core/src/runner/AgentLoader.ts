@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { logger } from '@a2arium/callagent-utils';
 import { PluginManager } from '../plugin/pluginManager.js';
@@ -36,7 +37,8 @@ export class AgentLoader {
         } else {
             runnerLogger.debug(`⚠️ Dependency resolution disabled - loading single agent only from ${agentFilePath}`);
             try {
-                const agentModulePath = path.resolve(agentFilePath);
+                const resolvedPath = path.resolve(agentFilePath);
+                const agentModulePath = fs.realpathSync(resolvedPath);
                 const agentModuleUrl = pathToFileURL(agentModulePath).href;
                 await import(agentModuleUrl);
             } catch (error: unknown) {

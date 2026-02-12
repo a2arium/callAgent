@@ -34,7 +34,6 @@
     "callagent"
   ],
   "dependencies": {
-    "@prisma/client": "*",
     "@a2arium/callagent-memory-engine": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
     "@a2arium/callagent-types": "workspace:*",
@@ -42,6 +41,9 @@
     "callllm": "portal:../../../callLLM",
     "dotenv": "^16.4.5",
     "uuid": "^11.1.0"
+  },
+  "peerDependencies": {
+    "@prisma/client": "*"
   },
   "devDependencies": {
     "jest": "^29.7.0",

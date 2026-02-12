@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
 import type { TaskInput } from '../shared/types/index.js';
 import { logger } from '@a2arium/callagent-utils';
 
@@ -15,7 +15,7 @@ import { logger } from '@a2arium/callagent-utils';
 export class AgentResultCache {
     private logger = logger.createLogger({ prefix: 'AgentCache' });
 
-    constructor(private prisma: PrismaClient) { }
+    constructor(private prisma: PrismaClientType | any) { }
 
     /**
      * Get cached result for an agent execution

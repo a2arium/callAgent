@@ -1,6 +1,8 @@
 import { logger } from '@a2arium/callagent-utils';
 import { MemoryError } from '@a2arium/callagent-types';
-import { PrismaClient } from '@prisma/client';
+import PrismaClientPkg from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
+const { PrismaClient } = PrismaClientPkg;
 import { EntityAlignmentService } from '../EntityAlignmentService.js';
 import { EntityFinder } from './EntityFinder.js';
 import { ConfidenceScorer } from './ConfidenceScorer.js';
@@ -38,7 +40,7 @@ export class RecognitionService {
     private entityFinder: EntityFinder;
 
     constructor(
-        private prisma: PrismaClient,
+        private prisma: PrismaClientType,
         private entityAlignmentService: EntityAlignmentService
     ) {
         this.confidenceScorer = new ConfidenceScorer(entityAlignmentService);

@@ -36,6 +36,26 @@ interface RegisteredAgent {
     loadedAt: Date;
 }
 
+const DISCOVERY_STATE_KEY = Symbol.for('callagent.discoveryState');
+const globalDiscoveryState: {
+    cache: DiscoveryCache;
+    registry: AgentRegistry;
+} = (globalThis as any)[DISCOVERY_STATE_KEY] || {
+    cache: {
+        agentLocations: new Map(),
+        discoveredDirectories: [],
+        lastScan: 0,
+        workspacePaths: null
+    },
+    registry: {
+        agents: new Map()
+    }
+};
+
+if (!(globalThis as any)[DISCOVERY_STATE_KEY]) {
+    (globalThis as any)[DISCOVERY_STATE_KEY] = globalDiscoveryState;
+}
+
 /**
  * Smart Agent Discovery Service
  * Replaces hardcoded paths with intelligent pattern-based discovery
@@ -47,16 +67,9 @@ interface RegisteredAgent {
  * 4. Smart filesystem discovery (pattern-based scanning)
  */
 export class SmartAgentDiscoveryService {
-    private static cache: DiscoveryCache = {
-        agentLocations: new Map(),
-        discoveredDirectories: [],
-        lastScan: 0,
-        workspacePaths: null
-    };
+    private static cache: DiscoveryCache = globalDiscoveryState.cache;
 
-    private static registry: AgentRegistry = {
-        agents: new Map()
-    };
+    private static registry: AgentRegistry = globalDiscoveryState.registry;
 
     private static readonly CACHE_TTL = 300000; // 5 minutes
     private static readonly MAX_SCAN_DEPTH = 8;

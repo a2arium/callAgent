@@ -155,10 +155,12 @@ export class PluginManager {
             }
 
             // Convert to absolute path and file URL for proper importing
+            const fs = await import('node:fs/promises');
             const path = await import('node:path');
             const { pathToFileURL } = await import('node:url');
 
-            const absolutePath = path.resolve(agentPath);
+            const resolvedPath = path.resolve(agentPath);
+            const absolutePath = await fs.realpath(resolvedPath);
             const fileUrl = pathToFileURL(absolutePath).href;
 
             pluginLogger.debug('Importing agent module', {

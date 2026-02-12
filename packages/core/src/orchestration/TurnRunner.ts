@@ -17,7 +17,8 @@ import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
-import { v4 as uuidv4 } from 'uuid';
+import * as uuid from 'uuid';
+const uuidv4 = uuid.v4;
 
 // Re-export type for convenience
 export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event';

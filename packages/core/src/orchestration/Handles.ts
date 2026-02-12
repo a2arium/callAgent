@@ -1,4 +1,5 @@
-import { v4 as uuidv4 } from 'uuid';
+import * as uuid from 'uuid';
+const uuidv4 = uuid.v4;
 import { EngineLocator } from './EngineLocator.js';
 import type { SessionManager } from './SessionManager.js';
 import { logger } from '@a2arium/callagent-utils';
