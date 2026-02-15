@@ -275,6 +275,44 @@ function createMemoryAdapter(): IMemory {
 
 ## Basic Usage
 
+### Canonical Storage & Direct Path Queries
+
+The framework is designed to store your data **canonically** in the database. This means that the object you pass to the `value` field in `add()` is stored directly as the root JSON object in the database column.
+
+**This is important for two reasons:**
+1. **Direct Path Queries**: You can query your data using direct property names like `status = "active"` or `profile.email`.
+2. **Avoiding Double-Wrapping**: If you wrap your data in an additional `value` key when calling `add()`, your queries will require a `value.` prefix (e.g., `value.status = "active"`), which is discouraged.
+
+#### ✅ Correct: Canonical Pattern (Recommended)
+```typescript
+await ctx.semantic.add({
+  id: 'user-123',
+  value: { 
+    name: 'John Smith',
+    status: 'active'
+  }
+});
+
+// Query works with direct path
+const users = await ctx.semantic.read({ filters: ['status = "active"'] });
+```
+
+#### ❌ Incorrect: Redundant Wrapping
+```typescript
+await ctx.semantic.add({
+  id: 'user-123',
+  value: { 
+    value: { // ⚠️ Redundant nesting
+      name: 'John Smith',
+      status: 'active'
+    }
+  }
+});
+
+// Query WOULD require 'value.' prefix (Not recommended)
+const users = await ctx.semantic.read({ filters: ['value.status = "active"'] });
+```
+
 ### Storing Data
 
 ```typescript
@@ -2359,7 +2397,7 @@ All memory operations should be wrapped in try/catch blocks to handle potential 
 
 ```typescript
 try {
-  await ctx.semantic?.add({ id: 'important-data', value: { value: 'critical' } });
+  await ctx.semantic?.add({ id: 'important-data', value: { status: 'critical', priority: 'high' } });
 } catch (error) {
   // Log the error and handle gracefully
   logger.error('Failed to store memory', error);
@@ -2477,6 +2515,9 @@ await ctx.memory.semantic.queryByKeyPattern('user:*');
 
 **Q: Can I use both string and object filter syntax?**
 > Yes! You can mix both syntaxes in the same query. The string syntax (`'priority >= 8'`) is more intuitive and concise, while the object syntax (`{ path: 'priority', operator: '>=', value: 8 }`) is useful for programmatic filter construction. Both are fully supported.
+
+**Q: Why do my queries only work if I add a `value.` prefix to the paths?**
+> This usually means your data is "double-wrapped". Ensure that the object you pass to `ctx.semantic.add({ value: ... })` does not itself contain a top-level `value` key unless you intend for it to be there. See [Canonical Storage & Direct Path Queries](#canonical-storage--direct-path-queries) for details.
 
 **Q: How do I handle nested arrays in entity alignment?**
 > The system now supports **natural array traversal** using intuitive dot notation. Instead of explicit indexing like `"titleAndDescription[0].title"`, you can use `"titleAndDescription.title"` and the system will automatically search within array elements for the first matching string value. This works for deeply nested arrays and mixed object/array structures. The natural syntax works for both entity alignment during storage and filter queries during search. See the [Natural Array Support](#natural-array-support) section for comprehensive examples.

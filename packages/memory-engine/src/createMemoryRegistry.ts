@@ -222,4 +222,3 @@ Error: ${error}
 
     throw new Error(`Unknown MEMORY_ADAPTER: ${adapterType}`);
 }
-

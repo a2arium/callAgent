@@ -1185,7 +1185,7 @@ new MemorySQLAdapter({
         // Build JSONB path for the field
         const jsonPath = pathParts.length === 1
             ? `value->>'${pathParts[0]}'`
-            : `value${pathParts.map(part => `->>'${part}'`).join('')}`;
+            : `value->${pathParts.slice(0, -1).map(part => `'${part}'`).join('->')}->>'${pathParts[pathParts.length - 1]}'`;
 
         let sqlOperator: string;
         let paramValue = value;
@@ -1256,7 +1256,11 @@ new MemorySQLAdapter({
                 });
         }
 
-        const sql = `${jsonPath} ${sqlOperator} $${startParamIndex}`;
+        // PostgreSQL JSONB extraction always returns text, so we need to cast for numeric operators
+        const needsNumericCast = ['>', '>=', '<', '<='].includes(operator) && typeof value === 'number';
+        const finalPath = needsNumericCast ? `(${jsonPath})::numeric` : jsonPath;
+
+        const sql = `${finalPath} ${sqlOperator} $${startParamIndex}`;
         return { sql, params };
     }
 
