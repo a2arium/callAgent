@@ -182,10 +182,9 @@ describeIfDb('MemorySQLAdapter integration', () => {
             const keys1 = results1.map(r => r.key).sort();
             const keys2 = results2.map(r => r.key).sort();
 
-            // It's technically possible they are the same, but with 10 items and 3 picked, 
+            // It's technically possible they are the same, but with 10 items and 3 picked,
             // there are 120 combinations (10 C 3).
             // We'll check they are not identical as a basic verification.
-            // If they are the same, we retry once more to reduce flakiness.
             if (JSON.stringify(keys1) === JSON.stringify(keys2)) {
                 const results3 = await adapter.getMany({ tag: 'random-test', random: true, limit: 3 });
                 const keys3 = results3.map(r => r.key).sort();
@@ -213,7 +212,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 filters: ['status != "active"'],
             });
             expect(results.length).toBe(1);
-            expect(results[0].value.status).toBe('inactive');
+            expect((results[0].value as any).status).toBe('inactive');
         });
 
         it('greater than: priority > 5', async () => {
@@ -240,7 +239,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 filters: ['priority < 5'],
             });
             expect(results.length).toBe(1);
-            expect(results[0].value.priority).toBe(3);
+            expect((results[0].value as any).priority).toBe(3);
         });
 
         it('less than or equal: priority <= 7', async () => {
@@ -262,7 +261,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 filters: ['name contains "Smith"'],
             });
             expect(results.length).toBe(1);
-            expect((results[0] as any).value.name).toBe('Bob Smith');
+            expect((results[0].value as any).name).toBe('Bob Smith');
         });
 
         it('STARTS_WITH: name starts_with "Alice"', async () => {
@@ -271,7 +270,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 filters: ['name starts_with "Alice"'],
             });
             expect(results.length).toBe(1);
-            expect(results[0].value.name).toBe('Alice Johnson');
+            expect((results[0].value as any).name).toBe('Alice Johnson');
         });
 
         it('ENDS_WITH: email ends_with "@company.com"', async () => {
@@ -293,7 +292,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 filters: ['profile.tier = "premium"'],
             });
             expect(results.length).toBe(2);
-            expect(results.every((r: any) => r.value.profile.tier === 'premium')).toBe(true);
+            expect(results.every((r: any) => (r.value as any).profile.tier === 'premium')).toBe(true);
         });
 
         it('multi-level nested: profile.settings.theme = "dark"', async () => {
@@ -442,6 +441,62 @@ describeIfDb('MemorySQLAdapter integration', () => {
             });
             expect(results.length).toBe(1);
             expect(results[0].value.name).toBe('Alice Johnson');
+        });
+    });
+
+    // ──────────────────────────────────────────────────────────────────
+    // LOGICAL FILTERS (OR/AND)
+    // ──────────────────────────────────────────────────────────────────
+    describe('Logical Filters (OR/AND)', () => {
+        beforeAll(seed);
+
+        it('should filter with OR logic in SQL path', async () => {
+            // Alice (priority 10) OR Bob (priority 3, inactive)
+            const results = await adapter.getMany({
+                filters: ['priority = 10 OR priority = 3']
+            });
+
+            expect(results).toHaveLength(2);
+            const keys = results.map(r => r.key).sort();
+            expect(keys).toEqual(['user:alice', 'user:bob']);
+        });
+
+        it('should filter with mixed OR and AND logic', async () => {
+            // (status = active AND department = Engineering) OR priority = 3
+            // Alice (active, Eng) - match
+            // Carol (active, Eng) - match
+            // Bob (inactive, Mark, priority 3) - match
+            const results = await adapter.getMany({
+                filters: ['status = "active" AND department = "Engineering" OR priority = 3']
+            });
+
+            expect(results).toHaveLength(3);
+            const keys = results.map(r => r.key).sort();
+            expect(keys).toEqual(['user:alice', 'user:bob', 'user:carol']);
+        });
+
+        it('should support OR with array filters', async () => {
+            // event:conf-2024 has 2024-03-15
+            const results = await adapter.getMany({
+                filters: ['eventOccurences[].date = "2024-03-15" OR priority = 10']
+            });
+
+            // Alice (priority 10) AND event:conf-2024
+            expect(results).toHaveLength(2);
+            const keys = results.map(r => r.key).sort();
+            expect(keys).toEqual(['event:conf-2024', 'user:alice']);
+        });
+
+        it('should handle OR with entity filters in memory fallback', async () => {
+            // speaker ~ "Jane Smith" OR lead ~ "Jane Smith"
+            // event:conf-2024 has speaker "Dr. Jane Smith"
+            const results = await adapter.getMany({
+                filters: ['speakers[].name ~ "Jane Smith" OR name = "Alice Johnson"']
+            });
+
+            expect(results).toHaveLength(2);
+            const sortedKeys = results.map(r => r.key).sort();
+            expect(sortedKeys).toEqual(['event:conf-2024', 'user:alice']);
         });
     });
 });

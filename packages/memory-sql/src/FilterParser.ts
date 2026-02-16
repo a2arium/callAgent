@@ -10,9 +10,10 @@ interface ArrayPathInfo {
 }
 
 /**
- * Enhanced filter result interface with array path detection
+ * Atomic filter result (e.g., "key = value")
  */
-interface ParsedFilter {
+interface AtomicParsedFilter {
+    type: 'atomic';
     path: string;
     operator: FilterOperator;
     value: any;
@@ -21,9 +22,23 @@ interface ParsedFilter {
 }
 
 /**
+ * Group of filters joined by logic (OR/AND)
+ */
+interface FilterGroup {
+    type: 'group';
+    logic: 'OR' | 'AND';
+    filters: ParsedFilter[];
+}
+
+/**
+ * Union type for parsed filters
+ */
+type ParsedFilter = AtomicParsedFilter | FilterGroup;
+
+/**
  * Parser for string-based filter syntax
- * Converts strings like 'priority >= 8' to { path: 'priority', operator: '>=', value: 8 }
- * Now supports array paths like 'eventOccurences[].date = "2025-07-24"'
+ * Converts strings like 'priority >= 8' to atomic filters
+ * Supports logical operators: 'status = "active" OR priority > 5'
  */
 export class FilterParser {
     private static readonly OPERATOR_PATTERNS = [
@@ -42,40 +57,105 @@ export class FilterParser {
     ];
 
     /**
-     * Parse a string filter into a filter object with array path support
-     * @param filterString String like 'priority >= 8' or 'eventOccurences[].date = "2025-07-24"'
-     * @returns Parsed filter object with array path information
+     * Parse a string filter into a filter object
+     * Supports OR and AND (case-insensitive)
+     * @param filterString String like 'a=1 OR b=2'
      */
     static parseFilter(filterString: string): ParsedFilter {
         const trimmed = filterString.trim();
 
-        // Find the operator in the string
+        // Check for OR (lowest precedence)
+        // Using a regex to split by " OR " but not inside quotes could be complex,
+        // for now we'll do simple splitting which covers 99% of use cases.
+        const orParts = this.splitByLogicalOperator(trimmed, 'OR');
+        if (orParts.length > 1) {
+            return {
+                type: 'group',
+                logic: 'OR',
+                filters: orParts.map(p => this.parseFilter(p))
+            };
+        }
+
+        // Check for AND
+        const andParts = this.splitByLogicalOperator(trimmed, 'AND');
+        if (andParts.length > 1) {
+            return {
+                type: 'group',
+                logic: 'AND',
+                filters: andParts.map(p => this.parseFilter(p))
+            };
+        }
+
+        return this.parseAtomicFilter(trimmed);
+    }
+
+    /**
+     * Splits a string by a logical operator, respecting basic quotes
+     */
+    private static splitByLogicalOperator(str: string, operator: 'OR' | 'AND'): string[] {
+        const regex = new RegExp(`\\s+${operator}\\s+`, 'i');
+        // Simple strategy: split and then merge parts if they were inside unbalanced quotes
+        // For the common case (documented examples), a simple split is usually enough
+        // but let's be slightly more robust.
+
+        const parts: string[] = [];
+        let currentPos = 0;
+        let inQuotes = false;
+        let quoteChar = '';
+
+        for (let i = 0; i < str.length; i++) {
+            const char = str[i];
+            if ((char === '"' || char === "'") && (i === 0 || str[i - 1] !== '\\')) {
+                if (!inQuotes) {
+                    inQuotes = true;
+                    quoteChar = char;
+                } else if (char === quoteChar) {
+                    inQuotes = false;
+                }
+            }
+
+            if (!inQuotes) {
+                const sub = str.substring(i);
+                const match = sub.match(regex);
+                if (match && match.index === 0) {
+                    parts.push(str.substring(currentPos, i).trim());
+                    i += match[0].length - 1;
+                    currentPos = i + 1;
+                }
+            }
+        }
+        parts.push(str.substring(currentPos).trim());
+        return parts.length > 1 ? parts : [str];
+    }
+
+    /**
+     * Parse an atomic filter string (single condition)
+     */
+    private static parseAtomicFilter(filterString: string): AtomicParsedFilter {
+        const trimmed = filterString.trim();
+
         for (const { pattern, operator } of this.OPERATOR_PATTERNS) {
             const match = trimmed.match(pattern);
             if (match) {
                 const operatorIndex = match.index!;
                 const operatorLength = match[0].length;
 
-                // Extract path (before operator)
                 const path = trimmed.substring(0, operatorIndex).trim();
                 if (!path) {
                     throw new Error(`Invalid filter: missing path in "${filterString}"`);
                 }
 
-                // Extract value (after operator)
                 const valueStr = trimmed.substring(operatorIndex + operatorLength).trim();
                 if (!valueStr) {
                     throw new Error(`Invalid filter: missing value in "${filterString}"`);
                 }
 
-                // Parse the value
                 const value = this.parseValue(valueStr);
-
-                // Check if this is an array path
                 const isArrayPath = path.includes('[]');
                 const arrayPathInfo = isArrayPath ? this.parseArrayPath(path) : undefined;
 
                 return {
+                    type: 'atomic',
                     path,
                     operator,
                     value,
@@ -150,16 +230,17 @@ export class FilterParser {
      * @param filters Array of string filters and/or MemoryFilter objects
      * @returns Array of parsed filter objects with array path information
      */
-    static parseFilters(filters: MemoryFilter[]): ParsedFilter[] {
+    static parseFilters(filters: any[]): ParsedFilter[] {
         return filters.map(filter => {
             if (typeof filter === 'string') {
                 return this.parseFilter(filter);
             }
 
-            // Convert object filter to ParsedFilter format
+            // Convert object filter to AtomicParsedFilter format
             const path = filter.path;
             const isArrayPath = path.includes('[]');
             return {
+                type: 'atomic',
                 path: filter.path,
                 operator: filter.operator,
                 value: filter.value,
@@ -173,14 +254,19 @@ export class FilterParser {
      * Legacy method for backward compatibility
      * @deprecated Use parseFilters instead which returns ParsedFilter[]
      */
-    static parseFiltersLegacy(filters: MemoryFilter[]): Array<{ path: string; operator: FilterOperator; value: any }> {
-        return this.parseFilters(filters).map(pf => ({
-            path: pf.path,
-            operator: pf.operator,
-            value: pf.value
-        }));
+    static parseFiltersLegacy(filters: any[]): Array<{ path: string; operator: FilterOperator; value: any }> {
+        return this.parseFilters(filters).map(pf => {
+            if (pf.type === 'atomic') {
+                return {
+                    path: pf.path,
+                    operator: pf.operator,
+                    value: pf.value
+                };
+            }
+            throw new Error('Legacy parsing does not support logical groups');
+        });
     }
 }
 
 // Export the interfaces for use in other files
-export type { ParsedFilter, ArrayPathInfo }; 
+export type { ParsedFilter, AtomicParsedFilter, FilterGroup, ArrayPathInfo }; 

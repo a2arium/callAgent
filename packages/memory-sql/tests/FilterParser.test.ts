@@ -1,10 +1,11 @@
-import { FilterParser, ParsedFilter, ArrayPathInfo } from '../src/FilterParser.js';
+import { FilterParser, ParsedFilter, AtomicParsedFilter, ArrayPathInfo } from '../src/FilterParser.js';
 
 describe('FilterParser', () => {
     describe('Regular Filter Parsing (existing functionality)', () => {
         test('parses simple equality filter', () => {
-            const result = FilterParser.parseFilter('priority = 8');
+            const result = FilterParser.parseFilter('priority = 8') as AtomicParsedFilter;
 
+            expect(result.type).toBe('atomic');
             expect(result.path).toBe('priority');
             expect(result.operator).toBe('=');
             expect(result.value).toBe(8);
@@ -13,7 +14,7 @@ describe('FilterParser', () => {
         });
 
         test('parses string filter with quotes', () => {
-            const result = FilterParser.parseFilter('name = "John Doe"');
+            const result = FilterParser.parseFilter('name = "John Doe"') as AtomicParsedFilter;
 
             expect(result.path).toBe('name');
             expect(result.operator).toBe('=');
@@ -31,7 +32,7 @@ describe('FilterParser', () => {
             ];
 
             tests.forEach(({ filter, operator, value }) => {
-                const result = FilterParser.parseFilter(filter);
+                const result = FilterParser.parseFilter(filter) as AtomicParsedFilter;
                 expect(result.operator).toBe(operator);
                 expect(result.value).toBe(value);
                 expect(result.isArrayPath).toBe(false);
@@ -46,7 +47,7 @@ describe('FilterParser', () => {
             ];
 
             tests.forEach(({ filter, operator, value }) => {
-                const result = FilterParser.parseFilter(filter);
+                const result = FilterParser.parseFilter(filter) as AtomicParsedFilter;
                 expect(result.operator).toBe(operator);
                 expect(result.value).toBe(value);
                 expect(result.isArrayPath).toBe(false);
@@ -61,14 +62,14 @@ describe('FilterParser', () => {
             ];
 
             tests.forEach(({ filter, operator }) => {
-                const result = FilterParser.parseFilter(filter);
+                const result = FilterParser.parseFilter(filter) as AtomicParsedFilter;
                 expect(result.operator).toBe(operator);
                 expect(result.isArrayPath).toBe(false);
             });
         });
 
         test('parses nested object paths', () => {
-            const result = FilterParser.parseFilter('venue.address.city = "Riga"');
+            const result = FilterParser.parseFilter('venue.address.city = "Riga"') as AtomicParsedFilter;
 
             expect(result.path).toBe('venue.address.city');
             expect(result.operator).toBe('=');
@@ -79,7 +80,7 @@ describe('FilterParser', () => {
 
     describe('Array Filter Parsing (new functionality)', () => {
         test('parses simple array path with equality', () => {
-            const result = FilterParser.parseFilter('eventOccurences[].date = "2025-07-24"');
+            const result = FilterParser.parseFilter('eventOccurences[].date = "2025-07-24"') as AtomicParsedFilter;
 
             expect(result.path).toBe('eventOccurences[].date');
             expect(result.operator).toBe('=');
@@ -100,7 +101,7 @@ describe('FilterParser', () => {
             ];
 
             tests.forEach(({ filter, operator, value }) => {
-                const result = FilterParser.parseFilter(filter);
+                const result = FilterParser.parseFilter(filter) as AtomicParsedFilter;
                 expect(result.operator).toBe(operator);
                 expect(result.value).toBe(value);
                 expect(result.isArrayPath).toBe(true);
@@ -116,7 +117,7 @@ describe('FilterParser', () => {
             ];
 
             tests.forEach(({ filter, operator, value }) => {
-                const result = FilterParser.parseFilter(filter);
+                const result = FilterParser.parseFilter(filter) as AtomicParsedFilter;
                 expect(result.operator).toBe(operator);
                 expect(result.value).toBe(value);
                 expect(result.isArrayPath).toBe(true);
@@ -125,7 +126,7 @@ describe('FilterParser', () => {
         });
 
         test('parses nested object paths within arrays', () => {
-            const result = FilterParser.parseFilter('events[].venue.name = "Conference Hall"');
+            const result = FilterParser.parseFilter('events[].venue.name = "Conference Hall"') as AtomicParsedFilter;
 
             expect(result.path).toBe('events[].venue.name');
             expect(result.isArrayPath).toBe(true);
@@ -135,7 +136,7 @@ describe('FilterParser', () => {
         });
 
         test('detects future nested arrays in paths', () => {
-            const result = FilterParser.parseFilter('events[].sessions[].speaker = "John"');
+            const result = FilterParser.parseFilter('events[].sessions[].speaker = "John"') as AtomicParsedFilter;
 
             expect(result.isArrayPath).toBe(true);
             expect(result.arrayPathInfo?.arrayField).toBe('events');
@@ -144,7 +145,7 @@ describe('FilterParser', () => {
         });
 
         test('handles complex nested paths', () => {
-            const result = FilterParser.parseFilter('conference[].days.sessions.speakers[].expertise contains "AI"');
+            const result = FilterParser.parseFilter('conference[].days.sessions.speakers[].expertise contains "AI"') as AtomicParsedFilter;
 
             expect(result.isArrayPath).toBe(true);
             expect(result.arrayPathInfo?.arrayField).toBe('conference');
@@ -195,7 +196,7 @@ describe('FilterParser', () => {
             ];
 
             tests.forEach(({ filter, expected }) => {
-                const result = FilterParser.parseFilter(filter);
+                const result = FilterParser.parseFilter(filter) as AtomicParsedFilter;
                 expect(result.value).toBe(expected);
             });
         });
@@ -214,19 +215,25 @@ describe('FilterParser', () => {
             expect(results).toHaveLength(3);
 
             // First filter (array)
-            expect(results[0].isArrayPath).toBe(true);
-            expect(results[0].arrayPathInfo?.arrayField).toBe('eventOccurences');
-            expect(results[0].arrayPathInfo?.nestedPath).toBe('date');
+            expect(results[0].type).toBe('atomic');
+            const r0 = results[0] as AtomicParsedFilter;
+            expect(r0.isArrayPath).toBe(true);
+            expect(r0.arrayPathInfo?.arrayField).toBe('eventOccurences');
+            expect(r0.arrayPathInfo?.nestedPath).toBe('date');
 
             // Second filter (regular object)
-            expect(results[1].isArrayPath).toBe(false);
-            expect(results[1].path).toBe('city');
-            expect(results[1].value).toBe('Riga');
+            expect(results[1].type).toBe('atomic');
+            const r1 = results[1] as AtomicParsedFilter;
+            expect(r1.isArrayPath).toBe(false);
+            expect(r1.path).toBe('city');
+            expect(r1.value).toBe('Riga');
 
             // Third filter (array)
-            expect(results[2].isArrayPath).toBe(true);
-            expect(results[2].arrayPathInfo?.arrayField).toBe('attendees');
-            expect(results[2].arrayPathInfo?.nestedPath).toBe('age');
+            expect(results[2].type).toBe('atomic');
+            const r2 = results[2] as AtomicParsedFilter;
+            expect(r2.isArrayPath).toBe(true);
+            expect(r2.arrayPathInfo?.arrayField).toBe('attendees');
+            expect(r2.arrayPathInfo?.nestedPath).toBe('age');
         });
 
         test('converts object filters with array paths', () => {
@@ -237,9 +244,75 @@ describe('FilterParser', () => {
             const results = FilterParser.parseFilters(filters);
 
             expect(results).toHaveLength(1);
-            expect(results[0].isArrayPath).toBe(true);
-            expect(results[0].arrayPathInfo?.arrayField).toBe('events');
-            expect(results[0].arrayPathInfo?.nestedPath).toBe('priority');
+            expect(results[0].type).toBe('atomic');
+            const r = results[0] as AtomicParsedFilter;
+            expect(r.isArrayPath).toBe(true);
+            expect(r.arrayPathInfo?.arrayField).toBe('events');
+            expect(r.arrayPathInfo?.nestedPath).toBe('priority');
+        });
+    });
+
+    describe('Logical Operator Splitting', () => {
+        test('parses OR operator', () => {
+            const result = FilterParser.parseFilter('priority = 8 OR status = "active"');
+
+            expect(result.type).toBe('group');
+            if (result.type === 'group') {
+                expect(result.logic).toBe('OR');
+                expect(result.filters).toHaveLength(2);
+                expect((result.filters[0] as any).path).toBe('priority');
+                expect((result.filters[1] as any).path).toBe('status');
+            }
+        });
+
+        test('parses multiple OR operators', () => {
+            const result = FilterParser.parseFilter('a = 1 OR b = 2 OR c = 3');
+
+            expect(result.type).toBe('group');
+            if (result.type === 'group') {
+                expect(result.logic).toBe('OR');
+                expect(result.filters).toHaveLength(3);
+                expect((result.filters[0] as any).path).toBe('a');
+                expect((result.filters[1] as any).path).toBe('b');
+                expect((result.filters[2] as any).path).toBe('c');
+            }
+        });
+
+        test('parses AND operator', () => {
+            const result = FilterParser.parseFilter('priority = 8 AND status = "active"');
+
+            expect(result.type).toBe('group');
+            if (result.type === 'group') {
+                expect(result.logic).toBe('AND');
+                expect(result.filters).toHaveLength(2);
+            }
+        });
+
+        test('handles mixed OR and AND (simple precedence)', () => {
+            // OR has lower precedence than AND in our implementation
+            // a = 1 OR b = 2 AND c = 3  =>  (a = 1) OR (b = 2 AND c = 3)
+            const result = FilterParser.parseFilter('a = 1 OR b = 2 AND c = 3');
+
+            expect(result.type).toBe('group');
+            if (result.type === 'group') {
+                expect(result.logic).toBe('OR');
+                expect(result.filters).toHaveLength(2);
+                expect(result.filters[0].type).toBe('atomic');
+                expect(result.filters[1].type).toBe('group');
+                if (result.filters[1].type === 'group') {
+                    expect(result.filters[1].logic).toBe('AND');
+                }
+            }
+        });
+
+        test('respects quotes when splitting', () => {
+            const result = FilterParser.parseFilter('name = "John OR Jane" OR priority = 1');
+            expect(result.type).toBe('group');
+            if (result.type === 'group') {
+                expect(result.filters).toHaveLength(2);
+                const atomicFilter = result.filters[0] as any;
+                expect(atomicFilter.value).toBe('John OR Jane');
+            }
         });
     });
 

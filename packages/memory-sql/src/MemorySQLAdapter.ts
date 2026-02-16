@@ -6,7 +6,7 @@ import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetMa
 import { EntityFieldParser } from './EntityFieldParser.js';
 import { EntityAlignmentService } from './EntityAlignmentService.js';
 import { addAlignedProxies } from './AlignedValueProxy.js';
-import { FilterParser, ParsedFilter } from './FilterParser.js';
+import { FilterParser, ParsedFilter, AtomicParsedFilter, FilterGroup } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
 import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
 import { TagNormalizer } from '@a2arium/callagent-utils';
@@ -442,7 +442,10 @@ new MemorySQLAdapter({
      * @private
      */
     private buildJsonFilterCondition(filter: ParsedFilter): any {
-        const { path, operator, value, isArrayPath, arrayPathInfo } = filter;
+        if (filter.type === 'group') {
+            throw new Error('JSON filter condition does not support groups');
+        }
+        const { path, isArrayPath } = filter;
 
         // Validate path - must be a non-empty string
         if (!path || typeof path !== 'string') {
@@ -465,40 +468,33 @@ new MemorySQLAdapter({
      * @private
      */
     private validateArrayFilter(filter: ParsedFilter): void {
-        if (!filter.arrayPathInfo) {
-            throw new MemoryError('Array path info missing for array filter', {
+        if (filter.type === 'group') {
+            throw new MemoryError('Array filter validation does not support groups', { code: 'INVALID_ARRAY_FILTER' });
+        }
+        const { arrayPathInfo, path, operator } = filter;
+
+        if (!arrayPathInfo) {
+            throw new MemoryError(`Path "${path}" must be an array path (e.g., "events[].date")`, {
                 code: 'INVALID_ARRAY_FILTER',
                 filter: filter.path
             });
         }
 
-        const { arrayField, nestedPath } = filter.arrayPathInfo;
+        const { arrayField, nestedPath } = arrayPathInfo;
 
         if (!arrayField.trim()) {
             throw new MemoryError('Array field name cannot be empty', {
-                code: 'INVALID_ARRAY_FIELD',
+                code: 'INVALID_ARRAY_FILTER',
                 filter: filter.path
             });
         }
 
-        if (!nestedPath.trim()) {
-            throw new MemoryError('Nested path in array filter cannot be empty', {
-                code: 'INVALID_NESTED_PATH',
-                filter: filter.path
-            });
-        }
-
-        // Validate operator compatibility with array filtering
-        const unsupportedOps: FilterOperator[] = ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'];
-        if (unsupportedOps.includes(filter.operator)) {
-            throw new MemoryError(
-                `Operator ${filter.operator} not supported for array filtering. Use regular entity filtering instead.`,
-                {
-                    code: 'UNSUPPORTED_ARRAY_OPERATOR',
-                    operator: filter.operator,
-                    filter: filter.path
-                }
-            );
+        // Entity filter operators check
+        if (['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(operator)) {
+            // NOTE: We allow this here so logical OR/AND groups can still be processed,
+            // but these will be handled in-memory by evaluateFilterInMemory rather than in SQL
+            // because building cross-joins for entity alignments inside JSON arrays is extremely complex.
+            return;
         }
     }
 
@@ -508,8 +504,14 @@ new MemorySQLAdapter({
  * @returns Raw SQL fragment that can be used in WHERE clauses
  * @private
  */
-    private buildArrayFilterCondition(filter: ParsedFilter): { sql: string; params: any[] } {
+    private buildArrayFilterCondition(filter: AtomicParsedFilter): { sql: string; params: any[] } {
+        this.validateArrayFilter(filter);
         const { arrayPathInfo, operator, value } = filter;
+
+        // Entity operators on array paths are handled in-memory, so we return a pass-through condition in SQL
+        if (['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(operator)) {
+            return { sql: '1=1', params: [] };
+        }
 
         if (!arrayPathInfo) {
             throw new MemoryError('Array path info missing for array filter', { code: 'INVALID_ARRAY_FILTER' });
@@ -624,7 +626,7 @@ new MemorySQLAdapter({
      * @returns Prisma query condition
      * @private
      */
-    private buildRegularFilterCondition(filter: ParsedFilter): any {
+    private buildRegularFilterCondition(filter: AtomicParsedFilter): any {
         const { path, operator, value } = filter;
 
         // Split dot notation path into array for nested JSON fields
@@ -940,17 +942,29 @@ new MemorySQLAdapter({
         }
 
         try {
-            // For simple queries without filters, use raw SQL for better performance with entity alignment
+            // For simple queries without filters, use querySimple
             if (!queryObj.filters || queryObj.filters.length === 0) {
                 return await this.querySimple<T>(queryObj);
             } else {
-                // For complex queries with filters, use Prisma for JSON path support
+                // For complex queries with filters, use the specialized filter handler
                 return await this.queryWithFilters<T>(queryObj);
             }
         } catch (error: any) {
+            if (error instanceof MemoryError) throw error;
             throw new MemoryError(`Failed to query memory: ${error.message}`,
                 { originalError: error, queryOptions: queryObj });
         }
+    }
+
+    /**
+     * Recursive check for entity operators in a filter tree
+     * @private
+     */
+    private hasEntityOperators(filter: ParsedFilter): boolean {
+        if (filter.type === 'group') {
+            return filter.filters.some(f => this.hasEntityOperators(f));
+        }
+        return ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator);
     }
 
     private async querySimple<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
@@ -1003,11 +1017,11 @@ new MemorySQLAdapter({
 
         // Check if we have entity-aware filters that require special handling
         const hasEntityFilters = filters?.some(filter => {
-            if (typeof filter === 'string') {
-                const parsed = FilterParser.parseFilter(filter);
-                return ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(parsed.operator);
-            }
-            return ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator);
+            const parsed = typeof filter === 'string' ? FilterParser.parseFilter(filter) : {
+                type: 'atomic',
+                operator: filter.operator
+            } as any;
+            return this.hasEntityOperators(parsed);
         });
 
         if ((hasEntityFilters || options.random) && this.entityService) {
@@ -1018,9 +1032,13 @@ new MemorySQLAdapter({
         if (filters && filters.length > 0) {
             try {
                 const parsedFilters = FilterParser.parseFilters(filters);
-                const hasArrayFilters = parsedFilters.some(filter => filter.isArrayPath);
+                // If any filter is an array path or a group, we must use raw SQL
+                const needsRawSQL = options.random || parsedFilters.some(f => {
+                    if (f.type === 'group') return true;
+                    return f.isArrayPath;
+                });
 
-                if (hasArrayFilters || options.random) {
+                if (needsRawSQL) {
                     return await this.queryWithRawArrayFilters<T>(options);
                 }
             } catch (error: any) {
@@ -1126,28 +1144,14 @@ new MemorySQLAdapter({
             paramIndex++;
         }
 
-        // Add filters (both regular and array)
-        for (const filter of parsedFilters) {
-            if (filter.isArrayPath) {
-                // Handle array filters with raw SQL
-                const arrayCondition = this.buildArrayFilterCondition(filter);
-
-                // Replace parameter placeholders with actual parameter numbers
-                let adjustedSql = arrayCondition.sql;
-                for (let i = 0; i < arrayCondition.params.length; i++) {
-                    adjustedSql = adjustedSql.replace(`$${i + 1}`, `$${paramIndex + i}`);
-                }
-
-                query += ` AND (${adjustedSql})`;
-                queryParams.push(...arrayCondition.params);
-                paramIndex += arrayCondition.params.length;
-            } else {
-                // Handle regular filters - convert to raw SQL
-                const regularCondition = this.buildRegularFilterRawSQL(filter, paramIndex);
-                query += ` AND (${regularCondition.sql})`;
-                queryParams.push(...regularCondition.params);
-                paramIndex += regularCondition.params.length;
-            }
+        // Add filter conditions
+        if (parsedFilters.length > 0) {
+            const { sql: filterSql, params: filterParams } = this.buildFilterRecursiveRawSQL(
+                { type: 'group', logic: 'AND', filters: parsedFilters },
+                paramIndex
+            );
+            query += ` AND (${filterSql})`;
+            queryParams.push(...filterParams);
         }
 
         // Add ordering and limit
@@ -1178,7 +1182,51 @@ new MemorySQLAdapter({
             });
         }
 
-        return processedResults;
+        // Filter in memory to ensure logical consistency and handle entity operators accurately
+        // Since the top-level filters array is implicitly an AND group, we use 'every'
+        return processedResults.filter(result => {
+            return parsedFilters.every(filter => this.evaluateFilterInMemory(result.value, filter));
+        });
+    }
+
+    /**
+     * Build raw SQL for a filter recursively, supporting logical groups
+     * @private
+     */
+    private buildFilterRecursiveRawSQL(filter: ParsedFilter, paramIndex: number): { sql: string; params: any[] } {
+        if (filter.type === 'group') {
+            const parts: string[] = [];
+            const allParams: any[] = [];
+            let currentParamIndex = paramIndex;
+
+            for (const subFilter of filter.filters) {
+                const result = this.buildFilterRecursiveRawSQL(subFilter, currentParamIndex);
+                parts.push(`(${result.sql})`);
+                allParams.push(...result.params);
+                currentParamIndex += result.params.length;
+            }
+
+            return {
+                sql: parts.join(` ${filter.logic} `),
+                params: allParams
+            };
+        }
+
+        // Atomic filter
+        if (filter.isArrayPath) {
+            // Validate first
+            this.validateArrayFilter(filter);
+
+            const arrayCondition = this.buildArrayFilterCondition(filter);
+            // Replace parameter placeholders with actual parameter numbers
+            let adjustedSql = arrayCondition.sql;
+            for (let i = 0; i < arrayCondition.params.length; i++) {
+                adjustedSql = adjustedSql.replace(`$${i + 1}`, `$${paramIndex + i}`);
+            }
+            return { sql: adjustedSql, params: arrayCondition.params };
+        } else {
+            return this.buildRegularFilterRawSQL(filter, paramIndex);
+        }
     }
 
     /**
@@ -1188,7 +1236,7 @@ new MemorySQLAdapter({
      * @returns Raw SQL condition with parameters
      * @private
      */
-    private buildRegularFilterRawSQL(filter: ParsedFilter, startParamIndex: number): { sql: string; params: any[] } {
+    private buildRegularFilterRawSQL(filter: AtomicParsedFilter, startParamIndex: number): { sql: string; params: any[] } {
         const { path, operator, value } = filter;
         const pathParts = path.split('.');
 
@@ -1198,7 +1246,6 @@ new MemorySQLAdapter({
             : `value->${pathParts.slice(0, -1).map(part => `'${part}'`).join('->')}->>'${pathParts[pathParts.length - 1]}'`;
 
         let sqlOperator: string;
-        let paramValue = value;
         let params: any[];
 
         switch (operator) {
@@ -1298,21 +1345,25 @@ new MemorySQLAdapter({
         const parsedFilters = FilterParser.parseFilters(filters || []);
 
         // Separate entity filters from regular filters
-        const entityFilters = parsedFilters.filter(f =>
-            ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(f.operator)
-        );
-        const regularFilters = parsedFilters.filter(f =>
-            !['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(f.operator)
-        );
+        const entityFilters: AtomicParsedFilter[] = [];
+        const regularFilters: ParsedFilter[] = [];
+
+        parsedFilters.forEach(filter => {
+            if (filter.type === 'atomic' && ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator)) {
+                entityFilters.push(filter);
+            } else {
+                regularFilters.push(filter);
+            }
+        });
 
         // Find memory keys that match entity filters
         const entityMatchedKeys = new Set<string>();
 
-        for (const entityFilter of entityFilters) {
+        for (const filter of entityFilters) {
             const matchedKeys = await this.findMemoryKeysByEntityFilter(
-                entityFilter.path,
-                entityFilter.operator as 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS',
-                entityFilter.value,
+                filter.path,
+                filter.operator as 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS',
+                filter.value,
                 tenantId
             );
 
@@ -1687,29 +1738,50 @@ new MemorySQLAdapter({
     /**
      * Evaluate a filter condition against a value in memory (for post-processing)
      */
-    private evaluateFilterInMemory(value: any, filter: { path: string; operator: FilterOperator; value: any }): boolean {
-        // Get the field value using JSON path
-        const fieldValue = this.getValueByPath(value, filter.path);
+    private evaluateFilterInMemory(value: any, filter: ParsedFilter): boolean {
+        if (filter.type === 'group') {
+            if (filter.logic === 'OR') {
+                return filter.filters.some(f => this.evaluateFilterInMemory(value, f));
+            } else {
+                return filter.filters.every(f => this.evaluateFilterInMemory(value, f));
+            }
+        }
 
-        switch (filter.operator) {
+        // Atomic filter
+        // If it's an array path, we need to check if ANY element matches
+        if (filter.isArrayPath) {
+            const values = this.getValuesByPath(value, filter.path);
+            return values.some(val => this.evaluateAtomicValue(val, filter.operator, filter.value));
+        }
+
+        const fieldValue = this.getValueByPath(value, filter.path);
+        return this.evaluateAtomicValue(fieldValue, filter.operator, filter.value);
+    }
+
+    private evaluateAtomicValue(fieldValue: any, operator: string, filterValue: any): boolean {
+        switch (operator) {
             case '=':
-                return fieldValue === filter.value;
+                return fieldValue === filterValue;
             case '!=':
-                return fieldValue !== filter.value;
+                return fieldValue !== filterValue;
             case '>':
-                return fieldValue > filter.value;
+                return fieldValue > filterValue;
             case '>=':
-                return fieldValue >= filter.value;
+                return fieldValue >= filterValue;
             case '<':
-                return fieldValue < filter.value;
+                return fieldValue < filterValue;
             case '<=':
-                return fieldValue <= filter.value;
+                return fieldValue <= filterValue;
             case 'CONTAINS':
-                return String(fieldValue).includes(String(filter.value));
+                return String(fieldValue).toLowerCase().includes(String(filterValue).toLowerCase());
             case 'STARTS_WITH':
-                return String(fieldValue).startsWith(String(filter.value));
+                return String(fieldValue).toLowerCase().startsWith(String(filterValue).toLowerCase());
             case 'ENDS_WITH':
-                return String(fieldValue).endsWith(String(filter.value));
+                return String(fieldValue).toLowerCase().endsWith(String(filterValue).toLowerCase());
+            case 'ENTITY_FUZZY':
+            case 'ENTITY_EXACT':
+            case 'ENTITY_ALIAS':
+                return String(fieldValue).toLowerCase().includes(String(filterValue).toLowerCase());
             default:
                 return false;
         }
@@ -1727,6 +1799,51 @@ new MemorySQLAdapter({
     }
 
     /**
+     * Get ALL matching values from an object using a dot-notation path with automatic array traversal
+     */
+    private getValuesByPath(obj: any, path: string): any[] {
+        const results: any[] = [];
+        this.getValuesByPathRecursive(obj, path.split('.'), 0, results);
+        return results;
+    }
+
+    /**
+     * Recursive helper for getValuesByPath that collects all matching elements
+     */
+    private getValuesByPathRecursive(obj: any, pathParts: string[], partIndex: number, results: any[]): void {
+        if (partIndex >= pathParts.length) {
+            results.push(obj);
+            return;
+        }
+
+        if (!obj || typeof obj !== 'object') {
+            return;
+        }
+
+        const currentPartRaw = pathParts[partIndex];
+        const currentPart = currentPartRaw.replace('[]', '');
+        const remainingParts = pathParts.slice(partIndex + 1);
+
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                this.getValuesByPathRecursive(item, pathParts, partIndex, results);
+            }
+            return;
+        }
+
+        if (currentPart in obj) {
+            const value = obj[currentPart];
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    this.getValuesByPathRecursive(item, pathParts, partIndex + 1, results);
+                }
+            } else {
+                this.getValuesByPathRecursive(value, pathParts, partIndex + 1, results);
+            }
+        }
+    }
+
+    /**
      * Recursive helper for getValueByPath that handles arrays naturally
      */
     private getValueByPathRecursive(obj: any, pathParts: string[], partIndex: number): any {
@@ -1740,7 +1857,8 @@ new MemorySQLAdapter({
             return undefined;
         }
 
-        const currentPart = pathParts[partIndex];
+        const currentPartRaw = pathParts[partIndex];
+        const currentPart = currentPartRaw.replace('[]', '');
         const remainingParts = pathParts.slice(partIndex + 1);
 
         // Case 1: Direct property access (standard object navigation)
