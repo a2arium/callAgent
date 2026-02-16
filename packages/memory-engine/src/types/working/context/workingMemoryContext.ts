@@ -168,12 +168,16 @@ export async function extendContextWithMemory(
 
     // Create working memory adapter if SQL adapter is available
     let workingMemoryAdapter: WorkingMemoryBackend | undefined;
+    let prisma = existingPrismaClient as any;
     try {
         const { PrismaClient } = await import('@prisma/client');
         const { WorkingMemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
 
         // Use existing PrismaClient if provided, otherwise create new one
-        const prisma = existingPrismaClient as any || new PrismaClient();
+        if (!prisma) {
+            prisma = new PrismaClient();
+        }
+
         workingMemoryAdapter = new WorkingMemorySQLAdapter(prisma, {
             defaultTenantId: tenantId
         });
@@ -191,7 +195,24 @@ export async function extendContextWithMemory(
     }
 
     // Use the provided semantic adapter (should be inherited from parent)
-    const semanticMemoryAdapter = existingSemanticAdapter as any;
+    // ✅ FIX: Auto-instantiate Semantic SQL adapter if Prisma is available but adapter is missing
+    let semanticMemoryAdapter = existingSemanticAdapter as any;
+    if (!semanticMemoryAdapter && prisma) {
+        try {
+            const { MemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
+            semanticMemoryAdapter = new MemorySQLAdapter({ prismaClient: prisma });
+            contextLogger.debug('Semantic memory adapter auto-created from existing Prisma client', {
+                tenantId,
+                agentId
+            });
+        } catch (error) {
+            contextLogger.warn('Failed to auto-create semantic memory adapter', {
+                tenantId,
+                agentId,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
 
     // Create UnifiedMemoryService with proper configuration
     const unifiedMemory = new UnifiedMemoryService(tenantId, {
@@ -259,12 +280,12 @@ export async function extendContextWithMemory(
 
     // Replace memory interface with MLO-backed registries
     // ✅ FIX: Preserve the SQL backend alongside MLO backend
-    const mloSemanticBackend = new MLOSemanticBackend(unifiedMemory, existingSemanticAdapter, context);
+    const mloSemanticBackend = new MLOSemanticBackend(unifiedMemory, semanticMemoryAdapter, context);
     const semanticBackends: Record<string, any> = { mlo: mloSemanticBackend };
-    if (existingSemanticAdapter) {
-        semanticBackends.sql = existingSemanticAdapter;
+    if (semanticMemoryAdapter) {
+        semanticBackends.sql = semanticMemoryAdapter;
     } else {
-        contextLogger.warn('[extendContextWithMemory] WARNING: No existingSemanticAdapter provided, SQL backend will be missing!');
+        contextLogger.warn('[extendContextWithMemory] WARNING: No semantic adapter could be resolved, SQL backend will be missing!');
     }
 
     context.memory = {
@@ -294,40 +315,110 @@ export async function extendContextWithMemory(
         add: async (item: { id: string; value?: unknown; data?: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
             const registry = semanticRegistryAccessor();
             const val = item.value !== undefined ? item.value : item.data;
+            if (!registry?.set) {
+                console.warn('[ctx.semantic.add] ctx.memory.semantic.set not available');
+                return;
+            }
             try {
-                await registry?.set?.(item.id, val, { tags: item.tags, entities: item.entities });
+                await registry.set(item.id, val, { tags: item.tags, entities: item.entities });
             } catch (err) {
-                /* noop */
+                console.error('[ctx.semantic.add] Failed to save semantic memory:', {
+                    id: item.id,
+                    error: err instanceof Error ? err.message : String(err)
+                });
             }
         },
-        remove: async (idOrPredicate: string | ((entry: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
+        remove: async (idOrPredicate: string | Record<string, unknown> | ((entry: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
             const registry = semanticRegistryAccessor();
             if (!registry) return;
             try {
+                // ID string remove
                 if (typeof idOrPredicate === 'string') {
                     await registry.delete?.(idOrPredicate);
                     return;
                 }
-                const all = await registry.read?.('*');
-                if (Array.isArray(all)) {
-                    for (const item of all) {
-                        const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities };
-                        if ((idOrPredicate as any)(mapped)) {
-                            await registry.delete?.(mapped.id);
+
+                // Object-based remove with filters/tags — delegate to adapter
+                if (typeof idOrPredicate === 'object' && idOrPredicate !== null && typeof idOrPredicate !== 'function') {
+                    const removeQuery: any = {};
+                    if ((idOrPredicate as any).tag) removeQuery.tag = (idOrPredicate as any).tag;
+                    if ((idOrPredicate as any).filters) removeQuery.filters = (idOrPredicate as any).filters;
+                    if ((idOrPredicate as any).limit) removeQuery.limit = (idOrPredicate as any).limit;
+
+                    const removeFn = registry.remove;
+                    // Only delegate if we have at least one filter criterion and the function exists
+                    if (removeFn && Object.keys(removeQuery).length > 0) {
+                        await removeFn(removeQuery);
+                        return;
+                    }
+                }
+
+                // Legacy: predicate-function-based deletion
+                if (typeof idOrPredicate === 'function') {
+                    const all = await registry.read?.('*');
+                    if (Array.isArray(all)) {
+                        for (const item of all) {
+                            const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities };
+                            if ((idOrPredicate as any)(mapped)) {
+                                await registry.delete?.(mapped.id);
+                            }
                         }
                     }
                 }
             } catch { /* noop */ }
         },
-        read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number } | any) => {
+        read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any } | any) => {
             const registry = semanticRegistryAccessor();
-            if (!registry?.read) return [];
+            if (!registry?.read) {
+                return [];
+            }
             try {
-                if (!filter) {
-                    return registry.read?.('*') as Promise<any>;
+                // ID-based lookup: fetch specific records by key
+                if (filter?.id) {
+                    const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
+                    const results: any[] = [];
+                    for (const id of ids) {
+                        const val = await registry.get?.(id);
+                        if (val !== null && val !== undefined) {
+                            results.push({ id, value: val, tags: undefined, entities: undefined });
+                        }
+                    }
+                    return typeof filter.limit === 'number' ? results.slice(0, filter.limit) : results;
                 }
-                return registry.read(filter);
-            } catch {
+
+                // Build query object for the adapter's read() method
+                const query: any = {};
+                // If filter is undefined/null, query remains empty -> means "all" (*) or handled below
+                if (filter?.tag) query.tag = filter.tag;
+                if (filter?.filters) query.filters = filter.filters;
+                if (filter?.limit) query.limit = filter.limit;
+                if (filter?.orderBy) query.orderBy = filter.orderBy;
+
+                // Delegate to adapter which uses SQL-level filtering
+                // If query object is empty, pass '*' to fetch all
+                const queryArg = Object.keys(query).length > 0 ? query : '*';
+                const rawResults = await registry.read(queryArg);
+
+                // Map adapter shape { key, value } → facade shape { id, value }
+                const mapped = Array.isArray(rawResults)
+                    ? rawResults.map((x: any) => ({
+                        id: x?.key ?? x?.id,
+                        value: x?.value,
+                        tags: x?.tags,
+                        entities: x?.entities,
+                    }))
+                    : [];
+
+                // Multi-tag filtering (adapter supports single tag; apply extra tags in JS if needed)
+                if (filter?.tags && filter.tags.length > 0 && !filter?.tag) {
+                    return mapped.filter((m: any) =>
+                        filter.tags!.every((t: string) => (m.tags || []).includes(t))
+                    );
+                }
+
+                return mapped;
+            } catch (err) {
+                console.error('[ctx.semantic.read] Error:', err instanceof Error ? err.message : String(err));
                 return [];
             }
         }

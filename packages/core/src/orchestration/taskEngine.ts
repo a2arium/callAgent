@@ -2964,31 +2964,91 @@ export class TaskEngine {
                         throw err; // Re-throw instead of silent failure
                     }
                 },
-                remove: async (idOrPredicate: string | ((f: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
+                remove: async (idOrPredicate: string | Record<string, unknown> | ((f: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
                     try {
                         if (typeof idOrPredicate === 'string') {
                             await (ctx.memory as any)?.semantic?.delete?.(idOrPredicate);
                             return;
                         }
-                        const all = await (ctx.memory as any)?.semantic?.getMany?.('*');
-                        if (Array.isArray(all)) {
-                            for (const item of all) {
-                                const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities } as any;
-                                if ((idOrPredicate as any)(mapped)) await (ctx.memory as any)?.semantic?.delete?.(mapped.id);
+                        // Object-based remove with filters/tags — delegate to adapter
+                        if (typeof idOrPredicate === 'object' && idOrPredicate !== null && typeof idOrPredicate !== 'function') {
+                            const removeQuery: any = {};
+                            if ((idOrPredicate as any).tag) removeQuery.tag = (idOrPredicate as any).tag;
+                            if ((idOrPredicate as any).filters) removeQuery.filters = (idOrPredicate as any).filters;
+                            if ((idOrPredicate as any).limit) removeQuery.limit = (idOrPredicate as any).limit;
+                            const removeFn = (ctx.memory as any)?.semantic?.remove;
+                            if (removeFn && Object.keys(removeQuery).length > 0) {
+                                await removeFn(removeQuery);
+                                return;
+                            }
+                        }
+                        // Legacy: predicate-function-based deletion
+                        if (typeof idOrPredicate === 'function') {
+                            const all = await (ctx.memory as any)?.semantic?.read?.('*');
+                            if (Array.isArray(all)) {
+                                for (const item of all) {
+                                    const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities } as any;
+                                    if ((idOrPredicate as any)(mapped)) await (ctx.memory as any)?.semantic?.delete?.(mapped.id);
+                                }
                             }
                         }
                     } catch { /* noop */ }
                 },
-                read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; limit?: number }) => {
+                read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any }) => {
                     try {
-                        const all = await (ctx.memory as any)?.semantic?.getMany?.('*');
-                        const mapped = Array.isArray(all) ? all.map((x: any) => ({ id: x?.key ?? x?.id, value: x?.value, tags: x?.tags, entities: x?.entities })) : [];
-                        if (!filter) return mapped;
-                        const byIds = filter.id ? mapped.filter(m => Array.isArray(filter.id) ? filter.id.includes(m.id) : m.id === filter.id) : mapped;
-                        const tagSet = filter.tags || (filter.tag ? [filter.tag] : undefined);
-                        const byTags = tagSet && tagSet.length ? byIds.filter(m => (tagSet as string[]).every(t => new Set(m.tags || []).has(t))) : byIds;
-                        return typeof filter.limit === 'number' ? byTags.slice(0, Math.max(0, filter.limit)) : byTags;
-                    } catch { return []; }
+                        const semanticRead = (ctx.memory as any)?.semantic?.read;
+                        if (!semanticRead) {
+                            console.warn('[ctx.semantic.read] ctx.memory.semantic.read not available');
+                            return [];
+                        }
+
+                        // ID-based lookup: fetch specific records by key
+                        if (filter?.id) {
+                            const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
+                            const results: any[] = [];
+                            for (const id of ids) {
+                                const val = await (ctx.memory as any)?.semantic?.get?.(id);
+                                if (val !== null && val !== undefined) {
+                                    results.push({ id, value: val, tags: undefined, entities: undefined });
+                                }
+                            }
+                            return typeof filter.limit === 'number' ? results.slice(0, filter.limit) : results;
+                        }
+
+                        // Build query object for the adapter's read() method
+                        const query: any = {};
+                        if (filter?.tag) query.tag = filter.tag;
+                        if (filter?.filters) query.filters = filter.filters;
+                        if (filter?.limit) query.limit = filter.limit;
+                        if (filter?.orderBy) query.orderBy = filter.orderBy;
+
+                        // Delegate to adapter which uses SQL-level filtering
+                        const rawResults = await semanticRead(
+                            Object.keys(query).length > 0 ? query : '*'
+                        );
+
+                        // Map adapter shape { key, value } → facade shape { id, value }
+                        const mapped = Array.isArray(rawResults)
+                            ? rawResults.map((x: any) => ({
+                                id: x?.key ?? x?.id,
+                                value: x?.value,
+                                tags: x?.tags,
+                                entities: x?.entities
+                            }))
+                            : [];
+
+                        // Multi-tag filtering (adapter supports single tag; apply extra tags in JS)
+                        if (filter?.tags && filter.tags.length > 0 && !filter?.tag) {
+                            return mapped.filter((m: any) =>
+                                filter.tags!.every((t: string) => (m.tags || []).includes(t))
+                            );
+                        }
+
+                        return mapped;
+                    } catch (err) {
+                        console.error('[ctx.semantic.read] Error:', err instanceof Error ? err.message : String(err));
+                        return [];
+                    }
                 }
             };
             (ctx as any).world = { update: (fn: (wm: any) => void) => { try { fn(((ctx as any).__mental as any).worldModel); } catch { /* noop */ } }, patch: (p: Record<string, unknown>) => { try { Object.assign(((ctx as any).__mental as any).worldModel, p); } catch { /* noop */ } } };

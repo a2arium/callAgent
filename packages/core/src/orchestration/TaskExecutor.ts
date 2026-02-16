@@ -114,30 +114,28 @@ export class TaskExecutor {
             log.warn('Memory backends empty or stub detected, reinitializing...', { turn: env.turn, agentId });
 
             try {
-                const { createMemoryRegistry } = await import('@a2arium/callagent-memory-engine');
+                const { extendContextWithMemory, getMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
                 const { createEmbeddingFunction, isEmbeddingAvailable } = await import('../llm/LLMFactory.js');
-                const { getMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
 
-                const embeddingFunction = isEmbeddingAvailable() ? await createEmbeddingFunction() : undefined;
+                // We don't need embedding function here as proper config will handle it via UnifiedMemoryService if configured
+                // But we keep existingPrisma logic
                 const existingPrisma = getSessionStorePrisma?.() || await getMemoryPrismaClient();
 
-                const memoryRegistry = await createMemoryRegistry(
+                // Use extendContextWithMemory to ensure facades (ctx.semantic, etc.) are also attached
+                // Passing empty config {} will result in default 'basic' memory profile
+                await extendContextWithMemory(
+                    ctx as any,
                     tenantId,
-                    agentId,
-                    ctx,
-                    {
-                        ...(existingPrisma ? { database: { prismaClient: existingPrisma } } : {}),
-                        embeddingFunction
-                    }
+                    agentId || 'default',
+                    {},
+                    undefined,
+                    existingPrisma
                 );
 
-                // Replace the stub memory with real registry
-                (ctx as any).memory = memoryRegistry;
-
-                log.info('Memory registry re-initialized successfully', {
+                log.info('Memory registry and facades re-initialized successfully', {
                     turn: env.turn,
                     agentId,
-                    backends: Object.keys(memoryRegistry.semantic.backends)
+                    backends: Object.keys((ctx as any).memory?.semantic?.backends || {})
                 });
             } catch (memErr) {
                 log.error('Failed to reinitialize memory registry', {
