@@ -33,7 +33,7 @@ const normalizeInbox = (value: SnapshotShape['inbox']): DurableObservationInbox 
 
 const addObservationToInbox = (value: SnapshotShape['inbox'], observation: DurableObservation): DurableObservationInbox => {
     const inbox = normalizeInbox(value);
-    inbox.current.push(observation);
+    inbox.current = [observation]; // REPLACE instead of PUSH for resume context
     inbox.all.push(observation);
     return inbox;
 };

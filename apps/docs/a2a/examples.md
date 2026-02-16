@@ -698,6 +698,87 @@ export default createAgent({
 }, import.meta.url);
 ```
 
+
+## Multi-Turn and Input Required
+
+### Echo Button Reproduction Agent (Minimal)
+
+This example demonstrates the `requestInput` pattern with buttons, used to reproduce the state-loss bug in `ProgrammaticInvoker`.
+
+```typescript
+// agent.ts
+import { createAgent } from '@a2arium/callagent-core';
+
+export default createAgent({
+    manifest: {
+        name: 'echo-button',
+        version: '1.0.0',
+        description: 'Demonstrates button-based interactions and resume state'
+    },
+    async handleTask(ctx) {
+        // Log perception for debugging
+        console.log('========================================');
+        console.log('[echo-button] PERCEPTION');
+        console.log('  text:', ctx.task.input.text);
+        console.log('  raw:', !!ctx.task.input.raw);
+        console.log('========================================');
+
+        // Initial turn: send buttons
+        if (ctx.task.input.text === '/start') {
+            await ctx.requestInput?.(
+                '👋 Hello! Click the button below to test resume.',
+                {
+                    schema: {
+                        kind: 'buttons',
+                        buttons: [
+                            { title: '🔘 Click Me', payload: 'hello_from_button' }
+                        ]
+                    }
+                }
+            );
+            return;
+        }
+
+        // Resumed turn: echo payload
+        const payload = ctx.task.input.text;
+        return `✅ Button click received! Payload: ${payload}`;
+    }
+}, import.meta.url);
+```
+
+### Reproduction Bridge Script
+
+```typescript
+// bridge-echo-button.ts
+import { ProgrammaticInvoker } from '@a2arium/callagent-chat-bridge';
+import { PluginManager } from '@a2arium/callagent-core';
+import { TelegramSender } from './senders/telegram.js'; // hypothetical
+
+const sender = new TelegramSender(...);
+const invoker = new ProgrammaticInvoker({ chatSender: sender });
+
+// Handle incoming messages/clicks
+async function onMessage(msg: any) {
+    if (msg.payload) {
+        // Resume existing task
+        await invoker.resume({
+            id: msg.taskId,
+            token: msg.token,
+            input: { text: msg.payload, raw: msg },
+            route: msg.route
+        });
+    } else {
+        // Start new task
+        await invoker.start({
+            id: `task-${Date.now()}`,
+            agentId: 'echo-button',
+            input: { text: msg.text, raw: msg },
+            route: msg.route
+        });
+    }
+}
+```
+
 ## Real-World Use Cases
 
 ### E-commerce Order Processing

@@ -445,8 +445,8 @@ export async function runLoop<
             }
 
             return {
-                action: { kind: 'internal', done: true } as ExecutableAction,
-                result: { ...base, data: { intent: (a as any).intent, done: true }, toolId: 'internal' }
+                action: { kind: 'internal', done: (a as any).done || false } as ExecutableAction,
+                result: { ...base, data: { intent: (a as any).intent, done: (a as any).done || false }, toolId: 'internal' }
             };
         }),
         transition: modules.transition ?? ((env, exec, _m, _mem) => {
@@ -475,6 +475,10 @@ export async function runLoop<
                     try { log.info('Default transition: detected pending child, returning await_child', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
                     return { kind: 'await_child', token: firstToken } as TransitionOut<ObservationPayload>;
                 }
+            }
+
+            if (action.kind === 'internal' && (action as any).done === true) {
+                return { kind: 'complete', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
             }
 
             return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
@@ -713,8 +717,6 @@ export async function runLoop<
             if (observations.length > 0) {
                 inbox.all.push(...observations);
                 inbox.current = [...observations];
-            } else {
-                // ✅ FIX: Don't clear inbox.current when there are no new observations!
             }
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);

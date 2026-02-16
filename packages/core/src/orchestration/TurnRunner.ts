@@ -173,20 +173,20 @@ export class TurnRunner {
                 trigger
             );
 
-            // Inject initial input if present
+            // Inject initial input if present (start OR resume)
             if (trigger === 'start' && params.input) {
                 const inputObservation: EngineObservation = {
                     source: 'user',
                     kind: 'input.provided',
                     payload: {
-                        token: `input-start-${sessionId}`,
+                        token: `input-${trigger}-${sessionId}-${Date.now()}`,
                         value: params.input
                     },
                     provenance: {
                         ts: Date.now(),
                         turn: startTurnTotal + 1,
-                        id: `input-start-${sessionId}`,
-                        correlationId: `input-start-${sessionId}`
+                        id: `input-${trigger}-${sessionId}-${Date.now()}`,
+                        correlationId: `input-${trigger}-${sessionId}-${Date.now()}`
                     }
                 };
                 envInbox = InboxManager.addObservationToInbox(envInbox, inputObservation);

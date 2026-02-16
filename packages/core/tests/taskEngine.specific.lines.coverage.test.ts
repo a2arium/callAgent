@@ -1,54 +1,41 @@
 
-
 import { jest } from '@jest/globals';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/memory/stores/SessionStore.js';
-import { setPendingTasks } from '../src/orchestration/Handles.js';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
+const mockCreateTaskHandle = jest.fn();
+const mockGetPendingTasks = jest.fn();
+const mockSetPendingTasks = jest.fn();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
-const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
-const loopRunnerPath = path.resolve(__dirname, '../src/loop/loopRunner.ts');
-const handlesPath = path.resolve(__dirname, '../src/orchestration/Handles.ts');
-const taskEnginePath = path.resolve(__dirname, '../src/orchestration/taskEngine.ts');
-
-await jest.unstable_mockModule(a2aPath, () => ({
+jest.mock('../src/orchestration/A2AService.js', () => ({
     globalA2AService: {
-        sendTaskToAgent: jest.fn() as any,
+        sendTaskToAgent: jest.fn(),
         findLocalAgent: jest.fn().mockResolvedValue({
             manifest: { name: 'mock-agent' },
             loop: {},
             llmAdapter: {},
             tenantId: 'test-tenant'
-        } as never)
+        } as any)
     }
-} as any));
+}));
 
-await jest.unstable_mockModule(outboxPath, () => ({
+jest.mock('../src/eventbus/outboxPublisher.js', () => ({
     outboxPublisher: { start: jest.fn(), stop: jest.fn() }
 }));
 
-await jest.unstable_mockModule(loopRunnerPath, () => ({
+jest.mock('../src/loop/loopRunner.js', () => ({
     runLoop: (...args: any[]) => runLoopMock(...args)
 }));
 
-// Mock createTaskHandle to control the flow and trigger the specific lines
-const mockCreateTaskHandle = jest.fn();
-const mockGetPendingTasks = jest.fn();
-const mockSetPendingTasks = jest.fn();
-
-await jest.unstable_mockModule(handlesPath, () => ({
-    createTaskHandle: mockCreateTaskHandle,
+jest.mock('../src/orchestration/Handles.js', () => ({
+    createTaskHandle: (...args: any[]) => mockCreateTaskHandle(...args),
     createGroupHandle: jest.fn(),
     getPendingInputs: jest.fn(),
     setPendingInputs: jest.fn(),
-    getPendingTasks: mockGetPendingTasks,
-    setPendingTasks: mockSetPendingTasks,
+    getPendingTasks: () => mockGetPendingTasks(),
+    setPendingTasks: (v: any) => mockSetPendingTasks(v),
     getPendingGroups: jest.fn(),
     setPendingGroups: jest.fn(),
     InputHandle: class { },
@@ -58,9 +45,10 @@ await jest.unstable_mockModule(handlesPath, () => ({
     GroupHandle: class { }
 }));
 
-await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
+jest.mock('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
 
-const { TaskEngine } = await import(taskEnginePath);
+// Use direct import since we are using regular jest.mock
+import { TaskEngine } from '../src/orchestration/taskEngine.js';
 
 class FakeSessionStore implements IWorkingMemorySessionStore {
     private snapshots = new Map<string, WMSessionSnapshot>();
@@ -122,11 +110,6 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         return this.getSnapshot(tenantId, taskId);
     }
 
-    // Add missing methods for SessionManager compatibility
-    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
-        return this.getSnapshot(tenantId, sessionId);
-    }
-
     async consumeBudget(tenantId: string, budgetId: string, amount: number): Promise<void> {
         // Mock implementation
     }
@@ -137,6 +120,11 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
 
     close(): void {
         // Mock implementation
+    }
+
+    // Add listEventsSince to satisfy IWorkingMemorySessionStore
+    async listEventsSince(tenantId: string, sessionId: string, sinceEventId: string | null): Promise<any[]> {
+        return [];
     }
 }
 
@@ -154,12 +142,11 @@ afterEach(() => {
 });
 
 describe('TaskEngine Specific Line Coverage Tests', () => {
-    describe('Lines 4398-4407: Semantic Memory Read Functionality', () => {
+    describe('Semantic Memory Read Functionality', () => {
         test('semantic memory read functionality is wired correctly in context', async () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            // Mock semantic memory with getMany to trigger the real TaskEngine wireContext code
             const mockSemanticMemory = {
                 getMany: jest.fn().mockResolvedValue([
                     { key: 'item1', value: 'value1', tags: ['tag1'], entities: [] },
@@ -167,12 +154,10 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 ])
             };
 
-            // Set up a base snapshot that will trigger wireContext to add semantic memory
             const base = {
                 M: {
                     memory: {
                         vars: {},
-                        // Add semantic memory to trigger the wireContext logic
                         semantic: mockSemanticMemory
                     }
                 },
@@ -182,7 +167,6 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
             };
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
-            // Set up minimal mocks to avoid full TaskEngine complexity
             jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
             runLoopMock.mockResolvedValue({
                 M: { memory: { vars: {} } },
@@ -190,16 +174,11 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 metrics: {}
             });
 
-            // Create context through TaskEngine which should wire the semantic memory read function
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            // Test that the real TaskEngine wireContext added the read function (lines 4398-4407)
             if ((ctx as any).memory.semantic && (ctx as any).memory.semantic.read) {
                 const result = await (ctx as any).memory.semantic.read({});
                 expect(Array.isArray(result)).toBe(true);
-                // The semantic memory read function was added by TaskEngine wireContext (line 4397)
-                // and executed lines 4398-4407. The function exists and was called, which means
-                // the targeted lines are covered.
             }
         });
 
@@ -207,7 +186,6 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            // Mock semantic memory without getMany to test error handling (line 4406)
             const mockSemanticMemory = {};
 
             const base = {
@@ -232,7 +210,6 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            // Test error handling when getMany is missing (line 4406)
             if ((ctx as any).memory.semantic && (ctx as any).memory.semantic.read) {
                 const result = await (ctx as any).memory.semantic.read({});
                 expect(result).toEqual([]);
@@ -245,11 +222,9 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            // Set up goals that will trigger the wireContext logic (lines 4429-4430)
             const base = {
                 M: {
                     memory: { vars: {} },
-                    // Set up goalState to trigger goals API wiring
                     goalState: {
                         hierarchy: {
                             nodes: {
@@ -274,13 +249,10 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 metrics: {}
             });
 
-            // Create context through TaskEngine which should wire the goals API
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            // Test goals clear with predicate (lines 4429-4430)
             if ((ctx as any).goals && (ctx as any).goals.clear) {
                 await (ctx as any).goals.clear((goal: any) => goal.completed);
-                // The test passes if no error is thrown, indicating the real wireContext logic was executed
             }
         });
 
@@ -316,10 +288,8 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            // Test goals clear without predicate
             if ((ctx as any).goals && (ctx as any).goals.clear) {
                 await (ctx as any).goals.clear();
-                // The test passes if no error is thrown
             }
         });
     });
@@ -346,7 +316,6 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 metrics: {}
             });
 
-            // Mock createTaskHandle to trigger the sendTaskToAgent logic
             const mockTaskHandle = {
                 __injectDispatcher: jest.fn()
             };
@@ -355,30 +324,24 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 token: 'test-token'
             });
 
-            // Mock getPendingTasks to return the task with our token
             mockGetPendingTasks.mockReturnValue({
                 'test-token': { target: 'test-agent', input: { test: 'input' } }
             });
 
-            // Mock the dispatcher to return input_required status (lines 4534-4535)
-            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher) => {
-                // Override the dispatcher to return input_required
+            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher: any) => {
                 dispatcher.mockResolvedValue({
                     status: 'input_required',
                     prompt: 'Please provide input'
                 });
             });
 
-            // Create context through TaskEngine which should wire sendTaskToAgent
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            // Test the real sendTaskToAgent function wired by TaskEngine (lines 4534-4535)
             if ((ctx as any).sendTaskToAgent) {
                 const result = await (ctx as any).sendTaskToAgent('test-agent', { test: 'input' }, {
                     handlerName: 'testHandler'
                 });
 
-                // Should return token object even for input_required status (fallback path)
                 expect(result).toBeDefined();
                 expect(result.token).toBe('test-token');
                 expect(mockCreateTaskHandle).toHaveBeenCalled();
@@ -408,7 +371,6 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 metrics: {}
             });
 
-            // Mock createTaskHandle to trigger the sendTaskToAgent error handling (lines 4580-4587)
             const mockTaskHandle = {
                 __injectDispatcher: jest.fn()
             };
@@ -417,88 +379,24 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 token: 'test-token'
             });
 
-            // Mock getPendingTasks to return the task with our token
             mockGetPendingTasks.mockReturnValue({
                 'test-token': { target: 'test-agent', input: { test: 'input' } }
             });
 
-            // Mock the dispatcher to throw an error
             const testError = new Error('Test error');
-            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher) => {
-                // The dispatcher should be a function that when called throws an error
+            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher: any) => {
                 dispatcher.mockImplementation(async () => {
                     throw testError;
                 });
             });
 
-            // Create context through TaskEngine which should wire sendTaskToAgent
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            // Test the real sendTaskToAgent error handling (lines 4580-4587)
-            // Note: The error handling lines are now covered even if the function returns undefined
-            // The important thing is that sendTaskToAgent is being called and the real TaskEngine code is executed
             if ((ctx as any).sendTaskToAgent) {
                 const result = await (ctx as any).sendTaskToAgent('test-agent', { test: 'input' }, {
                     handlerName: 'testHandler'
                 });
 
-                // The test passes as long as sendTaskToAgent was called, which means lines 4580-4587 were executed
-                expect(mockCreateTaskHandle).toHaveBeenCalled();
-            }
-        });
-
-        test('error handling with string error type', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const base = {
-                M: {
-                    memory: { vars: {} }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
-            };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
-
-            jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
-            runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
-            });
-
-            // Mock createTaskHandle to trigger the sendTaskToAgent error handling
-            const mockTaskHandle = {
-                __injectDispatcher: jest.fn()
-            };
-            mockCreateTaskHandle.mockResolvedValue({
-                handle: mockTaskHandle,
-                token: 'test-token'
-            });
-
-            // Mock getPendingTasks to return the task with our token
-            mockGetPendingTasks.mockReturnValue({
-                'test-token': { target: 'test-agent', input: { test: 'input' } }
-            });
-
-            // Mock the dispatcher to throw a string error (line 4584)
-            const stringError = new Error('String error message');
-            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher) => {
-                dispatcher.mockImplementation(async () => {
-                    throw stringError;
-                });
-            });
-
-            const ctx = await (engine as any).restoreCtx('t', 'session');
-
-            // Test string error handling (line 4584)
-            if ((ctx as any).sendTaskToAgent) {
-                const result = await (ctx as any).sendTaskToAgent('test-agent', { test: 'input' }, {
-                    handlerName: 'testHandler'
-                });
-
-                // The test passes as long as sendTaskToAgent was called, which means lines 4580-4587 were executed
                 expect(mockCreateTaskHandle).toHaveBeenCalled();
             }
         });

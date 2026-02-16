@@ -1,0 +1,1 @@
+{"version":3,"file":"ablyPublisher.d.ts","sourceRoot":"","sources":["ablyPublisher.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,iBAAiB,EAAE,SAAS,EAAE,MAAM,gBAAgB,CAAC;AAEnE,qBAAa,aAAc,YAAW,iBAAiB;IACnD,OAAO,CAAC,MAAM,CAAM;gBACR,MAAM,CAAC,EAAE,MAAM;IAYrB,OAAO,CAAC,UAAU,EAAE,MAAM,EAAE,KAAK,EAAE,SAAS,GAAG,OAAO,CAAC,IAAI,CAAC;CAKrE"}

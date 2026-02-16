@@ -6,6 +6,7 @@
   "main": "dist/BugReproAgent.js",
   "description": "Minimal reproduction of critical APLRET framework bugs",
   "dependencies": {
+    "@a2arium/callagent-chat-bridge": "workspace:*",
     "@a2arium/callagent-core": "workspace:"
   },
   "scripts": {
@@ -14,5 +15,8 @@
     "test:a2a": "yarn build && ../../node_modules/.bin/tsx ../../packages/core/src/runner/runnerCli.ts --agentPath=dist/BugReproAgent.js --input='{\"testMode\":\"test-a2a\"}'",
     "test:both": "yarn build && ../../node_modules/.bin/tsx ../../packages/core/src/runner/runnerCli.ts --agentPath=dist/BugReproAgent.js --input='{\"testMode\":\"test-both\"}'",
     "test:api": "yarn build && ../../node_modules/.bin/tsx ../../packages/core/src/runner/runnerCli.ts --agentPath=dist/BugReproAgent.js --input='{\"testMode\":\"test-api\"}'"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
   }
 }

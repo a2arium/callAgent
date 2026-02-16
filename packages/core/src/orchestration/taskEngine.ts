@@ -788,17 +788,7 @@ export class TaskEngine {
         const sessionId = task.id;
         const session = await this.sessionManager?.load(tenantId, sessionId);
 
-        // 🔍 DEBUG: Check what session was loaded
-        log.debug('🔍 DEBUG: Session loaded', {
-            tenantId,
-            sessionId,
-            hasSession: !!session,
-            hasSnapshot: !!session?.snapshot,
-            metaTurn: (session?.snapshot as any)?.meta?.turn,
-            wmVersion: session?.wmVersion?.toString()
-        });
 
-        // MentalState load (single source of truth)
         const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
         let M: MentalState = (baseSnap as any).M as MentalState || initialM(ctx);
 
@@ -1008,7 +998,8 @@ export class TaskEngine {
         // Extend the context with streaming capabilities
         extendContextWithStreaming(ctx, isStreaming);
         // carry runMode from agent manifest via streaming runner if present; default loop
-        if (!(ctx as any).runMode) { (ctx as any).runMode = 'loop'; }
+        // FIX: Don't prematurely default to 'loop' here, wait until we check the manifest
+        // if (!(ctx as any).runMode) { (ctx as any).runMode = 'loop'; }
 
         try {
             // Set initial status
@@ -1237,8 +1228,8 @@ export class TaskEngine {
         try {
             const agentName = (snap as any)?.agentId;
             const plugin = agentName ? PluginManager.findAgent(agentName) : null;
-            // Build minimal context for this resume turn
-            const ctx = this.createContext({ id: taskId, input: {} });
+            // Build context for this resume turn; use provided input as the current turn input
+            const ctx = this.createContext({ id: taskId, input: input as any });
             (ctx as any).tenantId = tenantId;
             if (agentName) (ctx as any).agentId = agentName;
             // Ensure replies in this resumed turn are streamed to chat
@@ -1465,28 +1456,39 @@ export class TaskEngine {
                 );
                 assignVarsIntoMental();
             } catch { /* noop */ }
-            const taskResult = await this.turnRunner.runTurn(ctx, {
-                tenantId,
-                sessionId: taskId,
-                trigger: 'resume',
-                isStreaming: false,
-                input: { token } // Reflect input token in result if needed
-            }, {
-                initialM: M,
-                snapshot: baseNow
-            });
+            // Resolve runMode for resume
+            const manifestRunMode = (plugin?.manifest as any)?.runMode;
+            const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
+            console.error(`[TaskEngine DEBUG] resumeInput: runMode=${runMode}, stage=${(M as any).memory?.vars?.stage}, turn=${(M as any).memory?.vars?.turn}`);
 
-            const channel = taskChannel(taskId);
-            try {
-                if (taskResult.status) {
-                    eventBus.publish(channel, {
-                        id: taskId,
-                        status: taskResult.status,
-                        final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
-                    } as any);
-                }
-            } catch { }
-        } catch { /* swallow resume errors to avoid blocking ack */ }
+            if (runMode === 'legacy') {
+                await this.executeTaskHandler(ctx);
+            } else {
+                const taskResult = await this.turnRunner.runTurn(ctx, {
+                    tenantId,
+                    sessionId: taskId,
+                    trigger: 'resume',
+                    isStreaming: false,
+                    input: { token } // Reflect input token in result if needed
+                }, {
+                    initialM: M,
+                    snapshot: baseNow
+                });
+
+                const channel = taskChannel(taskId);
+                try {
+                    if (taskResult.status) {
+                        eventBus.publish(channel, {
+                            id: taskId,
+                            status: taskResult.status,
+                            final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
+                        } as any);
+                    }
+                } catch { }
+            }
+        } catch (e) {
+            try { console.error('[TaskEngine] resumeInput auto-resume failed:', e instanceof Error ? e.message : String(e), e instanceof Error ? e.stack : ''); } catch { }
+        }
         return { acknowledged: true };
     }
 
@@ -2614,9 +2616,28 @@ export class TaskEngine {
      * In a real implementation, this would find and call the correct agent plugin
      */
     private async executeTaskHandler(ctx: TaskContext): Promise<void> {
-        // If a durable 'handleTask' is registered, invoke it as the entrypoint
+        // 1. Try agent-scoped handleTask first
+        const agentId = (ctx as any).agentId;
+        if (agentId) {
+            try {
+                const { PluginManager } = await import('../plugin/pluginManager.js');
+                const plugin = PluginManager.findAgent(agentId);
+                if (plugin && typeof (plugin as any).handleTask === 'function') {
+                    (ctx as any).logger?.info?.('TaskEngine.executeTaskHandler: invoking agent-scoped handleTask', { agentId, taskId: ctx.task.id });
+                    await (plugin as any).handleTask(ctx, { input: ctx.task.input });
+                    (ctx as any).logger?.info?.('TaskEngine.executeTaskHandler: agent-scoped handleTask returned', { agentId, taskId: ctx.task.id });
+                    return;
+                }
+            } catch (err) {
+                (ctx as any).logger?.error?.('TaskEngine.executeTaskHandler: agent-scoped handleTask failed', { taskId: ctx.task.id, error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
+                // If the agent-scoped handler explicitly failed, don't fall back to global registry
+                throw err;
+            }
+        }
+
+        // 2. Fallback to durable 'handleTask' if registered in global registry
         try {
-            (ctx as any).logger?.info?.('TaskEngine.executeTaskHandler: invoking durable handler handleTask', { taskId: ctx.task.id });
+            (ctx as any).logger?.info?.('TaskEngine.executeTaskHandler: invoking durable handler handleTask from registry', { taskId: ctx.task.id });
             const { invokeHandler } = await import('./HandlerRegistry.js');
             await invokeHandler('handleTask', ctx, {
                 input: ctx.task.input
@@ -2626,7 +2647,11 @@ export class TaskEngine {
         } catch (err) {
             // Fallback: placeholder
             const traceId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            (ctx as any).logger?.warn?.('TaskEngine.executeTaskHandler: durable handler invocation failed, falling back to placeholder', { taskId: ctx.task.id, traceId, error: err instanceof Error ? err.message : String(err) });
+            if (err instanceof Error && err.message.includes('HANDLER_NOT_FOUND')) {
+                (ctx as any).logger?.warn?.('TaskEngine.executeTaskHandler: no registered handleTask found, and no agent-scoped handler available', { taskId: ctx.task.id });
+            } else {
+                (ctx as any).logger?.error?.('TaskEngine.executeTaskHandler: durable handler invocation failed', { taskId: ctx.task.id, traceId, error: err instanceof Error ? err.message : String(err) });
+            }
             console.log('Executing task handler (placeholder):', ctx.task.id);
         }
     }
@@ -2833,26 +2858,35 @@ export class TaskEngine {
 
                     // Get Prisma client from session manager or singleton
                     const { getMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
-                    const existingPrisma = (this.sessionManager as any)?.store?.prisma || await getMemoryPrismaClient();
 
-                    const memoryRegistry = await createMemoryRegistry(
-                        tenantId,
-                        agentName,
-                        ctx,
-                        {
-                            ...(existingPrisma ? { database: { prismaClient: existingPrisma } } : {}),
-                            embeddingFunction
-                        }
-                    );
+                    // Only attempt to use SQL memory if we have a session prisma or a database URL is configured
+                    const dbUrl = process.env.DATABASE_URL || process.env.MEMORY_DATABASE_URL;
+                    const sessionPrisma = (this.sessionManager as any)?.store?.prisma;
 
-                    // Replace the stub memory object with the real one
-                    (ctx as any).memory = memoryRegistry;
+                    if (sessionPrisma || dbUrl) {
+                        const existingPrisma = sessionPrisma || await getMemoryPrismaClient();
 
-                    console.log('[TaskEngine] restoreCtx: Memory registry created with backends', {
-                        agentName,
-                        semanticBackends: Object.keys(memoryRegistry.semantic.backends),
-                        hasSet: !!(memoryRegistry.semantic as any)?.set
-                    });
+                        const memoryRegistry = await createMemoryRegistry(
+                            tenantId,
+                            agentName,
+                            ctx,
+                            {
+                                ...(existingPrisma ? { database: { prismaClient: existingPrisma } } : {}),
+                                embeddingFunction
+                            }
+                        );
+
+                        // Replace the stub memory object with the real one
+                        (ctx as any).memory = memoryRegistry;
+
+                        console.log('[TaskEngine] restoreCtx: Memory registry created with backends', {
+                            agentName,
+                            semanticBackends: Object.keys(memoryRegistry.semantic.backends),
+                            hasSet: !!(memoryRegistry.semantic as any)?.set
+                        });
+                    } else {
+                        try { console.log('[TaskEngine] restoreCtx: skipping memory registry initialization (no database config)'); } catch { }
+                    }
                 } catch (memErr) {
                     console.error('[TaskEngine] restoreCtx: Failed to create memory registry', {
                         error: memErr instanceof Error ? memErr.message : String(memErr),

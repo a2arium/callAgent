@@ -11,6 +11,7 @@ export type SessionSnapshot = {
 };
 
 export class WorkingMemorySessionStore {
+    private static globalPrisma: PrismaClientType | null = null;
     private readonly prisma: PrismaClientType;
     private readonly ownsPrisma: boolean;
     private readonly log = logger.createLogger({ prefix: 'WMSessionStore' });
@@ -21,8 +22,12 @@ export class WorkingMemorySessionStore {
             this.prisma = prisma;
             this.ownsPrisma = false;
         } else {
-            this.prisma = new (PrismaClient as any)();
-            this.ownsPrisma = true;
+            // Use global singleton if available, otherwise create it
+            if (!WorkingMemorySessionStore.globalPrisma) {
+                WorkingMemorySessionStore.globalPrisma = new (PrismaClient as any)();
+            }
+            this.prisma = WorkingMemorySessionStore.globalPrisma!;
+            this.ownsPrisma = false; // We don't own the global singleton
         }
     }
 
