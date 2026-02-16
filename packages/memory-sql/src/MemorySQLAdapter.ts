@@ -597,11 +597,14 @@ new MemorySQLAdapter({
             fieldAccessor = `elem->>'${nestedPath}'`;
         }
 
-        // Add type casting for numeric comparisons
-        // PostgreSQL JSONB extraction always returns text, so we need to cast for numeric operators
-        const needsNumericCast = ['>', '>=', '<', '<='].includes(operator) && typeof value === 'number';
+        // PostgreSQL JSONB extraction always returns text, so we need to cast for numeric/boolean operators
+        const needsNumericCast = typeof value === 'number';
+        const needsBooleanCast = typeof value === 'boolean';
+
         if (needsNumericCast) {
             fieldAccessor = `(${fieldAccessor})::numeric`;
+        } else if (needsBooleanCast) {
+            fieldAccessor = `(${fieldAccessor})::boolean`;
         }
 
         // Use JSONB array elements extraction with proper field access
@@ -832,6 +835,7 @@ new MemorySQLAdapter({
                 ...input,
                 limit: options?.limit ?? input.limit,
                 orderBy: options?.orderBy ?? input.orderBy,
+                random: options?.random ?? input.random,
                 backend: options?.backend ?? input.backend,
                 tenantId: (options as any)?.tenantId ?? (input as any)?.tenantId
             };
@@ -865,7 +869,9 @@ new MemorySQLAdapter({
         `;
 
         // Add ordering if specified
-        if (options?.orderBy) {
+        if (options?.random) {
+            query += ` ORDER BY RANDOM()`;
+        } else if (options?.orderBy) {
             // For now, only support ordering by created_at/updated_at since JSON path ordering is complex
             if (options.orderBy.path === 'createdAt') {
                 query += ` ORDER BY created_at ${options.orderBy.direction.toUpperCase()}`;
@@ -928,7 +934,7 @@ new MemorySQLAdapter({
                 { code: 'NOT_IMPLEMENTED' });
         }
 
-        if (queryObj.orderBy) {
+        if (queryObj.orderBy && !queryObj.random) {
             throw new MemoryError('Sorting by JSON paths not implemented yet.',
                 { code: 'NOT_IMPLEMENTED' });
         }
@@ -966,7 +972,7 @@ new MemorySQLAdapter({
             queryParams.push(normalizedTag);
         }
 
-        query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
+        query += ` ORDER BY ${options.random ? 'RANDOM()' : 'updated_at DESC'} LIMIT ${limit}`;
 
         const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;
@@ -1004,7 +1010,7 @@ new MemorySQLAdapter({
             return ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator);
         });
 
-        if (hasEntityFilters && this.entityService) {
+        if ((hasEntityFilters || options.random) && this.entityService) {
             return await this.queryWithEntityFilters<T>(options);
         }
 
@@ -1014,7 +1020,7 @@ new MemorySQLAdapter({
                 const parsedFilters = FilterParser.parseFilters(filters);
                 const hasArrayFilters = parsedFilters.some(filter => filter.isArrayPath);
 
-                if (hasArrayFilters) {
+                if (hasArrayFilters || options.random) {
                     return await this.queryWithRawArrayFilters<T>(options);
                 }
             } catch (error: any) {
@@ -1059,8 +1065,12 @@ new MemorySQLAdapter({
         // Execute Prisma query
         const findOptions: any = {
             take: limit,
-            orderBy: { updatedAt: 'desc' }
+            orderBy: options.random ? undefined : { updatedAt: 'desc' }
         };
+
+        // Note: Prisma does not support ORDER BY RANDOM() natively. 
+        // If random is requested, we should have already routed to raw SQL paths above.
+        // But if we landed here, we fallback to standard order.
 
         if (Object.keys(whereConditions).length > 0) {
             findOptions.where = whereConditions;
@@ -1141,7 +1151,7 @@ new MemorySQLAdapter({
         }
 
         // Add ordering and limit
-        query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
+        query += ` ORDER BY ${options.random ? 'RANDOM()' : 'updated_at DESC'} LIMIT ${limit}`;
 
         // Execute raw SQL query
         const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
@@ -1256,9 +1266,16 @@ new MemorySQLAdapter({
                 });
         }
 
-        // PostgreSQL JSONB extraction always returns text, so we need to cast for numeric operators
-        const needsNumericCast = ['>', '>=', '<', '<='].includes(operator) && typeof value === 'number';
-        const finalPath = needsNumericCast ? `(${jsonPath})::numeric` : jsonPath;
+        // PostgreSQL JSONB extraction always returns text, so we need to cast for comparison operators
+        const needsNumericCast = typeof value === 'number';
+        const needsBooleanCast = typeof value === 'boolean';
+
+        let finalPath = jsonPath;
+        if (needsNumericCast) {
+            finalPath = `(${jsonPath})::numeric`;
+        } else if (needsBooleanCast) {
+            finalPath = `(${jsonPath})::boolean`;
+        }
 
         const sql = `${finalPath} ${sqlOperator} $${startParamIndex}`;
         return { sql, params };
@@ -1343,7 +1360,7 @@ new MemorySQLAdapter({
             console.warn('Regular filters combined with entity filters will be applied in memory - may be slower');
         }
 
-        query += ` ORDER BY updated_at DESC LIMIT ${limit}`;
+        query += ` ORDER BY ${options.random ? 'RANDOM()' : 'updated_at DESC'} LIMIT ${limit}`;
 
         const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;

@@ -164,6 +164,34 @@ describeIfDb('MemorySQLAdapter integration', () => {
             const results = await adapter.getMany({ tag: 'premium' });
             expect(results.length).toBe(2);
         });
+
+        it('supports random ordering', async () => {
+            // Seed more items for better randomization testing
+            const randomTags = ['random-test'];
+            for (let i = 0; i < 10; i++) {
+                await adapter.set(`random:${i}`, { val: i }, { tags: randomTags });
+            }
+
+            const results1 = await adapter.getMany({ tag: 'random-test', random: true, limit: 3 });
+            const results2 = await adapter.getMany({ tag: 'random-test', random: true, limit: 3 });
+
+            expect(results1.length).toBe(3);
+            expect(results2.length).toBe(3);
+
+            // Extract keys
+            const keys1 = results1.map(r => r.key).sort();
+            const keys2 = results2.map(r => r.key).sort();
+
+            // It's technically possible they are the same, but with 10 items and 3 picked, 
+            // there are 120 combinations (10 C 3).
+            // We'll check they are not identical as a basic verification.
+            // If they are the same, we retry once more to reduce flakiness.
+            if (JSON.stringify(keys1) === JSON.stringify(keys2)) {
+                const results3 = await adapter.getMany({ tag: 'random-test', random: true, limit: 3 });
+                const keys3 = results3.map(r => r.key).sort();
+                expect(JSON.stringify(keys1)).not.toBe(JSON.stringify(keys3));
+            }
+        });
     });
 
     // ──────────────────────────────────────────────────────────────────
@@ -234,7 +262,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 filters: ['name contains "Smith"'],
             });
             expect(results.length).toBe(1);
-            expect(results[0].value.name).toBe('Bob Smith');
+            expect((results[0] as any).value.name).toBe('Bob Smith');
         });
 
         it('STARTS_WITH: name starts_with "Alice"', async () => {

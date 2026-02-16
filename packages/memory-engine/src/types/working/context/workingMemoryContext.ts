@@ -367,7 +367,7 @@ export async function extendContextWithMemory(
                 }
             } catch { /* noop */ }
         },
-        read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any } | any) => {
+        read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any; random?: boolean } | any) => {
             const registry = semanticRegistryAccessor();
             if (!registry?.read) {
                 return [];
@@ -393,6 +393,7 @@ export async function extendContextWithMemory(
                 if (filter?.filters) query.filters = filter.filters;
                 if (filter?.limit) query.limit = filter.limit;
                 if (filter?.orderBy) query.orderBy = filter.orderBy;
+                if (filter?.random) query.random = filter.random;
 
                 // Delegate to adapter which uses SQL-level filtering
                 // If query object is empty, pass '*' to fetch all

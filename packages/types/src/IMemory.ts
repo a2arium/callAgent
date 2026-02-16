@@ -110,6 +110,8 @@ export type MemoryQueryOptions = {
         path: string;
         direction: 'asc' | 'desc';
     };
+    /** Return results in random order (supported by some adapters) */
+    random?: boolean;
 };
 
 /**
@@ -141,6 +143,8 @@ export type GetManyOptions = {
         direction: 'asc' | 'desc';
     };
     backend?: string;
+    /** Return results in random order (supported by some adapters) */
+    random?: boolean;
 };
 
 /**
@@ -155,6 +159,8 @@ export type GetManyQuery = {
         direction: 'asc' | 'desc';
     };
     backend?: string;
+    /** Return results in random order (supported by some adapters) */
+    random?: boolean;
 };
 
 /**

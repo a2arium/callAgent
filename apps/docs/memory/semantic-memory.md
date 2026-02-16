@@ -549,6 +549,23 @@ const results = await ctx.semantic.read({
 | `STARTS_WITH` | String starts with | `'code starts_with "ABC"'` | `{ path: 'code', operator: 'STARTS_WITH', value: 'ABC' }` |
 | `ENDS_WITH` | String ends with | `'email ends_with "@example.com"'` | `{ path: 'email', operator: 'ENDS_WITH', value: '@example.com' }` |
 
+### Random Ordering
+
+You can request records in a random order by setting `random: true`. This is particularly useful for sampling or creating varied experiences when you have more records than the `limit`.
+
+```typescript
+// Get 3 random active users
+const randomUsers = await ctx.semantic.read({
+  tag: 'user',
+  filters: ['status = "active"'],
+  limit: 3,
+  random: true
+} as any);
+```
+
+> [!NOTE]
+> Random ordering is performed at the database level (`ORDER BY RANDOM()`) for efficiency and to ensure the `limit` is respected before returning results.
+
 ### String Syntax Value Types
 
 The string syntax supports various value types:

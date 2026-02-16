@@ -2994,7 +2994,7 @@ export class TaskEngine {
                         }
                     } catch { /* noop */ }
                 },
-                read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any }) => {
+                read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any; random?: boolean }) => {
                     try {
                         const semanticRead = (ctx.memory as any)?.semantic?.read;
                         if (!semanticRead) {
@@ -3021,6 +3021,7 @@ export class TaskEngine {
                         if (filter?.filters) query.filters = filter.filters;
                         if (filter?.limit) query.limit = filter.limit;
                         if (filter?.orderBy) query.orderBy = filter.orderBy;
+                        if (filter?.random) query.random = filter.random;
 
                         // Delegate to adapter which uses SQL-level filtering
                         const rawResults = await semanticRead(

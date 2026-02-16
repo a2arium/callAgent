@@ -68,6 +68,8 @@ export type GetManyOptions = {
     };
     backend?: string;
     tenantId?: string;            // Tenant context for query operations
+    /** Return results in random order */
+    random?: boolean;
 };
 
 export type GetManyQuery = {
@@ -80,6 +82,8 @@ export type GetManyQuery = {
     };
     backend?: string;
     tenantId?: string;            // Tenant context for query operations
+    /** Return results in random order */
+    random?: boolean;
 };
 
 // Union type for getMany parameter
