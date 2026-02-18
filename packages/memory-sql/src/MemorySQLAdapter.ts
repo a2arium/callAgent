@@ -1,3 +1,4 @@
+import './env-fix.js';
 import PrismaClientPkg from '@prisma/client';
 import type { PrismaClient as PrismaClientType, Prisma } from '@prisma/client';
 const { PrismaClient } = PrismaClientPkg;
@@ -68,21 +69,23 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
             // Use provided client
             this.prisma = config.prismaClient as PrismaClientType;
             this.ownsPrisma = false;
-        } else if (config.databaseUrl) {
-            // Create client with provided URL
-            this.prisma = new (PrismaClient as any)({
-                datasources: { db: { url: config.databaseUrl } }
-            });
-            this.ownsPrisma = true;
-        } else if (process.env.MEMORY_DATABASE_URL) {
-            // Fallback to MEMORY_DATABASE_URL only
-            const dbUrl = process.env.MEMORY_DATABASE_URL;
-            this.prisma = new (PrismaClient as any)({
-                datasources: { db: { url: dbUrl } }
-            });
-            this.ownsPrisma = true;
         } else {
-            throw new Error(`
+            if (config.databaseUrl) {
+                // Create client with provided URL
+                this.prisma = new (PrismaClient as any)({
+                    datasources: { db: { url: config.databaseUrl } }
+                });
+                this.ownsPrisma = true;
+            } else if (process.env.MEMORY_DATABASE_URL) {
+                // Fallback to MEMORY_DATABASE_URL only
+                const dbUrl = process.env.MEMORY_DATABASE_URL;
+                console.warn(`MemorySQLAdapter: Using MEMORY_DATABASE_URL from environment. Ensure PRISMA_SKIP_DOTENV is handled if this is a monorepo setup.`);
+                this.prisma = new (PrismaClient as any)({
+                    datasources: { db: { url: dbUrl } }
+                });
+                this.ownsPrisma = true;
+            } else {
+                throw new Error(`
 MemorySQLAdapter requires database configuration. Provide either:
 1. config.prismaClient: Pre-configured PrismaClient
 2. config.databaseUrl: Database connection string  
@@ -92,7 +95,8 @@ Example:
 new MemorySQLAdapter({ 
   databaseUrl: "postgresql://user:pass@localhost:5432/mydb" 
 })
-            `.trim());
+                `.trim());
+            }
         }
 
         // Set configuration options

@@ -1,3 +1,4 @@
+import './env-fix.js';
 import PrismaClientPkg from '@prisma/client';
 import type { PrismaClient as PrismaClientType, Prisma } from '@prisma/client';
 const { PrismaClient } = PrismaClientPkg;
@@ -24,7 +25,14 @@ export class WorkingMemorySessionStore {
         } else {
             // Use global singleton if available, otherwise create it
             if (!WorkingMemorySessionStore.globalPrisma) {
-                WorkingMemorySessionStore.globalPrisma = new (PrismaClient as any)();
+                const dbUrl = process.env.MEMORY_DATABASE_URL;
+                if (!dbUrl) {
+                    throw new Error('WorkingMemorySessionStore: MEMORY_DATABASE_URL environment variable is required when no PrismaClient is provided.');
+                }
+
+                WorkingMemorySessionStore.globalPrisma = new (PrismaClient as any)({
+                    datasources: { db: { url: dbUrl } }
+                });
             }
             this.prisma = WorkingMemorySessionStore.globalPrisma!;
             this.ownsPrisma = false; // We don't own the global singleton
