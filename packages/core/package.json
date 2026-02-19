@@ -14,9 +14,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "cd ../../ && yarn test --testPathPattern=\"packages/core\"",
-    "dev": "ts-node --project tsconfig.json src/runner/runnerCli.ts",
+    "prisma:generate": "prisma generate",
+    "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma-client && cp -R src/generated/prisma-client/* dist/generated/prisma-client/",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run",
     "version:patch": "npm version patch",
@@ -38,15 +37,15 @@
     "@a2arium/callagent-memory-sql": "workspace:*",
     "@a2arium/callagent-types": "workspace:*",
     "@a2arium/callagent-utils": "workspace:*",
+    "@prisma/adapter-pg": "7.4.0",
+    "@prisma/client": "7.4.0",
     "callllm": "portal:../../../callLLM",
-    "dotenv": "^16.4.5",
+    "pg": "8.13.3",
     "uuid": "^11.1.0"
-  },
-  "peerDependencies": {
-    "@prisma/client": "*"
   },
   "devDependencies": {
     "jest": "^29.7.0",
+    "prisma": "^7.4.0",
     "ts-jest": "^29.3.2",
     "typescript": "^5.8.3"
   },

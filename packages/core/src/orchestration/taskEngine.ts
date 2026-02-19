@@ -2860,7 +2860,7 @@ export class TaskEngine {
                     const { getMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
 
                     // Only attempt to use SQL memory if we have a session prisma or a database URL is configured
-                    const dbUrl = process.env.DATABASE_URL || process.env.MEMORY_DATABASE_URL;
+                    const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
                     const sessionPrisma = (this.sessionManager as any)?.store?.prisma;
 
                     if (sessionPrisma || dbUrl) {

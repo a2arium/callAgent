@@ -8,6 +8,8 @@ import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../.
 import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../../episodic/EpisodicMemoryRegistry.js';
 import { EmbedMemoryRegistry } from '../../embed/EmbedMemoryRegistry.js';
+import { PrismaClient } from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
 import { logger } from '@a2arium/callagent-utils';
 
 const contextLogger = logger.createLogger({ prefix: 'WorkingMemoryContext' });
@@ -168,9 +170,8 @@ export async function extendContextWithMemory(
 
     // Create working memory adapter if SQL adapter is available
     let workingMemoryAdapter: WorkingMemoryBackend | undefined;
-    let prisma = existingPrismaClient as any;
+    let prisma = existingPrismaClient as PrismaClientType;
     try {
-        const { PrismaClient } = await import('@prisma/client');
         const { WorkingMemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
 
         // Use existing PrismaClient if provided, otherwise create new one

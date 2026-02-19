@@ -1,8 +1,7 @@
 import { logger } from '@a2arium/callagent-utils';
 import { MemoryError } from '@a2arium/callagent-types';
-import PrismaClientPkg from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
-const { PrismaClient } = PrismaClientPkg;
+import { PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient as PrismaClientType } from '../generated/prisma/index.js';
 import { EntityAlignmentService } from '../EntityAlignmentService.js';
 import { EntityFinder } from './EntityFinder.js';
 import { ConfidenceScorer } from './ConfidenceScorer.js';

@@ -1,7 +1,10 @@
-import PrismaClientPkg from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
-const { PrismaClient } = PrismaClientPkg;
+import { PrismaClient } from '../generated/prisma-client/index.js';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
+import { getSafePgConfig } from '../pgStartupDiagnostic.js';
+
+type PrismaClientType = InstanceType<typeof PrismaClient>;
 
 const log = logger.createLogger({ prefix: 'OutboxPublisher' });
 
@@ -16,7 +19,21 @@ export class OutboxPublisher {
 
     constructor(prisma?: PrismaClientType) {
         this.ownsPrisma = !prisma;
-        this.prisma = prisma || new (PrismaClient as any)();
+        if (prisma) {
+            this.prisma = prisma;
+        } else {
+            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+            if (!dbUrl) throw new Error('MEMORY_DATABASE_URL (or DATABASE_URL) required for OutboxPublisher');
+            console.log(`[OutboxPublisher] Initializing with: ${dbUrl.split('@')[1] || 'hidden'}`);
+            if (typeof dbUrl !== 'string') {
+                throw new Error(`Invalid type for database URL: expected string, received ${typeof dbUrl}. Check your environment variables.`);
+            }
+            const config = getSafePgConfig(dbUrl);
+            this.prisma = new PrismaClient({
+                adapter: new PrismaPg(config, { schema: 'public' }),
+                log: ['info', 'warn', 'error']
+            }) as any;
+        }
     }
 
     start(intervalMs = 500): void {

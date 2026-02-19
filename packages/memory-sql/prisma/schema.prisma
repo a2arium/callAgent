@@ -2,11 +2,11 @@
 
 datasource db {
     provider = "postgresql"
-    url      = env("MEMORY_DATABASE_URL")
 }
 
 generator client {
     provider = "prisma-client-js"
+    output   = "../src/generated/prisma"
 }
 
 model AgentMemoryStore {

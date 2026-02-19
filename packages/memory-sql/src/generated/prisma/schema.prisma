@@ -1,0 +1,185 @@
+// Prisma schema for @a2arium/memory-sql
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+model AgentMemoryStore {
+  key       String
+  value     Json
+  tags      String[]
+  embedding Unsupported("vector(1536)")? // pgvector type for embeddings
+  tenantId  String                       @default("default") @map("tenant_id")
+  createdAt DateTime                     @default(now()) @map("created_at")
+  updatedAt DateTime                     @updatedAt @map("updated_at")
+
+  // Binary data storage fields
+  blobData     Bytes? @map("blob_data") // BYTEA field for binary content (images, files, etc.)
+  blobMetadata Json?  @map("blob_metadata") // Metadata for blob (size, type, filename, etc.)
+
+  @@id([tenantId, key]) // Compound primary key for tenant isolation
+  @@index([tenantId]) // Index for fast tenant-scoped queries
+  @@map("agent_memory_store")
+}
+
+model EntityStore {
+  id            String                      @id @default(cuid())
+  entityType    String                      @map("entity_type") // User-defined: 'location', 'person', etc.
+  canonicalName String                      @map("canonical_name") // The "main" name for this entity
+  aliases       String[] // All known variations/spellings
+  embedding     Unsupported("vector(1536)") // pgvector type for embeddings
+  metadata      Json                        @default("{}") // Additional properties
+  confidence    Float                       @default(1.0) // Overall confidence in this entity
+  tenantId      String                      @default("default") @map("tenant_id")
+  createdAt     DateTime                    @default(now()) @map("created_at")
+  updatedAt     DateTime                    @updatedAt @map("updated_at")
+
+  // Relations
+  alignments EntityAlignment[]
+
+  @@unique([tenantId, entityType, canonicalName]) // Updated to include tenantId
+  @@index([tenantId]) // Index for tenant-scoped entity queries
+  @@index([tenantId, entityType]) // Index for tenant-scoped entity type queries
+  @@map("entity_store")
+}
+
+model EntityAlignment {
+  id            String   @id @default(cuid())
+  memoryKey     String   @map("memory_key") // Reference to AgentMemoryStore.key
+  fieldPath     String   @map("field_path") // Field name like 'venue' or 'details.location'
+  entityId      String   @map("entity_id") // Reference to EntityStore.id
+  originalValue String   @map("original_value") // What user originally entered
+  confidence    String // 'high', 'medium', 'low'
+  tenantId      String   @default("default") @map("tenant_id")
+  alignedAt     DateTime @default(now()) @map("aligned_at")
+
+  // Relations
+  entity EntityStore @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, memoryKey, fieldPath]) // Updated to include tenantId
+  @@index([tenantId]) // Index for tenant-scoped alignment queries
+  @@index([tenantId, memoryKey]) // Index for tenant-scoped memory alignments
+  @@map("entity_alignment")
+}
+
+// Working Memory Tables
+model WorkingMemorySession {
+  tenantId      String    @map("tenant_id")
+  agentId       String    @map("agent_id")
+  currentGoal   String?   @map("current_goal")
+  goalTimestamp DateTime? @map("goal_timestamp")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@id([tenantId, agentId]) // Compound primary key for tenant + agent isolation
+  @@index([tenantId]) // Index for tenant-scoped queries
+  @@map("working_memory_sessions")
+}
+
+model WorkingMemoryThought {
+  id                 String   @id @default(cuid())
+  tenantId           String   @map("tenant_id")
+  agentId            String   @map("agent_id")
+  content            String
+  type               String   @default("thought") // 'thought', 'observation', 'decision', 'internal'
+  timestamp          DateTime
+  processingMetadata Json?    @map("processing_metadata") // MLO processing history
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, agentId, timestamp]) // Index for chronological queries
+  @@index([tenantId]) // Index for tenant-scoped queries
+  @@map("working_memory_thoughts")
+}
+
+model WorkingMemoryDecision {
+  tenantId    String   @map("tenant_id")
+  agentId     String   @map("agent_id")
+  decisionKey String   @map("decision_key")
+  decision    String
+  reasoning   String?
+  timestamp   DateTime
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@id([tenantId, agentId, decisionKey]) // Compound primary key
+  @@index([tenantId]) // Index for tenant-scoped queries
+  @@index([tenantId, agentId]) // Index for agent-scoped queries
+  @@map("working_memory_decisions")
+}
+
+model WorkingMemoryVariable {
+  tenantId      String   @map("tenant_id")
+  agentId       String   @map("agent_id")
+  variableKey   String   @map("variable_key")
+  variableValue Json     @map("variable_value")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, agentId, variableKey]) // Compound primary key
+  @@index([tenantId]) // Index for tenant-scoped queries
+  @@index([tenantId, agentId]) // Index for agent-scoped queries
+  @@map("working_memory_variables")
+}
+
+model AgentResultCache {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  agentName String   @map("agent_name")
+  cacheKey  String   @map("cache_key")
+  result    Json
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@unique([tenantId, agentName, cacheKey])
+  @@index([tenantId, agentName])
+  @@index([expiresAt])
+  @@map("agent_result_cache")
+}
+
+// ========================================
+// Session-scoped Working Memory (v2)
+// ========================================
+
+model WMSession {
+  tenantId  String   @map("tenant_id")
+  sessionId String   @map("session_id")
+  agentId   String   @map("agent_id")
+  wmVersion BigInt   @default(0) @map("wm_version")
+  snapshot  Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, sessionId])
+  @@index([tenantId])
+  @@index([tenantId, agentId])
+  @@map("wm_sessions")
+}
+
+model WMEvent {
+  eventId   String   @id @default(cuid()) @map("event_id")
+  tenantId  String   @map("tenant_id")
+  sessionId String   @map("session_id")
+  seq       Int
+  type      String
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, sessionId, seq])
+  @@map("wm_events")
+}
+
+model Outbox {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  topic     String
+  key       String
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, topic])
+  @@map("outbox")
+}

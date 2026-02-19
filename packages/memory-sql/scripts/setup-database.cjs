@@ -65,7 +65,7 @@ EXAMPLES:
 function checkDatabaseUrl() {
   // First try to load .env file
   loadEnvFile();
-  
+
   const dbUrl = process.env.DATABASE_URL || process.env.MEMORY_DATABASE_URL;
   if (!dbUrl) {
     console.error(`
@@ -84,7 +84,12 @@ For more help, run: npx @a2arium/callagent-memory-sql help
     `);
     process.exit(1);
   }
-  
+
+  // Ensure MEMORY_DATABASE_URL is set for Prisma (referrenced in schema.prisma)
+  if (!process.env.MEMORY_DATABASE_URL) {
+    process.env.MEMORY_DATABASE_URL = dbUrl;
+  }
+
   console.log(`✅ Database URL configured`);
   return dbUrl;
 }
@@ -92,7 +97,7 @@ For more help, run: npx @a2arium/callagent-memory-sql help
 function runCommand(command, description) {
   console.log(`🔧 ${description}...`);
   try {
-    execSync(command, { 
+    execSync(command, {
       stdio: 'inherit',
       cwd: __dirname + '/..'
     });
@@ -105,7 +110,7 @@ function runCommand(command, description) {
 
 function main() {
   const command = process.argv[2] || 'help';
-  
+
   switch (command) {
     case 'setup':
       checkDatabaseUrl();
@@ -134,16 +139,16 @@ Your CallAgent memory database is ready to use. You can now:
 For more examples, see: https://github.com/a2arium/callagent
       `);
       break;
-      
+
     case 'migrate':
       checkDatabaseUrl();
       runCommand('npx prisma migrate deploy', 'Running database migrations');
       break;
-      
+
     case 'generate':
       runCommand('npx prisma generate', 'Generating Prisma client');
       break;
-      
+
     case 'studio':
       checkDatabaseUrl();
       console.log(`
@@ -153,7 +158,7 @@ For more examples, see: https://github.com/a2arium/callagent
       `);
       runCommand('npx prisma studio', 'Starting Prisma Studio');
       break;
-      
+
     case 'help':
     default:
       printHelp();

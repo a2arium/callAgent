@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@prisma/client';
 import { logger } from '@a2arium/callagent-utils';
 
 /**
@@ -14,7 +14,7 @@ export class CacheCleanupService {
     private intervalId?: NodeJS.Timeout;
     private isRunning = false;
 
-    constructor(private prisma: PrismaClient | any) { }
+    constructor(private prisma: PrismaClientType | any) { }
 
     /**
      * Remove all expired cache entries

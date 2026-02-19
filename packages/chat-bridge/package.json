@@ -17,7 +17,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "prisma:generate": "prisma generate",
+    "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma && cp -R src/generated/prisma/* dist/generated/prisma/"
   },
   "keywords": [
     "chat",
@@ -33,9 +34,13 @@
     "@a2arium/callagent-core": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
     "@a2arium/callagent-types": "workspace:*",
-    "@a2arium/callagent-utils": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*",
+    "@prisma/adapter-pg": "^7.4.0",
+    "@prisma/client": "^7.4.0",
+    "pg": "^8.13.3"
   },
   "devDependencies": {
+    "prisma": "^7.4.0",
     "typescript": "^5.8.3"
   }
 }

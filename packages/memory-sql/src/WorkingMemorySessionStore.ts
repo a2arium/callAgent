@@ -1,8 +1,10 @@
-import './env-fix.js';
-import PrismaClientPkg from '@prisma/client';
-import type { PrismaClient as PrismaClientType, Prisma } from '@prisma/client';
-const { PrismaClient } = PrismaClientPkg;
+import { PrismaClient } from './generated/prisma/index.js';
+import type { PrismaClient as PrismaClientType, Prisma } from './generated/prisma/index.js';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
+import { validatePgEnvironment, dumpPgEnvironment } from './pgEnvValidator.js';
+import { getSafePgConfig } from './safePool.js';
 
 export type SessionSnapshot = {
     wmVersion: bigint;
@@ -30,8 +32,17 @@ export class WorkingMemorySessionStore {
                     throw new Error('WorkingMemorySessionStore: MEMORY_DATABASE_URL environment variable is required when no PrismaClient is provided.');
                 }
 
+                if (typeof dbUrl !== 'string') {
+                    throw new Error(`Invalid type for MEMORY_DATABASE_URL in WorkingMemorySessionStore: expected string, received ${typeof dbUrl}`);
+                }
+
+                // Validate ALL pg-related env vars before creating the pool.
+                // This catches the case where PGUSER/PGDATABASE/etc. is an Object.
+                dumpPgEnvironment('WorkingMemorySessionStore');
+                validatePgEnvironment('WorkingMemorySessionStore');
+
                 WorkingMemorySessionStore.globalPrisma = new (PrismaClient as any)({
-                    datasources: { db: { url: dbUrl } }
+                    adapter: new PrismaPg(getSafePgConfig(dbUrl))
                 });
             }
             this.prisma = WorkingMemorySessionStore.globalPrisma!;

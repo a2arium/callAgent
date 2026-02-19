@@ -2,7 +2,10 @@
 import 'dotenv/config';
 import { logger } from '@a2arium/callagent-utils';
 import { AgentResultCache, CacheCleanupService } from '@a2arium/callagent-memory-engine';
-// import { CacheCleanupService } from '../cache/index.js'; // TODO: locate CacheCleanupService
+import { PrismaClient } from '../generated/prisma-client/index.js';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
+import { getSafePgConfig } from '../pgStartupDiagnostic.js';
 
 // Create CLI logger
 const cliLogger = logger.createLogger({ prefix: 'CacheCLI' });
@@ -87,11 +90,16 @@ Examples:
 async function initializeCacheServices(): Promise<{
     cache: AgentResultCache;
     cleanup: CacheCleanupService;
-    prisma: any;
+    prisma: PrismaClient;
 }> {
     try {
-        const { PrismaClient } = await import('@prisma/client');
-        const prisma = new PrismaClient();
+        const connectionString = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+        if (!connectionString) {
+            throw new Error('MEMORY_DATABASE_URL (or DATABASE_URL) environment variable is not set.');
+        }
+        const config = getSafePgConfig(connectionString);
+        const adapter = new PrismaPg(config);
+        const prisma = new PrismaClient({ adapter });
         const cache = new AgentResultCache(prisma as any);
         const cleanup = new CacheCleanupService(prisma as any);
 

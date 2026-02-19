@@ -1,3 +1,7 @@
+// Install global pg startup parameter guard FIRST, before any pool creation.
+// This strips non-string params from pg's startup message to prevent ERR_INVALID_ARG_TYPE.
+import './pgStartupDiagnostic.js';
+
 export * from './config/index.js';
 export * from './plugin/types.js';
 export * from './plugin/createAgent.js';

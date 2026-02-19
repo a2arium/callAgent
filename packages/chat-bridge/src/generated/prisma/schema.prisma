@@ -1,0 +1,29 @@
+// Prisma schema for chat-bridge conversation mapping and idempotency
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model ChatSession {
+  key          String   @id
+  agentId      String
+  taskId       String
+  state        String // 'idle' | 'running' | 'waitingInput'
+  token        String?
+  lastEventSeq Int?
+  updatedAt    DateTime @updatedAt
+}
+
+model ChatIdempotency {
+  id        String   @id // `${key}:${messageId}`
+  key       String
+  messageId String
+  createdAt DateTime @default(now())
+
+  @@unique([key, messageId])
+}

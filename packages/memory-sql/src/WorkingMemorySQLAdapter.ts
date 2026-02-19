@@ -1,9 +1,11 @@
-import './env-fix.js';
-import PrismaClientPkg from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
-const { PrismaClient } = PrismaClientPkg;
+import { PrismaClient } from './generated/prisma/index.js';
+import type { PrismaClient as PrismaClientType } from './generated/prisma/index.js';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
 import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
+import { validatePgEnvironment } from './pgEnvValidator.js';
+import { createSafePool } from './safePool.js';
 
 /**
  * Configuration options for WorkingMemorySQLAdapter
@@ -63,15 +65,23 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
             this.ownsPrisma = false;
         } else {
             if (config.databaseUrl) {
+                if (typeof config.databaseUrl !== 'string') {
+                    throw new Error(`Invalid type for databaseUrl in WorkingMemorySQLAdapter: expected string, received ${typeof config.databaseUrl}`);
+                }
+                validatePgEnvironment('WorkingMemorySQLAdapter');
                 this.prisma = new (PrismaClient as any)({
-                    datasources: { db: { url: config.databaseUrl } }
+                    adapter: new PrismaPg(createSafePool(config.databaseUrl))
                 });
                 this.ownsPrisma = true;
             } else if (process.env.MEMORY_DATABASE_URL) {
                 const dbUrl = process.env.MEMORY_DATABASE_URL;
+                if (typeof dbUrl !== 'string') {
+                    throw new Error(`Invalid type for MEMORY_DATABASE_URL in WorkingMemorySQLAdapter: expected string, received ${typeof dbUrl}`);
+                }
+                validatePgEnvironment('WorkingMemorySQLAdapter');
                 console.warn(`WorkingMemorySQLAdapter: Using MEMORY_DATABASE_URL from environment. Ensure PRISMA_SKIP_DOTENV is handled if this is a monorepo setup.`);
                 this.prisma = new (PrismaClient as any)({
-                    datasources: { db: { url: dbUrl } }
+                    adapter: new PrismaPg(createSafePool(dbUrl))
                 });
                 this.ownsPrisma = true;
             } else {

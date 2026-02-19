@@ -1,6 +1,5 @@
-import PrismaClientPkg from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
-const { PrismaClient } = PrismaClientPkg;
+import { PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient as PrismaClientType } from '../generated/prisma/index.js';
 
 /**
  * A dedicated service for finding matching entities using a progressive cascade of strategies.

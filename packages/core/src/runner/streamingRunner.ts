@@ -29,7 +29,9 @@ import { resolveTenantId } from '../plugin/tenantResolver.js';
 import { globalA2AService } from '../orchestration/A2AService.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { ArtifactImpl } from '@a2arium/callagent-memory-engine';
-import type { PrismaClient } from '@prisma/client';
+import { PrismaClient } from '../generated/prisma-client/index.js';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
 
 // Create base runner logger
@@ -164,8 +166,15 @@ export async function runAgentWithStreaming(
     const ensureAgentResultCache = async (): Promise<AgentResultCache> => {
         if (agentResultCache) return agentResultCache;
         try {
-            const { PrismaClient } = await import('@prisma/client');
-            agentResultCachePrisma = new PrismaClient();
+            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+            if (!dbUrl) throw new Error('MEMORY_DATABASE_URL (or DATABASE_URL) is required for AgentResultCache');
+            if (typeof dbUrl !== 'string') {
+                throw new Error(`Invalid type for database URL in streamingRunner: expected string, received ${typeof dbUrl}`);
+            }
+
+            agentResultCachePrisma = new PrismaClient({
+                adapter: new PrismaPg((await import('../pgStartupDiagnostic.js')).createSafePool(dbUrl))
+            }) as any;
             agentResultCache = new AgentResultCache(agentResultCachePrisma as any);
             return agentResultCache;
         } catch (error) {

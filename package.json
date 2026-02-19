@@ -20,7 +20,7 @@
   "scripts": {
     "postinstall": "node scripts/sync-dotenv.cjs",
     "build": "yarn turbo run build",
-    "generate:prisma": "prisma generate --schema=packages/memory-sql/prisma/schema.prisma",
+    "generate:prisma": "npx prisma generate --schema=packages/memory-sql/prisma/schema.prisma && npx prisma generate --schema=packages/chat-bridge/prisma/schema.prisma && npx prisma generate --schema=packages/core/prisma/schema.prisma",
     "start": "node packages/core/dist/runner/runnerCli.js",
     "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
@@ -67,19 +67,23 @@
     "@types/express": "^5.0.1",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.14.1",
+    "@types/pg": "^8.16.0",
     "@types/uuid": "^10.0.0",
     "copyfiles": "^2.4.1",
     "jest": "^29.7.0",
     "jest-mock-extended": "^4.0.0-beta1",
     "ngrok": "^5.0.0-beta.2",
-    "prisma": "^6.7.0",
+    "prisma": "^7.4.0",
     "ts-jest": "^29.3.2",
     "ts-node": "^10.9.2",
     "turbo": "^2.5.3",
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@prisma/client": "^6.7.0"
+    "@prisma/adapter-pg": "^7.4.0",
+    "@prisma/client": "^7.4.0",
+    "dotenv": "^17.3.1",
+    "tsx": "^4.21.0"
   },
   "workspaces": [
     "packages/*",
@@ -89,10 +93,9 @@
     "apps/examples/business-logic/*"
   ],
   "resolutions": {
-    "@callmessenger/core": "link:../callMessenger/packages/core",
-    "@callmessenger/adapter-telegram": "link:../callMessenger/packages/adapter-telegram",
-    "@callmessenger/adapter-web": "link:../callMessenger/packages/adapter-web",
-    "uuid": "10.0.0"
+    "uuid": "10.0.0",
+    "prisma": "7.4.0",
+    "@prisma/client": "7.4.0"
   },
   "private": true,
   "packageManager": "yarn@4.9.4"

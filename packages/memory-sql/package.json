@@ -10,8 +10,8 @@
     "scripts"
   ],
   "scripts": {
-    "prebuild": "prisma generate",
-    "build": "tsc -p tsconfig.json",
+    "prisma:generate": "prisma generate",
+    "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma && cp -R src/generated/prisma/* dist/generated/prisma/",
     "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
@@ -38,15 +38,16 @@
   ],
   "dependencies": {
     "@a2arium/callagent-types": "workspace:*",
-    "@a2arium/callagent-utils": "workspace:*"
-  },
-  "peerDependencies": {
-    "@prisma/client": "^6.7.0"
+    "@a2arium/callagent-utils": "workspace:*",
+    "@prisma/adapter-pg": "^7.4.0",
+    "@prisma/client": "^7.4.0",
+    "pg": "^8.13.3"
   },
   "devDependencies": {
+    "dotenv": "^17.3.1",
     "jest": "^29.7.0",
     "jest-mock-extended": "^4.0.0-beta1",
-    "prisma": "^6.7.0",
+    "prisma": "^7.4.0",
     "ts-jest": "^29.3.2",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"

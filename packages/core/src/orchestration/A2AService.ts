@@ -57,16 +57,26 @@ export class A2AService implements IA2AService {
         });
     }
 
-    /**
-     * Initialize cache service for A2A operations
-     */
     private async initializeCacheService(): Promise<void> {
         try {
-            const PrismaClientPkg = await import('@prisma/client');
-            const { PrismaClient } = PrismaClientPkg.default || PrismaClientPkg;
-            const prisma = new PrismaClient();
-            this.agentResultCache = new AgentResultCache(prisma);
-            a2aLogger.debug('A2A cache service initialized successfully');
+            const { PrismaClient } = await import('../generated/prisma-client/index.js');
+            const { PrismaPg } = await import('@prisma/adapter-pg');
+            const pg = (await import('pg')).default;
+
+            const dbUrl = process.env.MEMORY_DATABASE_URL;
+            if (dbUrl) {
+                if (typeof dbUrl !== 'string') {
+                    throw new Error(`Invalid type for MEMORY_DATABASE_URL: expected string, received ${typeof dbUrl}`);
+                }
+                const { createSafePool } = await import('../pgStartupDiagnostic.js');
+                const pool = createSafePool(dbUrl);
+                const adapter = new PrismaPg(pool);
+                const prisma = new PrismaClient({ adapter }) as any;
+                this.agentResultCache = new AgentResultCache(prisma);
+                a2aLogger.debug('A2A cache service initialized successfully');
+            } else {
+                a2aLogger.warn('MEMORY_DATABASE_URL not found, A2A cache service will not be available');
+            }
         } catch (error) {
             a2aLogger.error('A2A cache service initialization failed, continuing without caching', error);
         }

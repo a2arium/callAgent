@@ -1,0 +1,55 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma-client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AgentMemoryStore {
+  key          String
+  value        Json
+  tags         String[]
+  tenantId     String   @default("default") @map("tenant_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  blobData     Bytes?   @map("blob_data")
+  blobMetadata Json?    @map("blob_metadata")
+
+  @@id([tenantId, key])
+  @@map("agent_memory_store")
+}
+
+model AgentResultCache {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  agentName String   @map("agent_name")
+  cacheKey  String   @map("cache_key")
+  result    Json
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@unique([tenantId, agentName, cacheKey])
+  @@index([tenantId, agentName])
+  @@index([expiresAt])
+  @@map("agent_result_cache")
+}
+
+model Outbox {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  topic     String
+  key       String
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, topic])
+  @@map("outbox")
+}
