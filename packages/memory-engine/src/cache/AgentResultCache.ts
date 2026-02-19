@@ -1,6 +1,6 @@
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
+import { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
+import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory-sql/generated';
 import type { TaskInput } from '../shared/types/index.js';
 import { logger } from '@a2arium/callagent-utils';
 

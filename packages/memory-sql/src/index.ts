@@ -7,3 +7,4 @@ export { storeImage, getImage, listImages, deleteImage, storeFile, getFile } fro
 export { processDataForStorage, detectDataType } from './BinaryDataProcessor.js';
 export * from './types.js';
 export { WorkingMemorySessionStore } from './WorkingMemorySessionStore.js';
+export { getSafePgConfig, createSafePool } from './safePool.js';

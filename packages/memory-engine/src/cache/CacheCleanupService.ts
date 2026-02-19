@@ -1,4 +1,4 @@
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
+import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory-sql/generated';
 import { logger } from '@a2arium/callagent-utils';
 
 /**

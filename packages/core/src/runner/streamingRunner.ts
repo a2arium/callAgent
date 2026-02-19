@@ -173,7 +173,7 @@ export async function runAgentWithStreaming(
             }
 
             agentResultCachePrisma = new PrismaClient({
-                adapter: new PrismaPg((await import('../pgStartupDiagnostic.js')).createSafePool(dbUrl))
+                adapter: new PrismaPg((await import('../pgStartupDiagnostic.js')).getSafePgConfig(dbUrl))
             }) as any;
             agentResultCache = new AgentResultCache(agentResultCachePrisma as any);
             return agentResultCache;

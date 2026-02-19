@@ -11,6 +11,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./generated": {
+      "types": "./dist/generated/prisma-client/index.d.ts",
+      "import": "./dist/generated/prisma-client/index.js",
+      "default": "./dist/generated/prisma-client/index.js"
     }
   },
   "scripts": {

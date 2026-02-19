@@ -8,8 +8,8 @@ import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../.
 import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../../episodic/EpisodicMemoryRegistry.js';
 import { EmbedMemoryRegistry } from '../../embed/EmbedMemoryRegistry.js';
-import { PrismaClient } from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
+import { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
+import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory-sql/generated';
 import { logger } from '@a2arium/callagent-utils';
 
 const contextLogger = logger.createLogger({ prefix: 'WorkingMemoryContext' });

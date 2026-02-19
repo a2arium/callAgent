@@ -68,9 +68,9 @@ export class A2AService implements IA2AService {
                 if (typeof dbUrl !== 'string') {
                     throw new Error(`Invalid type for MEMORY_DATABASE_URL: expected string, received ${typeof dbUrl}`);
                 }
-                const { createSafePool } = await import('../pgStartupDiagnostic.js');
-                const pool = createSafePool(dbUrl);
-                const adapter = new PrismaPg(pool);
+                const { getSafePgConfig } = await import('../pgStartupDiagnostic.js');
+                const config = getSafePgConfig(dbUrl);
+                const adapter = new PrismaPg(config);
                 const prisma = new PrismaClient({ adapter }) as any;
                 this.agentResultCache = new AgentResultCache(prisma);
                 a2aLogger.debug('A2A cache service initialized successfully');

@@ -22,7 +22,10 @@ const { parse } = pgConnectionString;
  * Passing this object to PrismaPg (instead of a Pool instance) avoids
  * instanceof-related configuration leakage in monorepos.
  */
-export function getSafePgConfig(connectionString: string): pg.PoolConfig {
+export function getSafePgConfig(
+    connectionString: string,
+    poolOptions?: { max?: number; min?: number; idleTimeoutMillis?: number }
+): pg.PoolConfig {
     const parsed = parse(connectionString);
 
     const config: pg.PoolConfig = {
@@ -31,6 +34,7 @@ export function getSafePgConfig(connectionString: string): pg.PoolConfig {
         user: parsed.user || undefined,
         password: parsed.password || undefined,
         database: parsed.database || undefined,
+        ...(poolOptions || {}),
     };
 
     if (parsed.ssl !== undefined && parsed.ssl !== false) {
@@ -43,8 +47,11 @@ export function getSafePgConfig(connectionString: string): pg.PoolConfig {
 /**
  * @deprecated Use getSafePgConfig instead and pass the config object to PrismaPg.
  */
-export function createSafePool(connectionString: string): pg.Pool {
-    return new pg.Pool(getSafePgConfig(connectionString));
+export function createSafePool(
+    connectionString: string,
+    poolOptions?: { max?: number; min?: number; idleTimeoutMillis?: number }
+): pg.Pool {
+    return new pg.Pool(getSafePgConfig(connectionString, poolOptions));
 }
 
 /**

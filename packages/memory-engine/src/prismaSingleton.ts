@@ -1,10 +1,8 @@
-import { PrismaClient } from '@prisma/client';
-import type { PrismaClient as PrismaClientType } from '@prisma/client';
+import { getSafePgConfig } from '@a2arium/callagent-memory-sql';
+import { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
+import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory-sql/generated';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
-import pgConnectionString from 'pg-connection-string';
-
-const { parse: parseConnectionString } = pgConnectionString;
 
 let singletonPrismaClient: PrismaClientType | null = null;
 
@@ -18,15 +16,8 @@ export async function getMemoryPrismaClient(): Promise<PrismaClientType> {
             if (typeof dbUrl !== 'string') {
                 throw new Error(`Invalid type for MEMORY_DATABASE_URL in prismaSingleton: expected string, received ${typeof dbUrl}`);
             }
-            const parsed = parseConnectionString(dbUrl);
-            const pool = new pg.Pool({
-                host: parsed.host || 'localhost',
-                port: parsed.port ? parseInt(parsed.port, 10) : 5432,
-                user: parsed.user || undefined,
-                password: parsed.password || undefined,
-                database: parsed.database || undefined,
-            });
-            const adapter = new PrismaPg(pool);
+            const config = getSafePgConfig(dbUrl);
+            const adapter = new PrismaPg(config);
             singletonPrismaClient = new PrismaClient({ adapter }) as any;
         } else {
             // Fallback for cases where DB is not needed or initialized later

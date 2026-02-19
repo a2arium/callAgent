@@ -58,6 +58,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./generated": {
+      "types": "./dist/generated/prisma/index.d.ts",
+      "import": "./dist/generated/prisma/index.js",
+      "default": "./dist/generated/prisma/index.js"
     }
   }
 }

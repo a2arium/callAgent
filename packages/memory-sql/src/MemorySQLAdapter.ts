@@ -1,3 +1,4 @@
+import { getSafePgConfig } from './safePool.js';
 import { PrismaClient } from './generated/prisma/index.js';
 import type { PrismaClient as PrismaClientType, Prisma } from './generated/prisma/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -79,7 +80,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 }
                 validatePgEnvironment('MemorySQLAdapter');
                 this.prisma = new (PrismaClient as any)({
-                    adapter: new PrismaPg(createSafePool(config.databaseUrl))
+                    adapter: new PrismaPg(getSafePgConfig(config.databaseUrl))
                 });
                 this.ownsPrisma = true;
             } else if (process.env.MEMORY_DATABASE_URL) {
@@ -91,7 +92,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 validatePgEnvironment('MemorySQLAdapter');
                 console.warn(`MemorySQLAdapter: Using MEMORY_DATABASE_URL from environment. Ensure PRISMA_SKIP_DOTENV is handled if this is a monorepo setup.`);
                 this.prisma = new (PrismaClient as any)({
-                    adapter: new PrismaPg(createSafePool(dbUrl))
+                    adapter: new PrismaPg(getSafePgConfig(dbUrl))
                 });
                 this.ownsPrisma = true;
             } else {

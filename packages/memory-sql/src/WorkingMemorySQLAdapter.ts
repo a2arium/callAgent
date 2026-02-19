@@ -5,7 +5,7 @@ import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
 import { WorkingMemoryBackend, ThoughtEntry, DecisionEntry, WorkingMemoryState } from '@a2arium/callagent-types';
 import { validatePgEnvironment } from './pgEnvValidator.js';
-import { createSafePool } from './safePool.js';
+import { getSafePgConfig } from './safePool.js';
 
 /**
  * Configuration options for WorkingMemorySQLAdapter
@@ -70,7 +70,7 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
                 }
                 validatePgEnvironment('WorkingMemorySQLAdapter');
                 this.prisma = new (PrismaClient as any)({
-                    adapter: new PrismaPg(createSafePool(config.databaseUrl))
+                    adapter: new PrismaPg(getSafePgConfig(config.databaseUrl))
                 });
                 this.ownsPrisma = true;
             } else if (process.env.MEMORY_DATABASE_URL) {
@@ -81,7 +81,7 @@ export class WorkingMemorySQLAdapter implements WorkingMemoryBackend {
                 validatePgEnvironment('WorkingMemorySQLAdapter');
                 console.warn(`WorkingMemorySQLAdapter: Using MEMORY_DATABASE_URL from environment. Ensure PRISMA_SKIP_DOTENV is handled if this is a monorepo setup.`);
                 this.prisma = new (PrismaClient as any)({
-                    adapter: new PrismaPg(createSafePool(dbUrl))
+                    adapter: new PrismaPg(getSafePgConfig(dbUrl))
                 });
                 this.ownsPrisma = true;
             } else {
