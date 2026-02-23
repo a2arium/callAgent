@@ -470,11 +470,22 @@ export class SmartAgentDiscoveryService {
      */
     private static isAgentFile(filename: string): boolean {
         const lower = filename.toLowerCase();
+        // Ignore map files, type definitions, and common non-agent patterns
+        if (lower.endsWith('.map') || lower.endsWith('.d.ts') || lower.endsWith('.d.mts') || lower.endsWith('.d.cts')) {
+            return false;
+        }
+
+        // Only consider .js, .mjs, .cjs, .ts, .mts, .cts files
+        if (!/\.(j|t)s$|\.(m|c)(j|t)s$/.test(lower)) {
+            return false;
+        }
+
         return (
             lower.includes('agent') ||
             lower === 'agentmodule.js' ||
             lower === 'agentmodule.ts' ||
-            (lower === 'index.js' || lower === 'index.ts') ||
+            lower === 'index.js' ||
+            lower === 'index.ts' ||
             lower === 'agent.js' ||
             lower === 'agent.ts'
         );
@@ -809,20 +820,34 @@ export class SmartAgentDiscoveryService {
      * List all discoverable agents
      */
     static async listAvailableAgents(): Promise<Array<{ name: string; agentPath: string; manifestPath: string | null }>> {
-        const agents: Array<{ name: string; agentPath: string; manifestPath: string | null }> = [];
+        const agentsMap = new Map<string, { name: string; agentPath: string; manifestPath: string | null }>();
         const discoveredDirs = await this.discoverAgentDirectories();
 
         for (const dir of discoveredDirs) {
             try {
                 const files = await fs.readdir(dir);
 
-                for (const file of files) {
-                    if (this.isAgentFile(file)) {
-                        const agentPath = path.join(dir, file);
-                        const agentName = this.extractAgentNameFromPath(agentPath);
-                        const manifestPath = await this.findManifest(agentName);
+                // Priority within a directory: 
+                // 1. Files containing "agent" (exact match "agent.js/ts" preferred)
+                // 2. index.js/ts
+                const sortedFiles = files.filter(f => this.isAgentFile(f)).sort((a, b) => {
+                    const la = a.toLowerCase();
+                    const lb = b.toLowerCase();
+                    if (la === 'agent.js' || la === 'agent.ts') return -1;
+                    if (lb === 'agent.js' || lb === 'agent.ts') return 1;
+                    return la.localeCompare(lb);
+                });
 
-                        agents.push({
+                for (const file of sortedFiles) {
+                    const agentPath = path.join(dir, file);
+                    const agentName = this.extractAgentNameFromPath(agentPath);
+
+                    // If we already found this agent name in THIS directory (or previous), keep the first one
+                    // The first one is likely the most "standard" due to our sorting
+                    if (!agentsMap.has(agentName)) {
+                        const manifestPath = await this.findManifest(agentName, agentPath);
+
+                        agentsMap.set(agentName, {
                             name: agentName,
                             agentPath,
                             manifestPath
@@ -834,27 +859,35 @@ export class SmartAgentDiscoveryService {
             }
         }
 
-        return agents;
+        return Array.from(agentsMap.values());
     }
 
     /**
      * Extract agent name from file path
      */
     private static extractAgentNameFromPath(agentPath: string): string {
-        const filename = path.basename(agentPath, path.extname(agentPath));
+        const ext = path.extname(agentPath);
+        const filename = path.basename(agentPath, ext);
         const dirname = path.basename(path.dirname(agentPath));
 
         // If filename is generic (index, agent, AgentModule), use directory name
-        if (['index', 'agent', 'agentmodule'].includes(filename.toLowerCase())) {
+        const lowerFilename = filename.toLowerCase();
+        if (['index', 'agent', 'agentmodule'].includes(lowerFilename)) {
             return dirname;
         }
 
-        // Remove Agent suffix and convert to kebab-case
-        return filename
-            .replace(/Agent$/, '')
-            .replace(/([A-Z])/g, '-$1')
-            .toLowerCase()
-            .replace(/^-/, '');
+        // If the filename contains "agent" but it's not JUST "agent", 
+        // we might have something like "my-cool-agent.ts"
+        let name = filename;
+        if (lowerFilename.endsWith('agent') && lowerFilename !== 'agent') {
+            name = filename.slice(0, -5); // Remove "agent" or "Agent"
+        }
+
+        // Convert CamelCase/PascalCase to kebab-case
+        return name
+            .replace(/([a-z])([A-Z])/g, '$1-$2')
+            .replace(/[\s_]+/g, '-')
+            .toLowerCase();
     }
 
     /**

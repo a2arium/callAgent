@@ -261,8 +261,15 @@ export async function buildAgentIndex(options: BuildAgentIndexOptions = {}): Pro
 
         const existingModule = primaryModuleByAgent.get(name);
         if (existingModule) {
-            if (path.resolve(existingModule) !== path.resolve(modulePath)) {
-                warnings.push(`Duplicate agent name detected: "${name}". Keeping first occurrence and skipping ${modulePath}`);
+            const currentResolved = path.resolve(modulePath);
+            const existingResolved = path.resolve(existingModule);
+
+            if (currentResolved !== existingResolved) {
+                warnings.push(
+                    `Duplicate agent name detected: "${name}". ` +
+                    `Keeping first occurrence (${toPosix(path.relative(cwd, existingResolved))}) ` +
+                    `and skipping ${toPosix(path.relative(cwd, currentResolved))}`
+                );
             }
             continue;
         }
