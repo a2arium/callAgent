@@ -93,9 +93,9 @@ async function initializeCacheServices(): Promise<{
     prisma: PrismaClient;
 }> {
     try {
-        const connectionString = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+        const connectionString = process.env.MEMORY_DATABASE_URL;
         if (!connectionString) {
-            throw new Error('MEMORY_DATABASE_URL (or DATABASE_URL) environment variable is not set.');
+            throw new Error('MEMORY_DATABASE_URL environment variable is not set.');
         }
         const config = getSafePgConfig(connectionString);
         const adapter = new PrismaPg(config);

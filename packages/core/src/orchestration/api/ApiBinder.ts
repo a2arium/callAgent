@@ -26,6 +26,7 @@ export interface ApiBinderDependencies {
     taskCreationMutex: { runExclusive: <T>(key: string, fn: () => Promise<T>) => Promise<T> };
     backgroundTaskPromises: Set<Promise<void>>;
     handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }) => Promise<void>;
+    handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
 }
 
 export class ApiBinder {
@@ -42,6 +43,37 @@ export class ApiBinder {
         const { tenantId, sessionId } = params;
         const agentId = params.agentId ?? ((ctx as any).agentId as string) ?? 'default';
         const flushMentalState = params.flushMentalState;
+
+        // Ensure __autoExecuteTool is attached for async tool execution
+        // This is needed because startTask uses an external initialContext that doesn't have it
+        if (typeof (ctx as any).__autoExecuteTool !== 'function' && this.deps.handleToolCompleted) {
+            const handleToolCompleted = this.deps.handleToolCompleted;
+            (ctx as any).__autoExecuteTool = async (tId: string, sId: string, token: string, toolName: string, args: unknown) => {
+                try {
+                    let result: unknown;
+                    if (toolName.startsWith('mcp:')) {
+                        const parts = toolName.slice(4).split('.');
+                        if (parts.length >= 2) {
+                            const serverName = parts[0];
+                            const mcpToolName = parts.slice(1).join('.');
+                            if (typeof (ctx as any).llm?.callMcpTool === 'function') {
+                                result = await (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any);
+                            } else {
+                                throw new Error(`MCP execution not supported by current LLM adapter for tool: ${toolName}`);
+                            }
+                        } else {
+                            throw new Error(`Invalid MCP tool name format: ${toolName}. Expected mcp:server.tool`);
+                        }
+                    } else {
+                        result = await ctx.tools.invoke(toolName, args);
+                    }
+                    await handleToolCompleted({ tenantId: tId, taskId: sId, token, result });
+                } catch (error) {
+                    const errorResult = { error: true, message: error instanceof Error ? error.message : String(error) };
+                    await handleToolCompleted({ tenantId: tId, taskId: sId, token, result: errorResult });
+                }
+            };
+        }
 
         // Artifacts Factory
         if (!(ctx as any).artifacts) {
@@ -165,38 +197,62 @@ export class ApiBinder {
         };
 
         // requestTool implementation
-        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => {
-            // ... Similar logic ...
-            // For brevity in this tool call, implementing key parts. 
-            // Logic is very similar to TaskEngine, just using TaskStateUtils and deps.
-            // I'll replicate core logic properly.
-            if (!this.deps.sessionManager) throw new Error('Session manager not configured');
-            const snap = await this.deps.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const token = uuidv4();
-            const toolsNow = getPendingTools(base) as any;
-            toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
-
-            console.log('[DEBUG-ApiBinder] requestTool token:', token);
-            console.log('[DEBUG-ApiBinder] toolsNow keys:', Object.keys(toolsNow));
-
-            if (opts?.setToken || opts?.setStage) {
-                toolsNow[token].options = {
-                    setToken: opts.setToken,
-                    setStage: opts.setStage
-                };
+        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { awaitCompletion?: boolean; onCompleted?: string; setToken?: boolean; setStage?: string }) => {
+            if (opts?.awaitCompletion === true) {
+                // Check if it's an MCP tool call
+                if (toolName.startsWith('mcp:')) {
+                    const parts = toolName.slice(4).split('.');
+                    if (parts.length >= 2) {
+                        const serverName = parts[0];
+                        const mcpToolName = parts.slice(1).join('.');
+                        if (typeof (ctx as any).llm?.callMcpTool === 'function') {
+                            return (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any);
+                        } else {
+                            throw new Error(`MCP execution not supported by current LLM adapter for tool: ${toolName}`);
+                        }
+                    } else {
+                        throw new Error(`Invalid MCP tool name format: ${toolName}. Expected mcp:server.tool`);
+                    }
+                }
+                return (ctx as any).tools.invoke(toolName, args);
             }
+            // Async tool request path: enqueue and let background handler execute
+            if (!this.deps.sessionManager) throw new Error('Session manager not configured');
+            const token = uuidv4();
 
             try { await flushMentalState(); } catch { /* best-effort */ }
-            const expected = snap?.wmVersion ?? BigInt(0);
-            const next = setPendingTools(base, toolsNow);
-            await this.deps.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected, snapshot: next });
+
+            // Use saveWithRetry to avoid CAS_MISMATCH after flushMentalState bumps version
+            await this.deps.snapshotRepo.saveWithRetry({
+                tenantId, sessionId,
+                agentId: (ctx as any).agentId || 'default',
+                mutate: (baseSnap) => {
+                    const toolsNow = getPendingTools(baseSnap) as any;
+                    toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
+                    if (opts?.setToken || opts?.setStage) {
+                        toolsNow[token].options = { setToken: opts.setToken, setStage: opts.setStage };
+                    }
+                    return setPendingTools(baseSnap, toolsNow);
+                }
+            });
             await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
 
             // Auto-update optimization logic (skipped details for brevity but crucial for feature parity... I should include if replacing)
             // ... (Auto token/stage update logic) ...
 
             (ctx as any).__wmSavedThisTurn = true;
+
+            // Trigger async auto-execution in the background
+            if (typeof (ctx as any).__autoExecuteTool === 'function') {
+                // Don't await - let it run in the background, but track the promise
+                const toolPromise = (ctx as any).__autoExecuteTool(tenantId, sessionId, token, toolName, args).catch((e: Error) => {
+                    log.error('[ApiBinder] Background tool execution failed', { token, toolName, error: e.message });
+                }).finally(() => {
+                    this.deps.backgroundTaskPromises.delete(toolPromise);
+                });
+                this.deps.backgroundTaskPromises.add(toolPromise);
+            }
+
             return { token } as any;
         };
 
@@ -373,7 +429,15 @@ export class ApiBinder {
             // Note: When awaitCompletion=false and no inbox, A2AService will call handleChildCompleted via notification
 
             if (result && typeof result === 'object') {
-                Object.assign(handle, result);
+                for (const key of Object.keys(result)) {
+                    if (key !== 'token') {
+                        try {
+                            (handle as any)[key] = (result as any)[key];
+                        } catch (e) {
+                            // Skip properties that cannot be set (like read-only descriptors)
+                        }
+                    }
+                }
                 return { handle, token };
             }
             return { handle, token };
@@ -410,7 +474,7 @@ export class ApiBinder {
                     parentChildToken: token,
                     awaitCompletion: false,
                     skipFlush: true
-                } as any).catch(async (e) => {
+                } as any).catch(async (e: any) => {
                     await this.deps.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
                         taskId: sessionId,
                         childAgent: child.agent,

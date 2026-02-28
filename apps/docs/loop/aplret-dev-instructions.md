@@ -240,8 +240,9 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 
 6) HOW TO THINK (TURN TEMPLATES)
 - If you need data from a tool/API:
-  Turn N: Policy→Intent(fetch), Shield, Execution→invoke tool, Transition→await_tool(exec.action.token).
+  Turn N: Policy→Intent(fetch), Shield, Execution→invoke tool via `requestTool({ awaitCompletion: false })`, extract `token = handle.token`, Transition→`await_tool(token)`.
   Turn N+1: Perception validates tool result from inbox; Learning writes validated result to M; Policy chooses next Intent (e.g., fetch more if invalid/incomplete; otherwise proceed).
+  (Or you can use `requestTool({ awaitCompletion: true })` for synchronous inline execution).
 - For user input:
   Turn N: prompt + requestInput → await_input(exec.action.token).
   Turn N+1: Perception validates input; Learning updates M; Policy decides next step.
@@ -254,6 +255,7 @@ You are an A-P-L-R-E-T agent operating in discrete TURNS. Follow these hard rule
 - Perception must produce normalized observation objects (e.g., {text, eventType, resumeToken?, meta?}).
 - Learning must return a NEW M (immutable update) that includes everything Policy will need next turn.
 - Execution returns either ask_user/tool/subagent/internal and may include tokens in exec.action/result; control is tracked via env.pending/env.control. Execution never mutates M.
+- **Tools API**: Both regular and MCP tools (`mcp:server.tool`) use the unified `requestTool` API.
 
 8) WHEN IN DOUBT
 - Prefer gathering/validating in a FUTURE TURN rather than mixing steps.
@@ -320,7 +322,9 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
     return { eventType: 'idle' };
   },
 
-  learning: (prev, _action, obs): MentalState<Sensory> => ({
+  // ⚠️ IMPORTANT: learning receives (prev, prevAction, obs, ...) — NOT (prev, obs)!
+  // The 2nd arg is prevAction (often unused). The perception output is the 3rd arg.
+  learning: (prev, _prevAction, obs): MentalState<Sensory> => ({
     ...prev,
     memory: {
       ...prev.memory,
@@ -432,8 +436,10 @@ The `config` field in your manifest is available throughout your agent implement
 **In Policy, Shield, and Execution modules** (via `ctx.config.manifestConfig`):
 
 ```typescript
-policy: (m, ctx) => {
-  const cfg = ctx.config.manifestConfig as { enableValidation?: boolean };
+// Note: Policy receives (m, mem, llm) — NOT (m, ctx).
+// Use mem.read() for config access or pass config through M via Learning.
+policy: (m) => {
+  const cfg = m.memory?.config as { enableValidation?: boolean };
   
   if (cfg?.enableValidation) {
     // Use validation logic
@@ -850,11 +856,16 @@ perception: (env: EnvironmentState<MyConfig>, alpha) => {
 
 ### Learning
 
+> [!WARNING]
+> The `learning` module's 2nd argument is `prevAction`, **NOT** the perception output.
+> The perception output `obs` is the **3rd** argument. Writing `learning: (prev, obs) => ...`
+> silently receives `prevAction` as `obs` (TypeScript won't warn — fewer params are always accepted).
+
 ```typescript
 learning: (
-  prevMentalState: MentalState, 
-  prevAction: ProposedAction | undefined, 
-  obs: Observation,
+  prevMentalState: MentalState,
+  prevAction: ProposedAction | undefined,  // ← often unused, but DO NOT skip!
+  obs: Observation,                        // ← perception output is HERE (3rd arg)
   rPrev?: number
 ) => MentalState | Promise<MentalState>
 ```
@@ -1109,12 +1120,83 @@ Note: Examples below assume the upcoming `ShieldOutcome` API (pass/transform/vet
 ### Execution
 
 ```typescript
-execution: (intent: ProposedAction, ctx: TaskContext, m: MentalState) => Promise<ExecutableAction>
+execution: (intent: ProposedAction, ctx: TaskContext, mem: MemoryReader, m: MentalState) => Promise<{ action: ExecutableAction; result: ExecResult }>
 ```
 
-**Purpose**: Map intents to effects using the **stage dispatcher** and **runEffect()** for safety.
+**Purpose**: Map intents to effects using the **stage dispatcher**. 
+
+The engine exposes a unified API `ctx.requestTool` capable of running both regular tools and external MCP tools. Since tools return data asynchronously to ensure loop correctness, you can choose inline blocking (`awaitCompletion: true`) or async durable execution (`awaitCompletion: false`).
+
+```typescript
+execution: async (intent, ctx) => {
+  // Option 1: Synchronous tool execution (blocks loop)
+  if (intent.kind === 'call_tool_sync') {
+    const result = await ctx.requestTool(intent.toolName, intent.args, { awaitCompletion: true });
+    return {
+      action: { kind: 'internal', done: true },
+      result: { status: 'ok', data: result }
+    };
+  }
+
+  // Option 2: Asynchronous tool execution (suspends loop)
+  if (intent.kind === 'call_tool_async') {
+    // Both standard and MCP tools use this uniform signature.
+    // E.g., intent.toolName = 'mcp:github.list_repos'
+    const handle = await ctx.requestTool(intent.toolName, intent.args, { awaitCompletion: false });
+    return {
+      action: { kind: 'tool', token: handle.token },
+      result: { status: 'ok', toolId: intent.toolName }
+    };
+  }
+}
+```
 
 See [Appendix A: Complete Implementation Example](#appendix-a-complete-implementation-example) for full code.
+
+### Setting up Tools and MCPs
+
+To use tools with an APLRET agent, you register them in the `llmConfig` during agent creation. This includes both framework-native `ToolDefinition` objects and external MCP (Model Context Protocol) servers.
+
+```typescript
+import { createAgent, type ToolDefinition } from '@a2arium/callagent-core';
+
+// 1. Define a standard tool
+const myTool: ToolDefinition = {
+  name: 'my_standard_tool',
+  description: 'A custom framework-level tool',
+  parameters: { type: 'object', properties: { input: { type: 'string' } } },
+  callFunction: async (args) => ({ result: `Processed ${args.input}` })
+};
+
+export const agent = createAgent({
+  // ...
+  llmConfig: {
+    provider: 'openai',
+    modelAliasOrName: 'gpt-4o',
+    
+    // 2. Register standard tools
+    initialTools: [myTool],
+    
+    // 3. Configure external MCP servers
+    mcpServers: {
+      github: {
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-github'],
+        env: { GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN }
+      }
+    }
+  },
+  
+  // Now Policy can decide to use 'my_standard_tool' or 'mcp:github.list_repos'
+  // and Execution can invoke them via ctx.requestTool()
+  execution: async (intent, ctx) => {
+    if (intent.kind === 'use_github') {
+      const handle = await ctx.requestTool('mcp:github.list_repos', {}, { awaitCompletion: false });
+      return { action: { kind: 'tool', token: handle.token }, result: { status: 'ok' } };
+    }
+  }
+});
+```
 
 ### Transition
 

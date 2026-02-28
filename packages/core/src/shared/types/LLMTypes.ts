@@ -25,6 +25,10 @@ export interface ILLMCaller {
     getMessages?: (includeSystem?: boolean) => unknown;
     /** Optional: set conversation messages (used on restore) */
     setMessages?: (messages: unknown) => void;
+    /** Direct MCP tool execution bypasses LLM inference */
+    callMcpTool?(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown>;
+    /** Get available schemas from an MCP server */
+    getMcpServerToolSchemas?(serverName: string): Promise<Record<string, unknown>>;
 }
 
 /**
@@ -91,4 +95,11 @@ export type LLMConfig = {
     usageCallback?: (usage: Usage) => void;
     historyMode?: 'stateless' | 'dynamic' | 'full';
     defaultSettings?: Record<string, any>; // Match library settings type
+    mcpServers?: {
+        [serverName: string]: {
+            command: string;
+            args?: string[];
+            env?: Record<string, string>;
+        } | undefined;
+    };
 }; 

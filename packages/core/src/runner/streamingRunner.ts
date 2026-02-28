@@ -46,6 +46,7 @@ type StreamingOptions = {
     outputFile?: string;
     tenantId?: string; // CLI-specified tenant override
     resolveDeps?: boolean; // Whether to resolve dependencies (default: true)
+    maxTurns?: number; // Override the default maxTurns
 };
 
 /**
@@ -100,11 +101,19 @@ export async function runAgentWithStreaming(
 
     // Initialize Services
     const runnerState = new RunnerStateService();
-    const toolService = new ToolExecutionService(); // Can be populated with durable handlers later?
+    const toolService = new ToolExecutionService();
 
-    // Durable handlers will be registered to HandlerRegistry, but ToolExecutionService 
-    // is ready for context-level tool execution if we decide to move it there.
-    // For now we keep it empty or initialize with defaults.
+    // Register local tools from llmConfig into the ToolExecutionService
+    // so ctx.requestTool('toolName', ..., { awaitCompletion: true }) can find them
+    const configTools = (plugin.llmConfig as any)?.tools || (plugin.llmConfig as any)?.initialTools;
+    if (configTools && Array.isArray(configTools)) {
+        for (const tool of configTools) {
+            const fn = tool.invoke || tool.callFunction;
+            if (tool.name && typeof fn === 'function') {
+                toolService.register(tool.name, fn);
+            }
+        }
+    }
 
     // Initialize stream transport
     const transport = new StreamTransport({
@@ -166,8 +175,8 @@ export async function runAgentWithStreaming(
     const ensureAgentResultCache = async (): Promise<AgentResultCache> => {
         if (agentResultCache) return agentResultCache;
         try {
-            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
-            if (!dbUrl) throw new Error('MEMORY_DATABASE_URL (or DATABASE_URL) is required for AgentResultCache');
+            const dbUrl = process.env.MEMORY_DATABASE_URL;
+            if (!dbUrl) throw new Error('MEMORY_DATABASE_URL is required for AgentResultCache');
             if (typeof dbUrl !== 'string') {
                 throw new Error(`Invalid type for database URL in streamingRunner: expected string, received ${typeof dbUrl}`);
             }
@@ -287,7 +296,16 @@ export async function runAgentWithStreaming(
         recordUsage: (usage: unknown): void => {
             agentLogger.warn('recordUsage is stubbed in local runner', { usage });
         },
-        memory: memoryRegistry
+        memory: memoryRegistry,
+        requestTool: async (toolName: string, args: unknown, opts?: { awaitCompletion?: boolean; onCompleted?: string }) => {
+            if (opts?.awaitCompletion === true) {
+                // Delegate to the local tool service for synchronous execution
+                return toolService.asContextCapability().invoke(toolName, args);
+            }
+            // Async tool requests are not fully supported in local runner (no durable session)
+            agentLogger.warn('requestTool: async mode is not fully supported in local runner; returning stub token', { toolName });
+            return { token: `local-stub-${Date.now()}` } as any;
+        }
     };
 
     // Replace the LLM stub with a real implementation BEFORE creating memory registry
@@ -509,7 +527,10 @@ export async function runAgentWithStreaming(
                 if (wmCap) {
                     runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
                 }
-                await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx });
+                await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
+                // Wait for any background tool executions (e.g. async requestTool) to complete
+                // This is critical for await_tool outcomes where the loop exits but __autoExecuteTool is still running
+                await engine.waitForBackgroundTasks(60000);
                 logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
                 if (!options.isStreaming) {
                     logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);

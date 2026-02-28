@@ -716,8 +716,8 @@ export async function runLoop<
                 : [];
             if (observations.length > 0) {
                 inbox.all.push(...observations);
-                inbox.current = [...observations];
             }
+            inbox.current = [...observations];
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
 
@@ -835,6 +835,48 @@ export async function runLoop<
                     // Convert await_child to continue so loop proceeds
                     outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
                     // Don't break - continue to next turn
+                    continue;
+                }
+            }
+
+            // ✅ FIX: Same pattern for await_tool — if tool result was already injected
+            // into inbox by handleToolCompleted (running concurrently in background),
+            // continue the loop instead of exiting.
+            if (outcome.kind === 'await_tool' && (outcome as any).token) {
+                const awaitToken = (outcome as any).token;
+
+                // Check if tool result is already in the inbox
+                let toolResultInInbox = inbox.all.some(
+                    (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
+                ) || env.inbox.all.some(
+                    (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
+                );
+
+                if (toolResultInInbox) {
+                    log.info('🔄 SYNC TOOL: Tool result already in inbox, continuing loop instead of awaiting', {
+                        taskId,
+                        runId,
+                        loopCounter: turn,
+                        envTurn: (env as any).turn,
+                        awaitToken: awaitToken?.substring(0, 15)
+                    });
+                    // Move tool completion to current inbox for next turn
+                    const toolObs = inbox.all.find(
+                        (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
+                    ) || env.inbox.all.find(
+                        (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
+                    );
+                    if (toolObs) {
+                        inbox.current = [toolObs];
+                    }
+
+                    // Remove from pending tools
+                    if (env.pending && (env.pending as any).tools && awaitToken) {
+                        delete (env.pending as any).tools[awaitToken];
+                    }
+
+                    // Convert await_tool to continue so loop proceeds
+                    outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
                     continue;
                 }
             }

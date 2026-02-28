@@ -64,6 +64,7 @@ export class TurnRunner {
         }
     ): Promise<TaskEntity> {
         const { tenantId, sessionId, trigger, isStreaming } = params;
+        console.log(`[TurnRunner] runTurn called: trigger=${trigger}, sessionId=${sessionId}, toolToken=${params.toolToken}`);
 
         // Telemetry state
         let turnNode: TurnNode | undefined;
@@ -312,7 +313,7 @@ export class TurnRunner {
                 } else if (manifestBudgets && typeof manifestBudgets === 'object') {
                     loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
                 } else {
-                    loopOpts = { maxTurns: 1 };
+                    loopOpts = { maxTurns: 50 };
                 }
 
                 if (typeof loopOpts.maxTurns === 'number') {

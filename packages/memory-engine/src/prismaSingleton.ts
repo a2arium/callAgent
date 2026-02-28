@@ -21,7 +21,8 @@ export async function getMemoryPrismaClient(): Promise<PrismaClientType> {
             singletonPrismaClient = new PrismaClient({ adapter }) as any;
         } else {
             // Fallback for cases where DB is not needed or initialized later
-            singletonPrismaClient = new PrismaClient() as any;
+            // DO NOT create PrismaClient without options as it throws in this version
+            return null as any;
         }
     }
     return singletonPrismaClient!;

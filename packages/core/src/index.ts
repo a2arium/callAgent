@@ -117,6 +117,7 @@ export {
 // Event bus and task channel helpers
 export { eventBus } from './eventbus/inMemoryEventBus.js';
 export { taskChannel } from './eventbus/taskEventEmitter.js';
+export { outboxPublisher } from './eventbus/outboxPublisher.js';
 
 // Telemetry exports
 export { telemetry, TelemetryCollector } from './telemetry/TelemetryCollector.js';

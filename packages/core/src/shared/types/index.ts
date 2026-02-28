@@ -336,6 +336,23 @@ export type TaskContext = {
             setStage?: string
         }
     ) => Promise<import('../../orchestration/Handles.js').InputHandle>;
+
+    /**
+     * Request a tool to be executed asynchronously.
+     * @param toolName - Name of the tool to request
+     * @param args - Arguments to pass to the tool
+     * @param opts - Options including awaitCompletion
+     */
+    requestTool: <TArgs = unknown>(
+        toolName: string,
+        args: TArgs,
+        opts?: {
+            awaitCompletion?: boolean;
+            onCompleted?: string;
+            onFailed?: string;
+        }
+    ) => Promise<import('../../orchestration/Handles.js').TaskHandle>;
+
     allTasks?: (
         children: Array<{ agent: string; input: unknown }>,
         opts?: { withTimeoutMs?: number; cancelRemaining?: boolean; onAllCompleted?: string; onAnyFailed?: string }

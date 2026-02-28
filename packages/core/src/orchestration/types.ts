@@ -39,4 +39,7 @@ export type StartTaskParams = {
     tenantId?: string;
     initialContext?: TaskContext; // use prebuilt context when provided
     parentTelemetryNodeId?: string; // Telemetry ID for sub-agent linking
+    options?: {
+        maxTurns?: number;
+    };
 };

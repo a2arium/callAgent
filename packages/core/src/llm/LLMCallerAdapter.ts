@@ -59,29 +59,31 @@ export class LLMCallerAdapter implements ILLMCaller {
         });
 
 
+        // Prepare tools array
+        const initialTools = config.initialTools || [];
+        const combinedTools = [...initialTools];
+
+        if (config.mcpServers) {
+            combinedTools.push(config.mcpServers as any);
+        }
+
         // Initialize the LLMCaller from the callllm library
-        // Note: Cast to 'any' to bypass TypeScript's strict checking on the constructor
-        // In a real implementation, we would need to ensure our types exactly match callllm
-        this.caller = new (LLMCaller as any)(
-            config.provider,
+        this.caller = new LLMCaller(
+            config.provider as any,
             config.modelAliasOrName,
             config.systemPrompt || 'You are a helpful assistant.',
             {
                 apiKey: config.apiKey, // If undefined, callllm will use environment variables
                 historyMode: config.historyMode, // Pass the historyMode setting if provided
-                usageCallback, // Set the usageCallback if provided to automatically track usage
-                telemetryCollector: callllmTelemetryCollector // Use bridge for telemetry
+                usageCallback: usageCallback as any, // Cast: Usage shape differs between callagent-core and callllm
+                telemetryCollector: callllmTelemetryCollector, // Use bridge for telemetry
+                tools: combinedTools // Pass initial tools array
             }
         );
 
         // Apply any default settings
         if (config.defaultSettings) {
             this.caller.updateSettings(config.defaultSettings);
-        }
-
-        // Register initial tools if provided
-        if (config.initialTools && config.initialTools.length > 0) {
-            this.caller.addTools(config.initialTools);
         }
     }
 
@@ -194,6 +196,26 @@ export class LLMCallerAdapter implements ILLMCaller {
      */
     updateSettings(settings: Record<string, any>): void {
         this.caller.updateSettings(settings);
+    }
+
+    /**
+     * Execute an MCP tool directly, bypassing the LLM
+     */
+    async callMcpTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+        if (typeof (this.caller as any).callMcpTool === 'function') {
+            return (this.caller as any).callMcpTool(serverName, toolName, args);
+        }
+        throw new Error('Underlying LLMCaller does not support callMcpTool');
+    }
+
+    /**
+     * Get JSON schemas for tools provided by an MCP server
+     */
+    async getMcpServerToolSchemas(serverName: string): Promise<Record<string, unknown>> {
+        if (typeof (this.caller as any).getMcpServerToolSchemas === 'function') {
+            return (this.caller as any).getMcpServerToolSchemas(serverName);
+        }
+        throw new Error('Underlying LLMCaller does not support getMcpServerToolSchemas');
     }
 
     getMessages(includeSystem?: boolean): unknown {

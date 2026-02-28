@@ -1,0 +1,18 @@
+{
+    "name": "@examples/mcp-agent-demo",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "main": "dist/test-mcp-agent.js",
+    "scripts": {
+        "build": "tsc",
+        "dev": "NODE_OPTIONS=\"--experimental-vm-modules --no-warnings\" tsx test-mcp-agent.ts"
+    },
+    "dependencies": {
+        "@a2arium/callagent-core": "workspace:*"
+    },
+    "devDependencies": {
+        "tsx": "^4.19.3",
+        "typescript": "^5.8.3"
+    }
+}

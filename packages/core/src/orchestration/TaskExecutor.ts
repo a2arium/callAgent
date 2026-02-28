@@ -155,10 +155,18 @@ export class TaskExecutor {
         const loopKeepAlive = setInterval(() => { }, 1000);
 
         try {
-            const result = await runLoop(ctx, M, env, overrides, loopOpts);
-            mNext = result.M;
-            outcome = result.outcome;
-            metrics = result.metrics;
+            // ✅ FIX: Register active loop context so handleToolCompleted can inject results
+            // instead of starting a redundant runTurn
+            const { TaskEngine } = await import('./taskEngine.js');
+            TaskEngine.__activeLoopContexts.set(sessionId, ctx);
+            try {
+                const result = await runLoop(ctx, M, env, overrides, loopOpts);
+                mNext = result.M;
+                outcome = result.outcome;
+                metrics = result.metrics;
+            } finally {
+                TaskEngine.__activeLoopContexts.delete(sessionId);
+            }
         } catch (loopError) {
             console.error('[TaskExecutor] runLoop threw an error:', loopError);
             log.error('runLoop exception', { error: loopError instanceof Error ? loopError.message : String(loopError) });

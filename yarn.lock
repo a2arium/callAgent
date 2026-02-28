@@ -1081,6 +1081,16 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@examples/mcp-agent-demo@workspace:apps/examples/mcp-agent-demo":
+  version: 0.0.0-use.local
+  resolution: "@examples/mcp-agent-demo@workspace:apps/examples/mcp-agent-demo"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+    tsx: "npm:^4.19.3"
+    typescript: "npm:^5.8.3"
+  languageName: unknown
+  linkType: soft
+
 "@examples/telegram-bridge-demo@workspace:apps/examples/telegram-bridge-demo":
   version: 0.0.0-use.local
   resolution: "@examples/telegram-bridge-demo@workspace:apps/examples/telegram-bridge-demo"
@@ -7571,7 +7581,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"tsx@npm:^4.21.0":
+"tsx@npm:^4.19.3, tsx@npm:^4.21.0":
   version: 4.21.0
   resolution: "tsx@npm:4.21.0"
   dependencies:

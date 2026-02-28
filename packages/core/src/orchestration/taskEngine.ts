@@ -11,7 +11,7 @@ import { decide } from './reducer.js';
 import { applyInputProvided, getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
 import type { DurableHandlerInvoker } from './DurableHandlerInvoker.js';
 import { DurableHandlerInvokerCore } from './DurableHandlerInvoker.js';
-import { InputHandle, createTaskHandle, createGroupHandle, GroupHandle } from './Handles.js';
+import { InputHandle, createTaskHandle, createGroupHandle, type GroupHandle } from './Handles.js';
 import { getPendingTasks, setPendingTasks, getPendingGroups, setPendingGroups } from './Handles.js';
 import { globalA2AService } from './A2AService.js';
 import * as uuid from 'uuid';
@@ -125,6 +125,8 @@ class KeyedMutex {
 
 export class TaskEngine {
     static testOverrides?: TaskEngineTestOverrides;
+    // Track active loop contexts by taskId so handleToolCompleted can inject results directly
+    static __activeLoopContexts: Map<string, TaskContext> = new Map();
     private sessionManager?: SessionManager;
     private snapshotRepo?: SnapshotRepository;
     private taskExecutorInitialized = false;
@@ -156,7 +158,8 @@ export class TaskEngine {
             getSessionStorePrisma: () => this.getSessionStorePrisma(),
             taskCreationMutex: this.taskCreationMutex,
             backgroundTaskPromises: this.backgroundTaskPromises,
-            handleChildCompleted: (p) => this.handleChildCompleted(p)
+            handleChildCompleted: (p) => this.handleChildCompleted(p),
+            handleToolCompleted: (p) => this.handleToolCompleted(p)
         });
 
         this.turnRunner = new TurnRunner(
@@ -848,6 +851,32 @@ export class TaskEngine {
             VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
         };
 
+        // Seed loop budget limits if provided in params.options
+        if (params.options) {
+            (ctx as any).options = { ...(ctx as any).options, ...params.options };
+
+            try {
+                if (typeof params.options.maxTurns === 'number') {
+                    // Update base snapshot meta immediately so it persists
+                    const meta = (baseSnap as any).meta || {};
+                    const budgets = meta.budgets || {};
+                    budgets.maxTurns = params.options.maxTurns;
+                    meta.budgets = budgets;
+                    (baseSnap as any).meta = meta;
+
+                    // Also seed initial mental state meta if needed
+                    const mMeta = (M as any).meta || {};
+                    const mBudgets = mMeta.budgets || {};
+                    mBudgets.maxTurns = params.options.maxTurns;
+                    mMeta.budgets = mBudgets;
+                    (M as any).meta = mMeta;
+                }
+            } catch (err) {
+                try { (ctx as any).logger?.warn?.('TaskEngine.startTask: Failed to inject options.maxTurns', { error: err }); } catch { }
+            }
+        }
+
+
         const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
             const next = PathUtils.deletePathImmutable(obj, path);
             return { next, changed: next !== obj };
@@ -1518,16 +1547,21 @@ export class TaskEngine {
             }
         };
         (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, toolObservation);
-        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+        const saveResult = await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', { token });
-        // Always auto-resume one loop turn to consume the tool result
+
+        // Check if there's an active loop
+        const activeCtx = TaskEngine.__activeLoopContexts?.get(taskId);
+
+
+        // No active loop — auto-resume one loop turn to consume the tool result
         try {
             const agentName = (snap as any)?.agentId;
             const ctx = this.createContext({ id: taskId, input: {} });
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
 
-            const snapNow = await this.sessionManager!.load(tenantId, taskId);
-            const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
+            // Use 'next' directly - it's the snapshot we just saved with the observation
+            const baseNow = next as Record<string, unknown>;
             const M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
@@ -1543,17 +1577,8 @@ export class TaskEngine {
                 initialM: M,
                 snapshot: baseNow
             });
-
-            const channel = taskChannel(taskId);
-            try {
-                if (taskResult.status) {
-                    eventBus.publish(channel, {
-                        id: taskId,
-                        status: taskResult.status,
-                        final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
-                    } as any);
-                }
-            } catch { }
+            // Note: TurnRunner.runTurn already publishes the completion event via eventBus,
+            // so we don't need to publish again here.
         } catch { /* ignore resume errors */ }
     }
 
@@ -2308,7 +2333,7 @@ export class TaskEngine {
                                 loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
                                 log.debug('Resume restored budgets from manifest', loopOpts);
                             } else if (!loopOpts.maxTurns) {
-                                loopOpts = { maxTurns: 1 }; // Safety default
+                                loopOpts = { maxTurns: 50 }; // Safety default
                             }
 
                             if (typeof loopOpts.maxTurns === 'number') {
@@ -2377,7 +2402,8 @@ export class TaskEngine {
                     console.log(`[TaskEngine.handleChildCompleted] Checking groups, token=${token}, groups=${Object.keys(groups).length}`);
                 }
                 let mutated = false;
-                for (const [gToken, g] of Object.entries(groups || {})) {
+                for (const [gToken, gEntry] of Object.entries(groups || {})) {
+                    const g = gEntry as any;
                     if (g.childTokens?.includes(token)) {
                         if (process.env.DEBUG_BACKGROUND_TASKS) {
                             console.log(`[TaskEngine.handleChildCompleted] Found group ${gToken} with token ${token}, childTokens=${g.childTokens.length}`);
@@ -2386,7 +2412,7 @@ export class TaskEngine {
                         (g.results as any)[token] = { ok: true, value: result };
                         mutated = true;
                         // Check if all children have results recorded
-                        const allDone = g.childTokens.every(ct => (g.results as any)[ct] !== undefined);
+                        const allDone = g.childTokens.every((ct: string) => (g.results as any)[ct] !== undefined);
                         if (process.env.DEBUG_BACKGROUND_TASKS) {
                             console.log(`[TaskEngine.handleChildCompleted] Group ${gToken} allDone=${allDone}, results=${Object.keys((g.results as any) || {}).length}/${g.childTokens.length}`);
                         }
@@ -2586,7 +2612,8 @@ export class TaskEngine {
         const base2 = (snap2.snapshot as Record<string, unknown>) || {};
         const groups = getPendingGroups(base2);
         let mutated = false;
-        for (const [gToken, g] of Object.entries(groups)) {
+        for (const [gToken, gEntry] of Object.entries(groups)) {
+            const g = gEntry as any;
             if (g.childTokens?.includes(token)) {
                 g.results = g.results || {} as any;
                 (g.results as any)[token] = { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2787,6 +2814,7 @@ export class TaskEngine {
             throw: (code, message) => { throw new Error(`${code}: ${message}`); },
             sendTaskToAgent: async () => { throw new Error('A2A not available in basic task engine'); },
             requestInput: async () => { throw new Error('requestInput not available in basic task engine'); },
+            requestTool: async () => { throw new Error('requestTool not available in basic task engine'); },
 
             // (legacy methods removed)
             vars: {
@@ -2801,6 +2829,41 @@ export class TaskEngine {
             // (legacy goals API removed)
             recall: async () => { throw new Error('Memory not available in basic task engine'); },
             remember: async () => { throw new Error('Memory not available in basic task engine'); }
+        };
+
+        // Attach auto-executor for requestTool({ awaitCompletion: false })
+        (ctx as any).__autoExecuteTool = async (tId: string, sId: string, token: string, toolName: string, args: unknown) => {
+            try {
+                let result: unknown;
+                // Check if it's an MCP tool call (format: mcp:serverName.toolName)
+                if (toolName.startsWith('mcp:')) {
+                    const parts = toolName.slice(4).split('.');
+                    if (parts.length >= 2) {
+                        const serverName = parts[0];
+                        const mcpToolName = parts.slice(1).join('.');
+                        if (typeof (ctx as any).llm?.callMcpTool === 'function') {
+                            result = await (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any);
+                        } else {
+                            throw new Error(`MCP execution not supported by current LLM adapter for tool: ${toolName}`);
+                        }
+                    } else {
+                        throw new Error(`Invalid MCP tool name format: ${toolName}. Expected mcp:server.tool`);
+                    }
+                } else {
+                    // Regular tool execution
+                    result = await ctx.tools.invoke(toolName, args);
+                }
+
+                // Feed result back into the engine using handleToolCompleted
+                await this.handleToolCompleted({ tenantId: tId, taskId: sId, token, result });
+            } catch (error) {
+                // Return error object as the result so the agent sees the failure
+                const errorResult = {
+                    error: true,
+                    message: error instanceof Error ? error.message : String(error)
+                };
+                await this.handleToolCompleted({ tenantId: tId, taskId: sId, token, result: errorResult });
+            }
         };
 
         // ✅ FIX: Attach session manager reference for loop to reload inbox on await_child
@@ -2860,7 +2923,8 @@ export class TaskEngine {
                     const { getMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
 
                     // Only attempt to use SQL memory if we have a session prisma or a database URL is configured
-                    const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
+                    const dbUrl = process.env.MEMORY_DATABASE_URL;
+                    if (!dbUrl) throw new Error('MEMORY_DATABASE_URL is required for AgentResultCache');
                     const sessionPrisma = (this.sessionManager as any)?.store?.prisma;
 
                     if (sessionPrisma || dbUrl) {

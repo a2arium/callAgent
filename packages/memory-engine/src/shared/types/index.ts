@@ -35,10 +35,10 @@ export * from './artifacts.js'; // Export artifacts types
 export * from './SerializationTypes.js';
 
 // MLO Configuration Types
-export * from '@a2arium/callagent-memory-engine';
+export * from '../../lifecycle/config/index.js';
 
 // MLO Interface Types
-export * from '@a2arium/callagent-memory-engine';
+export * from '../../lifecycle/interfaces/index.js';
 
 // --- Agent Card (Enhanced for A2A) ---
 /**

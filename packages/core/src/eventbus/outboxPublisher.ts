@@ -22,8 +22,12 @@ export class OutboxPublisher {
         if (prisma) {
             this.prisma = prisma;
         } else {
-            const dbUrl = process.env.MEMORY_DATABASE_URL || process.env.DATABASE_URL;
-            if (!dbUrl) throw new Error('MEMORY_DATABASE_URL (or DATABASE_URL) required for OutboxPublisher');
+            const dbUrl = process.env.MEMORY_DATABASE_URL;
+            if (!dbUrl) {
+                log.warn('MEMORY_DATABASE_URL not found. OutboxPublisher will be disabled.');
+                this.prisma = null as any;
+                return;
+            }
             console.log(`[OutboxPublisher] Initializing with: ${dbUrl.split('@')[1] || 'hidden'}`);
             if (typeof dbUrl !== 'string') {
                 throw new Error(`Invalid type for database URL: expected string, received ${typeof dbUrl}. Check your environment variables.`);
@@ -37,6 +41,10 @@ export class OutboxPublisher {
     }
 
     start(intervalMs = 500): void {
+        if (!this.prisma) {
+            log.debug('OutboxPublisher start() ignored: no prisma client');
+            return;
+        }
         if (this.running) return;
         this.running = true;
         const tick = async () => {
@@ -93,6 +101,7 @@ export class OutboxPublisher {
     }
 
     private async publishOnce(): Promise<void> {
+        if (!this.prisma) return;
         // Simple polling publisher; production should use NOTIFY/LISTEN or job queue
         const rows: OutboxRow[] = await this.prisma.outbox.findMany({
             orderBy: { createdAt: 'asc' },

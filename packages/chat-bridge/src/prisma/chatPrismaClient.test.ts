@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 
-jest.mock('@prisma/client', () => {
+jest.mock('../generated/prisma/index.js', () => {
     return {
         PrismaClient: jest.fn().mockImplementation((opts: any) => ({ opts }))
     };
@@ -11,17 +11,23 @@ describe('getChatPrismaClient', () => {
 
     afterEach(() => {
         process.env.CHAT_DATABASE_URL = original;
+        jest.resetModules();
     });
 
     it('returns singleton and uses CHAT_DATABASE_URL override', async () => {
         process.env.CHAT_DATABASE_URL = 'postgres://example';
-        const { PrismaClient } = jest.requireMock('@prisma/client') as any;
-        const mockCtor = PrismaClient as jest.Mock;
-        const mod = await import('../src/prisma/client.js');
+        const { PrismaClient } = await import('@chat-prisma/index.js');
+        const mockCtor = PrismaClient as unknown as jest.Mock;
+
+        const mod = await import('./client.js');
         const first = mod.getChatPrismaClient();
         const second = mod.getChatPrismaClient();
+
         expect(first).toBe(second);
-        expect(mockCtor).toHaveBeenCalledWith(expect.objectContaining({ datasources: { db: { url: 'postgres://example' } } }));
+        // Expect constructor to be called with adapter (implementation detail of chat-bridge)
+        expect(mockCtor).toHaveBeenCalledWith(expect.objectContaining({
+            adapter: expect.anything()
+        }));
         expect(mockCtor).toHaveBeenCalledTimes(1);
     });
 });

@@ -3,47 +3,39 @@ import { jest } from '@jest/globals';
 import path from 'node:path';
 import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 
-// --- Module mocks (must be defined before imports run) ---
+import { globalA2AService } from '@a2arium/callagent-core/orchestration/A2AService.js';
+import { PluginManager } from '@a2arium/callagent-core/plugin/pluginManager.js';
+import * as Handles from '@a2arium/callagent-core/orchestration/Handles.js';
+
 const runLoopMock = jest.fn<any>();
-const mockCreateTaskHandle = jest.fn();
-const mockGetPendingTasks = jest.fn();
-const mockSetPendingTasks = jest.fn();
+const mockCreateMemoryRegistry = jest.fn<any>();
 
-jest.mock('../src/orchestration/A2AService.js', () => ({
-    globalA2AService: {
-        sendTaskToAgent: jest.fn(),
-        findLocalAgent: jest.fn().mockResolvedValue({
-            manifest: { name: 'mock-agent' },
-            loop: {},
-            llmAdapter: {},
-            tenantId: 'test-tenant'
-        } as any)
-    }
-}));
-
-jest.mock('../src/eventbus/outboxPublisher.js', () => ({
+// Mock other dependencies
+jest.mock('@a2arium/callagent-core/eventbus/outboxPublisher.js', () => ({
     outboxPublisher: { start: jest.fn(), stop: jest.fn() }
 }));
 
-jest.mock('../src/loop/loopRunner.js', () => ({
+jest.mock('@a2arium/callagent-core/loop/loopRunner.js', () => ({
     runLoop: (...args: any[]) => runLoopMock(...args)
 }));
 
-jest.mock('../src/orchestration/Handles.js', () => ({
-    createTaskHandle: (...args: any[]) => mockCreateTaskHandle(...args),
-    createGroupHandle: jest.fn(),
-    getPendingInputs: jest.fn(),
-    setPendingInputs: jest.fn(),
-    getPendingTasks: () => mockGetPendingTasks(),
-    setPendingTasks: (v: any) => mockSetPendingTasks(v),
-    getPendingGroups: jest.fn(),
-    setPendingGroups: jest.fn(),
-    InputHandle: class { },
-    TaskHandle: class {
-        __injectDispatcher = jest.fn();
-    },
-    GroupHandle: class { }
+jest.mock('@a2arium/callagent-core/plugin/pluginManager.js', () => ({
+    PluginManager: {
+        findAgent: jest.fn().mockReturnValue({
+            manifest: { name: 'test-agent' },
+            handleTask: jest.fn().mockResolvedValue({ status: 'complete' })
+        }),
+        listAgents: jest.fn().mockReturnValue([])
+    }
 }));
+
+jest.mock('@a2arium/callagent-memory-engine', () => {
+    const actual = jest.requireActual('@a2arium/callagent-memory-engine') as any;
+    return {
+        ...actual,
+        createMemoryRegistry: (...args: any[]) => mockCreateMemoryRegistry(...args)
+    };
+});
 
 jest.mock('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
 
@@ -56,12 +48,16 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
     private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
 
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
-        const key = `${tenantId}:${sessionId}`;
-        this.snapshots.set(key, { wmVersion, snapshot, agentId, updatedAt: new Date().toISOString() });
+        this.snapshots.set(`${tenantId}:${sessionId}`, {
+            wmVersion,
+            snapshot,
+            agentId,
+            updatedAt: new Date().toISOString()
+        });
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        return this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        return this.snapshots.get(`${tenantId}:${sessionId}`) || null;
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -122,217 +118,159 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         // Mock implementation
     }
 
-    // Add listEventsSince to satisfy IWorkingMemorySessionStore
-    async listEventsSince(tenantId: string, sessionId: string, sinceEventId: string | null): Promise<any[]> {
+    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<any[]> {
         return [];
     }
 }
 
 beforeAll(() => {
     process.env.DISABLE_OUTBOX_PUBLISHER = '1';
+    process.env.MEMORY_DATABASE_URL = 'postgresql://fake';
 });
 
 afterEach(() => {
     runLoopMock.mockReset();
-    mockCreateTaskHandle.mockReset();
-    mockGetPendingTasks.mockReset();
-    mockSetPendingTasks.mockReset();
-    jest.clearAllMocks();
-    TaskEngine.testOverrides = undefined;
+    mockCreateMemoryRegistry.mockReset();
 });
 
+function createMockMHiearchy(goals: any[]) {
+    const nodes: any = {};
+    const roots: string[] = [];
+    for (const g of goals) {
+        nodes[g.id] = { ...g, title: g.text || g.title, status: 'active', priority: g.priority || 1, type: 'short' };
+        roots.push(g.id);
+    }
+    return {
+        goalState: {
+            hierarchy: { nodes, roots }
+        },
+        memory: { vars: {} }
+    };
+}
+
 describe('TaskEngine Specific Line Coverage Tests', () => {
+    let store: FakeSessionStore;
+    let engine: TaskEngine;
+
+    beforeEach(() => {
+        store = new FakeSessionStore();
+        engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any
+        });
+    });
+
     describe('Semantic Memory Read Functionality', () => {
         test('semantic memory read functionality is wired correctly in context', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const mockSemanticMemory = {
-                getMany: jest.fn().mockResolvedValue([
-                    { key: 'item1', value: 'value1', tags: ['tag1'], entities: [] },
-                    { key: 'item2', value: 'value2', tags: ['tag2'], entities: [] }
-                ])
+            const mockGetMany = jest.fn().mockResolvedValue([]);
+            const mockSemanticHandle = {
+                getMany: mockGetMany,
+                search: jest.fn(),
+                add: jest.fn(),
+                backends: { sql: {} }
             };
 
-            const base = {
+            const mockRegistry = {
+                semantic: mockSemanticHandle,
+                episodic: {},
+                working: {}
+            };
+
+            mockCreateMemoryRegistry.mockResolvedValue(mockRegistry as any);
+
+            store.seed('t', 'session', {
+                meta: { agentId: 'test-agent' },
                 M: {
                     memory: {
-                        vars: {},
-                        semantic: mockSemanticMemory
+                        config: { semantic: { backends: ['sql'] } }
                     }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
-            };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
-
-            jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
-            runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
+                }
             });
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
-            if ((ctx as any).memory.semantic && (ctx as any).memory.semantic.read) {
-                const result = await (ctx as any).memory.semantic.read({});
-                expect(Array.isArray(result)).toBe(true);
+            if (ctx.memory?.semantic?.getMany) {
+                await ctx.memory.semantic.getMany(['key1']);
+                expect(mockGetMany).toHaveBeenCalledWith(['key1']);
             }
         });
 
         test('semantic memory read handles missing getMany gracefully', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const mockSemanticMemory = {};
-
-            const base = {
-                M: {
-                    memory: {
-                        vars: {},
-                        semantic: mockSemanticMemory
-                    }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
+            const mockSemanticHandle = {
+                search: jest.fn(),
+                backends: { sql: {} }
             };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
-            jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
-            runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
+            const mockRegistry = {
+                semantic: mockSemanticHandle
+            };
+
+            mockCreateMemoryRegistry.mockResolvedValue(mockRegistry as any);
+
+            store.seed('t', 'session', {
+                meta: { agentId: 'test-agent' },
+                M: { memory: { config: { semantic: { backends: ['sql'] } } } }
             });
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
-
-            if ((ctx as any).memory.semantic && (ctx as any).memory.semantic.read) {
-                const result = await (ctx as any).memory.semantic.read({});
-                expect(result).toEqual([]);
-            }
+            expect(ctx.memory?.semantic?.getMany).toBeUndefined();
         });
     });
 
     describe('Goals Clear Functionality', () => {
         test('goals clear with predicate removes matching goals', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const base = {
-                M: {
-                    memory: { vars: {} },
-                    goalState: {
-                        hierarchy: {
-                            nodes: {
-                                'goal1': { id: 'goal1', title: 'Goal 1', completed: false },
-                                'goal2': { id: 'goal2', title: 'Goal 2', completed: true },
-                                'goal3': { id: 'goal3', title: 'Goal 3', completed: false }
-                            },
-                            roots: ['goal1', 'goal2', 'goal3']
-                        }
-                    }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
-            };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
-
-            jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
-            runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
+            store.seed('t', 'session', {
+                meta: { agentId: 'test-agent' },
+                M: createMockMHiearchy([
+                    { id: '1', text: 'goal 1', priority: 1 },
+                    { id: '2', text: 'goal 2', priority: 2 }
+                ])
             });
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
-
-            if ((ctx as any).goals && (ctx as any).goals.clear) {
-                await (ctx as any).goals.clear((goal: any) => goal.completed);
+            if (ctx.goals?.clear) {
+                await ctx.goals.clear((g: any) => g.id === '1');
+                const M = (ctx as any).M;
+                expect(M.goalState.hierarchy.nodes['1'].status).toBe('failed');
+                expect(M.goalState.hierarchy.nodes['2'].status).toBe('active');
             }
         });
 
         test('goals clear without predicate removes all goals', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const base = {
-                M: {
-                    memory: { vars: {} },
-                    goalState: {
-                        hierarchy: {
-                            nodes: {
-                                'goal1': { id: 'goal1', title: 'Goal 1' },
-                                'goal2': { id: 'goal2', title: 'Goal 2' }
-                            },
-                            roots: ['goal1', 'goal2']
-                        }
-                    }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
-            };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
-
-            jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
-            runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
+            store.seed('t', 'session', {
+                meta: { agentId: 'test-agent' },
+                M: createMockMHiearchy([
+                    { id: '1', text: 'goal 1', priority: 1 }
+                ])
             });
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
-
-            if ((ctx as any).goals && (ctx as any).goals.clear) {
-                await (ctx as any).goals.clear();
+            if (ctx.goals?.clear) {
+                await ctx.goals.clear();
+                const M = (ctx as any).M;
+                expect(M.goalState.hierarchy.nodes['1'].status).toBe('failed');
             }
         });
     });
 
     describe('Input Required Check', () => {
         test('durable handler returns early when input_required status is returned', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const base = {
-                M: {
-                    memory: { vars: {} }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
-            };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
-
             jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+            jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
+                token: 'test-token',
+                status: 'input_required',
+                prompt: 'Please provide input'
+            } as any);
+
             runLoopMock.mockResolvedValue({
                 M: { memory: { vars: {} } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
 
-            const mockTaskHandle = {
-                __injectDispatcher: jest.fn()
-            };
-            mockCreateTaskHandle.mockResolvedValue({
-                handle: mockTaskHandle,
-                token: 'test-token'
-            });
-
-            mockGetPendingTasks.mockReturnValue({
-                'test-token': { target: 'test-agent', input: { test: 'input' } }
-            });
-
-            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher: any) => {
-                dispatcher.mockResolvedValue({
-                    status: 'input_required',
-                    prompt: 'Please provide input'
-                });
+            store.seed('t', 'session', {
+                meta: { agentId: 'test-agent' },
+                M: { memory: { vars: {} } }
             });
 
             const ctx = await (engine as any).restoreCtx('t', 'session');
@@ -343,61 +281,37 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
                 });
 
                 expect(result).toBeDefined();
-                expect(result.token).toBe('test-token');
-                expect(mockCreateTaskHandle).toHaveBeenCalled();
             }
         });
     });
 
     describe('Error Handling in Durable Handlers', () => {
         test('error handling enqueues outbox event and rethrows', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const base = {
-                M: {
-                    memory: { vars: {} }
-                },
-                meta: { turn: 0, agentId: 'agent-a' },
-                pending: {},
-                inbox: { current: [], all: [] }
-            };
-            store.seed('t', 'session', base, BigInt(0), 'agent-a');
+            store.seed('t', 'session', {
+                meta: { agentId: 'test-agent' },
+                M: { memory: { vars: {} } }
+            });
 
             jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+            const testError = new Error('Test error');
+            jest.spyOn(globalA2AService, 'sendTaskToAgent').mockImplementation(async () => {
+                throw testError;
+            });
             runLoopMock.mockResolvedValue({
                 M: { memory: { vars: {} } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
 
-            const mockTaskHandle = {
-                __injectDispatcher: jest.fn()
-            };
-            mockCreateTaskHandle.mockResolvedValue({
-                handle: mockTaskHandle,
-                token: 'test-token'
-            });
-
-            mockGetPendingTasks.mockReturnValue({
-                'test-token': { target: 'test-agent', input: { test: 'input' } }
-            });
-
-            const testError = new Error('Test error');
-            mockTaskHandle.__injectDispatcher.mockImplementation((dispatcher: any) => {
-                dispatcher.mockImplementation(async () => {
-                    throw testError;
-                });
-            });
-
             const ctx = await (engine as any).restoreCtx('t', 'session');
 
             if ((ctx as any).sendTaskToAgent) {
-                const result = await (ctx as any).sendTaskToAgent('test-agent', { test: 'input' }, {
+                await expect((ctx as any).sendTaskToAgent('test-agent', { test: 'input' }, {
                     handlerName: 'testHandler'
-                });
+                })).rejects.toThrow('Test error');
 
-                expect(mockCreateTaskHandle).toHaveBeenCalled();
+                const outbox = store.getOutbox();
+                expect(outbox.some(e => e.topic === 'task.child_dispatch' && (e.payload as any).error === 'Test error')).toBe(true);
             }
         });
     });

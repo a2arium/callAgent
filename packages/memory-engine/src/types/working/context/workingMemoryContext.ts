@@ -174,9 +174,9 @@ export async function extendContextWithMemory(
     try {
         const { WorkingMemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
 
-        // Use existing PrismaClient if provided, otherwise create new one
+        // Use existing PrismaClient if provided
         if (!prisma) {
-            prisma = new PrismaClient();
+            throw new Error('No Prisma client provided and MEMORY_DATABASE_URL is missing');
         }
 
         workingMemoryAdapter = new WorkingMemorySQLAdapter(prisma, {

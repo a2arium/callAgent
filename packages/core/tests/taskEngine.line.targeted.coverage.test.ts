@@ -22,7 +22,7 @@ jest.mock('@prisma/client', () => ({
 }), { virtual: true });
 
 // Mock globalA2AService
-jest.mock('../src/orchestration/A2AService.js', () => ({
+jest.mock('@a2arium/callagent-core/orchestration/A2AService', () => ({
     globalA2AService: {
         sendTaskToAgent: jest.fn(),
         findLocalAgent: jest.fn().mockResolvedValue({
@@ -35,7 +35,7 @@ jest.mock('../src/orchestration/A2AService.js', () => ({
 }));
 
 // Mock outboxPublisher
-jest.mock('../src/eventbus/outboxPublisher.js', () => ({
+jest.mock('@a2arium/callagent-core/eventbus/outboxPublisher', () => ({
     outboxPublisher: { start: jest.fn(), stop: jest.fn() }
 }));
 

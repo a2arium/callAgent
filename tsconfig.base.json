@@ -46,6 +46,9 @@
       ],
       "@a2arium/callagent-chat-bridge/*": [
         "packages/chat-bridge/src/*"
+      ],
+      "@chat-prisma/*": [
+        "packages/chat-bridge/src/generated/prisma/*"
       ]
     }
   }
