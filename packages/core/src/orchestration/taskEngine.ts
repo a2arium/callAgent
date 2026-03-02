@@ -1,4 +1,5 @@
 import type { TaskContext, TaskInput } from '../shared/types/index.js';
+import { LoopRegistry } from './LoopRegistry.js';
 import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import { Artifact } from '../shared/types/index.js'; // Explicitly import Memory Artifact for usage
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
@@ -125,8 +126,6 @@ class KeyedMutex {
 
 export class TaskEngine {
     static testOverrides?: TaskEngineTestOverrides;
-    // Track active loop contexts by taskId so handleToolCompleted can inject results directly
-    static __activeLoopContexts: Map<string, TaskContext> = new Map();
     private sessionManager?: SessionManager;
     private snapshotRepo?: SnapshotRepository;
     private taskExecutorInitialized = false;
@@ -652,13 +651,20 @@ export class TaskEngine {
         // Attach LLM state into sensory
         try {
             const llmAny = (ctx as any).llm as any;
+            const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+
             let llmState: unknown = undefined;
-            if (llmAny?.getMessages) {
-                const messages = llmAny.getMessages(true);
-                llmState = { messages } as unknown;
-            } else if (llmAny?.exportState) {
-                llmState = llmAny.exportState();
+            if (historyMode !== 'stateless') {
+                if (llmAny?.getMessages) {
+                    const messages = llmAny.getMessages(true);
+                    llmState = { messages } as unknown;
+                } else if (llmAny?.exportState) {
+                    llmState = llmAny.exportState();
+                }
+            } else {
+                log.debug('[TaskEngine] Skipping LLM history save (stateless mode)');
             }
+
             const sensory = (M.memory as any).sensory || {};
             (M.memory as any).sensory = { ...sensory, llmState };
         } catch { /* ignore */ }
@@ -1551,8 +1557,23 @@ export class TaskEngine {
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', { token });
 
         // Check if there's an active loop
-        const activeCtx = TaskEngine.__activeLoopContexts?.get(taskId);
+        const activeCtx = LoopRegistry.__activeLoopContexts?.get(taskId);
 
+        // ✅ FIX: If the original runLoop is still active, inject the tool result
+        // into its inbox and let the loop's await_tool→continue logic handle it.
+        // Do NOT start a redundant runTurn which creates a fresh context lacking
+        // the original streaming transport, leading to process hangs.
+        if (activeCtx) {
+            log.debug('handleToolCompleted: Active loop exists, injecting into inbox only', { taskId, token });
+            try {
+                const activeInbox = (activeCtx as any).__activeLoopInbox;
+                if (activeInbox) {
+                    activeInbox.current.push(toolObservation);
+                    activeInbox.all.push(toolObservation);
+                }
+            } catch { /* best-effort */ }
+            return;
+        }
 
         // No active loop — auto-resume one loop turn to consume the tool result
         try {
@@ -2301,7 +2322,7 @@ export class TaskEngine {
                         const env: EnvironmentState = {
                             time: new Date().toISOString(),
                             sessionId: parentTaskId,
-                            turn: recordedTurn + 1,
+                            turn: recordedTurn, // Bug 1 Fix: Let loopRunner increment
                             budget: { maxTurns: Infinity, latencyMs: Infinity },
                             pending: {
                                 inputs: ((latestBase as any)?.pending?.inputs) || {},
@@ -2333,7 +2354,8 @@ export class TaskEngine {
                                 loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
                                 log.debug('Resume restored budgets from manifest', loopOpts);
                             } else if (!loopOpts.maxTurns) {
-                                loopOpts = { maxTurns: 50 }; // Safety default
+                                // Bug 2 Fix: Use default if manifest/snapshot missing
+                                loopOpts = { maxTurns: 50 };
                             }
 
                             if (typeof loopOpts.maxTurns === 'number') {
@@ -2704,17 +2726,26 @@ export class TaskEngine {
                 (ctx as any).llm = createLLMForTask(plugin.llmConfig, ctx as any);
             }
 
-            // Restore LLM conversation state if available
+            // Restore/Clear LLM conversation state if available
             if (M) {
                 try {
-                    const llmStateFromM = (((M.memory as any)?.sensory as any)?.llmState);
                     const llmAny = (ctx as any).llm as any;
-                    if (typeof llmStateFromM !== 'undefined' && llmAny?.importState) {
-                        llmAny.importState(llmStateFromM);
-                        try { console.log('[TaskEngine] Restored LLM history for', agentName); } catch { }
+                    const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+
+                    if (historyMode === 'stateless') {
+                        if (typeof llmAny?.clearHistory === 'function') {
+                            llmAny.clearHistory();
+                            try { console.log('[TaskEngine] Cleared LLM history (stateless mode) for', agentName); } catch { }
+                        }
+                    } else {
+                        const llmStateFromM = (((M.memory as any)?.sensory as any)?.llmState);
+                        if (typeof llmStateFromM !== 'undefined' && llmAny?.importState) {
+                            llmAny.importState(llmStateFromM);
+                            try { console.log('[TaskEngine] Restored LLM history for', agentName); } catch { }
+                        }
                     }
                 } catch (e) {
-                    try { console.log('[TaskEngine] Failed to restore LLM state for', agentName, e); } catch { }
+                    try { console.log('[TaskEngine] Failed to restore/clear LLM state for', agentName, e); } catch { }
                 }
             }
         } catch (e) {

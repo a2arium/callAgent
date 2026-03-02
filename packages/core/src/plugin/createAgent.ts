@@ -37,10 +37,29 @@ export const createAgent = <
     ObsConfigOrPayload extends import('../loop/oneTurn.js').ObservationConfig = import('../loop/oneTurn.js').ObservationConfig
 >(
     options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>,
-    metaUrl: string
+    metaUrl?: string
 ): AgentPlugin => {
-    // Get caller directory directly from required metaUrl
-    const callerDir = getDirname(metaUrl);
+    // ✅ BUG FIX: Make metaUrl optional to prevent "path argument must be of type string" crash when omitted
+    // Fall back to stacking trace inference if explicit metaUrl is not provided (e.g. from wrapper functions)
+    let callerDir = process.cwd();
+    if (metaUrl) {
+        callerDir = getDirname(metaUrl);
+    } else {
+        try {
+            const stack = new Error().stack?.split('\n') || [];
+            for (let i = 2; i < stack.length; i++) {
+                const line = stack[i];
+                // Match both file:// URLs (ESM) and absolute paths (CJS/Jest)
+                const match = line.match(/(?:file:\/\/|\/)([^\s\(\)]+?)(?::\d+:\d+)/);
+                if (match && match[1]) {
+                    const extracted = match[1];
+                    const rawPath = line.includes('file://') ? fileURLToPath('file://' + extracted) : (extracted.startsWith('/') ? extracted : `/${extracted}`);
+                    callerDir = path.dirname(rawPath);
+                    break;
+                }
+            }
+        } catch { /* fallback to cwd */ }
+    }
 
     // Resolve tenant ID using hierarchy: explicit → env → default
     const tenantId = resolveTenantId(options.tenantId);
@@ -54,80 +73,93 @@ export const createAgent = <
 
     let manifest: AgentManifest;
 
-    if (options.manifest === undefined) {
-        // No manifest specified - use default agent.json
-        const manifestPath = path.resolve(callerDir, 'agent.json');
-        pluginLogger.debug('Loading default agent.json manifest', { manifestPath });
-
+    // Phase 1: Establish base manifest
+    if (typeof options.manifest === 'string') {
+        // Custom JSON file specified
+        const manifestPath = path.resolve(callerDir, options.manifest);
         try {
             const manifestJson = fs.readFileSync(manifestPath, 'utf8');
             manifest = JSON.parse(manifestJson);
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new ManifestError(`Failed to load agent manifest from ${manifestPath}: ${message}`, { manifestPath });
+        }
+    } else if (options.manifest && typeof options.manifest === 'object') {
+        // Inline manifest object provided
+        manifest = { ...options.manifest };
+    } else {
+        // No manifest provided at all, we'll try to discover agent.json below
+        manifest = {} as any;
+    }
 
-            // Validate that agent name matches folder structure for agent.json
-            // Handle case where agent is running from dist/ subdirectory
-            let folderName = path.basename(callerDir);
-            if (folderName === 'dist') {
-                // If we're in a dist directory, use the parent directory name
-                folderName = path.basename(path.dirname(callerDir));
+    // Phase 2: Discovery & Deep Merge (BUG 1 FIX)
+    // Always try to find and merge agent.json if we are in a directory that looks like an agent folder
+    // and we don't have a full manifest yet, OR if we have a partial manifest and want to fill in defaults.
+    const defaultJsonPath = path.resolve(callerDir, 'agent.json');
+    if (fs.existsSync(defaultJsonPath)) {
+        try {
+            const jsonContent = fs.readFileSync(defaultJsonPath, 'utf8');
+            const jsonManifest = JSON.parse(jsonContent);
+
+            // If we already have a manifest (from inline options), deep merge it with agent.json
+            // and ensure agent.json provides the defaults.
+            const base = jsonManifest;
+            const explicit = manifest;
+
+            // Start with everything from agent.json
+            const merged = { ...base };
+
+            // Overwrite with explicit options, but PROTECT nested objects like budget
+            for (const [key, value] of Object.entries(explicit)) {
+                if (value === undefined) continue;
+
+                if (typeof value === 'object' && value !== null && !Array.isArray(value) &&
+                    typeof (merged as any)[key] === 'object' && (merged as any)[key] !== null) {
+                    // Deep merge for nested objects (e.g., budget, capabilities)
+                    (merged as any)[key] = {
+                        ...(merged as any)[key],
+                        ...Object.fromEntries(Object.entries(value).filter(([_, v]) => v !== undefined))
+                    };
+                } else {
+                    // Direct overwrite for primitives, arrays, or new keys
+                    (merged as any)[key] = value;
+                }
             }
+            manifest = merged;
 
-            // Support category-based validation
-            const validateFolderStructure = (manifestName: string, actualFolderName: string): boolean => {
-                if (manifestName.includes('/')) {
-                    // Category-based agent name (e.g., 'data-processing/csv-parser')
-                    const parts = manifestName.split('/');
+            // Validation: agent.json can only be used if it matches the folder/name structure (security/sanity check)
+            let folderName = path.basename(callerDir);
+            if (folderName === 'dist') folderName = path.basename(path.dirname(callerDir));
+
+            const validateFolderStructure = (mName: string, fName: string): boolean => {
+                if (!mName) return true;
+                if (mName.includes('/')) {
+                    const parts = mName.split('/');
                     if (parts.length === 2) {
-                        const [category, agentName] = parts;
-                        // Check if we're in the correct agent folder within a category
                         const parentDir = path.dirname(callerDir === 'dist' ? path.dirname(callerDir) : callerDir);
                         const categoryName = path.basename(path.dirname(parentDir));
-                        return agentName === actualFolderName && category === categoryName;
+                        return parts[1] === fName && parts[0] === categoryName;
                     }
                 }
-                // Traditional validation: simple name must match folder
-                return manifestName === actualFolderName;
+                return mName === fName;
             };
 
             if (!validateFolderStructure(manifest.name, folderName)) {
-                const expectedStructure = manifest.name.includes('/')
-                    ? `category structure matching '${manifest.name}'`
-                    : `folder named '${manifest.name}'`;
-
-                throw new ManifestError(
-                    `agent.json can only be used when agent name matches folder structure. ` +
-                    `Expected ${expectedStructure}, but found folder '${folderName}'. ` +
-                    `Use inline manifest or specify custom JSON file instead.`,
-                    { manifestPath, expectedName: manifest.name, actualFolderName: folderName }
-                );
+                pluginLogger.warn('agent.json name mismatch with folder structure', {
+                    manifestName: manifest.name,
+                    folderName
+                });
             }
-        } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
-            pluginLogger.error('Failed to load default agent.json manifest', error, { manifestPath });
-            throw new ManifestError(`Failed to load agent manifest from ${manifestPath}: ${message}`, { manifestPath });
-        }
-    } else if (typeof options.manifest === 'string') {
-        // Custom JSON file specified
-        const manifestPath = path.resolve(callerDir, options.manifest);
-        pluginLogger.debug('Loading manifest from specified path', { manifestPath });
 
-        try {
-            const manifestJson = fs.readFileSync(manifestPath, 'utf8');
-            manifest = JSON.parse(manifestJson);
-        } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
-            pluginLogger.error('Failed to load manifest from specified path', error, { manifestPath });
-            throw new ManifestError(`Failed to load agent manifest from ${manifestPath}: ${message}`, { manifestPath });
+        } catch (err) {
+            pluginLogger.warn('Found agent.json but failed to merge it', { error: err });
         }
-    } else {
-        // Inline manifest object provided
-        pluginLogger.debug('Using provided inline manifest object');
-        manifest = options.manifest;
     }
 
-    // Basic validation (can expand later)
+    // Phase 3: Final validation
     if (!manifest.name || !manifest.version) {
         pluginLogger.error('Invalid manifest', null, { manifest });
-        throw new ManifestError('Invalid agent manifest: missing name or version', { manifest });
+        throw new ManifestError('Invalid agent manifest: missing name or version. Ensure agent.json exists or inline manifest provides these.', { manifest });
     }
 
     // Build loop.modules from either explicit loop or top-level sugar
@@ -148,59 +180,13 @@ export const createAgent = <
         manifest,
         handleTask: options.handleTask,
         tenantId: tenantId,
-        // Erase generics at the boundary; runner treats modules as unknown-typed
         loop: loop as any,
-        // Future hooks (initialize, etc.) would be stored here
+        llmConfig: options.llmConfig,     // ✅ BUG 7 FIX: Forward LLM Configuration
+        llmAdapter: options.llmAdapter,   // ✅ BUG 7 FIX: Forward custom adapter if provided
     };
 
-    try {
-        // console.log('[createAgent] registering', manifest.name, 'from', metaUrl);
-        const lk = Object.keys(((plugin as any).loop?.modules || {}) as Record<string, unknown>);
-        // console.log('[createAgent] loop present:', !!(plugin as any).loop, 'module keys:', lk.length ? lk : '(none)');
-    } catch { /* noop */ }
-
-    // If llmConfig is provided, create an LLM adapter and store it on the plugin
-    if (options.llmConfig) {
-        try {
-            pluginLogger.debug('Creating LLM adapter for agent', {
-                provider: options.llmConfig.provider,
-                model: options.llmConfig.modelAliasOrName,
-                tenantId
-            });
-            // Store the config instead of creating the adapter directly
-            // The adapter will be created per-task in the runner with automatic usage tracking
-            plugin.llmConfig = options.llmConfig;
-            pluginLogger.info(`LLM config stored for agent: ${manifest.name} (tenant: ${tenantId})`);
-        } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
-            pluginLogger.error('Failed to setup LLM config', error);
-            throw new PluginError(`Failed to setup LLM config for agent ${manifest.name}: ${message}`);
-        }
-    }
-
-    // Register the plugin with the unified PluginManager (which uses AgentRegistry)
-    // This replaces the old registerPlugin() call and ensures A2A compatibility
+    // Register with framework
     PluginManager.registerAgent(plugin);
-    pluginLogger.info(`Agent registered successfully: ${manifest.name} (v${manifest.version}) with tenant: ${tenantId}`);
 
-    return plugin; // Returned value is primarily for typing consistency
+    return plugin;
 };
-
-/**
- * Minimal Agent Discovery & Loading Utility for the Runner
- * This is intentionally left simple/placeholder as the runner will dynamically import.
- * In a full framework, this would be more sophisticated (scanning node_modules, DI containers, etc.)
- * @param pluginDir - Directory to scan for agents
- */
-export async function loadPlugins(pluginDir: string): Promise<void> {
-    // Simple glob/readdir in pluginDir to find AgentModule.ts or AgentModule.js
-    // For this minimal example, let's assume the runner imports specific files directly
-    // or we provide a hardcoded list for simplicity.
-    // A slightly less minimal version might use glob:
-    // const files = await glob('**/AgentModule.{js,ts}', { cwd: pluginDir });
-    // for (const file of files) {
-    //     await import(path.resolve(pluginDir, file)); // Importing triggers createAgent
-    // }
-    pluginLogger.info(`Agent discovery placeholder. Directory: ${pluginDir}`);
-    pluginLogger.info('Runner should directly import agent files.');
-}

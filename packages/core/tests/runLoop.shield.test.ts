@@ -7,7 +7,7 @@ describe('runLoop shield safety branches', () => {
     const baseEnv = () => ({
         time: new Date().toISOString(),
         sessionId: 'shield-session',
-        turn: 1,
+        turn: 0,
         budget: { maxTurns: 1, latencyMs: 0 },
         pending: { inputs: {}, children: {}, tools: {}, groups: {} },
         inbox: normalizeObservationInbox(undefined),

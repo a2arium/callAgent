@@ -142,6 +142,30 @@ export class TurnRunner {
             const flushMentalState = async () => {
                 const mutateFn = async (baseSnap: Record<string, unknown>) => {
                     VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
+
+                    // Inject LLM history into M before saving
+                    try {
+                        const llmAny = (ctx as any).llm as any;
+                        const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+
+                        if (historyMode !== 'stateless') {
+                            let llmState: unknown = undefined;
+                            if (llmAny?.getMessages) {
+                                const messages = llmAny.getMessages(true);
+                                llmState = { messages } as unknown;
+                            } else if (llmAny?.exportState) {
+                                llmState = llmAny.exportState();
+                            }
+
+                            if (llmState) {
+                                const sensory = (M.memory as any).sensory || {};
+                                (M.memory as any).sensory = { ...sensory, llmState };
+                            }
+                        }
+                    } catch (err) {
+                        log.warn('Failed to inject LLM state during TurnRunner flush', { error: (err as Error).message });
+                    }
+
                     return { ...baseSnap, M };
                 };
 
@@ -185,6 +209,7 @@ export class TurnRunner {
                     },
                     provenance: {
                         ts: Date.now(),
+                        // ✅ FIX: Use next turn number for provenance since TaskExecutor will increment it
                         turn: startTurnTotal + 1,
                         id: `input-${trigger}-${sessionId}-${Date.now()}`,
                         correlationId: `input-${trigger}-${sessionId}-${Date.now()}`
@@ -266,7 +291,7 @@ export class TurnRunner {
                                     },
                                     provenance: {
                                         ts: new Date(completionEvent.createdAt).getTime(),
-                                        turn: startTurnTotal + 1,
+                                        turn: startTurnTotal, // Bug 1 Fix: Let loopRunner increment
                                         id: token,
                                         correlationId: token
                                     }
@@ -287,7 +312,7 @@ export class TurnRunner {
             const env: EnvironmentState = {
                 time: new Date().toISOString(),
                 sessionId,
-                turn: startTurnTotal + 1,
+                turn: startTurnTotal, // Bug 1 Fix: Let loopRunner increment
                 budget: { maxTurns: Infinity, latencyMs: Infinity },
                 inbox: envInbox,
                 pending: (base as any)?.pending || {},
@@ -313,6 +338,7 @@ export class TurnRunner {
                 } else if (manifestBudgets && typeof manifestBudgets === 'object') {
                     loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
                 } else {
+                    log.warn('No budgets found in manifest or state for agent, using default 50 turns. Ensure agent.json is present and correctly matched if this is unexpected.', { agentId, sessionId });
                     loopOpts = { maxTurns: 50 };
                 }
 

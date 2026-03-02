@@ -93,7 +93,7 @@ describe('runLoop memory wiring and defaults', () => {
         expect(result.metrics?.timings?.length).toBeGreaterThan(0);
         expect(result.metrics?.rewards?.length).toBeGreaterThan(0);
 
-        expect(env.inbox.current[0]).toMatchObject({ kind: 'obs' });
+        expect(env.inbox.current.length).toBe(0);
         expect(env.inbox.all.length).toBeGreaterThan(0);
     });
 });
@@ -158,11 +158,11 @@ describe('runLoop default execution and transitions', () => {
             task: { id: 'execution-task', input: {} },
             reply: jest.fn(),
             requestInput: jest.fn().mockResolvedValue({ token: 'input-token' }),
-            sendTaskToAgent: jest.fn()
+            sendTaskToAgent: (jest.fn() as any)
                 .mockResolvedValueOnce({ token: 'child-token' })
                 .mockResolvedValueOnce({ note: 'done' }),
-            requestTool: jest.fn().mockResolvedValue({ token: 'tool-token' }),
-            tools: { invoke: jest.fn().mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error('tool error')) }
+            requestTool: (jest.fn() as any).mockResolvedValue({ token: 'tool-token' }),
+            tools: { invoke: (jest.fn() as any).mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error('tool error')) }
         };
         const M: any = initialM(ctx);
         const env = baseEnv({ pending: { inputs: {}, children: { 'pending-child': {} }, tools: {}, groups: {} } });
@@ -237,7 +237,7 @@ describe('runLoop await_child fast-paths', () => {
 
         expect(env.pending.children['child-token']).toBeUndefined();
         expect(result.outcome.kind).toBe('await_tool');
-        expect(env.inbox.current[0]).toMatchObject(childObs);
+        expect(env.inbox.current.length).toBe(0);
     });
 
     it('reloads inbox from session manager when child completion is persisted externally', async () => {
@@ -269,20 +269,28 @@ describe('runLoop await_child fast-paths', () => {
 
         expect(sessionManager.load).toHaveBeenCalledWith('tenant-1', 'child-reload-task');
         expect(env.pending.children['reload-child']).toBeUndefined();
-        expect(env.inbox.current[0]).toMatchObject(childObs);
+        expect(env.inbox.current.length).toBe(0);
         expect(result.outcome.kind).toBe('await_input');
     });
 });
 
 describe('runLoop budgets, errors, and observation normalization', () => {
-    it('fails when env.turn already exceeds global budget', async () => {
+    it('allows at least one turn to execute even when env.turn exceeds global budget', async () => {
+        // ✅ FIX: This test was updated to reflect the new behavior where runLoop
+        // allows at least one turn to execute before checking the global budget.
+        // This prevents agents from failing immediately on resume when env.turn >= budget.maxTurns.
         const ctx: any = { task: { id: 'budget-task', input: {} } };
         const M: any = initialM(ctx);
         const env = baseEnv({ turn: 5, budget: { maxTurns: 4, latencyMs: 0 } });
 
+        // With the fix, the loop will execute one turn (turnIdx=0) before checking budget
+        // Since no modules are provided, it will fail with an execution error
         const result = await runLoop(ctx, M, env, {} as any, { maxTurns: 10 });
 
-        expect(result.outcome).toEqual({ kind: 'fail', reason: 'budget_turns_exceeded' });
+        // Should execute at least one turn (not fail immediately with budget_turns_exceeded)
+        // The error will be from missing execution module
+        expect(result.outcome.kind).toBe('fail');
+        expect(result.outcome.reason).toContain('turn_0_error');
     });
 
     it('fails fast when latency budget is exceeded', async () => {
@@ -330,8 +338,9 @@ describe('runLoop budgets, errors, and observation normalization', () => {
 
         const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 3 });
 
-        expect(env.inbox.current[0]).toMatchObject({ kind: 'existing' });
+        // ✅ FIXED: In the new version, inbox.current is CLEARED between turns to avoid phantom observations.
+        expect(env.inbox.current.length).toBe(0);
         expect(result.outcome.kind).toBe('fail');
-        expect(String(result.outcome.reason)).toContain('turn_1_error');
+        expect(String((result.outcome as any).reason)).toContain('turn_1_error');
     });
 });

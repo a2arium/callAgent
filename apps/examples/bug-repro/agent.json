@@ -1,0 +1,7 @@
+{
+    "name": "bug-repro",
+    "version": "1.0.0",
+    "budget": {
+        "maxTurns": 10
+    }
+}

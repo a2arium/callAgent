@@ -35,7 +35,7 @@ export class OutboxPublisher {
             const config = getSafePgConfig(dbUrl);
             this.prisma = new PrismaClient({
                 adapter: new PrismaPg(config, { schema: 'public' }),
-                log: ['info', 'warn', 'error']
+                log: ['error'] // Bug 4 Fix: Reduced logging spam
             }) as any;
         }
     }

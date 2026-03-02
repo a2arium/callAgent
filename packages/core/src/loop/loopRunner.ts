@@ -51,6 +51,7 @@ export async function runLoop<
     // DIAGNOSTIC: Unique ID for this runLoop execution to detect race conditions
     const runId = Math.random().toString(36).substring(2, 8);
     const taskId = ctx.task.id.substring(0, 20);
+    const sessionId = (ctx as any).task?.id || taskId;
     log.debug('runLoop started', { taskId, runId });
 
     const start = Date.now();
@@ -555,27 +556,34 @@ export async function runLoop<
         loopWillRun: maxTurns > 0
     });
 
-    for (let turn = 0; turn < maxTurns; turn++) {
-        // For subsequent iterations in the same runLoop call, increment turn
-        if (turn > 0) {
-            try { (env as any).turn += 1; } catch { }
+    for (let turnIdx = 0; turnIdx < maxTurns; turnIdx++) {
+        // ✅ FIX: Only increment turn if this is NOT the first iteration of this loop call.
+        // The first turn count is now incremented by TaskExecutor before initialization.
+        if (turnIdx > 0) {
+            (env as any).turn = ((env as any).turn || 0) + 1;
         }
 
-        // Check global budget from env (handles resume cases where local turn count resets)
+        // Current turn number for logging and state
+        const turn = (env as any).turn;
+
+        // ✅ FIX: Check global budget from env AFTER at least one turn has been attempted
+        // This ensures that resumed agents get a chance to execute even if env.turn >= budget.maxTurns
+        // The global budget should be checked on SUBSEQUENT iterations, not the first one
         const globalMaxTurns = (env as any).budget?.maxTurns;
-        if (typeof globalMaxTurns === 'number' && (env as any).turn > globalMaxTurns) {
+        if (turnIdx > 0 && typeof globalMaxTurns === 'number' && turn > globalMaxTurns) {
             log.debug('🔍 DEBUG: Global budget check triggered', {
                 taskId,
                 runId,
-                envTurn: (env as any).turn,
-                globalMaxTurns
+                envTurn: turn,
+                globalMaxTurns,
+                turnIdx
             });
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }
 
         // Update logging context with current turn number
-        updateLoggingContext({ turn: (env as any).turn });
+        updateLoggingContext({ turn });
 
         // 🔍 DEBUG: Log each iteration
         if (opts.latencyMs && Date.now() - start > opts.latencyMs) {
@@ -591,14 +599,14 @@ export async function runLoop<
         let prevCtxTelemetryNodeId: string | undefined;
 
         try {
-            log.debug('Before oneTurn', { taskId, runId, turn });
+            log.debug('Before oneTurn', { taskId, runId, turn: turnIdx });
 
             // ✅ FIX: Validate that ctx.memory exists before calling oneTurn
             if (!(ctx as any).memory) {
                 log.warn('ctx.memory is undefined - this may cause errors if agent uses memory operations', {
                     taskId,
                     runId,
-                    turn,
+                    turn: turnIdx,
                     agentId: (ctx as any).agentId
                 });
             }
@@ -610,7 +618,7 @@ export async function runLoop<
                 prevCtxTelemetryNodeId = ctx.telemetry?.nodeId;
 
                 const OuterTurnNodeId = (ctx as any).currentTurnNodeId; // ID from TurnRunner (execution session)
-                const turnIndex = (env as any).turn;
+                const turnIndex = turn;
                 // If there's no outer ID, we might be root or detached.
                 // We create a new TurnNode child of whatever is current in ctx.telemetry?
                 // Or child of OuterTurnNodeId if available.
@@ -661,7 +669,7 @@ export async function runLoop<
                 log.error('Turn execution failed', {
                     taskId,
                     runId,
-                    turn,
+                    turn: turnIdx,
                     error: errorMessage,
                     stack: errorStack,
                     hasMemory: !!(ctx as any).memory,
@@ -694,8 +702,8 @@ export async function runLoop<
             log.debug('🔍 DEBUG: Transition outcome', {
                 taskId,
                 runId,
-                loopCounter: turn,
-                envTurn: (env as any).turn,
+                loopCounter: turnIdx,
+                envTurn: turn,
                 outcomeKind: outcome.kind,
                 hasToken: !!(outcome as any).token,
                 actionKind: (step.exec as any)?.action?.kind,
@@ -716,8 +724,16 @@ export async function runLoop<
                 : [];
             if (observations.length > 0) {
                 inbox.all.push(...observations);
+                inbox.current = [...observations];
+            } else {
+                // Hygiene: avoid having "phantom" observations by mistake 
+                // if next turn starts without them being cleared. 
+                // Perception is responsible for filling them.
+                env.inbox.current = [];
             }
-            inbox.current = [...observations];
+            // If observations is empty, we PRESERVE inbox.current from previous turn
+            // unless it's a specific outcome like 'continue' that explicitly clears it.
+
             if (step.timings) timings.push(step.timings);
             rewards.push(step.reward || 0);
 
@@ -733,7 +749,7 @@ export async function runLoop<
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {
                 kind: 'fail',
-                reason: `turn_${turn}_error: ${error instanceof Error ? error.message : String(error)}`
+                reason: `turn_${turnIdx}_error: ${error instanceof Error ? error.message : String(error)}`
             };
             if (iterationTurnNode) {
                 try {
@@ -749,6 +765,7 @@ export async function runLoop<
             }
             (ctx as any).currentTurnNodeId = prevCtxTurnNodeId;
         }
+
 
         // Stop on await_* or terminal
         // 🔍 DEBUG: Log loop continuation check
@@ -788,16 +805,10 @@ export async function runLoop<
                                         (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
                                     );
                                     if (childResultInInbox) {
-                                        log.debug('🔄 SYNC CHILD: Found child result in database inbox', {
+                                        log.debug('🔄 SYNC CHILD: Found child result in database inbox, continuing loop instead of yielding', {
                                             taskId,
                                             awaitToken: awaitToken?.substring(0, 15)
                                         });
-                                        // Merge fresh inbox into local inbox
-                                        for (const obs of freshInbox.all) {
-                                            if (!inbox.all.some((o: any) => o.kind === obs.kind && o.payload?.token === obs.payload?.token)) {
-                                                inbox.all.push(obs);
-                                            }
-                                        }
                                     }
                                 }
                             }
@@ -811,8 +822,8 @@ export async function runLoop<
                     log.info('🔄 SYNC CHILD: Child result already in inbox, continuing loop instead of awaiting', {
                         taskId,
                         runId,
-                        loopCounter: turn,
-                        envTurn: (env as any).turn,
+                        loopCounter: turnIdx,
+                        envTurn: turn,
                         awaitToken: awaitToken?.substring(0, 15)
                     });
                     // Move child completion to current inbox for next turn
@@ -822,11 +833,25 @@ export async function runLoop<
                         (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
                     );
                     if (childObs) {
+                        // ✅ FIX: Explicitly set inbox.current to ensure perception sees the result
+                        // and it doesn't "blink" out due to turn reset
                         inbox.current = [childObs];
+
+                        // ✅ FIX: Sync completion must update LLM history so it doesn't re-invoke
+                        if ((ctx as any).llm?.addToolResult) {
+                            const payload = childObs.payload as any;
+                            const childAgentId = payload.agentId || (outcome as any).agentId;
+                            try {
+                                const toolResult = payload.result !== undefined ? (typeof payload.result === 'string' ? payload.result : JSON.stringify(payload.result)) : '{}';
+                                (ctx as any).llm.addToolResult(awaitToken, toolResult, childAgentId);
+                                log.debug('🔄 SYNC CHILD: Injected result into LLM history', { awaitToken: awaitToken?.substring(0, 15) });
+                            } catch (e) {
+                                log.debug('Failed to sync child result to LLM history', { error: (e as Error).message });
+                            }
+                        }
                     }
 
                     // ✅ FIX: Remove from pending children so next turn doesn't await again
-                    // We deferred this removal from TaskEngine (injection) to here
                     if (env.pending && env.pending.children && awaitToken) {
                         delete env.pending.children[awaitToken];
                         log.debug('🔄 SYNC CHILD: Removed child from pending', { awaitToken: awaitToken?.substring(0, 15) });
@@ -846,7 +871,7 @@ export async function runLoop<
                 const awaitToken = (outcome as any).token;
 
                 // Check if tool result is already in the inbox
-                let toolResultInInbox = inbox.all.some(
+                const toolResultInInbox = inbox.all.some(
                     (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
                 ) || env.inbox.all.some(
                     (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
@@ -856,8 +881,8 @@ export async function runLoop<
                     log.info('🔄 SYNC TOOL: Tool result already in inbox, continuing loop instead of awaiting', {
                         taskId,
                         runId,
-                        loopCounter: turn,
-                        envTurn: (env as any).turn,
+                        loopCounter: turnIdx,
+                        envTurn: turn,
                         awaitToken: awaitToken?.substring(0, 15)
                     });
                     // Move tool completion to current inbox for next turn
@@ -867,7 +892,20 @@ export async function runLoop<
                         (o: any) => o.kind === 'tool.completed' && o.payload?.token === awaitToken
                     );
                     if (toolObs) {
+                        // ✅ FIX: Explicitly set inbox.current
                         inbox.current = [toolObs];
+
+                        // ✅ FIX: Sync tool completion must update LLM history
+                        if ((ctx as any).llm?.addToolResult) {
+                            const payload = toolObs.payload as any;
+                            try {
+                                const toolResult = payload.result !== undefined ? (typeof payload.result === 'string' ? payload.result : JSON.stringify(payload.result)) : '{}';
+                                (ctx as any).llm.addToolResult(awaitToken, toolResult);
+                                log.debug('🔄 SYNC TOOL: Injected result into LLM history', { awaitToken: awaitToken?.substring(0, 15) });
+                            } catch (e) {
+                                log.debug('Failed to sync tool result to LLM history', { error: (e as Error).message });
+                            }
+                        }
                     }
 
                     // Remove from pending tools
@@ -884,30 +922,30 @@ export async function runLoop<
             log.debug('🔍 DEBUG: Loop stopping (non-continue outcome)', {
                 taskId,
                 runId,
-                loopCounter: turn,
-                envTurn: (env as any).turn,
+                loopCounter: turnIdx,
+                envTurn: turn,
                 outcomeKind: outcome.kind,
                 hasToken: !!(outcome as any).token
             });
             break;
         }
-        if (turn === maxTurns - 1) {
+
+        if (turnIdx === maxTurns - 1) {
             // 🔍 DEBUG: Log budget check
             log.debug('🔍 DEBUG: Budget check triggered', {
                 taskId,
                 runId,
-                loopCounter: turn,
-                envTurn: (env as any).turn,
+                loopCounter: turnIdx,
+                envTurn: turn,
                 maxTurns,
-                condition: `${turn} === ${maxTurns} - 1`
+                condition: `${turnIdx} === ${maxTurns} - 1`
             });
             if (process.env.DEBUG_BACKGROUND_TASKS) {
-                console.log(`[runLoop] FAILING at turn ${turn} === ${maxTurns} - 1: budget_turns_exceeded`);
+                console.log(`[runLoop] FAILING at turn ${turnIdx} === ${maxTurns} - 1: budget_turns_exceeded`);
             }
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }
-        // no-op
     }
 
     // DIAGNOSTIC: Log what runLoop is returning

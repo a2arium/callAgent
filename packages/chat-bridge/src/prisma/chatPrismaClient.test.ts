@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 
-jest.mock('../generated/prisma/index.js', () => {
+jest.mock('@chat-prisma/index.js', () => {
     return {
         PrismaClient: jest.fn().mockImplementation((opts: any) => ({ opts }))
     };

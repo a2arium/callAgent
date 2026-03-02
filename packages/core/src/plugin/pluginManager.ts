@@ -206,6 +206,13 @@ export class PluginManager {
             }
 
             if (loadedAgent) {
+                // Note: Manifest merging is now handled centrally in createAgent()
+                // to support both direct imports and discovery.
+                pluginLogger.debug('Agent loaded and registered', {
+                    agentName: loadedAgent.manifest.name,
+                    path: agentPath
+                });
+
                 // Auto-register exported durable handlers from this module (excluding default)
                 try {
                     for (const [exportName, exported] of Object.entries(agentModule as Record<string, unknown>)) {
@@ -215,6 +222,7 @@ export class PluginManager {
                         }
                     }
                 } catch { /* best-effort */ }
+
                 // Auto-register the agent in SmartAgentDiscoveryService for faster future lookups
                 SmartAgentDiscoveryService.registerAgent(loadedAgent.manifest.name, {
                     path: agentPath,
@@ -232,7 +240,6 @@ export class PluginManager {
 
             pluginLogger.warn('Agent imported but not found in registry', { agentNameOrPath, agentPath });
             return null;
-
         } catch (error) {
             pluginLogger.error('Failed to load agent', error, { agentNameOrPath });
             return null;
@@ -294,4 +301,4 @@ export class PluginManager {
             return [];
         }
     }
-} 
+}

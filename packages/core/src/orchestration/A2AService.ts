@@ -14,7 +14,7 @@ import { ContextSerializer } from './ContextSerializer.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
 import { InteractiveTaskHandler } from './InteractiveTaskResult.js';
-import { logger } from '@a2arium/callagent-utils';
+import { logger, withLoggingContext } from '@a2arium/callagent-utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { EngineLocator } from './EngineLocator.js';
@@ -25,6 +25,7 @@ const uuidv4 = uuid.v4;
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { TaskEngine } from './taskEngine.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
+import { getCallChainTracker, type CallChainTracker } from './CallChainTracker.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -48,6 +49,7 @@ const log = logger.createLogger({ prefix: 'A2AService' });
 export class A2AService implements IA2AService {
     private agentResultCache: AgentResultCache | null = null;
     private readonly pendingNotifications: Set<Promise<void>> = new Set();
+    private readonly callChainTracker: CallChainTracker;
 
     constructor(
         private eventBus?: any // Future: for interactive communication
@@ -55,6 +57,15 @@ export class A2AService implements IA2AService {
         // Initialize cache service
         this.initializeCacheService().catch(error => {
             a2aLogger.error('Failed to initialize A2A cache service', error);
+        });
+
+        // Initialize call chain tracker with config from environment
+        const maxDepth = process.env.MAX_AGENT_DEPTH ? parseInt(process.env.MAX_AGENT_DEPTH, 10) : undefined;
+        this.callChainTracker = getCallChainTracker({
+            maxDepth,
+            enableCycleDetection: process.env.ENABLE_CYCLE_DETECTION !== 'false',
+            enableDepthLimiting: process.env.ENABLE_DEPTH_LIMITING !== 'false',
+            warnOnlyInDevelopment: process.env.NODE_ENV === 'development' && process.env.CYCLE_WARN_ONLY === 'true'
         });
     }
 
@@ -124,6 +135,65 @@ export class A2AService implements IA2AService {
             options
         });
 
+        // ✅ CIRCULAR DEPENDENCY DETECTION
+        // Check if spawning this agent would create a circular dependency or exceed max depth
+        const cycleCheck = this.callChainTracker.checkCircularDependency(
+            targetAgent,
+            sourceCtx.task.id
+        );
+
+        if (cycleCheck.hasCycle) {
+            const chain = cycleCheck.chain.map(c => c.agentId).join(' → ');
+            const errorMessage =
+                `CIRCULAR DEPENDENCY DETECTED:\n` +
+                `  Attempting to spawn: ${targetAgent}\n` +
+                `  Agent chain: ${chain} → ${targetAgent}\n` +
+                `  This would create infinite recursion.\n` +
+                `  \n` +
+                `  Solution options:\n` +
+                `  1. Refactor to break the cycle (e.g., use a third orchestrator agent)\n` +
+                `  2. Make one of the agents complete without calling the other\n` +
+                `  3. Use explicit childTaskId and handle resumption manually\n` +
+                `  \n` +
+                `  Full call chain:\n${this.callChainTracker.formatCallChain(sourceCtx.task.id)}`;
+
+            a2aLogger.error('Circular dependency detected', {
+                targetAgent,
+                chain,
+                sourceTaskId: sourceCtx.task.id
+            });
+
+            throw new Error(errorMessage);
+        }
+
+        if (cycleCheck.exceedsMaxDepth) {
+            const chain = cycleCheck.chain.map(c => c.agentId).join(' → ');
+            const maxDepth = (this.callChainTracker as any).config?.maxDepth || 20;
+            const errorMessage =
+                `MAXIMUM AGENT DEPTH EXCEEDED (${maxDepth}):\n` +
+                `  Attempting to spawn: ${targetAgent}\n` +
+                `  Current depth: ${cycleCheck.depth}\n` +
+                `  Agent chain: ${chain}\n` +
+                `  \n` +
+                `  This may indicate infinite recursion or overly deep agent nesting.\n` +
+                `  \n` +
+                `  Solution options:\n` +
+                `  1. Refactor to reduce agent nesting depth\n` +
+                `  2. Increase MAX_AGENT_DEPTH environment variable if this is expected\n` +
+                `  3. Use explicit childTaskId for manual resumption\n` +
+                `  \n` +
+                `  Full call chain:\n${this.callChainTracker.formatCallChain(sourceCtx.task.id)}`;
+
+            a2aLogger.error('Maximum agent depth exceeded', {
+                targetAgent,
+                depth: cycleCheck.depth,
+                maxDepth,
+                chain
+            });
+
+            throw new Error(errorMessage);
+        }
+
         try {
             // 1. Discover target agent
             const targetPlugin = await this.findLocalAgent(targetAgent);
@@ -139,24 +209,42 @@ export class A2AService implements IA2AService {
             // 2. Serialize source context
             const serializedContext = await ContextSerializer.serializeContext(sourceCtx, options);
 
-            // 3. Create target context
-            const targetCtx = await this.createTargetContext(
-                sourceCtx, // Pass MinimalSourceTaskContext
-                targetPlugin,
-                taskInput,
-                serializedContext, // Pass serialized context for inspection if needed
-                options
-            );
+            // 3. Create target context and deserialize with sanitized logging metadata
+            // This prevents "blink" effect where parent turn leaks into child initialization logs
+            const { targetCtx, serializedContext: _ } = await withLoggingContext({ turn: undefined }, async () => {
+                const targetCtx = await this.createTargetContext(
+                    sourceCtx,
+                    targetPlugin,
+                    taskInput,
+                    serializedContext,
+                    options
+                );
+                await ContextSerializer.deserializeContext(targetCtx, serializedContext);
+                return { targetCtx, serializedContext };
+            });
 
-            // 4. Deserialize context into target
-            await ContextSerializer.deserializeContext(targetCtx, serializedContext);
+            // 4. Register this call in the chain tracker
+            const parentDepth = this.callChainTracker.getCallChain(sourceCtx.task.id).length;
+            this.callChainTracker.registerCall({
+                taskId: targetCtx.task.id,
+                agentId: targetAgent,
+                parentTaskId: sourceCtx.task.id,
+                depth: parentDepth + 1,
+                timestamp: Date.now()
+            });
 
             // 5. Execute target agent via TaskEngine for WM/LLM persistence
             const eng = getRequiredEngine();
             // Attach WM proxy so child ctx.vars writes persist
             try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
 
-            const result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, options);
+            let result;
+            try {
+                result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, options);
+            } finally {
+                // Unregister when complete (even if error)
+                this.callChainTracker.unregisterCall(targetCtx.task.id);
+            }
 
             // If child signaled input_required via targetCtx flag, route to parent and do not treat as completed
             if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
@@ -358,11 +446,20 @@ export class A2AService implements IA2AService {
         const baseCtx = { ...sourceCtx };
 
         // Create target-specific overrides only for what needs to be different
+        const sourceTaskId = sourceCtx.task.id;
+        const targetAgentId = targetPlugin.manifest.name;
+
+        // ✅ FIX: Generate unique child task ID to prevent state pollution across different runs
+        // For resume scenarios, callers can provide explicit childTaskId via options.childTaskId
+        // Otherwise, generate a unique ID using timestamp + random to ensure each call gets fresh state
+        const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+        const childTaskId = options.childTaskId || `a2a_${sourceTaskId.slice(0, 16)}_${targetAgentId.slice(0, 16)}_${uniqueSuffix}`;
+
         const targetSpecificOverrides = {
             tenantId: serializedContext.tenantId,
-            agentId: targetPlugin.manifest.name,
+            agentId: targetAgentId,
             task: {
-                id: `a2a_task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                id: childTaskId,
                 input: taskInput,
             },
 
@@ -379,7 +476,11 @@ export class A2AService implements IA2AService {
             throw: this.createTargetThrow(targetPlugin),
 
             // Override recordUsage for target-specific tracking
-            recordUsage: this.createTargetRecordUsage(targetPlugin)
+            recordUsage: this.createTargetRecordUsage(targetPlugin),
+
+            // ✅ FIX: Do not inherit parent loop state
+            __activeLoopInbox: undefined,
+            __activeLoopEnv: undefined
         };
 
         // Merge base context with target-specific overrides
@@ -707,151 +808,165 @@ export class A2AService implements IA2AService {
         operationId: string,
         options: A2ACallOptions
     ): Promise<unknown> {
-        try {
-            const effectiveCache = this.resolveEffectiveCacheConfig(targetPlugin, options);
+        return withLoggingContext(
+            {
+                agentId: targetPlugin.manifest.name,
+                taskId: targetCtx.task.id,
+                tenantId: targetCtx.tenantId,
+                parentTaskId: (options as any).parentTaskId,
+                correlationId: operationId,
+                // ✅ FIX: Prevent parent turn from bleeding into child logs (Blink Effect)
+                // LoopRunner will set the correct turn once the loop starts.
+                turn: undefined
+            },
+            async () => {
+                try {
+                    const effectiveCache = this.resolveEffectiveCacheConfig(targetPlugin, options);
 
-            // Check cache if enabled (manifest or override)
-            if (this.agentResultCache && effectiveCache.enabled) {
-                const cachedResult = await this.agentResultCache.getCachedResult(
-                    targetPlugin.manifest.name,
-                    targetCtx.task.input,
-                    effectiveCache.excludePaths,
-                    targetCtx.tenantId
-                );
+                    // Check cache if enabled (manifest or override)
+                    if (this.agentResultCache && effectiveCache.enabled) {
+                        const cachedResult = await this.agentResultCache.getCachedResult(
+                            targetPlugin.manifest.name,
+                            targetCtx.task.input,
+                            effectiveCache.excludePaths,
+                            targetCtx.tenantId
+                        );
 
-                if (cachedResult) {
-                    a2aLogger.debug('A2A cache hit', {
+                        if (cachedResult) {
+                            a2aLogger.debug('A2A cache hit', {
+                                operationId,
+                                targetAgent: targetPlugin.manifest.name,
+                                taskId: targetCtx.task.id
+                            });
+                            console.log(`⚡ ${targetPlugin.manifest.name} (cached result)\n`);
+
+                            // Debug: Log the full cached result to inspect content/errors
+                            try {
+                                const resultSummary = JSON.stringify(cachedResult, (key, value) => {
+                                    if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
+                                    return value;
+                                }, 2);
+                                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result:\n${resultSummary}\n`);
+                            } catch (err) {
+                                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result (non-serializable):`, cachedResult);
+                            }
+
+                            // Hydrate artifacts in cached result before returning
+                            try {
+                                ArtifactHydrationService.attachHydratedArtifactHandles(
+                                    cachedResult,
+                                    this.agentResultCache,
+                                    targetCtx.tenantId
+                                );
+                            } catch (hydrationError) {
+                                a2aLogger.error('Failed to hydrate artifacts in cached result', hydrationError, {
+                                    operationId,
+                                    targetAgent: targetPlugin.manifest.name
+                                });
+                                // Continue even if hydration fails, returning the raw result
+                            }
+
+                            return cachedResult;
+                        }
+                    }
+
+
+                    console.log(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
+
+                    a2aLogger.debug('Executing target agent', {
                         operationId,
                         targetAgent: targetPlugin.manifest.name,
                         taskId: targetCtx.task.id
                     });
-                    console.log(`⚡ ${targetPlugin.manifest.name} (cached result)\n`);
 
-                    // Debug: Log the full cached result to inspect content/errors
+                    const hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
+                    const result = hasLoopModules
+                        ? await (async () => {
+                            // Always route loop-first agents through the engine so A2A overrides are respected
+                            const eng = getRequiredEngine();
+                            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                            const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
+                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
+                            return started ?? { status: 'started' } as any;
+                        })()
+                        : (targetPlugin.handleTask
+                            ? await targetPlugin.handleTask(targetCtx)
+                            : await (async () => {
+                                // Fallback: engine path
+                                const eng = getRequiredEngine();
+                                try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                                const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
+                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
+                                return started ?? { status: 'started' } as any;
+                            })());
+
+                    // Debug: Log the full result from the target agent to inspect content/errors
                     try {
-                        const resultSummary = JSON.stringify(cachedResult, (key, value) => {
+                        const resultSummary = JSON.stringify(result, (key, value) => {
                             if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
                             return value;
                         }, 2);
-                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result:\n${resultSummary}\n`);
+                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result:\n${resultSummary}\n`);
                     } catch (err) {
-                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result (non-serializable):`, cachedResult);
+                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result (non-serializable):`, result);
                     }
 
-                    // Hydrate artifacts in cached result before returning
-                    try {
-                        ArtifactHydrationService.attachHydratedArtifactHandles(
-                            cachedResult,
-                            this.agentResultCache,
-                            targetCtx.tenantId
-                        );
-                    } catch (hydrationError) {
-                        a2aLogger.error('Failed to hydrate artifacts in cached result', hydrationError, {
-                            operationId,
-                            targetAgent: targetPlugin.manifest.name
-                        });
-                        // Continue even if hydration fails, returning the raw result
+
+                    // Cache the result if caching is enabled
+                    if (this.agentResultCache && effectiveCache.enabled) {
+                        try {
+                            await this.agentResultCache.setCachedResult(
+                                targetPlugin.manifest.name,
+                                targetCtx.task.input,
+                                result,
+                                effectiveCache.ttlSeconds,
+                                effectiveCache.excludePaths,
+                                targetCtx.tenantId
+                            );
+                        } catch (cacheError) {
+                            a2aLogger.error('Failed to cache A2A result', cacheError, {
+                                operationId,
+                                targetAgent: targetPlugin.manifest.name
+                            });
+                        }
                     }
 
-                    return cachedResult;
-                }
-            }
+                    // Hydrate artifacts in the LIVE result before returning
+                    // This ensures that if the agent returned markers (from its own memory/cache),
+                    // the parent receives functional artifacts.
+                    if (this.agentResultCache) {
+                        try {
+                            ArtifactHydrationService.attachHydratedArtifactHandles(
+                                result,
+                                this.agentResultCache,
+                                targetCtx.tenantId
+                            );
+                        } catch (hydrationError) {
+                            a2aLogger.error('Failed to hydrate artifacts in live result', hydrationError, {
+                                operationId,
+                                targetAgent: targetPlugin.manifest.name
+                            });
+                        }
+                    }
 
+                    console.log(`✅ ${targetPlugin.manifest.name} completed\n`);
 
-            console.log(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
+                    a2aLogger.debug('Target agent execution completed', {
+                        operationId,
+                        targetAgent: targetPlugin.manifest.name,
+                        hasResult: !!result
+                    });
 
-            a2aLogger.debug('Executing target agent', {
-                operationId,
-                targetAgent: targetPlugin.manifest.name,
-                taskId: targetCtx.task.id
-            });
-
-            const hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
-            const result = hasLoopModules
-                ? await (async () => {
-                    // Always route loop-first agents through the engine so A2A overrides are respected
-                    const eng = getRequiredEngine();
-                    try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
-                    const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                    const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
-                    return started ?? { status: 'started' } as any;
-                })()
-                : (targetPlugin.handleTask
-                    ? await targetPlugin.handleTask(targetCtx)
-                    : await (async () => {
-                        // Fallback: engine path
-                        const eng = getRequiredEngine();
-                        try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
-                        const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                        const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
-                        return started ?? { status: 'started' } as any;
-                    })());
-
-            // Debug: Log the full result from the target agent to inspect content/errors
-            try {
-                const resultSummary = JSON.stringify(result, (key, value) => {
-                    if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
-                    return value;
-                }, 2);
-                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result:\n${resultSummary}\n`);
-            } catch (err) {
-                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result (non-serializable):`, result);
-            }
-
-
-            // Cache the result if caching is enabled
-            if (this.agentResultCache && effectiveCache.enabled) {
-                try {
-                    await this.agentResultCache.setCachedResult(
-                        targetPlugin.manifest.name,
-                        targetCtx.task.input,
-                        result,
-                        effectiveCache.ttlSeconds,
-                        effectiveCache.excludePaths,
-                        targetCtx.tenantId
-                    );
-                } catch (cacheError) {
-                    a2aLogger.error('Failed to cache A2A result', cacheError, {
+                    return result;
+                } catch (error) {
+                    a2aLogger.error('Target agent execution failed', error, {
                         operationId,
                         targetAgent: targetPlugin.manifest.name
                     });
+                    throw error;
                 }
             }
-
-            // Hydrate artifacts in the LIVE result before returning
-            // This ensures that if the agent returned markers (from its own memory/cache),
-            // the parent receives functional artifacts.
-            if (this.agentResultCache) {
-                try {
-                    ArtifactHydrationService.attachHydratedArtifactHandles(
-                        result,
-                        this.agentResultCache,
-                        targetCtx.tenantId
-                    );
-                } catch (hydrationError) {
-                    a2aLogger.error('Failed to hydrate artifacts in live result', hydrationError, {
-                        operationId,
-                        targetAgent: targetPlugin.manifest.name
-                    });
-                }
-            }
-
-            console.log(`✅ ${targetPlugin.manifest.name} completed\n`);
-
-            a2aLogger.debug('Target agent execution completed', {
-                operationId,
-                targetAgent: targetPlugin.manifest.name,
-                hasResult: !!result
-            });
-
-            return result;
-        } catch (error) {
-            a2aLogger.error('Target agent execution failed', error, {
-                operationId,
-                targetAgent: targetPlugin.manifest.name
-            });
-            throw error;
-        }
+        );
     }
 
     private resolveEffectiveCacheConfig(targetPlugin: AgentPlugin, options: A2ACallOptions) {

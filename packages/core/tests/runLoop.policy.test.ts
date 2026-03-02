@@ -6,7 +6,7 @@ import type { EnvironmentState } from '../src/loop/types.js';
 const baseEnv = (overrides: Partial<EnvironmentState> = {}): EnvironmentState => ({
     time: new Date().toISOString(),
     sessionId: 'policy-session',
-    turn: 1,
+    turn: 0,
     budget: { maxTurns: 1, latencyMs: 0 },
     pending: { inputs: {}, children: {}, tools: {}, groups: {} },
     inbox: { current: [], all: [] } as any,

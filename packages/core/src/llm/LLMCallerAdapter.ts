@@ -224,6 +224,22 @@ export class LLMCallerAdapter implements ILLMCaller {
         return undefined;
     }
 
+    getHistoryMode(): 'stateless' | 'dynamic' | 'full' {
+        const anyCaller = this.caller as any;
+        if (typeof anyCaller.getHistoryMode === 'function') return anyCaller.getHistoryMode();
+        return 'full'; // Default to full if not supported
+    }
+
+    clearHistory(): void {
+        const anyCaller = this.caller as any;
+        if (typeof anyCaller.clearHistory === 'function') {
+            anyCaller.clearHistory();
+        } else {
+            // Fallback: set messages to empty array
+            this.setMessages([]);
+        }
+    }
+
     setMessages(messages: unknown): void {
         const anyCaller = this.caller as any;
         try {

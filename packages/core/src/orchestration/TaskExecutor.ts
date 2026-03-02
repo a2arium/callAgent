@@ -1,6 +1,6 @@
 import * as uuid from 'uuid';
 const uuidv4 = uuid.v4;
-import { logger } from '@a2arium/callagent-utils';
+import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { InboxManager, type EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
@@ -56,6 +56,10 @@ export class TaskExecutor {
             sessionManager, tenantId, sessionId, agentId,
             isStreaming, getSessionStorePrisma, throwOnSaveFailure
         } = params;
+
+        // ✅ FIX: Increment turn count immediately so initialization logs reflect the correct turn
+        env.turn = (env.turn || 0) + 1;
+        updateLoggingContext({ turn: env.turn });
 
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log('[TaskExecutor.executeTurn] About to call runLoop', {
@@ -157,15 +161,15 @@ export class TaskExecutor {
         try {
             // ✅ FIX: Register active loop context so handleToolCompleted can inject results
             // instead of starting a redundant runTurn
-            const { TaskEngine } = await import('./taskEngine.js');
-            TaskEngine.__activeLoopContexts.set(sessionId, ctx);
+            const { LoopRegistry } = await import('./LoopRegistry.js');
+            LoopRegistry.__activeLoopContexts.set(sessionId, ctx);
             try {
                 const result = await runLoop(ctx, M, env, overrides, loopOpts);
                 mNext = result.M;
                 outcome = result.outcome;
                 metrics = result.metrics;
             } finally {
-                TaskEngine.__activeLoopContexts.delete(sessionId);
+                LoopRegistry.__activeLoopContexts.delete(sessionId);
             }
         } catch (loopError) {
             console.error('[TaskExecutor] runLoop threw an error:', loopError);
@@ -331,6 +335,29 @@ export class TaskExecutor {
 
         if (prune) {
             nextInbox = InboxManager.normalizeInbox(pruneSnapshot(nextInbox as any) as any);
+        }
+
+        // Inject LLM state into M before saving
+        try {
+            const llmAny = (ctx as any).llm as any;
+            const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+
+            if (historyMode !== 'stateless') {
+                let llmState: unknown = undefined;
+                if (llmAny?.getMessages) {
+                    const messages = llmAny.getMessages(true);
+                    llmState = { messages } as unknown;
+                } else if (llmAny?.exportState) {
+                    llmState = llmAny.exportState();
+                }
+
+                if (llmState) {
+                    const sensory = (mNextEffective.memory as any).sensory || {};
+                    (mNextEffective.memory as any).sensory = { ...sensory, llmState };
+                }
+            }
+        } catch (err) {
+            log.warn('Failed to inject LLM state during saveSnapshot', { error: (err as Error).message });
         }
 
         const next = { ...baseNow, M: mNextEffective, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;

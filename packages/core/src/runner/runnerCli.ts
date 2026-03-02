@@ -278,6 +278,12 @@ async function main(): Promise<void> {
         if (options.isStreaming) {
             // Don't exit immediately - the event listeners need to stay alive
             cliLogger.info('Streaming started - press Ctrl+C to exit');
+        } else {
+            // ✅ FIX: Non-streaming mode — force clean exit.
+            // Without this, dangling resources (keepAlive intervals, event bus
+            // subscriptions, Prisma pools, outbox publisher) keep the event loop
+            // alive indefinitely, causing the CLI process to hang.
+            process.exit(0);
         }
     } catch (error: unknown) {
         if (error instanceof Error) {

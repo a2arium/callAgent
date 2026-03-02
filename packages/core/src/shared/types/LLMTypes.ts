@@ -25,6 +25,10 @@ export interface ILLMCaller {
     getMessages?: (includeSystem?: boolean) => unknown;
     /** Optional: set conversation messages (used on restore) */
     setMessages?: (messages: unknown) => void;
+    /** Optional: get current history mode */
+    getHistoryMode?: () => 'stateless' | 'dynamic' | 'full';
+    /** Optional: clear conversation history */
+    clearHistory?: () => void;
     /** Direct MCP tool execution bypasses LLM inference */
     callMcpTool?(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown>;
     /** Get available schemas from an MCP server */

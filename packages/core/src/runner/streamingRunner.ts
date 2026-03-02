@@ -527,7 +527,14 @@ export async function runAgentWithStreaming(
                 if (wmCap) {
                     runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
                 }
-                await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
+                const returnedTask = await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
+                if (returnedTask && returnedTask.status?.state === 'failed') {
+                    // ✅ BUG FIX: Explicitly throw to ensure CLI process exits with non-zero code on unhandled runLoop errors
+                    const failMsg = returnedTask.status.metadata?.reason ||
+                        (returnedTask.status.message?.parts?.find(p => p.type === 'text') as any)?.text ||
+                        'Task execution failed';
+                    throw new AgentError(failMsg, agentName, { taskId: taskCtx.task.id });
+                }
                 // Wait for any background tool executions (e.g. async requestTool) to complete
                 // This is critical for await_tool outcomes where the loop exits but __autoExecuteTool is still running
                 await engine.waitForBackgroundTasks(60000);

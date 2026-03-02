@@ -220,4 +220,74 @@ describe('LoopRunner Sync Child Reproduction', () => {
         expect(result.outcome.kind).toBe('complete');
         expect(turnCount).toBe(2);
     });
+
+    it('Scenario 4: Loop continues after async tool completion (await_tool)', async () => {
+        const ctx = {
+            task: { id: 'test-task', input: {} },
+            agentId: 'test-agent',
+            logger: console
+        } as unknown as TaskContext;
+
+        const M = { memory: { vars: {} } } as unknown as MentalState;
+
+        const env = {
+            turn: 0,
+            inbox: { current: [], all: [] },
+            pending: {},
+            budget: { maxTurns: 10 }
+        } as unknown as EnvironmentState;
+
+        let localTurn = 0;
+
+        const overrides = {
+            perception: async () => ({ inbox: env.inbox, pending: env.pending }),
+            learning: async (params: any) => params.M,
+            policy: (m: any) => {
+                localTurn++;
+                if (localTurn === 1) {
+                    // Turn 1: dispatch an async tool
+                    return { kind: 'tool', name: 'fetch_page', args: { url: 'https://example.com' }, awaitCallback: true } as const;
+                }
+                // Turn 2: done
+                return { kind: 'internal', intent: 'finish' } as const;
+            },
+            execution: async (action: any) => {
+                if (action.kind === 'tool' && action.awaitCallback) {
+                    // Simulate async tool request that returns a token
+                    // Then immediately simulate tool result arriving in inbox
+                    // (mimics handleToolCompleted injecting into __activeLoopInbox)
+                    const token = 'tool-token-async-1';
+                    const obs = {
+                        source: 'tool',
+                        kind: 'tool.completed',
+                        payload: { token, result: { html: '<h1>Hello</h1>' }, tool: action.name }
+                    };
+                    env.inbox.current.push(obs as any);
+                    env.inbox.all.push(obs as any);
+
+                    return {
+                        action: { kind: 'tool' as const, token },
+                        result: { status: 'ok' as const, correlationId: token, toolId: action.name }
+                    };
+                }
+                return { action: { kind: 'internal' as const, done: true }, result: { status: 'ok' as const, data: { done: true } } };
+            },
+            transition: (env: any, exec: any) => {
+                if (exec.action.kind === 'internal' && exec.action.done) {
+                    return { kind: 'complete' as const, result: exec.result.data };
+                }
+                if (exec.action.kind === 'tool' && exec.action.token) {
+                    return { kind: 'await_tool' as const, token: exec.action.token };
+                }
+                return { kind: 'continue' as const, observations: [] };
+            }
+        };
+
+        const result = await runLoop(ctx, M, env, overrides, { maxTurns: 10 });
+
+        // The loop should detect the tool result already in inbox and continue
+        // to Turn 2, which produces 'complete'
+        expect(result.outcome.kind).toBe('complete');
+        expect(localTurn).toBe(2);
+    });
 });

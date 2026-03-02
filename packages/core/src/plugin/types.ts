@@ -43,6 +43,8 @@ export type CreateAgentPluginOptions<
     manifest?: string | AgentManifest;
     /** LLM configuration specific to this agent */
     llmConfig?: LLMConfig;
+    /** LLM adapter instance for this plugin */
+    llmAdapter?: ILLMCaller;
     /** 
      * Main task handler for the agent
      * @param ctx - Guaranteed agent task context with all working memory and A2A capabilities

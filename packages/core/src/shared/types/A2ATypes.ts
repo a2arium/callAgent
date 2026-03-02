@@ -67,6 +67,8 @@ export type A2ACallOptions = {
     autoClearToken?: boolean;
     /** Automatically transition to stage when child requests input */
     setStage?: string;
+    /** Explicitly provide a task ID for the child agent (for persistence/resumption) */
+    childTaskId?: string;
 };
 
 /**
