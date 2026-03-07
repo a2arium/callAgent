@@ -5,7 +5,7 @@ import { MentalState, EnvironmentState } from '../loop/types.js';
 import { initialM } from '../loop/init.js';
 import { SessionManager } from './SessionManager.js';
 import { ApiBinder } from './api/ApiBinder.js';
-import { VarsSync } from './synchronization/VarsSync.js';
+
 import { TaskExecutor } from './TaskExecutor.js';
 import { InboxManager, EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
@@ -85,64 +85,11 @@ export class TurnRunner {
             // Ensure ctx knows about M for syncing
             (ctx as any).M = M;
 
-            // 3. Setup Vars Facade & Sync
-            const currentVars = ((M.memory as any)?.vars || {}) as Record<string, unknown>;
-            const varCache = new Map<string, unknown>(Object.entries(currentVars));
-
-            // Define helper for removing keys (adapted from TaskEngine)
-            const iterMentalTargets = (
-                fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
-            ): void => {
-                const candidates: unknown[] = [
-                    M,
-                    (ctx as any).M,
-                    (ctx as any).__mental
-                ];
-
-                for (const mental of candidates) {
-                    if (!mental || typeof mental !== 'object') continue;
-                    const target = mental as Record<string, unknown>;
-                    let memory = target.memory;
-
-                    if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
-                        memory = {};
-                        target.memory = memory as Record<string, unknown>;
-                    }
-
-                    const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
-                    fn({ target, memory: memory as Record<string, unknown>, existing });
-                }
-            };
-
-            const removeKeyFromMental = (key: string): void => {
-                iterMentalTargets(({ target, memory, existing }) => {
-                    let updated: Record<string, unknown> | undefined;
-                    if (Object.prototype.hasOwnProperty.call(existing, key)) {
-                        updated = { ...existing };
-                        delete updated[key];
-                    }
-                    if (updated) {
-                        (memory as Record<string, unknown>).vars = updated;
-                        target.vars = updated;
-                    }
-                });
-            };
-
-            (ctx as any).vars = VarsSync.createVarsProxy(
-                varCache,
-                (key, value) => { (ctx as any).__varsDirty = true; },
-                (key) => { (ctx as any).__varsDirty = true; removeKeyFromMental(key); }
-            );
-
-            // Sync immediately
-            VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
-
+            // 3. (Vars Façade removed per APLRET contract)
 
             // 4. Attach APIs and Flush Helper
             const flushMentalState = async () => {
                 const mutateFn = async (baseSnap: Record<string, unknown>) => {
-                    VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
-
                     // Inject LLM history into M before saving
                     try {
                         const llmAny = (ctx as any).llm as any;
@@ -176,7 +123,6 @@ export class TurnRunner {
                     expectedWmVersion: snap?.wmVersion ?? BigInt(0),
                     snapshot: await mutateFn(base)
                 });
-                (ctx as any).__varsDirty = false;
             };
 
             await this.apiBinder.attachOrchestrationAPIs(ctx, {

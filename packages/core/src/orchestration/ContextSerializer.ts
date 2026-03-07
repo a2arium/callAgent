@@ -159,18 +159,10 @@ export class ContextSerializer {
                 workingMemory.decisions = await ctx.memory.mlo.getAllDecisions();
             }
 
-            // Extract variables - handle both Map-like and object-like vars
-            if (ctx.vars) {
-                if ((ctx.vars as any).keys && (ctx.vars as any).get) {
-                    // Map-like interface
-                    const kv: Record<string, unknown> = {};
-                    for (const k of (ctx.vars as any).keys()) kv[k] = (ctx.vars as any).get(k);
-                    workingMemory.variables = kv;
-                } else {
-                    // Object-like interface (for tests)
-                    workingMemory.variables = { ...ctx.vars };
-                }
-            }
+            // Variables (ctx.vars) were removed per APLRET.
+            // Any cross-turn control state should be in env.pending.controlVars.
+            // Any business state should be in M.worldModel.
+            workingMemory.variables = {};
 
             serializerLogger.debug('Working memory serialized', {
                 hasGoal: !!workingMemory.goal,
@@ -282,10 +274,8 @@ export class ContextSerializer {
                 }
             }
 
-            // Restore variables
-            if (ctx.vars && workingMemory.variables) {
-                Object.assign(ctx.vars, workingMemory.variables);
-            }
+            // Restore variables NO-OP: ctx.vars has been removed per APLRET.
+            // If legacy agents send variables, they are dropped.
 
             serializerLogger.debug('Working memory deserialized successfully');
         } catch (error) {

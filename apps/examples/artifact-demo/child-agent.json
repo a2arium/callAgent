@@ -1,7 +1,0 @@
-{
-  "name": "artifact-demo-child",
-  "version": "1.0.0",
-  "description": "Helper child agent for artifact demo",
-  "runMode": "loop"
-}
-

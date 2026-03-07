@@ -71,11 +71,7 @@ export type Skill = {
     policyRef?: string;        // reference to policy/program
 };
 
-export type WorldModel = {
-    implicit: unknown | null;  // placeholder for learned dynamics/value
-    explicit: unknown | null;  // placeholder for rules/sim
-    simulator: unknown | null; // placeholder for external simulators
-};
+export type WorldModel = Record<string, unknown>;
 
 export type GoalId = string;
 export type GoalType = 'long' | 'mid' | 'short';
@@ -147,12 +143,10 @@ export type MemoryWriter = {
 };
 
 export type MentalState<Sensory = unknown> = {
-    // Deprecated: short-term vars alias (kept optional for compatibility)
-    vars?: Record<string, unknown>;
+
     memory: {
         sensory: Sensory;        // e.g., { llmState, lastObservation }
-        // Deprecated: short-term vars bag (kept optional for compatibility)
-        vars?: Record<string, unknown>;
+
         thoughts?: import('../shared/types/index.js').ThoughtEntry[];
         decisions?: Record<string, import('../shared/types/index.js').DecisionEntry>;
         scratch?: unknown;       // Optional ephemeral working set (Learning-owned)
@@ -211,6 +205,7 @@ export type EnvironmentState<ObservationPayload extends ObservationConfig = Obse
         children: Record<string, unknown>;
         tools: Record<string, unknown>;
         groups: Record<string, unknown>;
+        controlVars?: Record<string, unknown>;
     };
     // Optional control surface for modules needing control signals without ctx.vars
     control?: ControlState;

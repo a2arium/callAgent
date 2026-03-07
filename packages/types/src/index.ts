@@ -8,6 +8,11 @@ export type {
     EpisodicMemoryBackend,
     EmbedMemoryBackend,
     MemoryRegistry,
+    SemanticAddInput,
+    SemanticItem,
+    SemanticReadFilter,
+    SemanticRemoveFilter,
+    SemanticPredicateFilter,
 } from './IMemory.js';
 
 export type {

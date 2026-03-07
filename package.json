@@ -25,21 +25,9 @@
     "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
     "test": "node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
-    "run:llm": "yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{\"prompt\": \"Tell me a joke about AI.\"}'",
-    "run:memory": "yarn run-agent apps/examples/memory-usage/dist/AgentModule.js '{}' --stream --tenant=customer-123",
     "run:hello": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}'",
     "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}' --no-resolve-deps",
-    "run:loop-mini": "yarn run-agent apps/examples/loop-agent-mini/dist/AgentModule.js '{}' --stream --format=console",
-    "run:loop-mini:dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts apps/examples/loop-agent-mini/AgentModule.ts '{}' --stream --format=console --no-resolve-deps",
-    "run:artifact-demo": "LOG_LEVEL=info yarn run-agent apps/examples/artifact-demo/dist/agent.js '{\"sizeKB\":256}' --format=console",
-    "run:interactive-a2a": "yarn run-agent apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js '{}' --stream --format=console",
     "input": "node packages/core/dist/runner/runnerCli.js input",
-    "run:calc": "run-agent apps/examples/calculator-workflow/dist/CoordinatorAgent.js '{\"expression\": \"5 * 2 + 3 - 1\"}'",
-    "run:csv-parser": "yarn run-agent apps/examples/data-processing/csv-parser/dist/AgentModule.js '{\"csvData\": \"name,age,city\\nJohn,25,NYC\\nJane,30,LA\"}'",
-    "run:data-analyzer": "yarn run-agent apps/examples/business-logic/data-analyzer/dist/AgentModule.js '{\"csvData\": \"name,age,salary\\nJohn,25,50000\\nJane,30,60000\\nBob,35,70000\", \"analysisType\": \"statistics\"}'",
-    "run:memory-recognition": "yarn run-agent apps/examples/memory-recognition/dist/agent.js '{}'",
-    "run:telegram-demo": "yarn workspace @examples/telegram-bridge-demo run start",
-    "run:telegram-demo:dev": "yarn workspace @examples/telegram-bridge-demo run dev",
     "agent-cache": "yarn build && node packages/core/dist/runner/cacheCli.js",
     "agent-index": "yarn build && node packages/core/dist/runner/agentsCli.js index",
     "agent-index:fast": "node packages/core/dist/runner/agentsCli.js index",
@@ -88,9 +76,7 @@
   "workspaces": [
     "packages/*",
     "apps/*",
-    "apps/examples/*",
-    "apps/examples/data-processing/*",
-    "apps/examples/business-logic/*"
+    "apps/examples/*"
   ],
   "resolutions": {
     "uuid": "10.0.0",

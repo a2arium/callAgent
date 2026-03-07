@@ -90,7 +90,6 @@ import { PathUtils } from './utils/PathUtils.js';
 import { SnapshotRepository } from './persistence/SnapshotRepository.js';
 import { ApiBinder } from './api/ApiBinder.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
-import { VarsSync } from './synchronization/VarsSync.js';
 import { TurnRunner } from './TurnRunner.js';
 // Legacy adapters to maintain internal calls if needed, or replace usages.
 
@@ -527,52 +526,10 @@ export class TaskEngine {
         const currentVars = ((M?.memory as any)?.vars || {}) as Record<string, unknown>;
 
         if (!(ctx as any).__ctxId) (ctx as any).__ctxId = `ctx-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const ensureVarsId = () => {
-            const varsObj = (ctx as any).vars;
-            if (varsObj && !(varsObj as any).__varsId) {
-                (varsObj as any).__varsId = `vars-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-            }
-        };
-        ensureVarsId();
-
-        // Define onUpdate/onDelete handlers for synchronization
-        const onUpdate = (key: string, value: unknown) => {
-            // We can optimize strict sync if needed, but for now rely on flushMentalState or similar if attached?
-            // Actually, attachWorkingMemory sets up the initial facade. 
-            // The persistence is handled via M referencing the same object if we keep them in sync.
-            // But the proxy writes to 'cache' (Map). We need to sync back to 'M.memory.vars'.
-            // VarsSync.assignVarsIntoMental handles bulk sync.
-            // Let's implement active sync here to keep M updated in real-time.
-            const mental = (ctx as any).__mental;
-            if (mental?.memory?.vars) {
-                mental.memory.vars[key] = value;
-            }
-            (ctx as any).__varsDirty = true;
-        };
-        const onDelete = (key: string) => {
-            const mental = (ctx as any).__mental;
-            if (mental?.memory?.vars) {
-                delete mental.memory.vars[key];
-            }
-            (ctx as any).__varsDirty = true;
-        };
-
         if (!(ctx as any).tenantId) (ctx as any).tenantId = tenantId;
         if (!(ctx as any).agentId) (ctx as any).agentId = agentId;
         if (M && !(ctx as any).__mental) {
             (ctx as any).__mental = M;
-        }
-
-        if (!(ctx as any).vars) {
-            (ctx as any).vars = VarsSync.createVarsProxy(currentVars, onUpdate, onDelete);
-
-            // Log loaded vars
-            log.debug('attachWorkingMemory loaded vars', {
-                sessionId,
-                agentId,
-                count: Object.keys(currentVars).length,
-                keys: Object.keys(currentVars)
-            });
         }
 
         await this.apiBinder.attachOrchestrationAPIs(ctx, {
@@ -851,11 +808,8 @@ export class TaskEngine {
             }
         };
 
-        // Helper to sync vars into mental state
-        const assignVarsIntoMental = () => {
-            // Pass M explicitly to ensure it updates the local reference used in flush
-            VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
-        };
+        // Legacy helper assignVarsIntoMental removed.
+        const assignVarsIntoMental = () => { };
 
         // Seed loop budget limits if provided in params.options
         if (params.options) {
@@ -999,14 +953,8 @@ export class TaskEngine {
             }
         };
 
-        (ctx as any).vars = VarsSync.createVarsProxy(
-            varCache,
-            (key: string, value: unknown) => { (ctx as any).__varsDirty = true; },
-            (key: string) => { (ctx as any).__varsDirty = true; removeKeyFromMental(key); }
-        );      // ✅ FIX: Don't call assignVarsIntoMental during turn - it overwrites Learning's changes!
+        // Legacy VarsSync.createVarsProxy and assignVarsIntoMental removed.
 
-        // Ensure alias is initialized before loop modules read mentalState.vars
-        try { assignVarsIntoMental(); } catch { /* noop */ }
 
         await this.apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
@@ -1444,9 +1392,7 @@ export class TaskEngine {
                     }
                 };
 
-                const assignVarsIntoMental = () => {
-                    VarsSync.assignVarsIntoMental(ctx, varCache, [M, (ctx as any).M]);
-                };
+                const assignVarsIntoMental = () => { };
 
                 const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
                     const next = PathUtils.deletePathImmutable(obj, path);
@@ -1484,12 +1430,7 @@ export class TaskEngine {
                     return PathUtils.getPath(obj, path);
                 };
 
-                (ctx as any).vars = VarsSync.createVarsProxy(
-                    varCache,
-                    (key: string, value: unknown) => { (ctx as any).__varsDirty = true; },
-                    (key: string) => { (ctx as any).__varsDirty = true; removeKeyFromMental(key); }
-                );
-                assignVarsIntoMental();
+                // Legacy VarsSync.createVarsProxy removed.
             } catch { /* noop */ }
             // Resolve runMode for resume
             const manifestRunMode = (plugin?.manifest as any)?.runMode;
@@ -2328,7 +2269,8 @@ export class TaskEngine {
                                 inputs: ((latestBase as any)?.pending?.inputs) || {},
                                 children: ((latestBase as any)?.pending?.children) || {},
                                 tools: ((latestBase as any)?.pending?.tools) || {},
-                                groups: ((latestBase as any)?.pending?.groups) || {}
+                                groups: ((latestBase as any)?.pending?.groups) || {},
+                                controlVars: ((latestBase as any)?.pending?.controlVars) || {}
                             },
                             inbox: envInbox,
                             lastExec: (latestBase as any)?.meta?.lastExec || undefined,
@@ -2806,6 +2748,9 @@ export class TaskEngine {
                     remove: async () => 0,
                     recognize: async () => { throw new Error('Semantic memory recognition not available in basic task engine'); },
                     enrich: async () => { throw new Error('Semantic memory enrichment not available in basic task engine'); },
+                    add: async () => { },
+                    readItems: async () => [],
+                    removeItem: async () => { },
                 },
                 episodic: {
                     getDefaultBackend: () => 'none',
@@ -2848,15 +2793,6 @@ export class TaskEngine {
             requestTool: async () => { throw new Error('requestTool not available in basic task engine'); },
 
             // (legacy methods removed)
-            vars: {
-                get: () => undefined,
-                set: () => { },
-                merge: () => { },
-                update: () => { },
-                delete: () => { },
-                keys: () => [],
-                has: () => false
-            } as any,
             // (legacy goals API removed)
             recall: async () => { throw new Error('Memory not available in basic task engine'); },
             remember: async () => { throw new Error('Memory not available in basic task engine'); }
@@ -3016,7 +2952,7 @@ export class TaskEngine {
                     vars: varsState
                 }
             };
-            VarsSync.ensureVarsFacade(ctx, varsState);
+            // Legacy VarsSync.ensureVarsFacade removed
         };
         ensureVarsFacade();
         await this.apiBinder.attachOrchestrationAPIs(ctx, {
@@ -3038,115 +2974,6 @@ export class TaskEngine {
                 }
             };
             (ctx as any).thoughts = { add: async (t: any) => { try { await (ctx as any).addThought(String((t?.text ?? t) || '')); } catch { /* noop */ } } };
-            (ctx as any).semantic = {
-                add: async (item: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
-                    try {
-                        if (!(ctx.memory as any)?.semantic?.set) {
-                            console.error('[ctx.semantic.add] ERROR: ctx.memory.semantic.set is not available. Memory registry may not be initialized.');
-                            console.error('[ctx.semantic.add] Backends:', (ctx.memory as any)?.semantic?.backends);
-                            throw new Error('ctx.memory.semantic.set is not available - memory registry not properly initialized');
-                        }
-                        await (ctx.memory as any).semantic.set(item.id, item.value, { tags: item.tags, entities: item.entities });
-                    } catch (err) {
-                        console.error('[ctx.semantic.add] Failed to save semantic memory:', {
-                            id: item.id,
-                            error: err instanceof Error ? err.message : String(err),
-                            hasMemory: !!(ctx.memory as any),
-                            hasSemantic: !!(ctx.memory as any)?.semantic,
-                            hasSet: !!(ctx.memory as any)?.semantic?.set,
-                            backends: (ctx.memory as any)?.semantic?.backends
-                        });
-                        throw err; // Re-throw instead of silent failure
-                    }
-                },
-                remove: async (idOrPredicate: string | Record<string, unknown> | ((f: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
-                    try {
-                        if (typeof idOrPredicate === 'string') {
-                            await (ctx.memory as any)?.semantic?.delete?.(idOrPredicate);
-                            return;
-                        }
-                        // Object-based remove with filters/tags — delegate to adapter
-                        if (typeof idOrPredicate === 'object' && idOrPredicate !== null && typeof idOrPredicate !== 'function') {
-                            const removeQuery: any = {};
-                            if ((idOrPredicate as any).tag) removeQuery.tag = (idOrPredicate as any).tag;
-                            if ((idOrPredicate as any).filters) removeQuery.filters = (idOrPredicate as any).filters;
-                            if ((idOrPredicate as any).limit) removeQuery.limit = (idOrPredicate as any).limit;
-                            const removeFn = (ctx.memory as any)?.semantic?.remove;
-                            if (removeFn && Object.keys(removeQuery).length > 0) {
-                                await removeFn(removeQuery);
-                                return;
-                            }
-                        }
-                        // Legacy: predicate-function-based deletion
-                        if (typeof idOrPredicate === 'function') {
-                            const all = await (ctx.memory as any)?.semantic?.read?.('*');
-                            if (Array.isArray(all)) {
-                                for (const item of all) {
-                                    const mapped = { id: item?.key ?? item?.id, value: item?.value, tags: item?.tags, entities: item?.entities } as any;
-                                    if ((idOrPredicate as any)(mapped)) await (ctx.memory as any)?.semantic?.delete?.(mapped.id);
-                                }
-                            }
-                        }
-                    } catch { /* noop */ }
-                },
-                read: async (filter?: { id?: string | string[]; tag?: string; tags?: string[]; filters?: any[]; limit?: number; orderBy?: any; random?: boolean }) => {
-                    try {
-                        const semanticRead = (ctx.memory as any)?.semantic?.read;
-                        if (!semanticRead) {
-                            console.warn('[ctx.semantic.read] ctx.memory.semantic.read not available');
-                            return [];
-                        }
-
-                        // ID-based lookup: fetch specific records by key
-                        if (filter?.id) {
-                            const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
-                            const results: any[] = [];
-                            for (const id of ids) {
-                                const val = await (ctx.memory as any)?.semantic?.get?.(id);
-                                if (val !== null && val !== undefined) {
-                                    results.push({ id, value: val, tags: undefined, entities: undefined });
-                                }
-                            }
-                            return typeof filter.limit === 'number' ? results.slice(0, filter.limit) : results;
-                        }
-
-                        // Build query object for the adapter's read() method
-                        const query: any = {};
-                        if (filter?.tag) query.tag = filter.tag;
-                        if (filter?.filters) query.filters = filter.filters;
-                        if (filter?.limit) query.limit = filter.limit;
-                        if (filter?.orderBy) query.orderBy = filter.orderBy;
-                        if (filter?.random) query.random = filter.random;
-
-                        // Delegate to adapter which uses SQL-level filtering
-                        const rawResults = await semanticRead(
-                            Object.keys(query).length > 0 ? query : '*'
-                        );
-
-                        // Map adapter shape { key, value } → facade shape { id, value }
-                        const mapped = Array.isArray(rawResults)
-                            ? rawResults.map((x: any) => ({
-                                id: x?.key ?? x?.id,
-                                value: x?.value,
-                                tags: x?.tags,
-                                entities: x?.entities
-                            }))
-                            : [];
-
-                        // Multi-tag filtering (adapter supports single tag; apply extra tags in JS)
-                        if (filter?.tags && filter.tags.length > 0 && !filter?.tag) {
-                            return mapped.filter((m: any) =>
-                                filter.tags!.every((t: string) => (m.tags || []).includes(t))
-                            );
-                        }
-
-                        return mapped;
-                    } catch (err) {
-                        console.error('[ctx.semantic.read] Error:', err instanceof Error ? err.message : String(err));
-                        return [];
-                    }
-                }
-            };
             (ctx as any).world = { update: (fn: (wm: any) => void) => { try { fn(((ctx as any).__mental as any).worldModel); } catch { /* noop */ } }, patch: (p: Record<string, unknown>) => { try { Object.assign(((ctx as any).__mental as any).worldModel, p); } catch { /* noop */ } } };
         } catch { /* noop */ }
         // LLM state restoration now happens immediately after LLM creation above (lines 1551-1564)

@@ -169,23 +169,74 @@ export type GetManyQuery = {
 export type GetManyInput = string | GetManyQuery;
 
 /**
+ * High-level agent API input for adding semantic memory
+ */
+export type SemanticAddInput = {
+    id: string;
+    value: unknown;
+    tags?: string[];
+    entities?: Record<string, string>;
+    backend?: string;
+};
+
+/**
+ * Filter for query-based semantic memory item retrieval
+ */
+export type SemanticReadFilter = {
+    id?: string | string[];
+    tag?: string;
+    tags?: string[];
+    filters?: any[];
+    backend?: string;
+    limit?: number;
+    orderBy?: { path: string; direction: 'asc' | 'desc' };
+    random?: boolean;
+};
+
+/**
+ * Returned high-level wrapper item from semantic memory
+ */
+export type SemanticItem = {
+    id: string;
+    value: unknown;
+    tags?: string[];
+    entities?: Record<string, unknown>;
+};
+
+/**
+ * Filter for query-based semantic memory item removal
+ */
+export type SemanticRemoveFilter = {
+    tag?: string;
+    filters?: any[];
+    limit?: number;
+};
+
+/**
+ * Predicate function based memory removal definition
+ */
+export type SemanticPredicateFilter = (item: SemanticItem) => boolean;
+
+/**
  * Interface for a semantic memory backend, supporting key-value storage and advanced queries.
  *
  * Semantic memory is used for storing structured, queryable knowledge (e.g., facts, user profiles).
  * Backends may support tags, filtering, similarity search, and entity alignment.
  */
 export type SemanticMemoryBackend = {
+    // ── Low-level Adapter API (for infrastructure) ──
     get<T>(key: string, opts?: { backend?: string }): Promise<T | null>;
     read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>>;
     set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
     delete(key: string, opts?: { backend?: string }): Promise<void>;
     remove(input: GetManyInput, options?: GetManyOptions): Promise<number>;
 
-    // Recognition and enrichment methods
+
+    // ── Advanced Operations ──
     recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>>;
     enrich<T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>>;
 
-    // Entity alignment methods (optional - available when alignment is enabled)
+    // ── Entity Alignment ──
     entities?: {
         unlink(memoryKey: string, fieldPath: string): Promise<void>;
         realign(memoryKey: string, fieldPath: string, newEntityId: string): Promise<void>;
@@ -196,6 +247,7 @@ export type SemanticMemoryBackend = {
         }>;
     };
 };
+
 
 /**
  * Interface for an episodic memory backend, supporting event log storage and retrieval.
@@ -241,7 +293,11 @@ export type MemoryRegistry<T> = {
  * Each tier is a registry supporting multiple backends and default selection.
  */
 export type IMemory = {
-    semantic: MemoryRegistry<SemanticMemoryBackend>;
+    semantic: MemoryRegistry<SemanticMemoryBackend> & {
+        add(item: SemanticAddInput): Promise<void>;
+        readItems(filter?: SemanticReadFilter): Promise<SemanticItem[]>;
+        removeItem(idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter): Promise<void>;
+    };
     episodic: MemoryRegistry<EpisodicMemoryBackend>;
     embed: MemoryRegistry<EmbedMemoryBackend>;
     working?: MemoryRegistry<import('./workingMemory.js').WorkingMemoryBackend>;

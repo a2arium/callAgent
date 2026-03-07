@@ -1155,25 +1155,7 @@ describe('TaskEngine orchestration coverage', () => {
         expect(store.writeCount).toBe(0);
     });
 
-    test('restoreCtx rehydrates mental vars facade and exposes session manager', async () => {
-        const store = new FakeSessionStore();
-        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-        const realCreate = (engine as any).createContext.bind(engine);
-        jest.spyOn(engine as any, 'createContext').mockImplementation((task: any) => {
-            const ctx = realCreate(task);
-            // Force ensureVarsFacade to rebuild when restoreCtx runs
-            (ctx as any).vars = {};
-            return ctx;
-        });
-        const base = { meta: { agentId: 'agent-a' }, M: { memory: { vars: { a: 1 } } }, inbox: { current: [], all: [] }, pending: {} };
-        store.seed('t', 'task', base as any, BigInt(0), 'agent-a');
 
-        const ctx: any = await (engine as any).restoreCtx('t', 'task');
-        expect(ctx._sessionManager).toBeDefined();
-        expect(ctx.vars.get('a')).toBe(1);
-        ctx.vars.set('b', 2);
-        expect((ctx.__mental as any).memory.vars.b).toBe(2);
-    });
 
     test('restoreCtx durable sendTaskToAgent injects child completion into active loop', async () => {
         // Use spyOn instead of module mocking to avoid Jest ESM issues

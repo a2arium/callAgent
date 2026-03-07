@@ -10,7 +10,12 @@ import {
     RecognitionOptions,
     RecognitionResult,
     EnrichmentOptions,
-    EnrichmentResult
+    EnrichmentResult,
+    SemanticAddInput,
+    SemanticItem,
+    SemanticReadFilter,
+    SemanticRemoveFilter,
+    SemanticPredicateFilter
 } from '@a2arium/callagent-types';
 import { logger } from '@a2arium/callagent-utils';
 // import { createEmbeddingFunction, isEmbeddingAvailable } from '../llm/LLMFactory.js'; // REMOVED: Injected via config
@@ -104,7 +109,7 @@ Error: ${error}
         }
 
         // Create semantic memory registry using the existing adapter
-        const semantic: MemoryRegistry<SemanticMemoryBackend> = {
+        const semantic: IMemory['semantic'] = {
             getDefaultBackend: () => 'sql',
             setDefaultBackend: () => { },
             backends: { sql: semanticAdapter },
@@ -116,6 +121,75 @@ Error: ${error}
             delete: (key: string, opts?: { backend?: string }) => semanticAdapter.delete(key),
             remove: (input: GetManyInput, options?: GetManyOptions) =>
                 (semanticAdapter as any).remove?.(input, options) ?? (semanticAdapter as any).deleteMany?.(input, options),
+
+            // ── High-level Agent API ──
+            add: async (item: SemanticAddInput) => {
+                await semanticAdapter.set(item.id, item.value, { tags: item.tags, entities: item.entities });
+            },
+            readItems: async (filter?: SemanticReadFilter) => {
+                if (filter?.id) {
+                    const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
+                    const results: SemanticItem[] = [];
+                    for (const id of ids) {
+                        const val = await semanticAdapter.get<unknown>(id);
+                        if (val !== null && val !== undefined) {
+                            results.push({ id, value: val, tags: undefined, entities: undefined });
+                        }
+                    }
+                    return typeof filter.limit === 'number' ? results.slice(0, filter.limit) : results;
+                }
+                const query: any = {};
+                if (filter?.tag) query.tag = filter.tag;
+                if (filter?.filters) query.filters = filter.filters;
+                if (filter?.limit) query.limit = filter.limit;
+                if (filter?.orderBy) query.orderBy = filter.orderBy;
+
+                const rawResults = await semanticAdapter.read(Object.keys(query).length > 0 ? query : '*');
+                const mapped = Array.isArray(rawResults)
+                    ? rawResults.map((x: any) => ({
+                        id: x?.key ?? x?.id,
+                        value: x?.value,
+                        tags: x?.tags,
+                        entities: x?.entities,
+                    }))
+                    : [];
+
+                if (filter?.tags && filter.tags.length > 0 && !filter?.tag) {
+                    return mapped.filter((m: any) =>
+                        filter.tags!.every((t: string) => (m.tags || []).includes(t))
+                    );
+                }
+                return mapped;
+            },
+            removeItem: async (idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter) => {
+                try {
+                    if (typeof idOrFilter === 'string') {
+                        await semanticAdapter.delete(idOrFilter);
+                        return;
+                    }
+                    if (typeof idOrFilter === 'object' && idOrFilter !== null && typeof idOrFilter !== 'function') {
+                        const removeQuery: any = {};
+                        if ((idOrFilter as any).tag) removeQuery.tag = (idOrFilter as any).tag;
+                        if ((idOrFilter as any).filters) removeQuery.filters = (idOrFilter as any).filters;
+                        if ((idOrFilter as any).limit) removeQuery.limit = (idOrFilter as any).limit;
+                        if (Object.keys(removeQuery).length > 0) {
+                            await semanticAdapter.remove(removeQuery);
+                            return;
+                        }
+                    }
+                    if (typeof idOrFilter === 'function') {
+                        const all = await semanticAdapter.read('*');
+                        if (Array.isArray(all)) {
+                            for (const rawItem of all) {
+                                const item = rawItem as Record<string, unknown>;
+                                const mapped = { id: (item.key ?? item.id) as string, value: item.value, tags: item.tags, entities: item.entities };
+                                if ((idOrFilter as (f: typeof mapped) => boolean)(mapped)) await semanticAdapter.delete(mapped.id);
+                            }
+                        }
+                    }
+                } catch { /* noop */ }
+            },
+
             entities: semanticAdapter.entities,
             recognize: <T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>> =>
                 semanticAdapter.recognize(candidateData, {

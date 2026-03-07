@@ -27,6 +27,7 @@ describe('Orchestration & Stability V2 Repros', () => {
             };
 
             // First run: executes one turn and yields
+            env.turn++; // TaskExecutor increments turn before runLoop
             const res1 = await runLoop(ctx, M, env, modules, { maxTurns: 5 });
             expect(env.turn).toBe(1); // First turn completed
             expect(res1.outcome.kind).toBe('await_tool');
@@ -36,9 +37,10 @@ describe('Orchestration & Stability V2 Repros', () => {
             modules.policy = () => ({ kind: 'internal', done: true });
             modules.transition = () => ({ kind: 'complete' });
 
+            env.turn++; // TaskExecutor increments turn on resume
             const res2 = await runLoop(ctx, res1.M, env, modules, { maxTurns: 5 });
 
-            // BUG: env.turn will likely still be 1 because turn=0 in the new call
+            // Ensure env.turn correctly progressed
             expect(env.turn).toBe(2);
         });
     });

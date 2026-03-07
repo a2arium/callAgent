@@ -840,16 +840,6 @@ export class A2AService implements IA2AService {
                             });
                             console.log(`⚡ ${targetPlugin.manifest.name} (cached result)\n`);
 
-                            // Debug: Log the full cached result to inspect content/errors
-                            try {
-                                const resultSummary = JSON.stringify(cachedResult, (key, value) => {
-                                    if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
-                                    return value;
-                                }, 2);
-                                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result:\n${resultSummary}\n`);
-                            } catch (err) {
-                                console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} cached result (non-serializable):`, cachedResult);
-                            }
 
                             // Hydrate artifacts in cached result before returning
                             try {
@@ -871,7 +861,7 @@ export class A2AService implements IA2AService {
                     }
 
 
-                    console.log(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
+                    a2aLogger.info(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
 
                     a2aLogger.debug('Executing target agent', {
                         operationId,
@@ -899,18 +889,6 @@ export class A2AService implements IA2AService {
                                 const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
                                 return started ?? { status: 'started' } as any;
                             })());
-
-                    // Debug: Log the full result from the target agent to inspect content/errors
-                    try {
-                        const resultSummary = JSON.stringify(result, (key, value) => {
-                            if (key === 'html' && typeof value === 'string' && value.length > 100) return value.substring(0, 100) + '...';
-                            return value;
-                        }, 2);
-                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result:\n${resultSummary}\n`);
-                    } catch (err) {
-                        console.log(`\n🔍 [A2AService] Target agent ${targetPlugin.manifest.name} result (non-serializable):`, result);
-                    }
-
 
                     // Cache the result if caching is enabled
                     if (this.agentResultCache && effectiveCache.enabled) {

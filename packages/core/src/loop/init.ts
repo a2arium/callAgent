@@ -13,14 +13,13 @@ export function initialM(ctx: TaskContext): MentalState {
     return {
         memory: {
             sensory: { llmState, lastObservation: ctx.task.input },
-            vars: {},
             longTerm: {
                 episodic: [],
                 semantic: { concepts: [] },
                 procedural: { skills: [] }
             }
         },
-        worldModel: { implicit: null, explicit: null, simulator: null },
+        worldModel: {},
         goalState: {
             hierarchy: { nodes: {}, roots: [] }
         },

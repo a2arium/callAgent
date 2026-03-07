@@ -169,76 +169,7 @@ export type TaskContext = {
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 
-    // Working Memory Operations (replaced by namespaced helpers below)
 
-    // Working memory variables - facade (writes via methods only)
-    vars: {
-        /**
-         * Get a variable value. Supports nested paths using dot notation.
-         * @param key - Variable key or nested path (e.g., 'user.profile.name')
-         * @returns The stored value or undefined if not found
-         * @example
-         * const name = ctx.vars.get('user.profile.name');
-         * const stage = ctx.vars.get('stage');
-         */
-        get<T = unknown>(key: string): T | undefined;
-
-        /**
-         * Set a variable value. Supports nested paths with automatic object creation.
-         * @param key - Variable key or nested path (e.g., 'user.profile.email')
-         * @param value - Value to store
-         * @example
-         * ctx.vars.set('user.profile.email', 'john@example.com');
-         * ctx.vars.set('stage', 'completed');
-         */
-        set<T = unknown>(key: string, value: T): void;
-
-        /**
-         * Merge multiple key-value pairs into variables. Does NOT treat dots as paths.
-         * @param patch - Object containing key-value pairs to merge
-         * @example
-         * ctx.vars.merge({ stage: 'completed', counter: 42 });
-         * // Note: merge({ 'user.profile.email': 'value' }) creates a key with dots
-         */
-        merge(patch: Record<string, unknown>): void;
-
-        /**
-         * Update a variable value using a function that receives the current value.
-         * Supports nested paths with automatic object creation.
-         * @param key - Variable key or nested path (e.g., 'counter', 'user.profile.name')
-         * @param fn - Function that receives current value and returns new value
-         * @example
-         * ctx.vars.update('counter', (current) => (current || 0) + 1);
-         * ctx.vars.update('user.profile.name', (current) => current?.toUpperCase() || 'UNKNOWN');
-         */
-        update<T = unknown>(key: string, fn: (prev: T | undefined) => T): void;
-
-        /**
-         * Delete a variable. Supports nested paths.
-         * @param key - Variable key or nested path to delete
-         * @example
-         * ctx.vars.delete('user.profile.email');
-         * ctx.vars.delete('temporaryData');
-         */
-        delete(key: string): void;
-
-        /**
-         * Get all variable keys (top-level only).
-         * @returns Array of variable keys
-         * @example
-         * const keys = ctx.vars.keys(); // ['user', 'stage', 'counter']
-         */
-        keys(): string[];
-
-        /**
-         * Check if a variable exists. Supports nested paths.
-         * @param key - Variable key or nested path to check
-         * @returns True if the variable exists
-         * @example
-         * if (ctx.vars.has('user.profile.email')) { ... }
-         */
-        has(key: string): boolean;
-    };
 
     // Artifacts factory for offloading large data
     artifacts: {
@@ -270,13 +201,8 @@ export type TaskContext = {
     };
     episodic?: { add: (e: any) => void };
     thoughts?: { add: (t: { text: string } | string) => Promise<void> | void };
-    // Semantic memory facade (hybrid): prefer add/read/remove over legacy set/get/delete
-    semantic?: {
-        add: (item: SemanticAddInput) => Promise<void> | void;
-        read: (filter?: SemanticReadFilter) => Promise<SemanticItem[]> | SemanticItem[];
-        remove: (idOrPredicate: string | ((item: SemanticItem) => boolean)) => Promise<void> | void;
-    };
-    world?: { update: (fn: (wm: any) => void) => void; patch: (p: Record<string, unknown>) => void };
+
+    world?: { read: () => Readonly<Record<string, unknown>> };
     decisions?: {
         add: (key: string, value: unknown, reasoning?: string) => Promise<void>;
         get: (key: string) => Promise<{ key: string; value: unknown; reasoning?: string; ts: string } | null>;
@@ -289,13 +215,7 @@ export type TaskContext = {
 
     // Future Capabilities (Stubbed/Placeholder - DO NOT USE in minimal agent logic)
     tools: { invoke: <T = unknown>(toolName: string, args: unknown, options?: { onCompleted?: string; setToken?: boolean; setStage?: string }) => Promise<T> };
-    memory: IMemory & {
-        // NEW: Direct MLO access (will be defined later)
-        mlo?: unknown; // Enhanced for A2A serialization - UnifiedMemoryService or compatible service
-        semantic?: unknown; // Placeholder for semantic adapter access
-        episodic?: unknown; // Placeholder for episodic adapter access
-        embed?: unknown; // Placeholder for embed adapter access
-    };
+    memory: IMemory;
     cognitive: { loadWorkingMemory: (e: unknown) => void; plan: (prompt: string, options?: unknown) => Promise<unknown>; record: (state: unknown) => void; flush: () => Promise<void>; };
     config: unknown; // Minimal config object
     validate: (schema: unknown, data: unknown) => void; // Basic validation, will throw
@@ -359,29 +279,14 @@ export type TaskContext = {
     ) => Promise<import('../../orchestration/Handles.js').GroupHandle>;
 }
 
-// --- Semantic facade types ---
-export type SemanticAddInput = {
-    id: string;
-    value: unknown;
-    tags?: string[];
-    entities?: Record<string, unknown>;
-    backend?: string;
-};
-
-export type SemanticReadFilter = {
-    id?: string | string[];
-    tag?: string;
-    tags?: string[];
-    backend?: string;
-    limit?: number;
-};
-
-export type SemanticItem = {
-    id: string;
-    value: unknown;
-    tags?: string[];
-    entities?: Record<string, unknown>;
-};
+// --- Shared Semantic facade types ---
+export type {
+    SemanticAddInput,
+    SemanticReadFilter,
+    SemanticItem,
+    SemanticRemoveFilter,
+    SemanticPredicateFilter
+} from '@a2arium/callagent-types';
 
 /**
  * Guaranteed Agent Task Context
@@ -389,7 +294,7 @@ export type SemanticItem = {
  * Use this type for agent implementations to avoid "possibly undefined" errors
  */
 export type AgentTaskContext = Required<Pick<TaskContext,
-    'vars' | 'recall' | 'remember' | 'sendTaskToAgent' | 'artifacts'
+    'recall' | 'remember' | 'sendTaskToAgent' | 'artifacts'
 >> & TaskContext;
 
 /**
@@ -418,10 +323,6 @@ export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
         if (typeof (ctx as any)[method] !== 'function') {
             throw new Error(`Agent context is missing required method: ${method}. Ensure the agent is run through the proper runner with memory support.`);
         }
-    }
-
-    if (!ctx.vars || typeof ctx.vars !== 'object') {
-        throw new Error('Agent context is missing required vars object. Ensure the agent is run through the proper runner with memory support.');
     }
 
     if (!ctx.artifacts || typeof ctx.artifacts !== 'object') {

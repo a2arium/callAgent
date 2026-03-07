@@ -26,7 +26,7 @@ export type MinimalSourceTaskContext = {
         };
         [key: string]: any;
     };
-    vars?: Record<string, any>;
+
     // Add agentId to allow the serializer to get the source agent's ID
     agentId: string;
     // Add llm and tools for sharing with target context
@@ -59,9 +59,9 @@ export type A2ACallOptions = {
         /** Override excludePaths; falls back to manifest when omitted */
         excludePaths?: string[];
     };
-    /** Automatically store child token in ctx.vars when child requests input */
+    /** Automatically store child token in env.pending.controlVars when child requests input */
     setToken?: boolean;
-    /** Path in ctx.vars where token is stored (default: 'child.token') */
+    /** Path in controlVars where token is stored (default: 'child.token') */
     tokenPath?: string;
     /** Automatically clear token when child completes (default: true) */
     autoClearToken?: boolean;

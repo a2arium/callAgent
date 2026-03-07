@@ -1,6 +1,0 @@
-{
-  "name": "llm-agent",
-  "version": "0.1.0",
-  "description": "LLM-powered agent that can perform various tasks using OpenAI models",
-  "runMode": "legacy"
-}

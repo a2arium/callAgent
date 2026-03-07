@@ -35,7 +35,8 @@ await jest.unstable_mockModule(resolve(srcDir, 'loop/loopRunner.ts'), () => ({
 }));
 
 await jest.unstable_mockModule('@a2arium/callagent-utils', () => ({
-    logger: mockLogger
+    logger: mockLogger,
+    updateLoggingContext: jest.fn()
 }));
 
 await jest.unstable_mockModule(resolve(srcDir, 'llm/LLMFactory.ts'), () => ({

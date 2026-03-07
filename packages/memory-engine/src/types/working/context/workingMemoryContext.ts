@@ -3,7 +3,7 @@ import { MemoryLifecycleConfig } from '../../../lifecycle/config/types.js';
 import { getMemoryProfile } from '../../../lifecycle/config/MemoryProfiles.js';
 import { WorkingVariables } from '../../../shared/types/workingMemory.js';
 import { TaskContext } from '../../../shared/types/index.js';
-import { WorkingMemoryBackend } from '@a2arium/callagent-types';
+import { WorkingMemoryBackend, IMemory } from '@a2arium/callagent-types';
 import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../../MLOBackends.js';
 import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../../episodic/EpisodicMemoryRegistry.js';
@@ -295,7 +295,7 @@ export async function extendContextWithMemory(
         semantic: new SemanticMemoryRegistry(
             semanticBackends,
             'mlo' // MLO is default, but SQL backend is available too
-        ),
+        ) as unknown as IMemory['semantic'],
         episodic: new EpisodicMemoryRegistry(
             { mlo: new MLOEpisodicBackend(unifiedMemory) },
             'mlo'
