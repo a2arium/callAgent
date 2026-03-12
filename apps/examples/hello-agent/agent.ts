@@ -3,7 +3,7 @@ import {
     type EnvironmentState,
     type MentalState,
     type MemoryReader,
-    type ProposedAction,
+    type Intent,
     type ExecutableAction,
     type ExecResult,
     type TransitionOut,
@@ -69,7 +69,7 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
         return { nameFromInput, generatedGreeting };
     },
 
-    learning: (prev: MentalState<Sensory>, _prevAction: ProposedAction | undefined, obs: HelloPerception) => {
+    learning: (prev: MentalState<Sensory>, _prevAction: Intent | undefined, obs: HelloPerception) => {
         const next = { ...prev, memory: { ...prev.memory } };
 
         if (obs.nameFromInput) {
@@ -83,7 +83,7 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
         return next;
     },
 
-    policy: (m: MentalState<Sensory>, _mem: MemoryReader): ProposedAction => {
+    policy: (m: MentalState<Sensory>, _mem: MemoryReader): Intent => {
         // Did we already generate the greeting? If so, complete the loop.
         if (m.worldModel?.generatedGreeting) {
             logger.info('[Policy] Greeting is ready. Yielding complete.');
@@ -108,9 +108,9 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
         return { action: 'pass', intent: action };
     },
 
-    execution: async (action: ProposedAction, ctx: TaskContext, _mem: MemoryReader, _m: MentalState<Sensory>) => {
+    execution: async (action: Intent, ctx: TaskContext, _mem: MemoryReader, _m: MentalState<Sensory>) => {
         if (action.kind === 'internal' && action.intent === 'generate_greeting') {
-            const name = (action.data as { name: string }).name || 'World';
+            const name = (action.data as { name: string })?.name || 'World';
 
             try {
                 if (!ctx.llm) {
@@ -175,7 +175,7 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
             action: { kind: 'internal', done: true } satisfies ExecutableAction,
             result: {
                 status: 'error',
-                error: { code: 'unknown_intent', message: `Unhandled action: ${action.kind}` }
+                error: { code: 'unknown_intent', message: `Unhandled action: ${(action as any).kind || 'unknown'}` }
             } satisfies ExecResult<HelloExecData>
         };
     },

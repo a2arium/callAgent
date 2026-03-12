@@ -27,7 +27,7 @@ describe('runLoop default policy and shield branches', () => {
         M.memory.scratch = { react: { lastResult: { prev: true } } };
 
         const execution = jest.fn(async (action: any) => ({
-            action: { kind: 'ask_user', token: 'react-token' },
+            action: { kind: 'prompt_user', token: 'react-token' },
             result: { status: 'ok', data: action }
         }));
 
@@ -46,7 +46,7 @@ describe('runLoop default policy and shield branches', () => {
         );
 
         const calledWith = execution.mock.calls[0]?.[0];
-        expect(calledWith).toMatchObject({ kind: 'tool', name: 'echo' });
+        expect(calledWith).toMatchObject({ kind: 'call_tool', toolName: 'echo' });
         expect((calledWith as any).args).toMatchObject({ msg: 'ping', context: { prev: true } });
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('react-token');
@@ -58,7 +58,7 @@ describe('runLoop default policy and shield branches', () => {
         M.hitl = 'guardrails';
 
         const execution = jest.fn(async (action: any) => ({
-            action: { kind: 'ask_user', token: 'guardrails-token' },
+            action: { kind: 'prompt_user', token: 'guardrails-token' },
             result: { status: 'ok', data: action }
         }));
 
@@ -67,7 +67,7 @@ describe('runLoop default policy and shield branches', () => {
             M,
             baseEnv(),
             {
-                policy: () => ({ kind: 'tool', name: 't', args: {} }),
+                policy: () => ({ kind: 'call_tool', toolName: 't', args: {} }),
                 execution
             } as any,
             { maxTurns: 1 }
@@ -76,7 +76,7 @@ describe('runLoop default policy and shield branches', () => {
         expect(execution).toHaveBeenCalled();
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('guardrails-token');
-        expect(result.M.lastAdvise).toMatchObject({ kind: 'tool', policy: 'guardrails' });
+        expect(result.M.lastAdvise).toMatchObject({ kind: 'call_tool', policy: 'guardrails' });
     });
 
     it('asks consent before running tool actions', async () => {
@@ -85,7 +85,7 @@ describe('runLoop default policy and shield branches', () => {
         M.hitl = 'consent';
 
         const execution = jest.fn(async (action: any) => ({
-            action: { kind: 'ask_user', token: 'consent-token' },
+            action: { kind: 'prompt_user', token: 'consent-token' },
             result: { status: 'ok', data: action }
         }));
 
@@ -94,7 +94,7 @@ describe('runLoop default policy and shield branches', () => {
             M,
             baseEnv(),
             {
-                policy: () => ({ kind: 'tool', name: 'db-write', args: { foo: 'bar' } }),
+                policy: () => ({ kind: 'call_tool', toolName: 'db-write', args: { foo: 'bar' } }),
                 execution
             } as any,
             { maxTurns: 1 }
@@ -103,7 +103,7 @@ describe('runLoop default policy and shield branches', () => {
         expect(execution).toHaveBeenCalled();
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('consent-token');
-        expect(result.M.lastAdvise).toMatchObject({ kind: 'tool', tool: 'db-write', policy: 'consent' });
+        expect(result.M.lastAdvise).toMatchObject({ kind: 'call_tool', tool: 'db-write', policy: 'consent' });
     });
 
     it('returns await_child when pending children exist even if execution returned internal', async () => {

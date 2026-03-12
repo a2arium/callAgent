@@ -26,8 +26,6 @@ export type { MentalState, EnvironmentState, ObservationInbox, MemoryReader, Mem
 export type { ControlState, ControlPendingState } from './loop/types.js';
 export { getPendingToken, controlSnapshot } from './loop/controlHelpers.js';
 export type {
-    ProposedAction,
-    ExecutableAction,
     ExecResult,
     ExecErrorPayload,
     TransitionOut,
@@ -40,6 +38,8 @@ export type {
     SynthesizeObservation
 } from './loop/oneTurn.js';
 export type { Modules } from './loop/oneTurn.js';
+export { IntentSchema, ExecutableActionSchema } from './types/intent.js';
+export type { Intent, ExecutableAction } from './types/intent.js';
 export type {
     ChildCompletedPayload,
     ChildCompletedObservation,

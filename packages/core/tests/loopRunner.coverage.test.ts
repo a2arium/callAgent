@@ -172,14 +172,14 @@ describe('runLoop default execution and transitions', () => {
             attention: () => ({}),
             perception: () => ({ inbox: [], time: env.time, pending: env.pending } as any),
             learning: async (prev: any, _prevAction: any, _obs: any, mem: any) => {
-                const askRes = await ctx.defaults.execution({ kind: 'ask_user', prompt: 'Need input', schema: {} } as any, ctx, mem);
-                const childRes = await ctx.defaults.execution({ kind: 'subagent', target: 'child', input: {} } as any, ctx, mem);
-                const childNoToken = await ctx.defaults.execution({ kind: 'subagent', target: 'child', input: {} } as any, ctx, mem);
-                const toolAwait = await ctx.defaults.execution({ kind: 'tool', name: 'needs-callback', args: {}, awaitCallback: true } as any, ctx, mem);
-                const toolImmediate = await ctx.defaults.execution({ kind: 'tool', name: 'immediate', args: {} } as any, ctx, mem);
-                const toolError = await ctx.defaults.execution({ kind: 'tool', name: 'fails', args: {} } as any, ctx, mem);
-                const languageRes = await ctx.defaults.execution({ kind: 'language', content: 'hello' } as any, ctx, mem);
-                const internalRes = await ctx.defaults.execution({ kind: 'unknown', intent: 'noop' } as any, ctx, mem);
+                const askRes = await ctx.defaults.execution({ kind: 'prompt_user', prompt: 'Need input', schema: {} } as any, ctx, mem, M);
+                const childRes = await ctx.defaults.execution({ kind: 'delegate_to_child', agentId: 'child', input: {} } as any, ctx, mem, M);
+                const childNoToken = await ctx.defaults.execution({ kind: 'delegate_to_child', agentId: 'child', input: {} } as any, ctx, mem, M);
+                const toolAwait = await ctx.defaults.execution({ kind: 'call_tool', toolName: 'needs-callback', args: {}, mode: 'async' } as any, ctx, mem, M);
+                const toolImmediate = await ctx.defaults.execution({ kind: 'call_tool', toolName: 'immediate', args: {} } as any, ctx, mem, M);
+                const toolError = await ctx.defaults.execution({ kind: 'call_tool', toolName: 'fails', args: {} } as any, ctx, mem, M);
+                const languageRes = await ctx.defaults.execution({ kind: 'answer_with_llm', query: 'hello' } as any, ctx, mem, M);
+                const internalRes = await ctx.defaults.execution({ kind: 'unknown', intent: 'noop' } as any, ctx, mem, M);
 
                 transitionResults.push(
                     ctx.defaults.transition(env, askRes as any, M, mem),
@@ -192,7 +192,7 @@ describe('runLoop default execution and transitions', () => {
 
                 return prev;
             },
-            policy: () => ({ kind: 'ask_user', prompt: 'Need input' } as any),
+            policy: () => ({ kind: 'prompt_user', prompt: 'Need input' } as any),
             shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any)
         };
 

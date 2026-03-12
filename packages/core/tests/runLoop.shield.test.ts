@@ -25,10 +25,10 @@ describe('runLoop shield safety branches', () => {
             attention: () => ({}),
             perception: () => ({}),
             learning: (prev: any) => prev,
-            policy: () => ({ kind: 'tool', name: 'send', args: { message: 'contains secret data' } }),
+            policy: () => ({ kind: 'call_tool', toolName: 'send', args: { message: 'contains secret data' } }),
             execution: jest.fn(async (action: any) => {
                 capturedAction = action;
-                return { action: { kind: 'ask_user', token: 'pii-token' }, result: { status: 'ok', data: action } };
+                return { action: { kind: 'prompt_user', token: 'pii-token' }, result: { status: 'ok', data: action } };
             }),
             extrinsicReward: () => 0,
             intrinsicReward: () => 0
@@ -36,7 +36,7 @@ describe('runLoop shield safety branches', () => {
 
         const result = await runLoop(ctx, M, baseEnv() as any, modules as any, { maxTurns: 1 });
 
-        expect(capturedAction?.kind).toBe('ask_user');
+        expect(capturedAction?.kind).toBe('prompt_user');
         expect(String(capturedAction?.prompt || '')).toContain('PII');
         expect(result.M.lastAdvise).toEqual({ flagged: 'pii' });
         expect(result.outcome.kind).toBe('await_input');
@@ -54,10 +54,10 @@ describe('runLoop shield safety branches', () => {
             attention: () => ({}),
             perception: () => ({}),
             learning: (prev: any) => prev,
-            policy: () => ({ kind: 'tool', name: 'expensive-tool', args: { cost: 10 } }),
+            policy: () => ({ kind: 'call_tool', toolName: 'expensive-tool', args: { cost: 10 } }),
             execution: jest.fn(async (action: any) => {
                 capturedAction = action;
-                return { action: { kind: 'ask_user', token: 'cost-token' }, result: { status: 'ok', data: action } };
+                return { action: { kind: 'prompt_user', token: 'cost-token' }, result: { status: 'ok', data: action } };
             }),
             extrinsicReward: () => 0,
             intrinsicReward: () => 0
@@ -65,7 +65,7 @@ describe('runLoop shield safety branches', () => {
 
         const result = await runLoop(ctx, M, baseEnv() as any, modules as any, { maxTurns: 1 });
 
-        expect(capturedAction?.kind).toBe('ask_user');
+        expect(capturedAction?.kind).toBe('prompt_user');
         expect(String(capturedAction?.prompt || '')).toContain('cost');
         expect(result.M.lastAdvise).toEqual({ blocked: 'cost', cost: 10, limit: 5 });
         expect(result.outcome.kind).toBe('await_input');

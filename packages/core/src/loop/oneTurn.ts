@@ -4,6 +4,7 @@
 
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState, MemoryReader, MemoryWriter } from './types.js';
+import type { Intent, ExecutableAction } from '../types/intent.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
@@ -56,20 +57,6 @@ export type Observation<Payload = unknown> = {
     error?: { code: string; message: string };
 };
 
-export type ProposedAction =
-    | { kind: 'ask_user'; prompt: string; schema?: unknown }
-    | { kind: 'subagent'; target: string; input: unknown; awaitCompletion?: boolean }
-    | { kind: 'tool'; name: string; args: unknown; awaitCallback?: boolean }
-    | { kind: 'language'; content: string }
-    | { kind: 'internal'; intent: string; data?: unknown };
-
-export type ExecutableAction =
-    | { kind: 'ask_user'; token: string }
-    | { kind: 'subagent'; token?: string }
-    | { kind: 'tool'; token?: string }
-    | { kind: 'language'; echoed: boolean }
-    | { kind: 'internal'; done: boolean };
-
 export type ExecErrorPayload = { code: string; message: string };
 
 export type ExecResult<Data = unknown, ErrorPayload extends ExecErrorPayload = ExecErrorPayload> = {
@@ -83,8 +70,8 @@ export type ExecResult<Data = unknown, ErrorPayload extends ExecErrorPayload = E
 };
 
 export type ShieldOutcome =
-    | { action: 'pass'; intent: ProposedAction }
-    | { action: 'transform'; intent: ProposedAction }
+    | { action: 'pass'; intent: Intent }
+    | { action: 'transform'; intent: Intent }
     | { action: 'veto'; reason: string }
     | { action: 'defer'; askUser: string };
 
@@ -100,9 +87,9 @@ export type TransitionOut<ObservationPayload extends ObservationConfig> =
 export type TurnOutcome<ObservationPayload extends ObservationConfig> = TransitionOut<ObservationPayload>;
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
-    | ((m: MentalState<Sensory>, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
+    | ((m: MentalState<Sensory>, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>)
+    | ((m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>)
+    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>);
 
 export type Modules<
     Sensory = unknown,
@@ -116,22 +103,22 @@ export type Modules<
     perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, mem: MemoryReader) => Obs | Promise<Obs>;
     learning: (
         prev: MentalState<Sensory>,
-        prevAction: ProposedAction | undefined,
+        prevAction: Intent | undefined,
         o: Obs,
         mem: MemoryReader,
         writer: MemoryWriter,
         rPrev?: number
     ) => MentalState<Sensory> | Promise<MentalState<Sensory>>;
-    policy: (m: MentalState<Sensory>, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>;
-    shield: (m: MentalState<Sensory>, a: ProposedAction, mem: MemoryReader) => ShieldOutcome;
-    execution: (a: ProposedAction, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
+    policy: (m: MentalState<Sensory>, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>;
+    shield: (m: MentalState<Sensory>, a: Intent, mem: MemoryReader) => ShieldOutcome;
+    execution: (a: Intent, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
     transition: (
         env: EnvironmentState<ObservationPayload>,
         exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> },
         m: MentalState<Sensory>,
         mem: MemoryReader
     ) => TransitionOut<ObservationPayload> | Promise<TransitionOut<ObservationPayload>>;
-    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>) => number;
+    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => number;
 };
 
@@ -149,7 +136,7 @@ export async function oneTurn<
     mods: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>,
     mem: MemoryReader,
     writer: MemoryWriter,
-    prevAction?: ProposedAction,
+    prevAction?: Intent,
     rPrev?: number
 ): Promise<{
     m: MentalState<Sensory>;
@@ -267,9 +254,9 @@ export async function oneTurn<
     try { (ctx as any).M = m1; } catch { /* noop */ }
 
     const tPol0 = Date.now();
-    const policyFn = mods.policy as unknown as (...args: unknown[]) => ProposedAction | Array<{ action: ProposedAction; prob: number }>;
+    const policyFn = mods.policy as unknown as (...args: unknown[]) => Intent | Array<{ action: Intent; prob: number }>;
     const arity = typeof policyFn === 'function' ? policyFn.length : 1;
-    let pi: ProposedAction | Array<{ action: ProposedAction; prob: number }>;
+    let pi: Intent | Array<{ action: Intent; prob: number }>;
     try {
         // Wrap policy execution
         pi = await runWithTelemetry('policy', () => {
@@ -287,7 +274,7 @@ export async function oneTurn<
     }
     timings.policyMs = Date.now() - tPol0;
 
-    // Store Policy Output (ProposedAction) in local var for Shield Input
+    // Store Policy Output (Intent) in local var for Shield Input
     const policyOutput = pi;
 
     // ... (omitted selection logic, assuming deterministic for telemetry correctness or updated later) ...
@@ -335,20 +322,20 @@ export async function oneTurn<
         throw new Error(`Shield module failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    let toExecute: ProposedAction | null = null;
+    let toExecute: Intent | null = null;
     switch (sh.action) {
         case 'pass':
         case 'transform':
             toExecute = sh.intent;
             break;
         case 'veto':
-            toExecute = { kind: 'internal', intent: 'vetoed' } as ProposedAction;
+            toExecute = { kind: 'internal', intent: 'vetoed' } as Intent;
             break;
         case 'defer':
-            toExecute = { kind: 'ask_user', prompt: sh.askUser } as ProposedAction;
+            toExecute = { kind: 'prompt_user', prompt: sh.askUser } as Intent;
             break;
         default:
-            toExecute = { kind: 'internal', intent: 'noop' } as ProposedAction;
+            toExecute = { kind: 'internal', intent: 'noop' } as Intent;
     }
 
     const tE0 = Date.now();

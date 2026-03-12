@@ -4,14 +4,13 @@ import {
     type Modules,
     type TurnOutcome,
     type TransitionOut,
-    type ProposedAction,
-    type ExecutableAction,
     type ExecResult,
     type ExecErrorPayload,
     type AttentionSignal,
     type SynthesizeObservation,
     type ObservationConfig
 } from './oneTurn.js';
+import type { Intent, ExecutableAction } from '../types/intent.js';
 import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
@@ -290,12 +289,12 @@ export async function runLoop<
                             // Multi-step: if we have a prior tool result in scratch.react, use it to refine args
                             const scratch = (((m as any)?.memory as any)?.scratch?.react) || {};
                             const refinedArgs = { [p.argKey]: argVal, context: scratch.lastResult };
-                            return { kind: 'tool', name: p.tool, args: refinedArgs } as any;
+                            return { kind: 'call_tool', toolName: p.tool, args: refinedArgs } as any;
                         }
                     } catch { /* ignore bad regex */ }
                 }
             }
-            return { kind: 'language', content: 'Ok.' } as any;
+            return { kind: 'answer_with_llm', query: 'Ok.' } as any;
         }),
         shield: modules.shield ?? ((m, a, _mem) => {
             try {
@@ -303,14 +302,14 @@ export async function runLoop<
                 const safety = (m as any)?.safety || {};
                 if (!level) return { action: 'pass', intent: a } as any;
                 // guardrails: block tools/subagents without explicit consent
-                if (level === 'guardrails' && (a as any)?.kind && ((a as any).kind === 'tool' || (a as any).kind === 'subagent')) {
+                if (level === 'guardrails' && (a as any)?.kind && ((a as any).kind === 'call_tool' || (a as any).kind === 'delegate_to_child')) {
                     (m as any).lastAdvise = { kind: (a as any).kind, policy: 'guardrails' };
                     return { action: 'defer', askUser: 'Approve action?' } as any;
                 }
                 // consent: ask user before tools
-                if (level === 'consent' && (a as any)?.kind === 'tool') {
-                    (m as any).lastAdvise = { kind: (a as any).kind, tool: (a as any).name, toolArgs: (a as any).args, policy: 'consent' };
-                    return { action: 'defer', askUser: `Run tool ${(a as any).name}?` } as any;
+                if (level === 'consent' && (a as any)?.kind === 'call_tool') {
+                    (m as any).lastAdvise = { kind: (a as any).kind, tool: (a as any).toolName, toolArgs: (a as any).args, policy: 'consent' };
+                    return { action: 'defer', askUser: `Run tool ${(a as any).toolName}?` } as any;
                 }
                 // cost limit: if action declares cost in args, block if above threshold
                 try {
@@ -350,7 +349,7 @@ export async function runLoop<
             const kind = (a as any).kind;
             const base: ExecResult = { status: 'ok', ts: Date.now() };
 
-            if (kind === 'ask_user') {
+            if (kind === 'prompt_user') {
                 const handle = await (ctx as any).requestInput((a as any).prompt, {
                     schema: (a as any).schema,
                     onProvided: '__onInputProvided'
@@ -358,7 +357,7 @@ export async function runLoop<
                 const token = (handle as any)?.token || '';
                 try { log.info('Execution asking for user input', { token }); } catch { }
                 return {
-                    action: { kind: 'ask_user', token } as ExecutableAction,
+                    action: { kind: 'prompt_user', token } as ExecutableAction,
                     result: {
                         ...base,
                         data: { prompt: (a as any).prompt },
@@ -368,11 +367,11 @@ export async function runLoop<
                 };
             }
 
-            if (kind === 'subagent') {
+            if (kind === 'delegate_to_child') {
                 // FLUSH BEFORE DISPATCH: Ensure DB has current state (including M) so child creation (which loads parent) sees valid data.
                 if (typeof (ctx as any).flushSnapshot === 'function') {
                     try {
-                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: (a as any).target });
+                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: (a as any).agentId });
                         await (ctx as any).flushSnapshot({ M, env });
                     } catch (e) {
                         log.warn('Failed to flush snapshot before subagent dispatch', { error: (e as Error).message });
@@ -381,24 +380,24 @@ export async function runLoop<
                     log.warn('LoopRunner: flushSnapshot not available on context for subagent dispatch');
                 }
 
-                const res = await (ctx as any).sendTaskToAgent((a as any).target, (a as any).input, {
+                const res = await (ctx as any).sendTaskToAgent((a as any).agentId, (a as any).input, {
                     onCompleted: '__onChildCompleted'
                 });
                 const token = (res as any)?.token || (res as any)?.childToken;
                 if (token) {
                     return {
-                        action: { kind: 'subagent', token } as ExecutableAction,
-                        result: { ...base, correlationId: token, toolId: (a as any).target }
+                        action: { kind: 'delegate_to_child', token } as ExecutableAction,
+                        result: { ...base, correlationId: token, toolId: (a as any).agentId }
                     };
                 }
                 return {
-                    action: { kind: 'subagent' } as ExecutableAction,
-                    result: { ...base, data: res, toolId: (a as any).target }
+                    action: { kind: 'delegate_to_child' } as ExecutableAction,
+                    result: { ...base, data: res, toolId: (a as any).agentId }
                 };
             }
 
-            if (kind === 'tool') {
-                const toolName = (a as any).name;
+            if (kind === 'call_tool') {
+                const toolName = (a as any).toolName;
 
                 // FLUSH BEFORE TOOL: Some tools might inspect agent state via DB or side-channels
                 if (typeof (ctx as any).flushSnapshot === 'function') {
@@ -412,25 +411,25 @@ export async function runLoop<
                     log.debug('LoopRunner: flushSnapshot not available on context for tool execution', { toolId: toolName });
                 }
 
-                if ((a as any).awaitCallback) {
+                if ((a as any).mode === 'async') {
                     const handle = await (ctx as any).requestTool(toolName, (a as any).args, {
                         onCompleted: '__onToolCompleted'
                     });
                     const token = (handle as any)?.token || '';
                     return {
-                        action: { kind: 'tool', token } as ExecutableAction,
+                        action: { kind: 'call_tool', token } as ExecutableAction,
                         result: { ...base, correlationId: token || undefined, toolId: toolName }
                     };
                 }
                 try {
                     const result = await (ctx as any).tools.invoke(toolName, (a as any).args);
                     return {
-                        action: { kind: 'tool' } as ExecutableAction,
+                        action: { kind: 'call_tool' } as ExecutableAction,
                         result: { ...base, data: result, toolId: toolName }
                     };
                 } catch (error) {
                     return {
-                        action: { kind: 'tool' } as ExecutableAction,
+                        action: { kind: 'call_tool' } as ExecutableAction,
                         result: {
                             ...base,
                             status: 'error',
@@ -444,11 +443,11 @@ export async function runLoop<
                 }
             }
 
-            if (kind === 'language') {
-                await (ctx as any).reply((a as any).content);
+            if (kind === 'answer_with_llm') {
+                await (ctx as any).reply((a as any).query);
                 return {
-                    action: { kind: 'language', echoed: true } as ExecutableAction,
-                    result: { ...base, data: { echoed: true, content: (a as any).content }, toolId: 'language' }
+                    action: { kind: 'answer_with_llm', echoed: true } as ExecutableAction,
+                    result: { ...base, data: { echoed: true, query: (a as any).query }, toolId: 'language' }
                 };
             }
 
@@ -462,16 +461,16 @@ export async function runLoop<
 
             if (result.status === 'ok') {
 
-                if (action.kind === 'ask_user' && action.token) {
+                if (action.kind === 'prompt_user' && action.token) {
                     try { log.info('Transition to await_input', { token: action.token }); } catch { }
                     return { kind: 'await_input', token: action.token } as TransitionOut<ObservationPayload>;
                 }
 
-                if (action.kind === 'subagent' && action.token) {
+                if (action.kind === 'delegate_to_child' && action.token) {
                     return { kind: 'await_child', token: action.token } as TransitionOut<ObservationPayload>;
                 }
 
-                if (action.kind === 'tool' && action.token) {
+                if (action.kind === 'call_tool' && action.token) {
                     return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
                 }
 
@@ -553,7 +552,7 @@ export async function runLoop<
     (ctx as any).defaults = defaults;
 
     let m = M;
-    let prevAction: ProposedAction | undefined = undefined;
+    let prevAction: Intent | undefined = undefined;
     let rPrev: number | undefined = undefined;
     let outcome: TurnOutcome<ObservationPayload> = { kind: 'continue', observations: [] };
     const timings: Record<string, number>[] = [];
