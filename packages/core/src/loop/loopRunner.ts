@@ -256,7 +256,7 @@ export async function runLoop<
             // Default perception returns inbox observations
             return { time: e.time, pending: e.pending, inbox: turnInbox } as any;
         }),
-        learning: modules.learning ?? ((prev, _prevAction, obs, _mem, writer) => {
+        learning: modules.learning ?? ((prev, _prevAction, obs, _mem, writer, _rPrev) => {
             const next = { ...(prev as any) } as MentalState<Sensory>;
             try {
                 const episodic = Array.isArray((next as any).memory?.longTerm?.episodic)
@@ -325,7 +325,14 @@ export async function runLoop<
                     const patterns: string[] = Array.isArray(safety.piiPatterns) ? safety.piiPatterns : [];
                     if (patterns.length > 0) {
                         const regexes = patterns.map(p => new RegExp(p, 'i'));
-                        const containsPII = scanForPII((a as any)?.args, regexes);
+                        // Helper to recursively check objects/arrays
+                        const scanForPII = (v: any): boolean => {
+                            if (typeof v === 'string') return regexes.some(r => r.test(v));
+                            if (Array.isArray(v)) return v.some(scanForPII);
+                            if (v && typeof v === 'object') return Object.values(v).some(scanForPII);
+                            return false;
+                        };
+                        const containsPII = scanForPII((a as any)?.args);
                         if (containsPII) {
                             (m as any).lastAdvise = { flagged: 'pii' };
                             return { action: 'defer', askUser: `Action contains potential PII. Proceed?` } as any;
@@ -339,7 +346,7 @@ export async function runLoop<
                 return { action: 'pass', intent: a } as any;
             } catch { return { action: 'pass', intent: a } as any; }
         }),
-        execution: modules.execution ?? (async (a, ctx, _mem) => {
+        execution: modules.execution ?? (async (a: any, ctx: any, _mem) => {
             const kind = (a as any).kind;
             const base: ExecResult = { status: 'ok', ts: Date.now() };
 
@@ -453,35 +460,41 @@ export async function runLoop<
         transition: modules.transition ?? ((env, exec, _m, _mem) => {
             const { action, result } = exec;
 
-            if (action.kind === 'ask_user' && action.token) {
-                try { log.info('Transition to await_input', { token: action.token }); } catch { }
-                return { kind: 'await_input', token: action.token } as TransitionOut<ObservationPayload>;
-            }
+            if (result.status === 'ok') {
 
-            if (action.kind === 'subagent' && action.token) {
-                return { kind: 'await_child', token: action.token } as TransitionOut<ObservationPayload>;
-            }
-
-            if (action.kind === 'tool' && action.token) {
-                return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
-            }
-
-            // ✅ FIX v3.5: Check if there are pending children even if action.kind !== 'subagent'
-            // This handles cases where custom execution modules dispatch children but return { kind: 'internal' }
-            const pendingChildren = env.pending?.children;
-            if (pendingChildren && typeof pendingChildren === 'object') {
-                const tokens = Object.keys(pendingChildren);
-                if (tokens.length > 0) {
-                    const firstToken = tokens[0];
-                    try { log.info('Default transition: detected pending child, returning await_child', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
-                    return { kind: 'await_child', token: firstToken } as TransitionOut<ObservationPayload>;
+                if (action.kind === 'ask_user' && action.token) {
+                    try { log.info('Transition to await_input', { token: action.token }); } catch { }
+                    return { kind: 'await_input', token: action.token } as TransitionOut<ObservationPayload>;
                 }
+
+                if (action.kind === 'subagent' && action.token) {
+                    return { kind: 'await_child', token: action.token } as TransitionOut<ObservationPayload>;
+                }
+
+                if (action.kind === 'tool' && action.token) {
+                    return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
+                }
+
+                // ✅ FIX v3.5: Check if there are pending children even if action.kind !== 'subagent'
+                // This handles cases where custom execution modules dispatch children but return { kind: 'internal' }
+                const pendingChildren = env.pending?.children;
+                if (pendingChildren && typeof pendingChildren === 'object') {
+                    const tokens = Object.keys(pendingChildren);
+                    if (tokens.length > 0) {
+                        const firstToken = tokens[0];
+                        try { log.info('Default transition: detected pending child, returning await_child', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
+                        return { kind: 'await_child', token: firstToken } as TransitionOut<ObservationPayload>;
+                    }
+                }
+
+                if (action.kind === 'internal' && (action as any).done === true) {
+                    return { kind: 'complete', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
+                }
+
+                return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
             }
 
-            if (action.kind === 'internal' && (action as any).done === true) {
-                return { kind: 'complete', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
-            }
-
+            // Error path
             return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {

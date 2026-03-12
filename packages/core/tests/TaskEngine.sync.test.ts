@@ -33,7 +33,7 @@ describe('TaskEngine sync completion', () => {
                 M: {
                     memory: {
                         vars: {},
-                        sensory: { llmState: undefined },
+                        sensory: {},
                         longTerm: { semantic: {}, episodic: [], procedural: {} }
                     },
                     worldModel: { explicit: null, implicit: null, simulator: null },

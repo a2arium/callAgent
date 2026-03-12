@@ -11,18 +11,26 @@ import {
     type ObservationConfig
 } from '@a2arium/callagent-core';
 import { logger } from '@a2arium/callagent-utils';
+import { z } from 'zod';
 
 type Sensory = {
     name?: string;
 };
 
+type WorldModel = {
+    generatedGreeting?: { greeting: string; emoji: string };
+};
+
 type HelloPerception = {
     nameFromInput?: string;
+    generatedGreeting?: { greeting: string; emoji: string };
 };
 
 type HelloExecData = {
-    greeting: string;
-    processedAt: string;
+    kind?: string;
+    payload?: any;
+    greeting?: string;
+    processedAt?: string;
 };
 
 type HelloError = {
@@ -30,55 +38,69 @@ type HelloError = {
     message: string;
 };
 
-export default createAgent<Sensory, HelloPerception, unknown, HelloExecData, HelloError, ObservationConfig>({
-    manifest: {
-        name: 'hello-agent',
-        version: '0.2.0',
-        runMode: 'loop',
-        budgets: {
-            maxTurns: 2 // Enough to observe input and complete
-        }
+const GreetingSchema = z.object({
+    greeting: z.string().describe('The personalized greeting text for the user'),
+    emoji: z.string().describe('A single suitable emoji that fits the enthusiastic tone')
+});
+
+export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, HelloError, ObservationConfig>({
+
+    llmConfig: {
+        provider: 'openai',
+        modelAliasOrName: 'gpt-4o-mini',
+        systemPrompt: 'You are a highly enthusiastic greeting assistant.',
+        historyMode: 'stateless'
     },
 
     perception: (env: EnvironmentState<ObservationConfig>): HelloPerception => {
         // Look for user input in the inbox
-        const inputs = env.inbox.all.filter(obs => obs.source === 'user' && obs.kind === 'input.provided');
-        const latestInput = inputs[inputs.length - 1]; // most recent
+        const userInputs = env.inbox.all.filter(obs => obs.source === 'user' && obs.kind === 'input.provided');
+        const latestInput = userInputs[userInputs.length - 1]; // most recent
         const payload = latestInput?.payload?.value as Record<string, unknown> | undefined;
 
         const nameFromInput = typeof payload?.name === 'string' ? payload.name : undefined;
 
-        logger.info('[Perception] Recognized input', { nameFromInput });
+        // Look for LLM generated greeting from internal transitions
+        const llmOutputs = env.inbox.all.filter(obs => obs.kind === 'greeting.generated');
+        const generatedGreeting = llmOutputs[llmOutputs.length - 1]?.payload as { greeting: string; emoji: string } | undefined;
 
-        return { nameFromInput };
+        logger.info('[Perception] Recognized signals', { nameFromInput, hasGeneratedGreeting: !!generatedGreeting });
+
+        return { nameFromInput, generatedGreeting };
     },
 
     learning: (prev: MentalState<Sensory>, _prevAction: ProposedAction | undefined, obs: HelloPerception) => {
-        const currentName = obs.nameFromInput || prev.memory?.sensory?.name;
+        const next = { ...prev, memory: { ...prev.memory } };
 
-        return {
-            ...prev,
-            memory: {
-                ...prev.memory,
-                sensory: {
-                    name: currentName
-                }
-            }
-        };
+        if (obs.nameFromInput) {
+            next.memory.sensory = { ...next.memory.sensory, name: obs.nameFromInput };
+        }
+
+        if (obs.generatedGreeting) {
+            next.worldModel = { ...next.worldModel, generatedGreeting: obs.generatedGreeting };
+        }
+
+        return next;
     },
 
     policy: (m: MentalState<Sensory>, _mem: MemoryReader): ProposedAction => {
-        const name = m.memory?.sensory?.name;
-
-        // If we have a name, we can greet
-        if (name) {
-            logger.info('[Policy] Name is available, intent is to greet.');
-            return { kind: 'internal', intent: 'greet' };
+        // Did we already generate the greeting? If so, complete the loop.
+        if (m.worldModel?.generatedGreeting) {
+            logger.info('[Policy] Greeting is ready. Yielding complete.');
+            return { kind: 'internal', intent: 'complete', data: m.worldModel.generatedGreeting };
         }
 
-        // If no name, request input or fallback
-        logger.info('[Policy] Name NOT available, defaulting to greet anyway (fallback).');
-        return { kind: 'internal', intent: 'greet' };
+        // Do we have a name to generate a greeting for?
+        const name = m.memory?.sensory?.name;
+        if (name) {
+            // Emitting intent to use LLM, but policy does NOT call LLM directly
+            logger.info('[Policy] Requesting execution to generate greeting via LLM.');
+            return { kind: 'internal', intent: 'generate_greeting', data: { name } };
+        }
+
+        // Fallback or explicit request for user
+        logger.info('[Policy] Name NOT available, using fallback intent.');
+        return { kind: 'internal', intent: 'fallback_greet' };
     },
 
     shield: (_m, action, _mem) => {
@@ -86,25 +108,66 @@ export default createAgent<Sensory, HelloPerception, unknown, HelloExecData, Hel
         return { action: 'pass', intent: action };
     },
 
-    execution: async (action: ProposedAction, ctx: TaskContext, _mem: MemoryReader, m: MentalState<Sensory>) => {
-        if (action.kind === 'internal' && action.intent === 'greet') {
-            const name = m.memory?.sensory?.name || 'World';
-            const greeting = `Hello, ${name}! 👋`;
+    execution: async (action: ProposedAction, ctx: TaskContext, _mem: MemoryReader, _m: MentalState<Sensory>) => {
+        if (action.kind === 'internal' && action.intent === 'generate_greeting') {
+            const name = (action.data as { name: string }).name || 'World';
+
+            try {
+                if (!ctx.llm) {
+                    throw new Error('LLM not configured in context');
+                }
+
+                logger.info('[Execution] Generating structured greeting using LLM...');
+                const prompt = `Generate a short greeting for the user named "${name}".`;
+                const responses = await ctx.llm.call(prompt, {
+                    jsonSchema: { name: 'GreetingParams', schema: GreetingSchema }
+                });
+
+                const result = responses[0]?.contentObject;
+
+                if (!result) {
+                    throw new Error('LLM failed to produce structured output based on contract');
+                }
+
+                logger.info('[Execution] LLM generation successful.', { result });
+                return {
+                    action: { kind: 'internal', done: false } satisfies ExecutableAction,
+                    result: { status: 'ok', data: { kind: 'greeting_completed', payload: result } } satisfies ExecResult<HelloExecData>
+                };
+            } catch (error) {
+                logger.error('[Execution] LLM error', { error: error instanceof Error ? error.message : String(error) });
+                return {
+                    action: { kind: 'internal', done: false } satisfies ExecutableAction,
+                    result: { status: 'error', error: { code: 'llm_error', message: 'Failed to generate greeting' } } satisfies ExecResult<HelloExecData>
+                };
+            }
+        }
+
+        if (action.kind === 'internal' && action.intent === 'complete') {
+            const { greeting, emoji } = action.data as { greeting: string, emoji: string };
             const processedAt = new Date().toISOString();
 
-            logger.info('[Execution] Executing greeting', { greeting });
-
+            logger.info('[Execution] Dispatching reply with completed LLM text');
             await ctx.reply([{
                 type: 'text',
-                text: `${greeting}\n\nProcessed at: ${processedAt}\n\n(Generated via APLRET Execution module)`
+                text: `${greeting} ${emoji}\n\nProcessed at: ${processedAt}\n\n(Generated via canonical LLM Flow in APLRET)`
             }]);
 
             return {
                 action: { kind: 'internal', done: true } satisfies ExecutableAction,
-                result: {
-                    status: 'ok',
-                    data: { greeting, processedAt }
-                } satisfies ExecResult<HelloExecData>
+                result: { status: 'ok', data: { greeting, processedAt } } satisfies ExecResult<HelloExecData>
+            };
+        }
+
+        if (action.kind === 'internal' && action.intent === 'fallback_greet') {
+            const processedAt = new Date().toISOString();
+            await ctx.reply([{
+                type: 'text',
+                text: `Hello, World! 👋\n\nProcessed at: ${processedAt}\n\n(Generated via fallback)`
+            }]);
+            return {
+                action: { kind: 'internal', done: true } satisfies ExecutableAction,
+                result: { status: 'ok', data: { greeting: 'Hello, World!', processedAt } } satisfies ExecResult<HelloExecData>
             };
         }
 
@@ -117,13 +180,25 @@ export default createAgent<Sensory, HelloPerception, unknown, HelloExecData, Hel
         };
     },
 
-    transition: (env: EnvironmentState<ObservationConfig>, exec: { action: ExecutableAction; result: ExecResult<HelloExecData> }, _m: MentalState<Sensory>): TransitionOut<ObservationConfig> => {
-        if (exec.result.status === 'ok') {
+    transition: (_env: EnvironmentState<ObservationConfig>, exec: { action: ExecutableAction; result: ExecResult<HelloExecData> }, _m: MentalState<Sensory>): TransitionOut<ObservationConfig> => {
+        if (exec.action.kind === 'internal' && exec.action.done) {
             logger.info('[Transition] Completing loop successfully.');
             return { kind: 'complete', result: exec.result.data };
         }
 
-        logger.warn('[Transition] Failing loop due to execution error.');
+        if (exec.result.status === 'ok' && exec.result.data?.kind === 'greeting_completed') {
+            logger.info('[Transition] Emitting observation for generated greeting.');
+            return {
+                kind: 'continue',
+                observations: [{
+                    source: 'internal',
+                    kind: 'greeting.generated',
+                    payload: exec.result.data.payload
+                }]
+            };
+        }
+
+        logger.warn('[Transition] Failed or continuing without observation.', exec.result);
         return { kind: 'fail', reason: 'execution_error' };
     }
 }, import.meta.url);

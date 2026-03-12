@@ -133,7 +133,7 @@ describe('TaskEngine Additional Coverage Tests', () => {
         });
 
         test('attachAndRestoreLLM respects test override and forwards context', async () => {
-            const mockAttachAndRestoreLLM = jest.fn() as jest.MockedFunction<(ctx: any, agentName: string | undefined, M: any) => Promise<void>>;
+            const mockAttachAndRestoreLLM = jest.fn() as jest.MockedFunction<(ctx: any, agentName: string | undefined, M: any, baseSnap?: Record<string, unknown>) => Promise<void>>;
             mockAttachAndRestoreLLM.mockResolvedValue(undefined);
             // @ts-ignore
             (TaskEngine as any).testOverrides = { attachAndRestoreLLM: mockAttachAndRestoreLLM };
@@ -144,13 +144,13 @@ describe('TaskEngine Additional Coverage Tests', () => {
 
             await (engine as any).attachAndRestoreLLM(ctx, undefined, ctx.M);
 
-            expect(mockAttachAndRestoreLLM).toHaveBeenCalledWith(ctx, undefined, ctx.M);
+            expect(mockAttachAndRestoreLLM).toHaveBeenCalledWith(ctx, undefined, ctx.M, undefined);
             // @ts-ignore
             (TaskEngine as any).testOverrides = undefined;
         });
 
         test('attachAndRestoreLLM propagates override errors for visibility', async () => {
-            const mockAttachAndRestoreLLM = jest.fn() as jest.MockedFunction<(ctx: any, agentName: string | undefined, M: any) => Promise<void>>;
+            const mockAttachAndRestoreLLM = jest.fn() as jest.MockedFunction<(ctx: any, agentName: string | undefined, M: any, baseSnap?: Record<string, unknown>) => Promise<void>>;
             mockAttachAndRestoreLLM.mockRejectedValue(new Error('override failed'));
             // @ts-ignore
             (TaskEngine as any).testOverrides = { attachAndRestoreLLM: mockAttachAndRestoreLLM };
@@ -160,7 +160,7 @@ describe('TaskEngine Additional Coverage Tests', () => {
             const ctx = engine.createContext(task);
 
             await expect((engine as any).attachAndRestoreLLM(ctx, undefined, ctx.M)).rejects.toThrow('override failed');
-            expect(mockAttachAndRestoreLLM).toHaveBeenCalledWith(ctx, undefined, ctx.M);
+            expect(mockAttachAndRestoreLLM).toHaveBeenCalledWith(ctx, undefined, ctx.M, undefined);
             // @ts-ignore
             (TaskEngine as any).testOverrides = undefined;
         });

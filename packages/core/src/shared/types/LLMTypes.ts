@@ -36,25 +36,25 @@ export interface ILLMCaller {
 }
 
 /**
- * Pure LLM port for use in pure modules (Perception, Shield, etc.)
+ * A sealed interface for making LLM generation calls.
  * 
- * This sealed interface provides ONLY LLM inference capabilities - no tools,
- * no message manipulation, no side effects beyond usage tracking (observability).
- * 
- * Usage tracking is maintained for cost monitoring but doesn't violate purity.
- * The outputs are still deterministic given the same inputs (when temp=0, seed is set).
- * 
+ * This port is designed for internal sub-components within the `Execution` module
+ * that need to perform inference but do not need access to the full `TaskContext`.
+ *
+ * Example:
+ * ```ts
+ * // Inside an Execution tool handler:
+ * async function summarize(text: string, llm: PureLLMPort) {
+ *     const res = await llm.call(`Summarize: ${text}`);
+ *     return res[0]?.content;
+ * }
+ * ```
  * Best practices when using in pure modules:
  * - Use temperature=0 for best-effort determinism
  * - Use structured outputs with JSON schema validation
  * - Pin model versions for replay (done via agent config)
  * - Validate all LLM outputs with JSON Schema before trusting them
  * - Always provide fallback logic for when LLM calls fail
- * 
- * Architectural principle:
- * Perception/Shield remain pure transformers. Whether they use regex or LLM
- * is an implementation detail. The module signature stays the same - they accept
- * inputs and return outputs without side effects (usage tracking is observability).
  */
 export type PureLLMPort = {
     /**
@@ -77,17 +77,6 @@ export type PureLLMPort = {
      */
     stream?<T = unknown>(message: string, options?: Record<string, unknown>): AsyncIterable<UniversalStreamResponse<T>>;
 };
-
-/**
- * Extract a pure LLM port from TaskContext
- * This creates a sealed interface that prevents access to ctx capabilities
- */
-export function extractPureLLMPort(ctx: { llm: ILLMCaller }): PureLLMPort {
-    return {
-        call: ctx.llm.call.bind(ctx.llm),
-        stream: ctx.llm.stream?.bind(ctx.llm)
-    };
-}
 
 // Configuration for LLM integration
 export type LLMConfig = {

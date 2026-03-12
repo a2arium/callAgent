@@ -2,7 +2,7 @@ import { TaskEngine } from '../src/orchestration/taskEngine.js';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { jest } from '@jest/globals';
-import { MentalState } from '../src/loop/types.js';
+import type { Snapshot } from '../src/loop/types.js';
 
 describe('LLM History Mode', () => {
     let sessionStore: InMemorySessionManager;
@@ -46,7 +46,7 @@ describe('LLM History Mode', () => {
         await engine.flushContextSnapshot('test-tenant', 'test-task', 'test-agent', ctx);
 
         const snap = await sessionManager.load('test-tenant', 'test-task');
-        const savedLlmState = (snap?.snapshot as any)?.M?.memory?.sensory?.llmState;
+        const savedLlmState = (snap?.snapshot as Snapshot)?.llmState;
 
         expect(savedLlmState).toBeUndefined();
         expect(mockStatelessCaller.getMessages).not.toHaveBeenCalled();
@@ -62,16 +62,15 @@ describe('LLM History Mode', () => {
         };
 
         const ctx: any = { llm: mockStatelessCaller };
-        const M: any = {
-            memory: {
-                sensory: {
-                    llmState: { messages: [{ role: 'user', content: 'stale' }] }
-                }
-            }
+        const M: any = { memory: { sensory: {} } };
+
+        // baseSnap is now passed explicitly as 4th parameter — no hidden __lastSnapshotBase
+        const baseSnap: Snapshot = {
+            M,
+            llmState: { messages: [{ role: 'user', content: 'stale' }] }
         };
 
-        // attachAndRestoreLLM is private, but we can access it for testing
-        await (engine as any).attachAndRestoreLLM(ctx, 'test-agent', M);
+        await (engine as any).attachAndRestoreLLM(ctx, 'test-agent', M, baseSnap);
 
         expect(mockStatelessCaller.clearHistory).toHaveBeenCalled();
         expect(mockStatelessCaller.importState).not.toHaveBeenCalled();
@@ -107,13 +106,18 @@ describe('LLM History Mode', () => {
         // 1. Test Saving
         await engine.flushContextSnapshot('test-tenant', 'test-task', 'test-agent', ctx);
         const snap = await sessionManager.load('test-tenant', 'test-task');
-        const savedLlmState = (snap?.snapshot as any)?.M?.memory?.sensory?.llmState;
+        const savedLlmState = (snap?.snapshot as Snapshot)?.llmState;
 
         expect(savedLlmState).toEqual({ messages: [{ role: 'user', content: 'preserved' }] });
 
-        // 2. Test Restoration
+        // 2. Test Restoration — pass baseSnap explicitly, no __lastSnapshotBase needed
         const restoreCtx: any = { llm: mockFullCaller };
-        await (engine as any).attachAndRestoreLLM(restoreCtx, 'test-agent', (snap?.snapshot as any).M);
+        const baseSnap: Snapshot = {
+            M: (snap?.snapshot as Snapshot).M,
+            llmState: savedLlmState
+        };
+
+        await (engine as any).attachAndRestoreLLM(restoreCtx, 'test-agent', baseSnap.M, baseSnap);
 
         expect(mockFullCaller.importState).toHaveBeenCalledWith(savedLlmState);
     });

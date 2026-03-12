@@ -337,30 +337,31 @@ export class TaskExecutor {
             nextInbox = InboxManager.normalizeInbox(pruneSnapshot(nextInbox as any) as any);
         }
 
-        // Inject LLM state into M before saving
+        // Inject LLM history into snapshot base
+        let attachedLlmState: unknown = undefined;
         try {
             const llmAny = (ctx as any).llm as any;
             const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
 
             if (historyMode !== 'stateless') {
-                let llmState: unknown = undefined;
                 if (llmAny?.getMessages) {
                     const messages = llmAny.getMessages(true);
-                    llmState = { messages } as unknown;
+                    attachedLlmState = { messages } as unknown;
                 } else if (llmAny?.exportState) {
-                    llmState = llmAny.exportState();
-                }
-
-                if (llmState) {
-                    const sensory = (mNextEffective.memory as any).sensory || {};
-                    (mNextEffective.memory as any).sensory = { ...sensory, llmState };
+                    attachedLlmState = llmAny.exportState();
                 }
             }
         } catch (err) {
-            log.warn('Failed to inject LLM state during saveSnapshot', { error: (err as Error).message });
+            log.warn('Failed to fetch LLM state during saveSnapshot', { error: (err as Error).message });
         }
 
-        const next = { ...baseNow, M: mNextEffective, meta: nextMeta, inbox: nextInbox } as Record<string, unknown>;
+        const next = {
+            ...baseNow,
+            M: mNextEffective,
+            meta: nextMeta,
+            inbox: nextInbox,
+            ...(attachedLlmState ? { llmState: attachedLlmState } : {})
+        } as Record<string, unknown>;
 
         // Offload Artifacts
         try {

@@ -21,9 +21,7 @@ export type { ArtifactType, ArtifactHandle, LocalArtifact };
 // Export the static factory as 'Artifact'
 export { Artifact };
 
-// Re-export LLM types including the pure LLM port for modules
 export type { PureLLMPort, ILLMCaller, LLMConfig } from './LLMTypes.js';
-export { extractPureLLMPort } from './LLMTypes.js';
 
 // Working Memory Types
 export * from './workingMemory.js';

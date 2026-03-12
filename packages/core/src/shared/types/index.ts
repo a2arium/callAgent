@@ -51,7 +51,6 @@ export { Artifact };
 
 // Re-export LLM types including the pure LLM port for modules
 export type { PureLLMPort, ILLMCaller, LLMConfig } from './LLMTypes.js';
-export { extractPureLLMPort } from './LLMTypes.js';
 
 // MLO Configuration & Interface Types & Shared Types (WorkingMemory, Artifacts, A2ATypes, etc.)
 export * from '@a2arium/callagent-memory-engine';

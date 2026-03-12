@@ -27,7 +27,7 @@ import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 
 import { logger } from '@a2arium/callagent-utils';
 
-import { normalizeObservationInbox, type EnvironmentState, type ObservationInbox } from '../loop/types.js';
+import { normalizeObservationInbox, type EnvironmentState, type ObservationInbox, type Snapshot } from '../loop/types.js';
 import type { Observation, ObservationConfig, SynthesizeObservation } from '../loop/oneTurn.js';
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
@@ -81,7 +81,7 @@ export type {
 
 const log = logger.createLogger({ prefix: 'TaskEngine' });
 export type TaskEngineTestOverrides = {
-    attachAndRestoreLLM?: (ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined) => Promise<void>;
+    attachAndRestoreLLM?: (ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined, baseSnap?: Record<string, unknown>) => Promise<void>;
 };
 // Re-export or use the extracted class
 // Re-export or use the extracted class
@@ -606,26 +606,23 @@ export class TaskEngine {
             });
         } catch { /* noop */ }
         // Attach LLM state into sensory
+        let attachedLlmState: unknown = undefined;
         try {
             const llmAny = (ctx as any).llm as any;
             const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
 
-            let llmState: unknown = undefined;
             if (historyMode !== 'stateless') {
                 if (llmAny?.getMessages) {
                     const messages = llmAny.getMessages(true);
-                    llmState = { messages } as unknown;
+                    attachedLlmState = { messages } as unknown;
                 } else if (llmAny?.exportState) {
-                    llmState = llmAny.exportState();
+                    attachedLlmState = llmAny.exportState();
                 }
             } else {
                 log.debug('[TaskEngine] Skipping LLM history save (stateless mode)');
             }
-
-            const sensory = (M.memory as any).sensory || {};
-            (M.memory as any).sensory = { ...sensory, llmState };
         } catch { /* ignore */ }
-        const next = { ...(baseSnap as any), M } as Record<string, unknown>;
+        const next = { ...(baseSnap as any), M, ...(attachedLlmState ? { llmState: attachedLlmState } : {}) } as Record<string, unknown>;
         try {
             const snap = await this.sessionManager.load(tenantId, sessionId);
             const expected = snap?.wmVersion ?? BigInt(0);
@@ -873,18 +870,20 @@ export class TaskEngine {
         const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
             return PathUtils.getPath(obj, path);
         };
-        const updateLlmInMental = () => {
+        let cachedLlmState: unknown = undefined;
+        const prepareLlmState = () => {
             try {
                 const llmAny = (ctx as any).llm as any;
-                let llmState: unknown = undefined;
-                if (llmAny?.getMessages) {
-                    const messages = llmAny.getMessages(true);
-                    llmState = { messages } as unknown;
-                } else if (llmAny?.exportState) {
-                    llmState = llmAny.exportState();
+                const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+
+                if (historyMode !== 'stateless') {
+                    if (llmAny?.getMessages) {
+                        const messages = llmAny.getMessages(true);
+                        cachedLlmState = { messages } as unknown;
+                    } else if (llmAny?.exportState) {
+                        cachedLlmState = llmAny.exportState();
+                    }
                 }
-                const sensory = (M.memory as any).sensory || {};
-                (M.memory as any).sensory = { ...sensory, llmState };
             } catch { /* ignore */ }
         };
         const flushMentalState = async () => {
@@ -895,8 +894,8 @@ export class TaskEngine {
             // Logic to execute inside retry loop
             const mutateFn = async (baseSnap: Record<string, unknown>) => {
                 assignVarsIntoMental();
-                updateLlmInMental();
-                const next = { ...baseSnap, M } as Record<string, unknown>;
+                prepareLlmState();
+                const next = { ...baseSnap, M, ...(cachedLlmState ? { llmState: cachedLlmState } : {}) } as Record<string, unknown>;
 
                 if (prisma) {
                     const cache = new AgentResultCache(prisma);
@@ -1263,26 +1262,28 @@ export class TaskEngine {
                     // Helper to flush M and save snapshot
                     const flushMentalState = async () => {
                         try {
-                            const M = ((await this.sessionManager!.load(tenantId, sessionId))?.snapshot as any)?.M;
+                            const snap = await this.sessionManager!.load(tenantId, sessionId);
+                            const M = (snap?.snapshot as any)?.M;
                             if (M) {
-                                const llmStateFromM = (((M.memory as any)?.sensory as any)?.llmState);
                                 const llmAny = (ctx as any).llm as any;
-                                if (typeof llmStateFromM === 'undefined' && llmAny?.exportState) {
-                                    const exported = llmAny.exportState();
-                                    if (M.memory) {
-                                        (M.memory as any).sensory = (M.memory as any).sensory || {};
-                                        (M.memory as any).sensory.llmState = exported;
-                                    }
+                                const llmStateFromSnap = (snap?.snapshot as any)?.llmState;
+                                if (typeof llmStateFromSnap === 'undefined' && llmAny?.exportState) {
+                                    return llmAny.exportState();
                                 }
                             }
                         } catch { /* noop */ }
+                        return undefined;
                     };
                     const controlUpdates: Array<[string, unknown]> = [];
                     const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
-                        try { await flushMentalState(); } catch { /* best-effort */ }
+                        let exportedLlm: unknown = undefined;
+                        try { exportedLlm = await flushMentalState(); } catch { /* best-effort */ }
                         const latest = await this.sessionManager!.load(tenantId, sessionId);
                         const latestBase = (latest?.snapshot as Record<string, unknown>) || baseSnap;
                         let nextSnapshot = setPendingInputs(latestBase, pending);
+                        if (exportedLlm) {
+                            nextSnapshot.llmState = exportedLlm;
+                        }
                         if (controlUpdates.length > 0) {
                             for (const [path, value] of controlUpdates) {
                                 nextSnapshot = TaskStateUtils.applyControlVarToSnapshot(nextSnapshot, path, value);
@@ -2650,9 +2651,9 @@ export class TaskEngine {
     /**
      * Helper to attach and restore LLM for a context from persisted MentalState
      */
-    private async attachAndRestoreLLM(ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined): Promise<void> {
+    private async attachAndRestoreLLM(ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined, baseSnap?: Record<string, unknown>): Promise<void> {
         if (TaskEngine.testOverrides?.attachAndRestoreLLM) {
-            return TaskEngine.testOverrides.attachAndRestoreLLM(ctx, agentName, M);
+            return TaskEngine.testOverrides.attachAndRestoreLLM(ctx, agentName, M, baseSnap);
         }
         if (!agentName) return;
 
@@ -2680,9 +2681,11 @@ export class TaskEngine {
                             try { console.log('[TaskEngine] Cleared LLM history (stateless mode) for', agentName); } catch { }
                         }
                     } else {
-                        const llmStateFromM = (((M.memory as any)?.sensory as any)?.llmState);
-                        if (typeof llmStateFromM !== 'undefined' && llmAny?.importState) {
-                            llmAny.importState(llmStateFromM);
+                        // Pass snapshot explicitly to grab llmState
+                        const finalLlmState = (baseSnap as Snapshot)?.llmState;
+
+                        if (typeof finalLlmState !== 'undefined' && llmAny?.importState) {
+                            llmAny.importState(finalLlmState);
                             try { console.log('[TaskEngine] Restored LLM history for', agentName); } catch { }
                         }
                     }
@@ -2867,11 +2870,9 @@ export class TaskEngine {
 
                 // Restore LLM state immediately after creating/attaching LLM
                 try {
-                    const M = (baseSnap as any).M as MentalState | undefined;
-                    const llmStateFromM = M ? (((M.memory as any)?.sensory as any)?.llmState) : undefined;
-                    const legacyLlm = (baseSnap as any)?.llm;
-                    const llmState = typeof llmStateFromM !== 'undefined' ? llmStateFromM : legacyLlm;
                     const llmAny = (ctx as any).llm as any;
+                    const llmState = (baseSnap as Snapshot)?.llmState;
+
                     if (typeof llmState !== 'undefined' && llmAny?.importState) {
                         llmAny.importState(llmState);
                         try { console.log('[TaskEngine] restoreCtx restored LLM history'); } catch { }

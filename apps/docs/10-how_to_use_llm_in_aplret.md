@@ -34,11 +34,6 @@ The framework uses the `callllm` library under the hood, wrapped by `LLMCallerAd
 import { createAgent } from '@a2arium/callagent-core';
 
 export default createAgent({
-  manifest: {
-    name: 'my-agent',
-    version: '1.0.0',
-    runMode: 'loop'
-  },
 
   llmConfig: {
     provider: 'openai',                    // 'openai' | 'anthropic' | 'google' | etc
@@ -523,7 +518,6 @@ const ExtractionSchema = z.object({
 });
 
 export default createAgent({
-  manifest: { name: 'extractor', version: '1.0.0', runMode: 'loop' },
 
   llmConfig: {
     provider: 'openai',

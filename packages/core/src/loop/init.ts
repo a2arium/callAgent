@@ -1,6 +1,6 @@
 // Initialization helpers for MentalState.
 // Seeds a default MentalState from the current TaskContext. This keeps placeholders
-// for future capabilities and captures LLM state under memory.sensory.
+// for future capabilities.
 
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState } from './types.js';
@@ -8,11 +8,9 @@ import type { MentalState } from './types.js';
 function nowIso(): string { return new Date().toISOString(); }
 
 export function initialM(ctx: TaskContext): MentalState {
-    const llmAny = (ctx as unknown as { llm?: { exportState?: () => unknown } }).llm;
-    const llmState = (llmAny && typeof llmAny.exportState === 'function') ? llmAny.exportState() : null;
     return {
         memory: {
-            sensory: { llmState, lastObservation: ctx.task.input },
+            sensory: { lastObservation: ctx.task.input },
             longTerm: {
                 episodic: [],
                 semantic: { concepts: [] },

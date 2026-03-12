@@ -4,7 +4,6 @@
 
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState, MemoryReader, MemoryWriter } from './types.js';
-import type { PureLLMPort } from '../shared/types/LLMTypes.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
@@ -101,9 +100,9 @@ export type TransitionOut<ObservationPayload extends ObservationConfig> =
 export type TurnOutcome<ObservationPayload extends ObservationConfig> = TransitionOut<ObservationPayload>;
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
-    | ((m: MentalState<Sensory>, mem: MemoryReader, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState<Sensory>, o: Obs, mem: MemoryReader, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
-    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, mem: MemoryReader, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
+    | ((m: MentalState<Sensory>, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
+    | ((m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>)
+    | ((m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>);
 
 export type Modules<
     Sensory = unknown,
@@ -113,29 +112,27 @@ export type Modules<
     ExecError extends ExecErrorPayload = ExecErrorPayload,
     ObservationPayload extends ObservationConfig = ObservationConfig
 > = {
-    attention: (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, mem: MemoryReader, llm?: PureLLMPort) => Alpha;
-    perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, mem: MemoryReader, llm?: PureLLMPort) => Obs | Promise<Obs>;
+    attention: (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, mem: MemoryReader) => Alpha;
+    perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, mem: MemoryReader) => Obs | Promise<Obs>;
     learning: (
         prev: MentalState<Sensory>,
         prevAction: ProposedAction | undefined,
         o: Obs,
         mem: MemoryReader,
         writer: MemoryWriter,
-        rPrev?: number,
-        llm?: PureLLMPort
+        rPrev?: number
     ) => MentalState<Sensory> | Promise<MentalState<Sensory>>;
-    policy: (m: MentalState<Sensory>, mem: MemoryReader, llm?: PureLLMPort) => ProposedAction | Array<{ action: ProposedAction; prob: number }>;
-    shield: (m: MentalState<Sensory>, a: ProposedAction, mem: MemoryReader, llm?: PureLLMPort) => ShieldOutcome;
+    policy: (m: MentalState<Sensory>, mem: MemoryReader) => ProposedAction | Array<{ action: ProposedAction; prob: number }>;
+    shield: (m: MentalState<Sensory>, a: ProposedAction, mem: MemoryReader) => ShieldOutcome;
     execution: (a: ProposedAction, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
     transition: (
         env: EnvironmentState<ObservationPayload>,
         exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> },
         m: MentalState<Sensory>,
-        mem: MemoryReader,
-        llm?: PureLLMPort
+        mem: MemoryReader
     ) => TransitionOut<ObservationPayload> | Promise<TransitionOut<ObservationPayload>>;
-    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>, llm?: PureLLMPort) => number;
-    intrinsicReward?: (m: MentalState<Sensory>, o: Obs, mem: MemoryReader, llm?: PureLLMPort) => number;
+    extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>) => number;
+    intrinsicReward?: (m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => number;
 };
 
 export async function oneTurn<
@@ -153,8 +150,7 @@ export async function oneTurn<
     mem: MemoryReader,
     writer: MemoryWriter,
     prevAction?: ProposedAction,
-    rPrev?: number,
-    llm?: PureLLMPort // Added llm parameter here
+    rPrev?: number
 ): Promise<{
     m: MentalState<Sensory>;
     outcome: TransitionOut<ObservationPayload>;
@@ -233,7 +229,7 @@ export async function oneTurn<
     const tA0 = Date.now();
     let alpha: Alpha;
     try {
-        alpha = await runWithTelemetry('attention', () => mods.attention(mPrev, env, mem, llm), { mPrev, env });
+        alpha = await runWithTelemetry('attention', () => mods.attention(mPrev, env, mem), { mPrev, env });
     } catch (error) {
         log.error('Attention module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Attention module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -243,7 +239,7 @@ export async function oneTurn<
     const tP0 = Date.now();
     let o: Obs;
     try {
-        o = await runWithTelemetry('perception', () => mods.perception(env, alpha, mem, llm), { env, alpha });
+        o = await runWithTelemetry('perception', () => mods.perception(env, alpha, mem), { env, alpha });
     } catch (error) {
         log.error('Perception module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Perception module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -253,7 +249,7 @@ export async function oneTurn<
     const tL0 = Date.now();
     let m1: MentalState<Sensory>;
     try {
-        const result = await runWithTelemetry('learning', () => mods.learning(mPrev, prevAction, o, mem, writer, rPrev, llm), { mPrev, prevAction, o });
+        const result = await runWithTelemetry('learning', () => mods.learning(mPrev, prevAction, o, mem, writer, rPrev), { mPrev, prevAction, o });
         m1 = result instanceof Promise ? await result : result;
         // Apply in-memory patches (if writer exposes an apply hook) so Policy sees updates
         const applyFn = (writer as any)?.__applyToMental;
@@ -277,12 +273,10 @@ export async function oneTurn<
     try {
         // Wrap policy execution
         pi = await runWithTelemetry('policy', () => {
-            if (arity >= 5) {
-                return (policyFn as any)(m1, mPrev, o, mem, llm);
-            } else if (arity === 4) {
-                return (policyFn as any)(m1, o, mem, llm);
+            if (arity >= 4) {
+                return (policyFn as any)(m1, mPrev, o, mem);
             } else if (arity === 3) {
-                return (policyFn as any)(m1, mem, llm);
+                return (policyFn as any)(m1, o, mem);
             } else {
                 return (policyFn as any)(m1, mem);
             }
@@ -335,7 +329,7 @@ export async function oneTurn<
     }
     let sh: ShieldOutcome;
     try {
-        sh = await runWithTelemetry('shield', () => mods.shield(m1, chosen, mem, llm), { m1, chosen });
+        sh = await runWithTelemetry('shield', () => mods.shield(m1, chosen, mem), { m1, chosen });
     } catch (error) {
         log.error('Shield module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Shield module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -370,7 +364,7 @@ export async function oneTurn<
     const tT0 = Date.now();
     let outcome: TransitionOut<ObservationPayload>;
     try {
-        outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem, llm), { env: 'env-redacted', exec });
+        outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem), { env: 'env-redacted', exec });
     } catch (error) {
         log.error('Transition module error', { error: error instanceof Error ? error.message : String(error) });
         throw new Error(`Transition module failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -381,7 +375,7 @@ export async function oneTurn<
     let rExt = 0;
     if (typeof mods.extrinsicReward === 'function') {
         try {
-            rExt = Number(mods.extrinsicReward(m1, chosen, exec, outcome, llm) || 0);
+            rExt = Number(mods.extrinsicReward(m1, chosen, exec, outcome) || 0);
         } catch (error) {
             log.error('ExtrinsicReward module error', { error: error instanceof Error ? error.message : String(error) });
             // Don't throw - reward is optional, just log and default to 0
@@ -390,7 +384,7 @@ export async function oneTurn<
     let rInt = 0;
     if (typeof mods.intrinsicReward === 'function') {
         try {
-            rInt = Number(mods.intrinsicReward(m1, o, mem, llm) || 0);
+            rInt = Number(mods.intrinsicReward(m1, o, mem) || 0);
         } catch (error) {
             log.error('IntrinsicReward module error', { error: error instanceof Error ? error.message : String(error) });
             // Don't throw - reward is optional, just log and default to 0

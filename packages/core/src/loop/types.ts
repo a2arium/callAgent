@@ -145,7 +145,7 @@ export type MemoryWriter = {
 export type MentalState<Sensory = unknown> = {
 
     memory: {
-        sensory: Sensory;        // e.g., { llmState, lastObservation }
+        sensory: Sensory;        // e.g., { lastObservation }
 
         thoughts?: import('../shared/types/index.js').ThoughtEntry[];
         decisions?: Record<string, import('../shared/types/index.js').DecisionEntry>;
@@ -170,6 +170,7 @@ export type MentalState<Sensory = unknown> = {
 
 export type Snapshot = {
     M: MentalState;
+    llmState?: unknown;
     pending?: {
         inputs?: Record<string, unknown>;
         children?: Record<string, unknown>;

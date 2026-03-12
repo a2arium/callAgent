@@ -105,8 +105,7 @@ export class TurnRunner {
                             }
 
                             if (llmState) {
-                                const sensory = (M.memory as any).sensory || {};
-                                (M.memory as any).sensory = { ...sensory, llmState };
+                                return { ...baseSnap, M, llmState };
                             }
                         }
                     } catch (err) {
