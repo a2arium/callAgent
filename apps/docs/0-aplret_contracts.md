@@ -1404,22 +1404,13 @@ type Sensory = {
 
 type Obs =
   | { kind: 'user_message'; text: string }
-  | { kind: 'idle' };
-
-type ObservationConfig = {
-  user: string | { text: string };
-  tool: { summary: string };
-  child: { summary: string };
-  internal: { value: string };
-  env: { value: string };
-};
 
 type Intent =
   | { kind: 'prompt_user'; prompt: string }
   | { kind: 'answer_with_llm'; query: string }
   | { kind: 'wait' };
 
-export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown, ObservationConfig>({
+export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
   manifest: 'agent.json',
 
   attention: (_m, env) => ({

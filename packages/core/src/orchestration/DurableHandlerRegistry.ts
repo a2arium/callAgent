@@ -1,4 +1,4 @@
-import type { Observation, ObservationConfig, SynthesizeObservation } from '../loop/oneTurn.js';
+import type { Observation } from '../loop/oneTurn.js';
 import { normalizeObservationInbox, type ObservationInbox } from '../loop/types.js';
 
 export type PendingInputHandler = {
@@ -7,31 +7,22 @@ export type PendingInputHandler = {
     expiresAt?: string;
 };
 
-type DurableObservationConfig = ObservationConfig & {
-    user: unknown;
-    tool?: unknown;
-    child?: unknown;
-    internal?: unknown;
-    env?: unknown;
-};
 
-type DurableObservation = SynthesizeObservation<DurableObservationConfig>;
-type DurableObservationInbox = ObservationInbox<DurableObservationConfig>;
 
 export type SnapshotShape = {
     vars?: Record<string, unknown>;
     pending?: {
         inputs?: Record<string, PendingInputHandler>;
     };
-    inbox?: DurableObservationInbox | Observation[];
+    inbox?: ObservationInbox | Observation[];
     meta?: { turn?: number };
 };
 
-const normalizeInbox = (value: SnapshotShape['inbox']): DurableObservationInbox => {
-    return normalizeObservationInbox<DurableObservationConfig>(value);
+const normalizeInbox = (value: SnapshotShape['inbox']): ObservationInbox => {
+    return normalizeObservationInbox(value);
 };
 
-const addObservationToInbox = (value: SnapshotShape['inbox'], observation: DurableObservation): DurableObservationInbox => {
+const addObservationToInbox = (value: SnapshotShape['inbox'], observation: Observation): ObservationInbox => {
     const inbox = normalizeInbox(value);
     inbox.current = [observation]; // REPLACE instead of PUSH for resume context
     inbox.all.push(observation);
@@ -73,7 +64,7 @@ export function applyInputProvided(
     inputs[token] = input as unknown;
     vars.__inputs = inputs;
     const snapshotWithVars = { ...snapshot, vars } as SnapshotShape;
-    const observation: DurableObservation = {
+    const observation: Observation = {
         source: 'user',
         kind: 'input.provided',
         payload: { token, value: input },

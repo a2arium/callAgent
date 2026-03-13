@@ -7,7 +7,6 @@ import {
     type ArtifactMarker
 } from '@a2arium/callagent-memory-engine';
 import type { MentalState, ObservationInbox } from '../loop/types.js';
-import type { ObservationConfig } from '../loop/oneTurn.js';
 
 const log = logger.createLogger({ prefix: 'ArtifactHydrationService' });
 
@@ -19,16 +18,16 @@ export class ArtifactHydrationService {
     /**
      * Hydrate artifacts within an observation inbox
      */
-    static hydrateInboxArtifacts<T extends ObservationConfig>(
-        inbox: ObservationInbox<T>,
+    static hydrateInboxArtifacts(
+        inbox: ObservationInbox,
         prisma: unknown,
         tenantId: string,
         contextLabel: string
-    ): ObservationInbox<T> {
+    ): ObservationInbox {
         if (!prisma) return inbox;
         try {
             const cache = new AgentResultCache(prisma as any);
-            return hydrateArtifacts(inbox, cache, tenantId) as ObservationInbox<T>;
+            return hydrateArtifacts(inbox, cache, tenantId) as ObservationInbox;
         } catch (err) {
             log.warn('Failed to hydrate inbox artifacts', {
                 context: contextLabel,

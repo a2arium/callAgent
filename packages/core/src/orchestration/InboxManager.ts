@@ -1,23 +1,15 @@
 import { logger } from '@a2arium/callagent-utils';
 import { normalizeObservationInbox, type ObservationInbox } from '../loop/types.js';
-import type { ObservationConfig, SynthesizeObservation } from '../loop/oneTurn.js';
+import type { Observation } from '../loop/oneTurn.js';
 
 const log = logger.createLogger({ prefix: 'InboxManager' });
 
-export type EngineObservationConfig = ObservationConfig & {
-    user: unknown;
-    tool: unknown;
-    child: unknown;
-    internal?: unknown;
-    env?: unknown;
-};
-
-export type EngineObservation = SynthesizeObservation<EngineObservationConfig>;
-export type EngineObservationInbox = ObservationInbox<EngineObservationConfig>;
+export type EngineObservation = Observation;
+export type EngineObservationInbox = ObservationInbox;
 
 export class InboxManager {
-    static normalizeInbox(value: unknown): EngineObservationInbox {
-        return normalizeObservationInbox<EngineObservationConfig>(value);
+    static normalizeInbox(value: unknown): ObservationInbox {
+        return normalizeObservationInbox(value);
     }
 
     static addObservationToInbox(inboxValue: unknown, observation: EngineObservation): EngineObservationInbox {

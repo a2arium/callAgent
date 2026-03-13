@@ -6,29 +6,26 @@
 // - Single source of truth for session cognition (no parallel stores)
 // - migration handled outside this file
 // - Placeholders for future capabilities (world model, emotion, reward)
-import type { Observation, SynthesizeObservation, ObservationConfig } from './oneTurn.js';
+import { Observation, ObservationSchema } from '../types/observation.js';
 
-export type ObservationBySource<Payload extends ObservationConfig, Source> = Extract<
-    SynthesizeObservation<Payload>,
-    { source: Source }
->;
+export type ObservationBySource<Source> = Extract<Observation, { source: Source }>;
 
-const findUser = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
-    observations.find((o): o is ObservationBySource<Payload, 'user'> => (o as { source?: unknown })?.source === 'user');
-const findTool = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
-    observations.find((o): o is ObservationBySource<Payload, 'tool'> => (o as { source?: unknown })?.source === 'tool');
-const findChild = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
-    observations.find((o): o is ObservationBySource<Payload, 'child'> => (o as { source?: unknown })?.source === 'child');
-const findInternal = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
-    observations.find((o): o is ObservationBySource<Payload, 'internal'> => (o as { source?: unknown })?.source === 'internal');
-const findEnv = <Payload extends ObservationConfig>(observations: SynthesizeObservation<Payload>[]) =>
-    observations.find((o): o is ObservationBySource<Payload, 'env'> => (o as { source?: unknown })?.source === 'env');
+const findUser = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'user'> => o?.source === 'user');
+const findTool = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'tool'> => o?.source === 'tool');
+const findChild = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'child'> => o?.source === 'child');
+const findInternal = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'internal'> => o?.source === 'internal');
+const findEnv = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'env'> => o?.source === 'env');
 
-const attachInboxAccessors = <Payload extends ObservationConfig>(
-    inbox: Pick<ObservationInbox<Payload>, 'current' | 'all'> & Partial<ObservationInbox<Payload>>
-): ObservationInbox<Payload> => {
-    const casted = inbox as ObservationInbox<Payload>;
-    const define = <K extends keyof ObservationInbox<Payload>>(key: K, fn: ObservationInbox<Payload>[K]) => {
+const attachInboxAccessors = (
+    inbox: Pick<ObservationInbox, 'current' | 'all'> & Partial<ObservationInbox>
+): ObservationInbox => {
+    const casted = inbox as ObservationInbox;
+    const define = <K extends keyof ObservationInbox>(key: K, fn: ObservationInbox[K]) => {
         Object.defineProperty(casted, key, { value: fn, enumerable: false, writable: true, configurable: true });
     };
     define('user', () => findUser(inbox.current));
@@ -39,14 +36,14 @@ const attachInboxAccessors = <Payload extends ObservationConfig>(
     return casted;
 };
 
-export type ObservationInbox<Payload extends ObservationConfig = ObservationConfig> = {
-    current: SynthesizeObservation<Payload>[];
-    all: SynthesizeObservation<Payload>[];
-    user(): ObservationBySource<Payload, 'user'> | undefined;
-    tool(): ObservationBySource<Payload, 'tool'> | undefined;
-    child(): ObservationBySource<Payload, 'child'> | undefined;
-    internal(): ObservationBySource<Payload, 'internal'> | undefined;
-    env(): ObservationBySource<Payload, 'env'> | undefined;
+export type ObservationInbox = {
+    current: Observation[];
+    all: Observation[];
+    user(): ObservationBySource<'user'> | undefined;
+    tool(): ObservationBySource<'tool'> | undefined;
+    child(): ObservationBySource<'child'> | undefined;
+    internal(): ObservationBySource<'internal'> | undefined;
+    env(): ObservationBySource<'env'> | undefined;
 };
 
 export type EpisodicEvent = {
@@ -195,12 +192,12 @@ export type ControlState = {
 };
 
 // Environment state visible to the loop per turn
-export type EnvironmentState<ObservationPayload extends ObservationConfig = ObservationConfig> = {
+export type EnvironmentState = {
     time: string; // ISO timestamp
     sessionId?: string; // current session id (task id)
     turn: number; // cumulative loop turn (persisted per session)
     budget: { maxTurns: number; latencyMs: number }; // loop constraints from manifest
-    inbox: ObservationInbox<ObservationPayload>; // ordered observations awaiting perception (current turn + history)
+    inbox: ObservationInbox; // ordered observations awaiting perception (current turn + history)
     pending: {
         inputs: Record<string, unknown>;
         children: Record<string, unknown>;
@@ -216,20 +213,37 @@ export type EnvironmentState<ObservationPayload extends ObservationConfig = Obse
     config?: Record<string, unknown>; // manifest-level configuration
 };
 
-export const normalizeObservationInbox = <ObservationPayload extends ObservationConfig = ObservationConfig>(
+export const normalizeObservationInbox = (
     value: unknown
-): ObservationInbox<ObservationPayload> => {
+): ObservationInbox => {
+    const parseOrLog = (obsArray: unknown[]): Observation[] => {
+        const result: Observation[] = [];
+        for (const item of obsArray) {
+            const parsed = ObservationSchema.safeParse(item);
+            if (parsed.success) {
+                result.push(parsed.data);
+            } else {
+                // We drop invalid envelope structures right at the generic boundary.
+                if (process.env.CALLAGENT_DEBUG_INBOX) {
+                    // eslint-disable-next-line no-console
+                    console.warn('[normalizeObservationInbox] Dropping invalid observation payload envelope:', parsed.error, item);
+                }
+            }
+        }
+        return result;
+    };
+
     if (Array.isArray(value)) {
-        const arr = value as SynthesizeObservation<ObservationPayload>[];
+        const arr = parseOrLog(value);
         return attachInboxAccessors({
             current: [...arr],
             all: [...arr]
         });
     }
     if (value && typeof value === 'object') {
-        const candidate = value as Partial<ObservationInbox<ObservationPayload>>;
-        const current = Array.isArray(candidate.current) ? [...candidate.current] : [];
-        const all = Array.isArray(candidate.all) ? [...candidate.all] : [];
+        const candidate = value as Partial<ObservationInbox>;
+        const current = Array.isArray(candidate.current) ? parseOrLog(candidate.current) : [];
+        const all = Array.isArray(candidate.all) ? parseOrLog(candidate.all) : [];
         const inbox = {
             current,
             all,
@@ -243,3 +257,4 @@ export const normalizeObservationInbox = <ObservationPayload extends Observation
     }
     return attachInboxAccessors({ current: [], all: [] });
 };
+

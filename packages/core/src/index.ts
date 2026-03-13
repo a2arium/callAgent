@@ -33,9 +33,7 @@ export type {
     ShieldOutcome,
     AttentionSignal,
     Observation,
-    ObservationProvenance,
-    ObservationConfig,
-    SynthesizeObservation
+    ObservationProvenance
 } from './loop/oneTurn.js';
 export type { Modules } from './loop/oneTurn.js';
 export { IntentSchema, ExecutableActionSchema } from './types/intent.js';

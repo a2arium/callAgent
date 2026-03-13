@@ -7,8 +7,7 @@ import {
     type ExecutableAction,
     type ExecResult,
     type TransitionOut,
-    type TaskContext,
-    type ObservationConfig
+    type TaskContext
 } from '@a2arium/callagent-core';
 import { logger } from '@a2arium/callagent-utils';
 import { z } from 'zod';
@@ -43,7 +42,7 @@ const GreetingSchema = z.object({
     emoji: z.string().describe('A single suitable emoji that fits the enthusiastic tone')
 });
 
-export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, HelloError, ObservationConfig>({
+export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, HelloError>({
 
     llmConfig: {
         provider: 'openai',
@@ -52,16 +51,15 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
         historyMode: 'stateless'
     },
 
-    perception: (env: EnvironmentState<ObservationConfig>): HelloPerception => {
+    perception: (env: EnvironmentState): HelloPerception => {
         // Look for user input in the inbox
         const userInputs = env.inbox.all.filter(obs => obs.source === 'user' && obs.kind === 'input.provided');
         const latestInput = userInputs[userInputs.length - 1]; // most recent
-        const payload = latestInput?.payload?.value as Record<string, unknown> | undefined;
-
-        const nameFromInput = typeof payload?.name === 'string' ? payload.name : undefined;
+        const payload = latestInput?.payload as Record<string, unknown> | undefined;
+        const nameFromInput = typeof payload?.value === 'string' ? payload.value : (payload?.value as any)?.name;
 
         // Look for LLM generated greeting from internal transitions
-        const llmOutputs = env.inbox.all.filter(obs => obs.kind === 'greeting.generated');
+        const llmOutputs = env.inbox.all.filter(obs => obs.kind === 'state.noted');
         const generatedGreeting = llmOutputs[llmOutputs.length - 1]?.payload as { greeting: string; emoji: string } | undefined;
 
         logger.info('[Perception] Recognized signals', { nameFromInput, hasGeneratedGreeting: !!generatedGreeting });
@@ -180,7 +178,7 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
         };
     },
 
-    transition: (_env: EnvironmentState<ObservationConfig>, exec: { action: ExecutableAction; result: ExecResult<HelloExecData> }, _m: MentalState<Sensory>): TransitionOut<ObservationConfig> => {
+    transition: (_env: EnvironmentState, exec: { action: ExecutableAction; result: ExecResult<HelloExecData> }, _m: MentalState<Sensory>): TransitionOut => {
         if (exec.action.kind === 'internal' && exec.action.done) {
             logger.info('[Transition] Completing loop successfully.');
             return { kind: 'complete', result: exec.result.data };
@@ -192,7 +190,7 @@ export default createAgent<Sensory, HelloPerception, WorldModel, HelloExecData, 
                 kind: 'continue',
                 observations: [{
                     source: 'internal',
-                    kind: 'greeting.generated',
+                    kind: 'state.noted',
                     payload: exec.result.data.payload
                 }]
             };

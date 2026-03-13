@@ -7,8 +7,7 @@ import {
     type ExecResult,
     type ExecErrorPayload,
     type AttentionSignal,
-    type SynthesizeObservation,
-    type ObservationConfig
+    type Observation
 } from './oneTurn.js';
 import type { Intent, ExecutableAction } from '../types/intent.js';
 import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
@@ -23,28 +22,27 @@ type LoopRunnerOptions = {
     latencyMs?: number;
 };
 
-const ensureInbox = <ObservationPayload extends ObservationConfig = ObservationConfig>(environment: EnvironmentState<ObservationPayload>): ObservationInbox<ObservationPayload> => {
-    const normalized = normalizeObservationInbox<ObservationPayload>(environment.inbox);
+const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
+    const normalized = normalizeObservationInbox(environment.inbox);
     environment.inbox = normalized;
     return normalized;
 };
 
 export async function runLoop<
     Sensory = unknown,
-    Obs = SynthesizeObservation<ObservationConfig>,
+    Obs = Observation,
     Alpha = AttentionSignal,
     ExecData = unknown,
-    ExecError extends import('./oneTurn.js').ExecErrorPayload = import('./oneTurn.js').ExecErrorPayload,
-    ObservationPayload extends ObservationConfig = ObservationConfig
+    ExecError extends import('./oneTurn.js').ExecErrorPayload = import('./oneTurn.js').ExecErrorPayload
 >(
     ctx: TaskContext,
     M: MentalState<Sensory>,
-    env: EnvironmentState<ObservationPayload>,
-    modules: Partial<Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>>,
+    env: EnvironmentState,
+    modules: Partial<Modules<Sensory, Obs, Alpha, ExecData, ExecError>>,
     opts: LoopRunnerOptions = {}
 ): Promise<{
     M: MentalState<Sensory>;
-    outcome: TurnOutcome<ObservationPayload>;
+    outcome: TurnOutcome;
     metrics?: { timings: Record<string, number>[]; rewards: number[] };
 }> {
     // DIAGNOSTIC: Unique ID for this runLoop execution to detect race conditions
@@ -247,9 +245,9 @@ export async function runLoop<
     };
 
     // Provide minimal defaults (prefer agent overrides when present)
-    const defaults: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload> = {
+    const defaults: Modules<Sensory, Obs, Alpha, ExecData, ExecError> = {
         attention: modules.attention ?? ((_prev, _env, _mem) => ({ kind: 'all' })),
-        perception: modules.perception ?? ((e: EnvironmentState<ObservationPayload>, _alpha: Alpha, _mem) => {
+        perception: modules.perception ?? ((e: EnvironmentState, _alpha: Alpha, _mem) => {
             const inboxState = ensureInbox(e);
             const turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
             // Default perception returns inbox observations
@@ -463,15 +461,15 @@ export async function runLoop<
 
                 if (action.kind === 'prompt_user' && action.token) {
                     try { log.info('Transition to await_input', { token: action.token }); } catch { }
-                    return { kind: 'await_input', token: action.token } as TransitionOut<ObservationPayload>;
+                    return { kind: 'await_input', token: action.token } as TransitionOut;
                 }
 
                 if (action.kind === 'delegate_to_child' && action.token) {
-                    return { kind: 'await_child', token: action.token } as TransitionOut<ObservationPayload>;
+                    return { kind: 'await_child', token: action.token } as TransitionOut;
                 }
 
                 if (action.kind === 'call_tool' && action.token) {
-                    return { kind: 'await_tool', token: action.token } as TransitionOut<ObservationPayload>;
+                    return { kind: 'await_tool', token: action.token } as TransitionOut;
                 }
 
                 // ✅ FIX v3.5: Check if there are pending children even if action.kind !== 'subagent'
@@ -482,19 +480,19 @@ export async function runLoop<
                     if (tokens.length > 0) {
                         const firstToken = tokens[0];
                         try { log.info('Default transition: detected pending child, returning await_child', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
-                        return { kind: 'await_child', token: firstToken } as TransitionOut<ObservationPayload>;
+                        return { kind: 'await_child', token: firstToken } as TransitionOut;
                     }
                 }
 
                 if (action.kind === 'internal' && (action as any).done === true) {
-                    return { kind: 'complete', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
+                    return { kind: 'complete', observations: [] as Observation[] } as TransitionOut;
                 }
 
-                return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
+                return { kind: 'continue', observations: [] as Observation[] } as TransitionOut;
             }
 
             // Error path
-            return { kind: 'continue', observations: [] as SynthesizeObservation<ObservationPayload>[] } as TransitionOut<ObservationPayload>;
+            return { kind: 'continue', observations: [] as Observation[] } as TransitionOut;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {
             try {
@@ -536,7 +534,7 @@ export async function runLoop<
                 return 0;
             } catch { return 0; }
         })
-    } as Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>;
+    } as Modules<Sensory, Obs, Alpha, ExecData, ExecError>;
 
     function scanForPII(value: unknown, regexes: RegExp[]): boolean {
         try {
@@ -554,7 +552,7 @@ export async function runLoop<
     let m = M;
     let prevAction: Intent | undefined = undefined;
     let rPrev: number | undefined = undefined;
-    let outcome: TurnOutcome<ObservationPayload> = { kind: 'continue', observations: [] };
+    let outcome: TurnOutcome = { kind: 'continue', observations: [] };
     const timings: Record<string, number>[] = [];
     const rewards: number[] = [];
 
@@ -665,7 +663,7 @@ export async function runLoop<
 
             let step;
             try {
-                step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>(
+                step = await oneTurn<Sensory, Obs, Alpha, ExecData, ExecError>(
                     ctx,
                     env,
                     m,
@@ -729,10 +727,10 @@ export async function runLoop<
             }
 
             if (outcome.kind === 'continue' && !Array.isArray((outcome as any).observations)) {
-                outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
+                outcome = { kind: 'continue', observations: [] } as TransitionOut;
             }
             const observations = Array.isArray((outcome as any).observations)
-                ? ((outcome as any).observations as SynthesizeObservation<ObservationPayload>[])
+                ? ((outcome as any).observations as Observation[])
                 : [];
             if (observations.length > 0) {
                 inbox.all.push(...observations);
@@ -870,7 +868,7 @@ export async function runLoop<
                     }
 
                     // Convert await_child to continue so loop proceeds
-                    outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
+                    outcome = { kind: 'continue', observations: [] } as TransitionOut;
                     // Don't break - continue to next turn
                     continue;
                 }
@@ -926,7 +924,7 @@ export async function runLoop<
                     }
 
                     // Convert await_tool to continue so loop proceeds
-                    outcome = { kind: 'continue', observations: [] } as TransitionOut<ObservationPayload>;
+                    outcome = { kind: 'continue', observations: [] } as TransitionOut;
                     continue;
                 }
             }

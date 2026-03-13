@@ -28,7 +28,7 @@ import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { logger } from '@a2arium/callagent-utils';
 
 import { normalizeObservationInbox, type EnvironmentState, type ObservationInbox, type Snapshot } from '../loop/types.js';
-import type { Observation, ObservationConfig, SynthesizeObservation } from '../loop/oneTurn.js';
+import type { Observation } from '../loop/oneTurn.js';
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';

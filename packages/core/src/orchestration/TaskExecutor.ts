@@ -22,7 +22,7 @@ import { SessionManager } from './SessionManager.js';
 
 const log = logger.createLogger({ prefix: 'TaskExecutor' });
 
-export type LoopOutcome = TurnOutcome<any>;
+export type LoopOutcome = TurnOutcome;
 
 export interface ExecuteTurnParams {
     ctx: TaskContext;

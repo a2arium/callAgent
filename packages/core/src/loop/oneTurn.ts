@@ -5,59 +5,18 @@
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState, MemoryReader, MemoryWriter } from './types.js';
 import type { Intent, ExecutableAction } from '../types/intent.js';
+import type {
+    Observation,
+    ObservationProvenance,
+    ExecErrorPayload
+} from '../types/observation.js'; // Original import, keeping it as the instruction's snippet was for index.ts
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
 
 export type AttentionSignal = unknown;
 
-export type ObservationProvenance = {
-    ts: number;
-    turn: number;
-    id?: string;
-    toolId?: string;
-    correlationId?: string;
-};
-
-export type ObservationConfig = {
-    user?: unknown;
-    tool?: unknown;
-    child?: unknown;
-    internal?: unknown;
-    env?: unknown;
-};
-
-export type UserEnvelope<T> = { token: string; value: T };
-export type ToolEnvelope<T> = { token: string; result: T; tool: string };
-export type ChildEnvelope<T> = {
-    token: string;
-    result: T;
-    agentId?: string;
-    childTaskId?: string;
-    executionMetadata?: {
-        timings?: unknown;
-        rewards?: unknown;
-        state?: string;
-        timestamp?: string;
-    };
-};
-
-export type SynthesizeObservation<T extends ObservationConfig> =
-    | (T['user'] extends undefined ? never : { source: 'user'; kind: 'input.provided'; payload: UserEnvelope<T['user']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })
-    | (T['tool'] extends undefined ? never : { source: 'tool'; kind: 'tool.completed'; payload: ToolEnvelope<T['tool']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })
-    | (T['child'] extends undefined ? never : { source: 'child'; kind: 'child.completed'; payload: ChildEnvelope<T['child']>; provenance?: ObservationProvenance; error?: { code: string; message: string } })
-    | (T['internal'] extends undefined ? never : { source: 'internal'; kind: string; payload: T['internal']; provenance?: ObservationProvenance; error?: { code: string; message: string } })
-    | (T['env'] extends undefined ? never : { source: 'env'; kind: string; payload: T['env']; provenance?: ObservationProvenance; error?: { code: string; message: string } });
-
-export type Observation<Payload = unknown> = {
-    source: 'tool' | 'child' | 'env' | 'user' | 'internal';
-    kind: string;
-    payload: Payload;
-    provenance?: ObservationProvenance;
-    error?: { code: string; message: string };
-};
-
-export type ExecErrorPayload = { code: string; message: string };
+export type { Observation, ObservationProvenance, ExecErrorPayload };
 
 export type ExecResult<Data = unknown, ErrorPayload extends ExecErrorPayload = ExecErrorPayload> = {
     status: 'ok' | 'error';
@@ -75,16 +34,17 @@ export type ShieldOutcome =
     | { action: 'veto'; reason: string }
     | { action: 'defer'; askUser: string };
 
-export type TransitionOut<ObservationPayload extends ObservationConfig> =
-    | { kind: 'continue'; observations: SynthesizeObservation<ObservationPayload>[] }
+export type TransitionOut =
+    | { kind: 'continue'; observations: Observation[] }
     | { kind: 'await_input'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; reason: string };
 
+
 // Temporary alias while downstream modules migrate
-export type TurnOutcome<ObservationPayload extends ObservationConfig> = TransitionOut<ObservationPayload>;
+export type TurnOutcome = TransitionOut;
 
 export type PolicyFn<Sensory = unknown, Obs = unknown> =
     | ((m: MentalState<Sensory>, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>)
@@ -96,11 +56,10 @@ export type Modules<
     Obs = Observation,
     Alpha = AttentionSignal,
     ExecData = unknown,
-    ExecError extends ExecErrorPayload = ExecErrorPayload,
-    ObservationPayload extends ObservationConfig = ObservationConfig
+    ExecError extends ExecErrorPayload = ExecErrorPayload
 > = {
-    attention: (prev: MentalState<Sensory>, env: EnvironmentState<ObservationPayload>, mem: MemoryReader) => Alpha;
-    perception: (env: EnvironmentState<ObservationPayload>, alpha: Alpha, mem: MemoryReader) => Obs | Promise<Obs>;
+    attention: (prev: MentalState<Sensory>, env: EnvironmentState, mem: MemoryReader) => Alpha;
+    perception: (env: EnvironmentState, alpha: Alpha, mem: MemoryReader) => Obs | Promise<Obs>;
     learning: (
         prev: MentalState<Sensory>,
         prevAction: Intent | undefined,
@@ -113,12 +72,12 @@ export type Modules<
     shield: (m: MentalState<Sensory>, a: Intent, mem: MemoryReader) => ShieldOutcome;
     execution: (a: Intent, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
     transition: (
-        env: EnvironmentState<ObservationPayload>,
+        env: EnvironmentState,
         exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> },
         m: MentalState<Sensory>,
         mem: MemoryReader
-    ) => TransitionOut<ObservationPayload> | Promise<TransitionOut<ObservationPayload>>;
-    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>) => number;
+    ) => TransitionOut | Promise<TransitionOut>;
+    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => number;
 };
 
@@ -127,20 +86,19 @@ export async function oneTurn<
     Obs = Observation,
     Alpha = AttentionSignal,
     ExecData = unknown,
-    ExecError extends ExecErrorPayload = ExecErrorPayload,
-    ObservationPayload extends ObservationConfig = ObservationConfig
+    ExecError extends ExecErrorPayload = ExecErrorPayload
 >(
     ctx: TaskContext,
-    env: EnvironmentState<ObservationPayload>,
+    env: EnvironmentState,
     mPrev: MentalState<Sensory>,
-    mods: Modules<Sensory, Obs, Alpha, ExecData, ExecError, ObservationPayload>,
+    mods: Modules<Sensory, Obs, Alpha, ExecData, ExecError>,
     mem: MemoryReader,
     writer: MemoryWriter,
     prevAction?: Intent,
     rPrev?: number
 ): Promise<{
     m: MentalState<Sensory>;
-    outcome: TransitionOut<ObservationPayload>;
+    outcome: TransitionOut;
     exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     timings: Record<string, number>;
     reward: number;
@@ -349,7 +307,7 @@ export async function oneTurn<
     timings.executionMs = Date.now() - tE0;
 
     const tT0 = Date.now();
-    let outcome: TransitionOut<ObservationPayload>;
+    let outcome: TransitionOut;
     try {
         outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem), { env: 'env-redacted', exec });
     } catch (error) {

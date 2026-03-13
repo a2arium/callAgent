@@ -29,22 +29,25 @@ describe('InboxManager', () => {
         });
 
         it('should return the inbox if valid', () => {
-            const input = { current: ['a'], all: ['a', 'b'] };
+            const obsA = { source: 'internal', kind: 'state.noted', payload: 'a' };
+            const obsB = { source: 'internal', kind: 'state.noted', payload: 'b' };
+            const input = { current: [obsA], all: [obsA, obsB] };
             const result = InboxManager.normalizeInbox(input);
             expect(result).toEqual(input);
         });
 
         it('should wrap array input as current and all', () => {
-            const input = ['a'];
+            const obsA = { source: 'internal', kind: 'state.noted', payload: 'a' };
+            const input = [obsA];
             const result = InboxManager.normalizeInbox(input);
-            expect(result).toEqual({ current: ['a'], all: ['a'] });
+            expect(result).toEqual({ current: [obsA], all: [obsA] });
         });
     });
 
     describe('addObservationToInbox', () => {
         it('should add observation to both current and all', () => {
             const inbox: any = { current: [], all: [] };
-            const obs: any = { kind: 'test', payload: {} };
+            const obs: any = { source: 'internal', kind: 'state.noted', payload: {} };
             const result = InboxManager.addObservationToInbox(inbox, obs);
             expect(result.current).toContain(obs);
             expect(result.all).toContain(obs);
@@ -56,8 +59,8 @@ describe('InboxManager', () => {
     describe('addObservationToInboxIfMissing', () => {
         it('should add observation if not present', () => {
             const inbox: any = { current: [], all: [] };
-            const obs: any = { kind: 'test', id: 1 };
-            const predicate = (o: any) => o.id === 1;
+            const obs: any = { source: 'internal', kind: 'state.noted', payload: { id: 1 } };
+            const predicate = (o: any) => o.payload?.id === 1;
 
             const result = InboxManager.addObservationToInboxIfMissing(inbox, obs, predicate);
             expect(result.all).toContain(obs);
@@ -65,9 +68,9 @@ describe('InboxManager', () => {
         });
 
         it('should revive in current if already in all but not current', () => {
-            const obs: any = { kind: 'test', id: 1 };
+            const obs: any = { source: 'internal', kind: 'state.noted', payload: { id: 1 } };
             const inbox: any = { current: [], all: [obs] };
-            const predicate = (o: any) => o.id === 1;
+            const predicate = (o: any) => o.payload?.id === 1;
 
             const result = InboxManager.addObservationToInboxIfMissing(inbox, obs, predicate);
             expect(result.all.length).toBe(1);
@@ -79,7 +82,7 @@ describe('InboxManager', () => {
     describe('mergeInboxes', () => {
         it('should merge remote child completion observations logic', () => {
             const localInbox: any = { current: [], all: [] };
-            const remoteObs: any = { kind: 'child.completed', payload: { token: 'child-1', result: 'foo' } };
+            const remoteObs: any = { source: 'child', kind: 'child.completed', payload: { token: 'child-1', result: 'foo' } };
             const remoteInbox: any = { current: [], all: [remoteObs] };
             const pendingChildren = { 'child-1': true };
 
@@ -91,7 +94,7 @@ describe('InboxManager', () => {
 
         it('should NOT merge if child is not pending', () => {
             const localInbox: any = { current: [], all: [] };
-            const remoteObs: any = { kind: 'child.completed', payload: { token: 'child-1' } };
+            const remoteObs: any = { source: 'child', kind: 'child.completed', payload: { token: 'child-1' } };
             const remoteInbox: any = { current: [], all: [remoteObs] };
             const pendingChildren = {}; // empty
 
@@ -101,7 +104,7 @@ describe('InboxManager', () => {
         });
 
         it('should NOT merge if already in local', () => {
-            const obs: any = { kind: 'child.completed', payload: { token: 'child-1' } };
+            const obs: any = { source: 'child', kind: 'child.completed', payload: { token: 'child-1' } };
             const localInbox: any = { current: [], all: [obs] };
             const remoteInbox: any = { current: [], all: [obs] };
             const pendingChildren = { 'child-1': true };

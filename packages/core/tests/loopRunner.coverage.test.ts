@@ -212,7 +212,7 @@ describe('runLoop await_child fast-paths', () => {
     it('continues loop when child completion is already in the inbox', async () => {
         const ctx: any = { task: { id: 'child-sync', input: {} }, reply: jest.fn() };
         const M: any = initialM(ctx);
-        const childObs = { kind: 'child.completed', payload: { token: 'child-token', data: 'ok' } };
+        const childObs = { source: 'child', kind: 'child.completed', payload: { token: 'child-token', data: 'ok' } };
         const env = baseEnv({
             inbox: normalizeObservationInbox({ current: [], all: [childObs] }),
             pending: { inputs: {}, children: { 'child-token': {} }, tools: {}, groups: {} }
@@ -241,7 +241,7 @@ describe('runLoop await_child fast-paths', () => {
     });
 
     it('reloads inbox from session manager when child completion is persisted externally', async () => {
-        const childObs = { kind: 'child.completed', payload: { token: 'reload-child', value: 1 } };
+        const childObs = { source: 'child', kind: 'child.completed', payload: { token: 'reload-child', value: 1 } };
         const sessionManager = { load: jest.fn().mockResolvedValue({ snapshot: { inbox: { all: [childObs], current: [] } } }) };
         const ctx: any = { task: { id: 'child-reload-task', input: {} }, _sessionManager: sessionManager, tenantId: 'tenant-1', reply: jest.fn() };
         const M: any = initialM(ctx);
@@ -313,7 +313,7 @@ describe('runLoop budgets, errors, and observation normalization', () => {
     it('normalizes continue outcomes, preserves inbox when no observations, and captures turn errors', async () => {
         const ctx: any = { task: { id: 'error-task', input: {} }, reply: jest.fn() };
         const M: any = initialM(ctx);
-        const env = baseEnv({ inbox: normalizeObservationInbox([{ kind: 'existing', payload: {} } as any]) });
+        const env = baseEnv({ inbox: normalizeObservationInbox([{ source: 'internal', kind: 'state.noted', payload: {} } as any]) });
 
         let call = 0;
         const modules = {

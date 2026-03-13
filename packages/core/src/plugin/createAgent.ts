@@ -33,10 +33,9 @@ export const createAgent = <
     Obs = unknown,
     Alpha = unknown,
     ExecData = unknown,
-    ExecError extends import('../loop/oneTurn.js').ExecErrorPayload = import('../loop/oneTurn.js').ExecErrorPayload,
-    ObsConfigOrPayload extends import('../loop/oneTurn.js').ObservationConfig = import('../loop/oneTurn.js').ObservationConfig
+    ExecError extends import('../loop/oneTurn.js').ExecErrorPayload = import('../loop/oneTurn.js').ExecErrorPayload
 >(
-    options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>,
+    options: CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>,
     metaUrl?: string
 ): AgentPlugin => {
     // ✅ BUG FIX: Make metaUrl optional to prevent "path argument must be of type string" crash when omitted
@@ -166,7 +165,7 @@ export const createAgent = <
     const sugarModules: Record<string, unknown> = {};
     const moduleKeys: Array<
         keyof NonNullable<
-            NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError, ObsConfigOrPayload>['loop']>['modules']
+            NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>['loop']>['modules']
         >
     > = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
     for (const k of moduleKeys) {

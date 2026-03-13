@@ -99,15 +99,6 @@ type Sensory = {
 
 type Obs =
   | { kind: 'user_message'; text: string }
-  | { kind: 'idle' };
-
-type ObservationConfig = {
-  user: string | { text: string };
-  tool: { summary: string };
-  child: { summary: string };
-  internal: { value: string };
-  env: { value: string };
-};
 
 type Intent =
   | { kind: 'prompt_user'; prompt: string }
@@ -124,7 +115,7 @@ By passing no extra configuration to `createAgent`, the framework will load the 
 ```ts
 import { createAgent } from '@a2arium/callagent-core';
 
-export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown, ObservationConfig>({
+export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
   // Manifests resolve entirely by default if run from repo root.
   // Overrides are possible via agentCard: { path: ... } or { inline: ... }
 

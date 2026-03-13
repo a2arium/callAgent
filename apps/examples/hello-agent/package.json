@@ -13,5 +13,10 @@
   },
   "dependencies": {
     "@a2arium/callagent-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/copyfiles": "^2",
+    "copyfiles": "^2.4.1",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,4 +1,4 @@
-import type { ObservationConfig, SynthesizeObservation } from '../loop/oneTurn.js';
+import type { Observation } from '../types/observation.js';
 import type {
     ChildCompletedObservation,
     ChildCompletedPayload,
@@ -70,7 +70,7 @@ export type ChildCompletionDetails<Result = unknown, Input = unknown> = {
 };
 
 export const findChildCompletion = <Result = unknown, Input = unknown>(
-    observations: Array<SynthesizeObservation<ObservationConfig>>,
+    observations: Array<Observation>,
     token?: string
 ): ChildCompletionDetails<Result, Input> | undefined => {
     for (const observation of observations) {
