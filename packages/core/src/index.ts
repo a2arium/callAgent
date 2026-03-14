@@ -21,7 +21,7 @@ export { TaskEngine } from './orchestration/taskEngine.js';
 export { EngineLocator } from './orchestration/EngineLocator.js';
 export { InteractiveTaskHandler } from './orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
-export type { TaskContext, AgentManifest, AgentTaskContext } from './shared/types/index.js';
+export type { TaskContext, AgentCard, AgentRuntimeManifest, ResolvedManifests, AgentTaskContext } from './shared/types/index.js';
 export type { MentalState, EnvironmentState, ObservationInbox, MemoryReader, MemoryWriter } from './loop/types.js';
 export type { ControlState, ControlPendingState } from './loop/types.js';
 export { getPendingToken, controlSnapshot } from './loop/controlHelpers.js';

@@ -47,17 +47,32 @@ describe('Framework Stability Regressions', () => {
     });
 
     describe('Bug 6: Manifest Discovery (Stack Inference)', () => {
-        it('should correctly infer caller directory when metaUrl is omitted', () => {
+        it('should correctly infer caller directory when metaUrl is omitted', async () => {
             // If this runs without throwing, it means createAgent found a name/version 
             // even if it didn't find a real agent.json (it falls back to basic manifest)
-            const agent = createAgent({
-                manifest: {
-                    name: 'stack-trace-agent',
-                    version: '1.0.0'
+            const agent = await createAgent({
+                agentCard: {
+                    inline: {
+                        name: 'stack-trace-agent',
+                        version: '1.0.0',
+                        description: 'test',
+                        supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0', url: 'http://localhost' }],
+                        capabilities: {},
+                        defaultInputModes: ['text/plain'],
+                        defaultOutputModes: ['text/plain'],
+                        skills: [{ id: 'stack-trace-agent', name: 'Stack Trace Agent', description: 'Stack trace agent skill' }]
+                    } as any
+                },
+                runtimeManifest: {
+                    inline: {
+                        name: 'stack-trace-agent',
+                        version: '1.0.0',
+                        runMode: 'loop'
+                    } as any
                 }
-            } as any);
+            });
 
-            expect(agent.manifest.name).toBe('stack-trace-agent');
+            expect(agent.resolved.agentCard.name).toBe('stack-trace-agent');
         });
     });
 
@@ -82,7 +97,7 @@ describe('Framework Stability Regressions', () => {
     });
 
     describe('Bug 7: LLM Configuration Drop', () => {
-        it('should forward llmConfig and llmAdapter from options to the created agent plugin', () => {
+        it('should forward llmConfig and llmAdapter from options to the created agent plugin', async () => {
             const mockLlmConfig = {
                 provider: 'test-provider',
                 modelAliasOrName: 'test-model'
@@ -91,14 +106,29 @@ describe('Framework Stability Regressions', () => {
                 call: jest.fn()
             };
 
-            const agent = createAgent({
-                manifest: {
-                    name: 'bug7-test-agent',
-                    version: '1.0.0'
+            const agent = await createAgent({
+                agentCard: {
+                    inline: {
+                        name: 'bug7-test-agent',
+                        version: '1.0.0',
+                        description: 'test',
+                        supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0', url: 'http://localhost' }],
+                        capabilities: {},
+                        defaultInputModes: ['text/plain'],
+                        defaultOutputModes: ['text/plain'],
+                        skills: [{ id: 'main', name: 'main', description: 'main' }]
+                    } as any
+                },
+                runtimeManifest: {
+                    inline: {
+                        name: 'bug7-test-agent',
+                        version: '1.0.0',
+                        runMode: 'loop'
+                    } as any
                 },
                 llmConfig: mockLlmConfig,
                 llmAdapter: mockLlmAdapter
-            } as any);
+            });
 
             expect(agent.llmConfig).toBe(mockLlmConfig);
             expect(agent.llmAdapter).toBe(mockLlmAdapter);

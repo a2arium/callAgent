@@ -79,10 +79,16 @@ describe('A2AService Simple Tests', () => {
 
     describe('cache override resolution', () => {
         const createPlugin = (manifestCache?: { enabled?: boolean; ttlSeconds?: number; excludePaths?: string[] }) => ({
-            manifest: {
-                name: 'test-agent',
-                version: '1.0.0',
-                cache: manifestCache
+            resolved: {
+                agentCard: {
+                    name: 'test-agent',
+                    version: '1.0.0'
+                } as any,
+                runtimeManifest: {
+                    name: 'test-agent',
+                    version: '1.0.0',
+                    cache: manifestCache
+                } as any
             }
         } as any);
 

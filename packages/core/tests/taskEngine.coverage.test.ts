@@ -23,7 +23,11 @@ const runLoopMock = jest.fn<any>();
 // Create properly typed mocks
 const mockFindLocalAgent = jest.fn() as jest.MockedFunction<(agentName: string) => Promise<any>>;
 mockFindLocalAgent.mockResolvedValue({
-    manifest: { name: 'mock-agent' },
+    manifest: { name: 'mock-agent' }, // Legacy support if still used anywhere
+    resolved: {
+        agentCard: { name: 'mock-agent', version: '1.0.0' },
+        runtimeManifest: { name: 'mock-agent', version: '1.0.0' }
+    },
     loop: {},
     llmAdapter: {},
     tenantId: 'test-tenant'
@@ -157,6 +161,10 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
     const findMock = jest.fn() as jest.MockedFunction<(agentName: string) => Promise<any>>;
     findMock.mockResolvedValue({
         manifest: { name: 'child-agent' },
+        resolved: {
+            agentCard: { name: 'child-agent', version: '1.0.0' },
+            runtimeManifest: { name: 'child-agent', version: '1.0.0' }
+        },
         loop: {},
         llmAdapter: {},
         tenantId: 'test-tenant'
@@ -186,6 +194,10 @@ beforeEach(() => {
     // Mock globalA2AService.findLocalAgent to return a fake agent
     jest.spyOn(globalA2AService, 'findLocalAgent').mockResolvedValue({
         manifest: { name: 'mock-agent', version: '1.0.0' },
+        resolved: {
+            agentCard: { name: 'mock-agent', version: '1.0.0' },
+            runtimeManifest: { name: 'mock-agent', version: '1.0.0' }
+        },
         handleTask: jest.fn<any>().mockResolvedValue({ status: 'completed' }),
         loop: {} as any,
         llmAdapter: undefined,

@@ -86,15 +86,15 @@ export async function runAgentWithStreaming(
 
     // Plugin is already registered in the unified registry via createAgent()
 
-    const agentName = plugin.manifest.name;
-    const runMode = (plugin.manifest as any).runMode || 'loop';
+    const agentName = plugin.resolved.agentCard.name;
+    const runMode = plugin.resolved.runtimeManifest.runMode || 'loop';
 
     // Resolve final tenant ID using hierarchy: CLI override → agent tenantId → env → default
     const explicitTenantId = options.tenantId || plugin.tenantId;
     const finalTenantId = resolveTenantId(explicitTenantId);
 
     // Use base runner logger here
-    logTraceMethod.call(runnerLogger, `Running agent '${agentName}' (v${plugin.manifest.version}) with streaming=${options.isStreaming} and tenant=${finalTenantId}`);
+    logTraceMethod.call(runnerLogger, `Running agent '${agentName}' (v${plugin.resolved.agentCard.version}) with streaming=${options.isStreaming} and tenant=${finalTenantId}`);
 
     // --- Create Task Context ---
     const taskId = `local-task-${Date.now()}`;
@@ -170,7 +170,7 @@ export async function runAgentWithStreaming(
     // Create cache service for agent result caching and artifact storage
     let agentResultCache: AgentResultCache | null = null;
     let agentResultCachePrisma: PrismaClient | null = null;
-    const cacheEnabled = plugin.manifest.cache?.enabled === true;
+    const cacheEnabled = plugin.resolved.runtimeManifest.cache?.enabled === true;
 
     const ensureAgentResultCache = async (): Promise<AgentResultCache> => {
         if (agentResultCache) return agentResultCache;
@@ -196,8 +196,8 @@ export async function runAgentWithStreaming(
         try {
             await ensureAgentResultCache();
             agentLogger.debug('Agent result cache initialized', {
-                ttlSeconds: plugin.manifest.cache?.ttlSeconds,
-                excludePaths: plugin.manifest.cache?.excludePaths
+                ttlSeconds: plugin.resolved.runtimeManifest.cache?.ttlSeconds,
+                excludePaths: plugin.resolved.runtimeManifest.cache?.excludePaths
             });
         } catch (error) {
             agentLogger.error('Failed to initialize agent result cache, continuing without caching', error);
@@ -310,19 +310,19 @@ export async function runAgentWithStreaming(
 
     // Replace the LLM stub with a real implementation BEFORE creating memory registry
     if (!plugin.llmAdapter && plugin.llmConfig) {
-        logTraceMethod.call(runnerLogger, `Creating LLM using factory for plugin ${plugin.manifest.name}`, {
+        logTraceMethod.call(runnerLogger, `Creating LLM using factory for plugin ${plugin.resolved.agentCard.name}`, {
             provider: plugin.llmConfig.provider,
             model: plugin.llmConfig.modelAliasOrName
         });
         try {
             partialCtx.llm = createLLMForTask(plugin.llmConfig, partialCtx as any);
-            logTraceMethod.call(runnerLogger, `LLM created successfully for plugin ${plugin.manifest.name}`);
+            logTraceMethod.call(runnerLogger, `LLM created successfully for plugin ${plugin.resolved.agentCard.name}`);
         } catch (error) {
-            logTraceMethod.call(runnerLogger, `Failed to create LLM for plugin ${plugin.manifest.name}`, { error: error instanceof Error ? error.message : String(error) });
+            logTraceMethod.call(runnerLogger, `Failed to create LLM for plugin ${plugin.resolved.agentCard.name}`, { error: error instanceof Error ? error.message : String(error) });
             // Keep the stub LLM that was already assigned
         }
     } else if (!plugin.llmAdapter) {
-        logTraceMethod.call(runnerLogger, `Not creating LLM - plugin ${plugin.manifest.name} has no config`, {
+        logTraceMethod.call(runnerLogger, `Not creating LLM - plugin ${plugin.resolved.agentCard.name} has no config`, {
             hasAdapter: !!plugin.llmAdapter,
             hasConfig: !!plugin.llmConfig
         });
@@ -333,7 +333,7 @@ export async function runAgentWithStreaming(
         partialCtx,
         finalTenantId,
         agentName,
-        plugin.manifest, // Agent config for memory profile
+        plugin.resolved.runtimeManifest, // Agent config for memory profile
         semanticAdapter, // Existing semantic adapter for backward compatibility
         await (await import('@a2arium/callagent-memory-engine')).getMemoryPrismaClient()
     );
@@ -386,14 +386,14 @@ export async function runAgentWithStreaming(
         try {
             const cache = await ensureAgentResultCache();
             const cachedResult = await cache.getCachedResult(
-                plugin.manifest.name,
+                plugin.resolved.agentCard.name,
                 input,
-                plugin.manifest.cache?.excludePaths || [],
+                plugin.resolved.runtimeManifest.cache?.excludePaths || [],
                 finalTenantId
             );
 
             if (cachedResult) {
-                agentLogger.info(`Cache hit - returning cached result for agent ${plugin.manifest.name}`);
+                agentLogger.info(`Cache hit - returning cached result for agent ${plugin.resolved.agentCard.name}`);
 
                 if (options.isStreaming) {
                     try {
@@ -454,19 +454,19 @@ export async function runAgentWithStreaming(
             if ('status' in event && event.final === true && (event.status as any)?.state === 'completed') {
                 try {
                     const resultToCache = (event.status as any)?.metadata?.result;
-                    agentLogger.info(`Caching result for agent ${plugin.manifest.name}`, { hasResult: resultToCache !== undefined });
+                    agentLogger.info(`Caching result for agent ${plugin.resolved.agentCard.name}`, { hasResult: resultToCache !== undefined });
                     if (resultToCache !== undefined) {
                         try {
                             const cache = await ensureAgentResultCache();
                             await cache.setCachedResult(
-                                plugin.manifest.name,
+                                plugin.resolved.agentCard.name,
                                 input,
                                 resultToCache,
-                                plugin.manifest.cache?.ttlSeconds || 300,
-                                plugin.manifest.cache?.excludePaths || [],
+                                plugin.resolved.runtimeManifest.cache?.ttlSeconds || 300,
+                                plugin.resolved.runtimeManifest.cache?.excludePaths || [],
                                 finalTenantId
                             );
-                            agentLogger.info(`Result cached successfully for agent ${plugin.manifest.name}`);
+                            agentLogger.info(`Result cached successfully for agent ${plugin.resolved.agentCard.name}`);
                         } catch (error) {
                             agentLogger.error('Failed to persist cached result', error);
                         }

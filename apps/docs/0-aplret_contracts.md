@@ -1411,7 +1411,7 @@ type Intent =
   | { kind: 'wait' };
 
 export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
-  manifest: 'agent.json',
+  // Manifests resolve automatically from agent-card.json + agent.runtime.json
 
   attention: (_m, env) => ({
     hasCurrentInput: env.inbox.current.some(o => o.source === 'user')

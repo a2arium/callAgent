@@ -884,7 +884,7 @@ import { PluginManager } from '@a2arium/core';
 
 const agent = PluginManager.findAgent('data-analyzer');
 if (agent) {
-  console.log('Found:', agent.manifest.name);
+  console.log('Found:', agent.resolved.agentCard.name);
 }
 ```
 

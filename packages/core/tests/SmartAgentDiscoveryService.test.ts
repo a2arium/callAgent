@@ -10,7 +10,7 @@ describe('SmartAgentDiscoveryService', () => {
         it('should register and find agents', () => {
             const agentInfo = {
                 path: '/test/path/TestAgent.ts',
-                manifest: { name: 'test-agent', version: '1.0.0' },
+                agentCard: { name: 'test-agent', version: '1.0.0' } as any,
                 loadedAt: new Date()
             };
 
@@ -23,7 +23,7 @@ describe('SmartAgentDiscoveryService', () => {
         it('should find registered agents instantly', async () => {
             const agentInfo = {
                 path: '/test/path/TestAgent.ts',
-                manifest: { name: 'test-agent', version: '1.0.0' },
+                agentCard: { name: 'test-agent', version: '1.0.0' } as any,
                 loadedAt: new Date()
             };
 
@@ -78,7 +78,7 @@ describe('SmartAgentDiscoveryService', () => {
         it('should clear cache properly', () => {
             const agentInfo = {
                 path: '/test/path/TestAgent.ts',
-                manifest: { name: 'test-agent', version: '1.0.0' },
+                agentCard: { name: 'test-agent', version: '1.0.0' } as any,
                 loadedAt: new Date()
             };
 

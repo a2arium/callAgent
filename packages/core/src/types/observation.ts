@@ -80,6 +80,7 @@ export const ObservationSchema = z.discriminatedUnion('source', [
             'llm.responded', 
             'plan.proposed', 
             'plan.updated', 
+            'plan.step.updated',
             'goal.updated', 
             'validation.failed', 
             'state.noted'

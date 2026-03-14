@@ -18,12 +18,13 @@ export class PluginManager {
         try {
             globalAgentRegistry.register(agent);
             pluginLogger.debug('Agent plugin registered', {
-                name: agent.manifest.name,
-                version: agent.manifest.version
+                name: agent.resolved.agentCard.name,
+                version: agent.resolved.agentCard.version
             });
         } catch (error) {
             pluginLogger.error('Failed to register agent plugin', error, {
-                name: agent.manifest.name
+                // Best effort if registration failed
+                name: (agent as any).resolved?.agentCard?.name || 'unknown'
             });
             throw error;
         }
@@ -63,8 +64,8 @@ export class PluginManager {
                 throw new Error(`Failed to load main agent: ${agentNameOrPath}`);
             }
 
-            // Use the actual agent name from the loaded agent's manifest
-            const agentName = mainAgent.manifest.name;
+            // Use the actual agent name from the loaded agent's card
+            const agentName = mainAgent.resolved.agentCard.name;
             pluginLogger.debug('Using agent name from manifest', {
                 original: agentNameOrPath,
                 actualName: agentName
@@ -174,11 +175,12 @@ export class PluginManager {
             const agentsBefore = new Set(this.listAgents().map(a => a.name));
 
             // Dynamically import the agent module
-            // The import should trigger createAgent() which registers the agent
+            // The import will trigger createAgent() which is now async
             const agentModule = await import(fileUrl);
 
-            // Give the agent a moment to register itself
-            await new Promise(resolve => setTimeout(resolve, 10));
+            // Robust Loading: Await any exported Promises to ensure createAgent() finishes registration
+            const exportedValues = Object.values(agentModule);
+            await Promise.all(exportedValues.filter(v => v instanceof Promise));
 
             // Find the registered agent - first try by the search name
             let loadedAgent = this.findAgent(agentNameOrPath);
@@ -208,31 +210,16 @@ export class PluginManager {
             if (loadedAgent) {
                 // Note: Manifest merging is now handled centrally in createAgent()
                 // to support both direct imports and discovery.
-                pluginLogger.debug('Agent loaded and registered', {
-                    agentName: loadedAgent.manifest.name,
-                    path: agentPath
-                });
-
-                // Auto-register exported durable handlers from this module (excluding default)
-                try {
-                    for (const [exportName, exported] of Object.entries(agentModule as Record<string, unknown>)) {
-                        if (exportName === 'default') continue;
-                        if (typeof exported === 'function') {
-                            registerHandler(exportName, async (ctx: any, ev: any) => (exported as any)(ctx, ev));
-                        }
-                    }
-                } catch { /* best-effort */ }
-
                 // Auto-register the agent in SmartAgentDiscoveryService for faster future lookups
-                SmartAgentDiscoveryService.registerAgent(loadedAgent.manifest.name, {
+                SmartAgentDiscoveryService.registerAgent(loadedAgent.resolved.agentCard.name, {
                     path: agentPath,
-                    manifest: loadedAgent.manifest,
+                    card: loadedAgent.resolved.agentCard,
                     loadedAt: new Date()
                 });
 
                 pluginLogger.debug('Agent loaded successfully', {
-                    agentName: loadedAgent.manifest.name,
-                    version: loadedAgent.manifest.version,
+                    agentName: loadedAgent.resolved.agentCard.name,
+                    version: loadedAgent.resolved.agentCard.version,
                     path: agentPath
                 });
                 return loadedAgent;
@@ -293,7 +280,7 @@ export class PluginManager {
      * List all discoverable agents (not necessarily loaded)
      * @returns Array of discoverable agents with their paths
      */
-    static async listDiscoverableAgents(): Promise<Array<{ name: string; agentPath: string; manifestPath: string | null }>> {
+    static async listDiscoverableAgents(): Promise<Array<{ name: string; agentPath: string; agentCardPath: string | null; runtimeManifestPath: string | null }>> {
         try {
             return await SmartAgentDiscoveryService.listAvailableAgents();
         } catch (error) {

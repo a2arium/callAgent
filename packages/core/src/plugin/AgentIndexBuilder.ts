@@ -27,7 +27,8 @@ export type AgentIndexRecord = Record<string, AgentIndexEntry>;
 
 export interface AgentIndexEntry {
     module: string;
-    manifest?: string | null;
+    agentCard?: string | null;
+    runtimeManifest?: string | null;
 }
 
 export interface BuildAgentIndexOptions {
@@ -228,19 +229,21 @@ export async function buildAgentIndex(options: BuildAgentIndexOptions = {}): Pro
     const warnings: string[] = [];
 
     for (const entry of entries) {
-        const { name, agentPath, manifestPath } = entry;
+        const { name, agentPath, agentCardPath, runtimeManifestPath } = entry;
 
         if (!name || !AGENT_NAME_PATTERN.test(name)) {
             continue;
         }
 
-        const resolvedManifest = await resolveManifestPath(name, manifestPath ?? null, agentPath ?? null);
-        if (!resolvedManifest) {
-            warnings.push(`Skipping agent "${name}" because manifest could not be located`);
+        const resolvedCard = agentCardPath ? path.resolve(agentCardPath) : null;
+        const resolvedRuntime = runtimeManifestPath ? path.resolve(runtimeManifestPath) : null;
+
+        if (!resolvedCard && !resolvedRuntime) {
+            warnings.push(`Skipping agent "${name}" because no manifest could be located`);
             continue;
         }
 
-        const modulePath = await resolveModulePath(name, agentPath ?? null, resolvedManifest, options);
+        const modulePath = await resolveModulePath(name, agentPath ?? null, resolvedCard || resolvedRuntime, options);
         if (!modulePath) {
             warnings.push(`Skipping agent "${name}" because runtime module was not found near ${toPosix(path.relative(cwd, agentPath ?? cwd))}`);
             continue;
@@ -275,11 +278,11 @@ export async function buildAgentIndex(options: BuildAgentIndexOptions = {}): Pro
         }
 
         const relModule = toPosix(path.relative(cwd, modulePath));
-        const relManifest = toPosix(path.relative(cwd, resolvedManifest));
 
         index[name] = {
             module: relModule,
-            manifest: relManifest
+            agentCard: resolvedCard ? toPosix(path.relative(cwd, resolvedCard)) : null,
+            runtimeManifest: resolvedRuntime ? toPosix(path.relative(cwd, resolvedRuntime)) : null
         };
 
         primaryModuleByAgent.set(name, modulePath);
@@ -294,7 +297,8 @@ export async function buildAgentIndex(options: BuildAgentIndexOptions = {}): Pro
     for (const [name, entry] of Object.entries(index)) {
         adjustedIndex[name] = {
             module: toPosix(path.relative(indexDir, path.resolve(cwd, entry.module))),
-            manifest: entry.manifest ? toPosix(path.relative(indexDir, path.resolve(cwd, entry.manifest))) : entry.manifest
+            agentCard: entry.agentCard ? toPosix(path.relative(indexDir, path.resolve(cwd, entry.agentCard))) : null,
+            runtimeManifest: entry.runtimeManifest ? toPosix(path.relative(indexDir, path.resolve(cwd, entry.runtimeManifest))) : null
         };
     }
 

@@ -433,7 +433,7 @@ The agent manifest defines metadata and configuration for your agent. You can pr
 
 The `config` field in your manifest is available throughout your agent implementation:
 
-**In Policy, Shield, and Execution modules** (via `ctx.config.manifestConfig`):
+**In Policy, Shield, and Execution modules** (via `ctx.config.runtimeManifestConfig`):
 
 ```typescript
 // Note: Policy receives (m, mem, llm) — NOT (m, ctx).
@@ -464,7 +464,7 @@ perception: (env) => {
 
 ### Configuration for A2A Child Agents
 
-When one agent invokes another via `ctx.sendTaskToAgent()`, each agent receives its own manifest configuration. The child agent's `config` field is automatically propagated through the same mechanisms (`ctx.config.manifestConfig` and `env.config`).
+When one agent invokes another via `ctx.sendTaskToAgent()`, each agent receives its own manifest configuration. The child agent's `config` field is automatically propagated through the same mechanisms (`ctx.config.runtimeManifestConfig` and `env.config`).
 
 This allows you to configure agent behavior without hardcoded constants, making agents more flexible and easier to test with different configurations.
 

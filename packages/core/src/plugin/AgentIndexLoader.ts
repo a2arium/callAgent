@@ -76,7 +76,8 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
         }
 
         const absoluteModulePath = toAbsolute(modulePath, baseDir);
-        const manifestPath = entry.manifest ? toAbsolute(entry.manifest, baseDir) : undefined;
+        const agentCardPath = entry.agentCard ? toAbsolute(entry.agentCard, baseDir) : undefined;
+        const runtimeManifestPath = entry.runtimeManifest ? toAbsolute(entry.runtimeManifest, baseDir) : undefined;
 
         try {
             if (PluginManager.isAgentLoaded(agentName)) {
@@ -84,16 +85,15 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
                 continue;
             }
 
-            manifestByAgent.set(agentName, manifestPath);
+            manifestByAgent.set(agentName, agentCardPath || runtimeManifestPath);
 
             const moduleUrl = pathToFileURL(absoluteModulePath).href;
             const agentModule = await import(moduleUrl);
 
             const registered = PluginManager.findAgent(agentName);
             if (!registered) {
-                const newAgents = PluginManager.listAgents().filter(agent => {
-                    const manifest = agent.manifest as { name?: string } | undefined;
-                    return manifest?.name === agentName;
+                const newAgents = PluginManager.listAgents().filter(card => {
+                    return card.name === agentName;
                 });
                 if (!newAgents.length) {
                     skippedAgents.push(agentName);

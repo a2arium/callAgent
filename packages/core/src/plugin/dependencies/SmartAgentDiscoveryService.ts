@@ -1,6 +1,11 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { logger } from '@a2arium/callagent-utils';
+import { 
+    AgentCard, 
+    AgentRuntimeManifest, 
+    DiscoveredManifestPaths 
+} from '@a2arium/callagent-types';
 
 const discoveryLogger = logger.createLogger({ prefix: 'SmartAgentDiscovery' });
 
@@ -32,7 +37,7 @@ interface AgentRegistry {
 
 interface RegisteredAgent {
     path: string;
-    manifest?: any;
+    card?: AgentCard;
     loadedAt: Date;
 }
 
@@ -376,21 +381,21 @@ export class SmartAgentDiscoveryService {
             discoveryLogger.debug('Searching in directory', { name, dir });
             const agentPath = await this.searchForAgentInDirectory(name, dir);
             if (agentPath) {
-                // Check if manifest exists for this agent
-                const manifestExists = await this.checkManifestExists(agentPath, name);
-                if (manifestExists) {
-                    discoveryLogger.debug('Found complete agent (with manifest)', { name, dir, agentPath });
+                // Check if card exists for this agent
+                const cardExists = await this.checkCardExists(agentPath, name);
+                if (cardExists) {
+                    discoveryLogger.debug('Found complete agent (with agent-card.json)', { name, dir, agentPath });
                     return agentPath;
                 }
-                discoveryLogger.debug('Found agent but no manifest, continuing search', { name, dir, agentPath });
+                discoveryLogger.debug('Found agent but no card, continuing search', { name, dir, agentPath });
             }
         }
 
-        // Fallback: return first found agent even without manifest
+        // Fallback: return first found agent even without card
         for (const dir of prioritizedDirectories) {
             const found = await this.searchForAgentInDirectory(name, dir);
             if (found) {
-                discoveryLogger.debug('Fallback: returning agent without manifest', { name, dir, found });
+                discoveryLogger.debug('Fallback: returning agent without card', { name, dir, found });
                 return found;
             }
         }
@@ -579,28 +584,28 @@ export class SmartAgentDiscoveryService {
     }
 
     /**
-     * Check if a manifest exists for the given agent path and name
+     * Check if an agent-card.json exists for the given agent path and name
      */
-    private static async checkManifestExists(agentPath: string, expectedName: string): Promise<boolean> {
+    private static async checkCardExists(agentPath: string, expectedName: string): Promise<boolean> {
         const agentDir = path.dirname(agentPath);
-        const manifestPath = path.join(agentDir, 'agent.json');
+        const cardPath = path.join(agentDir, 'agent-card.json');
 
         try {
-            await fs.access(manifestPath);
+            await fs.access(cardPath);
 
-            // Validate that this manifest actually belongs to the requested agent
+            // Validate that this card actually belongs to the requested agent
             try {
-                const manifestContent = await fs.readFile(manifestPath, 'utf8');
-                const manifest = JSON.parse(manifestContent);
+                const cardContent = await fs.readFile(cardPath, 'utf8');
+                const card = JSON.parse(cardContent);
 
-                // Check if the manifest name matches what we're looking for
-                return manifest.name === expectedName;
+                // Check if the card name matches what we're looking for
+                return card.name === expectedName;
             } catch {
-                // Failed to parse manifest
+                // Failed to parse card
                 return false;
             }
         } catch {
-            // No manifest file found
+            // No card file found
             return false;
         }
     }
@@ -691,63 +696,42 @@ export class SmartAgentDiscoveryService {
     }
 
     /**
-     * Find manifest file for an agent
+     * Find manifest paths for an agent (both card and runtime)
      */
-    static async findManifest(name: string, contextPath?: string): Promise<string | null> {
-        discoveryLogger.debug('Searching for agent manifest', { name, contextPath });
+    static async findManifestPaths(name: string, contextPath?: string): Promise<DiscoveredManifestPaths | null> {
+        discoveryLogger.debug('Searching for agent manifest paths', { name, contextPath });
 
         // Try to find the agent first
         const agentPath = await this.findAgent(name, contextPath);
         if (!agentPath) {
-            discoveryLogger.debug('Agent not found, cannot search for manifest', { name });
+            discoveryLogger.debug('Agent not found, cannot search for manifests', { name });
             return null;
         }
 
-        // Look for agent.json in the same directory as the agent
         const agentDir = path.dirname(agentPath);
-        const manifestPath = path.join(agentDir, 'agent.json');
+        const cardPath = path.join(agentDir, 'agent-card.json');
+        const runtimePath = path.join(agentDir, 'agent-runtime.json');
+
+        const result: DiscoveredManifestPaths = {
+            agentCardPath: null,
+            runtimeManifestPath: null
+        };
 
         try {
-            await fs.access(manifestPath);
-
-            // Validate that this manifest actually belongs to the requested agent
-            try {
-                const manifestContent = await fs.readFile(manifestPath, 'utf8');
-                const manifest = JSON.parse(manifestContent);
-
-                // Check if the manifest name matches what we're looking for
-                if (manifest.name === name) {
-                    discoveryLogger.debug('Found matching manifest', {
-                        name,
-                        manifestPath,
-                        manifestName: manifest.name
-                    });
-                    return manifestPath;
-                } else {
-                    discoveryLogger.debug('Found manifest but name mismatch', {
-                        name,
-                        manifestPath,
-                        expectedName: name,
-                        actualName: manifest.name
-                    });
-
-                    // Try to find manifest in parent directories or other locations
-                    return await this.searchForCorrectManifest(name, agentPath);
-                }
-            } catch (parseError) {
-                discoveryLogger.debug('Failed to parse manifest file', {
-                    manifestPath,
-                    error: parseError instanceof Error ? parseError.message : String(parseError)
-                });
-                return null;
-            }
+            await fs.access(cardPath);
+            result.agentCardPath = cardPath;
         } catch {
-            // No manifest file found in agent directory
-            discoveryLogger.debug('No agent.json found in agent directory', { agentDir });
-
-            // Try to find manifest in other locations
-            return await this.searchForCorrectManifest(name, agentPath);
+            discoveryLogger.debug('No agent-card.json found in agent directory', { agentDir });
         }
+
+        try {
+            await fs.access(runtimePath);
+            result.runtimeManifestPath = runtimePath;
+        } catch {
+            discoveryLogger.debug('No agent-runtime.json found in agent directory', { agentDir });
+        }
+
+        return result;
     }
 
     /**
@@ -817,10 +801,18 @@ export class SmartAgentDiscoveryService {
     }
 
     /**
+     * Legacy helper for finding a manifest path (prefers card)
+     */
+    static async findManifest(name: string, contextPath?: string): Promise<string | null> {
+        const paths = await this.findManifestPaths(name, contextPath);
+        return paths?.agentCardPath || paths?.runtimeManifestPath || null;
+    }
+
+    /**
      * List all discoverable agents
      */
-    static async listAvailableAgents(): Promise<Array<{ name: string; agentPath: string; manifestPath: string | null }>> {
-        const agentsMap = new Map<string, { name: string; agentPath: string; manifestPath: string | null }>();
+    static async listAvailableAgents(): Promise<Array<{ name: string; agentPath: string; agentCardPath: string | null; runtimeManifestPath: string | null }>> {
+        const agentsMap = new Map<string, { name: string; agentPath: string; agentCardPath: string | null; runtimeManifestPath: string | null }>();
         const discoveredDirs = await this.discoverAgentDirectories();
 
         for (const dir of discoveredDirs) {
@@ -845,12 +837,13 @@ export class SmartAgentDiscoveryService {
                     // If we already found this agent name in THIS directory (or previous), keep the first one
                     // The first one is likely the most "standard" due to our sorting
                     if (!agentsMap.has(agentName)) {
-                        const manifestPath = await this.findManifest(agentName, agentPath);
+                        const manifests = await this.findManifestPaths(agentName, agentPath);
 
                         agentsMap.set(agentName, {
                             name: agentName,
                             agentPath,
-                            manifestPath
+                            agentCardPath: manifests?.agentCardPath || null,
+                            runtimeManifestPath: manifests?.runtimeManifestPath || null
                         });
                     }
                 }
@@ -920,11 +913,11 @@ export class SmartAgentDiscoveryService {
             errors.push(`Agent file not found for '${agentName}'`);
         }
 
-        // For folder-based discovery, also check for manifest file
+        // For folder-based discovery, also check for card file
         if (!contextPath) {
-            const manifestPath = await this.findManifest(agentName);
-            if (!manifestPath) {
-                errors.push(`Manifest file not found for '${agentName}'`);
+            const manifests = await this.findManifestPaths(agentName);
+            if (!manifests?.agentCardPath) {
+                errors.push(`Agent card file (agent-card.json) not found for '${agentName}'`);
             }
         }
         // For filename-based discovery, agents should use inline manifests

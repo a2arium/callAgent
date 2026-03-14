@@ -29,7 +29,7 @@ export class AgentLoader {
                 if (loadedAgents.length > 0) {
                     // The main agent is the first one loaded
                     plugin = loadedAgents[0];
-                    runnerLogger.debug(`📦 Loaded agent: ${plugin.manifest.name} (v${plugin.manifest.version})`);
+                    runnerLogger.debug(`📦 Loaded agent: ${plugin.resolved.agentCard.name} (v${plugin.resolved.agentCard.version})`);
                 }
             } catch (error: unknown) {
                 this.handleLoadError(error, agentFilePath);

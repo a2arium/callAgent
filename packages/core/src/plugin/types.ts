@@ -1,7 +1,7 @@
-import type { AgentManifest, TaskContext, AgentTaskContext } from '../shared/types/index.js';
+import type { TaskContext, AgentTaskContext } from '../shared/types/index.js';
 import type { AttentionSignal } from '../loop/oneTurn.js';
-import type { LLMConfig } from '../shared/types/LLMTypes.js';
-import type { ILLMCaller } from '../shared/types/LLMTypes.js';
+import type { LLMConfig, ILLMCaller } from '../shared/types/LLMTypes.js';
+import { AgentCard, AgentRuntimeManifest, ManifestSource, ResolvedManifests } from '@a2arium/callagent-types';
 
 /**
  * Agent plugin interface for A2A-compatible agents
@@ -10,8 +10,8 @@ import type { ILLMCaller } from '../shared/types/LLMTypes.js';
  * in agent-to-agent communication with context inheritance.
  */
 export type AgentPlugin = {
-    /** Agent metadata and configuration */
-    manifest: AgentManifest;
+    /** Resolved and validated manifests (Card + Runtime) */
+    resolved: ResolvedManifests;
     /** 
      * Main task handler for the agent
      * @param ctx - Guaranteed agent task context with all working memory and A2A capabilities
@@ -38,8 +38,10 @@ export type CreateAgentPluginOptions<
     ExecData = unknown,
     ExecError extends import('../loop/oneTurn.js').ExecErrorPayload = import('../loop/oneTurn.js').ExecErrorPayload
 > = {
-    /** Agent manifest - path to JSON file or direct object, defaults to './agent.json' */
-    manifest?: string | AgentManifest;
+    /** Agent Card - public A2A identity and capabilities */
+    agentCard?: ManifestSource<AgentCard>;
+    /** Agent Runtime Manifest - internal execution configuration */
+    runtimeManifest?: ManifestSource<AgentRuntimeManifest>;
     /** LLM configuration specific to this agent */
     llmConfig?: LLMConfig;
     /** LLM adapter instance for this plugin */

@@ -18,10 +18,26 @@ describe('Runner Agent Registration Integration', () => {
     });
 
     const createMockAgent = (name: string, version: string = '1.0.0'): AgentPlugin => ({
-        manifest: {
-            name,
-            version,
-            description: `Test agent ${name}`
+        resolved: {
+            agentCard: {
+                name,
+                version,
+                description: `Test agent ${name}`,
+                supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0', url: 'http://localhost' }],
+                capabilities: {},
+                defaultInputModes: ['text/plain'],
+                defaultOutputModes: ['text/plain'],
+                skills: [{ id: 's1', name: 's1', description: 's1' }]
+            },
+            runtimeManifest: {
+                name,
+                version,
+                runMode: 'loop'
+            } as any,
+            agentCardHash: 'h1',
+            runtimeManifestHash: 'h2',
+            agentCardSource: 'inline',
+            runtimeManifestSource: 'inline'
         },
         handleTask: async () => ({ result: 'test' }),
         tenantId: 'test-tenant'
@@ -89,7 +105,7 @@ describe('Runner Agent Registration Integration', () => {
             // Register second version (should overwrite)
             PluginManager.registerAgent(agent2);
             expect(PluginManager.findAgent('test-agent')).toBe(agent2);
-            expect(PluginManager.findAgent('test-agent')?.manifest.version).toBe('2.0.0');
+            expect(PluginManager.findAgent('test-agent')?.resolved.agentCard.version).toBe('2.0.0');
 
             // Should still only have one agent in the list
             const allAgents = PluginManager.listAgents();
@@ -152,7 +168,7 @@ describe('Runner Agent Registration Integration', () => {
 
             // Verify all are findable
             agents.forEach(agent => {
-                expect(PluginManager.findAgent(agent.manifest.name)).toBe(agent);
+                expect(PluginManager.findAgent(agent.resolved.agentCard.name)).toBe(agent);
             });
 
             // Verify fuzzy matching works with different separators

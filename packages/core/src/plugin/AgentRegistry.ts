@@ -1,5 +1,5 @@
 import { AgentPlugin } from './types.js';
-import { AgentManifest } from '../shared/types/index.js';
+import { AgentCard } from '@a2arium/callagent-types';
 import { logger } from '@a2arium/callagent-utils';
 
 const registryLogger = logger.createLogger({ prefix: 'AgentRegistry' });
@@ -16,7 +16,7 @@ export class AgentRegistry {
      * Register an agent plugin
      */
     register(agent: AgentPlugin): void {
-        const name = agent.manifest.name;
+        const name = agent.resolved.agentCard.name;
 
         if (this.agents.has(name)) {
             registryLogger.warn('Agent already registered, overwriting', { name });
@@ -32,7 +32,7 @@ export class AgentRegistry {
 
         registryLogger.info('Agent registered', {
             name,
-            version: agent.manifest.version,
+            version: agent.resolved.agentCard.version,
             aliases: this.getAliases(name)
         });
     }
@@ -60,10 +60,10 @@ export class AgentRegistry {
     }
 
     /**
-     * List all registered agents
+     * List all registered agents (cards)
      */
-    listAgents(): AgentManifest[] {
-        return Array.from(this.agents.values()).map(plugin => plugin.manifest);
+    listAgents(): AgentCard[] {
+        return Array.from(this.agents.values()).map(plugin => plugin.resolved.agentCard);
     }
 
     /**

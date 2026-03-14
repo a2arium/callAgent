@@ -69,7 +69,7 @@ not in Policy and not in `MentalState`
 
 ```ts
 policy: (m, ctx) => {
-  const budgetMode = ctx.config.manifestConfig.toolMode;
+  const budgetMode = ctx.config.runtimeManifestConfig.toolMode;
   return budgetMode === 'strict'
     ? { kind: 'safe_path' }
     : { kind: 'fast_path' };

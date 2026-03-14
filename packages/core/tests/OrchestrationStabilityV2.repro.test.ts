@@ -45,13 +45,31 @@ describe('Orchestration & Stability V2 Repros', () => {
         });
     });
     describe('Bug 3: createAgent LLM Config Drop', () => {
-        it('should forward llmConfig and llmAdapter', () => {
+        it('should forward llmConfig and llmAdapter', async () => {
             const options: any = {
-                manifest: { name: 'test-agent', version: '1.0.0' },
+                agentCard: {
+                    inline: {
+                        name: 'test-agent',
+                        version: '1.0.0',
+                        description: 'test',
+                        supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0', url: 'http://localhost' }],
+                        capabilities: {},
+                        defaultInputModes: ['text/plain'],
+                        defaultOutputModes: ['text/plain'],
+                        skills: [{ id: 'test-agent', name: 'Test Agent', description: 'Test agent skill' }]
+                    }
+                },
+                runtimeManifest: {
+                    inline: {
+                        name: 'test-agent',
+                        version: '1.0.0',
+                        runMode: 'loop'
+                    }
+                },
                 llmConfig: { model: 'gpt-4' },
                 llmAdapter: { call: () => { } }
             };
-            const plugin = createAgent(options);
+            const plugin = await createAgent(options);
             expect(plugin.llmConfig).toBe(options.llmConfig);
             expect(plugin.llmAdapter).toBe(options.llmAdapter);
         });

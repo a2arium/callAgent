@@ -11,10 +11,26 @@ describe('PluginManager', () => {
     });
 
     const createMockAgent = (name: string, version: string = '1.0.0'): AgentPlugin => ({
-        manifest: {
-            name,
-            version,
-            description: `Test agent ${name}`
+        resolved: {
+            agentCard: {
+                name,
+                version,
+                description: `Test agent ${name}`,
+                supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0', url: 'http://localhost' }],
+                capabilities: {},
+                defaultInputModes: ['text/plain'],
+                defaultOutputModes: ['text/plain'],
+                skills: [{ id: 's1', name: 's1', description: 's1' }]
+            },
+            runtimeManifest: {
+                name,
+                version,
+                runMode: 'loop'
+            } as any,
+            agentCardHash: 'h1',
+            runtimeManifestHash: 'h2',
+            agentCardSource: 'inline',
+            runtimeManifestSource: 'inline'
         },
         handleTask: async () => ({ result: 'test' }),
         tenantId: 'test-tenant'
@@ -32,7 +48,7 @@ describe('PluginManager', () => {
 
         it('should handle registration errors gracefully', () => {
             const invalidAgent = {
-                manifest: null,
+                resolved: null,
                 handleTask: async () => ({}),
                 tenantId: 'test'
             } as any;
@@ -51,17 +67,15 @@ describe('PluginManager', () => {
 
         it('should find agent by exact name', () => {
             const agent = PluginManager.findAgent('hello-agent');
-            expect(agent?.manifest.name).toBe('hello-agent');
+            expect(agent?.resolved.agentCard.name).toBe('hello-agent');
         });
-
         it('should find agent by alias', () => {
             const agent = PluginManager.findAgent('hello');
-            expect(agent?.manifest.name).toBe('hello-agent');
+            expect(agent?.resolved.agentCard.name).toBe('hello-agent');
         });
-
         it('should find agent by fuzzy matching', () => {
             const agent = PluginManager.findAgent('data');
-            expect(agent?.manifest.name).toBe('data-processor');
+            expect(agent?.resolved.agentCard.name).toBe('data-processor');
         });
 
         it('should return null for non-existent agent', () => {

@@ -13,6 +13,10 @@ describe('Artifact Deep Hydration (Reproduction)', () => {
 
         const mockAgent = {
             manifest: { name: 'target-agent', version: '1.0.0', cache: { enabled: true } },
+            resolved: {
+                agentCard: { name: 'target-agent', version: '1.0.0' },
+                runtimeManifest: { name: 'target-agent', version: '1.0.0', cache: { enabled: true } }
+            },
             handleTask: jest.fn()
         };
         jest.spyOn(PluginManager, 'findAgent').mockReturnValue(mockAgent as any);

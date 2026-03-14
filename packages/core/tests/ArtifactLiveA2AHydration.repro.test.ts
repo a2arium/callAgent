@@ -19,6 +19,10 @@ describe('Artifact Live A2A Hydration (Reproduction)', () => {
         // MOCK AGENT returns a result with an inert marker
         const mockAgent = {
             manifest: { name: 'target-agent', version: '1.0.0', cache: { enabled: false } },
+            resolved: {
+                agentCard: { name: 'target-agent', version: '1.0.0' },
+                runtimeManifest: { name: 'target-agent', version: '1.0.0', cache: { enabled: false } }
+            },
             handleTask: jest.fn().mockResolvedValue({
                 status: 'completed',
                 data: {

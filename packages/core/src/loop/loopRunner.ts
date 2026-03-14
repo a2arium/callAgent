@@ -14,6 +14,7 @@ import { normalizeObservationInbox, type EnvironmentState, type MentalState, typ
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -122,7 +123,8 @@ export async function runLoop<
             world: { get: async () => (mState as any)?.worldModel },
             goals: { get: async () => (mState as any)?.goalState?.hierarchy || { nodes: {}, roots: [] } },
             policy: { getParams: async () => (mState as any)?.policyParams },
-            reward: { getParams: async () => (mState as any)?.rewardParams }
+            reward: { getParams: async () => (mState as any)?.rewardParams },
+            plans: { get: async () => (mState as any)?.plans || { plans: {}, activePlanId: undefined } }
         };
     };
 
@@ -135,7 +137,10 @@ export async function runLoop<
             worldReplace: undefined as import('./types.js').WorldModel | undefined,
             goalsReplace: undefined as import('./types.js').GoalHierarchy | undefined,
             policyParamsReplace: undefined as import('./types.js').MentalState['policyParams'] | undefined,
-            rewardParamsReplace: undefined as import('./types.js').MentalState['rewardParams'] | undefined
+            rewardParamsReplace: undefined as import('./types.js').MentalState['rewardParams'] | undefined,
+            plansReplace: undefined as import('../types/plan.js').PlanState | undefined,
+            planUpserts: new Map<string, import('../types/plan.js').Plan>(),
+            planStepUpdates: new Map<string, { planId: string, stepId: string, patch: Partial<import('../types/plan.js').PlanStep> }>()
         };
 
         const writer: import('./types.js').MemoryWriter & {
@@ -192,6 +197,18 @@ export async function runLoop<
                     }
                 }
             },
+            plans: {
+                set: (s: PlanState) => { patches.plansReplace = s; },
+                add: (p: Plan) => { patches.planUpserts.set(p.id, p); },
+                update: (id: PlanId, patch: Partial<Plan>) => {
+                    const current = patches.planUpserts.get(id);
+                    if (current) patches.planUpserts.set(id, { ...current, ...patch });
+                },
+                updateStep: (planId: PlanId, stepId: string, patch: Partial<PlanStep>) => {
+                    patches.planStepUpdates.set(`${planId}:${stepId}`, { planId, stepId, patch });
+                },
+                remove: (id: PlanId) => { /* logic to remove if needed */ }
+            },
             policy: { setParams: (p) => { patches.policyParamsReplace = p; } },
             reward: { setParams: (p) => { patches.rewardParamsReplace = p; } },
             __applyToMental: (m: MentalState<Sensory>) => {
@@ -218,6 +235,23 @@ export async function runLoop<
                 }
                 if (patches.worldReplace) (next as any).worldModel = patches.worldReplace;
                 if (patches.goalsReplace) (next as any).goalState = { ...(next as any).goalState, hierarchy: patches.goalsReplace };
+                if (patches.plansReplace) (next as any).plans = patches.plansReplace;
+                if (patches.planUpserts.size > 0) {
+                    const plans = { ...((next as any).plans?.plans || {}) };
+                    patches.planUpserts.forEach((p, id) => { plans[id] = p; });
+                    (next as any).plans = { ...((next as any).plans || {}), plans };
+                }
+                if (patches.planStepUpdates.size > 0) {
+                    const plans = { ...((next as any).plans?.plans || {}) };
+                    patches.planStepUpdates.forEach(({ planId, stepId, patch }) => {
+                        const plan = plans[planId];
+                        if (plan) {
+                            const steps = plan.steps.map((s: PlanStep) => s.id === stepId ? { ...s, ...patch } : s);
+                            plans[planId] = { ...plan, steps };
+                        }
+                    });
+                    (next as any).plans = { ...((next as any).plans || {}), plans };
+                }
                 if (patches.policyParamsReplace) (next as any).policyParams = patches.policyParamsReplace;
                 if (patches.rewardParamsReplace) (next as any).rewardParams = patches.rewardParamsReplace;
                 return next;
@@ -249,7 +283,22 @@ export async function runLoop<
         attention: modules.attention ?? ((_prev, _env, _mem) => ({ kind: 'all' })),
         perception: modules.perception ?? ((e: EnvironmentState, _alpha: Alpha, _mem) => {
             const inboxState = ensureInbox(e);
-            const turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
+            let turnInbox = Array.isArray(inboxState.current) ? [...inboxState.current] : [];
+
+            // Perception validation for plans
+            turnInbox = turnInbox.map(obs => {
+                if (obs.source === 'internal' && (obs.kind === 'plan.proposed' || obs.kind === 'plan.updated')) {
+                    try {
+                        const validated = PlanSchema.parse(obs.payload);
+                        return { ...obs, payload: validated };
+                    } catch (err) {
+                        log.warn('Dropped invalid plan observation', { kind: obs.kind, error: err });
+                        return undefined;
+                    }
+                }
+                return obs;
+            }).filter((o): o is NonNullable<typeof o> => !!o);
+
             // Default perception returns inbox observations
             return { time: e.time, pending: e.pending, inbox: turnInbox } as any;
         }),
@@ -263,6 +312,25 @@ export async function runLoop<
                 episodic.push(event);
                 ((next as any).memory.longTerm as any).episodic = episodic;
                 (writer as any).episodic?.append?.(event);
+                
+                // Learning: Single Writer for M.plans
+                const internal = (obs as any).internal?.();
+                if (internal) {
+                    const kind = internal.kind;
+                    const payload = internal.payload;
+                    if (kind === 'plan.proposed') {
+                        (writer as any).plans?.set?.({
+                            plans: { [payload.id]: payload },
+                            activePlanId: payload.id
+                        });
+                    } else if (kind === 'plan.updated') {
+                        (writer as any).plans?.add?.(payload);
+                    } else if (kind === 'plan.step.updated') {
+                        // payload would need to include planId and stepId and the patch
+                        const { planId, stepId, ...patch } = payload;
+                        (writer as any).plans?.updateStep?.(planId, stepId, patch);
+                    }
+                }
             } catch { /* noop */ }
             // Update lastObservation for ReAct patterns
             try {
@@ -449,6 +517,14 @@ export async function runLoop<
                 };
             }
 
+            if (kind === 'create_plan') {
+                // Placeholder: In a real agent, this would use an LLM or planner
+                return {
+                    action: { kind: 'internal' } as ExecutableAction,
+                    result: { ...base, data: { planProposed: { id: `plan_${Date.now()}`, goalId: (a as any).goalId, steps: [], status: 'proposed' } }, toolId: 'internal' }
+                };
+            }
+
             return {
                 action: { kind: 'internal', done: (a as any).done || false } as ExecutableAction,
                 result: { ...base, data: { intent: (a as any).intent, done: (a as any).done || false }, toolId: 'internal' }
@@ -488,7 +564,20 @@ export async function runLoop<
                     return { kind: 'complete', observations: [] as Observation[] } as TransitionOut;
                 }
 
-                return { kind: 'continue', observations: [] as Observation[] } as TransitionOut;
+                // Planning transitions
+                const data = result.data as any;
+                const obs: Observation[] = [];
+                if (data?.planProposed) {
+                    obs.push({ source: 'internal', kind: 'plan.proposed', payload: data.planProposed });
+                }
+                if (data?.planUpdated) {
+                    obs.push({ source: 'internal', kind: 'plan.updated', payload: data.planUpdated });
+                }
+                if (data?.planStepUpdated) {
+                    obs.push({ source: 'internal', kind: 'plan.step.updated', payload: data.planStepUpdated });
+                }
+
+                return { kind: 'continue', observations: obs } as TransitionOut;
             }
 
             // Error path

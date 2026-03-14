@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
-import { AgentManifest, isAgentManifest } from '@a2arium/callagent-types';
-import { ManifestValidator } from '../ManifestValidator.js';
+import { AgentCardSchema, AgentRuntimeManifestSchema } from '@a2arium/callagent-types';
 import { SmartAgentDiscoveryService } from './SmartAgentDiscoveryService.js';
 import { logger } from '@a2arium/callagent-utils';
+import { ManifestError } from '../../utils/errors.js';
 
 const resolverLogger = logger.createLogger({ prefix: 'DependencyResolver' });
 
@@ -122,36 +122,28 @@ export class AgentDependencyResolver {
 
     /**
      * Load and validate manifest for an agent
-     * Supports inline manifests, agent.json files, and same-directory discovery
+     * Supports inline manifests and agent-card.json/agent-runtime.json files
      * @param agentName - Name of the agent
      * @param contextPath - Optional context path for same-directory discovery
-     * @returns Validated agent manifest
+     * @returns Validated agent manifest (merged card + runtime for dependencies)
      * @throws DependencyResolutionError if manifest cannot be loaded or is invalid
      */
-    static async loadManifest(agentName: string, contextPath?: string): Promise<AgentManifest> {
+    static async loadManifest(agentName: string, contextPath?: string): Promise<{ dependencies?: { agents?: string[] } }> {
         resolverLogger.debug('Loading manifest', { agentName, contextPath });
 
         try {
-            // First check if agent is already registered with an inline manifest
+            // First check if agent is already registered with inline manifests
             const { PluginManager } = await import('../pluginManager.js');
             const registeredAgent = PluginManager.findAgent(agentName);
 
             if (registeredAgent) {
-                resolverLogger.debug('Found registered agent with inline manifest', {
+                resolverLogger.debug('Found registered agent with inline manifests', {
                     agentName,
-                    manifestName: registeredAgent.manifest.name
+                    manifestName: registeredAgent.resolved.agentCard.name
                 });
 
-                // Validate the inline manifest content
-                const validationResult = ManifestValidator.validate(registeredAgent.manifest);
-                if (!validationResult.isValid) {
-                    throw new DependencyResolutionError(
-                        `Inline manifest validation failed for agent '${agentName}': ${validationResult.errors.join(', ')}`,
-                        { agentName, errors: validationResult.errors, source: 'inline' }
-                    );
-                }
-
-                return registeredAgent.manifest;
+                // Return the dependencies from the runtime manifest
+                return registeredAgent.resolved.runtimeManifest;
             }
 
             // If we have a context path, try to load the agent from the same directory
@@ -164,89 +156,65 @@ export class AgentDependencyResolver {
                         contextPath
                     });
 
-                    // Load the agent to register its inline manifest
+                    // Load the agent to register its inline manifests
                     const loadedAgent = await PluginManager.loadAgent(agentName, contextPath);
                     if (loadedAgent) {
                         resolverLogger.debug('Successfully loaded agent via smart discovery', {
                             agentName,
-                            manifestName: loadedAgent.manifest.name
+                            manifestName: loadedAgent.resolved.agentCard.name
                         });
 
-                        // Validate the inline manifest content
-                        const validationResult = ManifestValidator.validate(loadedAgent.manifest);
-                        if (!validationResult.isValid) {
-                            throw new DependencyResolutionError(
-                                `Inline manifest validation failed for agent '${agentName}': ${validationResult.errors.join(', ')}`,
-                                { agentName, errors: validationResult.errors, source: 'smart-discovery' }
-                            );
-                        }
-
-                        return loadedAgent.manifest;
+                        // Return the dependencies from the runtime manifest
+                        return loadedAgent.resolved.runtimeManifest;
                     }
                 }
             }
 
-            // Fall back to agent.json discovery via smart discovery
-            const manifestPath = await SmartAgentDiscoveryService.findManifest(agentName, contextPath);
-            if (!manifestPath) {
+            // Fall back to agent-card.json/agent-runtime.json discovery via smart discovery
+            const manifestPaths = await SmartAgentDiscoveryService.findManifestPaths(agentName, contextPath);
+            if (!manifestPaths || (!manifestPaths.agentCardPath && !manifestPaths.runtimeManifestPath)) {
                 throw new DependencyResolutionError(
                     `Manifest not found for agent '${agentName}'. ` +
-                    `Agent must either be registered with inline manifest or have agent.json discoverable via smart discovery.`,
+                    `Agent must either be registered with inline manifests or have agent-card.json/agent-runtime.json discoverable via smart discovery.`,
                     { agentName, contextPath }
                 );
             }
 
-            const manifestContent = await fs.readFile(manifestPath, 'utf8');
-            const manifest = JSON.parse(manifestContent);
-
-            // Validate manifest structure
-            if (!isAgentManifest(manifest)) {
+            // For dependency resolution, we need the runtime manifest for dependencies
+            const runtimeManifestPath = manifestPaths.runtimeManifestPath;
+            if (!runtimeManifestPath) {
                 throw new DependencyResolutionError(
-                    `Invalid manifest structure for agent '${agentName}'`,
-                    { agentName, manifestPath }
+                    `Runtime manifest not found for agent '${agentName}'. Dependency resolution requires agent-runtime.json.`,
+                    { agentName, contextPath }
                 );
             }
 
-            // Validate that agent name matches folder structure for agent.json
-            // Support both traditional and category-based naming
-            const validateAgentNameStructure = (manifestName: string, expectedName: string): boolean => {
-                // Direct match (traditional)
-                if (manifestName === expectedName) {
-                    return true;
+            const runtimeContent = await fs.readFile(runtimeManifestPath, 'utf8');
+            const runtimeData = JSON.parse(runtimeContent);
+
+            // Validate runtime manifest schema
+            try {
+                AgentRuntimeManifestSchema.parse(runtimeData);
+            } catch (error) {
+                if (error instanceof Error) {
+                    throw new DependencyResolutionError(
+                        `Runtime manifest validation failed for agent '${agentName}': ${error.message}`,
+                        { agentName, runtimeManifestPath }
+                    );
                 }
+                throw error;
+            }
 
-                // Category-based match: if expectedName is 'category/agent', 
-                // manifestName should also be 'category/agent'
-                if (expectedName.includes('/') && manifestName === expectedName) {
-                    return true;
-                }
-
-                return false;
-            };
-
-            if (!validateAgentNameStructure(manifest.name, agentName)) {
-                const expectedStructure = agentName.includes('/')
-                    ? `category-based name '${agentName}'`
-                    : `simple name '${agentName}'`;
-
+            // Validate that agent name matches expected name
+            if (runtimeData.name !== agentName) {
                 throw new DependencyResolutionError(
-                    `agent.json can only be used when agent name matches expected structure. ` +
-                    `Expected ${expectedStructure}, got '${manifest.name}'.`,
-                    { agentName, manifestPath, expectedName: agentName, actualName: manifest.name }
+                    `Agent name mismatch in runtime manifest. Expected '${agentName}', got '${runtimeData.name}'.`,
+                    { agentName, runtimeManifestPath, expectedName: agentName, actualName: runtimeData.name }
                 );
             }
 
-            // Validate manifest content
-            const validationResult = ManifestValidator.validate(manifest);
-            if (!validationResult.isValid) {
-                throw new DependencyResolutionError(
-                    `Manifest validation failed for agent '${agentName}': ${validationResult.errors.join(', ')}`,
-                    { agentName, manifestPath, errors: validationResult.errors }
-                );
-            }
-
-            resolverLogger.debug('Manifest loaded successfully from agent.json', { agentName, manifestPath });
-            return manifest;
+            resolverLogger.debug('Runtime manifest loaded successfully', { agentName, runtimeManifestPath });
+            return runtimeData;
 
         } catch (error) {
             if (error instanceof DependencyResolutionError) {
@@ -254,7 +222,7 @@ export class AgentDependencyResolver {
             }
 
             throw new DependencyResolutionError(
-                `Failed to load manifest for agent '${agentName}': ${error instanceof Error ? error.message : String(error)}`,
+                `Failed to load runtime manifest for agent '${agentName}': ${error instanceof Error ? error.message : String(error)}`,
                 { agentName, originalError: error }
             );
         }

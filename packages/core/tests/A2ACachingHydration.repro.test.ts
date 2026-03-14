@@ -23,6 +23,10 @@ describe('A2AService Artifact Hydration (Reproduction)', () => {
                 version: '1.0.0',
                 cache: { enabled: true, ttlSeconds: 60 }
             },
+            resolved: {
+                agentCard: { name: 'test-agent', version: '1.0.0' },
+                runtimeManifest: { name: 'test-agent', version: '1.0.0', cache: { enabled: true, ttlSeconds: 60 } }
+            },
             handleTask: jest.fn().mockResolvedValue({ status: 'completed' })
         } as unknown as AgentPlugin;
 

@@ -75,9 +75,9 @@ Create `agent-card.json` in your repository root. This declares what the agent c
 
 The framework will serve this resolved card at `/.well-known/agent-card.json` automatically.
 
-### 0.2 Runtime Manifest — `agent.runtime.json`
+### 0.2 Runtime Manifest — `agent-runtime.json`
 
-Create `agent.runtime.json` in the repo root. This configures the runtime loops, budgets, and TurnTrace behavior.
+Create `agent-runtime.json` in the repo root. This configures the runtime loops, budgets, and TurnTrace behavior.
 
 ```json
 {
@@ -110,7 +110,7 @@ Keep the first version small.
 
 ## Step 2: Create the agent shell
 
-By passing no extra configuration to `createAgent`, the framework will load the default manifests (`agent-card.json` and `agent.runtime.json`) automatically.
+By passing no extra configuration to `createAgent`, the framework will load the default manifests (`agent-card.json` and `agent-runtime.json`) automatically.
 
 ```ts
 import { createAgent } from '@a2arium/callagent-core';

@@ -7,6 +7,7 @@
 // - migration handled outside this file
 // - Placeholders for future capabilities (world model, emotion, reward)
 import { Observation, ObservationSchema } from '../types/observation.js';
+import { PlanState, PlanStep, Plan, PlanId } from '../types/plan.js';
 
 export type ObservationBySource<Source> = Extract<Observation, { source: Source }>;
 
@@ -115,6 +116,7 @@ export type MemoryReader = {
     procedural: { list: () => Promise<Skill[]> };
     world: { get: () => Promise<WorldModel> };
     goals: { get: () => Promise<GoalHierarchy> };
+    plans: { get: () => Promise<PlanState> };
     policy: { getParams: () => Promise<MentalState['policyParams']> };
     reward: { getParams: () => Promise<MentalState['rewardParams']> };
 };
@@ -134,6 +136,13 @@ export type MemoryWriter = {
         update?: (id: GoalId, patch: Partial<GoalNode>) => void;
         remove?: (id: GoalId) => void;
         clear?: (predicate?: (g: GoalNode) => boolean) => void;
+    };
+    plans: {
+        set: (s: PlanState) => void;
+        add?: (plan: Plan) => void;
+        update?: (id: PlanId, patch: Partial<Plan>) => void;
+        updateStep?: (planId: PlanId, stepId: string, patch: Partial<PlanStep>) => void;
+        remove?: (id: PlanId) => void;
     };
     policy: { setParams: (p: MentalState['policyParams']) => void };
     reward: { setParams: (p: MentalState['rewardParams']) => void };
@@ -156,6 +165,7 @@ export type MentalState<Sensory = unknown> = {
     };
     worldModel: WorldModel;
     goalState: GoalState;
+    plans?: PlanState;
     emotion: { valence: number; arousal: number; label?: string };
     rewardParams: {
         extrinsicWeights: number[];

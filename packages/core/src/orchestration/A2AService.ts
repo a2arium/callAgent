@@ -236,7 +236,7 @@ export class A2AService implements IA2AService {
             // 5. Execute target agent via TaskEngine for WM/LLM persistence
             const eng = getRequiredEngine();
             // Attach WM proxy so child ctx.vars writes persist
-            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
 
             let result;
             try {
@@ -250,7 +250,7 @@ export class A2AService implements IA2AService {
             if ((targetCtx as any).__inputRequired && options.parentTenantId && options.parentTaskId && options.parentChildToken) {
                 // Guard: blocking await with non-terminal (input_required) is unsupported
                 if ((options as any)?.awaitCompletion === true) {
-                    const childName = targetPlugin.manifest.name;
+                    const childName = targetPlugin.resolved.agentCard.name;
                     throw new Error(
                         `Child agent '${childName}' requested await_input while parent awaited completion. ` +
                         `This is not supported for awaitCompletion=true. Fix by either: ` +
@@ -277,7 +277,7 @@ export class A2AService implements IA2AService {
             const isInputRequired = resultStatus === 'input_required' || (resultStatus && (resultStatus as any).state === 'input-required');
             if (isInputRequired && (options as any)?.awaitCompletion === true) {
                 const msg = [
-                    `Child agent '${targetPlugin.manifest.name}' returned await_input while parent awaited completion.`,
+                    `Child agent '${targetPlugin.resolved.agentCard.name}' returned await_input while parent awaited completion.`,
                     `This is not supported for awaitCompletion=true.`,
                     `Fix by either:`,
                     `- Making the child return 'complete' in one turn for this path (blocking).`,
@@ -311,7 +311,7 @@ export class A2AService implements IA2AService {
                         parentTaskId: options.parentTaskId!,
                         childToken: options.parentChildToken!,
                         result,
-                        childAgentId: targetPlugin.manifest.name
+                        childAgentId: targetPlugin.resolved.agentCard.name
                     });
                 };
 
@@ -351,7 +351,7 @@ export class A2AService implements IA2AService {
                                 parentTaskId: options.parentTaskId!,
                                 childToken: options.parentChildToken!,
                                 result,
-                                childAgentId: targetPlugin.manifest.name
+                                childAgentId: targetPlugin.resolved.agentCard.name
                             });
                             a2aLogger.debug('Successfully staged child completion observation', {
                                 parentTaskId: options.parentTaskId,
@@ -388,7 +388,7 @@ export class A2AService implements IA2AService {
             // Flush child snapshot (vars + llm) after turn (avoid duplicate if already saved during requestInput turn)
             try {
                 if (!(targetCtx as any).__wmSavedThisTurn) {
-                    await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any);
+                    await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name, targetCtx as any);
                 }
             } catch { }
 
@@ -415,8 +415,8 @@ export class A2AService implements IA2AService {
             if (agent) {
                 a2aLogger.debug('Local agent found', {
                     requestedName: agentName,
-                    foundName: agent.manifest.name,
-                    version: agent.manifest.version
+                    foundName: agent.resolved.agentCard.name,
+                    version: agent.resolved.agentCard.version
                 });
             } else {
                 a2aLogger.warn('Local agent not found', {
@@ -447,7 +447,7 @@ export class A2AService implements IA2AService {
 
         // Create target-specific overrides only for what needs to be different
         const sourceTaskId = sourceCtx.task.id;
-        const targetAgentId = targetPlugin.manifest.name;
+        const targetAgentId = targetPlugin.resolved.agentCard.name;
 
         // ✅ FIX: Generate unique child task ID to prevent state pollution across different runs
         // For resume scenarios, callers can provide explicit childTaskId via options.childTaskId
@@ -494,18 +494,18 @@ export class A2AService implements IA2AService {
             if (semanticRegistry.backends?.mlo?.underlyingAdapter) {
                 inheritedSemanticAdapter = semanticRegistry.backends.mlo.underlyingAdapter;
                 a2aLogger.debug('Inherited semantic adapter from parent MLO backend', {
-                    targetAgent: targetPlugin.manifest.name,
+                    targetAgent: targetPlugin.resolved.agentCard.name,
                     hasAdapter: !!inheritedSemanticAdapter
                 });
             } else if (semanticRegistry.backends?.sql) {
                 inheritedSemanticAdapter = semanticRegistry.backends.sql;
                 a2aLogger.debug('Inherited semantic adapter from parent SQL backend', {
-                    targetAgent: targetPlugin.manifest.name,
+                    targetAgent: targetPlugin.resolved.agentCard.name,
                     hasAdapter: !!inheritedSemanticAdapter
                 });
             } else {
                 a2aLogger.debug('No suitable semantic adapter found in parent context', {
-                    targetAgent: targetPlugin.manifest.name,
+                    targetAgent: targetPlugin.resolved.agentCard.name,
                     availableBackends: Object.keys(semanticRegistry.backends || {})
                 });
             }
@@ -515,8 +515,8 @@ export class A2AService implements IA2AService {
         const targetCtx = await extendContextWithMemory(
             mergedContext,
             serializedContext.tenantId,
-            targetPlugin.manifest.name,
-            targetPlugin.manifest,
+            targetPlugin.resolved.agentCard.name,
+            targetPlugin.resolved.runtimeManifest,
             inheritedSemanticAdapter,
             await (await import('@a2arium/callagent-memory-engine')).getMemoryPrismaClient()
         ) as unknown as FullTaskContext;
@@ -529,30 +529,30 @@ export class A2AService implements IA2AService {
         }
 
         // Record manifest config on child context for propagation
-        if (targetPlugin.manifest.config) {
+        if (targetPlugin.resolved.runtimeManifest.config) {
             if (!targetCtx.config || typeof targetCtx.config !== 'object') {
                 (targetCtx as any).config = {};
             }
-            (targetCtx.config as any).manifestConfig = targetPlugin.manifest.config;
-            (targetCtx as any).__manifestConfig = targetPlugin.manifest.config;
+            (targetCtx.config as any).runtimeManifestConfig = targetPlugin.resolved.runtimeManifest.config;
+            (targetCtx as any).__runtimeManifestConfig = targetPlugin.resolved.runtimeManifest.config;
         }
 
         // Set up LLM configuration for the target agent (similar to runner logic)
         if (!targetPlugin.llmAdapter && targetPlugin.llmConfig) {
             a2aLogger.debug('Creating LLM for target agent', {
-                targetAgent: targetPlugin.manifest.name,
+                targetAgent: targetPlugin.resolved.agentCard.name,
                 provider: targetPlugin.llmConfig.provider,
                 model: targetPlugin.llmConfig.modelAliasOrName
             });
             targetCtx.llm = createLLMForTask(targetPlugin.llmConfig, targetCtx);
         } else if (!targetPlugin.llmAdapter && !targetPlugin.llmConfig) {
             a2aLogger.debug('Target agent has no LLM configuration, using stub', {
-                targetAgent: targetPlugin.manifest.name
+                targetAgent: targetPlugin.resolved.agentCard.name
             });
             // Keep the inherited LLM (which might be a stub)
         } else if (targetPlugin.llmAdapter) {
             a2aLogger.debug('Target agent has pre-configured LLM adapter', {
-                targetAgent: targetPlugin.manifest.name
+                targetAgent: targetPlugin.resolved.agentCard.name
             });
             targetCtx.llm = targetPlugin.llmAdapter;
         }
@@ -587,7 +587,7 @@ export class A2AService implements IA2AService {
                 try {
                     const eng = getRequiredEngine();
                     // Persist child's current WM + LLM state BEFORE writing pending input
-                    try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name, targetCtx as any); } catch { }
+                    try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name, targetCtx as any); } catch { }
 
                     // Create a real pending input entry in the child's session so resumeInput can work
                     const childToken = uuidv4();
@@ -598,13 +598,13 @@ export class A2AService implements IA2AService {
                     inputs[childToken] = { schema: riOpts?.schema, expiresAt } as any;
                     const next = setPendingInputs(base, inputs);
                     const expected = snap?.wmVersion ?? BigInt(0);
-                    await (eng as any).sessionManager?.saveSnapshot({ tenantId: targetCtx.tenantId, sessionId: targetCtx.task.id, agentId: targetPlugin.manifest.name, expectedWmVersion: expected, snapshot: next });
+                    await (eng as any).sessionManager?.saveSnapshot({ tenantId: targetCtx.tenantId, sessionId: targetCtx.task.id, agentId: targetPlugin.resolved.agentCard.name, expectedWmVersion: expected, snapshot: next });
                     await (eng as any).sessionManager?.appendEvent(targetCtx.tenantId, targetCtx.task.id, 'task.input_required', { token: childToken, prompt, parts, schema: riOpts?.schema, expiresAt });
                     await (eng as any).sessionManager?.enqueueOutbox(targetCtx.tenantId, 'task.input_required', targetCtx.task.id, { taskId: targetCtx.task.id, prompt, parts, token: childToken, schema: riOpts?.schema, expiresAt });
 
                     // Now notify parent about input_required
                     const childOnProvided = riOpts?.onProvided;
-                    try { log.debug('Child requestInput routed to parent', { childAgent: targetPlugin.manifest.name, childOnProvided, prompt }); } catch { }
+                    try { log.debug('Child requestInput routed to parent', { childAgent: targetPlugin.resolved.agentCard.name, childOnProvided, prompt }); } catch { }
                     await eng.handleChildInputRequired({
                         tenantId: parentTenantId,
                         parentTaskId,
@@ -629,7 +629,7 @@ export class A2AService implements IA2AService {
         };
 
         a2aLogger.debug('Target context created with inheritance', {
-            targetAgent: targetPlugin.manifest.name,
+            targetAgent: targetPlugin.resolved.agentCard.name,
             taskId: targetCtx.task.id,
             tenantId: targetCtx.tenantId,
             inheritedMethods: Object.keys(baseCtx).length,
@@ -646,7 +646,7 @@ export class A2AService implements IA2AService {
      */
     private createTargetReply(targetPlugin: AgentPlugin, parent?: { tenantId: string; parentTaskId: string }) {
         return async (parts: any) => {
-            const prefix = `[${targetPlugin.manifest.name}]`;
+            const prefix = `[${targetPlugin.resolved.agentCard.name}]`;
 
             if (typeof parts === 'string') {
                 console.log(`${prefix} ${parts}`);
@@ -663,7 +663,7 @@ export class A2AService implements IA2AService {
             }
 
             a2aLogger.debug('Target agent reply', {
-                targetAgent: targetPlugin.manifest.name,
+                targetAgent: targetPlugin.resolved.agentCard.name,
                 parts: typeof parts === 'string' ? parts.substring(0, 100) : 'complex'
             });
 
@@ -693,7 +693,7 @@ export class A2AService implements IA2AService {
      */
     private createTargetProgress(targetPlugin: AgentPlugin) {
         return (pct: any, msg?: string) => {
-            const prefix = `[${targetPlugin.manifest.name}]`;
+            const prefix = `[${targetPlugin.resolved.agentCard.name}]`;
             if (typeof pct === 'number') {
                 console.log(`${prefix} Progress: ${pct}%${msg ? `: ${msg}` : ''}`);
             } else {
@@ -701,7 +701,7 @@ export class A2AService implements IA2AService {
             }
 
             a2aLogger.debug('Target agent progress', {
-                targetAgent: targetPlugin.manifest.name,
+                targetAgent: targetPlugin.resolved.agentCard.name,
                 progress: pct,
                 message: msg
             });
@@ -714,7 +714,7 @@ export class A2AService implements IA2AService {
     private createTargetComplete(targetPlugin: AgentPlugin) {
         return (pct?: number, status?: string) => {
             a2aLogger.debug('Target agent task marked complete', {
-                targetAgent: targetPlugin.manifest.name,
+                targetAgent: targetPlugin.resolved.agentCard.name,
                 status
             });
         };
@@ -726,7 +726,7 @@ export class A2AService implements IA2AService {
     private createTargetFail(targetPlugin: AgentPlugin) {
         return async (error: unknown) => {
             a2aLogger.error('Target agent task failed', error, {
-                targetAgent: targetPlugin.manifest.name
+                targetAgent: targetPlugin.resolved.agentCard.name
             });
             throw error; // Re-throw to be caught by executeTargetAgent
         };
@@ -738,17 +738,17 @@ export class A2AService implements IA2AService {
     private createTargetLogger(targetPlugin: AgentPlugin) {
         return {
             debug: (msg: string, data?: Record<string, unknown>) => {
-                a2aLogger.debug(`[${targetPlugin.manifest.name}] ${msg}`, data);
+                a2aLogger.debug(`[${targetPlugin.resolved.agentCard.name}] ${msg}`, data);
             },
             info: (msg: string, data?: Record<string, unknown>) => {
-                a2aLogger.debug(`[${targetPlugin.manifest.name}] ${msg}`, data);
+                a2aLogger.debug(`[${targetPlugin.resolved.agentCard.name}] ${msg}`, data);
             },
             warn: (msg: string, data?: Record<string, unknown>) => {
-                a2aLogger.warn(`[${targetPlugin.manifest.name}] ${msg}`, data);
+                a2aLogger.warn(`[${targetPlugin.resolved.agentCard.name}] ${msg}`, data);
             },
             error: (msg: string, error?: unknown, context?: Record<string, unknown>) => {
-                a2aLogger.error(`[${targetPlugin.manifest.name}] ${msg}`, error, {
-                    targetAgent: targetPlugin.manifest.name,
+                a2aLogger.error(`[${targetPlugin.resolved.agentCard.name}] ${msg}`, error, {
+                    targetAgent: targetPlugin.resolved.agentCard.name,
                     ...context
                 });
             }
@@ -777,7 +777,7 @@ export class A2AService implements IA2AService {
                 : details;
 
             a2aLogger.error(`Target agent threw structured error: [${code}] ${message}`, null, {
-                targetAgent: targetPlugin.manifest.name,
+                targetAgent: targetPlugin.resolved.agentCard.name,
                 errorMessage: errorToThrow.message,
                 errorName: errorToThrow.name,
                 details: safeDetails
@@ -792,7 +792,7 @@ export class A2AService implements IA2AService {
     private createTargetRecordUsage(targetPlugin: AgentPlugin) {
         return (usage: any) => {
             a2aLogger.debug('Target agent usage', {
-                targetAgent: targetPlugin.manifest.name,
+                targetAgent: targetPlugin.resolved.agentCard.name,
                 usage
             });
             // TODO: Future - aggregate usage back to source
@@ -810,7 +810,7 @@ export class A2AService implements IA2AService {
     ): Promise<unknown> {
         return withLoggingContext(
             {
-                agentId: targetPlugin.manifest.name,
+                agentId: targetPlugin.resolved.agentCard.name,
                 taskId: targetCtx.task.id,
                 tenantId: targetCtx.tenantId,
                 parentTaskId: (options as any).parentTaskId,
@@ -826,7 +826,7 @@ export class A2AService implements IA2AService {
                     // Check cache if enabled (manifest or override)
                     if (this.agentResultCache && effectiveCache.enabled) {
                         const cachedResult = await this.agentResultCache.getCachedResult(
-                            targetPlugin.manifest.name,
+                            targetPlugin.resolved.agentCard.name,
                             targetCtx.task.input,
                             effectiveCache.excludePaths,
                             targetCtx.tenantId
@@ -835,10 +835,10 @@ export class A2AService implements IA2AService {
                         if (cachedResult) {
                             a2aLogger.debug('A2A cache hit', {
                                 operationId,
-                                targetAgent: targetPlugin.manifest.name,
+                                targetAgent: targetPlugin.resolved.agentCard.name,
                                 taskId: targetCtx.task.id
                             });
-                            console.log(`⚡ ${targetPlugin.manifest.name} (cached result)\n`);
+                            console.log(`⚡ ${targetPlugin.resolved.agentCard.name} (cached result)\n`);
 
 
                             // Hydrate artifacts in cached result before returning
@@ -851,7 +851,7 @@ export class A2AService implements IA2AService {
                             } catch (hydrationError) {
                                 a2aLogger.error('Failed to hydrate artifacts in cached result', hydrationError, {
                                     operationId,
-                                    targetAgent: targetPlugin.manifest.name
+                                    targetAgent: targetPlugin.resolved.agentCard.name
                                 });
                                 // Continue even if hydration fails, returning the raw result
                             }
@@ -861,11 +861,11 @@ export class A2AService implements IA2AService {
                     }
 
 
-                    a2aLogger.info(`\n🔗 Starting ${targetPlugin.manifest.name}...`);
+                    a2aLogger.info(`\n🔗 Starting ${targetPlugin.resolved.agentCard.name}...`);
 
                     a2aLogger.debug('Executing target agent', {
                         operationId,
-                        targetAgent: targetPlugin.manifest.name,
+                        targetAgent: targetPlugin.resolved.agentCard.name,
                         taskId: targetCtx.task.id
                     });
 
@@ -874,9 +874,9 @@ export class A2AService implements IA2AService {
                         ? await (async () => {
                             // Always route loop-first agents through the engine so A2A overrides are respected
                             const eng = getRequiredEngine();
-                            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
                             const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
+                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
                             return started ?? { status: 'started' } as any;
                         })()
                         : (targetPlugin.handleTask
@@ -884,9 +884,9 @@ export class A2AService implements IA2AService {
                             : await (async () => {
                                 // Fallback: engine path
                                 const eng = getRequiredEngine();
-                                try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.manifest.name); } catch { }
+                                try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
                                 const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.manifest.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
+                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
                                 return started ?? { status: 'started' } as any;
                             })());
 
@@ -894,7 +894,7 @@ export class A2AService implements IA2AService {
                     if (this.agentResultCache && effectiveCache.enabled) {
                         try {
                             await this.agentResultCache.setCachedResult(
-                                targetPlugin.manifest.name,
+                                targetPlugin.resolved.agentCard.name,
                                 targetCtx.task.input,
                                 result,
                                 effectiveCache.ttlSeconds,
@@ -904,7 +904,7 @@ export class A2AService implements IA2AService {
                         } catch (cacheError) {
                             a2aLogger.error('Failed to cache A2A result', cacheError, {
                                 operationId,
-                                targetAgent: targetPlugin.manifest.name
+                                targetAgent: targetPlugin.resolved.agentCard.name
                             });
                         }
                     }
@@ -922,16 +922,16 @@ export class A2AService implements IA2AService {
                         } catch (hydrationError) {
                             a2aLogger.error('Failed to hydrate artifacts in live result', hydrationError, {
                                 operationId,
-                                targetAgent: targetPlugin.manifest.name
+                                targetAgent: targetPlugin.resolved.agentCard.name
                             });
                         }
                     }
 
-                    console.log(`✅ ${targetPlugin.manifest.name} completed\n`);
+                    console.log(`✅ ${targetPlugin.resolved.agentCard.name} completed\n`);
 
                     a2aLogger.debug('Target agent execution completed', {
                         operationId,
-                        targetAgent: targetPlugin.manifest.name,
+                        targetAgent: targetPlugin.resolved.agentCard.name,
                         hasResult: !!result
                     });
 
@@ -939,7 +939,7 @@ export class A2AService implements IA2AService {
                 } catch (error) {
                     a2aLogger.error('Target agent execution failed', error, {
                         operationId,
-                        targetAgent: targetPlugin.manifest.name
+                        targetAgent: targetPlugin.resolved.agentCard.name
                     });
                     throw error;
                 }
@@ -948,7 +948,7 @@ export class A2AService implements IA2AService {
     }
 
     private resolveEffectiveCacheConfig(targetPlugin: AgentPlugin, options: A2ACallOptions) {
-        const manifestCache = targetPlugin.manifest.cache ?? {};
+        const manifestCache = targetPlugin.resolved.runtimeManifest.cache ?? {};
         const overrideCache = options.cache;
         return {
             enabled: overrideCache?.enabled ?? manifestCache.enabled ?? false,

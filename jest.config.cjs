@@ -18,7 +18,7 @@ const config = {
 
     // Force TypeScript transformation with ts-jest only
     transform: {
-        '^.+\\.tsx?$': [
+        '^.+\\.[jt]sx?$': [
             'ts-jest',
             {
                 useESM: true,
@@ -42,6 +42,9 @@ const config = {
         '^@a2arium/callagent-core/(.*)$': '<rootDir>/packages/core/src/$1',
         '^@a2arium/callagent-core$': '<rootDir>/packages/core/src/index.ts',
         '^@a2arium/types/(.*)$': '<rootDir>/packages/types/src/$1',
+        '^@a2arium/callagent-memory-sql/generated$': '<rootDir>/packages/memory-sql/src/generated/prisma/index.js',
+        '^@a2arium/callagent-memory-sql/(.*)$': '<rootDir>/packages/memory-sql/src/$1',
+        '^@a2arium/callagent-memory-sql$': '<rootDir>/packages/memory-sql/src/index.ts',
         '^@a2arium/memory-sql/(.*)$': '<rootDir>/packages/memory-sql/src/$1',
         '^@a2arium/callagent-memory-engine$': '<rootDir>/packages/memory-engine/src/index.ts',
         '^@a2arium/callagent-memory-engine/(.*)$': '<rootDir>/packages/memory-engine/src/$1',
@@ -62,7 +65,7 @@ const config = {
     // Transform settings
     // Don't ignore workspace packages - they need to be transformed
     transformIgnorePatterns: [
-        'node_modules/(?!(jest-mock-extended|ts-essentials|@a2arium)/)',
+        'node_modules/(?!(jest-mock-extended|ts-essentials|@a2arium|@openrouter)/)',
         // Transform workspace packages
         '!packages/',
         '!apps/',

@@ -1000,7 +1000,7 @@ export class TaskEngine {
             // Check manifest for runMode, then ctx, then default to 'loop'
             const agentId = (ctx as any).agentId;
             const plugin = agentId ? PluginManager.findAgent(agentId) : null;
-            const manifestRunMode = (plugin?.manifest as any)?.runMode;
+            const manifestRunMode = plugin?.resolved.runtimeManifest.runMode;
             const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
             try { log.debug('Task execution start', { runMode, agentId: (ctx as any).agentId }); } catch { }
             if (process.env.DEBUG_BACKGROUND_TASKS) {
@@ -1434,7 +1434,7 @@ export class TaskEngine {
                 // Legacy VarsSync.createVarsProxy removed.
             } catch { /* noop */ }
             // Resolve runMode for resume
-            const manifestRunMode = (plugin?.manifest as any)?.runMode;
+            const manifestRunMode = plugin?.resolved.runtimeManifest.runMode;
             const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
             console.error(`[TaskEngine DEBUG] resumeInput: runMode=${runMode}, stage=${(M as any).memory?.vars?.stage}, turn=${(M as any).memory?.vars?.turn}`);
 
@@ -2094,7 +2094,7 @@ export class TaskEngine {
                                     ctx,
                                     tenantId,
                                     agentName || 'default',
-                                    plugin?.manifest || {},
+                                    plugin?.resolved.runtimeManifest || {},
                                     semanticAdapter,
                                     existingPrisma // ✅ FIX: Always pass PrismaClient to reuse it
                                 );
@@ -2284,8 +2284,8 @@ export class TaskEngine {
                         try {
                             // Restore budgets from snapshot first, then fallback to manifest
                             const persistedBudgets = (latestBase as any)?.meta?.budgets;
-                            const manifestBudgets = (plugin?.manifest as any)?.budgets;
-                            const hitl = (plugin?.manifest as any)?.hitl;
+                            const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
+                            const hitl = plugin?.resolved.runtimeManifest.hitl;
                             if (hitl) { try { (M as any).hitl = hitl; } catch { } }
 
                             if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {

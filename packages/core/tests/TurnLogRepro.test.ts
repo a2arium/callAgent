@@ -29,8 +29,27 @@ describe('Turn Logic & Logging Verification', () => {
         EngineLocator.setEngine(mockEngine);
 
         PluginManager.registerAgent({
-            name: 'child-agent',
-            manifest: { name: 'child-agent', version: '1.0.0' },
+            resolved: {
+                agentCard: {
+                    name: 'child-agent',
+                    version: '1.0.0',
+                    description: 'test child',
+                    supportedInterfaces: [{ protocolBinding: 'JSONRPC', protocolVersion: '1.0', url: 'http://localhost' }],
+                    capabilities: {},
+                    defaultInputModes: ['text/plain'],
+                    defaultOutputModes: ['text/plain'],
+                    skills: [{ id: 's1', name: 's1', description: 's1' }]
+                },
+                runtimeManifest: {
+                    name: 'child-agent',
+                    version: '1.0.0',
+                    runMode: 'loop'
+                } as any,
+                agentCardHash: 'h1',
+                runtimeManifestHash: 'h2',
+                agentCardSource: 'inline',
+                runtimeManifestSource: 'inline'
+            },
             execution: async (a, ctx) => {
                 return {
                     action: { kind: 'output', payload: { value: 'done' } },
@@ -42,7 +61,8 @@ describe('Turn Logic & Logging Verification', () => {
             learning: (p: any, a: any, o: any) => p,
             policy: () => ({ kind: 'output', payload: { value: 'done' } }),
             transition: (env: any) => ({ kind: 'complete' }),
-            shield: () => ({ kind: 'allow' })
+            shield: () => ({ kind: 'allow' }),
+            tenantId: 'tenant-1'
         } as any);
     });
 

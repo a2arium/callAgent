@@ -55,49 +55,9 @@ export type { PureLLMPort, ILLMCaller, LLMConfig } from './LLMTypes.js';
 // MLO Configuration & Interface Types & Shared Types (WorkingMemory, Artifacts, A2ATypes, etc.)
 export * from '@a2arium/callagent-memory-engine';
 
-// --- Agent Card (Enhanced for A2A) ---
-/**
- * Agent manifest defines the metadata and capabilities of an agent
- * Used for A2A communication to identify and configure target agents
- */
-export type AgentManifest = {
-    /** Agent name identifier */
-    name: string;
-    /** Agent version */
-    version: string;
-    /** Optional agent description */
-    description?: string;
-    /** Execution mode: 'loop' (default) or 'legacy' */
-    runMode?: 'loop' | 'legacy';
-    /** Optional default loop budgets */
-    budgets?: { maxTurns?: number; latencyMs?: number };
-    /** Human-in-the-loop level */
-    hitl?: 'advise' | 'consent' | 'guardrails';
-    /** Safety configuration */
-    safety?: { sanitize?: boolean; costLimit?: number; piiPatterns?: string[] };
-    /** Agent dependencies */
-    dependencies?: { agents: string[] };
-    /** Memory configuration for A2A context inheritance */
-    memory?: {
-        /** Memory profile (e.g., 'basic', 'advanced', 'custom') */
-        profile?: string;
-        /** Additional memory configuration */
-        [key: string]: unknown;
-    };
-    /** Agent result caching configuration */
-    cache?: {
-        /** Enable/disable caching for this agent (default: false) */
-        enabled?: boolean;
-        /** Cache TTL in seconds (default: 300 = 5 minutes) */
-        ttlSeconds?: number;
-        /** Paths to exclude from cache key (dot notation for nested objects) */
-        excludePaths?: string[];
-    };
-    /** Manifest-level configuration available at runtime */
-    config?: Record<string, unknown>;
-    // Future: capabilities, endpoint, auth, plugins, tools, etc.
-    [key: string]: unknown;
-}
+// --- Agent Types (A2A Discovery) ---
+// Re-export manifest types from callagent-types for A2A compatibility
+export type { AgentCard, AgentRuntimeManifest, ResolvedManifests } from '@a2arium/callagent-types';
 
 // --- Usage Tracking ---
 export type UsageRecord = {

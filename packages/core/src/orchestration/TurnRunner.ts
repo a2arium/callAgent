@@ -274,8 +274,8 @@ export class TurnRunner {
             let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
             try {
                 const persistedBudgets = (base as any)?.meta?.budgets;
-                const manifestBudgets = (plugin?.manifest as any)?.budgets;
-                const hitl = (plugin?.manifest as any)?.hitl;
+                const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
+                const hitl = plugin?.resolved.runtimeManifest.hitl;
                 if (hitl) { try { (M as any).hitl = hitl; } catch { } }
 
                 if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {

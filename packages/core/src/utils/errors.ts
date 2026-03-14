@@ -35,6 +35,8 @@ export class PluginError extends FrameworkError {
     }
 }
 
+import { ManifestErrorDetail } from '@a2arium/callagent-types';
+
 /**
  * Error thrown when a manifest is invalid or missing required fields
  */
@@ -42,10 +44,10 @@ export class ManifestError extends PluginError {
     /**
      * Create a new ManifestError
      * @param message - Error message
-     * @param details - Additional error details
+     * @param detail - Typed manifest error detail
      */
-    constructor(message: string, details?: Record<string, unknown>) {
-        super(message, details);
+    constructor(message: string, public detail?: ManifestErrorDetail) {
+        super(message, detail ? { ...detail } : undefined);
         Object.setPrototypeOf(this, ManifestError.prototype);
     }
 }

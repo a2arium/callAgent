@@ -2,7 +2,10 @@ export * from './IMemory.js';
 export * from './BaseError.js';
 export * from './MemoryError.js';
 export * from './workingMemory.js';
-export * from './agent/AgentManifest.js';
+export * from './agent/agentCard.js';
+export * from './agent/agentRuntimeManifest.js';
+export * from './agent/manifestSource.js';
+export * from './agent/manifestErrors.js';
 export type {
     SemanticMemoryBackend,
     EpisodicMemoryBackend,
