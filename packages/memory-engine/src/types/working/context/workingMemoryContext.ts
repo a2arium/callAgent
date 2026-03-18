@@ -1,8 +1,8 @@
 import { UnifiedMemoryService } from '../../../UnifiedMemoryService.js';
 import { MemoryLifecycleConfig } from '../../../lifecycle/config/types.js';
 import { getMemoryProfile } from '../../../lifecycle/config/MemoryProfiles.js';
-import { WorkingVariables } from '../../../shared/types/workingMemory.js';
 import { TaskContext } from '../../../shared/types/index.js';
+import type { WorkingVariables } from '../../../shared/types/workingMemory.js';
 import { WorkingMemoryBackend, IMemory } from '@a2arium/callagent-types';
 import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../../MLOBackends.js';
 import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
@@ -13,94 +13,6 @@ import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory
 import { logger } from '@a2arium/callagent-utils';
 
 const contextLogger = logger.createLogger({ prefix: 'WorkingMemoryContext' });
-
-/**
- * Creates a simple working variables proxy that provides immediate synchronous access
- * with background persistence through the MLO pipeline.
- * 
- * This approach:
- * 1. Maintains local cache for immediate access
- * 2. Returns cached values synchronously for reads
- * 3. Updates cache immediately for writes
- * 4. Syncs to database in background for persistence
- * 
- * Note: This means variables are only available after being set in the current session.
- * For persistence across sessions, agents should reload their state explicitly.
- */
-function createSimpleWorkingVariablesProxy(
-    unifiedMemory: UnifiedMemoryService,
-    agentId: string
-): WorkingVariables {
-    // Local cache for immediate synchronous access
-    const cache = new Map<string, unknown>();
-
-    contextLogger.debug('Created working variables proxy with local cache', {
-        agentId
-    });
-
-    // Define methods separately to avoid circular references in object literal
-    const get = <T = unknown>(key: string): T | undefined => {
-        return cache.get(key) as T;
-    };
-
-    const set = <T = unknown>(key: string, value: T): void => {
-        contextLogger.debug('Setting working variable', { key });
-        // Update cache immediately for synchronous access
-        cache.set(key, value);
-
-        // Persist to database in background (fire and forget)
-        unifiedMemory.setWorkingVariable(key, value, agentId).catch(error => {
-            contextLogger.warn(`Failed to persist working variable ${key}`, {
-                agentId,
-                error
-            });
-        });
-    };
-
-    const has = (key: string): boolean => {
-        return cache.has(key);
-    };
-
-    const del = (key: string): void => {
-        // Remove from cache immediately
-        cache.delete(key);
-
-        // Delete from database in background
-        unifiedMemory.setWorkingVariable(key, undefined, agentId).catch(error => {
-            contextLogger.warn(`Failed to delete working variable ${key}`, {
-                agentId,
-                error
-            });
-        });
-    };
-
-    const keys = (): string[] => {
-        return Array.from(cache.keys());
-    };
-
-    const merge = (patch: Record<string, unknown>): void => {
-        for (const [k, v] of Object.entries(patch)) {
-            set(k, v);
-        }
-    };
-
-    const update = <T = unknown>(key: string, fn: (prev: T | undefined) => T): void => {
-        const prev = get<T>(key);
-        const next = fn(prev);
-        set(key, next);
-    };
-
-    return {
-        get,
-        set,
-        has,
-        delete: del,
-        keys,
-        merge,
-        update
-    };
-}
-
 
 /**
  * Resolve memory configuration from agent manifest
@@ -270,9 +182,6 @@ export async function extendContextWithMemory(
             return entries;
         }
     };
-
-    // Add simple working variables for synchronous access
-    context.vars = createSimpleWorkingVariablesProxy(unifiedMemory, agentId) as any;
 
     // Add unified operations
     context.recall = async (query: string, options?: any) => unifiedMemory.recall(query, options);

@@ -167,7 +167,7 @@ beforeAll(() => {
 
 beforeEach(() => {
     runLoopMock.mockResolvedValue({
-        M: { memory: { vars: {} } },
+        M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
         outcome: { kind: 'continue' },
         metrics: {}
     });
@@ -206,7 +206,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             // Seed a session that will fail to load
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -241,7 +241,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -298,7 +298,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -342,7 +342,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -390,7 +390,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -438,7 +438,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -487,7 +487,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -515,7 +515,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {
                     tasks: {
@@ -528,12 +528,12 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             runLoopMock
                 .mockResolvedValueOnce({
-                    M: { memory: { vars: {} } },
+                    M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                     outcome: { kind: 'await_child', token: 'child-1' },
                     metrics: {}
                 })
                 .mockResolvedValueOnce({
-                    M: { memory: { vars: {} } },
+                    M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                     outcome: { kind: 'complete', result: { ok: true } },
                     metrics: {}
                 });
@@ -590,7 +590,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a', awaiting: { token: 'dup-token' } },
                 pending: {
                     tasks: { 'dup-token': { agentId: 'child-agent', input: {} } }
@@ -622,7 +622,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a', awaiting: { token: 'tool-token' } },
                 pending: {
                     tools: { 'tool-token': { name: 'test-tool', input: {} } }
@@ -651,7 +651,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a', awaiting: { token: 'child-1' } },
                 pending: { tasks: {} },
                 inbox: { current: [], all: [] }
@@ -676,7 +676,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: { tasks: {} },
                 inbox: { current: [], all: [] }
@@ -702,7 +702,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {
                     tasks: { 'child-1': { agentId: 'child-agent', input: {} } }
@@ -765,7 +765,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: {
@@ -795,7 +795,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -822,7 +822,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { success: true } },
                 metrics: {}
             });
@@ -847,7 +847,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { success: true } },
                 metrics: {}
             });
@@ -870,7 +870,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { success: true } },
                 metrics: {}
             });
@@ -894,7 +894,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { success: true } },
                 metrics: {}
             });
@@ -914,7 +914,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { success: true } },
                 metrics: {}
             });
@@ -936,7 +936,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'failed', error: 'Test failure' },
                 metrics: {}
             });
@@ -959,7 +959,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { processed: true } },
                 metrics: {}
             });
@@ -993,7 +993,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { artifacts: ['large-data'] } },
                 metrics: {}
             });
@@ -1051,31 +1051,20 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.configure({ failWrite: true });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
             };
             store.seed('t', 'parent', base, BigInt(0), 'agent-a');
 
-            const ctx = await engine.restoreCtx('t', 'parent');
+            await engine.restoreCtx('t', 'parent');
 
             // Attempt to persist child context - should handle CAS error gracefully
-            if ((engine as any).apiBinder) {
-                try {
-                    await (engine as any).apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't', sessionId: 'session', agentId: 'agent-a', flushMentalState: jest.fn() });
-                } catch (e: any) {
-                    // Ignore "TaskEngine requires a configured session manager" if it's expected
-                    if (!e.message.includes('configured session manager')) throw e;
-                }
-            }
-            if (ctx.persistChildContext) {
-                try {
-                    await ctx.persistChildContext('child-1', { vars: { childData: 'test' } });
-                } catch (error: any) {
-                    // Expected to fail due to CAS mismatch
-                    expect(error.message).toContain('CAS_MISMATCH');
-                }
+            try {
+                await engine.persistChildContext({ tenantId: 't', sessionId: 'session', agentId: 'agent-a' });
+            } catch (error: unknown) {
+                expect((error as Error).message).toContain('CAS_MISMATCH');
             }
         });
 
@@ -1088,7 +1077,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             // Simulate concurrent modification by having a different version
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -1096,7 +1085,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             store.seed('t', 'concurrent-test', base, BigInt(5), 'agent-a'); // Different version
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: { updated: true } } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { updated: true }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1158,7 +1147,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -1189,7 +1178,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -1217,7 +1206,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {},
                 inbox: { current: [], all: [] }
@@ -1249,55 +1238,6 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
 
 
-    describe('Helper Utilities and Mental State Operations', () => {
-        test('iterateMentalTargets with various mental states', () => {
-            const engine = new TaskEngine({});
-
-            // Create a mock callback function to capture calls
-            const mockCallback = jest.fn();
-
-            // Test with ctx.__mental
-            const ctxWithMental = {
-                __mental: { memory: { vars: { test: 'value' } } }
-            } as any;
-
-            (engine as any).iterateMentalTargets(ctxWithMental, mockCallback);
-            expect(mockCallback).toHaveBeenCalledWith({
-                target: ctxWithMental.__mental,
-                memory: ctxWithMental.__mental.memory,
-                vars: ctxWithMental.__mental.memory.vars
-            });
-
-            mockCallback.mockClear();
-
-            // Test with ctx.M
-            const ctxWithM = {
-                M: { memory: { vars: { test: 'value2' } } }
-            } as any;
-
-            (engine as any).iterateMentalTargets(ctxWithM, mockCallback);
-            expect(mockCallback).toHaveBeenCalledWith({
-                target: ctxWithM.M,
-                memory: ctxWithM.M.memory,
-                vars: ctxWithM.M.memory.vars
-            });
-
-            mockCallback.mockClear();
-
-            // Test with empty object - should not call callback
-            const emptyCtx = {} as any;
-            (engine as any).iterateMentalTargets(emptyCtx, mockCallback);
-            expect(mockCallback).not.toHaveBeenCalled();
-
-            // Test with context that has no mental properties - should not call callback
-            const noMentalCtx = { other: 'property' } as any;
-            (engine as any).iterateMentalTargets(noMentalCtx, mockCallback);
-            expect(mockCallback).not.toHaveBeenCalled();
-        });
-
-
-    });
-
     describe('Context Snapshot Management and Artifact Offloading', () => {
         test('handles flushContextSnapshot with artifact offloading', async () => {
             const store = new FailingSessionStore();
@@ -1307,7 +1247,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: { result: 'success' } } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { result: 'success' }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { artifacts: ['large-artifact-1'] } },
                 metrics: {}
             });
@@ -1329,7 +1269,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: { temp: 'data' } } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { temp: 'data' }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1352,7 +1292,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1376,7 +1316,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {
                     tasks: {
@@ -1418,7 +1358,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: {
                     turn: 0,
                     agentId: 'agent-a',
@@ -1454,7 +1394,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             const base = {
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 meta: { turn: 0, agentId: 'agent-a' },
                 pending: {
                     tasks: {
@@ -1521,8 +1461,8 @@ describe('TaskEngine Coverage Improvement Tests', () => {
         });
     });
 
-    describe('Variable Synchronization and State Consistency', () => {
-        test('handles complex variable synchronization between context and mental state', async () => {
+    describe('State Consistency (no vars in 3.3.1)', () => {
+        test('handles worldModel in loop result', async () => {
             const store = new FailingSessionStore();
             const engine = new TaskEngine({
                 sessionStore: store,
@@ -1531,14 +1471,12 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             runLoopMock.mockResolvedValue({
                 M: {
-                    memory: {
-                        vars: {
-                            synced: 'initial',
-                            nested: {
-                                value: 'nested-sync'
-                            }
-                        }
-                    }
+                    memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+                    worldModel: { synced: 'initial', nested: { value: 'nested-sync' } },
+                    goalState: { hierarchy: { nodes: {}, roots: [] } },
+                    emotion: { valence: 0, arousal: 0 },
+                    rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 },
+                    policyParams: { theta: undefined, stochastic: false }
                 },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
@@ -1561,7 +1499,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: { budgetConsumed: 100 }
             });
@@ -1592,7 +1530,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             (engine as any).backgroundTaskPromises.add(backgroundTask);
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1673,7 +1611,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             (engine as any).backgroundTaskPromises.add(task2);
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1731,7 +1669,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             };
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1753,7 +1691,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: {} } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: {} },
                 metrics: {}
             });
@@ -1875,7 +1813,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
             // Create a base context
-            const base = { M: { memory: { vars: {} } }, meta: { turn: 0, agentId: 'agent-a' } };
+            const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } }, meta: { turn: 0, agentId: 'agent-a' } };
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             // Test through actual handleChildCompleted call with TaskEntity result
@@ -2025,7 +1963,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
             // Create a base context
-            const base = { M: { memory: { vars: {} } }, meta: { turn: 0, agentId: 'agent-a' } };
+            const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } }, meta: { turn: 0, agentId: 'agent-a' } };
             store.seed('t', 'session', base, BigInt(0), 'agent-a');
 
             const ctx = await (engine as any).restoreCtx('t', 'session');

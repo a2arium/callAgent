@@ -187,49 +187,39 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            // Test basic persistence functionality
-            const base = { M: { memory: { vars: { a: 1 } } } };
+            // Test basic persistence functionality (no vars in 3.3.1)
+            const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { a: 1 }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } } };
             store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
 
             await engine.persistChildContext({
                 tenantId: 't',
                 sessionId: 'session',
-                agentId: 'agent-a',
-                vars: { b: 2 }
+                agentId: 'agent-a'
             });
 
             expect(store.writeCount).toBeGreaterThanOrEqual(1); // at least one attempt
             const snap = store.getSnapshot('t', 'session');
-            const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-            expect(vars.a).toBe(1);
-            // The new variable should be persisted (exact behavior depends on implementation)
-            expect(vars).toBeDefined();
+            const M = (snap?.snapshot as Record<string, unknown>)?.M as Record<string, unknown> | undefined;
+            expect(M?.worldModel).toBeDefined();
+            expect((M?.worldModel as Record<string, unknown>)?.a).toBe(1);
         });
 
-        test('handles complex variable merging scenarios', async () => {
+        test('handles persistChildContext without vars (worldModel unchanged by persist)', async () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            const base = { M: { memory: { vars: { config: { api: 'old' } } } } };
+            const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { config: { api: 'old' } }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } } };
             store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-
-            const newVars = {
-                config: { api: 'new', timeout: 5000 },
-                features: { newFeature: true }
-            };
 
             await engine.persistChildContext({
                 tenantId: 't',
                 sessionId: 'session',
-                agentId: 'agent-a',
-                vars: newVars
+                agentId: 'agent-a'
             });
 
             const snap = store.getSnapshot('t', 'session');
-            const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-            // In 3.3, we no longer merge vars. Base state remains.
-            expect(vars.config).toEqual({ api: 'old' });
-            expect(vars.features).toBeUndefined();
+            const M = (snap?.snapshot as Record<string, unknown>)?.M as Record<string, unknown> | undefined;
+            expect((M?.worldModel as Record<string, unknown>)?.config).toEqual({ api: 'old' });
         });
     });
 
@@ -283,8 +273,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
             await engine.persistChildContext({
                 tenantId: 't',
                 sessionId: 'task',
-                agentId: 'agent-a',
-                vars: { newVar: 'value' }
+                agentId: 'agent-a'
             });
 
             expect(store.writeCount).toBeGreaterThanOrEqual(1); // At least one write attempt
@@ -302,7 +291,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 meta: { turn: 1, awaiting: { kind: 'await_child', token: 'token-1' } },
                 pending: { controlVars: { child: { token: 'token-1' } } },
                 inbox: { current: [obs1], all: [obs1, obs2] },
-                M: { memory: { vars: {} } }
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } }
             } as any, { 'token-1': { target: 'child-1', handlers: {}, options: {} } });
 
             store.seed('t', 'parent', pending, BigInt(0), 'agent-a');
@@ -495,69 +484,23 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
         });
     });
 
-    describe('Mental State and Variable Management', () => {
-        test('handles circular reference protection in variable merging', async () => {
+    describe('Mental State Management (no vars in 3.3.1)', () => {
+        test('persistChildContext updates snapshot without vars', async () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            const base = { M: { memory: { vars: { a: 1 } } } };
+            const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { a: 1 }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } } };
             store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-
-            // Test with a simple object instead of circular reference
-            const simpleObj = { b: 2 };
 
             await engine.persistChildContext({
                 tenantId: 't',
                 sessionId: 'session',
-                agentId: 'agent-a',
-                vars: { simple: simpleObj }
+                agentId: 'agent-a'
             });
 
             const snap = store.getSnapshot('t', 'session');
-            const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-            expect(vars.a).toBe(1);
-            // In 3.3, we no longer merge. New vars are ignored.
-            expect(vars.simple).toBeUndefined();
-        });
-
-        test('handles deep object merging with complex nested structures', async () => {
-            const store = new FakeSessionStore();
-            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-            const base = {
-                M: {
-                    memory: {
-                        vars: {
-                            config: {
-                                api: { endpoint: 'old', version: 1 },
-                                features: { feature1: true }
-                            }
-                        }
-                    }
-                }
-            };
-            store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
-
-            const newVars = {
-                config: {
-                    api: { version: 2, timeout: 5000 }, // Should merge with existing
-                    features: { feature2: true } // Should add new feature
-                }
-            };
-            await engine.persistChildContext({
-                tenantId: 't',
-                sessionId: 'session',
-                agentId: 'agent-a',
-                vars: newVars
-            });
-
-            const snap = store.getSnapshot('t', 'session');
-            const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-            expect(vars.config).toEqual({ api: { endpoint: 'old', version: 1 }, features: { feature1: true } });
-            expect(vars.config.api.version).toBe(1);
-            expect(vars.config.api.timeout).toBeUndefined();
-            expect(vars.config.features.feature1).toBe(true);
-            expect(vars.config.features.feature2).toBeUndefined();
+            const M = (snap?.snapshot as Record<string, unknown>)?.M as Record<string, unknown> | undefined;
+            expect((M?.worldModel as Record<string, unknown>)?.a).toBe(1);
         });
     });
 
@@ -587,7 +530,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                     }
                 },
                 inbox: { current: [], all: [] },
-                M: { memory: { vars: {} } }
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } }
             };
             store.seed('t', 'expired-session', expired, BigInt(0), 'agent-a');
 
@@ -647,12 +590,10 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
     });
 
     describe('Memory and Performance Optimization', () => {
-        test('handles large conversation history pruning', async () => {
-            // Test basic functionality without complex memory management
+        test('handles large conversation history in worldModel', async () => {
             const store = new FakeSessionStore();
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
 
-            // Test basic snapshot operations
             const largeHistory = {
                 conversations: Array.from({ length: 100 }, (_, i) => ({
                     role: 'user',
@@ -660,21 +601,19 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 }))
             };
 
-            const base = { M: { memory: { vars: { conversationHistory: largeHistory } } } };
+            const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { conversationHistory: largeHistory }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } } };
             store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
 
             await engine.persistChildContext({
                 tenantId: 't',
                 sessionId: 'session',
-                agentId: 'agent-a',
-                vars: { additionalData: 'test' }
+                agentId: 'agent-a'
             });
 
             const snap = store.getSnapshot('t', 'session');
-            const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-            expect(vars.conversationHistory).toBeDefined();
-            // In 3.3, no merging. New vars ignored.
-            expect(vars.additionalData).toBeUndefined();
+            const M = (snap?.snapshot as Record<string, unknown>)?.M as Record<string, unknown> | undefined;
+            const wm = M?.worldModel as Record<string, unknown> | undefined;
+            expect(wm?.conversationHistory).toBeDefined();
         });
 
         test('handles memory cleanup in background tasks', async () => {
@@ -704,7 +643,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 meta: { turn: 1, awaiting: { kind: 'await_child', token: 'child-test' } },
                 pending: { controlVars: { child: { token: 'child-test' } } },
                 inbox: { current: [], all: [] },
-                M: { memory: { vars: {} } }
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } }
             } as any, { 'child-test': { target: 'child-1', handlers: {}, options: {} } });
 
             store.seed('t', 'parent', pending, BigInt(0), 'agent-a');
@@ -712,7 +651,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
             jest.spyOn(engine as any, 'createContext').mockReturnValue(createCtx());
             jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
             runLoopMock.mockResolvedValue({
-                M: { memory: { vars: { finalResult: 'parent-complete' } } },
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { finalResult: 'parent-complete' }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
                 outcome: { kind: 'complete', result: { finalResult: 'parent-complete' } },
                 metrics: {}
             });

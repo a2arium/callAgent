@@ -12,7 +12,6 @@ export * from './lifecycle/orchestrator/MemoryLifecycleOrchestrator.js';
 export * from './types/working/context/workingMemoryContext.js';
 export * from './utils/hydrateArtifacts.js';
 export * from './utils/offloadArtifacts.js';
-export * from './utils/serialization.js';
 export * from './stores/SessionStore.js';
 export * from './cache/AgentResultCache.js';
 export * from './cache/CacheCleanupService.js';

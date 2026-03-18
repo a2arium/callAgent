@@ -18,10 +18,10 @@ describe('TaskEngine Async Persistence Race', () => {
     it('should NOT corrupt snapshot if load returns empty during async dispatch', async () => {
         const { engine, sessionManager } = buildEngine();
 
-        // Setup initial valid snapshot (Turn 4)
+        // Setup initial valid snapshot (Turn 4); use worldModel (no memory.vars in 3.3.1)
         const initialSnap = {
             meta: { agentId: 'parent-agent', turn: 4 },
-            M: { memory: { vars: { existingVar: 'value' } } }
+            M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { existingVar: 'value' }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } }
         };
 
         await sessionManager.saveSnapshot({
@@ -91,6 +91,7 @@ describe('TaskEngine Async Persistence Race', () => {
         expect(snapshot.meta).toBeDefined();
         expect(snapshot.meta.turn).toBe(4);
         expect(snapshot.M).toBeDefined();
-        expect(snapshot.M.memory.vars.existingVar).toBe('value');
+        expect((snapshot.M as Record<string, unknown>).worldModel).toBeDefined();
+        expect((snapshot.M as Record<string, unknown>).worldModel).toEqual(expect.objectContaining({ existingVar: 'value' }));
     });
 });

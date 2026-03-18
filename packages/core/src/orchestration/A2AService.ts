@@ -235,8 +235,11 @@ export class A2AService implements IA2AService {
 
             // 5. Execute target agent via TaskEngine for WM/LLM persistence
             const eng = getRequiredEngine();
-            // Attach WM proxy so child ctx.vars writes persist
-            try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
+            // Attach WM and orchestration APIs for child session
+            try {
+                const attach = (eng as unknown as { attachWorkingMemory?: (ctx: typeof targetCtx, tenantId: string, sessionId: string, agentId: string) => Promise<void> }).attachWorkingMemory;
+                if (attach) await attach(targetCtx, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name);
+            } catch { }
 
             let result;
             try {

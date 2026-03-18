@@ -118,8 +118,7 @@ export class ContextSerializer {
     ): Promise<SerializedWorkingMemory> {
         const workingMemory: SerializedWorkingMemory = {
             thoughts: [],
-            decisions: {},
-            variables: {}
+            decisions: {}
         };
 
         try {
@@ -159,16 +158,12 @@ export class ContextSerializer {
                 workingMemory.decisions = await ctx.memory.mlo.getAllDecisions();
             }
 
-            // Variables (ctx.vars) were removed per APLRET.
-            // Any cross-turn control state should be in env.pending.controlVars.
-            // Any business state should be in M.worldModel.
-            workingMemory.variables = {};
+            // Variables (ctx.vars) were removed per APLRET; control state in env.pending.controlVars, business state in M.worldModel.
 
             serializerLogger.debug('Working memory serialized', {
                 hasGoal: !!workingMemory.goal,
                 thoughtCount: workingMemory.thoughts.length,
-                decisionCount: Object.keys(workingMemory.decisions).length,
-                variableCount: Object.keys(workingMemory.variables).length
+                decisionCount: Object.keys(workingMemory.decisions).length
             });
 
             return workingMemory;
@@ -273,9 +268,6 @@ export class ContextSerializer {
                     await (ctx as any).decisions.add(key, (decision as any).decision, (decision as any).reasoning);
                 }
             }
-
-            // Restore variables NO-OP: ctx.vars has been removed per APLRET.
-            // If legacy agents send variables, they are dropped.
 
             serializerLogger.debug('Working memory deserialized successfully');
         } catch (error) {

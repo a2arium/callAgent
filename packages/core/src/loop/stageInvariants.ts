@@ -1,6 +1,7 @@
 import type { TaskContext } from '../shared/types/index.js';
 import { throwInvariantError } from '../utils/invariantError.js';
-import { EnvironmentState } from './types.js';
+import type { EnvironmentState } from './types.js';
+import type { MentalState } from './types.js';
 
 export type StageInvariant = {
     required?: string[];
@@ -23,7 +24,7 @@ interface InternalTaskContext extends TaskContext {
             };
         };
     };
-    M: any;
+    M?: MentalState;
 }
 
 export function assertStageInvariants<TStage extends string>(
@@ -40,12 +41,9 @@ export function assertStageInvariants<TStage extends string>(
         || iCtx.env?.control?.pendingSnapshot?.controlVars;
 
     const hasVar = (key: string): boolean => {
-        if (controlVars) {
-            if (typeof (controlVars as any).has === 'function') return (controlVars as any).has(key);
-            if (Object.prototype.hasOwnProperty.call(controlVars, key)) return true;
-        }
-        const memoryVars = (iCtx.M as any)?.memory?.vars;
-        return memoryVars ? Object.prototype.hasOwnProperty.call(memoryVars, key) : false;
+        if (!controlVars) return false;
+        if (typeof (controlVars as Record<string, unknown>).has === 'function') return (controlVars as { has: (k: string) => boolean }).has(key);
+        return Object.prototype.hasOwnProperty.call(controlVars, key);
     };
 
     const pendingSnapshot = iCtx.__activeLoopEnv?.pending;

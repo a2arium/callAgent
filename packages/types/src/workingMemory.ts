@@ -20,7 +20,6 @@ export type WorkingMemoryState = {
         reasoning?: string;
         timestamp: string
     }>;
-    variables: Record<string, unknown>;
     loadedLongTermMemories: Array<{
         source: string;
         key: string;

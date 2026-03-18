@@ -397,19 +397,18 @@ describe('TaskEngine orchestration coverage', () => {
         expect((saved.pending as any)?.controlVars?.stage).toBe('awaiting');
     });
 
-    test('persists child context vars into existing snapshot', async () => {
+    test('persists child context into existing snapshot', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-        const base = { M: { memory: { vars: { a: 1 } } } };
+        const base = { M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: { a: 1 }, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } } };
         store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
 
-        await engine.persistChildContext({ tenantId: 't', sessionId: 'session', agentId: 'agent-a', vars: { b: 2 } });
+        await engine.persistChildContext({ tenantId: 't', sessionId: 'session', agentId: 'agent-a' });
 
         const snap = store.getSnapshot('t', 'session');
-        const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-        // In 3.3, we no longer merge vars. persistChildContext should probably be updated too,
-        // but for now, we align the test with the fact that TaskExecutor strips them.
-        expect(vars).toEqual({ a: 1 });
+        const M = (snap?.snapshot as Record<string, unknown>)?.M as Record<string, unknown> | undefined;
+        expect(M).toBeDefined();
+        expect((M?.worldModel as Record<string, unknown>)?.a).toBe(1);
     });
 
     test('handles child input required without handler by persisting pending input', async () => {
@@ -1045,35 +1044,6 @@ describe('TaskEngine orchestration coverage', () => {
             inbox.all.some(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'child-1')
         ).toBe(true);
         expect(runLoopMock).not.toHaveBeenCalled();
-    });
-
-    describe('helper internals', () => {
-        test('mergeVarsIntoMental strips vars instead of merging', async () => {
-            const { TaskExecutor } = await import('../src/orchestration/TaskExecutor.js');
-            const source = { memory: { vars: { a: 1, fn: () => 1 } }, vars: { b: 2, fn2: () => 2 } };
-            const target = { memory: { vars: { c: 3 } }, vars: { d: 4, fn3: () => 3 } };
-            const result = TaskExecutor.mergeVarsIntoMental(source as any, target as any);
-            // Target.vars is stripped. target.memory.vars stays (as we only strip top-level .vars currently)
-            // But source.vars/memory.vars are NOT merged.
-            expect(result.memory.vars).toEqual({ c: 3 });
-            expect((result as any).vars).toBeUndefined();
-        });
-
-        test('setNestedValueClone and deleteNestedValueClone handle dotted paths', () => {
-            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
-            const base = { a: { b: 1 }, x: 2 };
-            const next = (engine as any).setNestedValueClone(base, 'a.c', 3);
-            expect(next).toEqual({ a: { b: 1, c: 3 }, x: 2 });
-            expect(base).toEqual({ a: { b: 1 }, x: 2 }); // immutability
-
-            const { next: afterDelete, changed } = (engine as any).deleteNestedValueClone(next, 'a.b');
-            expect(changed).toBe(true);
-            expect(afterDelete).toEqual({ a: { c: 3 }, x: 2 });
-
-            const { changed: noChange } = (engine as any).deleteNestedValueClone(afterDelete, 'a.missing');
-            expect(noChange).toBe(false);
-        });
-
     });
 
     describe('background tasks', () => {

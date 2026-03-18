@@ -493,7 +493,7 @@ new WorkingMemorySQLAdapter({
 
         try {
             // Get all working memory data in parallel
-            const [session, thoughts, decisions, variables] = await Promise.all([
+            const [session, thoughts, decisions] = await Promise.all([
                 this.prisma.workingMemorySession.findUnique({
                     where: {
                         tenantId_agentId: {
@@ -504,9 +504,6 @@ new WorkingMemorySQLAdapter({
                 }),
                 this.getThoughts(agentId, resolvedTenantId),
                 this.prisma.workingMemoryDecision.findMany({
-                    where: { tenantId: resolvedTenantId, agentId }
-                }),
-                this.prisma.workingMemoryVariable.findMany({
                     where: { tenantId: resolvedTenantId, agentId }
                 })
             ]);
@@ -521,12 +518,6 @@ new WorkingMemorySQLAdapter({
                 };
             });
 
-            // Build variables map
-            const variablesMap: Record<string, unknown> = {};
-            variables.forEach((v: { variableKey: string; variableValue: unknown }) => {
-                variablesMap[v.variableKey] = v.variableValue;
-            });
-
             return {
                 currentGoal: session?.currentGoal ? {
                     content: session.currentGoal,
@@ -534,7 +525,6 @@ new WorkingMemorySQLAdapter({
                 } : null,
                 thoughtChain: thoughts,
                 decisions: decisionsMap,
-                variables: variablesMap,
                 loadedLongTermMemories: [], // Not implemented yet
                 meta: {
                     lastUpdatedAt: session?.updatedAt.toISOString() || new Date().toISOString(),

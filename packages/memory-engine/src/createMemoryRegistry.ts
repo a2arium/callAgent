@@ -249,7 +249,6 @@ Error: ${error}
                     currentGoal: null,
                     thoughtChain: [],
                     decisions: {},
-                    variables: {},
                     loadedLongTermMemories: [],
                     meta: {
                         lastUpdatedAt: new Date().toISOString(),

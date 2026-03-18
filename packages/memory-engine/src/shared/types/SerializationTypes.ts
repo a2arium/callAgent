@@ -7,7 +7,6 @@ export type SerializedWorkingMemory = {
     goal?: string;
     thoughts: ThoughtEntry[];
     decisions: Record<string, DecisionEntry>;
-    variables: Record<string, unknown>;
 };
 
 /**

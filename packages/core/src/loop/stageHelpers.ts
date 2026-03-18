@@ -1,6 +1,7 @@
 import type { TaskContext } from '../shared/types/index.js';
 import { throwInvariantError } from '../utils/invariantError.js';
-import { EnvironmentState } from './types.js';
+import type { EnvironmentState } from './types.js';
+import type { MentalState } from './types.js';
 
 export type StageInvariants<St extends string> = Partial<Record<St, {
     require?: string[];
@@ -20,7 +21,7 @@ interface InternalTaskContext extends TaskContext {
             };
         };
     };
-    M: any;
+    M?: MentalState;
 }
 
 export function createStageFacade<St extends string = string>(opts: {
@@ -36,20 +37,19 @@ export function createStageFacade<St extends string = string>(opts: {
 
     const readVar = (ctx: TaskContext, key: string): unknown => {
         const iCtx = ctx as InternalTaskContext;
-        // Prefer controlVars (control state), then fallback to legacy memory vars for compatibility
         const controlVars = iCtx.controlVars
             || iCtx.__activeLoopEnv?.pending?.controlVars
             || iCtx.env?.control?.pendingSnapshot?.controlVars;
         if (controlVars) {
-            if (typeof (controlVars as any).get === 'function') {
-                const val = (controlVars as any).get(key);
+            if (typeof (controlVars as Record<string, unknown>).get === 'function') {
+                const val = (controlVars as { get: (k: string) => unknown }).get(key);
                 if (typeof val !== 'undefined') return val;
-            } else if (Object.prototype.hasOwnProperty.call(controlVars, key)) {
-                return (controlVars as any)[key];
+            }
+            if (Object.prototype.hasOwnProperty.call(controlVars, key)) {
+                return (controlVars as Record<string, unknown>)[key];
             }
         }
-        const memoryVars = (iCtx.M as any)?.memory?.vars;
-        return memoryVars ? (memoryVars as Record<string, unknown>)[key] : undefined;
+        return undefined;
     };
 
     const setControlVar = (ctx: TaskContext, key: string, value: unknown): void => {

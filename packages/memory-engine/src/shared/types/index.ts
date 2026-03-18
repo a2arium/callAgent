@@ -106,77 +106,6 @@ export type TaskContext = {
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 
-    // Working Memory Operations (replaced by namespaced helpers below)
-
-    // Working memory variables - facade (writes via methods only)
-    vars: {
-        /**
-         * Get a variable value. Supports nested paths using dot notation.
-         * @param key - Variable key or nested path (e.g., 'user.profile.name')
-         * @returns The stored value or undefined if not found
-         * @example
-         * const name = ctx.vars.get('user.profile.name');
-         * const stage = ctx.vars.get('stage');
-         */
-        get<T = unknown>(key: string): T | undefined;
-
-        /**
-         * Set a variable value. Supports nested paths with automatic object creation.
-         * @param key - Variable key or nested path (e.g., 'user.profile.email')
-         * @param value - Value to store
-         * @example
-         * ctx.vars.set('user.profile.email', 'john@example.com');
-         * ctx.vars.set('stage', 'completed');
-         */
-        set<T = unknown>(key: string, value: T): void;
-
-        /**
-         * Merge multiple key-value pairs into variables. Does NOT treat dots as paths.
-         * @param patch - Object containing key-value pairs to merge
-         * @example
-         * ctx.vars.merge({ stage: 'completed', counter: 42 });
-         * // Note: merge({ 'user.profile.email': 'value' }) creates a key with dots
-         */
-        merge(patch: Record<string, unknown>): void;
-
-        /**
-         * Update a variable value using a function that receives the current value.
-         * Supports nested paths with automatic object creation.
-         * @param key - Variable key or nested path (e.g., 'counter', 'user.profile.name')
-         * @param fn - Function that receives current value and returns new value
-         * @example
-         * ctx.vars.update('counter', (current) => (current || 0) + 1);
-         * ctx.vars.update('user.profile.name', (current) => current?.toUpperCase() || 'UNKNOWN');
-         */
-        update<T = unknown>(key: string, fn: (prev: T | undefined) => T): void;
-
-        /**
-         * Delete a variable. Supports nested paths.
-         * @param key - Variable key or nested path to delete
-         * @example
-         * ctx.vars.delete('user.profile.email');
-         * ctx.vars.delete('temporaryData');
-         */
-        delete(key: string): void;
-
-        /**
-         * Get all variable keys (top-level only).
-         * @returns Array of variable keys
-         * @example
-         * const keys = ctx.vars.keys(); // ['user', 'stage', 'counter']
-         */
-        keys(): string[];
-
-        /**
-         * Check if a variable exists. Supports nested paths.
-         * @param key - Variable key or nested path to check
-         * @returns True if the variable exists
-         * @example
-         * if (ctx.vars.has('user.profile.email')) { ... }
-         */
-        has(key: string): boolean;
-    };
-
     // Artifacts factory for offloading large data
     artifacts: {
         /**
@@ -295,7 +224,7 @@ export type SemanticItem = {
  * Use this type for agent implementations to avoid "possibly undefined" errors
  */
 export type AgentTaskContext = Required<Pick<TaskContext,
-    'vars' | 'recall' | 'remember' | 'sendTaskToAgent' | 'artifacts'
+    'recall' | 'remember' | 'sendTaskToAgent' | 'artifacts'
 >> & TaskContext;
 
 /**
@@ -324,10 +253,6 @@ export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
         if (typeof (ctx as any)[method] !== 'function') {
             throw new Error(`Agent context is missing required method: ${method}. Ensure the agent is run through the proper runner with memory support.`);
         }
-    }
-
-    if (!ctx.vars || typeof ctx.vars !== 'object') {
-        throw new Error('Agent context is missing required vars object. Ensure the agent is run through the proper runner with memory support.');
     }
 
     if (!ctx.artifacts || typeof ctx.artifacts !== 'object') {

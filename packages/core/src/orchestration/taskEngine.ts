@@ -39,18 +39,10 @@ import { ArtifactImpl, isArtifactMarker, type ArtifactMarker } from '@a2arium/ca
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { hydrateArtifacts } from '@a2arium/callagent-memory-engine';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
-import { serializeVars } from '@a2arium/callagent-memory-engine';
 import { pruneSnapshot } from '../loop/hygiene.js';
 import { ArtifactHydrationService, HYDRATED_ARTIFACT_HANDLE_SYMBOL } from './ArtifactHydrationService.js';
 import { InboxManager, type EngineObservation, type EngineObservationInbox } from './InboxManager.js';
 import { TaskExecutor } from './TaskExecutor.js';
-
-type WorkingVarHookRegistrarFn = (hooks?: {
-    onChange?: (key: string, value: unknown) => void;
-    onDelete?: (key: string) => void;
-    onClear?: () => void;
-}) => void;
-
 
 
 
@@ -188,316 +180,13 @@ export class TaskEngine {
         return (this.sessionManager as any)?.store?.prisma;
     }
 
-    private iterateMentalTargets(
-        ctx: TaskContext,
-        fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; vars: Record<string, unknown> }) => void
-    ): void {
-        const candidates: unknown[] = [
-            (ctx as any).__mental,
-            (ctx as any).M
-        ];
-
-        for (const mental of candidates) {
-            if (!mental || typeof mental !== 'object') continue;
-            const target = mental as Record<string, unknown>;
-            let memory = target.memory;
-            if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
-                memory = {};
-                target.memory = memory as Record<string, unknown>;
-            }
-            let vars = (memory as Record<string, unknown>).vars;
-            if (!vars || typeof vars !== 'object' || Array.isArray(vars)) {
-                vars = {};
-                (memory as Record<string, unknown>).vars = vars;
-            }
-            fn({ target, memory: memory as Record<string, unknown>, vars: vars as Record<string, unknown> });
-        }
-    }
-
-    private setNestedValueClone(obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> {
-        if (!path.includes('.')) {
-            return { ...obj, [path]: value };
-        }
-        const parts = path.split('.');
-        const clone = { ...obj };
-        let current = clone;
-        for (let i = 0; i < parts.length - 1; i++) {
-            const part = parts[i];
-            const existing = current[part];
-            if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
-                current[part] = {};
-            } else {
-                current[part] = { ...(existing as Record<string, unknown>) };
-            }
-            current = current[part] as Record<string, unknown>;
-        }
-        current[parts[parts.length - 1]] = value;
-        return clone;
-    }
-
-    private deleteNestedValueClone(obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } {
-        if (!path.includes('.')) {
-            if (!Object.prototype.hasOwnProperty.call(obj, path)) {
-                return { next: obj, changed: false };
-            }
-            const clone = { ...obj };
-            delete clone[path];
-            return { next: clone, changed: true };
-        }
-        const parts = path.split('.');
-        const clone = { ...obj };
-        let currentClone: Record<string, unknown> = clone;
-        let currentOrig: Record<string, unknown> | undefined = obj;
-        for (let i = 0; i < parts.length - 1; i++) {
-            const part = parts[i];
-            const nextOrig = currentOrig?.[part];
-            if (!nextOrig || typeof nextOrig !== 'object' || Array.isArray(nextOrig)) {
-                return { next: obj, changed: false };
-            }
-            const nextClone = { ...(nextOrig as Record<string, unknown>) };
-            currentClone[part] = nextClone;
-            currentClone = nextClone;
-            currentOrig = nextOrig as Record<string, unknown>;
-        }
-        const leafKey = parts[parts.length - 1];
-        if (!currentOrig || !Object.prototype.hasOwnProperty.call(currentOrig, leafKey)) {
-            return { next: obj, changed: false };
-        }
-        delete currentClone[leafKey];
-        return { next: clone, changed: true };
-    }
-
-    private syncWorkingVarIntoMental(ctx: TaskContext, key: string, value: unknown): void {
-        log.debug('syncWorkingVarIntoMental', { key, hasValue: value !== undefined });
-        this.iterateMentalTargets(ctx, ({ target, memory, vars }) => {
-            const nextVars = this.setNestedValueClone(vars, key, value);
-            memory.vars = nextVars;
-            target.vars = { ...nextVars };
-        });
-        try {
-            (ctx as any).__varsDirty = true;
-        } catch { /* noop */ }
-    }
-
-    private removeWorkingVarFromMental(ctx: TaskContext, key: string): void {
-        this.iterateMentalTargets(ctx, ({ target, memory, vars }) => {
-            const { next, changed } = this.deleteNestedValueClone(vars, key);
-            if (!changed) return;
-            memory.vars = next;
-            target.vars = { ...next };
-        });
-        try {
-            (ctx as any).__varsDirty = true;
-        } catch { /* noop */ }
-    }
-
-    private clearWorkingVarsInMental(ctx: TaskContext): void {
-        this.iterateMentalTargets(ctx, ({ target, memory }) => {
-            memory.vars = {};
-            target.vars = {};
-        });
-        try {
-            (ctx as any).__varsDirty = true;
-        } catch { /* noop */ }
-    }
-
-    private registerWorkingVarHooks(ctx: TaskContext, varsObject: unknown, varCache?: Map<string, unknown>): void {
-        const registerFn: WorkingVarHookRegistrarFn | undefined = (varsObject as any)?.__registerWorkingVarHooks;
-        const hasRegisterFn = typeof registerFn === 'function';
-        log.debug('registerWorkingVarHooks', { hasRegisterFn });
-        if (!hasRegisterFn) {
-            this.wrapLegacyWorkingVarsProxy(ctx, varsObject, varCache);
-            return;
-        }
-        registerFn({
-            onChange: (key, value) => {
-                if (varCache) {
-                    if (key.includes('.')) {
-                        const baseKey = key.split('.')[0];
-                        const existing = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                        varCache.set(baseKey, this.setNestedValueClone(existing, key.substring(key.indexOf('.') + 1), value));
-                    } else {
-                        varCache.set(key, value);
-                    }
-                }
-                this.syncWorkingVarIntoMental(ctx, key, value);
-            },
-            onDelete: key => {
-                if (varCache) {
-                    if (key.includes('.')) {
-                        const baseKey = key.split('.')[0];
-                        const existing = (varCache.get(baseKey) as Record<string, unknown>) || {};
-                        const { next, changed } = this.deleteNestedValueClone(existing, key.substring(key.indexOf('.') + 1));
-                        if (changed) {
-                            varCache.set(baseKey, next);
-                        }
-                    } else {
-                        varCache.delete(key);
-                    }
-                }
-                this.removeWorkingVarFromMental(ctx, key);
-            },
-            onClear: () => {
-                varCache?.clear();
-                this.clearWorkingVarsInMental(ctx);
-            }
-        });
-    }
-
-    private wrapLegacyWorkingVarsProxy(ctx: TaskContext, varsObject: unknown, varCache?: Map<string, unknown>): void {
-        if (!varsObject || typeof varsObject !== 'object') return;
-        const marker = '__a2aLegacyVarSyncWrapped';
-        if ((varsObject as Record<string, unknown>)[marker]) return;
-        if (!(varsObject as any).__varsId) {
-            (varsObject as any).__varsId = `vars-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        }
-
-        const mapLike = varsObject as Record<string, unknown> & {
-            set?: (key: string, value: unknown) => unknown;
-            delete?: (key: string) => unknown;
-            clear?: () => unknown;
-        };
-
-        const wrapKey = (key: string): { base: string; path?: string } => {
-            if (!key.includes('.')) return { base: key };
-            return { base: key.split('.')[0], path: key.substring(key.indexOf('.') + 1) };
-        };
-        const readFromVarCache = (key: string): { exists: boolean; value?: unknown } => {
-            if (!varCache) return { exists: false };
-            const { base, path } = wrapKey(key);
-            if (!varCache.has(base)) return { exists: false };
-            const baseValue = varCache.get(base);
-            if (!path) {
-                return { exists: true, value: baseValue };
-            }
-            if (!baseValue || typeof baseValue !== 'object') {
-                return { exists: false };
-            }
-            const segments = path.split('.');
-            let current: unknown = baseValue;
-            for (const segment of segments) {
-                if (!current || typeof current !== 'object' || !(segment in (current as Record<string, unknown>))) {
-                    return { exists: false };
-                }
-                current = (current as Record<string, unknown>)[segment];
-            }
-            return { exists: true, value: current };
-        };
-
-        if (typeof mapLike.set === 'function') {
-            const originalSet = mapLike.set.bind(varsObject);
-            mapLike.set = (key: string, value: unknown) => {
-                const result = originalSet(key, value);
-                if (varCache) {
-                    const { base, path } = wrapKey(key);
-                    if (path) {
-                        const existing = (varCache.get(base) as Record<string, unknown>) || {};
-                        varCache.set(base, this.setNestedValueClone(existing, path, value));
-                    } else {
-                        varCache.set(base, value);
-                    }
-                }
-                this.syncWorkingVarIntoMental(ctx, key, value);
-                return result;
-            };
-        }
-
-        if (typeof mapLike.delete === 'function') {
-            const originalDelete = mapLike.delete.bind(varsObject);
-            mapLike.delete = (key: string) => {
-                const result = originalDelete(key);
-                if (varCache) {
-                    const { base, path } = wrapKey(key);
-                    if (path) {
-                        const existing = (varCache.get(base) as Record<string, unknown>) || {};
-                        const { next, changed } = this.deleteNestedValueClone(existing, path);
-                        if (changed) varCache.set(base, next);
-                    } else {
-                        varCache.delete(base);
-                    }
-                }
-                this.removeWorkingVarFromMental(ctx, key);
-                return result;
-            };
-        }
-
-        if (typeof mapLike.clear === 'function') {
-            const originalClear = mapLike.clear.bind(varsObject);
-            mapLike.clear = () => {
-                const result = originalClear();
-                varCache?.clear();
-                this.clearWorkingVarsInMental(ctx);
-                return result;
-            };
-        }
-
-        const originalGet = typeof mapLike.get === 'function' ? mapLike.get.bind(varsObject) : undefined;
-        mapLike.get = (key: string) => {
-            if (varCache) {
-                const fromCache = readFromVarCache(key);
-                if (fromCache.exists) return fromCache.value;
-            }
-            return originalGet ? originalGet(key) : undefined;
-        };
-
-        const originalHas = typeof mapLike.has === 'function' ? mapLike.has.bind(varsObject) : undefined;
-        mapLike.has = (key: string) => {
-            if (varCache && readFromVarCache(key).exists) return true;
-            return originalHas ? originalHas(key) : false;
-        };
-
-        const originalEntries = typeof mapLike.entries === 'function' ? mapLike.entries.bind(varsObject) : undefined;
-        mapLike.entries = () => {
-            if (varCache) return varCache.entries();
-            return originalEntries ? originalEntries() : [][Symbol.iterator]();
-        };
-
-        const originalKeys = typeof mapLike.keys === 'function' ? mapLike.keys.bind(varsObject) : undefined;
-        mapLike.keys = () => {
-            if (varCache) return varCache.keys();
-            return originalKeys ? originalKeys() : [][Symbol.iterator]();
-        };
-
-        const originalValues = typeof mapLike.values === 'function' ? mapLike.values.bind(varsObject) : undefined;
-        mapLike.values = () => {
-            if (varCache) return varCache.values();
-            return originalValues ? originalValues() : [][Symbol.iterator]();
-        };
-
-        const originalForEach = typeof mapLike.forEach === 'function' ? mapLike.forEach.bind(varsObject) : undefined;
-        mapLike.forEach = (callback: (value: unknown, key: string, map: unknown) => void) => {
-            if (varCache) {
-                varCache.forEach((value, key) => {
-                    callback(value, key, mapLike);
-                });
-            } else if (originalForEach) {
-                originalForEach(callback);
-            }
-        };
-
-        const originalSizeDescriptor = Object.getOwnPropertyDescriptor(mapLike, 'size');
-        Object.defineProperty(mapLike, 'size', {
-            get: () => {
-                if (varCache) return varCache.size;
-                if (originalSizeDescriptor?.get) return originalSizeDescriptor.get.call(varsObject);
-                if (typeof (mapLike as any).__legacySize === 'number') return (mapLike as any).__legacySize;
-                return 0;
-            },
-            configurable: true
-        });
-
-        (mapLike as any)[marker] = true;
-    }
-
-
-
-    // Persist a child's minimal context (e.g., vars) so durable handlers can restore it later
-    public async persistChildContext(params: { tenantId: string; sessionId: string; agentId: string; vars?: Record<string, unknown> }): Promise<void> {
+    // Persist a child's minimal context so durable handlers can restore it later
+    public async persistChildContext(params: { tenantId: string; sessionId: string; agentId: string }): Promise<void> {
         if (!this.sessionManager) return;
-        const { tenantId, sessionId, agentId, vars } = params;
+        const { tenantId, sessionId, agentId } = params;
         const snap = await this.sessionManager.load(tenantId, sessionId);
         const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const M = ((base as any).M || { memory: { vars: {} } }) as any;
+        const M = ((base as Record<string, unknown>).M || {}) as MentalState;
         const nextM = { ...M };
         const snapshot = { ...base, M: nextM } as Record<string, unknown>;
         try {
@@ -508,30 +197,27 @@ export class TaskEngine {
     }
 
 
-    // Attach working memory var proxy to an existing context so that writes are CAS-persisted
+    // Attach WM and orchestration APIs for child session (flush, requestInput, sendTaskToAgent, etc.)
     public async attachWorkingMemory(ctx: TaskContext, tenantId: string, sessionId: string, agentId: string, loadedMentalState?: MentalState): Promise<void> {
         if (!this.sessionManager) return;
 
-        // ✅ FIX Bug #1 Issue 1A: Load existing vars from snapshot (like startTask does)
-        // Optimization: Use provided loadedMentalState to avoid redundant DB load
         let M = loadedMentalState;
         if (!M) {
             const snapshot = await this.sessionManager.load(tenantId, sessionId);
-            M = (snapshot?.snapshot as any)?.M;
+            M = (snapshot?.snapshot as Record<string, unknown>)?.M as MentalState | undefined;
             M = (ArtifactHydrationService.hydrateMentalStateArtifacts(
                 M as MentalState,
-                this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                this.getSessionStorePrisma() || (this.sessionManager as unknown as Record<string, unknown>)?.prisma,
                 tenantId,
                 'attachWorkingMemory'
-            ) as typeof M) || M;
+            ) as MentalState) || M;
         }
-        const currentVars = ((M?.memory as any)?.vars || {}) as Record<string, unknown>;
 
-        if (!(ctx as any).__ctxId) (ctx as any).__ctxId = `ctx-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        if (!(ctx as any).tenantId) (ctx as any).tenantId = tenantId;
-        if (!(ctx as any).agentId) (ctx as any).agentId = agentId;
-        if (M && !(ctx as any).__mental) {
-            (ctx as any).__mental = M;
+        if (!(ctx as Record<string, unknown>).__ctxId) (ctx as Record<string, unknown>).__ctxId = `ctx-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        if (!(ctx as Record<string, unknown>).tenantId) (ctx as Record<string, unknown>).tenantId = tenantId;
+        if (!(ctx as Record<string, unknown>).agentId) (ctx as Record<string, unknown>).agentId = agentId;
+        if (M && !(ctx as Record<string, unknown>).__mental) {
+            (ctx as Record<string, unknown>).__mental = M;
         }
 
         await this.apiBinder.attachOrchestrationAPIs(ctx, {
@@ -544,7 +230,7 @@ export class TaskEngine {
         });
     }
 
-    // Flush current MentalState (preferred) or fallback vars/llm state into snapshot
+    // Flush current MentalState and LLM state into snapshot (no vars; worldModel/scratch are persisted via M)
     public async flushContextSnapshot(tenantId: string, sessionId: string, agentId: string, ctx: TaskContext): Promise<void> {
         // Use scheduler to debounce/coalesce flushes
         const flushKey = `${tenantId}:${sessionId}`;
@@ -555,59 +241,17 @@ export class TaskEngine {
 
     private async _doFlushContextSnapshot(tenantId: string, sessionId: string, agentId: string, ctx: TaskContext): Promise<void> {
         if (!this.sessionManager) return;
-        let plainVars: Record<string, unknown> = {};
-        const sanitizeVars = (vars: Record<string, unknown>): Record<string, unknown> => {
-            if (!vars || typeof vars !== 'object') return {};
-            const safe: Record<string, unknown> = {};
-            for (const [k, v] of Object.entries(vars)) {
-                if (typeof v === 'function') continue;
-                safe[k] = v;
-            }
-            return safe;
-        };
-        try {
-            // Get database access for offloading artifacts
-            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
-            if (prisma) {
-                const cache = new AgentResultCache(prisma);
-                // Use proper deep serialization that handles/offloads artifacts
-                plainVars = (await serializeVars((ctx as any).vars || {}, cache, tenantId)) as Record<string, unknown>;
-            } else {
-                // Fallback for no-DB cases (mostly tests)
-                plainVars = JSON.parse(JSON.stringify((ctx as any).vars || {}));
-            }
-        } catch (err) {
-            try { plainVars = { ...(ctx as any).vars } as Record<string, unknown>; } catch { plainVars = {}; }
-            log.warn('Error serializing vars in flushContextSnapshot', { error: err instanceof Error ? err.message : String(err) });
-        }
-        try {
-            const pending = (plainVars as any)?.pendingArtifact;
-            log.debug('🧪 [WM VAR TRACE] flushContextSnapshot plainVars', {
-                keys: Object.keys(plainVars),
-                hasPendingArtifact: !!pending,
-                pendingKind: pending && (pending as any).kind
-            });
-        } catch { /* noop */ }
-        // Prepare MentalState if available or compose one minimally
         const baseSnap = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
-        let M: any = (baseSnap as any).M;
-        const mentalFromCtx = (() => { try { return (ctx as any).__mental; } catch { return undefined; } })();
-        if (!M && mentalFromCtx) { M = mentalFromCtx; }
-        if (!M) { try { const { initialM } = await import('../loop/init.js'); M = initialM(ctx); } catch { M = { memory: { vars: {}, sensory: {} }, goalState: { hierarchy: { nodes: {}, roots: [] } } } }; }
-        // Merge vars without dropping Learning's contributions
-        try {
-            const snapshotVars = sanitizeVars((((M.memory as any)?.vars) || {}) as Record<string, unknown>);
-            const mentalVars = sanitizeVars((((mentalFromCtx as any)?.memory as any)?.vars) || {} as Record<string, unknown>);
-            const mergedVars = { ...mentalVars, ...snapshotVars, ...sanitizeVars(plainVars) } as Record<string, unknown>;
-            M.memory = { ...(M.memory || {}), vars: mergedVars };
-            const pending = (mergedVars as any)?.pendingArtifact;
-            log.debug('🧪 [WM VAR TRACE] flushContextSnapshot merged M.memory.vars', {
-                keys: Object.keys(mergedVars),
-                hasPendingArtifact: !!pending,
-                pendingKind: pending && (pending as any).kind
-            });
-        } catch { /* noop */ }
-        // Attach LLM state into sensory
+        let M: MentalState | undefined = (baseSnap as Record<string, unknown>).M as MentalState | undefined;
+        const mentalFromCtx = (() => { try { return (ctx as Record<string, unknown>).__mental as MentalState | undefined; } catch { return undefined; } })();
+        if (!M && mentalFromCtx) M = mentalFromCtx;
+        if (!M) {
+            try { const { initialM } = await import('../loop/init.js'); M = initialM(ctx); } catch {
+                M = { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } } as MentalState;
+            }
+        }
+        if (!M) return;
+        // Attach LLM state
         let attachedLlmState: unknown = undefined;
         try {
             const llmAny = (ctx as any).llm as any;
@@ -644,11 +288,6 @@ export class TaskEngine {
             if (prisma) {
                 const cache = new AgentResultCache(prisma);
                 log.debug('DEBUG: Calling offloadArtifacts');
-                try {
-                    log.debug('🧪 [WM VAR TRACE] flushContextSnapshot -> offloadArtifacts', {
-                        pendingKindBeforeOffload: ((M.memory as any)?.vars as any)?.pendingArtifact?.kind
-                    });
-                } catch { /* noop */ }
                 // We need to offload artifacts from M and inbox
                 // Note: offloadArtifacts modifies the object in place for arrays/objects
                 // We are working on 'next' which is a copy of baseSnap + M, so mutation is safe for 'next',
@@ -782,47 +421,9 @@ export class TaskEngine {
                     await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: declaredAgentId, expectedWmVersion: session?.wmVersion ?? BigInt(0), snapshot: baseSnap });
                 }
             } catch { /* best-effort */ }
-            // One-time migration from legacy snapshot.vars
-            try {
-                const legacyVars = (baseSnap as any).vars as Record<string, unknown> | undefined;
-                const hasVars = M?.memory && (M.memory as any) && Object.keys(((M.memory as any) as any).vars || {}).length > 0;
-                if (legacyVars && !hasVars) {
-                    (M.memory as any) = { ...((M.memory as any) || {}), vars: { ...(legacyVars as Record<string, unknown>) } };
-                }
-            } catch { /* ignore migration errors */ }
             // Expose MentalState on context for in-turn cognitive operations (e.g., goals API)
-            (ctx as any).__mental = M;
-            // Build ctx.vars proxy over M.memory.vars with turn-level flush
-            const currentVars = ((M.memory as any)?.vars || {}) as Record<string, unknown>;
-            const varCache = new Map<string, unknown>(Object.entries(currentVars));
-            (ctx as any).__wmVersion = session?.wmVersion;
-            (ctx as any).__varsDirty = false;
-            const iterMentalTargets = (
-                fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
-            ): void => {
-                const candidates: unknown[] = [
-                    M,
-                    (ctx as any).M,
-                    (ctx as any).__mental
-                ];
-
-                for (const mental of candidates) {
-                    if (!mental || typeof mental !== 'object') continue;
-                    const target = mental as Record<string, unknown>;
-                    let memory = target.memory;
-
-                    if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
-                        memory = {};
-                        target.memory = memory as Record<string, unknown>;
-                    }
-
-                    const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
-                    fn({ target, memory: memory as Record<string, unknown>, existing });
-                }
-            };
-
-            // Legacy helper assignVarsIntoMental removed.
-            const assignVarsIntoMental = () => { };
+            (ctx as Record<string, unknown>).__mental = M;
+            (ctx as Record<string, unknown>).__wmVersion = session?.wmVersion;
 
             // Seed loop budget limits if provided in params.options
             if (params.options) {
@@ -850,42 +451,6 @@ export class TaskEngine {
             }
 
 
-            const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
-                const next = PathUtils.deletePathImmutable(obj, path);
-                return { next, changed: next !== obj };
-            };
-
-            const removeKeyFromMental = (key: string): void => {
-                iterMentalTargets(({ target, memory, existing }) => {
-                    let updated: Record<string, unknown> | undefined;
-
-                    if (key.includes('.')) {
-                        if (existing) {
-                            const next = PathUtils.deletePathImmutable(existing, key);
-                            if (next !== existing) updated = next;
-                        }
-                    } else {
-                        if (Object.prototype.hasOwnProperty.call(existing, key)) {
-                            updated = { ...existing };
-                            delete updated[key];
-                        }
-                    }
-
-                    if (updated) {
-                        (memory as Record<string, unknown>).vars = updated;
-                        target.vars = updated;
-                    }
-                });
-            };
-
-            // Helper function to handle nested paths
-            const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-                return PathUtils.setPathImmutable(obj, path, value);
-            };
-
-            const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
-                return PathUtils.getPath(obj, path);
-            };
             let cachedLlmState: unknown = undefined;
             const prepareLlmState = () => {
                 try {
@@ -909,7 +474,6 @@ export class TaskEngine {
 
                 // Logic to execute inside retry loop
                 const mutateFn = async (baseSnap: Record<string, unknown>) => {
-                    assignVarsIntoMental();
                     prepareLlmState();
                     const next = { ...baseSnap, M, ...(cachedLlmState ? { llmState: cachedLlmState } : {}) } as Record<string, unknown>;
 
@@ -921,20 +485,12 @@ export class TaskEngine {
                 };
 
                 try {
-                    try {
-                        log.debug('🧪 [WM VAR TRACE] flushMentalState invoked', {
-                            varsDirty: (ctx as any).__varsDirty,
-                            cacheKeys: Array.from(varCache.keys())
-                        });
-                    } catch { /* noop */ }
-
                     await this.snapshotRepo.saveWithRetry({
                         tenantId,
                         sessionId,
-                        agentId: (ctx as any).agentId || 'default',
+                        agentId: typeof (ctx as Record<string, unknown>).agentId === 'string' ? (ctx as Record<string, unknown>).agentId as string : 'default',
                         mutate: mutateFn
                     });
-                    (ctx as any).__varsDirty = false;
                 } catch (e) {
                     if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
                         try {
@@ -945,11 +501,9 @@ export class TaskEngine {
                             await this.snapshotRepo.saveWithRetry({
                                 tenantId,
                                 sessionId: sessionId,
-                                agentId: (ctx as any).agentId || 'default',
+                                agentId: typeof (ctx as Record<string, unknown>).agentId === 'string' ? (ctx as Record<string, unknown>).agentId as string : 'default',
                                 mutate: async (baseSnap) => {
-                                    // M is already pruned and updated locally
                                     const next = { ...baseSnap, M };
-                                    // Re-run offload? Pruned M might still have artifacts?
                                     if (prisma) {
                                         const cache = new AgentResultCache(prisma);
                                         await offloadArtifacts(next, cache, tenantId);
@@ -957,7 +511,6 @@ export class TaskEngine {
                                     return next;
                                 }
                             });
-                            (ctx as any).__varsDirty = false;
                         } catch (retryErr) {
                             // ...
                             throw retryErr;
@@ -1402,79 +955,12 @@ export class TaskEngine {
             ) as MentalState) || M;
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
-            const startTurnTotal = Number((baseNow as any)?.meta?.turn) || 0;
-            // Reattach working variables facade linked to this MentalState (resume path)
-            try {
-                const currentVars = ((M as any)?.memory?.vars || {}) as Record<string, unknown>;
-                const varCache = new Map<string, unknown>(Object.entries(currentVars));
-                const iterMentalTargets = (
-                    fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
-                ): void => {
-                    const candidates: unknown[] = [
-                        M,
-                        (ctx as any).M,
-                        (ctx as any).__mental
-                    ];
-
-                    for (const mental of candidates) {
-                        if (!mental || typeof mental !== 'object') continue;
-                        const target = mental as Record<string, unknown>;
-                        let memory = target.memory;
-
-                        if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
-                            memory = {};
-                            target.memory = memory as Record<string, unknown>;
-                        }
-
-                        const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
-                        fn({ target, memory: memory as Record<string, unknown>, existing });
-                    }
-                };
-
-                const assignVarsIntoMental = () => { };
-
-                const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
-                    const next = PathUtils.deletePathImmutable(obj, path);
-                    return { next, changed: next !== obj };
-                };
-
-                const removeKeyFromMental = (key: string): void => {
-                    iterMentalTargets(({ target, memory, existing }) => {
-                        let updated: Record<string, unknown> | undefined;
-
-                        if (key.includes('.')) {
-                            if (existing) {
-                                const next = PathUtils.deletePathImmutable(existing, key);
-                                if (next !== existing) updated = next;
-                            }
-                        } else {
-                            if (Object.prototype.hasOwnProperty.call(existing, key)) {
-                                updated = { ...existing };
-                                delete updated[key];
-                            }
-                        }
-
-                        if (updated) {
-                            (memory as Record<string, unknown>).vars = updated;
-                            target.vars = updated;
-                        }
-                    });
-                };
-
-                const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-                    return PathUtils.setPathImmutable(obj, path, value);
-                };
-
-                const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
-                    return PathUtils.getPath(obj, path);
-                };
-
-                // Legacy VarsSync.createVarsProxy removed.
-            } catch { /* noop */ }
+            const baseMeta = (baseNow as Record<string, unknown>)?.meta as Record<string, unknown> | undefined;
+            const startTurnTotal = Number(baseMeta?.turn ?? 0) || 0;
             // Resolve runMode for resume
             const manifestRunMode = plugin?.resolved.runtimeManifest.runMode;
-            const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
-            console.error(`[TaskEngine DEBUG] resumeInput: runMode=${runMode}, stage=${(M as any).memory?.vars?.stage}, turn=${(M as any).memory?.vars?.turn}`);
+            const rawRunMode = (ctx as Record<string, unknown>).runMode;
+            const runMode: 'loop' | 'legacy' = (rawRunMode === 'legacy' || rawRunMode === 'loop') ? rawRunMode : (manifestRunMode ?? 'loop');
 
             if (runMode === 'legacy') {
                 await this.executeTaskHandler(ctx);
@@ -2140,8 +1626,7 @@ export class TaskEngine {
                                 log.debug('Context extended with memory successfully', {
                                     parentTaskId,
                                     agentName,
-                                    hasMemory: !!(ctx as any).memory,
-                                    hasVars: !!(ctx as any).vars
+                                    hasMemory: !!(ctx as Record<string, unknown>).memory
                                 });
                             } catch (memoryError) {
                                 log.error('Failed to extend context with memory in handleChildCompleted', {
@@ -2156,8 +1641,7 @@ export class TaskEngine {
                             log.debug('Context already has memory setup, skipping extendContextWithMemory', {
                                 parentTaskId,
                                 agentName,
-                                hasMemory: !!(ctx as any).memory,
-                                hasVars: !!(ctx as any).vars
+                                hasMemory: !!(ctx as Record<string, unknown>).memory
                             });
                         }
 
@@ -2970,33 +2454,6 @@ export class TaskEngine {
             }
             try { console.log('[TaskEngine] restoreCtx LLM type', (ctx as any).llm?.constructor?.name); } catch { }
         } catch { /* ignore LLM reattach failures */ }
-        // Rehydrate vars from MentalState if present; fallback to legacy vars
-        try {
-            const M = (baseSnap as any).M as MentalState | undefined;
-            const vars = M ? (((M.memory as any)?.vars) || {}) : ((baseSnap as any)?.vars || {});
-            // Merge into facade instead of overwriting it
-            try { (ctx as any).vars.merge(vars); } catch { (ctx as any).vars = { ...(ctx as any).vars, ...vars }; }
-            try { console.log('[TaskEngine] restoreCtx: vars.jsonObject', (vars as any)?.jsonObject); } catch { }
-        } catch {
-            (ctx as any).vars = ((baseSnap as any)?.vars || {}) as Record<string, unknown>;
-        }
-        const ensureVarsFacade = () => {
-            const current = (ctx as any).vars as Record<string, unknown> | undefined;
-            if (current && typeof (current as any).get === 'function' && typeof (current as any).set === 'function') {
-                return;
-            }
-            const mentalMemory = ((ctx as any).__mental?.memory as Record<string, unknown>) || {};
-            const varsState = (mentalMemory.vars = { ...(mentalMemory.vars as Record<string, unknown> | undefined), ...(current || {}) });
-            (ctx as any).__mental = {
-                ...(ctx as any).__mental,
-                memory: {
-                    ...(mentalMemory),
-                    vars: varsState
-                }
-            };
-            // Legacy VarsSync.ensureVarsFacade removed
-        };
-        ensureVarsFacade();
         await this.apiBinder.attachOrchestrationAPIs(ctx, {
             tenantId,
             sessionId: taskId,
@@ -3016,7 +2473,20 @@ export class TaskEngine {
                 }
             };
             (ctx as any).thoughts = { add: async (t: any) => { try { await (ctx as any).addThought(String((t?.text ?? t) || '')); } catch { /* noop */ } } };
-            (ctx as any).world = { update: (fn: (wm: any) => void) => { try { fn(((ctx as any).__mental as any).worldModel); } catch { /* noop */ } }, patch: (p: Record<string, unknown>) => { try { Object.assign(((ctx as any).__mental as any).worldModel, p); } catch { /* noop */ } } };
+            // Read-only world: deep clone so no shared refs; caller cannot mutate MentalState.worldModel
+            const __mental = (ctx as Record<string, unknown>).__mental as { worldModel?: Record<string, unknown> } | undefined;
+            const wm = __mental?.worldModel;
+            (ctx as Record<string, unknown>).world = {
+                read: (): Readonly<Record<string, unknown>> => {
+                    if (!wm || typeof wm !== 'object') return Object.freeze({});
+                    try {
+                        const cloned = JSON.parse(JSON.stringify(wm)) as Record<string, unknown>;
+                        return Object.freeze(cloned);
+                    } catch {
+                        return Object.freeze({ ...wm });
+                    }
+                }
+            };
         } catch { /* noop */ }
         // LLM state restoration now happens immediately after LLM creation above (lines 1551-1564)
         // Ensure restored context can emit streaming events to the same task channel

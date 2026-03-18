@@ -10,7 +10,6 @@ export type PendingInputHandler = {
 
 
 export type SnapshotShape = {
-    vars?: Record<string, unknown>;
     pending?: {
         inputs?: Record<string, PendingInputHandler>;
     };
@@ -49,6 +48,10 @@ export function setPendingInputs(
     return next as Record<string, unknown>;
 }
 
+/**
+ * Apply a user-provided input for the given token. Delivered values are not persisted
+ * in the snapshot; the observation in the inbox is the source of truth for this turn.
+ */
 export function applyInputProvided(
     snapshot: Record<string, unknown>,
     token: string,
@@ -59,24 +62,19 @@ export function applyInputProvided(
         delete pending[token];
     }
     const s = snapshot as SnapshotShape;
-    const vars = { ...(s.vars || {}) } as Record<string, unknown>;
-    const inputs = (vars.__inputs as Record<string, unknown>) || {};
-    inputs[token] = input as unknown;
-    vars.__inputs = inputs;
-    const snapshotWithVars = { ...snapshot, vars } as SnapshotShape;
     const observation: Observation = {
         source: 'user',
         kind: 'input.provided',
         payload: { token, value: input },
         provenance: {
             ts: Date.now(),
-            turn: Number(snapshotWithVars.meta?.turn ?? 0) + 1,
+            turn: Number(s.meta?.turn ?? 0) + 1,
             id: token,
             toolId: 'user',
             correlationId: token
         }
     };
-    const nextSnapshot = setPendingInputs(snapshotWithVars as Record<string, unknown>, pending) as SnapshotShape;
+    const nextSnapshot = setPendingInputs(snapshot, pending) as SnapshotShape;
     const nextInbox = addObservationToInbox(nextSnapshot.inbox, observation);
     const next = { ...nextSnapshot, inbox: nextInbox } as Record<string, unknown>;
     return { next };

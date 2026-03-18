@@ -333,9 +333,6 @@ export class TaskExecutor {
             mNextEffective = pruneSnapshot(mNext);
         }
 
-        // Merge vars
-        mNextEffective = TaskExecutor.mergeVarsIntoMental(M, mNextEffective);
-
         // Merge Inbox (Lost Update Fix)
         const remoteInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
         const pendingChildren = env.pending?.children ?? {};
@@ -391,18 +388,6 @@ export class TaskExecutor {
             expectedWmVersion: expected,
             snapshot: next
         });
-    }
-
-    static mergeVarsIntoMental(source: MentalState, target: MentalState): MentalState {
-        try {
-            // we no longer merge vars.
-            // But we do ensure that top-level .vars (obsolete) is removed from the target
-            // if it somehow got there.
-            if ((target as any).vars) {
-                delete (target as any).vars;
-            }
-        } catch { /* noop */ }
-        return target;
     }
 
     private static determineTaskStatus(outcome: LoopOutcome, metrics: any, isStreaming: boolean): TaskStatus {

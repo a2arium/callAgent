@@ -408,13 +408,12 @@ The framework may provide `ctx.*` namespaces. They MUST NOT create a second cogn
 - only Learning writes it
 - Policy reads only it
 
-### Execution scratch
+### `ctx.world` (read-only)
 
-If `ctx.vars` exists, it is an Execution-only scratchpad:
+`ctx.world` exposes a **read-only** view of `MentalState.worldModel`:
 
-- non-persisted
-- not authoritative
-- MUST NOT influence Policy decisions
+- **`ctx.world.read()`** returns a deep read-only copy of the current world model (no mutation of `MentalState`).
+- There is no `ctx.world.update()` or `ctx.world.patch()`; only Learning may mutate `worldModel` via `MemoryWriter.world.set()`.
 
 ### Thoughts / telemetry
 

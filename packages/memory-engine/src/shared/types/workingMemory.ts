@@ -20,7 +20,6 @@ export type WorkingMemoryState = {
         reasoning?: string;
         timestamp: string
     }>;
-    variables: Record<string, unknown>;
     loadedLongTermMemories: Array<{
         source: string;
         key: string;
@@ -55,4 +54,5 @@ export type DecisionEntry = {
 };
 
 export type SerializedWorkingMemoryState = WorkingMemoryState;
+/** @deprecated Legacy vars proxy only; ctx.vars removed in 3.3.1 */
 export type WorkingVariables = Record<string, unknown>; 

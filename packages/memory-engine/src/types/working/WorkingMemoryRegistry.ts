@@ -92,7 +92,6 @@ export class WorkingMemoryRegistry implements WorkingMemoryBackend {
             } : null,
             thoughtChain: thoughts,
             decisions: {}, // TODO: Implement decision retrieval
-            variables: {}, // TODO: Implement variable retrieval
             loadedLongTermMemories: [],
             meta: {
                 lastUpdatedAt: new Date().toISOString(),

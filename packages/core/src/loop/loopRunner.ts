@@ -123,7 +123,7 @@ export async function runLoop<
                 }
             },
             procedural: { list: async () => (mState as any)?.memory?.longTerm?.procedural?.skills || [] },
-            world: { get: async () => (mState as any)?.worldModel },
+            world: { get: async () => mState.worldModel ?? {} },
             goals: { get: async () => (mState as any)?.goalState?.hierarchy || { nodes: {}, roots: [] } },
             policy: { getParams: async () => (mState as any)?.policyParams },
             reward: { getParams: async () => (mState as any)?.rewardParams },
@@ -236,7 +236,7 @@ export async function runLoop<
                 if (patches.proceduralReplace) {
                     (next as any).memory.longTerm.procedural = { skills: patches.proceduralReplace };
                 }
-                if (patches.worldReplace) (next as any).worldModel = patches.worldReplace;
+                if (patches.worldReplace) (next as MentalState).worldModel = patches.worldReplace;
                 if (patches.goalsReplace) (next as any).goalState = { ...(next as any).goalState, hierarchy: patches.goalsReplace };
                 if (patches.plansReplace) (next as any).plans = patches.plansReplace;
                 if (patches.planUpserts.size > 0) {
@@ -1103,13 +1103,6 @@ export async function runLoop<
 
 
     }
-
-    // DIAGNOSTIC: Log what runLoop is returning
-    const finalVars = Object.keys(((m as any)?.memory?.vars) || {});
-    log.debug('runLoop returning MentalState', {
-        varsCount: finalVars.length,
-        vars: finalVars
-    });
 
     return { M: m, outcome, metrics: timings.length ? { timings, rewards } : undefined };
 }
