@@ -21,7 +21,7 @@ A test should be able to access:
 - `trace.execAction`, `trace.execResult`
 - `trace.transition`
 - `trace.stageBefore`, `trace.stageAfter`
-- `trace.stageTransition`, `trace.stageInvariantChecks`, `trace.stageInvariantError` (if using StageFacade)
+- `trace.stageTransition`, `trace.stageInvariantChecks`, `trace.stageInvariantError` (if using StageFacade — typed as `InvariantErrorPayload` when present)
 - `trace.pendingAfter`
 - `trace.agentCardSource`, `trace.runtimeManifestSource`, `trace.agentCardHash`, `trace.runtimeManifestHash`
 
@@ -82,10 +82,11 @@ Include at least:
 
 Include at least:
 
-- awaiting state without a token is rejected
-- invalid source-kind observation is rejected
-- terminal state forbids additional awaits
-- StageFacade invariant errors (e.g., missing required tokens or forbidden state transitions) are surfaced correctly
+- awaiting state without a token is rejected → throws `InvariantError` with `detail.type === 'transition_invariant'`
+- invalid source-kind observation is rejected → injects `validation.failed` observation
+- terminal state forbids additional awaits → throws `InvariantError` with `detail.type === 'transition_invariant'`
+- StageFacade invariant errors (missing required tokens, forbidden state transitions) throw `InvariantError` with `detail.type === 'stage_invariant'` — assert via `e.invariant.detail.required` / `e.invariant.detail.forbidden`
+- module failures throw `ModuleExecutionError` with typed `module` field (e.g., `'perception'`, `'execution'`)
 - manifest versions and sources match test expectations
 
 ## TurnTrace assertions that catch “lost between turns” bugs
@@ -144,6 +145,22 @@ h.injectToolCompleted({
 });
 
 h.runTurn().expectComplete();
+```
+
+For invariant error assertions, the harness should support:
+
+```ts
+// Assert that a structured InvariantError was thrown
+h.expectInvariantError(e => {
+  expect(e.invariant.code).toBe('STAGE_REQUIRES_KEY');
+  expect(e.invariant.detail.type).toBe('stage_invariant');
+  expect(e.invariant.detail.required).toContain('fetch.token');
+});
+
+// Assert that a ModuleExecutionError was thrown
+h.expectModuleError(e => {
+  expect(e.module).toBe('perception');
+});
 ```
 
 The exact API is up to the framework, but the operations above must be possible.

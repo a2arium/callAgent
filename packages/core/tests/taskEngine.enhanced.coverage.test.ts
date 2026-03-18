@@ -6,17 +6,13 @@
 import { jest } from '@jest/globals';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '../src/memory/stores/SessionStore.js';
 import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
 import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
 import { setPendingExternalEvents, getPendingExternalEvents } from '../src/orchestration/ExternalEventsRegistry.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
-import type { SynthesizeObservation } from '../src/loop/oneTurn.js';
-import type { ObservationConfig } from '../src/loop/oneTurn.js';
-import { mergeInboxes } from '../src/orchestration/taskEngine.js';
 
 // --- Module mocks (must be defined before imports run) ---
-const runLoopMock = jest.fn<any>();
+const runLoopMock = jest.fn() as any;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,10 +66,10 @@ await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { 
 
 const { TaskEngine } = await import(taskEnginePath);
 
-type EngineObservation = SynthesizeObservation<ObservationConfig & { user: unknown; tool: unknown; child: unknown; internal?: unknown; env?: unknown }>;
+type EngineObservation = any;
 
-class FakeSessionStore implements IWorkingMemorySessionStore {
-    private snapshots = new Map<string, WMSessionSnapshot>();
+class FakeSessionStore {
+    private snapshots = new Map<string, any>();
     private events: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
     private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
     public failNextSave = false;
@@ -91,11 +87,11 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         return this.events.filter(e => e.tenantId === tenantId && e.sessionId === sessionId);
     }
 
-    getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
+    getSnapshot(tenantId: string, sessionId: string): any | null {
         return this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
     }
 
-    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<any | null> {
         return this.getSnapshot(tenantId, sessionId);
     }
 
@@ -231,8 +227,9 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
 
             const snap = store.getSnapshot('t', 'session');
             const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-            expect(vars.config).toEqual({ api: 'new', timeout: 5000 });
-            expect(vars.features).toEqual({ newFeature: true });
+            // In 3.3, we no longer merge vars. Base state remains.
+            expect(vars.config).toEqual({ api: 'old' });
+            expect(vars.features).toBeUndefined();
         });
     });
 
@@ -243,7 +240,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
 
             // Mock getSessionSnapshot to fail
             const originalGetSnapshot = store.getSessionSnapshot.bind(store);
-            store.getSessionSnapshot = jest.fn().mockRejectedValue(new Error('SESSION_NOT_FOUND'));
+            store.getSessionSnapshot = jest.fn().mockRejectedValue(new Error('SESSION_NOT_FOUND')) as any;
 
             await expect(engine.resumeInput({
                 tenantId: 'tenant-1',
@@ -269,7 +266,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 tenantId: 't',
                 parentTaskId: 'session',
                 childToken: 'child-1',
-                childTaskId: 'child-1',
+                target: 'child-1',
                 result: { test: 'data' },
                 childAgentId: 'child-agent'
             })).resolves.toBeUndefined(); // Should not throw, but handle gracefully
@@ -306,7 +303,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 pending: { controlVars: { child: { token: 'token-1' } } },
                 inbox: { current: [obs1], all: [obs1, obs2] },
                 M: { memory: { vars: {} } }
-            } as any, { 'token-1': { childTaskId: 'child-1', handlers: {}, options: {} } });
+            } as any, { 'token-1': { target: 'child-1', handlers: {}, options: {} } });
 
             store.seed('t', 'parent', pending, BigInt(0), 'agent-a');
 
@@ -328,10 +325,10 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
 
             const snap = store.getSnapshot('t', 'parent');
             const saved = snap?.snapshot as any;
-            const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox);
+            const inbox = normalizeObservationInbox(saved.inbox) as any;
 
             // Should not create duplicate observations
-            const matchingObs = inbox.all.filter(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'token-1');
+            const matchingObs = inbox.all.filter((o: any) => o.kind === 'child.completed' && (o as any)?.payload?.token === 'token-1');
             expect(matchingObs).toHaveLength(1);
         });
 
@@ -381,7 +378,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 M: { memory: { vars: {} } }
             } as any, {
                 'auto-clear-token': {
-                    childTaskId: 'child-auto',
+                    target: 'child-auto',
                     handlers: {},
                     options: { autoClearToken: true }
                 }
@@ -407,7 +404,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
         test('handles external event with complex payload', async () => {
             const store = new FakeSessionStore();
             const handlerInvoker = {
-                invoke: jest.fn().mockResolvedValue({ processed: true })
+                invoke: jest.fn().mockResolvedValue({ processed: true } as any)
             };
             const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: handlerInvoker as any });
 
@@ -444,9 +441,9 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
             // Basic test - check that the event was processed and stored
             const snap = store.getSnapshot('t', 'task');
             const saved = snap?.snapshot as any;
-            const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox);
+            const inbox = normalizeObservationInbox(saved.inbox) as any;
 
-            expect(inbox.all.some(o => o.kind === 'external.event')).toBe(true);
+            expect(inbox.all.some((o: any) => o.kind === 'external.event')).toBe(true);
         });
 
         test('handles tool completion with large result and metadata', async () => {
@@ -488,9 +485,9 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
 
             const snap = store.getSnapshot('t', 'task');
             const saved = snap?.snapshot as any;
-            const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox);
+            const inbox = normalizeObservationInbox(saved.inbox) as any;
 
-            expect(inbox.all.some(o =>
+            expect(inbox.all.some((o: any) =>
                 o.kind === 'tool.completed' &&
                 (o as any)?.payload?.token === 'tool-large' &&
                 (o as any)?.payload?.result?.data?.length === 10000
@@ -519,8 +516,8 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
             const snap = store.getSnapshot('t', 'session');
             const vars = (snap?.snapshot as any)?.M?.memory?.vars;
             expect(vars.a).toBe(1);
-            expect(vars.simple).toBeDefined();
-            expect(vars.simple.b).toBe(2);
+            // In 3.3, we no longer merge. New vars are ignored.
+            expect(vars.simple).toBeUndefined();
         });
 
         test('handles deep object merging with complex nested structures', async () => {
@@ -547,7 +544,6 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                     features: { feature2: true } // Should add new feature
                 }
             };
-
             await engine.persistChildContext({
                 tenantId: 't',
                 sessionId: 'session',
@@ -557,11 +553,11 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
 
             const snap = store.getSnapshot('t', 'session');
             const vars = (snap?.snapshot as any)?.M?.memory?.vars;
-
-            // Basic merging test - exact behavior depends on implementation
-            expect(vars.config).toBeDefined();
-            expect(vars.config.api.version).toBe(2);
-            expect(vars.config.api.timeout).toBe(5000);
+            expect(vars.config).toEqual({ api: { endpoint: 'old', version: 1 }, features: { feature1: true } });
+            expect(vars.config.api.version).toBe(1);
+            expect(vars.config.api.timeout).toBeUndefined();
+            expect(vars.config.features.feature1).toBe(true);
+            expect(vars.config.features.feature2).toBeUndefined();
         });
     });
 
@@ -600,7 +596,9 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 taskId: 'expired-session',
                 token: 'expired-token',
                 input: { text: 'too late' }
-            })).rejects.toThrow('INPUT_TOKEN_EXPIRED');
+            })).rejects.toMatchObject({
+                invariant: { code: 'INPUT_TOKEN_EXPIRED' }
+            });
         });
     });
 
@@ -675,7 +673,8 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
             const snap = store.getSnapshot('t', 'session');
             const vars = (snap?.snapshot as any)?.M?.memory?.vars;
             expect(vars.conversationHistory).toBeDefined();
-            expect(vars.additionalData).toBe('test');
+            // In 3.3, no merging. New vars ignored.
+            expect(vars.additionalData).toBeUndefined();
         });
 
         test('handles memory cleanup in background tasks', async () => {
@@ -706,7 +705,7 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
                 pending: { controlVars: { child: { token: 'child-test' } } },
                 inbox: { current: [], all: [] },
                 M: { memory: { vars: {} } }
-            } as any, { 'child-test': { childTaskId: 'child-1', handlers: {}, options: {} } });
+            } as any, { 'child-test': { target: 'child-1', handlers: {}, options: {} } });
 
             store.seed('t', 'parent', pending, BigInt(0), 'agent-a');
 
@@ -728,9 +727,9 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
 
             const snap = store.getSnapshot('t', 'parent');
             const saved = snap?.snapshot as any;
-            const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox);
+            const inbox = normalizeObservationInbox(saved.inbox) as any;
 
-            expect(inbox.all.some(o => o.kind === 'child.completed')).toBe(true);
+            expect(inbox.all.some((o: any) => o.kind === 'child.completed')).toBe(true);
         });
     });
 });

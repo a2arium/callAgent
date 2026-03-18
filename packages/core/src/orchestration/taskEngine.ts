@@ -7,7 +7,7 @@ import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { extendContextWithStreaming } from '../context/StreamingContext.js';
 import { SessionManager } from './SessionManager.js';
 import { InMemorySessionManager } from './InMemorySessionManager.js';
-import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engine';
+import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 import { decide } from './reducer.js';
 import { applyInputProvided, getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
 import type { DurableHandlerInvoker } from './DurableHandlerInvoker.js';
@@ -91,6 +91,9 @@ import { SnapshotRepository } from './persistence/SnapshotRepository.js';
 import { ApiBinder } from './api/ApiBinder.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { TurnRunner } from './TurnRunner.js';
+import { throwInvariantError } from '../utils/invariantError.js';
+import type { InvariantErrorCode, InvariantErrorDetail } from '../types/invariantError.js';
+
 // Legacy adapters to maintain internal calls if needed, or replace usages.
 
 // FlushScheduler extracted to ./engine/FlushScheduler.ts
@@ -495,8 +498,7 @@ export class TaskEngine {
         const snap = await this.sessionManager.load(tenantId, sessionId);
         const base = (snap?.snapshot as Record<string, unknown>) || {};
         const M = ((base as any).M || { memory: { vars: {} } }) as any;
-        const currentVars = ((M.memory?.vars) || {}) as Record<string, unknown>;
-        const nextM = { ...M, memory: { ...(M.memory || {}), vars: { ...currentVars, ...(vars || {}) } } };
+        const nextM = { ...M };
         const snapshot = { ...base, M: nextM } as Record<string, unknown>;
         try {
             await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId, expectedWmVersion: BigInt(0), snapshot });
@@ -746,244 +748,257 @@ export class TaskEngine {
             }
         } catch { /* ignore LLM attach errors */ }
 
-        // Load session-scoped snapshot if available (tenantId/sessionId assumed on ctx for now)
-        const tenantId = (ctx as any).tenantId || startTenantId || 'default';
-        const sessionId = task.id;
-        const session = await this.sessionManager?.load(tenantId, sessionId);
-
-
-        const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
-        let M: MentalState = (baseSnap as any).M as MentalState || initialM(ctx);
-
-        // Hydrate any persisted Artifact markers inside the mental state / vars
-        const mentalHydrationPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
-        M = (ArtifactHydrationService.hydrateMentalStateArtifacts(M, mentalHydrationPrisma, tenantId, 'startTask') as MentalState) || M;
-        // Ensure session agentId is correctly set for this task upfront
-        try {
-            const declaredAgentId = ((ctx as any).agentId || agentId || 'default') as string;
-            const currentAgentId = (session as any)?.agentId as string | undefined;
-            if (this.sessionManager && declaredAgentId && (!currentAgentId || currentAgentId === 'default')) {
-                await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: declaredAgentId, expectedWmVersion: session?.wmVersion ?? BigInt(0), snapshot: baseSnap });
-            }
-        } catch { /* best-effort */ }
-        // One-time migration from legacy snapshot.vars
-        try {
-            const legacyVars = (baseSnap as any).vars as Record<string, unknown> | undefined;
-            const hasVars = M?.memory && (M.memory as any) && Object.keys(((M.memory as any) as any).vars || {}).length > 0;
-            if (legacyVars && !hasVars) {
-                (M.memory as any) = { ...((M.memory as any) || {}), vars: { ...(legacyVars as Record<string, unknown>) } };
-            }
-        } catch { /* ignore migration errors */ }
-        // Expose MentalState on context for in-turn cognitive operations (e.g., goals API)
-        (ctx as any).__mental = M;
-        // Build ctx.vars proxy over M.memory.vars with turn-level flush
-        const currentVars = ((M.memory as any)?.vars || {}) as Record<string, unknown>;
-        const varCache = new Map<string, unknown>(Object.entries(currentVars));
-        (ctx as any).__wmVersion = session?.wmVersion;
-        (ctx as any).__varsDirty = false;
-        const iterMentalTargets = (
-            fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
-        ): void => {
-            const candidates: unknown[] = [
-                M,
-                (ctx as any).M,
-                (ctx as any).__mental
-            ];
-
-            for (const mental of candidates) {
-                if (!mental || typeof mental !== 'object') continue;
-                const target = mental as Record<string, unknown>;
-                let memory = target.memory;
-
-                if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
-                    memory = {};
-                    target.memory = memory as Record<string, unknown>;
-                }
-
-                const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
-                fn({ target, memory: memory as Record<string, unknown>, existing });
-            }
-        };
-
-        // Legacy helper assignVarsIntoMental removed.
-        const assignVarsIntoMental = () => { };
-
-        // Seed loop budget limits if provided in params.options
-        if (params.options) {
-            (ctx as any).options = { ...(ctx as any).options, ...params.options };
-
-            try {
-                if (typeof params.options.maxTurns === 'number') {
-                    // Update base snapshot meta immediately so it persists
-                    const meta = (baseSnap as any).meta || {};
-                    const budgets = meta.budgets || {};
-                    budgets.maxTurns = params.options.maxTurns;
-                    meta.budgets = budgets;
-                    (baseSnap as any).meta = meta;
-
-                    // Also seed initial mental state meta if needed
-                    const mMeta = (M as any).meta || {};
-                    const mBudgets = mMeta.budgets || {};
-                    mBudgets.maxTurns = params.options.maxTurns;
-                    mMeta.budgets = mBudgets;
-                    (M as any).meta = mMeta;
-                }
-            } catch (err) {
-                try { (ctx as any).logger?.warn?.('TaskEngine.startTask: Failed to inject options.maxTurns', { error: err }); } catch { }
-            }
+        // Choose execution path: loop-first (default) or durable handler
+        // Check manifest for runMode, then ctx, then default to 'loop'
+        const activeAgentId = (ctx as any).agentId || agentId;
+        const plugin = activeAgentId ? PluginManager.findAgent(activeAgentId) : null;
+        const manifestRunMode = plugin?.resolved.runtimeManifest.runMode;
+        const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
+        try { log.debug('Task execution start', { runMode, agentId: activeAgentId }); } catch { }
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log('[TaskEngine.startTask] About to execute, runMode=', runMode, 'isStreaming=', isStreaming);
         }
 
+        const tenantId = ((ctx as any).tenantId || startTenantId || 'default') as string;
+        const sessionId = task.id as string;
+        const traceparent = createTraceparent();
 
-        const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
-            const next = PathUtils.deletePathImmutable(obj, path);
-            return { next, changed: next !== obj };
-        };
+        try {
+            // Load session-scoped snapshot if available (tenantId/sessionId assumed on ctx for now)
+            const session = await this.sessionManager?.load(tenantId, sessionId) ?? null;
 
-        const removeKeyFromMental = (key: string): void => {
-            iterMentalTargets(({ target, memory, existing }) => {
-                let updated: Record<string, unknown> | undefined;
 
-                if (key.includes('.')) {
-                    if (existing) {
-                        const next = PathUtils.deletePathImmutable(existing, key);
-                        if (next !== existing) updated = next;
-                    }
-                } else {
-                    if (Object.prototype.hasOwnProperty.call(existing, key)) {
-                        updated = { ...existing };
-                        delete updated[key];
-                    }
-                }
+            const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
+            let M: MentalState = (baseSnap as any).M as MentalState || initialM(ctx);
 
-                if (updated) {
-                    (memory as Record<string, unknown>).vars = updated;
-                    target.vars = updated;
-                }
-            });
-        };
-
-        // Helper function to handle nested paths
-        const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
-            return PathUtils.setPathImmutable(obj, path, value);
-        };
-
-        const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
-            return PathUtils.getPath(obj, path);
-        };
-        let cachedLlmState: unknown = undefined;
-        const prepareLlmState = () => {
+            // Hydrate any persisted Artifact markers inside the mental state / vars
+            const mentalHydrationPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
+            M = (ArtifactHydrationService.hydrateMentalStateArtifacts(M, mentalHydrationPrisma, tenantId, 'startTask') as MentalState) || M;
+            // Ensure session agentId is correctly set for this task upfront
             try {
-                const llmAny = (ctx as any).llm as any;
-                const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+                const declaredAgentId = ((ctx as any).agentId || activeAgentId || 'default') as string;
+                const currentAgentId = (session as any)?.agentId as string | undefined;
+                if (this.sessionManager && declaredAgentId && (!currentAgentId || currentAgentId === 'default')) {
+                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: declaredAgentId, expectedWmVersion: session?.wmVersion ?? BigInt(0), snapshot: baseSnap });
+                }
+            } catch { /* best-effort */ }
+            // One-time migration from legacy snapshot.vars
+            try {
+                const legacyVars = (baseSnap as any).vars as Record<string, unknown> | undefined;
+                const hasVars = M?.memory && (M.memory as any) && Object.keys(((M.memory as any) as any).vars || {}).length > 0;
+                if (legacyVars && !hasVars) {
+                    (M.memory as any) = { ...((M.memory as any) || {}), vars: { ...(legacyVars as Record<string, unknown>) } };
+                }
+            } catch { /* ignore migration errors */ }
+            // Expose MentalState on context for in-turn cognitive operations (e.g., goals API)
+            (ctx as any).__mental = M;
+            // Build ctx.vars proxy over M.memory.vars with turn-level flush
+            const currentVars = ((M.memory as any)?.vars || {}) as Record<string, unknown>;
+            const varCache = new Map<string, unknown>(Object.entries(currentVars));
+            (ctx as any).__wmVersion = session?.wmVersion;
+            (ctx as any).__varsDirty = false;
+            const iterMentalTargets = (
+                fn: (args: { target: Record<string, unknown>; memory: Record<string, unknown>; existing: Record<string, unknown> }) => void
+            ): void => {
+                const candidates: unknown[] = [
+                    M,
+                    (ctx as any).M,
+                    (ctx as any).__mental
+                ];
 
-                if (historyMode !== 'stateless') {
-                    if (llmAny?.getMessages) {
-                        const messages = llmAny.getMessages(true);
-                        cachedLlmState = { messages } as unknown;
-                    } else if (llmAny?.exportState) {
-                        cachedLlmState = llmAny.exportState();
+                for (const mental of candidates) {
+                    if (!mental || typeof mental !== 'object') continue;
+                    const target = mental as Record<string, unknown>;
+                    let memory = target.memory;
+
+                    if (!memory || typeof memory !== 'object' || Array.isArray(memory)) {
+                        memory = {};
+                        target.memory = memory as Record<string, unknown>;
                     }
-                }
-            } catch { /* ignore */ }
-        };
-        const flushMentalState = async () => {
-            if (!this.snapshotRepo) return;
-            // Capture dependencies for mutate function
-            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
 
-            // Logic to execute inside retry loop
-            const mutateFn = async (baseSnap: Record<string, unknown>) => {
-                assignVarsIntoMental();
-                prepareLlmState();
-                const next = { ...baseSnap, M, ...(cachedLlmState ? { llmState: cachedLlmState } : {}) } as Record<string, unknown>;
-
-                if (prisma) {
-                    const cache = new AgentResultCache(prisma);
-                    await offloadArtifacts(next, cache, tenantId);
+                    const existing = ((memory as Record<string, unknown>).vars ?? {}) as Record<string, unknown>;
+                    fn({ target, memory: memory as Record<string, unknown>, existing });
                 }
-                return next;
             };
 
-            try {
-                try {
-                    log.debug('🧪 [WM VAR TRACE] flushMentalState invoked', {
-                        varsDirty: (ctx as any).__varsDirty,
-                        cacheKeys: Array.from(varCache.keys())
-                    });
-                } catch { /* noop */ }
+            // Legacy helper assignVarsIntoMental removed.
+            const assignVarsIntoMental = () => { };
 
-                await this.snapshotRepo.saveWithRetry({
-                    tenantId,
-                    sessionId,
-                    agentId: (ctx as any).agentId || 'default',
-                    mutate: mutateFn
-                });
-                (ctx as any).__varsDirty = false;
-            } catch (e) {
-                if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                    try {
-                        const prunedM = pruneSnapshot(M);
-                        // Update local M with pruned version so future saves use it
-                        M = prunedM;
-                        // Retry with pruned M
-                        await this.snapshotRepo.saveWithRetry({
-                            tenantId,
-                            sessionId,
-                            agentId: (ctx as any).agentId || 'default',
-                            mutate: async (baseSnap) => {
-                                // M is already pruned and updated locally
-                                const next = { ...baseSnap, M };
-                                // Re-run offload? Pruned M might still have artifacts?
-                                if (prisma) {
-                                    const cache = new AgentResultCache(prisma);
-                                    await offloadArtifacts(next, cache, tenantId);
-                                }
-                                return next;
-                            }
-                        });
-                        (ctx as any).__varsDirty = false;
-                    } catch (retryErr) {
-                        // ...
-                        throw retryErr;
+            // Seed loop budget limits if provided in params.options
+            if (params.options) {
+                (ctx as any).options = { ...(ctx as any).options, ...params.options };
+
+                try {
+                    if (typeof params.options.maxTurns === 'number') {
+                        // Update base snapshot meta immediately so it persists
+                        const meta = (baseSnap as any).meta || {};
+                        const budgets = meta.budgets || {};
+                        budgets.maxTurns = params.options.maxTurns;
+                        meta.budgets = budgets;
+                        (baseSnap as any).meta = meta;
+
+                        // Also seed initial mental state meta if needed
+                        const mMeta = (M as any).meta || {};
+                        const mBudgets = mMeta.budgets || {};
+                        mBudgets.maxTurns = params.options.maxTurns;
+                        mMeta.budgets = mBudgets;
+                        (M as any).meta = mMeta;
                     }
-                } else {
-                    throw e;
+                } catch (err) {
+                    try { (ctx as any).logger?.warn?.('TaskEngine.startTask: Failed to inject options.maxTurns', { error: err }); } catch { }
                 }
             }
-        };
-
-        // Legacy VarsSync.createVarsProxy and assignVarsIntoMental removed.
 
 
-        await this.apiBinder.attachOrchestrationAPIs(ctx, {
-            tenantId,
-            sessionId,
-            agentId: (ctx as any).agentId || 'default',
-            flushMentalState
-        });
+            const deleteNestedValue = (obj: Record<string, unknown>, path: string): { next: Record<string, unknown>; changed: boolean } => {
+                const next = PathUtils.deletePathImmutable(obj, path);
+                return { next, changed: next !== obj };
+            };
 
-        // Append start event and publish status via outbox; reducer entrypoint
-        const traceparent = createTraceparent();
-        await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.started', { taskId: sessionId, traceparent });
-        await this.sessionManager?.enqueueOutbox(tenantId, 'task.status', sessionId, { taskId: sessionId, status: { state: 'working', timestamp: new Date().toISOString() }, traceparent });
-        // Emit initial working status locally too so CLI can see the taskId
-        try {
-            eventBus.publish(taskChannel(sessionId), {
-                id: sessionId,
-                status: { state: 'working', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Task started: ${sessionId}` }] } },
-                final: false
-            } as any);
-        } catch { }
-        const initialWm = (session?.snapshot as Record<string, unknown>) || {};
-        const { wm: wmAfterStart } = decide(initialWm, { t: 'task.started' });
+            const removeKeyFromMental = (key: string): void => {
+                iterMentalTargets(({ target, memory, existing }) => {
+                    let updated: Record<string, unknown> | undefined;
 
-        // Extend the context with streaming capabilities
-        extendContextWithStreaming(ctx, isStreaming);
-        // carry runMode from agent manifest via streaming runner if present; default loop
-        // FIX: Don't prematurely default to 'loop' here, wait until we check the manifest
-        // if (!(ctx as any).runMode) { (ctx as any).runMode = 'loop'; }
+                    if (key.includes('.')) {
+                        if (existing) {
+                            const next = PathUtils.deletePathImmutable(existing, key);
+                            if (next !== existing) updated = next;
+                        }
+                    } else {
+                        if (Object.prototype.hasOwnProperty.call(existing, key)) {
+                            updated = { ...existing };
+                            delete updated[key];
+                        }
+                    }
 
-        try {
+                    if (updated) {
+                        (memory as Record<string, unknown>).vars = updated;
+                        target.vars = updated;
+                    }
+                });
+            };
+
+            // Helper function to handle nested paths
+            const setNestedValue = (obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> => {
+                return PathUtils.setPathImmutable(obj, path, value);
+            };
+
+            const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => {
+                return PathUtils.getPath(obj, path);
+            };
+            let cachedLlmState: unknown = undefined;
+            const prepareLlmState = () => {
+                try {
+                    const llmAny = (ctx as any).llm as any;
+                    const historyMode = (typeof llmAny?.getHistoryMode === 'function') ? llmAny.getHistoryMode() : 'full';
+
+                    if (historyMode !== 'stateless') {
+                        if (llmAny?.getMessages) {
+                            const messages = llmAny.getMessages(true);
+                            cachedLlmState = { messages } as unknown;
+                        } else if (llmAny?.exportState) {
+                            cachedLlmState = llmAny.exportState();
+                        }
+                    }
+                } catch { /* ignore */ }
+            };
+            const flushMentalState = async () => {
+                if (!this.snapshotRepo) return;
+                // Capture dependencies for mutate function
+                const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+
+                // Logic to execute inside retry loop
+                const mutateFn = async (baseSnap: Record<string, unknown>) => {
+                    assignVarsIntoMental();
+                    prepareLlmState();
+                    const next = { ...baseSnap, M, ...(cachedLlmState ? { llmState: cachedLlmState } : {}) } as Record<string, unknown>;
+
+                    if (prisma) {
+                        const cache = new AgentResultCache(prisma);
+                        await offloadArtifacts(next, cache, tenantId);
+                    }
+                    return next;
+                };
+
+                try {
+                    try {
+                        log.debug('🧪 [WM VAR TRACE] flushMentalState invoked', {
+                            varsDirty: (ctx as any).__varsDirty,
+                            cacheKeys: Array.from(varCache.keys())
+                        });
+                    } catch { /* noop */ }
+
+                    await this.snapshotRepo.saveWithRetry({
+                        tenantId,
+                        sessionId,
+                        agentId: (ctx as any).agentId || 'default',
+                        mutate: mutateFn
+                    });
+                    (ctx as any).__varsDirty = false;
+                } catch (e) {
+                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        try {
+                            const prunedM = pruneSnapshot(M);
+                            // Update local M with pruned version so future saves use it
+                            M = prunedM;
+                            // Retry with pruned M
+                            await this.snapshotRepo.saveWithRetry({
+                                tenantId,
+                                sessionId: sessionId,
+                                agentId: (ctx as any).agentId || 'default',
+                                mutate: async (baseSnap) => {
+                                    // M is already pruned and updated locally
+                                    const next = { ...baseSnap, M };
+                                    // Re-run offload? Pruned M might still have artifacts?
+                                    if (prisma) {
+                                        const cache = new AgentResultCache(prisma);
+                                        await offloadArtifacts(next, cache, tenantId);
+                                    }
+                                    return next;
+                                }
+                            });
+                            (ctx as any).__varsDirty = false;
+                        } catch (retryErr) {
+                            // ...
+                            throw retryErr;
+                        }
+                    } else {
+                        throw e;
+                    }
+                }
+            };
+
+            // Legacy VarsSync.createVarsProxy and assignVarsIntoMental removed.
+
+
+            await this.apiBinder.attachOrchestrationAPIs(ctx, {
+                tenantId,
+                sessionId,
+                agentId: (ctx as any).agentId || 'default',
+                flushMentalState
+            });
+
+            // Append start event and publish status via outbox; reducer entrypoint
+            await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.started', { taskId: sessionId, traceparent });
+            await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, { taskId: sessionId, status: { state: 'working', timestamp: new Date().toISOString() }, traceparent });
+            // Emit initial working status locally too so CLI can see the taskId
+            try {
+                eventBus.publish(taskChannel(sessionId), {
+                    id: sessionId,
+                    status: { state: 'working', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Task started: ${sessionId}` }] } },
+                    final: false
+                } as any);
+            } catch { }
+            const initialWm = (session?.snapshot as Record<string, unknown>) || {};
+            const { wm: wmAfterStart } = decide(initialWm, { t: 'task.started' });
+
+            // Extend the context with streaming capabilities
+            extendContextWithStreaming(ctx, isStreaming);
+            // carry runMode from agent manifest via streaming runner if present; default loop
+            // FIX: Don't prematurely default to 'loop' here, wait until we check the manifest
+            // if (!(ctx as any).runMode) { (ctx as any).runMode = 'loop'; }
+
+
             // Set initial status
             const initialStatus: TaskStatus = {
                 state: 'submitted',
@@ -1027,7 +1042,7 @@ export class TaskEngine {
             } else {
                 const taskResult = await this.turnRunner.runTurn(ctx, {
                     tenantId,
-                    sessionId: task.id,
+                    sessionId,
                     trigger: 'start',
                     isStreaming,
                     input: task.input
@@ -1047,12 +1062,12 @@ export class TaskEngine {
                         agentNode?.end(task.status);
                         if (agentNode) telemetry.endNode(agentNode);
                     } catch { }
-                    await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.completed', {
+                    await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                         taskId: sessionId,
                         artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
                         traceparent
                     });
-                    await this.sessionManager?.enqueueOutbox(tenantId, 'task.status', sessionId, {
+                    await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
                         taskId: sessionId,
                         status: { state: 'completed', timestamp: new Date().toISOString() },
                         final: true,
@@ -1071,7 +1086,7 @@ export class TaskEngine {
             if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
                 try { await flushMentalState(); } catch (e) {
                     if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: 'unknown' });
+                        await this.sessionManager!.appendEvent(tenantId as string, sessionId as string, 'wm.snapshot_limit', { size: 'unknown' });
                     } else { throw e; }
                 }
             }
@@ -1092,12 +1107,12 @@ export class TaskEngine {
             }
 
             // Append completed event and publish status via outbox
-            await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.completed', {
+            await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                 taskId: sessionId,
                 artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
                 traceparent
             });
-            await this.sessionManager?.enqueueOutbox(tenantId, 'task.status', sessionId, {
+            await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
                 taskId: sessionId,
                 status: { state: 'completed', timestamp: new Date().toISOString() },
                 final: true,
@@ -1137,12 +1152,12 @@ export class TaskEngine {
             }
 
             // Append failed event and publish status via outbox
-            await this.sessionManager?.appendEvent(tenantId, sessionId, 'task.failed', {
+            await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.failed', {
                 taskId: sessionId,
                 error: error instanceof Error ? error.message : String(error),
                 traceparent
             });
-            await this.sessionManager?.enqueueOutbox(tenantId, 'task.status', sessionId, {
+            await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
                 taskId: sessionId,
                 status: {
                     state: 'failed',
@@ -1181,15 +1196,33 @@ export class TaskEngine {
         // load snapshot
         const snap = await this.sessionManager?.load(tenantId, taskId);
         if (!snap) {
-            throw new Error('SESSION_NOT_FOUND');
+            throwInvariantError(
+                'SESSION_NOT_FOUND',
+                `Session ${taskId} not found`,
+                { type: 'session_config', reason: 'session_not_found', taskId }
+            );
         }
+
         const base = (snap.snapshot as Record<string, unknown>) || {};
         // Validate token existence/expiry
         try {
             const pend = getPendingInputs(base) as any;
             const entry = pend[token];
-            if (!entry) throw new Error('INPUT_TOKEN_NOT_FOUND');
-            if (entry.expiresAt && Date.parse(entry.expiresAt) < Date.now()) throw new Error('INPUT_TOKEN_EXPIRED');
+            if (!entry) {
+                throwInvariantError(
+                    'INPUT_TOKEN_NOT_FOUND',
+                    `Input token ${token} not found for session ${taskId}`,
+                    { type: 'token_validation', category: 'input', token, reason: 'missing', pendingSnapshot: pend }
+                );
+            }
+            if (entry.expiresAt && Date.parse(entry.expiresAt) < Date.now()) {
+                throwInvariantError(
+                    'INPUT_TOKEN_EXPIRED',
+                    `Input token ${token} expired for session ${taskId}`,
+                    { type: 'token_validation', category: 'input', token, reason: 'expired', pendingSnapshot: pend }
+                );
+            }
+
         } catch (e) {
             throw e instanceof Error ? e : new Error('INPUT_TOKEN_INVALID');
         }
@@ -1231,8 +1264,13 @@ export class TaskEngine {
                     const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
                     const pendingNow = getPendingInputs(baseL);
                     if (Object.keys(pendingNow).length >= maxPrompts) {
-                        throw new Error('LIMIT_MAX_PROMPTS_EXCEEDED');
+                        throwInvariantError(
+                            'LIMIT_MAX_PROMPTS_EXCEEDED',
+                            `Maximum outstanding prompts reached (${maxPrompts})`,
+                            { type: 'session_config', reason: 'limit_max_prompts_exceeded', limit: maxPrompts, actual: Object.keys(pendingNow).length }
+                        );
                     }
+
                     const snap = await this.sessionManager.load(tenantId, sessionId);
                     const base = (snap?.snapshot as Record<string, unknown>) || {};
                     const token = opts?.__existingToken || uuidv4();
@@ -2790,7 +2828,10 @@ export class TaskEngine {
             updateStatus: () => { },
             services: { get: () => undefined },
             getEnv: () => undefined,
-            throw: (code, message) => { throw new Error(`${code}: ${message}`); },
+            throw: (code, message, detail, context) => {
+                throwInvariantError(code as InvariantErrorCode, message, detail as InvariantErrorDetail, context);
+            },
+
             sendTaskToAgent: async () => { throw new Error('A2A not available in basic task engine'); },
             requestInput: async () => { throw new Error('requestInput not available in basic task engine'); },
             requestTool: async () => { throw new Error('requestTool not available in basic task engine'); },

@@ -52,7 +52,7 @@ describe('oneTurn module error handling', () => {
         const writer = baseWriter();
 
         await expect(oneTurn({ task: { id: 't', input: {} } } as any, env, m, modules as any, mem as any, writer as any))
-            .rejects.toThrow('Attention module failed: boom');
+            .rejects.toThrow('attention module failed: boom');
     });
 
     it('wraps perception errors', async () => {
@@ -66,7 +66,7 @@ describe('oneTurn module error handling', () => {
         const writer = baseWriter();
 
         await expect(oneTurn({ task: { id: 't', input: {} } } as any, env, m, modules as any, mem as any, writer as any))
-            .rejects.toThrow('Perception module failed: p!');
+            .rejects.toThrow('perception module failed: p!');
     });
 });
 
@@ -187,10 +187,10 @@ describe('oneTurn shield mapping and error handling', () => {
             transition: () => ({ kind: 'continue', observations: [] })
         };
         await expect(oneTurn({ task: { id: 't', input: {} } } as any, env, mPrev, badExecModules, mem as any, writer as any))
-            .rejects.toThrow('Execution module failed: exec boom');
+            .rejects.toThrow('execution module failed: exec boom');
 
         const badTransitionModules = { ...badExecModules, execution: async (a: ProposedAction) => ({ action: { kind: 'internal', done: true } as any, result: { status: 'ok', data: a } }), transition: () => { throw new Error('transition boom'); } } as any;
         await expect(oneTurn({ task: { id: 't', input: {} } } as any, env, mPrev, badTransitionModules, mem as any, writer as any))
-            .rejects.toThrow('Transition module failed: transition boom');
+            .rejects.toThrow('transition module failed: transition boom');
     });
 });

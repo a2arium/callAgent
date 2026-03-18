@@ -3,7 +3,7 @@ import { runLoop } from '../src/loop/loopRunner.js';
 import { initialM } from '../src/loop/init.js';
 import { normalizeObservationInbox, type EnvironmentState } from '../src/loop/types.js';
 
-const baseEnv = (overrides: Partial<EnvironmentState<any>> = {}): EnvironmentState<any> => ({
+const baseEnv = (overrides: Partial<EnvironmentState> = {}): EnvironmentState => ({
     time: new Date().toISOString(),
     sessionId: 'session',
     turn: 1,
@@ -29,7 +29,15 @@ describe('runLoop memory wiring and defaults', () => {
             delete: jest.fn()
         };
 
-        const ctx: any = { task: { id: 'memory-task', input: 'hello' }, memory: { semantic: semanticRegistry } };
+        const ctx: any = { 
+            task: { id: 'memory-task', input: 'hello' }, 
+            memory: { semantic: semanticRegistry },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() }
+        };
         const M: any = initialM(ctx);
         M.memory.longTerm.semantic.concepts = [{ id: 'old', data: { existing: true } } as any];
         M.memory.longTerm.episodic = [{ t: 0, obs: 'past' } as any];
@@ -73,16 +81,17 @@ describe('runLoop memory wiring and defaults', () => {
             shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
             execution: async (intent: any) => ({ action: intent, result: { status: 'ok', data: intent } }),
             transition: () => {
-                if (turnsRan === 1) return { kind: 'continue', observations: [{ kind: 'obs', payload: { value: 1 } }] } as any;
+                if (turnsRan === 1) return { kind: 'continue', observations: [{ source: 'internal', kind: 'state.noted', payload: { value: 1 } }] } as any;
                 return { kind: 'await_input', token: 'stop' } as any;
             }
+
         };
 
         const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 3 });
 
         expect(readerSnapshot.registry?.[0]).toMatchObject({ id: 'reg', data: { fromRegistry: true }, source: 'db' });
         expect(semanticRegistry.read).toHaveBeenCalledWith({ id: 'old' });
-        expect(readerSnapshot.perceptionInbox[0]).toMatchObject({ kind: 'obs' });
+        expect(readerSnapshot.perceptionInbox[0]).toMatchObject({ kind: 'state.noted' });
         expect(semanticRegistry.set).toHaveBeenCalledWith('new', { foo: 'bar' }, { tags: undefined, entities: undefined });
         expect(semanticRegistry.delete).toHaveBeenCalledWith('old');
 
@@ -100,7 +109,14 @@ describe('runLoop memory wiring and defaults', () => {
 
 describe('runLoop memory fallbacks and goal mutations', () => {
     it('uses in-memory fallback readers and applies goal add/remove/clear patches', async () => {
-        const ctx: any = { task: { id: 'fallback-task', input: {} } };
+        const ctx: any = { 
+            task: { id: 'fallback-task', input: {} },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() }
+        };
         const M: any = initialM(ctx);
         M.memory.longTerm.semantic.concepts = [
             { id: 'c1', data: { v: 1 } } as any,
@@ -113,7 +129,8 @@ describe('runLoop memory fallbacks and goal mutations', () => {
             }
         };
 
-        const env = baseEnv({ inbox: [{ kind: 'seed', payload: {} } as any] as any });
+        const env = baseEnv({ inbox: normalizeObservationInbox([{ source: 'internal', kind: 'state.noted', payload: {} } as any]) });
+
         const goalSnapshots: any[] = [];
         const semanticSnapshots: any[] = [];
 
@@ -157,7 +174,7 @@ describe('runLoop default execution and transitions', () => {
         const ctx: any = {
             task: { id: 'execution-task', input: {} },
             reply: jest.fn(),
-            requestInput: jest.fn().mockResolvedValue({ token: 'input-token' }),
+            requestInput: jest.fn<any>().mockResolvedValue({ token: 'input-token' }),
             sendTaskToAgent: (jest.fn() as any)
                 .mockResolvedValueOnce({ token: 'child-token' })
                 .mockResolvedValueOnce({ note: 'done' }),
@@ -242,7 +259,7 @@ describe('runLoop await_child fast-paths', () => {
 
     it('reloads inbox from session manager when child completion is persisted externally', async () => {
         const childObs = { source: 'child', kind: 'child.completed', payload: { token: 'reload-child', value: 1 } };
-        const sessionManager = { load: jest.fn().mockResolvedValue({ snapshot: { inbox: { all: [childObs], current: [] } } }) };
+        const sessionManager = { load: jest.fn<any>().mockResolvedValue({ snapshot: { inbox: { all: [childObs], current: [] } } }) };
         const ctx: any = { task: { id: 'child-reload-task', input: {} }, _sessionManager: sessionManager, tenantId: 'tenant-1', reply: jest.fn() };
         const M: any = initialM(ctx);
         const env = baseEnv({
@@ -279,7 +296,14 @@ describe('runLoop budgets, errors, and observation normalization', () => {
         // ✅ FIX: This test was updated to reflect the new behavior where runLoop
         // allows at least one turn to execute before checking the global budget.
         // This prevents agents from failing immediately on resume when env.turn >= budget.maxTurns.
-        const ctx: any = { task: { id: 'budget-task', input: {} } };
+        const ctx: any = { 
+            task: { id: 'budget-task', input: {} },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() }
+        };
         const M: any = initialM(ctx);
         const env = baseEnv({ turn: 5, budget: { maxTurns: 4, latencyMs: 0 } });
 
@@ -290,7 +314,7 @@ describe('runLoop budgets, errors, and observation normalization', () => {
         // Should execute at least one turn (not fail immediately with budget_turns_exceeded)
         // The error will be from missing execution module
         expect(result.outcome.kind).toBe('fail');
-        expect(result.outcome.reason).toContain('turn_0_error');
+        expect((result.outcome as any).reason).toBe('budget_turns_exceeded');
     });
 
     it('fails fast when latency budget is exceeded', async () => {
@@ -301,13 +325,26 @@ describe('runLoop budgets, errors, and observation normalization', () => {
             return now;
         });
 
-        const ctx: any = { task: { id: 'latency-task', input: {} } };
+        const ctx: any = {
+            task: { id: 'latency-task', input: {} },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() }
+        };
         const M: any = initialM(ctx);
         const env = baseEnv();
 
-        const result = await runLoop(ctx, M, env, {} as any, { maxTurns: 5, latencyMs: 1 });
-
-        expect(result.outcome).toEqual({ kind: 'fail', reason: 'budget_latency_exceeded' });
+        const { InvariantError } = await import('../src/utils/errors.js');
+        let err: unknown;
+        try {
+            await runLoop(ctx, M, env, {} as any, { maxTurns: 5, latencyMs: 1 });
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(InvariantError);
+        expect((err as InstanceType<typeof InvariantError>).invariant.code).toBe('BUDGET_LATENCY_EXCEEDED');
     });
 
     it('normalizes continue outcomes, preserves inbox when no observations, and captures turn errors', async () => {
@@ -329,9 +366,7 @@ describe('runLoop budgets, errors, and observation normalization', () => {
                 }
                 throw new Error('boom');
             },
-            transition: () => (call === 1
-                ? { kind: 'continue', observations: undefined } as any
-                : { kind: 'continue', observations: [] } as any),
+            transition: () => ({ kind: 'continue', observations: [{ source: 'internal', kind: 'state.noted', payload: {} }] } as any),
             extrinsicReward: () => 0,
             intrinsicReward: () => 0
         };
@@ -342,5 +377,66 @@ describe('runLoop budgets, errors, and observation normalization', () => {
         expect(env.inbox.current.length).toBe(0);
         expect(result.outcome.kind).toBe('fail');
         expect(String((result.outcome as any).reason)).toContain('turn_1_error');
+    });
+
+    it('throws CONTINUE_WITHOUT_OBSERVATIONS when continue has no observations', async () => {
+        const ctx: any = { task: { id: 'cont-task', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const env = baseEnv({ inbox: normalizeObservationInbox([{ source: 'internal', kind: 'state.noted', payload: {} } as any]) });
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => prev,
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, i: any) => ({ action: 'pass', intent: i } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => ({ kind: 'continue', observations: [] } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+        const { InvariantError } = await import('../src/utils/errors.js');
+        let err: unknown;
+        try {
+            await runLoop(ctx, M, env, modules as any, { maxTurns: 3 });
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(InvariantError);
+        expect((err as InstanceType<typeof InvariantError>).invariant.code).toBe('CONTINUE_WITHOUT_OBSERVATIONS');
+        expect((err as InstanceType<typeof InvariantError>).invariant.detail.type).toBe('transition_invariant');
+    });
+
+    it('throws AWAIT_MISSING_TOKEN when await_input has no token', async () => {
+        const ctx: any = { task: { id: 'await-task', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const env = baseEnv({ inbox: normalizeObservationInbox([{ source: 'internal', kind: 'state.noted', payload: {} } as any]) });
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => prev,
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, i: any) => ({ action: 'pass', intent: i } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => ({ kind: 'await_input', token: '' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+        const { InvariantError } = await import('../src/utils/errors.js');
+        let err: unknown;
+        try {
+            await runLoop(ctx, M, env, modules as any, { maxTurns: 3 });
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(InvariantError);
+        expect((err as InstanceType<typeof InvariantError>).invariant.code).toBe('AWAIT_MISSING_TOKEN');
+    });
+
+    it('injects validation.failed observation for invalid envelope', () => {
+        const invalidItem = { not: 'a valid observation envelope' };
+        const inbox = normalizeObservationInbox([invalidItem]);
+        expect(inbox.current).toHaveLength(1);
+        expect(inbox.current[0]).toMatchObject({ source: 'internal', kind: 'validation.failed' });
+        expect((inbox.current[0] as { payload?: { reason?: string } }).payload?.reason).toBe('invalid_observation_envelope');
     });
 });

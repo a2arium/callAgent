@@ -1,4 +1,6 @@
 import type { TaskContext } from '../shared/types/index.js';
+import { throwInvariantError } from '../utils/invariantError.js';
+import { EnvironmentState } from './types.js';
 
 export type StageInvariant = {
     required?: string[];
@@ -8,6 +10,22 @@ export type StageInvariant = {
 
 export type StageInvariants<TStage extends string> = Record<TStage, StageInvariant>;
 
+/**
+ * Internal interface for TaskContext that includes loop-related properties
+ */
+interface InternalTaskContext extends TaskContext {
+    controlVars?: Record<string, unknown> | Map<string, unknown>;
+    __activeLoopEnv?: EnvironmentState;
+    env?: {
+        control?: {
+            pendingSnapshot?: {
+                controlVars?: Record<string, unknown>;
+            };
+        };
+    };
+    M: any;
+}
+
 export function assertStageInvariants<TStage extends string>(
     ctx: TaskContext,
     stage: TStage,
@@ -16,22 +34,35 @@ export function assertStageInvariants<TStage extends string>(
     const inv = invariants[stage];
     if (!inv) return;
 
-    const controlVars = (ctx as any).controlVars
-        || (ctx as any).__activeLoopEnv?.pending?.controlVars
-        || (ctx as any).env?.control?.pendingSnapshot?.controlVars;
+    const iCtx = ctx as InternalTaskContext;
+    const controlVars = iCtx.controlVars
+        || iCtx.__activeLoopEnv?.pending?.controlVars
+        || iCtx.env?.control?.pendingSnapshot?.controlVars;
+
     const hasVar = (key: string): boolean => {
         if (controlVars) {
             if (typeof (controlVars as any).has === 'function') return (controlVars as any).has(key);
             if (Object.prototype.hasOwnProperty.call(controlVars, key)) return true;
         }
-        const memoryVars = (ctx.M as any)?.memory?.vars;
+        const memoryVars = (iCtx.M as any)?.memory?.vars;
         return memoryVars ? Object.prototype.hasOwnProperty.call(memoryVars, key) : false;
     };
+
+    const pendingSnapshot = iCtx.__activeLoopEnv?.pending;
 
     if (Array.isArray(inv.required)) {
         for (const key of inv.required) {
             if (!hasVar(key)) {
-                throw new Error(`[StageInvariant] ${String(stage)} requires control.${key}`);
+                throwInvariantError(
+                    'STAGE_REQUIRES_KEY',
+                    `[StageInvariant] ${String(stage)} requires control.${key}`,
+                    {
+                        type: 'stage_invariant',
+                        stage: String(stage),
+                        required: [key],
+                        pendingSnapshot
+                    }
+                );
             }
         }
     }
@@ -39,7 +70,16 @@ export function assertStageInvariants<TStage extends string>(
     if (Array.isArray(inv.forbidden)) {
         for (const key of inv.forbidden) {
             if (hasVar(key)) {
-                throw new Error(`[StageInvariant] ${String(stage)} forbids control.${key}`);
+                throwInvariantError(
+                    'STAGE_FORBIDS_KEY',
+                    `[StageInvariant] ${String(stage)} forbids control.${key}`,
+                    {
+                        type: 'stage_invariant',
+                        stage: String(stage),
+                        forbidden: [key],
+                        pendingSnapshot
+                    }
+                );
             }
         }
     }
@@ -48,4 +88,5 @@ export function assertStageInvariants<TStage extends string>(
         inv.validate(ctx);
     }
 }
+
 

@@ -165,7 +165,15 @@ export class TaskExecutor {
             LoopRegistry.__activeLoopContexts.set(sessionId, ctx);
             try {
                 const result = await runLoop(ctx, M, env, overrides, loopOpts);
+                if (process.env.DEBUG_BACKGROUND_TASKS) {
+                    console.log('[TaskExecutor] runLoop result:', {
+                        hasResult: !!result,
+                        hasM: !!result?.M,
+                        hasOutcome: !!result?.outcome
+                    });
+                }
                 mNext = result.M;
+
                 outcome = result.outcome;
                 metrics = result.metrics;
             } finally {
@@ -387,32 +395,11 @@ export class TaskExecutor {
 
     static mergeVarsIntoMental(source: MentalState, target: MentalState): MentalState {
         try {
-            // FIX: Strip function properties
-            const stripFunctions = (obj: Record<string, unknown>): Record<string, unknown> => {
-                const result: Record<string, unknown> = {};
-                for (const [key, value] of Object.entries(obj)) {
-                    if (typeof value !== 'function') {
-                        result[key] = value;
-                    }
-                }
-                return result;
-            };
-
-            const sourceVars = (((source as any)?.memory as any)?.vars) || {};
-            const targetVars = (((target as any)?.memory as any)?.vars) || {};
-
-            if ((sourceVars && typeof sourceVars === 'object') || (targetVars && typeof targetVars === 'object')) {
-                const mem = (((target as any).memory) || {}) as Record<string, unknown>;
-                const cleanSourceVars = stripFunctions(sourceVars as Record<string, unknown>);
-                const cleanTargetVars = stripFunctions(targetVars as Record<string, unknown>);
-                // Merge: source has ctx.vars changes, target has Learning/Loop changes
-                const merged = { ...cleanTargetVars, ...cleanSourceVars };
-                (target as any).memory = { ...mem, vars: merged };
-            }
-
-            // FIX: Clean top-level vars
-            if ((target as any).vars && typeof (target as any).vars === 'object') {
-                (target as any).vars = stripFunctions((target as any).vars as Record<string, unknown>);
+            // we no longer merge vars.
+            // But we do ensure that top-level .vars (obsolete) is removed from the target
+            // if it somehow got there.
+            if ((target as any).vars) {
+                delete (target as any).vars;
             }
         } catch { /* noop */ }
         return target;

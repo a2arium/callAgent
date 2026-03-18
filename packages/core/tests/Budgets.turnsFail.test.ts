@@ -2,7 +2,7 @@ import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('Budgets - turns fail', () => {
     it('returns fail when maxTurns is exceeded without terminal outcome', async () => {
-        const ctx: any = { 
+        const ctx: any = {
             reply: async () => { },
             task: { id: 'test-task-id' }
         };
@@ -15,11 +15,15 @@ describe('Budgets - turns fail', () => {
             policyParams: { theta: null, stochastic: false }
         };
         const env: any = { time: new Date().toISOString(), input: {}, pending: { inputs: {}, children: {}, tools: {}, groups: {} } };
-        const { outcome } = await runLoop(ctx, M, env, {
-            policy: () => ({ kind: 'internal', intent: 'noop' })
-        }, { maxTurns: 1 });
-        expect(outcome.kind).toBe('fail');
-        expect((outcome as any).reason).toBe('budget_turns_exceeded');
+        const { InvariantError } = await import('../src/utils/errors.js');
+        await expect(runLoop(ctx, M, env, {
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any)
+        }, { maxTurns: 1 })).rejects.toMatchObject({
+            invariant: { 
+                code: 'BUDGET_TURNS_EXCEEDED',
+                detail: { type: 'budget_exceeded', budget: 'turns' }
+            }
+        });
     });
 });
 

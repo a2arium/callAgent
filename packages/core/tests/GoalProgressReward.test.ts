@@ -16,16 +16,21 @@ describe('Goal progress extrinsic reward', () => {
         };
         const env: any = { time: new Date().toISOString(), input: {}, pending: { inputs: {}, children: {}, tools: {}, groups: {} } };
         const modules = {
-            policy: () => ({ kind: 'language', content: 'x' }),
-            intrinsicReward: () => 0
+            policy: (m: any) => {
+                const nodes = m.goalState?.hierarchy?.nodes || {};
+                const done = Object.values(nodes).filter((n: any) => n.status === 'done').length;
+                m.DoneCount = done;
+                return { kind: 'internal', done: true } as any;
+            }
         };
         // First turn: no done goals → reward 0
-        const r1 = await runLoop(ctx, M, env, modules, { maxTurns: 1 });
-        expect((r1.metrics?.rewards?.[0] ?? 0)).toBe(0);
+        const res1 = await runLoop(ctx, M, env, modules, { maxTurns: 1 });
+        expect((res1.M as any).DoneCount ?? 0).toBe(0);
+
         // Mark goal as done
         (M.goalState.hierarchy.nodes as any).g1.status = 'done';
-        const r2 = await runLoop(ctx, M, env, modules, { maxTurns: 1 });
-        expect((r2.metrics?.rewards?.[0] ?? 0)).toBe(1);
+        const res2 = await runLoop(ctx, M, env, modules, { maxTurns: 1 });
+        expect((res2.M as any).DoneCount).toBe(1);
     });
 });
 

@@ -9,6 +9,7 @@
 import { Observation, ObservationSchema } from '../types/observation.js';
 import { PlanState, PlanStep, Plan, PlanId } from '../types/plan.js';
 
+
 export type ObservationBySource<Source> = Extract<Observation, { source: Source }>;
 
 const findUser = (observations: Observation[]) =>
@@ -233,15 +234,26 @@ export const normalizeObservationInbox = (
             if (parsed.success) {
                 result.push(parsed.data);
             } else {
-                // We drop invalid envelope structures right at the generic boundary.
                 if (process.env.CALLAGENT_DEBUG_INBOX) {
                     // eslint-disable-next-line no-console
-                    console.warn('[normalizeObservationInbox] Dropping invalid observation payload envelope:', parsed.error, item);
+                    console.warn('[normalizeObservationInbox] Invalid observation envelope, injecting validation.failed:', parsed.error.message);
                 }
+                // Inject validation.failed observation per APLRET contract so Perception/Learning can handle it
+                result.push({
+                    source: 'internal',
+                    kind: 'validation.failed',
+                    payload: {
+                        reason: 'invalid_observation_envelope',
+                        zodError: parsed.error.format(),
+                        originalPayload: item
+                    },
+                    provenance: { ts: Date.now(), turn: 0 }
+                });
             }
         }
         return result;
     };
+
 
     if (Array.isArray(value)) {
         const arr = parseOrLog(value);

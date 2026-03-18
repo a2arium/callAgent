@@ -129,3 +129,7 @@ export { ConsoleProvider } from './telemetry/providers/ConsoleProvider.js';
 export { OpikProvider } from './telemetry/providers/OpikProvider.js';
 export { CallagentBridgeProvider } from './telemetry/providers/CallagentBridgeProvider.js';
 export type { TelemetryProvider } from './telemetry/Provider.js';
+// Error system exports
+export { FrameworkError, PluginError, ManifestError, TaskExecutionError, AgentError, ConfigurationError, InvariantError, ModuleExecutionError, FrameworkModule, isErrorType } from './utils/errors.js';
+export { throwInvariantError } from './utils/invariantError.js';
+export type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail, InvariantErrorPayload } from './types/invariantError.js';

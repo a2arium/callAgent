@@ -15,6 +15,7 @@ import { globalA2AService } from '../A2AService.js';
 import type { SessionManager } from '../SessionManager.js';
 import type { SnapshotRepository } from '../persistence/SnapshotRepository.js';
 import { TaskStateUtils } from '../utils/TaskStateUtils.js';
+import { throwInvariantError } from '../../utils/invariantError.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -138,8 +139,13 @@ export class ApiBinder {
 
             try { await ctx.reply(parts as any); } catch { /* best-effort */ }
 
-            if (Object.keys(pending).length >= 100) {
-                throw new Error('LIMIT_MAX_PROMPTS_EXCEEDED');
+            const maxPrompts = 100;
+            if (Object.keys(pending).length >= maxPrompts) {
+                throwInvariantError(
+                    'LIMIT_MAX_PROMPTS_EXCEEDED',
+                    `Maximum outstanding prompts reached (${maxPrompts})`,
+                    { type: 'session_config', reason: 'limit_max_prompts_exceeded', limit: maxPrompts, actual: Object.keys(pending).length }
+                );
             }
 
             if (!opts?.__existingToken) {
@@ -197,10 +203,26 @@ export class ApiBinder {
         };
 
         // requestTool implementation
-        (ctx as any).requestTool = async (toolName: string, args: unknown, opts?: { awaitCompletion?: boolean; onCompleted?: string; setToken?: boolean; setStage?: string }) => {
+        (ctx as any).requestTool = async (toolNameOrCall: string | any, argsOrOptions?: any, maybeOptions?: any) => {
+            let toolName: string;
+            let args: any;
+            let opts: any;
+
+            if (typeof toolNameOrCall === 'object' && toolNameOrCall !== null) {
+                // Object-based call format: requestTool({ name, input, options })
+                toolName = toolNameOrCall.name;
+                args = toolNameOrCall.input;
+                opts = toolNameOrCall.options;
+            } else {
+                // Positional call format: requestTool(toolName, args, opts)
+                toolName = toolNameOrCall;
+                args = argsOrOptions;
+                opts = maybeOptions;
+            }
+
             if (opts?.awaitCompletion === true) {
-                // Check if it's an MCP tool call
-                if (toolName.startsWith('mcp:')) {
+                // Check if it's an MCP tool call (format: mcp:serverName.toolName)
+                if (typeof toolName === 'string' && toolName.startsWith('mcp:')) {
                     const parts = toolName.slice(4).split('.');
                     if (parts.length >= 2) {
                         const serverName = parts[0];
@@ -218,7 +240,7 @@ export class ApiBinder {
             }
             // Async tool request path: enqueue and let background handler execute
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
-            const token = uuidv4();
+            const token = opts?.setToken && typeof opts.setToken === 'string' ? opts.setToken : uuidv4();
 
             try { await flushMentalState(); } catch { /* best-effort */ }
 
@@ -227,7 +249,7 @@ export class ApiBinder {
                 tenantId, sessionId,
                 agentId: (ctx as any).agentId || 'default',
                 mutate: (baseSnap) => {
-                    const toolsNow = getPendingTools(baseSnap) as any;
+                    const toolsNow = { ...getPendingTools(baseSnap) } as any;
                     toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
                     if (opts?.setToken || opts?.setStage) {
                         toolsNow[token].options = { setToken: opts.setToken, setStage: opts.setStage };
@@ -236,9 +258,6 @@ export class ApiBinder {
                 }
             });
             await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
-
-            // Auto-update optimization logic (skipped details for brevity but crucial for feature parity... I should include if replacing)
-            // ... (Auto token/stage update logic) ...
 
             (ctx as any).__wmSavedThisTurn = true;
 

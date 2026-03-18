@@ -10,7 +10,9 @@ import type { TaskContext, TaskInput, MessagePart, Artifact as ArtifactHandle } 
 import type { TaskStatus, Artifact as StreamArtifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../plugin/types.js';
 import { logger, withLoggingContext, type LoggerConfig } from '@a2arium/callagent-utils';
-import { AgentError, TaskExecutionError } from '../utils/errors.js';
+import { AgentError, InvariantError, ModuleExecutionError, TaskExecutionError } from '../utils/errors.js';
+import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../types/invariantError.js';
+import { throwInvariantError } from '../utils/invariantError.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
@@ -288,10 +290,9 @@ export async function runAgentWithStreaming(
         updateStatus: (state: string): void => { agentLogger.debug(`Agent Status Update: -> ${state}`); },
         services: { get: <T = unknown>(name: string): T | undefined => { agentLogger.warn(`services.get is stubbed`, { name }); return undefined; } },
         getEnv: (key: string, defaultValue?: string): string | undefined => process.env[key] ?? defaultValue,
-        throw: (code: string, message: string, details?: unknown): never => {
-            // Use the specific agentLogger here
-            agentLogger.error(`Agent threw structured error: [${code}] ${message}`, null, { details });
-            throw new AgentError(message, agentName, { code, details });
+        throw: (code: InvariantErrorCode, message: string, detail: InvariantErrorDetail, context?: InvariantErrorContext): never => {
+            agentLogger.error(`Agent threw structured error: [${code}] ${message}`, null, { detailType: detail.type });
+            throwInvariantError(code, message, detail, context);
         },
         recordUsage: (usage: unknown): void => {
             agentLogger.warn('recordUsage is stubbed in local runner', { usage });
@@ -569,6 +570,9 @@ export async function runAgentWithStreaming(
                     }
                 } catch { /* ignore double failure */ }
 
+                if (error instanceof InvariantError || error instanceof ModuleExecutionError) {
+                    throw error;
+                }
                 if (error instanceof AgentError) {
                     throw error;
                 }

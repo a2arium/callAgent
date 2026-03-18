@@ -1,19 +1,32 @@
-// Goals API operating on MentalState.goalState.
-// Mutates ctx.__mental in-place; engine will flush MentalState once per turn
-// or before await exits. Priorities are [0,1]. Hierarchy is normalized.
-
 import type { TaskContext } from '../shared/types/index.js';
 import type { GoalHierarchy, GoalId, GoalNode, GoalStatus, GoalType, MentalState } from './types.js';
+import { throwInvariantError } from '../utils/invariantError.js';
 
 function nowIso(): string { return new Date().toISOString(); }
-function ensureMental(ctx: TaskContext): MentalState { return ((ctx as unknown as any).__mental) as MentalState; }
+
+/**
+ * Internal interface for context access in goals module
+ */
+interface InternalContext extends TaskContext {
+    __mental: MentalState;
+}
+
+function ensureMental(ctx: TaskContext): MentalState { 
+    return (ctx as unknown as InternalContext).__mental; 
+}
 
 function validatePriority(p?: number): number {
     const v = typeof p === 'number' ? p : 1;
-    if (v < 0 || v > 1) throw new Error('GOAL_PRIORITY_OUT_OF_RANGE');
+    if (v < 0 || v > 1) {
+        throwInvariantError(
+            'GOAL_PRIORITY_OUT_OF_RANGE',
+            `Goal priority ${v} is out of range [0, 1]`,
+            { type: 'goal_invariant', reason: 'priority_out_of_range' }
+        );
+    }
     return v;
 }
-
+// ... rest of private helpers ...
 function upsertNode(h: GoalHierarchy, node: GoalNode, parentId?: GoalId, order?: number): void {
     h.nodes[node.id] = node;
     if (parentId) {
@@ -65,7 +78,13 @@ export async function updateGoal(
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     const existing = h.nodes[id];
-    if (!existing) throw new Error('GOAL_NOT_FOUND');
+    if (!existing) {
+        throwInvariantError(
+            'GOAL_NOT_FOUND',
+            `Goal ${id} not found`,
+            { type: 'goal_invariant', goalId: id, reason: 'goal_not_found' }
+        );
+    }
     const next: GoalNode = {
         ...existing,
         ...patch,
@@ -84,7 +103,13 @@ export async function moveGoal(
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     const existing = h.nodes[id];
-    if (!existing) throw new Error('GOAL_NOT_FOUND');
+    if (!existing) {
+        throwInvariantError(
+            'GOAL_NOT_FOUND',
+            `Goal ${id} not found`,
+            { type: 'goal_invariant', goalId: id, reason: 'goal_not_found' }
+        );
+    }
     const next = { ...existing, parentId, updatedAt: nowIso() } as GoalNode;
     h.nodes[id] = next;
     // root ordering maintenance when moving to/from root
@@ -113,10 +138,22 @@ export async function completeGoal(
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     const existing = h.nodes[id];
-    if (!existing) throw new Error('GOAL_NOT_FOUND');
+    if (!existing) {
+        throwInvariantError(
+            'GOAL_NOT_FOUND',
+            `Goal ${id} not found`,
+            { type: 'goal_invariant', goalId: id, reason: 'goal_not_found' }
+        );
+    }
     if (opts?.requireNoActiveChildren) {
         const hasActiveChild = Object.values(h.nodes).some(n => n.parentId === id && n.status === 'active');
-        if (hasActiveChild) throw new Error('GOAL_HAS_ACTIVE_CHILDREN');
+        if (hasActiveChild) {
+            throwInvariantError(
+                'GOAL_HAS_ACTIVE_CHILDREN',
+                `Goal ${id} has active children`,
+                { type: 'goal_invariant', goalId: id, reason: 'goal_has_active_children' }
+            );
+        }
     }
     h.nodes[id] = { ...existing, status: 'done', completedAt: nowIso(), updatedAt: nowIso() };
     if (opts?.cascadeChildren) {
@@ -132,7 +169,13 @@ export async function failGoal(ctx: TaskContext, id: GoalId): Promise<void> {
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     const existing = h.nodes[id];
-    if (!existing) throw new Error('GOAL_NOT_FOUND');
+    if (!existing) {
+        throwInvariantError(
+            'GOAL_NOT_FOUND',
+            `Goal ${id} not found`,
+            { type: 'goal_invariant', goalId: id, reason: 'goal_not_found' }
+        );
+    }
     h.nodes[id] = { ...existing, status: 'failed', updatedAt: nowIso() };
 }
 
@@ -148,5 +191,6 @@ export async function listGoals(
     if (filter?.type) nodes = nodes.filter(n => n.type === filter.type);
     return nodes;
 }
+
 
 

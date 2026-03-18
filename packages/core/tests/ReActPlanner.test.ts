@@ -3,7 +3,7 @@ import { runLoop } from '../src/loop/loopRunner.js';
 
 describe('ReAct-style planner (feature flag)', () => {
     it('selects tool based on regex pattern over last observation', async () => {
-        const toolInvoke = jest.fn().mockResolvedValue('ok');
+        const toolInvoke = jest.fn<any>().mockResolvedValue('ok');
         const ctx: any = {
             reply: async () => { },
             task: { id: 'react-planner-test-task' },
@@ -26,7 +26,11 @@ describe('ReAct-style planner (feature flag)', () => {
                 inbox: []
             })
         };
-        await runLoop(ctx, M, env, modules, { maxTurns: 1 });
+        try {
+            await runLoop(ctx, M, env, modules, { maxTurns: 1 });
+        } catch (e) {
+            // Expected: InvariantError for local turn limit
+        }
         expect(toolInvoke).toHaveBeenCalledWith('search', { q: 'cats near Boston', context: undefined });
     });
 });

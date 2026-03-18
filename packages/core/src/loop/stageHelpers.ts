@@ -1,9 +1,27 @@
 import type { TaskContext } from '../shared/types/index.js';
+import { throwInvariantError } from '../utils/invariantError.js';
+import { EnvironmentState } from './types.js';
 
 export type StageInvariants<St extends string> = Partial<Record<St, {
     require?: string[];
     forbid?: string[];
 }>>;
+
+/**
+ * Internal interface for TaskContext that includes loop-related properties
+ */
+interface InternalTaskContext extends TaskContext {
+    controlVars?: Record<string, unknown> | Map<string, unknown>;
+    __activeLoopEnv?: EnvironmentState;
+    env?: {
+        control?: {
+            pendingSnapshot?: {
+                controlVars?: Record<string, unknown>;
+            };
+        };
+    };
+    M: any;
+}
 
 export function createStageFacade<St extends string = string>(opts: {
     stageKey?: string;
@@ -17,10 +35,11 @@ export function createStageFacade<St extends string = string>(opts: {
     const rules = (opts.invariants ?? {}) as StageInvariants<St>;
 
     const readVar = (ctx: TaskContext, key: string): unknown => {
+        const iCtx = ctx as InternalTaskContext;
         // Prefer controlVars (control state), then fallback to legacy memory vars for compatibility
-        const controlVars = (ctx as any).controlVars
-            || (ctx as any).__activeLoopEnv?.pending?.controlVars
-            || (ctx as any).env?.control?.pendingSnapshot?.controlVars;
+        const controlVars = iCtx.controlVars
+            || iCtx.__activeLoopEnv?.pending?.controlVars
+            || iCtx.env?.control?.pendingSnapshot?.controlVars;
         if (controlVars) {
             if (typeof (controlVars as any).get === 'function') {
                 const val = (controlVars as any).get(key);
@@ -29,20 +48,21 @@ export function createStageFacade<St extends string = string>(opts: {
                 return (controlVars as any)[key];
             }
         }
-        const memoryVars = (ctx.M as any)?.memory?.vars;
+        const memoryVars = (iCtx.M as any)?.memory?.vars;
         return memoryVars ? (memoryVars as Record<string, unknown>)[key] : undefined;
     };
 
     const setControlVar = (ctx: TaskContext, key: string, value: unknown): void => {
+        const iCtx = ctx as InternalTaskContext;
         // Update local controlVars bag
-        const existing = (ctx as any).controlVars;
+        const existing = iCtx.controlVars;
         if (existing && typeof (existing as any).set === 'function') {
             (existing as any).set(key, value);
         } else {
-            (ctx as any).controlVars = { ...(typeof existing === 'object' ? existing : {}), [key]: value };
+            iCtx.controlVars = { ...(typeof existing === 'object' ? existing : {}), [key]: value };
         }
         // Mirror into active loop env pending.controlVars when present
-        const env = (ctx as any).__activeLoopEnv;
+        const env = iCtx.__activeLoopEnv;
         if (env) {
             env.pending = env.pending || { inputs: {}, children: {}, tools: {}, groups: {} };
             env.pending.controlVars = { ...(env.pending.controlVars || {}), [key]: value };
@@ -54,12 +74,37 @@ export function createStageFacade<St extends string = string>(opts: {
         ?? (initial as St));
 
     const assertStage = (ctx: TaskContext, s: St): void => {
+        const iCtx = ctx as InternalTaskContext;
         const r = (rules[s] || {}) as { require?: string[]; forbid?: string[] };
+        const pendingSnapshot = iCtx.__activeLoopEnv?.pending;
+
         for (const k of r.require ?? []) {
-            if (readVar(ctx, k) === undefined) throw new Error(`[invariant] ${s} requires ${k}`);
+            if (readVar(ctx, k) === undefined) {
+                throwInvariantError(
+                    'STAGE_REQUIRES_KEY',
+                    `[invariant] ${s} requires ${k}`,
+                    {
+                        type: 'stage_invariant',
+                        stage: s,
+                        required: [k],
+                        pendingSnapshot
+                    }
+                );
+            }
         }
         for (const k of r.forbid ?? []) {
-            if (readVar(ctx, k) !== undefined) throw new Error(`[invariant] ${s} forbids ${k}`);
+            if (readVar(ctx, k) !== undefined) {
+                throwInvariantError(
+                    'STAGE_FORBIDS_KEY',
+                    `[invariant] ${s} forbids ${k}`,
+                    {
+                        type: 'stage_invariant',
+                        stage: s,
+                        forbidden: [k],
+                        pendingSnapshot
+                    }
+                );
+            }
         }
     };
 
@@ -82,4 +127,5 @@ export function createStageFacade<St extends string = string>(opts: {
 
     return { getStage, setStage, assertStage };
 }
+
 

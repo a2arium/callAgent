@@ -15,6 +15,9 @@ import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
+import { throwInvariantError } from '../utils/invariantError.js';
+import { InvariantError } from '../utils/errors.js';
+
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -312,7 +315,7 @@ export async function runLoop<
                 episodic.push(event);
                 ((next as any).memory.longTerm as any).episodic = episodic;
                 (writer as any).episodic?.append?.(event);
-                
+
                 // Learning: Single Writer for M.plans
                 const internal = (obs as any).internal?.();
                 if (internal) {
@@ -577,7 +580,19 @@ export async function runLoop<
                     obs.push({ source: 'internal', kind: 'plan.step.updated', payload: data.planStepUpdated });
                 }
 
+                if (obs.length === 0) {
+                    obs.push({
+                        source: 'internal',
+                        kind: 'state.noted',
+                        payload: {
+                            intent: (action as any).intent || action.kind,
+                            reason: 'continue_implicit'
+                        }
+                    });
+                }
+
                 return { kind: 'continue', observations: obs } as TransitionOut;
+
             }
 
             // Error path
@@ -664,31 +679,22 @@ export async function runLoop<
 
         // Current turn number for logging and state
         const turn = (env as any).turn;
-
-        // ✅ FIX: Check global budget from env AFTER at least one turn has been attempted
-        // This ensures that resumed agents get a chance to execute even if env.turn >= budget.maxTurns
-        // The global budget should be checked on SUBSEQUENT iterations, not the first one
-        const globalMaxTurns = (env as any).budget?.maxTurns;
-        if (turnIdx > 0 && typeof globalMaxTurns === 'number' && turn > globalMaxTurns) {
-            log.debug('🔍 DEBUG: Global budget check triggered', {
-                taskId,
-                runId,
-                envTurn: turn,
-                globalMaxTurns,
-                turnIdx
-            });
-            outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
-            break;
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log(`[runLoop] Iteration ${turnIdx}: env.turn=${(env as any).turn}, turn scope variable=${turn}`);
         }
+
 
         // Update logging context with current turn number
         updateLoggingContext({ turn });
 
         // 🔍 DEBUG: Log each iteration
-        if (opts.latencyMs && Date.now() - start > opts.latencyMs) {
-            console.log(`[LoopRunner] ⏰ Latency budget exceeded! Limit: ${opts.latencyMs}ms, Elapsed: ${Date.now() - start}ms`);
-            outcome = { kind: 'fail', reason: 'budget_latency_exceeded' };
-            break;
+        if (opts.latencyMs != null && Date.now() - start > opts.latencyMs) {
+            const elapsed = Date.now() - start;
+            throwInvariantError(
+                'BUDGET_LATENCY_EXCEEDED',
+                `Latency budget exceeded: limit ${opts.latencyMs}ms, elapsed ${elapsed}ms`,
+                { type: 'budget_exceeded', budget: 'latency', limit: opts.latencyMs, actual: elapsed }
+            );
         }
 
         // Create explicit TurnNode for this iteration
@@ -821,6 +827,15 @@ export async function runLoop<
             const observations = Array.isArray((outcome as any).observations)
                 ? ((outcome as any).observations as Observation[])
                 : [];
+
+            if (outcome.kind === 'continue' && observations.length === 0) {
+                throwInvariantError(
+                    'CONTINUE_WITHOUT_OBSERVATIONS',
+                    'Continue outcome requires at least one observation',
+                    { type: 'transition_invariant', transitionKind: 'continue', reason: 'empty_observations', pendingSnapshot: env.pending }
+                );
+            }
+
             if (observations.length > 0) {
                 inbox.all.push(...observations);
                 inbox.current = [...observations];
@@ -830,10 +845,9 @@ export async function runLoop<
                 // Perception is responsible for filling them.
                 env.inbox.current = [];
             }
-            // If observations is empty, we PRESERVE inbox.current from previous turn
-            // unless it's a specific outcome like 'continue' that explicitly clears it.
 
-            if (step.timings) timings.push(step.timings);
+
+            timings.push(step.timings || {});
             rewards.push(step.reward || 0);
 
             // Update control snapshot for downstream modules
@@ -844,12 +858,15 @@ export async function runLoop<
                 };
             } catch { /* noop */ }
         } catch (error) {
+            if (error instanceof InvariantError) throw error;
             console.error(`[LoopRunner] 🛑 FATAL: Turn ${turn} failed with exception!`, error);
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {
                 kind: 'fail',
                 reason: `turn_${turnIdx}_error: ${error instanceof Error ? error.message : String(error)}`
             };
+            // Hygiene: clear current inbox on fatal error to avoid leaking state to next run
+            env.inbox.current = [];
             if (iterationTurnNode) {
                 try {
                     iterationTurnNode.fail(error instanceof Error ? error : new Error(String(error)));
@@ -1014,37 +1031,77 @@ export async function runLoop<
 
                     // Convert await_tool to continue so loop proceeds
                     outcome = { kind: 'continue', observations: [] } as TransitionOut;
-                    continue;
                 }
             }
 
-            log.debug('🔍 DEBUG: Loop stopping (non-continue outcome)', {
-                taskId,
-                runId,
-                loopCounter: turnIdx,
-                envTurn: turn,
-                outcomeKind: outcome.kind,
-                hasToken: !!(outcome as any).token
-            });
-            break;
+            // Transition invariant enforcement: await_* must have token; terminal must have no pending
+            if (outcome.kind !== 'continue') {
+                if (outcome.kind === 'await_input' || outcome.kind === 'await_tool' || outcome.kind === 'await_child') {
+                    const token = (outcome as { token?: string }).token;
+                    if (typeof token !== 'string' || token.trim() === '') {
+                        throwInvariantError(
+                            'AWAIT_MISSING_TOKEN',
+                            `Transition ${outcome.kind} requires a non-empty token`,
+                            { type: 'transition_invariant', transitionKind: outcome.kind, reason: 'missing_token', pendingSnapshot: env.pending }
+                        );
+                    }
+                }
+                if (outcome.kind === 'complete' || outcome.kind === 'fail') {
+                    const p = env.pending;
+                    const hasPending =
+                        (p?.inputs && Object.keys(p.inputs).length > 0) ||
+                        (p?.children && Object.keys(p.children).length > 0) ||
+                        (p?.tools && Object.keys(p.tools).length > 0) ||
+                        (p?.groups && Object.keys(p.groups).length > 0);
+                    if (hasPending) {
+                        throwInvariantError(
+                            'TERMINAL_WITH_PENDING',
+                            'Terminal outcome (complete/fail) not allowed while pending inputs, tools, or children exist',
+                            { type: 'transition_invariant', transitionKind: outcome.kind, reason: 'pending_await_exists', pendingSnapshot: p }
+                        );
+                    }
+                }
+            }
+
+            // If AFTER sync checks outcome is STILL not continue, we stop.
+            if (outcome.kind !== 'continue') {
+                log.debug('🔍 DEBUG: Loop stopping (non-continue outcome)', {
+                    taskId,
+                    runId,
+                    loopCounter: turnIdx,
+                    envTurn: turn,
+                    outcomeKind: outcome.kind,
+                    hasToken: !!(outcome as any).token
+                });
+                break;
+            }
         }
 
-        if (turnIdx === maxTurns - 1) {
-            // 🔍 DEBUG: Log budget check
-            log.debug('🔍 DEBUG: Budget check triggered', {
-                taskId,
-                runId,
-                loopCounter: turnIdx,
-                envTurn: turn,
-                maxTurns,
-                condition: `${turnIdx} === ${maxTurns} - 1`
-            });
+        // --- BUDGET CHECK FOR NEXT TURN ---
+        const globalMaxTurns = (env as any).budget?.maxTurns;
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            console.log(`[runLoop] Budget check: turn=${turn}, globalMaxTurns=${globalMaxTurns}, typeof=${typeof globalMaxTurns}`);
+        }
+        if (typeof globalMaxTurns === 'number' && turn >= globalMaxTurns) {
+            log.debug('🔍 DEBUG: Global budget check triggered', { taskId, runId, turn, globalMaxTurns });
             if (process.env.DEBUG_BACKGROUND_TASKS) {
-                console.log(`[runLoop] FAILING at turn ${turnIdx} === ${maxTurns} - 1: budget_turns_exceeded`);
+                console.log(`[runLoop] budget_turns_exceeded hit! breaking loop`);
             }
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
             break;
         }
+
+        if (turnIdx === maxTurns - 1) {
+            log.debug('🔍 DEBUG: Local budget check triggered', { taskId, runId, turnIdx, maxTurns });
+            throwInvariantError(
+                'BUDGET_TURNS_EXCEEDED',
+                `Loop budget exceeded: maximum of ${maxTurns} turns reached`,
+                { type: 'budget_exceeded', budget: 'turns', limit: maxTurns, actual: turnIdx + 1 }
+            );
+        }
+
+
+
     }
 
     // DIAGNOSTIC: Log what runLoop is returning

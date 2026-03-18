@@ -23,22 +23,24 @@ const a2aPath = path.resolve(__dirname, '../src/orchestration/A2AService.ts');
 const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts');
 
 // Mock dependencies
-const runLoopMock = jest.fn();
+const runLoopMock = jest.fn() as any;
 await jest.unstable_mockModule(loopRunnerPath, () => ({
     runLoop: (...args: any[]) => runLoopMock(...args)
 }));
-
+const { runLoop } = await import(loopRunnerPath) as any;
 await jest.unstable_mockModule(a2aPath, () => ({
     globalA2AService: {
-        sendTaskToAgent: jest.fn(),
-        findLocalAgent: jest.fn().mockResolvedValue({
+        sendTaskToAgent: jest.fn() as any,
+        handleEvent: jest.fn() as any,
+        findLocalAgent: (jest.fn() as any).mockResolvedValue({
             manifest: { name: 'mock-agent' },
             loop: {},
             llmAdapter: {},
             tenantId: 'test-tenant'
-        })
+        } as any)
     }
 }));
+const { globalA2AService } = await import(a2aPath) as any;
 
 await jest.unstable_mockModule(outboxPath, () => ({
     outboxPublisher: { start: jest.fn(), stop: jest.fn() }
@@ -54,11 +56,12 @@ const { AgentResultCache } = await import('@a2arium/callagent-memory-engine');
 class FailingSessionStore implements IWorkingMemorySessionStore {
     private shouldFailLoad = false;
     private shouldFailWrite = false;
-    private failureCount = 0;
+    public failureCount = 0;
     private snapshots = new Map<string, WMSessionSnapshot>();
     private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
 
     configure(options: { failLoad?: boolean; failWrite?: boolean; maxRetries?: number }) {
+        console.log(`[DEBUG] FailingSessionStore.configure: ${JSON.stringify(options)}`);
         this.shouldFailLoad = options.failLoad ?? false;
         this.shouldFailWrite = options.failWrite ?? false;
         this.failureCount = 0;
@@ -81,6 +84,10 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
     }
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+        if (this.shouldFailLoad) {
+            this.failureCount++;
+            throw new Error(`SessionStore.load failed (attempt ${this.failureCount})`);
+        }
         return this.getSnapshot(tenantId, sessionId);
     }
 
@@ -158,8 +165,16 @@ beforeAll(() => {
     process.env.DISABLE_OUTBOX_PUBLISHER = '1';
 });
 
+beforeEach(() => {
+    runLoopMock.mockResolvedValue({
+        M: { memory: { vars: {} } },
+        outcome: { kind: 'continue' },
+        metrics: {}
+    });
+});
+
 afterEach(() => {
-    runLoopMock.mockReset();
+    runLoopMock.mockClear();
     jest.clearAllMocks();
     TaskEngine.testOverrides = undefined;
 });
@@ -196,10 +211,10 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 pending: {},
                 inbox: { current: [], all: [] }
             };
-            failingStore.seed('t', 'session', base, BigInt(0), 'agent-a');
+            failingStore.seed('t', 'session-load-fail', base, BigInt(0), 'agent-a');
 
             const result = await engine.startTask({
-                task: { id: 'session', input: { test: 'data' } },
+                task: { id: 'session-load-fail', input: { test: 'data' } },
                 isStreaming: false,
                 tenantId: 't'
             });
@@ -218,8 +233,8 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             // Test the CAS retry logic
             const mockHandlerInvoker = {
-                invoke: jest.fn().mockResolvedValue({ result: 'success' })
-            };
+                invoke: (jest.fn() as any).mockResolvedValue({ result: 'test' } as any)
+            } as any;
             const engineWithHandler = new TaskEngine({
                 sessionStore: failingStore,
                 handlerInvoker: mockHandlerInvoker as any
@@ -231,10 +246,15 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 pending: {},
                 inbox: { current: [], all: [] }
             };
-            failingStore.seed('t', 'session', base, BigInt(0), 'agent-a');
+            failingStore.seed('t', 'session-write-fail', base, BigInt(0), 'agent-a');
+            await engineWithHandler.startTask({
+                task: { id: 'session-write-fail', input: { test: 'data' } },
+                isStreaming: false,
+                tenantId: 't'
+            });
 
             const result = await engineWithHandler.startTask({
-                task: { id: 'session', input: { test: 'data' } },
+                task: { id: 'session-write-fail', input: { test: 'data' } },
                 isStreaming: false,
                 tenantId: 't'
             });
@@ -576,9 +596,10 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                     tasks: { 'dup-token': { agentId: 'child-agent', input: {} } }
                 },
                 inbox: {
-                    current: [{ type: 'child.completed', data: { token: 'dup-token' } }],
+                    current: [{ source: 'child', kind: 'child.completed', payload: { token: 'dup-token', result: { ok: true } } }],
                     all: []
                 }
+
             };
             store.seed('t', 'parent', base as any, BigInt(0), 'agent-a');
 
@@ -614,7 +635,8 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 tenantId: 't',
                 parentTaskId: 'parent',
                 toolToken: 'tool-token',
-                observation: { type: 'test', data: { result: 'tool-success' } }
+                observation: { source: 'tool', kind: 'tool.completed', payload: { token: 'tool-token', tool: 'test-tool', result: 'tool-success' } }
+
             });
 
             // Should stage observation and not throw
@@ -639,7 +661,8 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             await engine.handleExternalEventOccurred({
                 tenantId: 't',
                 parentTaskId: 'parent',
-                event: { type: 'external', data: { message: 'hello' } }
+                event: { source: 'external', kind: 'external.event', payload: { message: 'hello' } }
+
             });
 
             expect(true).toBe(true);
@@ -756,8 +779,9 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             // Simulate mergeInboxes functionality
             const remoteCompletions = [
-                { type: 'child.completed', data: { token: 'remote-1' } }
+                { source: 'child', kind: 'child.completed', payload: { token: 'remote-1', result: { ok: true } } }
             ];
+
 
             expect(ctx).toBeDefined();
             expect(Array.isArray(remoteCompletions)).toBe(true);
@@ -998,7 +1022,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                     memory: { vars: {} },
                     inbox: {
                         current: [
-                            { type: 'child.completed', data: { artifacts: ['artifact1'] } }
+                            { source: 'child', kind: 'child.completed', payload: { token: 'child-1', childTaskId: 'child-1', result: { artifacts: ['artifact1'] } }, provenance: { ts: Date.now(), turn: 0 } }
                         ],
                         all: []
                     }
@@ -1048,7 +1072,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             if (ctx.persistChildContext) {
                 try {
                     await ctx.persistChildContext('child-1', { vars: { childData: 'test' } });
-                } catch (error) {
+                } catch (error: any) {
                     // Expected to fail due to CAS mismatch
                     expect(error.message).toContain('CAS_MISMATCH');
                 }
@@ -1102,7 +1126,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             // Mock outboxPublisher to throw during startup
             const outboxModule = await import(outboxPath);
             const originalStart = (outboxModule as any).outboxPublisher.start;
-            (outboxModule as any).outboxPublisher.start = jest.fn().mockRejectedValue(new Error('Outbox startup failed'));
+            (outboxModule as any).outboxPublisher.start = (jest.fn() as any).mockRejectedValue(new Error('Outbox startup failed') as any);
 
             const engine = new TaskEngine({
                 sessionStore: new FailingSessionStore(),
@@ -1215,7 +1239,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                         }
                     });
                     expect(result).toBeDefined();
-                } catch (error) {
+                } catch (error: any) {
                     // CAS errors are expected with the failing store
                     expect(error.message).toContain('CAS_MISMATCH');
                 }
@@ -1361,7 +1385,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 },
                 inbox: {
                     current: [
-                        { type: 'child.completed', data: { token: 'child-dup', result: { done: true } } }
+                        { source: 'child', kind: 'child.completed', payload: { token: 'child-dup', childTaskId: 'child-dup', result: { done: true } }, provenance: { ts: Date.now(), turn: 0 } }
                     ],
                     all: []
                 }
@@ -1778,17 +1802,17 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             };
 
             expect(() => {
-                extendContextWithMemory(ctxWithManifest);
+                extendContextWithMemory(ctxWithManifest, 't', 'a', {});
             }).not.toThrow();
 
             // Test without manifest
             expect(() => {
-                extendContextWithMemory(baseCtx);
+                extendContextWithMemory(baseCtx, 't', 'a', {});
             }).not.toThrow();
 
             // Test extendContextWithMemory handles missing memory gracefully
             expect(() => {
-                extendContextWithMemory({ task: { id: 'test' } });
+                extendContextWithMemory({ task: { id: 'test' } }, 't', 'a', {});
             }).not.toThrow();
         });
 
@@ -1804,7 +1828,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 memory: { existing: 'structure' }
             } as any;
 
-            extendContextWithMemory(ctxWithMemory);
+            extendContextWithMemory(ctxWithMemory, 't', 'a', {});
             expect(ctxWithMemory.memory).toBeDefined();
             expect(ctxWithMemory.memory.existing).toBe('structure');
 
@@ -1818,7 +1842,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             } as any;
 
             expect(() => {
-                extendContextWithMemory(ctxWithDB);
+                extendContextWithMemory(ctxWithDB, 't', 'a', {});
             }).not.toThrow();
         });
 
@@ -1910,28 +1934,27 @@ describe('TaskEngine Coverage Improvement Tests', () => {
         test('should handle TaskEntity extraction in actual child completion flow', async () => {
             const store = new FailingSessionStore();
             const mockHandlerInvoker = {
-                invoke: jest.fn().mockResolvedValue({ handled: true })
-            };
+                invoke: (jest.fn() as any).mockResolvedValue({ handled: true } as any)
+            } as any;
             const engine = new TaskEngine({
                 sessionStore: store as any,
                 handlerInvoker: mockHandlerInvoker as any
             });
 
             // Mock the A2A service to return a TaskEntity wrapped result
-            const a2aModule = await import(a2aPath);
-            const mockSendTaskToAgent = jest.fn().mockResolvedValue({
-                id: 'child-task-456',
+            const mockSendTaskToAgent = (jest.fn() as any).mockResolvedValue({
+                id: 'child-task-id',
                 status: {
                     state: 'completed',
-                    timestamp: '2025-01-01T00:00:00Z',
+                    timestamp: new Date().toISOString(),
                     metadata: {
-                        result: { websiteData: 'extracted from website', url: 'https://example.com' },
-                        timings: { start: '2025-01-01T00:00:00Z', end: '2025-01-01T00:02:00Z' },
+                        result: { websiteData: 'test', url: 'test.com' },
+                        timings: { start: 'now', end: 'now' },
                         rewards: [{ value: 0.9, type: 'extrinsic' }]
                     }
                 }
-            });
-            (a2aModule as any).globalA2AService.sendTaskToAgent = mockSendTaskToAgent;
+            } as any);
+            globalA2AService.sendTaskToAgent = mockSendTaskToAgent;
 
             // Create a proper base context with required structure
             const base = {

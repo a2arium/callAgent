@@ -1120,28 +1120,34 @@ These invariants MUST be enforced by a combination of:
 
 Runtime invariant failures MUST be structured.
 
-Recommended shape:
+The normative shape is defined by the `InvariantErrorPayloadSchema` Zod schema in `packages/core/src/types/invariantError.ts`. The error payload uses a discriminated union for detail types to ensure context-specific fields are only present on the correct error type (Rule 4: illegal states must not compile).
+
+Normative shape:
 
 ```ts
-type InvariantError = {
-  code: string;
+type InvariantErrorPayload = {
+  code: InvariantErrorCode;  // closed enum, not arbitrary string
   message: string;
   stage?: string;
-  required?: string[];
-  forbidden?: string[];
-  pendingSnapshot?: unknown;
-  inboxSummary?: {
-    count: number;
-    entries?: Array<{ source: string; kind: string }>;
-  };
+  detail: InvariantErrorDetail;  // discriminated union on 'type'
   correlationId?: string;
   turnId?: string;
 };
 ```
 
+`InvariantErrorDetail` discriminants: `stage_invariant`, `token_validation`, `observation_validation`, `transition_invariant`, `goal_invariant`, `budget_exceeded`.
+
+Each discriminant carries only its own context (e.g., `stage_invariant` has `required`, `forbidden`, `pendingSnapshot`; `token_validation` has `category`, `token`, `reason`). There are no redundant top-level fields.
+
+Module execution failures (module threw during a turn) use a separate `ModuleExecutionError` class, not the invariant error system, because they represent runtime failures rather than contract violations.
+
 Notes:
 
 * `turnId` is optional but recommended when TurnTrace is enabled.
+* Error codes are a closed enum (`InvariantErrorCodeSchema`) — not arbitrary strings — to enable autocomplete and compile-time safety.
+* The `throwInvariantError()` factory function centralizes error construction and should be used at all enforcement sites.
+* `TaskContext.throw` accepts an optional fourth argument `InvariantErrorContext` (stage, correlationId, turnId). All runtimes (streaming, runner, task engine) delegate to `throwInvariantError()`, so `instanceof InvariantError` is reliable everywhere.
+* Malformed observation envelopes at inbox normalization result in an injected `source: 'internal', kind: 'validation.failed'` observation rather than a thrown invariant, so Perception/Learning can handle them.
 
 ### Enforcement guidance
 
@@ -1293,15 +1299,34 @@ Perception errors should not silently disappear; they should be visible to Learn
 
 ### Invariant errors
 
-Invariant failures MUST report enough context to debug quickly:
+Invariant failures MUST throw `InvariantError` (from `packages/core/src/utils/errors.ts`) with a structured `InvariantErrorPayload`. The payload MUST include:
 
-* current stage
-* required keys
-* forbidden keys
-* pending snapshot summary
-* current inbox summary
-* correlation id
-* optional turnId
+* `code` — closed enum from `InvariantErrorCodeSchema` (e.g., `'STAGE_REQUIRES_KEY'`, `'GOAL_NOT_FOUND'`)
+* `message` — human-readable description
+* `detail` — discriminated union carrying context specific to the error type:
+  * `stage_invariant`: stage name, required keys, forbidden keys, pending snapshot
+  * `token_validation`: token category, token value, reason (missing/expired/mismatch)
+  * `observation_validation`: source, kind, reason, inbox summary (used when validation is enforced by throwing)
+  * `session_config`: reason (session_not_found, limit_max_prompts_exceeded), taskId, limit, actual
+  * `transition_invariant`: transition kind, reason, pending snapshot
+  * `goal_invariant`: goal ID, reason (not_found/has_active_children/priority_out_of_range)
+  * `budget_exceeded`: budget type, limit, actual value
+* `correlationId` — optional, for distributed tracing
+* `turnId` — optional, for TurnTrace correlation
+
+All enforcement sites MUST use the `throwInvariantError()` factory function, not `throw new Error(string)`.
+
+Callers inspect errors via `instanceof InvariantError` and `e.invariant.detail.type` discriminant narrowing.
+
+### Module execution errors
+
+Module failures (when a module throws during `oneTurn`) MUST throw `ModuleExecutionError` (from `packages/core/src/utils/errors.ts`). This is semantically distinct from invariant errors — it represents a runtime failure, not a contract violation.
+
+`ModuleExecutionError` carries:
+
+* `module` — typed enum: `'attention'`, `'perception'`, `'learning'`, `'policy'`, `'shield'`, `'execution'`, `'transition'`
+* `originalMessage` — the original error message from the module
+* `originalCode` — optional, if the original error had a code
 
 ### Execution errors
 

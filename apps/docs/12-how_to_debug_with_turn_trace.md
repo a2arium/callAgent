@@ -66,7 +66,7 @@ Primary fields:
 - `execAction`
 - `transition`
 - `pendingAfter`
-- `stageTransition` / `stageAutoMarksApplied` / `stageInvariantChecks` / `stageInvariantError` (if using StageFacade)
+- `stageTransition` / `stageAutoMarksApplied` / `stageInvariantChecks` / `stageInvariantError` (if using StageFacade — typed as `InvariantErrorPayload`, inspect via `e.detail.type` discriminant)
 
 ### C) Wrong effect behavior
 
@@ -95,7 +95,7 @@ Primary fields:
 
 - `inboxCurrent`
 - `perception`
-- invariant errors (if present)
+- invariant errors (if present — inspect via `instanceof InvariantError` and `e.invariant.detail.type` narrowing, or `instanceof ModuleExecutionError` for module failures). Invalid observation envelopes are injected as `source: 'internal', kind: 'validation.failed'` into the inbox rather than thrown.
 
 ### E) Configuration drift
 
@@ -205,7 +205,7 @@ Ask:
 - Is pending state consistent with the stage?
 - Did Transition emit observations when it should have (for continue flows)?
 - Do `stageTransition` and `stageInvariantChecks` confirm the intended state change?
-- Did a StageFacade invariant error block the transition?
+- Did a StageFacade invariant error block the transition? (check `stageInvariantError` — if present, inspect `e.detail.type === 'stage_invariant'` and `e.detail.required` / `e.detail.forbidden` for specific violations)
 
 If the effect happened but control flow is wrong: fix Transition/control plumbing.
 

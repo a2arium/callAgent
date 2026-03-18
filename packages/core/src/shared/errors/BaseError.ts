@@ -11,14 +11,14 @@ export class BaseError extends Error {
     /**
      * Optional additional information about the error
      */
-    public readonly details?: any;
+    public readonly details?: Record<string, unknown>;
 
     /**
      * @param code Error code identifier
      * @param message Human-readable error message
      * @param details Additional contextual information (optional)
      */
-    constructor(code: string, message: string, details?: any) {
+    constructor(code: string, message: string, details?: Record<string, unknown>) {
         super(message);
         this.name = this.constructor.name;
         this.code = code;

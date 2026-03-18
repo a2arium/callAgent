@@ -15,11 +15,13 @@ describe('Rewards hooks', () => {
             policyParams: { theta: null, stochastic: false }
         };
         const env: any = { time: new Date().toISOString(), input: {}, pending: { inputs: {}, children: {}, tools: {}, groups: {} } };
-        const { metrics } = await runLoop(ctx, M, env, {
+        const result = await runLoop(ctx, M, env, {
             policy: () => ({ kind: 'language', content: 'x' }) as any,
             extrinsicReward: (_M, _a, _exec, _out) => 0.5,
-            intrinsicReward: (_M, _obs) => 0.25
+            intrinsicReward: (_M, _obs) => 0.25,
+            transition: () => ({ kind: 'complete', result: {} } as any)
         }, { maxTurns: 1 });
+        const metrics = result.metrics;
         expect(metrics?.rewards?.length).toBe(1);
         expect(metrics?.rewards?.[0]).toBeCloseTo(0.75, 5);
     });

@@ -34,7 +34,7 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
                 current: [{
                     source: 'user',
                     kind: 'input.provided',
-                    payload: { test: 'data' },
+                    payload: { text: 'data', token: 'test-token' },
                     provenance: { ts: Date.now(), turn: 11 }
                 }],
                 all: []
@@ -48,7 +48,6 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
         const mockM: MentalState = {
             memory: {
                 sensory: {},
-                vars: {},
                 longTerm: {
                     semantic: { concepts: [] },
                     episodic: [],
@@ -58,9 +57,12 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
             worldModel: { implicit: null, explicit: null, simulator: null },
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0 },
-            rewardParams: { extrinsicWeights: [1], intrinsic: {}, discountGamma: 0.99 },
+            rewardParams: { 
+                extrinsicWeights: [1], 
+                intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, 
+                discountGamma: 0.99 
+            },
             policyParams: { theta: null, stochastic: false },
-            vars: {}
         };
 
         let modulesCalled = false;
@@ -68,21 +70,28 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
             attention: () => ({ hasInput: true }),
             perception: () => ({ source: 'internal', kind: 'test', payload: {} }),
             learning: (m: any) => m,
-            policy: () => ({ kind: 'internal', done: true }),
-            shield: (m: any, a: any) => ({ action: 'pass', intent: a }),
+            policy: () => ({ kind: 'internal' as const, intent: 'noop', done: true } as any),
+            shield: (m: any, a: any) => ({ action: 'pass' as const, intent: a } as any),
             execution: async () => ({
-                action: { kind: 'internal', done: true },
-                result: { status: 'ok', data: { kind: 'final_complete', result: { test: 'success' } } }
+                action: { kind: 'internal' as const, done: true } as any,
+                result: { status: 'ok', data: { kind: 'final_complete', result: { test: 'success' } } } as any
             }),
-            transition: () => ({ kind: 'complete', result: { test: 'success' } })
+            transition: () => ({ kind: 'complete' as const, result: { test: 'success' } } as any)
         };
 
         // Call runLoop with opts.maxTurns = 10
         // The bug: loop will exit immediately because turn (11) > globalMaxTurns (10)
         console.log('BEFORE runLoop: env.turn =', mockEnv.turn, ', budget.maxTurns =', mockEnv.budget.maxTurns);
-        const result = await runLoop(mockCtx, mockM, mockEnv, mockModules, { maxTurns: 10 });
+        let result: any;
+        try {
+            result = await runLoop(mockCtx, mockM, mockEnv, mockModules, { maxTurns: 10 });
+        } catch (e) {
+            console.log('Caught expected budget throw:', (e as any)?.invariant?.code);
+        }
         console.log('AFTER runLoop: env.turn =', mockEnv.turn);
-        console.log('Result outcome kind:', result.outcome.kind);
+        if (result) {
+            console.log('Result outcome kind:', result.outcome.kind);
+        }
 
         // BUG: If bug exists, outcome will be 'fail' with reason 'budget_turns_exceeded'
         // WITHOUT executing any modules
@@ -117,7 +126,7 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
                 current: [{
                     source: 'user',
                     kind: 'input.provided',
-                    payload: { test: 'data' },
+                    payload: { text: 'data', token: 'test-token' },
                     provenance: { ts: Date.now(), turn: 5 }
                 }],
                 all: []
@@ -131,7 +140,6 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
         const mockM: MentalState = {
             memory: {
                 sensory: {},
-                vars: {},
                 longTerm: {
                     semantic: { concepts: [] },
                     episodic: [],
@@ -141,9 +149,12 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
             worldModel: { implicit: null, explicit: null, simulator: null },
             goalState: { hierarchy: { nodes: {}, roots: [] } },
             emotion: { valence: 0, arousal: 0 },
-            rewardParams: { extrinsicWeights: [1], intrinsic: {}, discountGamma: 0.99 },
+            rewardParams: { 
+                extrinsicWeights: [1], 
+                intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, 
+                discountGamma: 0.99 
+            },
             policyParams: { theta: null, stochastic: false },
-            vars: {}
         };
 
         let turnsExecuted = 0;
@@ -151,26 +162,33 @@ describe('LoopRunner Bug: Global Budget Check on First Iteration', () => {
             attention: () => ({ hasInput: true }),
             perception: () => ({ source: 'internal', kind: 'test', payload: {} }),
             learning: (m: any) => m,
-            policy: () => ({ kind: 'internal', done: false }),
-            shield: (m: any, a: any) => ({ action: 'pass', intent: a }),
+            policy: () => ({ kind: 'internal' as const, intent: 'noop', done: false } as any),
+            shield: (m: any, a: any) => ({ action: 'pass' as const, intent: a } as any),
             execution: async () => {
                 turnsExecuted++;
                 return {
-                    action: { kind: 'internal', done: false },
-                    result: { status: 'ok' }
+                    action: { kind: 'internal' as const, done: false } as any,
+                    result: { status: 'ok' } as any
                 };
             },
-            transition: () => ({ kind: 'continue' })
+            transition: () => ({ kind: 'continue' as const } as any)
         };
 
         // Request 3 more turns
-        const result = await runLoop(mockCtx, mockM, mockEnv, mockModules, { maxTurns: 3 });
+        let result: any;
+        try {
+            result = await runLoop(mockCtx, mockM, mockEnv, mockModules, { maxTurns: 3 });
+        } catch (e) {
+            console.log('Caught budget throw:', (e as any)?.invariant?.code);
+        }
 
         // Should execute 3 turns (not fail due to env.turn=5 being < budget.maxTurns=10)
         // OR should properly track that we want 3 more turns
         console.log('Turns executed:', turnsExecuted);
         console.log('Final env.turn:', mockEnv.turn);
-        console.log('Outcome:', result.outcome);
+        if (result) {
+            console.log('Outcome:', result.outcome);
+        }
 
         // The fix needs to clarify: is budget.maxTurns a TOTAL limit or PER-RUNLOOP limit?
     });

@@ -10,6 +10,7 @@ import type {
     ObservationProvenance,
     ExecErrorPayload
 } from '../types/observation.js'; // Original import, keeping it as the instruction's snippet was for index.ts
+import { InvariantError, ModuleExecutionError, FrameworkModule } from '../utils/errors.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
@@ -41,6 +42,14 @@ export type TransitionOut =
     | { kind: 'await_tool'; token: string }
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; reason: string };
+
+interface InternalTaskContext extends TaskContext {
+    currentTurnNodeId?: string;
+    telemetry?: {
+        nodeId?: string;
+    };
+    M?: any;
+}
 
 
 // Temporary alias while downstream modules migrate
@@ -104,6 +113,7 @@ export async function oneTurn<
     reward: number;
 }> {
     const timings: Record<string, number> = {};
+    const iCtx = ctx as InternalTaskContext;
 
     // Telemetry: Current Turn Node ID should be in ctx (set by TurnRunner or TaskEngine)
     // If not, we can't attach modules, so we skip.
@@ -119,7 +129,7 @@ export async function oneTurn<
     // Helper to instrument module execution
     // Uses real wall-clock time with logical sequence offset for ordering
     const runWithTelemetry = async <T>(name: string, fn: () => T | Promise<T>, input?: unknown): Promise<T> => {
-        const turnNodeId = (ctx as any).currentTurnNodeId;
+        const turnNodeId = iCtx.currentTurnNodeId;
         let node: InstanceType<typeof ModuleNode> | undefined;
         let prevNodeId: string | undefined;
 
@@ -138,9 +148,9 @@ export async function oneTurn<
 
             // Set ctx.telemetry.nodeId to module ID so any LLM calls inside this module
             // will have this module as their parent (not the turn)
-            if ((ctx as any).telemetry) {
-                prevNodeId = (ctx as any).telemetry.nodeId;
-                (ctx as any).telemetry.nodeId = node.id;
+            if (iCtx.telemetry) {
+                prevNodeId = iCtx.telemetry.nodeId;
+                iCtx.telemetry.nodeId = node.id;
             }
         }
 
@@ -165,8 +175,8 @@ export async function oneTurn<
             throw error;
         } finally {
             // Restore previous node ID
-            if (prevNodeId !== undefined && (ctx as any).telemetry) {
-                (ctx as any).telemetry.nodeId = prevNodeId;
+            if (prevNodeId !== undefined && iCtx.telemetry) {
+                iCtx.telemetry.nodeId = prevNodeId;
             }
         }
     };
@@ -176,8 +186,10 @@ export async function oneTurn<
     try {
         alpha = await runWithTelemetry('attention', () => mods.attention(mPrev, env, mem), { mPrev, env });
     } catch (error) {
-        log.error('Attention module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Attention module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Attention, errorObj.message, errorObj);
+
     }
     timings.attentionMs = Date.now() - tA0;
 
@@ -186,8 +198,10 @@ export async function oneTurn<
     try {
         o = await runWithTelemetry('perception', () => mods.perception(env, alpha, mem), { env, alpha });
     } catch (error) {
-        log.error('Perception module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Perception module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Perception, errorObj.message, errorObj);
+
     }
     timings.perceptionMs = Date.now() - tP0;
 
@@ -203,13 +217,15 @@ export async function oneTurn<
         }
         log.debug('Learning returned MentalState', { hasScratch: !!((m1 as any).memory?.scratch) });
     } catch (error) {
-        log.error('Learning module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Learning module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Learning, errorObj.message, errorObj);
+
     }
     timings.learningMs = Date.now() - tL0;
 
     // Expose current MentalState for this turn via ctx (read-mostly)
-    try { (ctx as any).M = m1; } catch { /* noop */ }
+    try { iCtx.M = m1; } catch { /* noop */ }
 
     const tPol0 = Date.now();
     const policyFn = mods.policy as unknown as (...args: unknown[]) => Intent | Array<{ action: Intent; prob: number }>;
@@ -227,8 +243,10 @@ export async function oneTurn<
             }
         }, { m1, o });
     } catch (error) {
-        log.error('Policy module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Policy module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Policy, errorObj.message, errorObj);
+
     }
     timings.policyMs = Date.now() - tPol0;
 
@@ -272,13 +290,17 @@ export async function oneTurn<
             }
         }
     }
+    const tSh0 = Date.now();
     let sh: ShieldOutcome;
     try {
         sh = await runWithTelemetry('shield', () => mods.shield(m1, chosen, mem), { m1, chosen });
     } catch (error) {
-        log.error('Shield module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Shield module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Shield, errorObj.message, errorObj);
+
     }
+    timings.shieldMs = Date.now() - tSh0;
 
     let toExecute: Intent | null = null;
     switch (sh.action) {
@@ -299,20 +321,24 @@ export async function oneTurn<
     const tE0 = Date.now();
     let exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     try {
-        exec = await runWithTelemetry('execution', () => mods.execution(toExecute!, ctx, mem, m1), { toExecute, ctx: 'ctx-redacted' });
+        exec = await runWithTelemetry('execution', () => mods.execution(toExecute!, ctx, mem, m1), { toExecute });
     } catch (error) {
-        log.error('Execution module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Execution module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Execution, errorObj.message, errorObj);
+
     }
     timings.executionMs = Date.now() - tE0;
 
     const tT0 = Date.now();
     let outcome: TransitionOut;
     try {
-        outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem), { env: 'env-redacted', exec });
+        outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem), { exec });
     } catch (error) {
-        log.error('Transition module error', { error: error instanceof Error ? error.message : String(error) });
-        throw new Error(`Transition module failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof InvariantError) throw error;
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        throw new ModuleExecutionError(FrameworkModule.Transition, errorObj.message, errorObj);
+
     }
     timings.transitionMs = Date.now() - tT0;
 

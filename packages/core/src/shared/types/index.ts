@@ -29,9 +29,11 @@ import type {
 // Export Handle types for typed A2A interactions
 export type { TaskHandle, InputHandle, GroupHandle } from '../../orchestration/Handles.js';
 
-// Re-export only specific streaming event types needed externally
 // Rename ProtocolArtifact to avoid conflict, but keep Artifact exporting the new type
 export type { A2AEvent, TaskStatus, ProtocolArtifact };
+
+import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../../types/invariantError.js';
+
 
 // Export the unified Artifact type and interfaces
 export type {
@@ -184,7 +186,8 @@ export type TaskContext = {
     updateStatus: (state: string) => void; // Placeholder for FSM state
     services: { get: <T = unknown>(name: string) => T | undefined }; // Placeholder for service registry
     getEnv: (key: string, defaultValue?: string) => string | undefined;
-    throw: (code: string, message: string, details?: unknown) => never; // Structured error throw
+    throw: (code: InvariantErrorCode, message: string, detail: InvariantErrorDetail, context?: InvariantErrorContext) => never; // Structured error throw
+
     sendTaskToAgent: {
         /**
          * Send a task to another agent.
