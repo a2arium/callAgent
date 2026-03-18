@@ -16,9 +16,9 @@
 import { telemetry } from '../TelemetryCollector.js';
 import { LLMNode } from '../nodes/LLMNode.js';
 import { ToolNode } from '../nodes/ToolNode.js';
-import { ModuleNode } from '../nodes/ModuleNode.js';
 import { WorkflowNode } from '../nodes/WorkflowNode.js';
 import { TelemetryNode } from '../nodes/TelemetryNode.js';
+import type { InternalTaskContext } from '../../loop/internalContext.js';
 import type {
     TelemetryProvider as CallLLMTelemetryProvider,
     ProviderInit,
@@ -32,6 +32,33 @@ import type {
     Usage
 } from 'callllm';
 
+/** Minimal usage shape we read from callllm (avoids any). */
+type UsageLike = {
+    tokens?: {
+        input?: number | { total?: number };
+        output?: number | { total?: number };
+        total?: number;
+    };
+    costs?: { total?: number; currency?: string };
+};
+
+function tokensIn(u: UsageLike | undefined): number {
+    if (!u?.tokens) return 0;
+    const i = u.tokens.input;
+    return typeof i === 'number' ? i : (i?.total ?? 0);
+}
+
+function tokensOut(u: UsageLike | undefined): number {
+    if (!u?.tokens) return 0;
+    const o = u.tokens.output;
+    return typeof o === 'number' ? o : (o?.total ?? 0);
+}
+
+function tokensTotal(u: UsageLike | undefined, inVal: number, outVal: number): number {
+    if (u?.tokens && typeof u.tokens.total === 'number') return u.tokens.total;
+    return inVal + outVal;
+}
+
 /**
  * Bridge provider that converts callLLM telemetry events into callagent telemetry nodes.
  */
@@ -39,6 +66,8 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
     name = 'callagent-bridge';
 
     private parentNodeId: string;
+    /** Optional ref to current task context for __currentModule and __turnLlmCalls/__turnToolCalls. */
+    private contextRef: InternalTaskContext | null = null;
     private llmNodes: Map<string, LLMNode> = new Map();
     private toolNodes: Map<string, ToolNode> = new Map();
     private llmPrompts: Map<string, PromptMessage[]> = new Map();
@@ -50,6 +79,14 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
 
     constructor(parentNodeId: string) {
         this.parentNodeId = parentNodeId;
+    }
+
+    /**
+     * Set the current task context so the bridge can stamp module and accumulate turn summaries.
+     * Call before LLM/tool calls (e.g. when setting parent node id).
+     */
+    setContextRef(ctx: InternalTaskContext | null): void {
+        this.contextRef = ctx;
     }
 
     async init(_config: ProviderInit): Promise<void> {
@@ -146,6 +183,9 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         node.name = `${ctx.provider.toLowerCase()}.chat.completions`;
         node.startTime = ctx.startedAt;
         node.status = 'active';
+        if (this.contextRef?.__currentModule) {
+            node.module = this.contextRef.__currentModule;
+        }
 
         Object.assign(node.providerData, {
             provider: ctx.provider,
@@ -204,21 +244,38 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         };
 
         // Populate usage and pricing
-        if (usage) {
-            const tokensIn = (usage as any)?.tokens?.input?.total ?? (usage as any)?.tokens?.input ?? 0;
-            const tokensOut = (usage as any)?.tokens?.output?.total ?? (usage as any)?.tokens?.output ?? 0;
-            const tokensTotal = (usage as any)?.tokens?.total ?? (tokensIn + tokensOut);
-            const cost = (usage as any)?.costs?.total || 0;
+        const u = usage as UsageLike | undefined;
+        if (u) {
+            const inVal = tokensIn(u);
+            const outVal = tokensOut(u);
+            const total = tokensTotal(u, inVal, outVal);
+            const cost = u.costs?.total ?? 0;
 
             node.usage = {
-                inputTokens: tokensIn,
-                outputTokens: tokensOut,
-                totalTokens: tokensTotal
+                inputTokens: inVal,
+                outputTokens: outVal,
+                totalTokens: total
             };
 
             if (cost) {
-                node.pricing = { cost, currency: (usage as any)?.costs?.currency || 'USD' };
+                node.pricing = { cost, currency: u.costs?.currency ?? 'USD' };
             }
+        }
+
+        // Accumulate into turn trace
+        const ictx = this.contextRef;
+        if (ictx?.__turnLlmCalls) {
+            const start = node.startTime ?? 0;
+            const durationMs = typeof node.endTime === 'number' ? node.endTime - start : undefined;
+            ictx.__turnLlmCalls.push({
+                model: node.model,
+                provider: (node.providerData as { provider?: string })?.provider,
+                durationMs,
+                inputTokens: node.usage?.inputTokens,
+                outputTokens: node.usage?.outputTokens,
+                cost: node.pricing?.cost,
+                module: node.module
+            });
         }
 
         if (responseModel) {
@@ -249,6 +306,9 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         toolNode.name = `execute_tool ${ctx.name}`;
         toolNode.startTime = ctx.startedAt;
         toolNode.status = 'active';
+        if (this.contextRef?.__currentModule) {
+            toolNode.module = this.contextRef.__currentModule;
+        }
         toolNode.input = {
             type: ctx.type,
             args: ctx.args,
@@ -277,6 +337,19 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
             telemetry.endNode(toolNode);
         }
 
+        // Accumulate into turn trace
+        const ictx = this.contextRef;
+        if (ictx?.__turnToolCalls) {
+            const start = toolNode.startTime ?? 0;
+            const durationMs = typeof toolNode.endTime === 'number' ? toolNode.endTime - start : undefined;
+            ictx.__turnToolCalls.push({
+                tool: toolNode.toolName,
+                durationMs,
+                status: toolNode.status === 'success' ? 'success' : 'failure',
+                module: toolNode.module
+            });
+        }
+
         this.popNode(ctx.conversationId, toolNode.id);
         this.toolNodes.delete(ctx.toolCallId);
     }
@@ -296,9 +369,13 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
     }
 
     /**
-     * Update the parent node ID. Call this when the context changes (e.g., new module).
+     * Update the parent node ID. Call this when the context changes (e.g., new turn).
+     * Optionally pass context so the bridge can stamp module and accumulate turn summaries.
      */
-    setParentNodeId(parentNodeId: string): void {
+    setParentNodeId(parentNodeId: string, ctx?: InternalTaskContext | null): void {
         this.parentNodeId = parentNodeId;
+        if (ctx !== undefined) {
+            this.contextRef = ctx ?? null;
+        }
     }
 }

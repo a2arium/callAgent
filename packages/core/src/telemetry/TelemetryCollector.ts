@@ -1,6 +1,7 @@
 
 import { TelemetryNode } from './nodes/TelemetryNode.js';
-import { TelemetryProvider } from './Provider.js';
+import type { TelemetryProvider } from './Provider.js';
+import type { TurnTrace } from '../types/turnTrace.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'TelemetryCollector' });
@@ -66,6 +67,11 @@ export class TelemetryCollector {
 
     public getNode(id: string): TelemetryNode | undefined {
         return this.nodeRegistry.get(id);
+    }
+
+    /** Emit the assembled TurnTrace to all providers. Called exactly once per turn by loopRunner. */
+    public emitTurnTrace(trace: TurnTrace): void {
+        this.broadcast((p) => p.onTurnTrace(trace));
     }
 
     private broadcast(fn: (p: TelemetryProvider) => void | Promise<void>): void {

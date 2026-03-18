@@ -21,6 +21,7 @@
   "scripts": {
     "prisma:generate": "prisma generate",
     "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma-client && cp -R src/generated/prisma-client/* dist/generated/prisma-client/",
+    "test:types": "tsd --files tests/stageFacadeTypes.test-d.ts",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run",
     "version:patch": "npm version patch",
@@ -52,6 +53,7 @@
     "jest": "^29.7.0",
     "prisma": "^7.4.0",
     "ts-jest": "^29.3.2",
+    "tsd": "^0.33.0",
     "typescript": "^5.8.3"
   },
   "type": "module"

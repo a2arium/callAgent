@@ -6,7 +6,9 @@ import { initialM } from '../loop/init.js';
 import { SessionManager } from './SessionManager.js';
 import { ApiBinder } from './api/ApiBinder.js';
 
-import { TaskExecutor } from './TaskExecutor.js';
+import { TaskExecutor, type LoopOpts } from './TaskExecutor.js';
+import type { InternalTaskContext } from '../loop/internalContext.js';
+import type { ManifestProvenance } from '../types/turnTrace.js';
 import { InboxManager, EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { PluginManager } from '../plugin/pluginManager.js';
@@ -265,18 +267,24 @@ export class TurnRunner {
                 externalEvents: undefined
             };
 
+            // Restore manifest provenance from snapshot so every turn-entry path has it
+            const metaProvenance = (base as Record<string, unknown>)?.meta as { manifestProvenance?: ManifestProvenance } | undefined;
+            if (metaProvenance?.manifestProvenance) {
+                (ctx as InternalTaskContext).__manifestProvenance = metaProvenance.manifestProvenance;
+            }
+
             // Budgeting
-            const agentId = (ctx as any).agentId;
+            const agentId = (ctx as Record<string, unknown>).agentId as string | undefined;
             const plugin = agentId ? PluginManager.findAgent(agentId) : null;
-            const moduleOverrides = (plugin as any)?.loop?.modules || {};
+            const moduleOverrides = (plugin as { loop?: { modules?: Record<string, unknown> } })?.loop?.modules || {};
 
             // Restore budgets
-            let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
+            let loopOpts: LoopOpts = {};
             try {
-                const persistedBudgets = (base as any)?.meta?.budgets;
+                const persistedBudgets = (base as Record<string, unknown>)?.meta as { maxTurns?: number; latencyMs?: number } | undefined;
                 const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                 const hitl = plugin?.resolved.runtimeManifest.hitl;
-                if (hitl) { try { (M as any).hitl = hitl; } catch { } }
+                if (hitl) { try { (M as Record<string, unknown>).hitl = hitl; } catch { } }
 
                 if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
                     loopOpts = persistedBudgets;
@@ -288,11 +296,13 @@ export class TurnRunner {
                 }
 
                 if (typeof loopOpts.maxTurns === 'number') {
-                    (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                    env.budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
                 }
             } catch (err) {
                 // ignore
             }
+
+            loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
 
             // 6. Execute Turn
             const { outcome, taskStatus } = await TaskExecutor.executeTurn({

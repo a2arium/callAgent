@@ -9,9 +9,25 @@ import type {
     Observation,
     ObservationProvenance,
     ExecErrorPayload
-} from '../types/observation.js'; // Original import, keeping it as the instruction's snippet was for index.ts
+} from '../types/observation.js';
+import type { StageTraceEntry } from '../types/stageFacade.js';
 import { InvariantError, ModuleExecutionError, FrameworkModule } from '../utils/errors.js';
 import { logger } from '@a2arium/callagent-utils';
+import type { InternalTaskContext } from './internalContext.js';
+import type {
+    JsonValue,
+    PerceptionTrace,
+    IntentTrace,
+    ShieldTrace,
+    InboxObservationSummary,
+} from '../types/turnTrace.js';
+import { summarizeInbox } from '../telemetry/turnTraceHelpers.js';
+import { computeStableHash } from '../telemetry/manifestProvenance.js';
+import { compactModuleOutput } from '../telemetry/turnTraceHelpers.js';
+
+type MemoryWriterWithApply = MemoryWriter & {
+    __applyToMental?: <S>(m: MentalState<S>) => MentalState<S>;
+};
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
 
@@ -42,14 +58,6 @@ export type TransitionOut =
     | { kind: 'await_tool'; token: string }
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; reason: string };
-
-interface InternalTaskContext extends TaskContext {
-    currentTurnNodeId?: string;
-    telemetry?: {
-        nodeId?: string;
-    };
-    M?: any;
-}
 
 
 // Temporary alias while downstream modules migrate
@@ -111,116 +119,82 @@ export async function oneTurn<
     exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     timings: Record<string, number>;
     reward: number;
+    stageTrace?: StageTraceEntry;
+    attention?: JsonValue;
+    perception?: PerceptionTrace;
+    intent?: IntentTrace;
+    shield?: ShieldTrace;
+    inboxSnapshot?: InboxObservationSummary[];
+    mentalStateBeforeHash?: string;
+    mentalStateAfterHash?: string;
 }> {
     const timings: Record<string, number> = {};
     const iCtx = ctx as InternalTaskContext;
 
-    // Telemetry: Current Turn Node ID should be in ctx (set by TurnRunner or TaskEngine)
-    // If not, we can't attach modules, so we skip.
-    const { telemetry } = await import('../telemetry/TelemetryCollector.js');
-    const { ModuleNode } = await import('../telemetry/nodes/ModuleNode.js');
+    const runWithTiming = async <T>(
+        name: string,
+        fn: () => T | Promise<T>
+    ): Promise<T> => Promise.resolve(fn());
 
+    // Snapshot inbox before any module runs (compact summary for TurnTrace)
+    const inboxCurrent = env.inbox?.current ?? [];
+    const inboxSnapshot = summarizeInbox(
+        Array.isArray(inboxCurrent) ? inboxCurrent : []
+    );
 
-
-    // Logical clock to ensure sequential module ordering in telemetry
-    // Even if modules execute in the same millisecond, they'll have distinct start times
-    let moduleSequence = 0;
-
-    // Helper to instrument module execution
-    // Uses real wall-clock time with logical sequence offset for ordering
-    const runWithTelemetry = async <T>(name: string, fn: () => T | Promise<T>, input?: unknown): Promise<T> => {
-        const turnNodeId = iCtx.currentTurnNodeId;
-        let node: InstanceType<typeof ModuleNode> | undefined;
-        let prevNodeId: string | undefined;
-
-        // Use logical clock: base time + sequence offset ensures correct ordering
-        const baseTime = Date.now();
-        const startTs = baseTime + moduleSequence++;
-
-        if (turnNodeId) {
-            const parentNode = telemetry.getNode(turnNodeId);
-            const traceId = parentNode?.traceId;
-            node = new ModuleNode(name, turnNodeId, undefined, traceId);
-            node.status = 'active';
-            node.input = input;
-            node.startTime = startTs;
-            telemetry.registerNode(node);
-
-            // Set ctx.telemetry.nodeId to module ID so any LLM calls inside this module
-            // will have this module as their parent (not the turn)
-            if (iCtx.telemetry) {
-                prevNodeId = iCtx.telemetry.nodeId;
-                iCtx.telemetry.nodeId = node.id;
-            }
-        }
-
-        try {
-            const result = await Promise.resolve(fn());
-
-            if (node) {
-                node.output = result;
-                // End time must be >= start time; use max of real time and startTs+1
-                node.endTime = Math.max(Date.now(), startTs + 1);
-                node.status = 'success';
-                telemetry.endNode(node);
-            }
-            return result;
-        } catch (error) {
-            if (node) {
-                node.output = { error: error instanceof Error ? error.message : String(error) };
-                node.endTime = Math.max(Date.now(), startTs + 1);
-                node.status = 'failure';
-                telemetry.failNode(node, error instanceof Error ? error : new Error(String(error)));
-            }
-            throw error;
-        } finally {
-            // Restore previous node ID
-            if (prevNodeId !== undefined && iCtx.telemetry) {
-                iCtx.telemetry.nodeId = prevNodeId;
-            }
-        }
-    };
+    // MentalState hash before Learning (will be set after we have mPrev)
+    let mentalStateBeforeHash: string | undefined;
+    let mentalStateAfterHash: string | undefined;
 
     const tA0 = Date.now();
     let alpha: Alpha;
     try {
-        alpha = await runWithTelemetry('attention', () => mods.attention(mPrev, env, mem), { mPrev, env });
+        alpha = await runWithTiming('attention', () => mods.attention(mPrev, env, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Attention, errorObj.message, errorObj);
-
     }
     timings.attentionMs = Date.now() - tA0;
+    const attentionOut: JsonValue = compactModuleOutput(alpha);
 
     const tP0 = Date.now();
     let o: Obs;
     try {
-        o = await runWithTelemetry('perception', () => mods.perception(env, alpha, mem), { env, alpha });
+        o = await runWithTiming('perception', () => mods.perception(env, alpha, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Perception, errorObj.message, errorObj);
-
     }
     timings.perceptionMs = Date.now() - tP0;
+    const perceptionOut: PerceptionTrace = {
+        kind: typeof o === 'object' && o !== null && 'kind' in (o as object) ? String((o as { kind?: string }).kind) : undefined,
+        summary: undefined,
+        data: compactModuleOutput(o),
+    };
+
+    mentalStateBeforeHash = computeStableHash(mPrev as Record<string, unknown>);
 
     const tL0 = Date.now();
     let m1: MentalState<Sensory>;
     try {
-        const result = await runWithTelemetry('learning', () => mods.learning(mPrev, prevAction, o, mem, writer, rPrev), { mPrev, prevAction, o });
+        const result = await runWithTiming('learning', () =>
+            mods.learning(mPrev, prevAction, o, mem, writer, rPrev)
+        );
         m1 = result instanceof Promise ? await result : result;
-        // Apply in-memory patches (if writer exposes an apply hook) so Policy sees updates
-        const applyFn = (writer as any)?.__applyToMental;
-        if (typeof applyFn === 'function') {
-            m1 = applyFn(m1);
+        const writerWithApply = writer as MemoryWriterWithApply;
+        if (typeof writerWithApply?.__applyToMental === 'function') {
+            m1 = writerWithApply.__applyToMental(m1);
         }
-        log.debug('Learning returned MentalState', { hasScratch: !!((m1 as any).memory?.scratch) });
+        mentalStateAfterHash = computeStableHash(m1 as Record<string, unknown>);
+        log.debug('Learning returned MentalState', {
+            hasScratch: !!(m1.memory?.scratch),
+        });
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Learning, errorObj.message, errorObj);
-
     }
     timings.learningMs = Date.now() - tL0;
 
@@ -228,25 +202,22 @@ export async function oneTurn<
     try { iCtx.M = m1; } catch { /* noop */ }
 
     const tPol0 = Date.now();
-    const policyFn = mods.policy as unknown as (...args: unknown[]) => Intent | Array<{ action: Intent; prob: number }>;
+    type PolicyResult = Intent | Array<{ action: Intent; prob: number }>;
+    const policyFn = mods.policy;
     const arity = typeof policyFn === 'function' ? policyFn.length : 1;
-    let pi: Intent | Array<{ action: Intent; prob: number }>;
+    let pi: PolicyResult;
     try {
-        // Wrap policy execution
-        pi = await runWithTelemetry('policy', () => {
-            if (arity >= 4) {
-                return (policyFn as any)(m1, mPrev, o, mem);
-            } else if (arity === 3) {
-                return (policyFn as any)(m1, o, mem);
-            } else {
-                return (policyFn as any)(m1, mem);
-            }
-        }, { m1, o });
+        if (arity >= 4) {
+            pi = (policyFn as unknown as (m: MentalState<Sensory>, prev: MentalState<Sensory> | undefined, o: Obs, mem: MemoryReader) => PolicyResult)(m1, mPrev, o, mem);
+        } else if (arity === 3) {
+            pi = (policyFn as unknown as (m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => PolicyResult)(m1, o, mem);
+        } else {
+            pi = (policyFn as unknown as (m: MentalState<Sensory>, mem: MemoryReader) => PolicyResult)(m1, mem);
+        }
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Policy, errorObj.message, errorObj);
-
     }
     timings.policyMs = Date.now() - tPol0;
 
@@ -293,14 +264,18 @@ export async function oneTurn<
     const tSh0 = Date.now();
     let sh: ShieldOutcome;
     try {
-        sh = await runWithTelemetry('shield', () => mods.shield(m1, chosen, mem), { m1, chosen });
+        sh = await runWithTiming('shield', () => mods.shield(m1, chosen, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Shield, errorObj.message, errorObj);
-
     }
     timings.shieldMs = Date.now() - tSh0;
+    const shieldOut: ShieldTrace = {
+        action: sh.action,
+        ...(sh.action === 'veto' && 'reason' in sh ? { reason: sh.reason } : {}),
+        ...(sh.action === 'defer' && 'askUser' in sh ? { note: sh.askUser } : {}),
+    };
 
     let toExecute: Intent | null = null;
     switch (sh.action) {
@@ -319,26 +294,34 @@ export async function oneTurn<
     }
 
     const tE0 = Date.now();
+    if (iCtx.telemetry) {
+        iCtx.__currentModule = 'execution';
+    }
     let exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
     try {
-        exec = await runWithTelemetry('execution', () => mods.execution(toExecute!, ctx, mem, m1), { toExecute });
+        exec = await runWithTiming('execution', () =>
+            mods.execution(toExecute!, ctx, mem, m1)
+        );
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Execution, errorObj.message, errorObj);
-
     }
     timings.executionMs = Date.now() - tE0;
+    if (iCtx.telemetry) {
+        iCtx.__currentModule = undefined;
+    }
 
     const tT0 = Date.now();
     let outcome: TransitionOut;
     try {
-        outcome = await runWithTelemetry('transition', () => mods.transition(env, exec, m1, mem), { exec });
+        outcome = await runWithTiming('transition', () =>
+            mods.transition(env, exec, m1, mem)
+        );
     } catch (error) {
         if (error instanceof InvariantError) throw error;
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Transition, errorObj.message, errorObj);
-
     }
     timings.transitionMs = Date.now() - tT0;
 
@@ -363,13 +346,39 @@ export async function oneTurn<
     }
     const r = (Number.isFinite(rExt) ? rExt : 0) + (Number.isFinite(rInt) ? rInt : 0);
     try {
-        // Append reward to last episodic event (if any)
-        const episodic = (m1.memory.longTerm.episodic || []);
+        const episodic = m1.memory?.longTerm?.episodic ?? [];
         if (episodic.length > 0) {
-            const last = episodic[episodic.length - 1] as any;
+            const last = episodic[episodic.length - 1] as EpisodicEventWithReward;
             last.rew = r;
         }
     } catch { /* noop */ }
 
-    return { m: m1, exec, outcome, timings, reward: r };
+    const stageTrace = iCtx.__stageTrace;
+    if (iCtx.__stageTrace) {
+        iCtx.__stageTrace = undefined;
+    }
+
+    type EpisodicEventWithReward = { t: number; obs: unknown; act: unknown; rew?: number; out?: unknown };
+
+    const intentOut: IntentTrace = {
+        kind: chosen.kind,
+        summary: undefined,
+        data: compactModuleOutput(chosen),
+    };
+
+    return {
+        m: m1,
+        exec,
+        outcome,
+        timings,
+        reward: r,
+        ...(stageTrace ? { stageTrace } : {}),
+        attention: attentionOut,
+        perception: perceptionOut,
+        intent: intentOut,
+        shield: shieldOut,
+        inboxSnapshot,
+        mentalStateBeforeHash,
+        mentalStateAfterHash,
+    };
 }

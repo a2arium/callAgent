@@ -121,7 +121,7 @@ export class A2AService implements IA2AService {
         sourceCtx: MinimalSourceTaskContext, // Use MinimalSourceTaskContext
         targetAgent: string,
         taskInput: TaskInput,
-        options: A2ACallOptions & { parentTenantId?: string; parentTaskId?: string; parentChildToken?: string } = {}
+        options: A2ACallOptions & { parentTenantId?: string; parentTaskId?: string; parentChildToken?: string; parentTelemetryNodeId?: string } = {}
     ): Promise<InteractiveTaskResult | unknown> {
         const startTime = Date.now();
         const operationId = `a2a_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -878,9 +878,10 @@ export class A2AService implements IA2AService {
                             // Always route loop-first agents through the engine so A2A overrides are respected
                             const eng = getRequiredEngine();
                             try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
-                            const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
-                            return started ?? { status: 'started' } as any;
+                            const entity = { id: targetCtx.task.id, input: targetCtx.task.input };
+                            const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
+                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: parentNodeId });
+                            return started ?? { status: 'started' };
                         })()
                         : (targetPlugin.handleTask
                             ? await targetPlugin.handleTask(targetCtx)
@@ -888,9 +889,10 @@ export class A2AService implements IA2AService {
                                 // Fallback: engine path
                                 const eng = getRequiredEngine();
                                 try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
-                                const entity = { id: targetCtx.task.id, input: targetCtx.task.input } as any;
-                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx as any });
-                                return started ?? { status: 'started' } as any;
+                                const entity = { id: targetCtx.task.id, input: targetCtx.task.input };
+                                const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
+                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: parentNodeId });
+                                return started ?? { status: 'started' };
                             })());
 
                     // Cache the result if caching is enabled

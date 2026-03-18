@@ -17,13 +17,29 @@ import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
-
+import type { InternalTaskContext } from './internalContext.js';
+import type { TurnTrace, ManifestProvenance, TurnTimings } from '../types/turnTrace.js';
+import { TurnTraceSchema } from '../types/turnTrace.js';
+import { summarizePending } from '../telemetry/turnTraceHelpers.js';
+import { aggregateUsage } from '../telemetry/turnTraceHelpers.js';
+import { generateCorrelationId } from '../tracing/Tracing.js';
+import { v4 as uuidv4 } from 'uuid';
+import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
 type LoopRunnerOptions = {
     maxTurns?: number;
     latencyMs?: number;
+    manifestProvenance?: ManifestProvenance;
+    collectTraces?: boolean;
+};
+
+const DEFAULT_PROVENANCE: ManifestProvenance = {
+    agentCardSource: 'inline',
+    runtimeManifestSource: 'inline',
+    agentCardHash: '',
+    runtimeManifestHash: '',
 };
 
 const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
@@ -48,11 +64,12 @@ export async function runLoop<
     M: MentalState<Sensory>;
     outcome: TurnOutcome;
     metrics?: { timings: Record<string, number>[]; rewards: number[] };
+    traces?: TurnTrace[];
 }> {
-    // DIAGNOSTIC: Unique ID for this runLoop execution to detect race conditions
+    const iCtx = ctx as InternalTaskContext;
     const runId = Math.random().toString(36).substring(2, 8);
     const taskId = ctx.task.id.substring(0, 20);
-    const sessionId = (ctx as any).task?.id || taskId;
+    const sessionId = ctx.task?.id ?? taskId;
     log.debug('runLoop started', { taskId, runId });
 
     const start = Date.now();
@@ -62,24 +79,25 @@ export async function runLoop<
 
     const inbox = ensureInbox(env);
 
-    // Initialize control snapshot on env for modules that need control signals
     try {
-        (env as any).control = {
-            pendingSnapshot: env.pending,
-            lastExec: env.lastExec
+        (env as EnvironmentState).control = {
+            pendingSnapshot: env.pending as import('./types.js').ControlPendingState,
+            lastExec: env.lastExec,
         };
     } catch { /* noop */ }
 
-    // ✅ FIX: Store inbox reference on context so handleChildCompleted can update it directly
-    // This allows synchronous child completions to be visible to the loop's await_child check
-    // ✅ FIX: Use a getter for __activeLoopInbox so it always reflects the current env.inbox
-    // This allows ApiBinder to inject results into the fresh inbox even if perception replaces the object identity.
     Object.defineProperty(ctx, '__activeLoopInbox', {
         get: () => env.inbox,
-        configurable: true
+        configurable: true,
     });
-    // ✅ FIX: Store env reference so synchronous completions can update pending state
-    (ctx as any).__activeLoopEnv = env;
+    iCtx.__activeLoopEnv = env;
+
+    const provenance = opts.manifestProvenance ?? iCtx.__manifestProvenance ?? DEFAULT_PROVENANCE;
+    const collectTraces = opts.collectTraces ?? false;
+    const collector = collectTraces ? (iCtx.__turnTraceCollector ?? new TurnTraceCollector()) : undefined;
+    if (collectTraces && collector && !iCtx.__turnTraceCollector) {
+        iCtx.__turnTraceCollector = collector;
+    }
 
     // log.info('LoopRunner: Attached __activeLoopInbox to context (v3.5)', { taskId, hasInbox: !!inbox, inboxLen: inbox.current.length });
 
@@ -748,6 +766,12 @@ export async function runLoop<
                 if (ctx.telemetry) {
                     ctx.telemetry.nodeId = iterationTurnNode.id;
                 }
+
+                // Initialize turn accumulators so bridge/orchestration can push LLM/tool/child summaries
+                const iCtxTurn = ctx as InternalTaskContext;
+                iCtxTurn.__turnLlmCalls = [];
+                iCtxTurn.__turnToolCalls = [];
+                iCtxTurn.__turnChildCalls = [];
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }
@@ -803,19 +827,148 @@ export async function runLoop<
 
             outcome = step.outcome;
 
-            // 🔍 DEBUG: Log transition outcome
-            log.debug('🔍 DEBUG: Transition outcome', {
+            const totalMs =
+                (step.timings?.attentionMs ?? 0) +
+                (step.timings?.perceptionMs ?? 0) +
+                (step.timings?.learningMs ?? 0) +
+                (step.timings?.policyMs ?? 0) +
+                (step.timings?.shieldMs ?? 0) +
+                (step.timings?.executionMs ?? 0) +
+                (step.timings?.transitionMs ?? 0);
+            const turnTimings: TurnTimings = {
+                attentionMs: step.timings?.attentionMs ?? 0,
+                perceptionMs: step.timings?.perceptionMs ?? 0,
+                learningMs: step.timings?.learningMs ?? 0,
+                policyMs: step.timings?.policyMs ?? 0,
+                shieldMs: step.timings?.shieldMs ?? 0,
+                executionMs: step.timings?.executionMs ?? 0,
+                transitionMs: step.timings?.transitionMs ?? 0,
+                totalMs,
+            };
+            const stageBefore = step.stageTrace?.stageBefore ?? 'idle';
+            const stageAfter = step.stageTrace?.stageAfter ?? stageBefore;
+            const turnId = uuidv4();
+            const correlationId = generateCorrelationId();
+            const parentNode = iterationTurnNode
+                ? telemetry.getNode(iterationTurnNode.parentId ?? '')
+                : undefined;
+            const traceId = iterationTurnNode?.traceId ?? parentNode?.traceId ?? undefined;
+            const spanId = iterationTurnNode?.id ?? undefined;
+
+            const usage = iCtx.__turnUsage
+                ? { ...iCtx.__turnUsage }
+                : undefined;
+            if (iCtx.__turnLlmCalls?.length && usage) {
+                usage.llmCalls = iCtx.__turnLlmCalls.length;
+            }
+            if (iCtx.__turnToolCalls?.length && usage) {
+                usage.toolCalls = iCtx.__turnToolCalls.length;
+            }
+            if (iCtx.__turnChildCalls?.length && usage) {
+                usage.childCalls = iCtx.__turnChildCalls.length;
+            }
+
+            const tracePayload: TurnTrace = {
+                turn,
+                turnId,
+                agentCardSource: provenance.agentCardSource,
+                runtimeManifestSource: provenance.runtimeManifestSource,
+                agentCardHash: provenance.agentCardHash,
+                runtimeManifestHash: provenance.runtimeManifestHash,
+                stageBefore,
+                stageAfter,
+                stageTransition:
+                    stageAfter !== stageBefore
+                        ? { from: stageBefore, to: stageAfter }
+                        : undefined,
+                stageAutoMarksApplied: step.stageTrace?.stageAutoMarksApplied,
+                stageInvariantChecks: step.stageTrace?.stageInvariantChecks,
+                stageInvariantError: undefined,
+                inboxCurrent: step.inboxSnapshot ?? [],
+                attention: step.attention,
+                perception: step.perception,
+                mentalStateBeforeHash: step.mentalStateBeforeHash,
+                mentalStateAfterHash: step.mentalStateAfterHash,
+                intent: step.intent,
+                shield: step.shield,
+                execAction: step.exec?.action
+                    ? {
+                          kind: step.exec.action.kind,
+                          token:
+                              'token' in step.exec.action
+                                  ? step.exec.action.token
+                                  : undefined,
+                          summary: undefined,
+                          data: step.exec.action as unknown as import('../types/turnTrace.js').JsonValue,
+                      }
+                    : undefined,
+                execResult: step.exec?.result
+                    ? {
+                          status: step.exec.result.status,
+                          summary: undefined,
+                          data: step.exec.result.data as import('../types/turnTrace.js').JsonValue | undefined,
+                          error: step.exec.result.error as import('../types/turnTrace.js').JsonValue | undefined,
+                          correlationId: step.exec.result.correlationId,
+                      }
+                    : undefined,
+                transition: {
+                    kind: outcome.kind,
+                    token: 'token' in outcome ? outcome.token : undefined,
+                    summary: undefined,
+                    result: 'result' in outcome ? (outcome as { result?: unknown }).result as import('../types/turnTrace.js').JsonValue : undefined,
+                },
+                pendingAfter: summarizePending(env.pending ?? {}),
+                timings: turnTimings,
+                usage,
+                correlationId,
+                traceId,
+                spanId,
+                llmCalls: iCtx.__turnLlmCalls,
+                toolCalls: iCtx.__turnToolCalls,
+                childCalls: iCtx.__turnChildCalls,
+            };
+
+            let trace: TurnTrace;
+            try {
+                trace = TurnTraceSchema.parse(tracePayload) as TurnTrace;
+            } catch (parseErr) {
+                log.warn('TurnTrace parse failed, using payload', {
+                    error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+                });
+                trace = tracePayload;
+            }
+
+            if (iterationTurnNode) {
+                iterationTurnNode.turnTrace = trace;
+            }
+            try {
+                telemetry.emitTurnTrace(trace);
+            } catch (emitErr) {
+                log.warn('TurnTrace emission failed', {
+                    error: emitErr instanceof Error ? emitErr.message : String(emitErr),
+                });
+            }
+            if (collector) {
+                collector.push(trace);
+            }
+            if (iCtx.__turnUsage) {
+                iCtx.__turnUsage = undefined;
+            }
+            iCtx.__turnLlmCalls = undefined;
+            iCtx.__turnToolCalls = undefined;
+            iCtx.__turnChildCalls = undefined;
+
+            log.debug('Transition outcome', {
                 taskId,
                 runId,
                 loopCounter: turnIdx,
                 envTurn: turn,
                 outcomeKind: outcome.kind,
-                hasToken: !!(outcome as any).token,
-                actionKind: (step.exec as any)?.action?.kind,
-                execStatus: (step.exec as any)?.result?.status
+                hasToken: !!(outcome as { token?: string }).token,
+                actionKind: step.exec?.action?.kind,
+                execStatus: step.exec?.result?.status,
             });
 
-            // Telemetry: Success End
             if (iterationTurnNode) {
                 iterationTurnNode.end({ outcome });
                 telemetry.endNode(iterationTurnNode);
@@ -1104,5 +1257,10 @@ export async function runLoop<
 
     }
 
-    return { M: m, outcome, metrics: timings.length ? { timings, rewards } : undefined };
+    return {
+        M: m,
+        outcome,
+        metrics: timings.length ? { timings, rewards } : undefined,
+        ...(collectTraces && collector ? { traces: [...collector.getAll()] } : {}),
+    };
 }

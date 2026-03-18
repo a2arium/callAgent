@@ -718,6 +718,15 @@ LLM costs are tracked automatically. The framework records:
 
 Use `ctx.recordUsage()` for additional custom usage tracking. The adapter handles LLM cost tracking transparently.
 
+### LLM calls in TurnTrace
+
+Each turn’s **TurnTrace** includes turn-level telemetry for LLM usage:
+
+- **`trace.llmCalls`** — array of **LLMCallTrace** entries (one per LLM call in that turn): `model`, `provider`, `durationMs`, `inputTokens`, `outputTokens`, `cost`, optional `module`.
+- **`trace.usage`** — aggregated **TurnUsage** for the turn: `inputTokens`, `outputTokens`, `totalTokens`, `totalCost`, `currency`, and optionally `llmCalls`, `toolCalls`, `childCalls` counts.
+
+Use these when debugging or testing to assert that the expected LLM calls were made in a turn and to verify token/cost totals. See **How-to: Debug with TurnTrace** and **How-to: Test APLRET agents** for patterns.
+
 ---
 
 ## Quick reference

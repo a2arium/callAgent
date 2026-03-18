@@ -4,6 +4,11 @@
  */
 
 import { jest } from '@jest/globals';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const srcDir = path.resolve(__dirname, '../src');
 import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
 import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
@@ -170,13 +175,13 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         llmAdapter: {},
         tenantId: 'test-tenant'
     });
-    await jest.unstable_mockModule('../src/orchestration/A2AService.js', () => ({
+    await jest.unstable_mockModule(path.resolve(srcDir, 'orchestration/A2AService.ts'), () => ({
         globalA2AService: { sendTaskToAgent: sendMock, findLocalAgent: findMock }
     } as any));
-    await jest.unstable_mockModule('../src/eventbus/outboxPublisher.js', () => ({
+    await jest.unstable_mockModule(path.resolve(srcDir, 'eventbus/outboxPublisher.ts'), () => ({
         outboxPublisher: { start: jest.fn(), stop: jest.fn() }
     }));
-    await jest.unstable_mockModule('../src/loop/loopRunner.js', () => ({
+    await jest.unstable_mockModule(path.resolve(srcDir, 'loop/loopRunner.ts'), () => ({
         runLoop: (...args: any[]) => runLoopMock(...args)
     }));
     await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
@@ -1247,6 +1252,41 @@ describe('TaskEngine orchestration coverage', () => {
         expect(capturedParams.input).toBeDefined();
         expect(capturedParams.input).toEqual(initialInput);
         expect(capturedParams.trigger).toBe('start');
+    });
+
+    test('startTask passes manifestProvenance to runLoop', async () => {
+        const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
+        const store = new FakeSessionStore();
+        const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+
+        runLoopMock.mockResolvedValue({
+            M: { memory: { vars: {} } },
+            outcome: { kind: 'complete', result: { ok: true } },
+            metrics: { timings: {} },
+        });
+
+        const task = {
+            id: 'provenance-task',
+            input: { test: true },
+            status: { state: 'submitted' as const, timestamp: new Date().toISOString() },
+        };
+
+        await engine.startTask({
+            task,
+            isStreaming: false,
+            agentId: 'test-agent',
+            tenantId: 't',
+        });
+
+        expect(runLoopMock).toHaveBeenCalled();
+        const loopOpts = runLoopMock.mock.calls[0]?.[4] as { manifestProvenance?: { agentCardSource: string; runtimeManifestSource: string; agentCardHash: string; runtimeManifestHash: string } } | undefined;
+        expect(loopOpts?.manifestProvenance).toBeDefined();
+        expect(loopOpts!.manifestProvenance).toMatchObject({
+            agentCardSource: expect.any(String),
+            runtimeManifestSource: expect.any(String),
+            agentCardHash: expect.any(String),
+            runtimeManifestHash: expect.any(String),
+        });
     });
 
     // Note: executeTaskHandler tests removed as they test internal implementation details

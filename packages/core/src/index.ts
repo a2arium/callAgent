@@ -52,8 +52,21 @@ export {
 } from './helpers/childObservations.js';
 export { runEffect } from './loop/effects.js';
 export { createStageFacade } from './loop/stageHelpers.js';
-export type { StageInvariants } from './loop/stageHelpers.js';
 export { assertStageInvariants } from './loop/stageInvariants.js';
+export { defineControlKeys } from './types/stageFacade.js';
+export type {
+    StageFacade,
+    StageEnterContext,
+    StageInvariantRule,
+    StageInvariantMap,
+    StageTransitionResult,
+    StageInvariantCheckResult,
+    StageTraceEntry,
+    StageSummary,
+    ControlKeyMap,
+    CreateStageFacadeOptions,
+} from './types/stageFacade.js';
+export { readControlVar, writeControlVar, deleteControlVar, resolveControlVars } from './loop/controlVarAccessors.js';
 export type {
     ChildCompletionInput,
     ToolCompletionInput,
@@ -117,18 +130,42 @@ export { eventBus } from './eventbus/inMemoryEventBus.js';
 export { taskChannel } from './eventbus/taskEventEmitter.js';
 export { outboxPublisher } from './eventbus/outboxPublisher.js';
 
-// Telemetry exports
+// TurnTrace
+export type {
+    TurnTrace,
+    TurnTimings,
+    TurnUsage,
+    PendingSummary,
+    ShieldTrace,
+    ManifestProvenance,
+    ManifestSource,
+    JsonValue,
+} from './types/turnTrace.js';
+
+// TurnTrace collection
+export { TurnTraceCollector } from './telemetry/TurnTraceCollector.js';
+
+// Manifest provenance
+export {
+    resolveManifestProvenance,
+    computeStableHash,
+    validateManifestIdentity,
+} from './telemetry/manifestProvenance.js';
+
+// Telemetry
+export type { TelemetryProvider } from './telemetry/Provider.js';
 export { telemetry, TelemetryCollector } from './telemetry/TelemetryCollector.js';
-export { TelemetryNode } from './telemetry/nodes/TelemetryNode.js';
-export { AgentNode } from './telemetry/nodes/AgentNode.js';
-export { TurnNode } from './telemetry/nodes/TurnNode.js';
-export { ModuleNode } from './telemetry/nodes/ModuleNode.js';
-export { ToolNode } from './telemetry/nodes/ToolNode.js';
-export { LLMNode } from './telemetry/nodes/LLMNode.js';
 export { ConsoleProvider } from './telemetry/providers/ConsoleProvider.js';
 export { OpikProvider } from './telemetry/providers/OpikProvider.js';
 export { CallagentBridgeProvider } from './telemetry/providers/CallagentBridgeProvider.js';
-export type { TelemetryProvider } from './telemetry/Provider.js';
+
+// Telemetry nodes (no ModuleNode)
+export { TelemetryNode } from './telemetry/nodes/TelemetryNode.js';
+export { AgentNode } from './telemetry/nodes/AgentNode.js';
+export { TurnNode } from './telemetry/nodes/TurnNode.js';
+export { ChildCallNode } from './telemetry/nodes/ChildCallNode.js';
+export { LLMNode } from './telemetry/nodes/LLMNode.js';
+export { ToolNode } from './telemetry/nodes/ToolNode.js';
 // Error system exports
 export { FrameworkError, PluginError, ManifestError, TaskExecutionError, AgentError, ConfigurationError, InvariantError, ModuleExecutionError, FrameworkModule, isErrorType } from './utils/errors.js';
 export { throwInvariantError } from './utils/invariantError.js';

@@ -12,6 +12,29 @@ Use this guide to build tests that are robust under async resumes, retries, and 
 
 Your runtime (or harness) must capture TurnTrace per turn and expose it to tests.
 
+### Using `collectTraces: true` with `runLoop`
+
+When you drive the loop via **`runLoop`** (e.g. in a test or harness), pass **`collectTraces: true`** (and optionally **`manifestProvenance`**) in the options:
+
+```ts
+const result = await runLoop(ctx, M, env, modules, {
+  maxTurns: 10,
+  collectTraces: true,
+  manifestProvenance: { agentCardSource: 'inline', runtimeManifestSource: 'inline', agentCardHash: '...', runtimeManifestHash: '...' },
+});
+// result.traces is TurnTrace[] — one entry per turn
+expect(result.traces).toBeDefined();
+expect(result.traces!.length).toBeGreaterThanOrEqual(1);
+const first = result.traces![0];
+expect(first.turn).toBe(1);
+expect(first.turnId).toBeDefined();
+expect(first.agentCardHash).toBeDefined();
+expect(first.inboxCurrent).toEqual(expect.any(Array));
+expect(first.timings.totalMs).toBeGreaterThanOrEqual(0);
+```
+
+You can then assert on **`result.traces`** per turn (intent, shield, transition, stage, pendingAfter, llmCalls, toolCalls, childCalls, etc.) without attaching a separate collector.
+
 A test should be able to access:
 
 - `trace.turn`, `trace.turnId`
@@ -89,6 +112,17 @@ Include at least:
 - module failures throw `ModuleExecutionError` with typed `module` field (e.g., `'perception'`, `'execution'`)
 - manifest versions and sources match test expectations
 
+### 5) Stage transitions and invariants (when using StageFacade)
+
+When the agent uses **`createStageFacade`**, add tests that:
+
+- **Current stage:** Use **`Stage.get(ctx)`** (or assert on TurnTrace `stageBefore` / `stageAfter`) to verify the stage after a turn or after a resume.
+- **Transitions:** Call **`Stage.set(ctx, nextStage)`** in tests (or trigger the code path that does); assert on the returned **`StageTransitionResult`** (`from`, `to`, `autoMarksApplied`, `invariantChecks`) when you need to verify transition details.
+- **Invariants:** Use **`Stage.assert(ctx, stage?)`** to assert that the current control state satisfies the invariants for the given stage; or trigger a transition that should fail (e.g. missing required token) and expect **`InvariantError`** with **`e.detail.type === 'stage_invariant'`** and inspect **`e.detail.required`** / **`e.detail.forbidden`**.
+- **Summary:** **`Stage.summary(ctx)`** returns a normalized shape `{ current, hasPendingInput, hasPendingTool, hasPendingChild, markCount }`; use it in tests to assert control state without depending on raw control keys.
+
+TurnTrace fields **`stageBefore`**, **`stageAfter`**, **`stageTransition`**, **`stageAutoMarksApplied`**, **`stageInvariantChecks`** (and **`stageTrace`** when exposed by the runtime) are populated from the same data when **`Stage.set()`** runs and the framework records the transition.
+
 ## TurnTrace assertions that catch “lost between turns” bugs
 
 These assertions are high signal:
@@ -117,11 +151,13 @@ If any of these fail, the change is usually incomplete.
 
 A harness should support:
 
-- running one turn
+- running one turn (or multiple via `runLoop`)
 - injecting observations into inbox
 - injecting tool/child completions by token
-- capturing TurnTrace per turn
+- capturing TurnTrace per turn (e.g. via **`runLoop(..., { collectTraces: true })`** → **`result.traces`**)
 - asserting stage/pending state
+
+When using **`runLoop`** with **`collectTraces: true`**, assert on **`result.traces`** (e.g. `result.traces![turnIndex].intent`, `result.traces![turnIndex].transition`, `result.traces![turnIndex].pendingAfter`). For a single-turn harness, **`result.traces![0]`** is the first turn’s TurnTrace.
 
 Example shape:
 

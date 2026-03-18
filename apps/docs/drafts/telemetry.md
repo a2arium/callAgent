@@ -1,20 +1,19 @@
 # Telemetry and Observability
 
-The CallAgent framework includes a built-in, hierarchical telemetry system that provides visibility into agent execution, performance, and costs. It supports pluggable providers, allowing you to stream data to different backends (e.g., Console, Opik, OpenTelemetry) with minimal configuration.
+The CallAgent framework uses a **one-TurnTrace-per-turn** telemetry model: each turn emits a single structured **TurnTrace** that includes module timings, inbox snapshot, intent/shield/execution/transition summaries, and optional sub-call arrays (LLM, tool, child). There are **no per-module spans** (no ModuleNode); module timings live inside **TurnTrace.timings**. Sub-spans (LLM, tool, child) are logical children of the **TurnNode** for that turn.
 
-## Key Features
+## Key concepts
 
-- **Zero-Touch Instrumentation**: `TaskEngine` and `TurnRunner` automatically track Agent and Turn execution. You don't need to manually verify start/end calls in your agent code.
-- **Hierarchical Tracing**: Events are structured in a tree (Agent -> Turn -> Module -> Tool/LLM), preserving context.
-- **Cost & Usage Tracking**: Token usage and costs are aggregated up the tree automatically.
-- **Pluggable Providers**: Switch between or combine multiple backends (Console, Opik, etc.).
+- **One TurnTrace per turn** — The loop emits exactly one TurnTrace per turn. No more, no fewer. It is the primary unit for debugging and testing.
+- **TurnTrace-aware providers** — Providers implement **`onTurnTrace(trace: TurnTrace)`** to receive the full trace once per turn. Optional **`onNodeStart`** / **`onNodeEnd`** are used only for agent-level (and optionally turn/sub-span) boundaries when the provider needs span-style events.
+- **Sub-span hierarchy** — LLM calls, tool calls, and child-agent calls are recorded as **TurnTrace.llmCalls**, **TurnTrace.toolCalls**, **TurnTrace.childCalls**. In span-based backends they are represented as children of the TurnNode (e.g. **LLMNode**, **ToolNode**, **ChildCallNode**). Child-agent execution is linked via **ChildCallNode** and optional `parentTurnId` / `childTraceId`.
+- **Manifest provenance** — Every TurnTrace carries **agentCardSource**, **runtimeManifestSource**, **agentCardHash**, **runtimeManifestHash**. Provenance is persisted in snapshot meta and restored on resume.
 
-## 1. Zero-Code Configuration
+## Configuration
 
-The easiest way to use telemetry is via environment variables. The framework checks these on startup and automatically configures the appropriate providers.
+### Console provider (local debugging)
 
-### Console Provider (Local Debugging)
-To see telemetry events in your terminal:
+Set:
 
 ```bash
 export CONSOLE_TELEMETRY=true
@@ -22,88 +21,69 @@ export CONSOLE_TELEMETRY=true
 export TELEMETRY_CONSOLE=true
 ```
 
-Output example:
+The **ConsoleProvider** implements **`onTurnTrace`** and prints a compact summary per turn (turn number, timings, intent/shield/transition summary, optional sub-call counts). It does **not** emit per-module lines; all module timings are inside the single turn summary.
+
+Example output:
+
 ```
-[START] AGENT ID=...
-[START] TURN ID=...
-[END] TURN ID=... Status=success Duration=150ms
-[END] AGENT ID=... Status=success Duration=450ms
+[Turn 1] turnId=... totalMs=120 attentionMs=2 perceptionMs=1 ... intent=language shield=pass transition=continue
+[Turn 2] turnId=... totalMs=80 ...
 ```
 
-### Opik (Observability Platform)
-To stream traces to [Opik](https://www.comet.com/site/products/opik/):
+### Opik (observability platform)
 
-1.  Set the `CALLAGENT_OPIK_ENABLED` flag (or just provide the API key):
-    ```bash
-    export CALLAGENT_OPIK_ENABLED=true
-    ```
-2.  Configure standard Opik variables:
-    ```bash
-    export OPIK_API_KEY="your-api-key"
-    export OPIK_WORKSPACE="your-workspace"
-    export OPIK_PROJECT_NAME="your-project"
-    ```
+To stream to [Opik](https://www.comet.com/site/products/opik/):
 
-The framework will automatically mapping:
-- **Agents** -> **Traces**
-- **Turns**, **Tools**, **LLM Calls** -> **Spans**
+1. Set `CALLAGENT_OPIK_ENABLED=true` (or provide the API key).
+2. Configure `OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME`.
 
-## 2. Manual Configuration
+The **OpikProvider** maps:
 
-If you need more control (e.g., adding custom providers or configuring them programmatically), you can use the `telemetry` singleton.
+- **AgentNode** → Trace
+- **TurnNode** (with **TurnTrace** attached) → Span; turn-level fields (timings, usage, llmCalls, toolCalls, childCalls) are available on the span or as child spans.
+- **LLMNode**, **ToolNode**, **ChildCallNode** → Child spans of the TurnNode.
 
-```typescript
-import { telemetry, ConsoleProvider, OpikProvider } from '@a2arium/callagent-core';
+## Manual configuration
 
-// Add providers manually
+Use the **telemetry** singleton to add providers. Providers must implement **TelemetryProvider**, including **`onTurnTrace(trace: TurnTrace)`** to receive the per-turn trace.
+
+```ts
+import { telemetry, ConsoleProvider, type TelemetryProvider, type TurnTrace } from '@a2arium/callagent-core';
+
 telemetry.addProvider(new ConsoleProvider());
 
-// You can create your own custom provider by implementing the TelemetryProvider interface
-class MyCustomProvider implements TelemetryProvider {
-    name = "custom";
-    onNodeStart(node) { ... }
-    onNodeEnd(node) { ... }
-    // ...
+class MyProvider implements TelemetryProvider {
+    name = 'custom';
+    onTurnTrace(trace: TurnTrace) {
+        // One call per turn with full TurnTrace
+        console.log('Turn', trace.turn, trace.turnId, trace.timings.totalMs);
+    }
+    onNodeStart(node) { /* optional: agent/turn/sub-span */ }
+    onNodeEnd(node) { /* optional */ }
 }
-telemetry.addProvider(new MyCustomProvider());
+telemetry.addProvider(new MyProvider());
 ```
 
-## 3. Data Model
+## Data model
 
-The telemetry system uses a node-based hierarchy:
+| Node / type   | Description |
+|---------------|-------------|
+| **AgentNode** | Full task execution. Root of the trace. |
+| **TurnNode**  | One turn. Carries **TurnTrace** (turn, turnId, timings, inboxCurrent, intent, shield, execAction, execResult, transition, pendingAfter, llmCalls, toolCalls, childCalls, error, provenance). |
+| **LLMNode**   | One LLM call. Child of TurnNode. |
+| **ToolNode**  | One tool call. Child of TurnNode. |
+| **ChildCallNode** | One child-agent dispatch/completion. Child of TurnNode; links to child trace via optional childTraceId / childAgentNodeId. |
 
-| Node Type | Description |
-| :--- | :--- |
-| **AgentNode** | Represents a full task execution. Maps to a **Trace** in distributed tracing systems. |
-| **TurnNode** | Represents a single turn loop. Child of AgentNode. |
-| **ModuleNode** | (Optional) Represents a module execution within a turn. |
-| **ToolNode** | Represents a tool execution. |
-| **LLMNode** | Represents an LLM call. |
+There is **no ModuleNode**. Module timings are fields in **TurnTrace.timings** (attentionMs, perceptionMs, learningMs, policyMs, shieldMs, executionMs, transitionMs, totalMs).
 
-### Manual Instrumentation
+## Collecting traces in tests
 
-While Agents and Turns are tracked automatically, you can manually track custom units of work (e.g., a complex calculation or sub-routine) using `ToolNode` or generic nodes:
+Pass **`collectTraces: true`** (and optionally **`manifestProvenance`**) to **`runLoop`**. The result includes **`result.traces`** (array of **TurnTrace**), one per turn. See **How-to: Test APLRET agents** and **How-to: Debug with TurnTrace**.
 
-```typescript
-import { ToolNode, telemetry } from '@a2arium/callagent-core';
+## Integration with usage tracking
 
-const node = new ToolNode('my-complex-operation', parentNodeId);
-telemetry.registerNode(node);
-node.start(inputData);
+When **`ctx.recordUsage()`** is called (e.g. from Execution after an LLM call), usage is associated with the turn and appears in **TurnTrace.usage** and in **TurnTrace.llmCalls** (and similarly for tools). Costs and token counts are aggregated at the turn level.
 
-try {
-    const result = await performOperation();
-    node.end(result);
-    telemetry.endNode(node);
-} catch (err) {
-    node.fail(err);
-    telemetry.failNode(node);
-}
-```
+---
 
-## 4. Integration with Usage Tracking
-
-The Telemetry system integrates with the [Usage Tracking](./usage-tracking.md) system. When `ctx.recordUsage()` is called, the cost and token counts are associated with the active telemetry node and propagated up the hierarchy (e.g., adding to the Turn's total, which adds to the Agent's total).
-
-TODO:
-Do integration with https://github.com/openlit/openlit
+TODO: Integration with OpenLIT or other backends as needed.

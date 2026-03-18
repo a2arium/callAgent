@@ -112,6 +112,15 @@ describe('oneTurn policy selection and rewards', () => {
         expect(result.m.applied).toBe(true);
         expect(result.reward).toBe(5);
         expect((result.m.memory.longTerm.episodic as any[])[0].rew).toBe(5);
+
+        // New return fields for TurnTrace / telemetry
+        expect(result.attention).toBeDefined();
+        expect(result.perception).toBeDefined();
+        expect(result.intent).toBeDefined();
+        expect(result.shield).toBeDefined();
+        expect(Array.isArray(result.inboxSnapshot)).toBe(true);
+        expect(typeof result.mentalStateBeforeHash === 'string' || result.mentalStateBeforeHash === undefined).toBe(true);
+        expect(typeof result.mentalStateAfterHash === 'string' || result.mentalStateAfterHash === undefined).toBe(true);
     });
 
     it('uses epsilon stochastic branch when explorationEpsilon triggers', async () => {

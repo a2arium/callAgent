@@ -28,11 +28,15 @@ import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { logger } from '@a2arium/callagent-utils';
 
 import { normalizeObservationInbox, type EnvironmentState, type ObservationInbox, type Snapshot } from '../loop/types.js';
+import { writeControlVar } from '../loop/controlVarAccessors.js';
 import type { Observation } from '../loop/oneTurn.js';
 import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentPlugin } from '../plugin/types.js';
+import { resolveManifestProvenance } from '../telemetry/manifestProvenance.js';
+import type { ManifestProvenance, ManifestSource } from '../types/turnTrace.js';
+import type { InternalTaskContext } from '../loop/internalContext.js';
 import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
 import { createMemoryRegistry } from '@a2arium/callagent-memory-engine';
 import { ArtifactImpl, isArtifactMarker, type ArtifactMarker } from '@a2arium/callagent-memory-engine';
@@ -389,18 +393,35 @@ export class TaskEngine {
 
         // Choose execution path: loop-first (default) or durable handler
         // Check manifest for runMode, then ctx, then default to 'loop'
-        const activeAgentId = (ctx as any).agentId || agentId;
+        const activeAgentId = (ctx as Record<string, unknown>).agentId as string | undefined || agentId;
         const plugin = activeAgentId ? PluginManager.findAgent(activeAgentId) : null;
         const manifestRunMode = plugin?.resolved.runtimeManifest.runMode;
-        const runMode: 'loop' | 'legacy' = (ctx as any).runMode || manifestRunMode || 'loop';
+        const runModeRaw = (ctx as Record<string, unknown>).runMode ?? manifestRunMode ?? 'loop';
+        const runMode: 'loop' | 'legacy' = runModeRaw === 'legacy' ? 'legacy' : 'loop';
         try { log.debug('Task execution start', { runMode, agentId: activeAgentId }); } catch { }
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log('[TaskEngine.startTask] About to execute, runMode=', runMode, 'isStreaming=', isStreaming);
         }
 
-        const tenantId = ((ctx as any).tenantId || startTenantId || 'default') as string;
+        const tenantId = ((ctx as Record<string, unknown>).tenantId || startTenantId || 'default') as string;
         const sessionId = task.id as string;
         const traceparent = createTraceparent();
+
+        // Compute manifest provenance (fail-fast on identity mismatch when plugin has both manifests)
+        let manifestProvenance: ManifestProvenance;
+        if (plugin?.resolved) {
+            try {
+                manifestProvenance = resolveManifestProvenance({
+                    agentCard: { source: plugin.resolved.agentCardSource as ManifestSource, content: plugin.resolved.agentCard },
+                    runtimeManifest: { source: plugin.resolved.runtimeManifestSource as ManifestSource, content: plugin.resolved.runtimeManifest }
+                });
+            } catch (err) {
+                throw new Error(`Manifest provenance failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        } else {
+            manifestProvenance = { agentCardSource: 'inline', runtimeManifestSource: 'inline', agentCardHash: '', runtimeManifestHash: '' };
+        }
+        (ctx as InternalTaskContext).__manifestProvenance = manifestProvenance;
 
         try {
             // Load session-scoped snapshot if available (tenantId/sessionId assumed on ctx for now)
@@ -408,7 +429,17 @@ export class TaskEngine {
 
 
             const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
-            let M: MentalState = (baseSnap as any).M as MentalState || initialM(ctx);
+            // Restore manifest provenance from snapshot if present (resume path)
+            const meta = baseSnap.meta as { manifestProvenance?: ManifestProvenance } | undefined;
+            if (meta?.manifestProvenance) {
+                (ctx as InternalTaskContext).__manifestProvenance = meta.manifestProvenance;
+            } else {
+                // Persist provenance into snapshot meta so it is saved and available on resume
+                const metaObj = (baseSnap.meta as Record<string, unknown>) || {};
+                metaObj.manifestProvenance = manifestProvenance;
+                baseSnap.meta = metaObj;
+            }
+            let M: MentalState = (baseSnap as Record<string, unknown>).M as MentalState || initialM(ctx);
 
             // Hydrate any persisted Artifact markers inside the mental state / vars
             const mentalHydrationPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
@@ -926,14 +957,14 @@ export class TaskEngine {
                     // Automatic token management (default: true)
                     if (opts?.setToken !== false) {
                         controlUpdates.push(['token', token]);
-                        TaskStateUtils.syncControlVarIntoActiveLoop(ctx as any, 'token', token);
+                        writeControlVar(ctx, 'token', token);
                     }
 
                     // Automatic stage management
                     if (opts?.setStage) {
                         try {
                             controlUpdates.push(['stage', opts.setStage]);
-                            TaskStateUtils.syncControlVarIntoActiveLoop(ctx as any, 'stage', opts.setStage);
+                            writeControlVar(ctx, 'stage', opts.setStage);
                         } catch (error) {
                             (ctx as any).logger?.warn?.('Failed to auto-set stage', { stage: opts.setStage, error });
                         }
@@ -1800,12 +1831,18 @@ export class TaskEngine {
                             externalEvents: undefined
                         };
 
-                        const overrides = (plugin as any)?.loop?.modules || {};
+                        const overrides = (plugin as { loop?: { modules?: Record<string, unknown> } })?.loop?.modules || {};
 
-                        let loopOpts: { maxTurns?: number; latencyMs?: number } = {};
+                        // Restore manifest provenance from parent snapshot
+                        const latestMeta = (latestBase as Record<string, unknown>)?.meta as { manifestProvenance?: ManifestProvenance } | undefined;
+                        if (latestMeta?.manifestProvenance) {
+                            (ctx as InternalTaskContext).__manifestProvenance = latestMeta.manifestProvenance;
+                        }
+
+                        let loopOpts: { maxTurns?: number; latencyMs?: number; manifestProvenance?: ManifestProvenance } = {};
                         try {
                             // Restore budgets from snapshot first, then fallback to manifest
-                            const persistedBudgets = (latestBase as any)?.meta?.budgets;
+                            const persistedBudgets = (latestBase as Record<string, unknown>)?.meta as { maxTurns?: number; latencyMs?: number } | undefined;
                             const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                             const hitl = plugin?.resolved.runtimeManifest.hitl;
                             if (hitl) { try { (M as any).hitl = hitl; } catch { } }
@@ -1824,11 +1861,12 @@ export class TaskEngine {
                             }
 
                             if (typeof loopOpts.maxTurns === 'number') {
-                                (env as any).budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
+                                env.budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
                             }
                         } catch (err) {
-                            try { (ctx as any).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
+                            try { (ctx as { logger?: { warn?: (msg: string, o?: unknown) => void } }).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
                         }
+                        loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
                         try {
                             const { taskStatus } = await TaskExecutor.executeTurn({
                                 ctx, M, env, overrides, loopOpts,

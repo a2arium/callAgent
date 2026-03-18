@@ -795,9 +795,17 @@ Rules:
 
 - stage lives in control state, not `MentalState`
 - transitions between stages must be explicit
-- each await stage must have a corresponding token. 
+- each await stage must have a corresponding token.
 - Any stage whose name begins with awaiting_ MUST declare a require: [...] token invariant (StageFacade) OR use the base await stage and the standard pending slot.
 - runtime should reject impossible combinations
+
+**StageFacade** (`createStageFacade<St>({ stages, initial, ... })`) is the canonical API for stage management. The returned **`StageFacade<St>`** exposes:
+
+- **`get(ctx)`** — current stage
+- **`set(ctx, stage)`** — transition; returns **`StageTransitionResult<St>`** (`from`, `to`, `autoMarksApplied`, `invariantChecks`); stage and autoMarks are committed **atomically** (validate-before-commit); **`onEnter`** runs post-commit with **`StageEnterContext`** (only `progress` and `complete`) and is non-transactional (no rollback if it throws)
+- **`is(ctx, stage)`** — equality check
+- **`assert(ctx, stage?)`** — assert current-stage invariants
+- **`summary(ctx)`** — **`StageSummary<St>`**: normalized, non-leaky shape `{ current, hasPendingInput, hasPendingTool, hasPendingChild, markCount }` (no raw control keys). Typed control keys: use **`defineControlKeys({ ... })`** from `@a2arium/callagent-core` for invariants and autoMarks.
 
 Recommended invariant examples:
 
@@ -1016,55 +1024,81 @@ Rules:
 
 ## TurnTrace
 
-The runtime should emit one structured TurnTrace per turn.
+The runtime emits **exactly one** structured TurnTrace per turn (one-turn-one-trace model). No ModuleNode or per-module spans; module timings live in `TurnTrace.timings`.
 
-TurnTrace is the primary unit of truth for debugging and testing.
+TurnTrace is the primary unit of truth for debugging and testing. The normative shape is backed by Zod in `packages/core/src/types/turnTrace.ts` (`TurnTraceSchema`).
 
-Recommended shape:
-
+Recommended shape (matches implementation):
 
 ```ts
 type TurnTrace = {
   turn: number;
   turnId: string;
 
-  // manifest provenance (required in v2)
+  // Manifest provenance (required; persisted/resumed with snapshot)
   agentCardSource: 'defaultPath' | 'pathOverride' | 'inline';
   runtimeManifestSource: 'defaultPath' | 'pathOverride' | 'inline';
   agentCardHash: string;
   runtimeManifestHash: string;
 
+  // Stage
   stageBefore: string;
   stageAfter?: string;
-  inboxCurrent: unknown[];
-  attention?: unknown;
-  perception?: unknown;
+  stageTransition?: { from: string; to: string };
+  stageAutoMarksApplied?: string[];
+  stageInvariantChecks?: StageInvariantCheckResult[];
+  stageInvariantError?: InvariantErrorPayload;
+
+  // Inbox (compact summary: source, kind, token)
+  inboxCurrent: InboxObservationSummary[];
+
+  // Module outputs (compact)
+  attention?: JsonValue;
+  perception?: PerceptionTrace;
   mentalStateBeforeHash?: string;
   mentalStateAfterHash?: string;
-  intent?: unknown;
+  intent?: IntentTrace;
   shield?: { action: 'pass' | 'transform' | 'defer' | 'veto'; note?: string; reason?: string };
-  execAction?: unknown;
-  execResult?: unknown;
-  transition?: unknown;
-  pendingAfter?: unknown;
-  timings?: Record<string, number>;
-  usage?: Record<string, unknown>;
+  execAction?: ExecActionTrace;
+  execResult?: ExecResultTrace;
+  transition?: TransitionTrace;
+
+  // Pending state (normalized summary)
+  pendingAfter?: PendingSummary;
+
+  // Timing and usage
+  timings: TurnTimings;
+  usage?: TurnUsage;
+
+  // Correlation
   correlationId?: string;
   traceId?: string;
   spanId?: string;
+
+  // Sub-call summaries (LLM, tool, child calls during this turn; linked via ChildCallNode for children)
+  llmCalls?: LLMCallTrace[];
+  toolCalls?: ToolCallTrace[];
+  childCalls?: ChildCallTrace[];
+
+  // Error (if turn failed)
+  error?: { code?: string; message: string; module?: FrameworkModule; detail?: JsonValue };
 };
 ```
 
+**Manifest provenance persistence/resume:** When TurnTrace is enabled, the runtime stores `ManifestProvenance` (agentCardSource, runtimeManifestSource, agentCardHash, runtimeManifestHash) on the task context and in snapshot meta. On resume, provenance is restored from snapshot so every TurnTrace carries the same provenance for the run. Identity (name/version) must match between Agent Card and Runtime Manifest or the loop will not start.
+
+**Child tracing:** Child-agent dispatch and completion are recorded in `TurnTrace.childCalls[]`. Parent/child traces are linked via `ChildCallNode` (telemetry node type `'child'`) and optional `parentTurnId` / `childTraceId` / `childAgentNodeId` in `ChildCallTrace`.
 
 ### TurnTrace requirements
 
-- one trace record per turn
-- stable `turnId` per turn
-- include stage before and after
-- include await token when relevant
-- include shield action
-- include execution latency and cost metadata when available
-- include enough data to reconstruct why Policy chose its intent
+- One trace record per turn (no more, no fewer).
+- Stable `turnId` per turn.
+- Include stage before and after (and `stageTransition` when StageFacade is used).
+- Include await token when relevant (in `pendingAfter` and transition).
+- Include shield action.
+- Include execution latency and cost metadata when available (`timings`, `usage`).
+- Include enough data to reconstruct why Policy chose its intent (`intent`, `perception`, `inboxCurrent`).
+- Sub-spans (LLM, tool, child) are logical children of the turn; child execution is linked via `ChildCallNode`.
 
 ### Correlation requirements
 

@@ -1,65 +1,99 @@
-
-import { TelemetryProvider } from '../Provider.js';
+import type { TelemetryProvider } from '../Provider.js';
 import { TelemetryNode } from '../nodes/TelemetryNode.js';
 import { logger } from '@a2arium/callagent-utils';
 import { AgentNode } from '../nodes/AgentNode.js';
 import { TurnNode } from '../nodes/TurnNode.js';
 import { ToolNode } from '../nodes/ToolNode.js';
 import { LLMNode } from '../nodes/LLMNode.js';
-import { ModuleNode } from '../nodes/ModuleNode.js';
-import { WorkflowNode } from '../nodes/WorkflowNode.js';
+import { ChildCallNode } from '../nodes/ChildCallNode.js';
+import type { TurnTrace } from '../../types/turnTrace.js';
 import { v7 as uuidv7 } from 'uuid';
 
-let OpikClient: any;
+type OpikTracePayload = {
+    id: string;
+    name: string;
+    metadata?: Record<string, unknown>;
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+    startTime?: Date;
+    endTime?: Date;
+};
+
+type OpikSpanPayload = {
+    id: string;
+    name: string;
+    type: 'general' | 'tool' | 'llm' | 'child';
+    startTime: Date;
+    endTime: Date;
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    parentSpanId?: string;
+    usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+    };
+    totalEstimatedCost?: number;
+    model?: string;
+    provider?: string;
+};
+
+type OpikTrace = {
+    span(payload: OpikSpanPayload): OpikSpan;
+    update(payload: Partial<OpikTracePayload>): void;
+    end(): void;
+};
+
+type OpikSpan = {
+    end(): void;
+};
+
+type OpikClient = {
+    trace(payload: OpikTracePayload): OpikTrace;
+};
 
 export class OpikProvider implements TelemetryProvider {
     public readonly name = 'opik';
     private enabled = false;
-    private client: any | undefined;
+    private client: OpikClient | undefined;
 
-    // Map internal node IDs to Opik Trace/Span objects
-    private traces = new Map<string, any>();
-    private spans = new Map<string, any>();
-
-    // Map internal Node IDs (v4) to Opik IDs (v7)
+    private traces = new Map<string, OpikTrace>();
+    private traceIdToTrace = new Map<string, OpikTrace>();
     private nodeToOpikId = new Map<string, string>();
+    private currentTurnNode: TurnNode | null = null;
 
     constructor() {
-        this.init().catch(err => logger.warn('Opik initialization failed', { error: err }));
+        this.init().catch((err) =>
+            logger.warn('Opik initialization failed', { error: err })
+        );
     }
 
-    private async init() {
-        if (process.env.CALLAGENT_OPIK_ENABLED !== 'true' && !process.env.OPIK_API_KEY) {
+    private async init(): Promise<void> {
+        if (
+            process.env.CALLAGENT_OPIK_ENABLED !== 'true' &&
+            !process.env.OPIK_API_KEY
+        ) {
             return;
         }
-
         try {
-            // Dynamic import to avoid hard dependency
-            const opikModule: any = await import('opik');
-            OpikClient = opikModule.Opik;
-
-            this.client = new OpikClient();
-
-            this.client = new OpikClient();
-
-            // Internal logging removed due to segfault risk
-            // try { if (opikModule.setLoggerLevel) ... } catch (e) ...
-
+            const opikModule = await import('opik');
+            const OpikClientClass = opikModule.Opik as new () => OpikClient;
+            this.client = new OpikClientClass();
             this.enabled = true;
             logger.info('Opik provider initialized');
-        } catch (error) {
+        } catch {
             logger.debug('Opik SDK not found, skipping Opik provider');
         }
     }
 
     onNodeStart(node: TelemetryNode): void {
         if (!this.enabled || !this.client) return;
-
         try {
             if (node instanceof AgentNode) {
                 this.startTrace(node);
-            } else {
-                this.startSpan(node);
+            } else if (node instanceof TurnNode) {
+                this.currentTurnNode = node;
             }
         } catch (error) {
             logger.error('Opik onNodeStart error', { error, nodeId: node.id });
@@ -68,10 +102,11 @@ export class OpikProvider implements TelemetryProvider {
 
     onNodeEnd(node: TelemetryNode): void {
         if (!this.enabled || !this.client) return;
-
         try {
             if (node instanceof AgentNode) {
                 this.endTrace(node);
+            } else if (node instanceof TurnNode) {
+                this.currentTurnNode = null;
             } else {
                 this.endSpan(node);
             }
@@ -80,24 +115,63 @@ export class OpikProvider implements TelemetryProvider {
         }
     }
 
+    onTurnTrace(trace: TurnTrace): void {
+        if (!this.enabled || !this.client || !this.currentTurnNode) return;
+        try {
+            const traceId = trace.traceId;
+            const opikTrace = traceId
+                ? this.traceIdToTrace.get(traceId)
+                : undefined;
+            if (!opikTrace) return;
+
+            const turnNode = this.currentTurnNode;
+            const startTime = turnNode.startTime
+                ? new Date(turnNode.startTime)
+                : new Date();
+            const endTime = turnNode.endTime
+                ? new Date(turnNode.endTime)
+                : new Date();
+
+            const spanPayload: OpikSpanPayload = {
+                id: this.getOpikId(turnNode.id),
+                name: `Turn ${trace.turn}`,
+                type: 'general',
+                startTime,
+                endTime,
+                input: { inboxSummary: trace.inboxCurrent },
+                output: {
+                    transition: trace.transition?.kind,
+                    intent: trace.intent?.kind,
+                },
+                metadata: {
+                    nodeId: turnNode.id,
+                    nodeType: 'turn',
+                    turn: trace.turn,
+                    turnId: trace.turnId,
+                    stageBefore: trace.stageBefore,
+                    stageAfter: trace.stageAfter,
+                    timings: trace.timings,
+                    usage: trace.usage,
+                    intent: trace.intent,
+                    shield: trace.shield,
+                    pendingAfter: trace.pendingAfter,
+                },
+            };
+            const span = opikTrace.span(spanPayload);
+            span.end();
+            this.currentTurnNode = null;
+        } catch (error) {
+            logger.error('Opik onTurnTrace error', { error });
+        }
+    }
+
     onNodeFailure(node: TelemetryNode, error: Error): void {
         if (!this.enabled || !this.client) return;
-
         try {
-            const span = this.spans.get(node.id);
+            const span = this.traces.get(node.id);
             if (span) {
-                // Opik span update for error
-                // Current SDK might prefer output.error or tags
                 span.update({
-                    output: { error: error.message, stack: error.stack }
-                });
-                return;
-            }
-
-            const trace = this.traces.get(node.id);
-            if (trace) {
-                trace.update({
-                    output: { error: error.message }
+                    output: { error: error.message, stack: error.stack },
                 });
             }
         } catch (err) {
@@ -105,106 +179,72 @@ export class OpikProvider implements TelemetryProvider {
         }
     }
 
-    onUsageUpdate(node: TelemetryNode): void {
-        // Usage is typically finalized on end for Opik, 
-        // but if we support streaming updates we could do it here.
-        // For now, we'll wait for End to flush usage.
+    onUsageUpdate(_node: TelemetryNode): void {
+        // Usage is finalized on end for Opik
     }
 
-    private safeInput(input: unknown): any {
+    private safeInput(input: unknown): Record<string, unknown> | undefined {
         if (input === undefined || input === null) return undefined;
-        return (typeof input === 'object' ? input : { value: input });
+        return typeof input === 'object' ? (input as Record<string, unknown>) : { value: input };
     }
 
-    private safeOutput(output: unknown): any {
+    private safeOutput(output: unknown): Record<string, unknown> | undefined {
         if (output === undefined || output === null) return undefined;
-        return (typeof output === 'object' ? output : { value: output });
+        return typeof output === 'object' ? (output as Record<string, unknown>) : { value: output };
     }
 
     private getOpikId(nodeId: string): string {
-        if (this.nodeToOpikId.has(nodeId)) {
-            return this.nodeToOpikId.get(nodeId)!;
-        }
-
-        // Opik REQUIRES version 7 UUIDs for spans. 
-        // We must map internal IDs (often v4 or strings) to stable v7 UUIDs.
+        const existing = this.nodeToOpikId.get(nodeId);
+        if (existing) return existing;
         const opikId = uuidv7();
         this.nodeToOpikId.set(nodeId, opikId);
         return opikId;
     }
 
-    // --- Helpers ---
-
-    private startTrace(node: AgentNode) {
-        const trace = this.client.trace({
+    private startTrace(node: AgentNode): void {
+        const trace = this.client!.trace({
             id: this.getOpikId(node.id),
             name: `agent:${node.agentName}`,
-            metadata: {
-                agentId: node.id,
-                ...node.providerData
-            },
-            input: this.safeInput(node.input)
+            metadata: { agentId: node.id, ...node.providerData },
+            input: this.safeInput(node.input),
         });
         this.traces.set(node.id, trace);
-        logger.debug('Opik Trace Started', { id: node.id, opikId: this.getOpikId(node.id), name: trace.name, input: node.input });
+        if (node.traceId) {
+            this.traceIdToTrace.set(node.traceId, trace);
+        }
     }
 
-    private endTrace(node: AgentNode) {
+    private endTrace(node: AgentNode): void {
         const trace = this.traces.get(node.id);
         if (!trace) return;
-
         trace.update({
             output: this.safeOutput(node.output),
             endTime: new Date(),
             metadata: {
                 status: node.status,
                 cost: node.pricing?.cost,
-                tokens: node.usage?.totalTokens
-            }
+                tokens: node.usage?.totalTokens,
+            },
         });
         trace.end();
         this.traces.delete(node.id);
+        if (node.traceId) {
+            this.traceIdToTrace.delete(node.traceId);
+        }
     }
 
-    private startSpan(node: TelemetryNode) {
-        // [REF-OPIK-FINAL-STATE]
-        // We do intentionally defer span creation until endSpan to ensure we have the full payload.
-        // This avoids the Opik SDK limitation where updates to undefined fields are ignored.
-        // The TelemetryNode internal state is the source of truth.
-        return;
-    }
-
-    private endSpan(node: TelemetryNode) {
-        // [REF-OPIK-FINAL-STATE]
-        // Construct the full span payload now that the node is complete.
-
+    private endSpan(node: TelemetryNode): void {
         const parentId = node.parentId;
-        // In "Final State" mode, we need to find the parent OBJECT to call .span() on.
-        // IMPORTANT: The parent logic might need adjustment if the parent span hasn't been created yet!
-        // However, Opik hierarchy relies on the trace/span objects existing in memory.
-        // Wait: If we defer creation, children can't find their parents if parents are also deferred!
-
-        // CORRECTION: 
-        // Logic: Turn (Start) -> Module (Start) -> LLM (Start) -> LLM (End) -> Module (End) -> Turn (End)
-        // If we defer ALL check-ins to End, then when LLM ends, Module has NOT ended, so Module span doesn't exist?
-        // Actually, if we use the Trace's `span()` method, we can pass a `parentSpanId`.
-        // Let's check how `trace.span()` works. It usually takes `parentSpanId` as an option.
-
-        // If the Opik SDK requires the parent *Object* to create a child, then deferral is tricky.
-        // BUT, looking at the code `parentObj.span(...)`, it seems we need the object.
-
-        // HACK 2.0:
-        // We will maintain the `onNodeStart` logic ONLY for capturing the Hierarchy (creating "shell" spans?)
-        // OR, we just use the `client.span(...)` or `trace.span(...)` and explicitly pass `parentSpanId`.
-
-        // Let's assume we can attach to the Trace.
         const traceId = node.traceId;
-        const trace = this.traces.get(traceId!);
+        const trace = traceId ? this.traceIdToTrace.get(traceId) : undefined;
 
         if (!trace) {
-            // Warn only if we have a traceId but can't find it. 
-            // If traceId is missing, it's a detached node.
-            if (traceId) logger.warn('OpikProvider: Could not find trace for node', { nodeId: node.id, traceId });
+            if (traceId) {
+                logger.warn('OpikProvider: Could not find trace for node', {
+                    nodeId: node.id,
+                    traceId,
+                });
+            }
             return;
         }
 
@@ -213,58 +253,45 @@ export class OpikProvider implements TelemetryProvider {
         const endTime = node.endTime ? new Date(node.endTime) : new Date();
         const startTime = node.startTime ? new Date(node.startTime) : new Date();
 
-        const spanPayload: any = {
-            id: this.getOpikId(node.id), // Use v7 ID
+        const spanPayload: OpikSpanPayload = {
+            id: this.getOpikId(node.id),
             name,
             type: spanType,
             startTime,
             endTime,
             input: this.safeInput(node.input),
             output: this.safeOutput(node.output),
-            metadata: {
-                nodeId: node.id,
-                nodeType: node.type
-            }
+            metadata: { nodeId: node.id, nodeType: node.type },
         };
 
-        if (node.parentId) {
-            spanPayload.parentSpanId = this.getOpikId(node.parentId); // Use parent's v7 ID
+        if (parentId) {
+            spanPayload.parentSpanId = this.getOpikId(parentId);
         }
 
-        // LLM Specifics
         if (node instanceof LLMNode) {
             spanPayload.usage = {
                 prompt_tokens: node.usage?.inputTokens,
                 completion_tokens: node.usage?.outputTokens,
-                total_tokens: node.usage?.totalTokens
+                total_tokens: node.usage?.totalTokens,
             };
             if (node.pricing?.cost) {
                 spanPayload.totalEstimatedCost = node.pricing.cost;
             }
-            if ((node as any).model) {
-                spanPayload.model = (node as any).model;
-            }
-            if ((node as any).provider) {
-                spanPayload.provider = (node as any).provider;
-            }
+            spanPayload.model = node.model;
+            spanPayload.provider = (node.providerData?.provider as string) ?? undefined;
         }
 
-        // Create and End immediately
-        // We use trace.span to ensure it belongs to the trace
-        // We might need to forcefully cast to `any` to pass explicit IDs if the type defs are strict.
         const span = trace.span(spanPayload);
         span.end();
     }
 
-
-
-    private getOpikSpanType(node: TelemetryNode): 'general' | 'tool' | 'llm' | 'workflow' {
+    private getOpikSpanType(
+        node: TelemetryNode
+    ): 'general' | 'tool' | 'llm' | 'child' {
         if (node instanceof LLMNode) return 'llm';
         if (node instanceof ToolNode) return 'tool';
-        // Opik SDK might not have 'workflow' in its strict type, 
-        // but we can pass it if we cast to any or if the backend supports it.
-        // For now, let's keep it 'general' for strict compatibility but detectable via metadata.
-        return 'general' as any;
+        if (node instanceof ChildCallNode) return 'child';
+        return 'general';
     }
 
     private getSpanName(node: TelemetryNode): string {
@@ -272,10 +299,13 @@ export class OpikProvider implements TelemetryProvider {
         if (node instanceof TurnNode) return `Turn ${node.turnIndex}`;
         if (node instanceof ToolNode) return `Tool: ${node.toolName}`;
         if (node instanceof LLMNode) {
-            const provider = (node as any).providerData?.provider?.toLowerCase() || 'llm';
+            const provider =
+                (node.providerData?.provider as string)?.toLowerCase() ?? 'llm';
             return `${provider}.chat.completions`;
         }
-        if (node instanceof ModuleNode || node instanceof WorkflowNode) return `${node.name}`;
-        return `${node.type}`;
+        if (node instanceof ChildCallNode) {
+            return `Child: ${node.childToken}`;
+        }
+        return node.type;
     }
 }

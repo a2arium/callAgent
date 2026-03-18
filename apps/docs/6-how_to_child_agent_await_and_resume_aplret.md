@@ -60,6 +60,17 @@ Payload envelope must include at least:
 - `result` (or `error`)
 - identifiers: `agentId`, `childTaskId` when available
 
+## TurnTrace and child calls
+
+Each turn’s **TurnTrace** can include **`childCalls`**: an array of **ChildCallTrace** entries for child tasks dispatched or completed in that turn. Each entry has:
+
+- **`token`**, **`agentId`**, **`childTaskId`**, **`awaitCompletion`**
+- **`durationMs`**, **`status`** (`'dispatched'`, `'completed'`, `'failed'`, `'input_required'`)
+- **`parentTurnId`**, **`childAgentNodeId`**, **`childTraceId`** for linking to the parent turn or the child’s trace
+- **`resultSummary`**, **`error`** when applicable
+
+Parent and child traces are linked in telemetry via **ChildCallNode** (node type `'child'`): the parent turn’s span has a child span for each dispatched child, and optional `childTraceId` / `childAgentNodeId` connect to the child run’s trace. Use **`trace.childCalls`** when debugging or testing to verify which child was dispatched, with which token, and when it completed.
+
 ## Step-by-step implementation
 
 ### Step 1: Make Policy request delegation using only `MentalState`

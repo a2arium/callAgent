@@ -20,7 +20,7 @@ You are probably putting too much into Policy if you see any of these:
 - loading artifacts
 - calling an LLM or tool
 - checking transport details such as tokens or current await state
-- checking current `stage` (e.g., branching on StageFacade values)
+- checking current `stage` (e.g., branching on `Stage.get(ctx)` or other StageFacade reads)
 - reading manifest config directly
 - performing validation there because it feels like “reasoning”
 - generating or repairing multi-step plans using an LLM directly in Policy

@@ -21,6 +21,26 @@ You should have:
 - access to the normalized observation taxonomy (source/kind)
 - access to the agent’s intent and stage unions
 
+## Collecting traces in tests or in-process runs
+
+Use **`TurnTraceCollector`** when you run the loop in-process and need to assert on traces:
+
+- Pass **`collectTraces: true`** (and optionally **`manifestProvenance`**) to **`runLoop(ctx, M, env, modules, opts)`**.
+- **`runLoop`** returns **`result.traces`** (array of **TurnTrace**) when **`collectTraces`** is true; each element is the trace for one turn.
+- Alternatively, attach a **`TurnTraceCollector`** to **`ctx.__turnTraceCollector`** before running; the loop will push each turn’s trace there and you can call **`collector.getByTurn(n)`**, **`collector.getLast()`**, or **`collector.getAll()`**.
+
+See **How-to: Test APLRET agents** for harness examples using **`collectTraces: true`** and **`result.traces`**.
+
+## Reading LLM, tool, and child sub-call summaries
+
+Each **TurnTrace** can include compact summaries of sub-calls made during that turn:
+
+- **`trace.llmCalls`** — array of **LLMCallTrace** (model, provider, durationMs, input/output tokens, cost, optional module).
+- **`trace.toolCalls`** — array of **ToolCallTrace** (tool name, durationMs, status, optional module).
+- **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, childAgentNodeId, childTraceId, resultSummary, error). Use these to see which child tasks were dispatched or completed in this turn and how they link to the parent turn or child trace.
+
+Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or export traces to your observability backend.
+
 ## First rule
 
 Do not debug from chat output alone.
@@ -62,11 +82,11 @@ Symptoms:
 
 Primary fields:
 
-- `stageBefore`, `stageAfter`
+- **`stageBefore`**, **`stageAfter`** — stage at turn start and after the turn (when **StageFacade** is used, **`Stage.set(ctx, stage)`** writes transition data to **`ctx.__stageTrace`**; oneTurn/loopRunner include it in the trace as **`stageTrace`** or as separate fields **`stageTransition`**, **`stageAutoMarksApplied`**, **`stageInvariantChecks`**)
 - `execAction`
 - `transition`
 - `pendingAfter`
-- `stageTransition` / `stageAutoMarksApplied` / `stageInvariantChecks` / `stageInvariantError` (if using StageFacade — typed as `InvariantErrorPayload`, inspect via `e.detail.type` discriminant)
+- **`stageTransition`** / **`stageAutoMarksApplied`** / **`stageInvariantChecks`** / **`stageInvariantError`** (if using StageFacade — typed as `InvariantErrorPayload`, inspect via `e.detail.type` discriminant)
 
 ### C) Wrong effect behavior
 

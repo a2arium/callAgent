@@ -14,6 +14,33 @@ import type { UsageRecord } from '../shared/types/index.js';
 // Type for the recordUsage function that accepts our detailed record
 type RecordUsageFunction = (cost: number | UsageRecord) => void;
 
+/** callllm Usage tokens can be number or { total?: number }. */
+function usageTokensInput(usage: Usage | undefined): number | undefined {
+    const t = usage?.tokens?.input;
+    return typeof t === 'number' ? t : t?.total;
+}
+
+function usageTokensOutput(usage: Usage | undefined): number | undefined {
+    const t = usage?.tokens?.output;
+    return typeof t === 'number' ? t : t?.total;
+}
+
+/** callllm LLMCaller may expose optional MCP/history methods. */
+type LLMCallerExtended = LLMCaller & {
+    callMcpTool?: (server: string, tool: string, args: Record<string, unknown>) => Promise<unknown>;
+    getMcpServerToolSchemas?: (server: string) => Promise<Record<string, unknown>>;
+    getMessages?: (includeSystem?: boolean) => unknown;
+    getHistoryMode?: () => 'stateless' | 'dynamic' | 'full';
+    clearHistory?: () => void;
+    setMessages?: (messages: unknown) => void;
+    history?: unknown[];
+    messages?: unknown[];
+    _history?: unknown[];
+};
+
+/** ProviderInit env: empty to avoid callllm loading Opik/OTel; we export via callagent. */
+const EMPTY_ENV = {} as Record<string, string | undefined>;
+
 /**
  * Adapter for the callllm library that implements the ILLMCaller interface
  * from our framework architecture.
@@ -43,42 +70,39 @@ export class LLMCallerAdapter implements ILLMCaller {
                         op: 'call',
                         provider: this.provider,
                         model: this.modelName,
-                        tokens: (usage as any)?.tokens ? { input: (usage as any)?.tokens?.input, output: (usage as any)?.tokens?.output } : undefined
+                        tokens: (usage?.tokens != null) ? { input: usageTokensInput(usage), output: usageTokensOutput(usage) } : undefined
                     };
                     this.recordUsage(record);
                 }
             } : undefined);
 
         // Create bridge provider for telemetry integration
-        // The bridge forwards callLLM telemetry events to callagent's telemetry system
         this.bridgeProvider = new CallagentBridgeProvider('root');
 
         const callllmTelemetryCollector = new CallLLMTelemetryCollector({
             providers: [this.bridgeProvider],
-            env: {} as any // Prevent auto-loading Opik/OTel - callagent handles telemetry export
+            env: EMPTY_ENV as NodeJS.ProcessEnv
         });
 
-
-        // Prepare tools array
-        const initialTools = config.initialTools || [];
-        const combinedTools = [...initialTools];
-
-        if (config.mcpServers) {
-            combinedTools.push(config.mcpServers as any);
+        const initialTools: ToolDefinition[] = config.initialTools ?? [];
+        const combinedTools: (ToolDefinition | unknown)[] = [...initialTools];
+        if (config.mcpServers != null) {
+            combinedTools.push(config.mcpServers);
         }
 
-        // Initialize the LLMCaller from the callllm library
+        // callllm LLMCallerOptions.usageCallback uses UsageData; our callback uses Usage. Cast for compatibility.
+        type CallLLMOptions = import('callllm').LLMCallerOptions;
         this.caller = new LLMCaller(
-            config.provider as any,
+            config.provider as 'openai' | 'cerebras' | 'venice' | 'openrouter',
             config.modelAliasOrName,
             config.systemPrompt || 'You are a helpful assistant.',
             {
-                apiKey: config.apiKey, // If undefined, callllm will use environment variables
-                historyMode: config.historyMode, // Pass the historyMode setting if provided
-                usageCallback: usageCallback as any, // Cast: Usage shape differs between callagent-core and callllm
-                telemetryCollector: callllmTelemetryCollector, // Use bridge for telemetry
-                tools: combinedTools // Pass initial tools array
-            }
+                apiKey: config.apiKey,
+                historyMode: config.historyMode,
+                usageCallback,
+                telemetryCollector: callllmTelemetryCollector,
+                tools: combinedTools
+            } as CallLLMOptions
         );
 
         // Apply any default settings
@@ -94,11 +118,11 @@ export class LLMCallerAdapter implements ILLMCaller {
         message: string | any,
         options?: Record<string, any>
     ): Promise<UniversalChatResponse<T>[]> {
-        // Set the parent node ID for telemetry - bridge will create LLMNode as child
+        // Set the parent node ID and context for telemetry - bridge will create LLMNode as child and accumulate turn summaries
         try {
             const parentId = options?.telemetryNodeId || this.ctx?.telemetry?.nodeId;
             if (parentId && this.bridgeProvider) {
-                this.bridgeProvider.setParentNodeId(parentId);
+                this.bridgeProvider.setParentNodeId(parentId, this.ctx ?? null);
             }
         } catch (e) { /* ignore telemetry setup errors */ }
 
@@ -118,8 +142,9 @@ export class LLMCallerAdapter implements ILLMCaller {
                         totalCost += response.metadata.usage.costs.total;
                     }
                     try {
-                        tokensIn += Number((response.metadata as any)?.usage?.tokens?.input || 0);
-                        tokensOut += Number((response.metadata as any)?.usage?.tokens?.output || 0);
+                        const meta = response.metadata as { usage?: Usage } | undefined;
+                        tokensIn += Number(usageTokensInput(meta?.usage) ?? 0);
+                        tokensOut += Number(usageTokensOutput(meta?.usage) ?? 0);
                     } catch { /* noop */ }
                 }
                 if (totalCost > 0) {
@@ -150,11 +175,11 @@ export class LLMCallerAdapter implements ILLMCaller {
         message: string | any,
         options?: Record<string, any>
     ): AsyncIterable<UniversalStreamResponse<T>> {
-        // Set the parent node ID for telemetry - bridge will create LLMNode as child
+        // Set the parent node ID and context for telemetry - bridge will create LLMNode as child and accumulate turn summaries
         try {
             const parentId = options?.telemetryNodeId || this.ctx?.telemetry?.nodeId;
             if (parentId && this.bridgeProvider) {
-                this.bridgeProvider.setParentNodeId(parentId);
+                this.bridgeProvider.setParentNodeId(parentId, this.ctx ?? null);
             }
         } catch (e) { /* ignore */ }
 
@@ -164,13 +189,14 @@ export class LLMCallerAdapter implements ILLMCaller {
                 // If this is the final chunk and we're not using callbacks, record the usage
                 if (chunk.isComplete && !options?.usageCallback && this.recordUsage &&
                     (chunk.metadata?.usage?.costs?.total)) {
+                    const usage = (chunk.metadata as { usage?: Usage }).usage;
                     const record: UsageRecord = {
                         cost: chunk.metadata.usage.costs.total,
                         kind: 'llm',
                         op: 'stream',
                         provider: this.provider,
                         model: this.modelName,
-                        tokens: (chunk.metadata as any)?.usage?.tokens ? { input: (chunk.metadata as any)?.usage?.tokens?.input, output: (chunk.metadata as any)?.usage?.tokens?.output } : undefined
+                        tokens: usage ? { input: usageTokensInput(usage), output: usageTokensOutput(usage) } : undefined
                     };
                     this.recordUsage(record);
                 }
@@ -194,87 +220,70 @@ export class LLMCallerAdapter implements ILLMCaller {
     /**
      * Update the default settings for this LLM caller
      */
-    updateSettings(settings: Record<string, any>): void {
-        this.caller.updateSettings(settings);
+    updateSettings(settings: Record<string, unknown>): void {
+        this.caller.updateSettings(settings as Record<string, unknown>);
     }
 
     /**
      * Execute an MCP tool directly, bypassing the LLM
      */
     async callMcpTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
-        if (typeof (this.caller as any).callMcpTool === 'function') {
-            return (this.caller as any).callMcpTool(serverName, toolName, args);
+        const ext = this.caller as LLMCallerExtended;
+        if (typeof ext.callMcpTool === 'function') {
+            return ext.callMcpTool(serverName, toolName, args);
         }
         throw new Error('Underlying LLMCaller does not support callMcpTool');
     }
 
-    /**
-     * Get JSON schemas for tools provided by an MCP server
-     */
     async getMcpServerToolSchemas(serverName: string): Promise<Record<string, unknown>> {
-        if (typeof (this.caller as any).getMcpServerToolSchemas === 'function') {
-            return (this.caller as any).getMcpServerToolSchemas(serverName);
+        const ext = this.caller as LLMCallerExtended;
+        if (typeof ext.getMcpServerToolSchemas === 'function') {
+            const out = await ext.getMcpServerToolSchemas(serverName);
+            return (Array.isArray(out) ? { tools: out } : out) as Record<string, unknown>;
         }
         throw new Error('Underlying LLMCaller does not support getMcpServerToolSchemas');
     }
 
     getMessages(includeSystem?: boolean): unknown {
-        const anyCaller = this.caller as any;
-        if (typeof anyCaller.getMessages === 'function') return anyCaller.getMessages(includeSystem === true);
+        const ext = this.caller as LLMCallerExtended;
+        if (typeof ext.getMessages === 'function') return ext.getMessages(includeSystem === true);
         return undefined;
     }
 
     getHistoryMode(): 'stateless' | 'dynamic' | 'full' {
-        const anyCaller = this.caller as any;
-        if (typeof anyCaller.getHistoryMode === 'function') return anyCaller.getHistoryMode();
-        return 'full'; // Default to full if not supported
+        const ext = this.caller as LLMCallerExtended;
+        if (typeof ext.getHistoryMode === 'function') return ext.getHistoryMode();
+        return 'full';
     }
 
     clearHistory(): void {
-        const anyCaller = this.caller as any;
-        if (typeof anyCaller.clearHistory === 'function') {
-            anyCaller.clearHistory();
+        const ext = this.caller as LLMCallerExtended;
+        if (typeof ext.clearHistory === 'function') {
+            ext.clearHistory();
         } else {
-            // Fallback: set messages to empty array
             this.setMessages([]);
         }
     }
 
     setMessages(messages: unknown): void {
-        const anyCaller = this.caller as any;
+        const ext = this.caller as LLMCallerExtended;
         try {
             const normalized = this.normalizeMessages(messages);
-            if (typeof anyCaller.setMessages === 'function') {
-                anyCaller.setMessages(normalized);
-            } else {
-                // Fallback: attempt to set a known internal history container
-                if (Array.isArray(normalized)) {
-                    if (Array.isArray(anyCaller.history)) {
-                        anyCaller.history = normalized;
-                        // minimal fallback
-                    } else if (Array.isArray(anyCaller.messages)) {
-                        anyCaller.messages = normalized;
-                        // minimal fallback
-                    } else if (Array.isArray(anyCaller._history)) {
-                        anyCaller._history = normalized;
-                        // minimal fallback
-                    } else {
-                        // no-op
-                    }
-                }
+            if (typeof ext.setMessages === 'function') {
+                ext.setMessages(normalized);
+            } else if (Array.isArray(normalized)) {
+                if (Array.isArray(ext.history)) ext.history = normalized;
+                else if (Array.isArray(ext.messages)) ext.messages = normalized;
+                else if (Array.isArray(ext._history)) ext._history = normalized;
             }
-        } catch (e) {
-            // swallow
-        }
+        } catch { /* swallow */ }
     }
 
-    // Persistence uses provider-native messages only
     exportState(): unknown {
         try {
-            const anyCaller = this.caller as any;
-            if (typeof anyCaller.getMessages === 'function') {
-                const messages = anyCaller.getMessages(true);
-                try { console.log(`[LLMAdapter] exportState messages count: ${Array.isArray(messages) ? messages.length : 'n/a'}`); } catch { }
+            const ext = this.caller as LLMCallerExtended;
+            if (typeof ext.getMessages === 'function') {
+                const messages = ext.getMessages(true);
                 return { messages };
             }
         } catch { /* ignore */ }
@@ -283,45 +292,39 @@ export class LLMCallerAdapter implements ILLMCaller {
 
     importState(state: unknown): void {
         try {
-            const anyCaller = this.caller as any;
-            if ((state as any)?.messages) {
-                const msgs = (state as any).messages;
-                const normalized = this.normalizeMessages(msgs);
-                if (typeof this.setMessages === 'function') {
-                    this.setMessages(normalized);
-                } else if (typeof anyCaller.setMessages === 'function') {
-                    anyCaller.setMessages(normalized);
-                } else {
-                    // no-op
+            const ext = this.caller as LLMCallerExtended;
+            const s = state as { messages?: unknown };
+            if (s?.messages != null) {
+                const normalized = this.normalizeMessages(s.messages);
+                if (typeof ext.setMessages === 'function') {
+                    ext.setMessages(normalized);
                 }
             }
         } catch { /* ignore */ }
     }
 
-    // Normalize messages into an array of { role: string; content: string }
     private normalizeMessages(messages: unknown): Array<{ role: string; content: string }> | unknown {
         try {
-            const raw = (messages && (messages as any).messages) ? (messages as any).messages : messages;
-            if (!Array.isArray(raw)) return raw as any;
-            const normalized = raw.map((m: any) => {
-                const role = m?.role ?? m?.speaker ?? 'assistant';
-                // Common shapes: { content: string } or { content: [{ type, text }] } or { text }
-                let content: string = '';
+            const wrap = messages as { messages?: unknown } | null;
+            const raw = (wrap && wrap.messages != null) ? wrap.messages : messages;
+            if (!Array.isArray(raw)) return raw;
+            return raw.map((m: Record<string, unknown>) => {
+                const role = (m?.role ?? m?.speaker ?? 'assistant') as string;
+                let content = '';
                 if (typeof m?.content === 'string') content = m.content;
                 else if (Array.isArray(m?.content)) {
-                    const firstText = m.content.find((p: any) => typeof p?.text === 'string')?.text;
-                    content = typeof firstText === 'string' ? firstText : JSON.stringify(m.content);
+                    const first = (m.content as Array<{ text?: string }>).find(p => typeof p?.text === 'string');
+                    content = typeof first?.text === 'string' ? first.text : JSON.stringify(m.content);
                 } else if (typeof m?.text === 'string') content = m.text;
-                else if (m?.parts && Array.isArray(m.parts)) {
-                    const firstText = m.parts.find((p: any) => typeof p?.text === 'string')?.text;
-                    content = typeof firstText === 'string' ? firstText : JSON.stringify(m.parts);
-                } else if (m?.message) content = String(m.message);
-                else content = '';
-                return { role: String(role), content: String(content) };
+                else if (Array.isArray((m as { parts?: unknown[] }).parts)) {
+                    const parts = (m as { parts: Array<{ text?: string }> }).parts;
+                    const first = parts.find(p => typeof p?.text === 'string');
+                    content = typeof first?.text === 'string' ? first.text : JSON.stringify(parts);
+                } else if (m?.message != null) content = String(m.message);
+                return { role: String(role), content };
             });
-            return normalized;
         } catch {
-            return messages as any;
+            return messages;
         }
     }
 }

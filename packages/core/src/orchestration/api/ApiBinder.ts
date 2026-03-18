@@ -15,7 +15,13 @@ import { globalA2AService } from '../A2AService.js';
 import type { SessionManager } from '../SessionManager.js';
 import type { SnapshotRepository } from '../persistence/SnapshotRepository.js';
 import { TaskStateUtils } from '../utils/TaskStateUtils.js';
+import { writeControlVar } from '../../loop/controlVarAccessors.js';
 import { throwInvariantError } from '../../utils/invariantError.js';
+import type { InternalTaskContext } from '../../loop/internalContext.js';
+import type { JsonValue } from '../../types/turnTrace.js';
+import { telemetry } from '../../telemetry/TelemetryCollector.js';
+import { ChildCallNode } from '../../telemetry/nodes/ChildCallNode.js';
+import type { TaskInput } from '../../shared/types/index.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -159,13 +165,13 @@ export class ApiBinder {
 
             if (opts?.setToken !== false) {
                 controlUpdates.push(['token', token]);
-                TaskStateUtils.syncControlVarIntoActiveLoop(ctx, 'token', token);
+                writeControlVar(ctx, 'token', token);
             }
 
             if (opts?.setStage) {
                 const stagePath = 'stage';
                 controlUpdates.push([stagePath, opts.setStage]);
-                TaskStateUtils.syncControlVarIntoActiveLoop(ctx, stagePath, opts.setStage);
+                writeControlVar(ctx, stagePath, opts.setStage);
             }
 
             if (!this.deps.snapshotRepo) throw new Error('SnapshotRepo not initialized');
@@ -293,17 +299,36 @@ export class ApiBinder {
                 }
             );
 
+            // Create ChildCallNode under current turn so child AgentNode can be parented to it
+            const parentId = ctx.telemetry?.nodeId ?? 'root';
+            const parentNode = telemetry.getNode(parentId);
+            const traceId = parentNode?.traceId;
+            const childCallNode = new ChildCallNode(token, parentId, agent, undefined, traceId);
+            childCallNode.start({ token, agentId: agent });
+            telemetry.registerNode(childCallNode);
+
+            const iCtx = ctx as InternalTaskContext;
+            if (iCtx.__turnChildCalls) {
+                iCtx.__turnChildCalls.push({
+                    token,
+                    agentId: agent,
+                    status: 'dispatched',
+                    module: iCtx.__currentModule,
+                    awaitCompletion: options?.awaitCompletion !== false
+                });
+            }
+
             const tokenPath = options?.tokenPath ?? 'child.token';
             const shouldSetToken = options?.setToken !== false;
             const controlUpdates: Array<[string, unknown]> = [];
 
             if (shouldSetToken) {
                 controlUpdates.push([tokenPath, token]);
-                TaskStateUtils.syncControlVarIntoActiveLoop(ctx, tokenPath, token);
+                writeControlVar(ctx, tokenPath, token);
             }
             if (options?.setStage) {
                 controlUpdates.push(['stage', options.setStage]);
-                TaskStateUtils.syncControlVarIntoActiveLoop(ctx, 'stage', options.setStage);
+                writeControlVar(ctx, 'stage', options.setStage);
             }
 
             const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
@@ -381,26 +406,40 @@ export class ApiBinder {
             if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
             if (options?.onFailed) { try { await (handle as any).onFailed(options.onFailed); } catch { } }
 
-            const minimalCtx = ctx as any;
-            const a2aOptions = { tenantId, streaming: (options?.streaming) === true } as any;
-
-            // ... A2A Send ...
             const awaitCompletion = options?.awaitCompletion !== false;
+            type CtxWithLoop = TaskContext & {
+                __activeLoopInbox?: { current: unknown[]; all: unknown[] };
+                __activeLoopEnv?: { turn?: number; pending?: { children?: Record<string, unknown> } };
+            };
+            const minimalCtx = ctx as CtxWithLoop;
+            const a2aOptions = {
+                tenantId,
+                streaming: (options?.streaming) === true,
+                parentTenantId: tenantId,
+                parentTaskId: sessionId,
+                parentChildToken: token,
+                skipParentNotification: awaitCompletion,
+                parentTelemetryNodeId: childCallNode.id
+            };
 
-            // ... Sync logic ... (omitted some parts, but key is we can delegate to deps.handleChildCompleted)
-            // Using globalA2AService
-
-            let result;
+            let result: unknown;
             try {
-                result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as any, {
+                result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as TaskInput, {
                     ...(options || {}),
-                    ...a2aOptions,
-                    parentTenantId: tenantId,
-                    parentTaskId: sessionId,
-                    parentChildToken: token,
-                    skipParentNotification: awaitCompletion
-                } as any);
+                    ...a2aOptions
+                });
             } catch (error) {
+                childCallNode.fail(error instanceof Error ? error : new Error(String(error)));
+                telemetry.endNode(childCallNode);
+                if (iCtx.__turnChildCalls) {
+                    iCtx.__turnChildCalls.push({
+                        token,
+                        agentId: agent,
+                        status: 'failed',
+                        module: iCtx.__currentModule,
+                        error: { message: error instanceof Error ? error.message : String(error) }
+                    });
+                }
                 await this.deps.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
                     taskId: sessionId,
                     childAgent: agent,
@@ -409,15 +448,30 @@ export class ApiBinder {
                 throw error;
             }
 
+            const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
+            childCallNode.childTaskId = cleanChildResult.childTaskId;
+            childCallNode.endTime = Date.now();
+            childCallNode.end(cleanChildResult.result, 'success');
+            telemetry.endNode(childCallNode);
+            if (iCtx.__turnChildCalls) {
+                iCtx.__turnChildCalls.push({
+                    token,
+                    agentId: agent,
+                    childTaskId: cleanChildResult.childTaskId,
+                    status: 'completed',
+                    module: iCtx.__currentModule,
+                    resultSummary: cleanChildResult.result != null ? ({ result: cleanChildResult.result } as unknown as JsonValue) : undefined
+                });
+            }
+
             // ... Result handling ...
             // ✅ ARCHITECTURAL FIX: Always inject child completion into active loop inbox when it exists
             // This ensures:
             // 1. The loop's await_child mechanism handles the completion naturally
             // 2. handleChildCompleted doesn't start a fresh loop (which would lose accumulated mental state)
             // 3. Both awaitCompletion:true and awaitCompletion:false work correctly
-            const inbox = (ctx as any).__activeLoopInbox;
+            const inbox = (ctx as { __activeLoopInbox?: { current: unknown[]; all: unknown[] }; __activeLoopEnv?: { turn?: number; pending?: { children?: Record<string, unknown> } } }).__activeLoopInbox;
             if (inbox) {
-                const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
                 const obs: EngineObservation = {
                     source: 'child',
                     kind: 'child.completed',
@@ -427,14 +481,15 @@ export class ApiBinder {
                         result: cleanChildResult.result,
                         executionMetadata: cleanChildResult.executionMetadata
                     },
-                    provenance: { ts: Date.now(), turn: (ctx as any).__activeLoopEnv?.turn || 0, id: token, correlationId: token }
+                    provenance: { ts: Date.now(), turn: minimalCtx.__activeLoopEnv?.turn ?? 0, id: token, correlationId: token }
                 };
 
                 inbox.current.push(obs);
                 inbox.all.push(obs);
 
-                if ((ctx as any).__activeLoopEnv?.pending?.children) {
-                    (ctx as any).__activeLoopEnv.pending.children[token] = {
+                const loopEnv = minimalCtx.__activeLoopEnv;
+                if (loopEnv?.pending?.children) {
+                    loopEnv.pending.children[token] = {
                         agent,
                         input: childInput
                     };

@@ -2,7 +2,7 @@
 import * as uuid from 'uuid';
 const uuidv4 = uuid.v4;
 
-export type NodeType = 'agent' | 'turn' | 'module' | 'tool' | 'llm' | 'workflow';
+export type NodeType = 'agent' | 'turn' | 'module' | 'tool' | 'llm' | 'workflow' | 'child';
 export type NodeStatus = 'pending' | 'active' | 'success' | 'failure';
 
 export interface PricingInfo {

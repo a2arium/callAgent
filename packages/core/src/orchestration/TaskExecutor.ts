@@ -17,19 +17,26 @@ import type {
 import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import type { TurnOutcome } from '../loop/oneTurn.js';
 import type { TaskContext } from '../shared/types/index.js';
-// Assuming SessionManager class is what we want if interface is missing
+import type { ManifestProvenance } from '../types/turnTrace.js';
 import { SessionManager } from './SessionManager.js';
 
 const log = logger.createLogger({ prefix: 'TaskExecutor' });
 
 export type LoopOutcome = TurnOutcome;
 
+export type LoopOpts = {
+    maxTurns?: number;
+    latencyMs?: number;
+    manifestProvenance?: ManifestProvenance;
+    collectTraces?: boolean;
+};
+
 export interface ExecuteTurnParams {
     ctx: TaskContext;
     M: MentalState;
     env: EnvironmentState;
     overrides: Record<string, unknown>;
-    loopOpts: { maxTurns?: number; latencyMs?: number };
+    loopOpts: LoopOpts;
     sessionManager: SessionManager | undefined;
     tenantId: string;
     sessionId: string;

@@ -1,4 +1,6 @@
-import type { ControlState, EnvironmentState } from './types.js';
+import type { ControlState, ControlPendingState, EnvironmentState } from './types.js';
+
+type TokenEntry = string | ({ token?: string } & Record<string, unknown>);
 
 /**
  * Safely read a pending token (input/tool/child/group) from the control snapshot.
@@ -8,14 +10,16 @@ export function getPendingToken(
     kind: 'inputs' | 'children' | 'tools' | 'groups',
     key?: string
 ): string | undefined {
-    const pending = env.control?.pendingSnapshot;
+    const pending: ControlPendingState | undefined = env.control?.pendingSnapshot;
     if (!pending) return undefined;
-    const bucket = (pending as any)[kind] as Record<string, any> | undefined;
+    const bucket = pending[kind] as Record<string, TokenEntry> | undefined;
     if (!bucket) return undefined;
-    if (key) return bucket[key]?.token ?? bucket[key];
-    // If no key provided, return the first token if present
-    const first = Object.values(bucket)[0] as any;
-    return first?.token ?? undefined;
+    if (key) {
+        const entry = bucket[key];
+        return typeof entry === 'string' ? entry : (entry as { token?: string })?.token;
+    }
+    const first = Object.values(bucket)[0] as TokenEntry | undefined;
+    return typeof first === 'string' ? first : (first as { token?: string })?.token;
 }
 
 /**

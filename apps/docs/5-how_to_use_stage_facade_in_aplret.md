@@ -67,37 +67,41 @@ Do not use it for trivial one-stage flows.
 ## Canonical example
 
 ```ts
-import { createStageFacade } from '@a2arium/callagent-core';
+import { createStageFacade, defineControlKeys } from '@a2arium/callagent-core';
 
-import type { Stage as AgentStage } from '../types.js';
+const stages = ['idle', 'awaiting_fetch', 'analyzing', 'completed'] as const;
+type AgentStage = (typeof stages)[number];
+
+export const CK = defineControlKeys({
+  fetchToken: 'fetch.token',
+  completedCalled: 'completed.called',
+  awaitingFetchCalled: 'awaiting_fetch.called',
+  analyzingCalled: 'analyzing.called',
+});
 
 export const Stage = createStageFacade<AgentStage>({
+  stages,
   initial: 'idle',
   invariants: {
-    idle: {
-      forbid: ['fetch.token', 'completed.called']
-    },
-    awaiting_fetch: {
-      require: ['fetch.token'],
-      forbid: ['completed.called']
-    },
-    analyzing: {
-      forbid: ['completed.called']
-    },
-    completed: {}
+    idle: { forbid: [CK.fetchToken, CK.completedCalled] },
+    awaiting_fetch: { require: [CK.fetchToken], forbid: [CK.completedCalled] },
+    analyzing: { forbid: [CK.completedCalled] },
+    completed: {},
   },
   autoMarks: {
-    awaiting_fetch: { 'awaiting_fetch.called': true },
-    analyzing: { 'analyzing.called': true },
-    completed: { 'completed.called': true }
+    awaiting_fetch: { [CK.awaitingFetchCalled]: true },
+    analyzing: { [CK.analyzingCalled]: true },
+    completed: { [CK.completedCalled]: true },
   },
   onEnter: {
     idle: (ctx) => ctx.progress(5, 'idle'),
     awaiting_fetch: (ctx) => ctx.progress(20, 'awaiting fetch result'),
-    completed: (ctx) => ctx.complete(100, 'completed')
-  }
+    completed: (ctx) => ctx.complete(100, 'completed'),
+  },
 });
 ```
+
+`onEnter` callbacks receive **`StageEnterContext`** (only `progress` and `complete`), not full `TaskContext`. Use `Stage.get(ctx)`, `Stage.set(ctx, stage)`, `Stage.is(ctx, stage)`, `Stage.assert(ctx, stage?)`, and `Stage.summary(ctx)` for the normalized shape `{ current, hasPendingInput, hasPendingTool, hasPendingChild, markCount }`. `Stage.set()` returns a **`StageTransitionResult`** (`from`, `to`, `autoMarksApplied`, `invariantChecks`).
 
 ## Design the stage union first
 
@@ -147,18 +151,20 @@ Instead of repeating:
 - `'completed.called'`
 - `'awaiting_fetch.called'`
 
-prefer a shared control-key map.
+prefer a shared control-key map via **`defineControlKeys`**:
 
 ```ts
-export const ControlKey = {
+import { defineControlKeys } from '@a2arium/callagent-core';
+
+export const CK = defineControlKeys({
   fetchToken: 'fetch.token',
   validationToken: 'validation.token',
   completedCalled: 'completed.called',
-  awaitingFetchCalled: 'awaiting_fetch.called'
-} as const;
+  awaitingFetchCalled: 'awaiting_fetch.called',
+});
 ```
 
-Then build invariants and autoMarks from that shared vocabulary.
+Then build invariants and autoMarks from `CK` (e.g. `require: [CK.fetchToken]`).
 
 This reduces drift and makes refactoring safer.
 
@@ -243,12 +249,12 @@ Use StageFacade when:
 
 ### 2. Validate stage invariants when stage changes
 
-When calling `Stage.set(...)`, the runtime or helper should:
+When calling **`Stage.set(ctx, newStage)`**, the facade:
 
-- apply autoMarks
-- run invariant checks
-- run `onEnter`
-- record the transition in TurnTrace
+- validates invariants for the new stage (against the state that would exist after stage + autoMarks)
+- if validation fails, throws and does **not** commit stage or marks (atomic)
+- if validation passes, commits stage and autoMarks, then runs `onEnter` with **`StageEnterContext`** (post-commit; if `onEnter` throws, stage and marks are not rolled back)
+- writes transition data to `ctx.__stageTrace` for TurnTrace (consumed by oneTurn/loopRunner)
 
 ### 3. Keep Policy blind to stage
 
@@ -258,15 +264,15 @@ Do not make Policy read stage.
 
 ## TurnTrace expectations
 
-When StageFacade is used, TurnTrace should show:
+When StageFacade is used, TurnTrace includes stage fields that match the documented StageFacade behavior:
 
-- `stageBefore`
-- `stageAfter`
-- any invariant failure
-- any autoMarks applied
-- any telemetry-style `onEnter` action if recorded
+- **`stageBefore`**, **`stageAfter`** — stage at turn start and after the turn
+- **`stageTransition`** — `{ from, to }` when **`Stage.set(ctx, nextStage)`** runs
+- **`stageAutoMarksApplied`** — list of autoMark keys applied on entry
+- **`stageInvariantChecks`** — results of required/forbidden checks (e.g. `required`, `forbidden`, `ok`, `failedKey`)
+- **`stageInvariantError`** — when a stage invariant fails, the structured **InvariantErrorPayload** (e.g. `detail.type === 'stage_invariant'`)
 
-That makes stage bugs debuggable.
+That makes stage bugs debuggable from a single trace.
 
 ## Testing checklist
 

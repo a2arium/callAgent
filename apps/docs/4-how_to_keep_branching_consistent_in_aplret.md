@@ -102,7 +102,7 @@ Transition must be explicit, token-safe, and invariant-safe.
 
 **Require:** exhaustiveness.
 
-**Recommendation:** If the agent has multiple await states or strict token requirements, delegate the actual state mutation and invariant checks to `StageFacade.set(ctx, newStage)` within the switch branches.
+**Recommendation:** If the agent has multiple await states or strict token requirements, delegate the actual state mutation and invariant checks to **`Stage.set(ctx, newStage)`** (from `createStageFacade`) within the switch branches. The call returns a **`StageTransitionResult`** with `from`, `to`, `autoMarksApplied`, and `invariantChecks` for logging or assertions.
 
 ## Allowed tools
 

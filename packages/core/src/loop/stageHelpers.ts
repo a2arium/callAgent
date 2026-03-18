@@ -1,131 +1,153 @@
 import type { TaskContext } from '../shared/types/index.js';
+import {
+    type StageFacade,
+    type StageEnterContext,
+    type StageTransitionResult,
+    type StageInvariantCheckResult,
+    type StageTraceEntry,
+    type StageSummary,
+    type StageInvariantRule,
+    type CreateStageFacadeOptions,
+    createStageFacadeConfigSchema,
+} from '../types/stageFacade.js';
 import { throwInvariantError } from '../utils/invariantError.js';
-import type { EnvironmentState } from './types.js';
-import type { MentalState } from './types.js';
+import { resolveControlVars, readControlVar, writeControlVar } from './controlVarAccessors.js';
+import type { InternalTaskContext } from './internalContext.js';
 
-export type StageInvariants<St extends string> = Partial<Record<St, {
-    require?: string[];
-    forbid?: string[];
-}>>;
+function runInvariantChecks(
+    snapshot: Record<string, unknown>,
+    stage: string,
+    rule: StageInvariantRule
+): StageInvariantCheckResult[] {
+    const results: StageInvariantCheckResult[] = [];
+    for (const key of rule.require ?? []) {
+        const ok = snapshot[key] !== undefined;
+        results.push({ required: [key], ok, failedKey: ok ? undefined : key });
+        if (!ok) {
+            throwInvariantError('STAGE_REQUIRES_KEY', `[invariant] ${stage} requires ${key}`, {
+                type: 'stage_invariant',
+                stage,
+                required: [key],
+                pendingSnapshot: snapshot,
+            });
+        }
+    }
+    for (const key of rule.forbid ?? []) {
+        const ok = snapshot[key] === undefined;
+        results.push({ forbidden: [key], ok, failedKey: ok ? undefined : key });
+        if (!ok) {
+            throwInvariantError('STAGE_FORBIDS_KEY', `[invariant] ${stage} forbids ${key}`, {
+                type: 'stage_invariant',
+                stage,
+                forbidden: [key],
+                pendingSnapshot: snapshot,
+            });
+        }
+    }
+    return results;
+}
 
-/**
- * Internal interface for TaskContext that includes loop-related properties
- */
-interface InternalTaskContext extends TaskContext {
-    controlVars?: Record<string, unknown> | Map<string, unknown>;
-    __activeLoopEnv?: EnvironmentState;
-    env?: {
-        control?: {
-            pendingSnapshot?: {
-                controlVars?: Record<string, unknown>;
-            };
+export function createStageFacade<St extends string>(options: CreateStageFacadeOptions<St>): StageFacade<St> {
+    const schema = createStageFacadeConfigSchema(options.stages);
+    const parsed = schema.parse({
+        stageKey: options.stageKey ?? 'stage',
+        initial: options.initial,
+        invariants: options.invariants,
+        autoMarks: options.autoMarks,
+        onEnter: options.onEnter,
+    });
+
+    const stageKey = parsed.stageKey;
+    const initial = parsed.initial as St;
+    const invariants = (parsed.invariants ?? {}) as Partial<Record<St, StageInvariantRule>>;
+    const autoMarks = (parsed.autoMarks ?? {}) as Partial<Record<St, Record<string, unknown>>>;
+    const onEnter = (parsed.onEnter ?? {}) as Partial<Record<St, (ctx: StageEnterContext, stage: St) => void>>;
+
+    const getStage = (ctx: TaskContext): St => {
+        const v = readControlVar(ctx, stageKey);
+        return (v !== undefined && v !== null ? String(v) : initial) as St;
+    };
+
+    const makeStageEnterContext = (ctx: TaskContext): StageEnterContext => ({
+        progress: (pct: number, message: string) => ctx.progress(pct, message),
+        complete: (pct: number, message: string) => ctx.complete(pct, message),
+    });
+
+    const setStage = (ctx: TaskContext, to: St): StageTransitionResult<St> => {
+        const iCtx = ctx as InternalTaskContext;
+        const from = getStage(ctx) as St;
+
+        const currentVars = resolveControlVars(ctx) ?? {};
+        const marksForStage = autoMarks[to] ?? {};
+        const wouldBe: Record<string, unknown> = { ...currentVars, [stageKey]: to, ...marksForStage };
+
+        const rule = invariants[to];
+        const invariantChecks: StageInvariantCheckResult[] = rule ? runInvariantChecks(wouldBe, to, rule) : [];
+
+        writeControlVar(ctx, stageKey, to);
+        const autoMarksApplied: string[] = [];
+        for (const [k, v] of Object.entries(marksForStage)) {
+            writeControlVar(ctx, k, v);
+            autoMarksApplied.push(k);
+        }
+
+        const stageTransition = { from, to };
+        const traceEntry: StageTraceEntry = {
+            stageBefore: from,
+            stageAfter: to,
+            stageTransition,
+            stageAutoMarksApplied: autoMarksApplied,
+            stageInvariantChecks: invariantChecks,
+        };
+        iCtx.__stageTrace = traceEntry;
+
+        const hook = onEnter[to];
+        if (hook) {
+            hook(makeStageEnterContext(ctx), to);
+        }
+
+        return {
+            from,
+            to,
+            autoMarksApplied,
+            invariantChecks,
         };
     };
-    M?: MentalState;
-}
 
-export function createStageFacade<St extends string = string>(opts: {
-    stageKey?: string;
-    initial?: St;
-    invariants?: StageInvariants<St>;
-    autoMarks?: Partial<Record<St, Record<string, unknown>>>; // keys to set when entering stage
-    onEnter?: Partial<Record<St, (ctx: TaskContext, stage: St) => void>>;
-} = {}) {
-    const stageKey = opts.stageKey ?? 'stage';
-    const initial = opts.initial as St | undefined;
-    const rules = (opts.invariants ?? {}) as StageInvariants<St>;
+    const isStage = (ctx: TaskContext, s: St): boolean => getStage(ctx) === s;
 
-    const readVar = (ctx: TaskContext, key: string): unknown => {
+    const assertStage = (ctx: TaskContext, stage?: St): void => {
+        const s = stage ?? getStage(ctx);
+        const rule = invariants[s as St];
+        if (!rule) return;
+        const snapshot = resolveControlVars(ctx) ?? {};
+        runInvariantChecks(snapshot, s, rule);
+    };
+
+    const summary = (ctx: TaskContext): StageSummary<St> => {
         const iCtx = ctx as InternalTaskContext;
-        const controlVars = iCtx.controlVars
-            || iCtx.__activeLoopEnv?.pending?.controlVars
-            || iCtx.env?.control?.pendingSnapshot?.controlVars;
+        const controlVars = resolveControlVars(ctx);
+        const current = getStage(ctx);
+        let markCount = 0;
         if (controlVars) {
-            if (typeof (controlVars as Record<string, unknown>).get === 'function') {
-                const val = (controlVars as { get: (k: string) => unknown }).get(key);
-                if (typeof val !== 'undefined') return val;
-            }
-            if (Object.prototype.hasOwnProperty.call(controlVars, key)) {
-                return (controlVars as Record<string, unknown>)[key];
+            for (const k of Object.keys(controlVars)) {
+                if (k !== stageKey) markCount++;
             }
         }
-        return undefined;
+        const pending = iCtx.__activeLoopEnv?.pending ?? {
+            inputs: {},
+            children: {},
+            tools: {},
+            groups: {},
+        };
+        return {
+            current,
+            hasPendingInput: Object.keys(pending.inputs ?? {}).length > 0,
+            hasPendingTool: Object.keys(pending.tools ?? {}).length > 0,
+            hasPendingChild: Object.keys(pending.children ?? {}).length > 0,
+            markCount,
+        };
     };
 
-    const setControlVar = (ctx: TaskContext, key: string, value: unknown): void => {
-        const iCtx = ctx as InternalTaskContext;
-        // Update local controlVars bag
-        const existing = iCtx.controlVars;
-        if (existing && typeof (existing as any).set === 'function') {
-            (existing as any).set(key, value);
-        } else {
-            iCtx.controlVars = { ...(typeof existing === 'object' ? existing : {}), [key]: value };
-        }
-        // Mirror into active loop env pending.controlVars when present
-        const env = iCtx.__activeLoopEnv;
-        if (env) {
-            env.pending = env.pending || { inputs: {}, children: {}, tools: {}, groups: {} };
-            env.pending.controlVars = { ...(env.pending.controlVars || {}), [key]: value };
-        }
-    };
-
-    const getStage = (ctx: TaskContext): St =>
-        ((readVar(ctx, stageKey) as St | undefined)
-        ?? (initial as St));
-
-    const assertStage = (ctx: TaskContext, s: St): void => {
-        const iCtx = ctx as InternalTaskContext;
-        const r = (rules[s] || {}) as { require?: string[]; forbid?: string[] };
-        const pendingSnapshot = iCtx.__activeLoopEnv?.pending;
-
-        for (const k of r.require ?? []) {
-            if (readVar(ctx, k) === undefined) {
-                throwInvariantError(
-                    'STAGE_REQUIRES_KEY',
-                    `[invariant] ${s} requires ${k}`,
-                    {
-                        type: 'stage_invariant',
-                        stage: s,
-                        required: [k],
-                        pendingSnapshot
-                    }
-                );
-            }
-        }
-        for (const k of r.forbid ?? []) {
-            if (readVar(ctx, k) !== undefined) {
-                throwInvariantError(
-                    'STAGE_FORBIDS_KEY',
-                    `[invariant] ${s} forbids ${k}`,
-                    {
-                        type: 'stage_invariant',
-                        stage: s,
-                        forbidden: [k],
-                        pendingSnapshot
-                    }
-                );
-            }
-        }
-    };
-
-    const setStage = (ctx: TaskContext, s: St): void => {
-        assertStage(ctx, s);
-        setControlVar(ctx, stageKey, s);
-        const autoMarks = (opts.autoMarks ?? {}) as Partial<Record<St, Record<string, unknown>>>;
-        const marks = autoMarks[s];
-        if (marks) {
-            for (const [k, v] of Object.entries(marks)) {
-                setControlVar(ctx, k, v as unknown);
-            }
-        }
-        const onEnter = (opts.onEnter ?? {}) as Partial<Record<St, (ctx: TaskContext, stage: St) => void>>;
-        const hook = onEnter[s];
-        if (hook) {
-            hook(ctx, s);
-        }
-    };
-
-    return { getStage, setStage, assertStage };
+    return { get: getStage, set: setStage, is: isStage, assert: assertStage, summary };
 }
-
-

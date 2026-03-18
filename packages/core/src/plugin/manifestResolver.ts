@@ -6,6 +6,7 @@ import {
     AgentCardSchema, 
     AgentRuntimeManifest, 
     AgentRuntimeManifestSchema,
+    ManifestErrorDetail,
     ManifestSource,
     ManifestResolutionSource,
     ResolvedManifests
@@ -133,7 +134,7 @@ async function readManifestFile(fullPath: string, type: 'agentCard' | 'runtimeMa
 
 function validateManifest<T>(
   data: unknown,
-  schema: import('zod').ZodSchema<T>,
+  schema: { parse: (data: unknown) => T },
   type: 'agentCard' | 'runtimeManifest',
   sourceInfo: string
 ): T {
@@ -141,7 +142,8 @@ function validateManifest<T>(
     return schema.parse(data);
   } catch (error) {
     if (error instanceof ZodError) {
-      const errorLines = (error.issues as any[]).map((e: any) => {
+      const zodErr = error as { issues?: Array<{ path?: unknown[]; message?: string; expected?: string; received?: string }> };
+      const errorLines = (zodErr.issues ?? []).map((e) => {
         const path = e.path && e.path.length > 0 ? e.path.join('.') : '(root)';
         const details = e.expected && e.received
           ? ` - expected: ${e.expected}, received: ${e.received}`
@@ -160,7 +162,7 @@ function validateManifest<T>(
           type: 'schema_validation',
           manifest: type,
           zodError: error,
-        }
+        } as unknown as ManifestErrorDetail
       );
     }
     throw error;

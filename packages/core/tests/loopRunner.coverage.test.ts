@@ -105,6 +105,48 @@ describe('runLoop memory wiring and defaults', () => {
         expect(env.inbox.current.length).toBe(0);
         expect(env.inbox.all.length).toBeGreaterThan(0);
     });
+
+    it('returns traces when collectTraces true and stamps manifest provenance and pending summary', async () => {
+        const ctx: any = {
+            task: { id: 'trace-coverage-task', input: 'x' },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() },
+        };
+        const M: any = initialM(ctx);
+        const env = baseEnv();
+        const modules = {
+            attention: () => ({}),
+            perception: (e: any) => ({ inbox: e.inbox.current, time: e.time, pending: e.pending }),
+            learning: async (prev: any) => prev,
+            policy: () => ({ kind: 'language', content: 'done' }),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent }),
+            execution: async (intent: any) => ({ action: intent, result: { status: 'ok', data: intent } }),
+            transition: () => ({ kind: 'complete', observations: [] }),
+        };
+        const provenance = { agentCardSource: 'inline' as const, runtimeManifestSource: 'inline' as const, agentCardHash: 'ah', runtimeManifestHash: 'rh' };
+
+        const resultNoTraces = await runLoop(ctx, M, env, modules as any, { maxTurns: 1 });
+        expect(resultNoTraces.traces).toBeUndefined();
+
+        const resultWithTraces = await runLoop(ctx, M, env, modules as any, { maxTurns: 2, collectTraces: true, manifestProvenance: provenance });
+        expect(resultWithTraces.traces).toBeDefined();
+        expect(Array.isArray(resultWithTraces.traces)).toBe(true);
+        expect(resultWithTraces.traces!.length).toBeGreaterThanOrEqual(1);
+        const first = resultWithTraces.traces![0];
+        expect(first.turn).toBe(1);
+        expect(first.turnId).toBeDefined();
+        expect(first.agentCardSource).toBe('inline');
+        expect(first.runtimeManifestSource).toBe('inline');
+        expect(first.agentCardHash).toBe('ah');
+        expect(first.runtimeManifestHash).toBe('rh');
+        expect(first.timings).toBeDefined();
+        expect(first.timings.totalMs).toBeGreaterThanOrEqual(0);
+        expect(Array.isArray(first.inboxCurrent)).toBe(true);
+        expect(first.pendingAfter).toBeDefined();
+    });
 });
 
 describe('runLoop memory fallbacks and goal mutations', () => {
