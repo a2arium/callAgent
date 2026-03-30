@@ -15,7 +15,7 @@ const FrameworkModuleNameSchema = z.enum([
 export const ManifestSourceSchema = z.enum(['defaultPath', 'pathOverride', 'inline']);
 export type ManifestSource = z.infer<typeof ManifestSourceSchema>;
 
-const JsonPrimitiveSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const JsonPrimitiveSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.undefined()]);
 type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
@@ -31,6 +31,7 @@ export const InboxObservationSummarySchema = z.object({
     kind: z.string(),
     hasToken: z.boolean().optional(),
     token: z.string().optional(),
+    payload: JsonValueSchema.optional(),
 });
 export type InboxObservationSummary = z.infer<typeof InboxObservationSummarySchema>;
 
@@ -199,6 +200,7 @@ export const TurnTraceSchema = z.object({
     correlationId: z.string().optional(),
     traceId: z.string().optional(),
     spanId: z.string().optional(),
+    parentSpanId: z.string().optional(),
 
     // Sub-call summaries (LLM, tool, child calls made during this turn)
     llmCalls: z.array(LLMCallTraceSchema).optional(),

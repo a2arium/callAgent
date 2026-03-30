@@ -8,6 +8,7 @@ const log = logger.createLogger({ prefix: 'TelemetryCollector' });
 
 import { ConsoleProvider } from './providers/ConsoleProvider.js';
 import { OpikProvider } from './providers/OpikProvider.js';
+import { turnOpikDiagEnabled } from './turnOpikDiagEnv.js';
 
 export class TelemetryCollector {
     private static instance: TelemetryCollector;
@@ -24,7 +25,12 @@ export class TelemetryCollector {
         }
 
         if (process.env.CALLAGENT_OPIK_ENABLED === 'true' || !!process.env.OPIK_API_KEY) {
-            this.addProvider(new OpikProvider());
+            this.addProvider(
+                new OpikProvider(
+                    (id: string) => this.nodeRegistry.get(id),
+                    () => [...this.nodeRegistry.values()]
+                )
+            );
         }
     }
 
@@ -69,8 +75,38 @@ export class TelemetryCollector {
         return this.nodeRegistry.get(id);
     }
 
+    /** Snapshot of registered nodes (e.g. Opik replay after async client init). */
+    public getRegisteredNodes(): TelemetryNode[] {
+        return [...this.nodeRegistry.values()];
+    }
+
+    /**
+     * Best-effort flush for providers that buffer (e.g. Opik). Call before process exit in CLIs.
+     */
+    public async shutdownProviders(): Promise<void> {
+        for (const p of this.providers) {
+            const maybe = (p as { flush?: () => Promise<void> }).flush;
+            if (typeof maybe === 'function') {
+                try {
+                    await maybe();
+                } catch (err) {
+                    log.error(`Provider ${p.name} flush error`, err);
+                }
+            }
+        }
+    }
+
     /** Emit the assembled TurnTrace to all providers. Called exactly once per turn by loopRunner. */
     public emitTurnTrace(trace: TurnTrace): void {
+        if (turnOpikDiagEnabled()) {
+            log.info('[CALLAGENT_DEBUG_TURN_OPIK] TelemetryCollector.emitTurnTrace → providers', {
+                providerNames: this.providers.map((p) => p.name),
+                turn: trace.turn,
+                traceId: trace.traceId,
+                spanId: trace.spanId,
+                parentSpanId: trace.parentSpanId,
+            });
+        }
         this.broadcast((p) => p.onTurnTrace(trace));
     }
 

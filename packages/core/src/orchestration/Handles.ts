@@ -1,5 +1,5 @@
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
 import { EngineLocator } from './EngineLocator.js';
 import type { SessionManager } from './SessionManager.js';
 import { logger } from '@a2arium/callagent-utils';
@@ -172,7 +172,17 @@ export class TaskHandle {
         try {
             const { globalA2AService } = await import('./A2AService.js');
             const engine = EngineLocator.getEngine();
-            const result = await globalA2AService.sendTaskToAgent({} as any, target, input as any, {
+            const meta = (base as { meta?: { agentId?: string; telemetry?: { nodeId?: string; traceId?: string } } }).meta;
+            const agentId = meta?.agentId ?? 'default';
+            const minimalSource = {
+                task: { id: this.sessionId },
+                tenantId: this.tenantId,
+                agentId,
+                ...(meta?.telemetry?.nodeId
+                    ? { telemetry: { nodeId: meta.telemetry.nodeId, traceId: meta.telemetry.traceId } }
+                    : {}),
+            };
+            const result = await globalA2AService.sendTaskToAgent(minimalSource as any, target, input as any, {
                 parentTenantId: this.tenantId,
                 parentTaskId: this.sessionId,
                 parentChildToken: this.childToken,
@@ -195,7 +205,7 @@ export async function createTaskHandle(
     target?: string,
     input?: unknown
 ): Promise<{ handle: TaskHandle; token: string }> {
-    const childToken = uuidv4();
+    const childToken = uuidv7();
     let snap: any;
     let base: any;
     let attempts = 0;
@@ -294,7 +304,7 @@ export async function createGroupHandle(
     sessionId: string,
     childTokens: string[]
 ): Promise<{ handle: GroupHandle; groupToken: string }> {
-    const groupToken = uuidv4();
+    const groupToken = uuidv7();
     const snap = await session.load(tenantId, sessionId);
     const base = (snap?.snapshot as Record<string, unknown>) || {};
     const groups = getPendingGroups(base);

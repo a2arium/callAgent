@@ -1,12 +1,13 @@
 
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
 import { logger } from '@a2arium/callagent-utils';
 import type { TaskContext } from '../../shared/types/index.js';
 import { ArtifactHydrationService } from '../ArtifactHydrationService.js';
 import { AgentResultCache, ArtifactImpl } from '@a2arium/callagent-memory-engine';
 import { type EngineObservation, type EngineObservationInbox } from '../InboxManager.js';
 import { applyInputProvided, getPendingInputs, setPendingInputs } from '../DurableHandlerRegistry.js';
+import { compactModuleOutput } from '../../telemetry/turnTraceHelpers.js';
 import { getPendingTools, setPendingTools } from '../ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from '../ExternalEventsRegistry.js';
 import { getPendingTasks, setPendingTasks, getPendingGroups, setPendingGroups } from '../Handles.js';
@@ -123,7 +124,7 @@ export class ApiBinder {
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
             const snapL = await this.deps.sessionManager.load(tenantId, sessionId);
             const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
-            const token = opts?.__existingToken || uuidv4();
+            const token = opts?.__existingToken || uuidv7();
             const controlUpdates: Array<[string, unknown]> = [];
             const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
             const pending = { ...getPendingInputs(baseL) };
@@ -246,8 +247,7 @@ export class ApiBinder {
             }
             // Async tool request path: enqueue and let background handler execute
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
-            const token = opts?.setToken && typeof opts.setToken === 'string' ? opts.setToken : uuidv4();
-
+            let toolToken = opts?.setToken && typeof opts.setToken === 'string' ? opts.setToken : `tool-${uuidv7()}`;
             try { await flushMentalState(); } catch { /* best-effort */ }
 
             // Use saveWithRetry to avoid CAS_MISMATCH after flushMentalState bumps version
@@ -256,29 +256,29 @@ export class ApiBinder {
                 agentId: (ctx as any).agentId || 'default',
                 mutate: (baseSnap) => {
                     const toolsNow = { ...getPendingTools(baseSnap) } as any;
-                    toolsNow[token] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
+                    toolsNow[toolToken] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
                     if (opts?.setToken || opts?.setStage) {
-                        toolsNow[token].options = { setToken: opts.setToken, setStage: opts.setStage };
+                        toolsNow[toolToken].options = { setToken: opts.setToken, setStage: opts.setStage };
                     }
                     return setPendingTools(baseSnap, toolsNow);
                 }
             });
-            await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token, toolName });
+            await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token: toolToken, toolName });
 
             (ctx as any).__wmSavedThisTurn = true;
 
             // Trigger async auto-execution in the background
             if (typeof (ctx as any).__autoExecuteTool === 'function') {
                 // Don't await - let it run in the background, but track the promise
-                const toolPromise = (ctx as any).__autoExecuteTool(tenantId, sessionId, token, toolName, args).catch((e: Error) => {
-                    log.error('[ApiBinder] Background tool execution failed', { token, toolName, error: e.message });
+                const toolPromise = (ctx as any).__autoExecuteTool(tenantId, sessionId, toolToken, toolName, args).catch((e: Error) => {
+                    log.error('[ApiBinder] Background tool execution failed', { token: toolToken, toolName, error: e.message });
                 }).finally(() => {
                     this.deps.backgroundTaskPromises.delete(toolPromise);
                 });
                 this.deps.backgroundTaskPromises.add(toolPromise);
             }
 
-            return { token } as any;
+            return { token: toolToken } as any;
         };
 
         // sendTaskToAgent implementation
@@ -292,12 +292,14 @@ export class ApiBinder {
             }
 
             log.debug(`[sendTaskToAgent] Requesting mutex for ${tenantId}:${sessionId}`);
-            const { handle, token } = await this.deps.taskCreationMutex.runExclusive(
+            let token = options?.customToken;
+            const { handle, token: generatedToken } = await this.deps.taskCreationMutex.runExclusive(
                 `${tenantId}:${sessionId}`,
                 async () => {
                     return await createTaskHandle(this.deps.sessionManager!, tenantId, sessionId, agent, childInput);
                 }
             );
+            if (!token) token = generatedToken;
 
             // Create ChildCallNode under current turn so child AgentNode can be parented to it
             const parentId = ctx.telemetry?.nodeId ?? 'root';
@@ -429,7 +431,9 @@ export class ApiBinder {
                     ...a2aOptions
                 });
             } catch (error) {
-                childCallNode.fail(error instanceof Error ? error : new Error(String(error)));
+                const er = error instanceof Error ? error : new Error(String(error));
+                childCallNode.fail(er);
+                telemetry.failNode(childCallNode, er);
                 telemetry.endNode(childCallNode);
                 if (iCtx.__turnChildCalls) {
                     iCtx.__turnChildCalls.push({
@@ -460,7 +464,9 @@ export class ApiBinder {
                     childTaskId: cleanChildResult.childTaskId,
                     status: 'completed',
                     module: iCtx.__currentModule,
-                    resultSummary: cleanChildResult.result != null ? ({ result: cleanChildResult.result } as unknown as JsonValue) : undefined
+                    resultSummary: cleanChildResult.result != null 
+                        ? compactModuleOutput({ result: cleanChildResult.result }) 
+                        : undefined
                 });
             }
 
@@ -541,22 +547,45 @@ export class ApiBinder {
                 const { handle, token } = await createTaskHandle(this.deps.sessionManager, tenantId, sessionId, child.agent);
                 childTokens.push(token);
 
-                const taskPromise = globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
-                    tenantId,
-                    parentTenantId: tenantId,
-                    parentTaskId: sessionId,
-                    parentChildToken: token,
-                    awaitCompletion: false,
-                    skipFlush: true
-                } as any).catch(async (e: any) => {
-                    await this.deps.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
-                        taskId: sessionId,
-                        childAgent: child.agent,
-                        error: e instanceof Error ? e.message : String(e)
+                const parentId = ctx.telemetry?.nodeId ?? 'root';
+                const parentNode = telemetry.getNode(parentId);
+                const traceIdForChild = parentNode?.traceId;
+                const childCallNode = new ChildCallNode(token, parentId, child.agent, undefined, traceIdForChild);
+                childCallNode.start({ token, agentId: child.agent });
+                telemetry.registerNode(childCallNode);
+
+                const taskPromise = globalA2AService
+                    .sendTaskToAgent(ctx as any, child.agent, child.input as any, {
+                        tenantId,
+                        parentTenantId: tenantId,
+                        parentTaskId: sessionId,
+                        parentChildToken: token,
+                        awaitCompletion: false,
+                        skipFlush: true,
+                        parentTelemetryNodeId: childCallNode.id,
+                    } as any)
+                    .then((result) => {
+                        const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
+                        childCallNode.childTaskId = cleanChildResult.childTaskId;
+                        childCallNode.endTime = Date.now();
+                        childCallNode.end(cleanChildResult.result, 'success');
+                        telemetry.endNode(childCallNode);
+                        return result;
+                    })
+                    .catch(async (e: unknown) => {
+                        const er = e instanceof Error ? e : new Error(String(e));
+                        childCallNode.fail(er);
+                        telemetry.failNode(childCallNode, er);
+                        telemetry.endNode(childCallNode);
+                        await this.deps.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
+                            taskId: sessionId,
+                            childAgent: child.agent,
+                            error: er.message,
+                        });
+                    })
+                    .finally(() => {
+                        this.deps.backgroundTaskPromises.delete(taskPromise as Promise<void>);
                     });
-                }).finally(() => {
-                    const removed = this.deps.backgroundTaskPromises.delete(taskPromise as Promise<void>);
-                });
                 this.deps.backgroundTaskPromises.add(taskPromise as Promise<void>);
             }
             const { handle: groupHandle, groupToken } = await createGroupHandle(this.deps.sessionManager, tenantId, sessionId, childTokens);

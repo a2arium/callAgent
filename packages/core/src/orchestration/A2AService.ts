@@ -21,11 +21,13 @@ import { EngineLocator } from './EngineLocator.js';
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { TaskEngine } from './taskEngine.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { getCallChainTracker, type CallChainTracker } from './CallChainTracker.js';
+import { AgentNode } from '../telemetry/nodes/AgentNode.js';
+import { telemetry } from '../telemetry/TelemetryCollector.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -241,9 +243,15 @@ export class A2AService implements IA2AService {
                 if (attach) await attach(targetCtx, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name);
             } catch { }
 
+            const execOptions = {
+                ...options,
+                parentTelemetryNodeId:
+                    options.parentTelemetryNodeId ?? sourceCtx.telemetry?.nodeId,
+            };
+
             let result;
             try {
-                result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, options);
+                result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, execOptions);
             } finally {
                 // Unregister when complete (even if error)
                 this.callChainTracker.unregisterCall(targetCtx.task.id);
@@ -481,9 +489,12 @@ export class A2AService implements IA2AService {
             // Override recordUsage for target-specific tracking
             recordUsage: this.createTargetRecordUsage(targetPlugin),
 
-            // ✅ FIX: Do not inherit parent loop state
+            // ✅ FIX: Do not inherit parent loop state or telemetry context
             __activeLoopInbox: undefined,
-            __activeLoopEnv: undefined
+            __activeLoopEnv: undefined,
+            __env: undefined,
+            currentTurnNodeId: undefined,
+            telemetry: { nodeId: undefined },
         };
 
         // Merge base context with target-specific overrides
@@ -593,7 +604,7 @@ export class A2AService implements IA2AService {
                     try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name, targetCtx as any); } catch { }
 
                     // Create a real pending input entry in the child's session so resumeInput can work
-                    const childToken = uuidv4();
+                    const childToken = uuidv7();
                     const snap = await (eng as any).sessionManager?.load(targetCtx.tenantId, targetCtx.task.id);
                     const base = (snap?.snapshot as Record<string, unknown>) || {};
                     const inputs = getPendingInputs(base);
@@ -823,8 +834,39 @@ export class A2AService implements IA2AService {
                 turn: undefined
             },
             async () => {
+                let agentNode: AgentNode | undefined;
+                let hasLoopModules = false;
                 try {
                     const effectiveCache = this.resolveEffectiveCacheConfig(targetPlugin, options);
+
+                    // Telemetry: Create an AgentNode upfront so both cache hits and cache misses produce a stable span
+                    try {
+                        const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
+                        const parentNode = parentNodeId ? telemetry.getNode(parentNodeId) : undefined;
+                        const traceId = parentNode?.traceId || targetCtx.telemetry?.traceId || uuidv7();
+                        const nodeId = uuidv7();
+                        agentNode = new AgentNode(targetPlugin.resolved.agentCard.name, nodeId, parentNodeId, traceId);
+                        
+                        agentNode.start({
+                            ...targetCtx.task.input,
+                            _cached: effectiveCache.enabled ? 'pending' : 'disabled'
+                        });
+                        telemetry.registerNode(agentNode);
+
+                        Object.assign(agentNode.providerData, {
+                            sessionId: targetCtx.task.id,
+                            tenantId: targetCtx.tenantId,
+                            parentSessionId: (options as { parentTaskId?: string }).parentTaskId,
+                            threadId: traceId,
+                        });
+                        
+                        // Inject telemetry node into targetCtx so TaskEngine avoids recreating it IF it runs
+                        if (!targetCtx.telemetry) targetCtx.telemetry = {};
+                        targetCtx.telemetry.nodeId = agentNode.id;
+                        targetCtx.telemetry.traceId = agentNode.traceId;
+                    } catch (tErr) {
+                        a2aLogger.warn('A2AService failed to start agent telemetry node', { error: tErr });
+                    }
 
                     // Check cache if enabled (manifest or override)
                     if (this.agentResultCache && effectiveCache.enabled) {
@@ -859,6 +901,15 @@ export class A2AService implements IA2AService {
                                 // Continue even if hydration fails, returning the raw result
                             }
 
+                            if (agentNode) {
+                                agentNode.end({
+                                    status: 'completed',
+                                    _origin: 'cache',
+                                    result: cachedResult
+                                });
+                                telemetry.endNode(agentNode);
+                            }
+
                             return cachedResult;
                         }
                     }
@@ -872,15 +923,16 @@ export class A2AService implements IA2AService {
                         taskId: targetCtx.task.id
                     });
 
-                    const hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
+                    hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
                     const result = hasLoopModules
                         ? await (async () => {
                             // Always route loop-first agents through the engine so A2A overrides are respected
                             const eng = getRequiredEngine();
                             try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
                             const entity = { id: targetCtx.task.id, input: targetCtx.task.input };
-                            const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
-                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: parentNodeId });
+                            
+                            // TaskEngine creates its own trace if parentNodeId is missing. We established one above natively in A2AService, so we pass it.
+                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: agentNode?.id, skipTelemetryNodeCreation: !!agentNode });
                             return started ?? { status: 'started' };
                         })()
                         : (targetPlugin.handleTask
@@ -890,8 +942,7 @@ export class A2AService implements IA2AService {
                                 const eng = getRequiredEngine();
                                 try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
                                 const entity = { id: targetCtx.task.id, input: targetCtx.task.input };
-                                const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
-                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: parentNodeId });
+                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: agentNode?.id, skipTelemetryNodeCreation: !!agentNode });
                                 return started ?? { status: 'started' };
                             })());
 
@@ -940,12 +991,25 @@ export class A2AService implements IA2AService {
                         hasResult: !!result
                     });
 
+                    // We already hooked TaskEngine to end the node if it was a startTask invocation. 
+                    // However, for pure fallback JS handleTask plugins, we might need to close it here.
+                    if (agentNode && !hasLoopModules && targetPlugin.handleTask) {
+                         agentNode.end({ status: 'completed', result });
+                         telemetry.endNode(agentNode);
+                    }
+
                     return result;
                 } catch (error) {
                     a2aLogger.error('Target agent execution failed', error, {
                         operationId,
                         targetAgent: targetPlugin.resolved.agentCard.name
                     });
+                    if (agentNode && agentNode.endTime == null) {
+                        const err = error instanceof Error ? error : new Error(String(error));
+                        agentNode.fail(err);
+                        telemetry.failNode(agentNode, err);
+                        telemetry.endNode(agentNode);
+                    }
                     throw error;
                 }
             }

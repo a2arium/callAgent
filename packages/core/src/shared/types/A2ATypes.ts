@@ -29,6 +29,12 @@ export type MinimalSourceTaskContext = {
 
     // Add agentId to allow the serializer to get the source agent's ID
     agentId: string;
+
+    /** Present when the caller participates in the telemetry tree (e.g. loop turn or subagent). */
+    telemetry?: {
+        nodeId?: string;
+        traceId?: string;
+    };
     // Add llm and tools for sharing with target context
     llm?: any;
     tools?: any;

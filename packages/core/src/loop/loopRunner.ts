@@ -13,20 +13,40 @@ import type { Intent, ExecutableAction } from '../types/intent.js';
 import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
+import { WorkflowNode } from '../telemetry/nodes/WorkflowNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
 import type { InternalTaskContext } from './internalContext.js';
 import type { TurnTrace, ManifestProvenance, TurnTimings } from '../types/turnTrace.js';
 import { TurnTraceSchema } from '../types/turnTrace.js';
-import { summarizePending } from '../telemetry/turnTraceHelpers.js';
-import { aggregateUsage } from '../telemetry/turnTraceHelpers.js';
+import { summarizePending, aggregateUsage, compactModuleOutput } from '../telemetry/turnTraceHelpers.js';
 import { generateCorrelationId } from '../tracing/Tracing.js';
-import { v4 as uuidv4 } from 'uuid';
+import { v7 as uuidv7 } from 'uuid';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
+
+/** Walk telemetry parents and ctx so TurnNode always gets the session trace id (Opik drops turns with undefined traceId). */
+function resolveTraceIdForTurnParent(
+    parentId: string | undefined,
+    ctx: TaskContext
+): string | undefined {
+    if (parentId) {
+        const seen = new Set<string>();
+        let pid: string | undefined = parentId;
+        while (pid && pid !== 'root' && !seen.has(pid)) {
+            seen.add(pid);
+            const p = telemetry.getNode(pid);
+            if (p?.traceId) return p.traceId;
+            pid = p?.parentId;
+        }
+    }
+    const tid = ctx.telemetry?.traceId;
+    return typeof tid === 'string' && tid.length > 0 ? tid : undefined;
+}
 
 type LoopRunnerOptions = {
     maxTurns?: number;
@@ -284,17 +304,41 @@ export async function runLoop<
 
     const flushMemoryPatches = async (patches: ReturnType<ReturnType<typeof createMemoryWriter>['__drain']>) => {
         const semantic = (ctx as any).memory?.semantic;
-        if (semantic) {
-            try {
-                for (const [id, item] of patches.semanticUpserts.entries()) {
-                    await semantic.set?.(id, item.data ?? item, { tags: (item as any).tags, entities: (item as any).entities });
-                }
-                for (const id of patches.semanticDeletes.values()) {
-                    await semantic.delete?.(id);
-                }
-            } catch (err) {
-                log.warn('Failed to flush semantic patches', { error: err instanceof Error ? err.message : String(err) });
+        const upsertCount = patches.semanticUpserts.size;
+        const deleteCount = patches.semanticDeletes.size;
+        if (!semantic || (upsertCount === 0 && deleteCount === 0)) {
+            return;
+        }
+
+        const parentId = ctx.telemetry?.nodeId;
+        const parentNode = parentId ? telemetry.getNode(parentId) : undefined;
+        const traceId = parentNode?.traceId;
+        let memNode: WorkflowNode | undefined;
+        if (parentId) {
+            memNode = new WorkflowNode('memory.semantic.flush', parentId, undefined, traceId);
+            memNode.start({ upsertCount, deleteCount });
+            telemetry.registerNode(memNode);
+        }
+
+        try {
+            for (const [id, item] of patches.semanticUpserts.entries()) {
+                await semantic.set?.(id, item.data ?? item, { tags: (item as any).tags, entities: (item as any).entities });
             }
+            for (const id of patches.semanticDeletes.values()) {
+                await semantic.delete?.(id);
+            }
+            if (memNode) {
+                memNode.end({ ok: true, upsertCount, deleteCount }, 'success');
+                telemetry.endNode(memNode);
+            }
+        } catch (err) {
+            if (memNode) {
+                const er = err instanceof Error ? err : new Error(String(err));
+                memNode.fail(er);
+                telemetry.failNode(memNode, er);
+                telemetry.endNode(memNode);
+            }
+            log.warn('Failed to flush semantic patches', { error: err instanceof Error ? err.message : String(err) });
         }
         // Episodic/procedural/world/goals/policy/reward are persisted via MentalState snapshot
     };
@@ -749,8 +793,9 @@ export async function runLoop<
                 // If we also make a node, we get nested turns: Execution -> Turn X. This is desired.
 
                 const parentId = OuterTurnNodeId || ctx.telemetry?.nodeId;
-                const parentNode = telemetry.getNode(parentId);
-                const traceId = parentNode?.traceId;
+                const parentNode = parentId ? telemetry.getNode(parentId) : undefined;
+                const traceId =
+                    parentNode?.traceId ?? resolveTraceIdForTurnParent(parentId, ctx);
                 iterationTurnNode = new TurnNode(turnIndex, parentId, undefined, traceId);
 
                 // Track input for this specific turn (the inbox contents)
@@ -847,12 +892,16 @@ export async function runLoop<
             };
             const stageBefore = step.stageTrace?.stageBefore ?? 'idle';
             const stageAfter = step.stageTrace?.stageAfter ?? stageBefore;
-            const turnId = uuidv4();
+            const turnId = uuidv7();
             const correlationId = generateCorrelationId();
-            const parentNode = iterationTurnNode
-                ? telemetry.getNode(iterationTurnNode.parentId ?? '')
-                : undefined;
-            const traceId = iterationTurnNode?.traceId ?? parentNode?.traceId ?? undefined;
+            const parentNode =
+                iterationTurnNode?.parentId != null && iterationTurnNode.parentId !== ''
+                    ? telemetry.getNode(iterationTurnNode.parentId)
+                    : undefined;
+            const traceId =
+                iterationTurnNode?.traceId ??
+                parentNode?.traceId ??
+                resolveTraceIdForTurnParent(iterationTurnNode?.parentId, ctx);
             const spanId = iterationTurnNode?.id ?? undefined;
 
             const usage = iCtx.__turnUsage
@@ -899,15 +948,15 @@ export async function runLoop<
                                   ? step.exec.action.token
                                   : undefined,
                           summary: undefined,
-                          data: step.exec.action as unknown as import('../types/turnTrace.js').JsonValue,
+                          data: compactModuleOutput(step.exec.action),
                       }
                     : undefined,
                 execResult: step.exec?.result
                     ? {
                           status: step.exec.result.status,
                           summary: undefined,
-                          data: step.exec.result.data as import('../types/turnTrace.js').JsonValue | undefined,
-                          error: step.exec.result.error as import('../types/turnTrace.js').JsonValue | undefined,
+                          data: compactModuleOutput(step.exec.result.data),
+                          error: compactModuleOutput(step.exec.result.error),
                           correlationId: step.exec.result.correlationId,
                       }
                     : undefined,
@@ -915,7 +964,7 @@ export async function runLoop<
                     kind: outcome.kind,
                     token: 'token' in outcome ? outcome.token : undefined,
                     summary: undefined,
-                    result: 'result' in outcome ? (outcome as { result?: unknown }).result as import('../types/turnTrace.js').JsonValue : undefined,
+                    result: 'result' in outcome ? compactModuleOutput((outcome as { result?: unknown }).result) : undefined,
                 },
                 pendingAfter: summarizePending(env.pending ?? {}),
                 timings: turnTimings,
@@ -923,6 +972,7 @@ export async function runLoop<
                 correlationId,
                 traceId,
                 spanId,
+                parentSpanId: iterationTurnNode?.parentId,
                 llmCalls: iCtx.__turnLlmCalls,
                 toolCalls: iCtx.__turnToolCalls,
                 childCalls: iCtx.__turnChildCalls,
@@ -942,6 +992,19 @@ export async function runLoop<
                 iterationTurnNode.turnTrace = trace;
             }
             try {
+                if (turnOpikDiagEnabled()) {
+                    log.info('[CALLAGENT_DEBUG_TURN_OPIK] loopRunner emitTurnTrace', {
+                        envTurn: turn,
+                        loopTurnIdx: turnIdx,
+                        traceId: trace.traceId,
+                        spanId: trace.spanId,
+                        parentSpanId: trace.parentSpanId,
+                        transitionKind: trace.transition?.kind,
+                        stageAfter: trace.stageAfter,
+                        taskId: (ctx as { task?: { id?: string } }).task?.id,
+                        agentId: (ctx as { agentId?: string }).agentId,
+                    });
+                }
                 telemetry.emitTurnTrace(trace);
             } catch (emitErr) {
                 log.warn('TurnTrace emission failed', {
@@ -1028,9 +1091,9 @@ export async function runLoop<
             }
             break;
         } finally {
-            // restore context
-            if (ctx.telemetry) {
-                ctx.telemetry.nodeId = prevCtxTelemetryNodeId || ''; //Restore previous node (e.g. AgentNode)
+            // restore context (never use '' — it breaks LLM bridge parent resolution)
+            if (ctx.telemetry && prevCtxTelemetryNodeId !== undefined) {
+                ctx.telemetry.nodeId = prevCtxTelemetryNodeId;
             }
             (ctx as any).currentTurnNodeId = prevCtxTurnNodeId;
         }

@@ -17,10 +17,11 @@ import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
 
 // Re-export type for convenience
 export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event';
@@ -165,11 +166,34 @@ export class TurnRunner {
                 envInbox = InboxManager.addObservationToInbox(envInbox, inputObservation);
             }
 
+            // Restore telemetry from snapshot if missing, to survive process/async suspension boundaries
+            const persistedTelemetry = (base as { meta?: { telemetry?: { nodeId?: string; traceId?: string } } })?.meta
+                ?.telemetry;
+            if (persistedTelemetry && (persistedTelemetry.nodeId || persistedTelemetry.traceId)) {
+                if (!ctx.telemetry) {
+                    ctx.telemetry = {};
+                }
+                if (
+                    persistedTelemetry.nodeId != null &&
+                    persistedTelemetry.nodeId !== '' &&
+                    ctx.telemetry.nodeId == null
+                ) {
+                    ctx.telemetry.nodeId = persistedTelemetry.nodeId;
+                }
+                if (
+                    persistedTelemetry.traceId != null &&
+                    persistedTelemetry.traceId !== '' &&
+                    ctx.telemetry.traceId == null
+                ) {
+                    ctx.telemetry.traceId = persistedTelemetry.traceId;
+                }
+            }
+
             // --- TELEMETRY START ---
             try {
                 let parentId = ctx.telemetry?.nodeId;
                 if (!parentId) {
-                    const tempId = uuidv4();
+                    const tempId = uuidv7();
                     tempAgentNode = new AgentNode((ctx as any).agentId || 'unknown-agent', tempId, undefined, tempId);
                     tempAgentNode.start();
                     telemetry.registerNode(tempAgentNode);
@@ -183,6 +207,22 @@ export class TurnRunner {
                 prevNodeId = ctx.telemetry.nodeId;
                 if (parentId) {
                     ctx.telemetry.nodeId = parentId;
+                }
+                const parentTelNode = parentId ? telemetry.getNode(parentId) : undefined;
+                if (parentTelNode?.traceId && !ctx.telemetry.traceId) {
+                    ctx.telemetry.traceId = parentTelNode.traceId;
+                }
+                if (turnOpikDiagEnabled()) {
+                    log.info('[CALLAGENT_DEBUG_TURN_OPIK] TurnRunner telemetry context', {
+                        sessionId,
+                        trigger,
+                        parentId,
+                        hadPersistedMetaTelemetry: !!(base as { meta?: { telemetry?: unknown } })?.meta
+                            ?.telemetry,
+                        ctxNodeId: ctx.telemetry?.nodeId,
+                        ctxTraceId: ctx.telemetry?.traceId,
+                        usedTempAgent: !!tempAgentNode,
+                    });
                 }
             } catch { }
             // -----------------------

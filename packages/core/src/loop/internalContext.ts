@@ -19,6 +19,7 @@ export type InternalTaskContext = TaskContext & {
     currentTurnNodeId?: string;
     telemetry?: {
         nodeId?: string;
+        traceId?: string;
     };
     /** Stage transition trace for TurnTrace. StageFacade writes here on set(); oneTurn/loopRunner read and clear. */
     __stageTrace?: StageTraceEntry;

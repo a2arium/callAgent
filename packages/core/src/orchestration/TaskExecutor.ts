@@ -1,5 +1,5 @@
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { InboxManager, type EngineObservation } from './InboxManager.js';
@@ -325,7 +325,12 @@ export class TaskExecutor {
         const expected = snapNow?.wmVersion ?? BigInt(0);
         const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
         const prevMeta = (baseNow as any).meta || {};
-        const nextMeta = { ...prevMeta, turn: env.turn, budgets: loopOpts };
+        const nextMeta = {
+            ...prevMeta,
+            turn: env.turn,
+            budgets: loopOpts,
+            ...(ctx.telemetry ? { telemetry: ctx.telemetry } : {})
+        };
 
         // FIX: Add/Clear awaiting
         if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {

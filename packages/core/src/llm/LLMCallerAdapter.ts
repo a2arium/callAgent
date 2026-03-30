@@ -10,6 +10,7 @@ import type {
 } from 'callllm';
 import { ILLMCaller, LLMConfig } from '../shared/types/LLMTypes.js';
 import type { UsageRecord } from '../shared/types/index.js';
+import type { InternalTaskContext } from '../loop/internalContext.js';
 
 // Type for the recordUsage function that accepts our detailed record
 type RecordUsageFunction = (cost: number | UsageRecord) => void;
@@ -78,6 +79,9 @@ export class LLMCallerAdapter implements ILLMCaller {
 
         // Create bridge provider for telemetry integration
         this.bridgeProvider = new CallagentBridgeProvider('root');
+        if (ctx) {
+            this.bridgeProvider.setContextRef(ctx as InternalTaskContext);
+        }
 
         const callllmTelemetryCollector = new CallLLMTelemetryCollector({
             providers: [this.bridgeProvider],

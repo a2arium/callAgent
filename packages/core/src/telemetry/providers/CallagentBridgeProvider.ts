@@ -59,6 +59,19 @@ function tokensTotal(u: UsageLike | undefined, inVal: number, outVal: number): n
     return inVal + outVal;
 }
 
+/** Follow parent chain until a node carries traceId (callllm children often only get parent id). */
+function resolveTraceIdFromParentId(parentId: string): string | undefined {
+    let pid: string | undefined = parentId;
+    const seen = new Set<string>();
+    while (pid && pid !== 'root' && !seen.has(pid)) {
+        seen.add(pid);
+        const p = telemetry.getNode(pid);
+        if (p?.traceId) return p.traceId;
+        pid = p?.parentId;
+    }
+    return undefined;
+}
+
 /**
  * Bridge provider that converts callLLM telemetry events into callagent telemetry nodes.
  */
@@ -139,9 +152,9 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
 
         const parentId = this.parentNodeId;
         const parentNode = telemetry.getNode(parentId);
-        const traceId = parentNode?.traceId;
+        const traceId = this.resolveBridgeTraceId(parentId, parentNode);
 
-        const node = new WorkflowNode(`conversation.${ctx.type}`, parentId, ctx.conversationId, traceId);
+        const node = new WorkflowNode(`llm.conversation.${ctx.type}`, parentId, ctx.conversationId, traceId);
         node.startTime = ctx.startedAt;
         node.status = 'active';
 
@@ -152,6 +165,7 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
 
     endConversation(ctx: ConversationContext, summary?: ConversationSummary, inputOutput?: ConversationInputOutput): void {
         const node = this.conversationNodes.get(ctx.conversationId);
+
         if (node) {
             node.endTime = Date.now();
             node.status = 'success';
@@ -161,7 +175,7 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
             this.conversationNodes.delete(ctx.conversationId);
         }
 
-        // Cleanup stack
+        // Cleanup stack map (do not endNode pending LLM/tool nodes here — that races endLLM and clears span content in Opik)
         this.nodeStack.delete(ctx.conversationId);
     }
 
@@ -175,9 +189,14 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
             }
         }
 
-        const parentId = this.getActiveParent(ctx.conversationId, 'llm');
+        let parentId = this.getActiveParent(ctx.conversationId, 'llm');
+        const stackParent = telemetry.getNode(parentId);
+        // 3.5: nest LLM under the active turn (parentNodeId), not under callllm's conversation span
+        if (stackParent?.type === 'workflow') {
+            parentId = this.parentNodeId;
+        }
         const parentNode = telemetry.getNode(parentId);
-        const traceId = parentNode?.traceId;
+        const traceId = this.resolveBridgeTraceId(parentId, parentNode);
 
         const node = new LLMNode(ctx.model, parentId, ctx.llmCallId, traceId);
         node.name = `${ctx.provider.toLowerCase()}.chat.completions`;
@@ -300,7 +319,7 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
     startTool(ctx: ToolCallContext): void {
         const parentId = this.getActiveParent(ctx.conversationId, 'tool');
         const parentNode = telemetry.getNode(parentId);
-        const traceId = parentNode?.traceId;
+        const traceId = parentNode?.traceId ?? resolveTraceIdFromParentId(parentId);
 
         const toolNode = new ToolNode(ctx.name, parentId, ctx.toolCallId, traceId);
         toolNode.name = `execute_tool ${ctx.name}`;
@@ -377,5 +396,16 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         if (ctx !== undefined) {
             this.contextRef = ctx ?? null;
         }
+    }
+
+    /** When parent is still `'root'` or chain lacks traceId, fall back to task context (Opik span routing). */
+    private resolveBridgeTraceId(
+        parentId: string,
+        parentNode: TelemetryNode | undefined
+    ): string | undefined {
+        const fromParent = parentNode?.traceId ?? resolveTraceIdFromParentId(parentId);
+        if (fromParent) return fromParent;
+        const fromCtx = this.contextRef?.telemetry?.traceId;
+        return typeof fromCtx === 'string' ? fromCtx : undefined;
     }
 }

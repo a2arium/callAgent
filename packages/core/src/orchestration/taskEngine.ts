@@ -16,13 +16,16 @@ import { InputHandle, createTaskHandle, createGroupHandle, type GroupHandle } fr
 import { getPendingTasks, setPendingTasks, getPendingGroups, setPendingGroups } from './Handles.js';
 import { globalA2AService } from './A2AService.js';
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
+
 import { outboxPublisher } from '../eventbus/outboxPublisher.js';
 import { createTraceparent } from '../tracing/Tracing.js';
 import type { MentalState } from '../loop/types.js';
 import { initialM } from '../loop/init.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
+import { WorkflowNode } from '../telemetry/nodes/WorkflowNode.js';
+import type { NodeStatus } from '../telemetry/nodes/TelemetryNode.js';
 
 
 import { logger } from '@a2arium/callagent-utils';
@@ -76,6 +79,34 @@ export type {
  */
 
 const log = logger.createLogger({ prefix: 'TaskEngine' });
+
+/**
+ * Merge ctx.telemetry into snapshot meta on every persist path (not only TaskExecutor.saveSnapshot).
+ * Without this, a flush before tool await can drop meta.telemetry; tool resume then lacks traceId and
+ * Opik turn spans attach to a new trace or are dropped.
+ */
+function mergeSnapshotMetaWithCtxTelemetry(
+    baseSnap: Record<string, unknown>,
+    ctx: TaskContext
+): Record<string, unknown> {
+    const prevMeta =
+        baseSnap.meta != null && typeof baseSnap.meta === 'object' && !Array.isArray(baseSnap.meta)
+            ? ({ ...(baseSnap.meta as Record<string, unknown>) } as Record<string, unknown>)
+            : {};
+    const nextMeta: Record<string, unknown> = { ...prevMeta };
+    const tel = ctx.telemetry;
+    if (tel != null && (tel.nodeId !== undefined || tel.traceId !== undefined)) {
+        const prevTel =
+            prevMeta.telemetry != null &&
+            typeof prevMeta.telemetry === 'object' &&
+            !Array.isArray(prevMeta.telemetry)
+                ? ({ ...(prevMeta.telemetry as Record<string, unknown>) } as Record<string, unknown>)
+                : {};
+        nextMeta.telemetry = { ...prevTel, ...tel };
+    }
+    return nextMeta;
+}
+
 export type TaskEngineTestOverrides = {
     attachAndRestoreLLM?: (ctx: TaskContext, agentName: string | undefined, M: MentalState | undefined, baseSnap?: Record<string, unknown>) => Promise<void>;
 };
@@ -272,7 +303,12 @@ export class TaskEngine {
                 log.debug('[TaskEngine] Skipping LLM history save (stateless mode)');
             }
         } catch { /* ignore */ }
-        const next = { ...(baseSnap as any), M, ...(attachedLlmState ? { llmState: attachedLlmState } : {}) } as Record<string, unknown>;
+        const next = {
+            ...(baseSnap as any),
+            M,
+            ...(attachedLlmState ? { llmState: attachedLlmState } : {}),
+            meta: mergeSnapshotMetaWithCtxTelemetry(baseSnap as Record<string, unknown>, ctx),
+        } as Record<string, unknown>;
         try {
             const snap = await this.sessionManager.load(tenantId, sessionId);
             const expected = snap?.wmVersion ?? BigInt(0);
@@ -318,7 +354,12 @@ export class TaskEngine {
                 try {
                     const snap2 = await this.sessionManager.load(tenantId, sessionId);
                     const expected2 = snap2?.wmVersion ?? BigInt(0);
-                    const next2 = { ...(((await this.sessionManager.load(tenantId, sessionId))?.snapshot as any) || {}), M } as Record<string, unknown>;
+                    const base2 = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
+                    const next2 = {
+                        ...base2,
+                        M,
+                        meta: mergeSnapshotMetaWithCtxTelemetry(base2, ctx),
+                    } as Record<string, unknown>;
                     await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot: next2 });
                 } catch { /* ignore */ }
             } else {
@@ -326,24 +367,96 @@ export class TaskEngine {
             }
         }
     }
+
+    /** Compact output for root agent traces (avoid huge payloads). */
+    private buildAgentTelemetryOutput(task: TaskEntity): Record<string, unknown> {
+        const status = task.status;
+        const state = status?.state;
+        const terminalStates = new Set(['completed', 'failed', 'canceled', 'input-required']);
+        return {
+            state,
+            timestamp: status?.timestamp,
+            artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
+            taskId: task.id,
+            terminal: typeof state === 'string' && terminalStates.has(state),
+            outcome:
+                state === 'completed'
+                    ? 'success'
+                    : state === 'failed'
+                      ? 'failure'
+                      : state === 'input-required'
+                        ? 'await_input'
+                        : state ?? 'unknown',
+        };
+    }
+
+    private taskFailureMessage(task: TaskEntity): string {
+        const st = task.status;
+        if (!st || st.state !== 'failed') return 'Task failed';
+        const msg = (st as { message?: { parts?: Array<{ type?: string; text?: string }> } }).message;
+        if (msg?.parts && Array.isArray(msg.parts)) {
+            const text = msg.parts
+                .filter((p) => p.type === 'text' && typeof p.text === 'string')
+                .map((p) => p.text!)
+                .join(' ');
+            return text || 'Task failed';
+        }
+        return 'Task failed';
+    }
+
+    /**
+     * Close the execution AgentNode for Opik and other providers.
+     * Applies to TaskEngine-created nodes and reused nodes from A2AService (loop subagents).
+     */
+    private finalizeAgentNodeTelemetry(
+        agentNode: AgentNode | undefined,
+        task: TaskEntity,
+        thrown?: Error
+    ): void {
+        if (!agentNode || agentNode.endTime != null) return;
+        try {
+            const state = task.status?.state;
+            const output = this.buildAgentTelemetryOutput(task);
+
+            if (state === 'failed' || thrown) {
+                const err = thrown ?? new Error(this.taskFailureMessage(task));
+                agentNode.fail(err);
+                telemetry.failNode(agentNode, err);
+                telemetry.endNode(agentNode);
+                return;
+            }
+
+            const nodeStatus: NodeStatus = 'success';
+            agentNode.end(output, nodeStatus);
+            telemetry.endNode(agentNode);
+        } catch {
+            /* ignore telemetry errors */
+        }
+    }
+
     /**
      * Start a task with either streaming or buffered mode
      * @returns The final task entity for buffered mode, or void for streaming mode
      */
     async startTask(params: StartTaskParams): Promise<TaskEntity | void> {
-        const { task, isStreaming, agentId, tenantId: startTenantId, initialContext, parentTelemetryNodeId } = params;
+        const { task, isStreaming, agentId, tenantId: startTenantId, initialContext, parentTelemetryNodeId, skipTelemetryNodeCreation } = params;
 
         // Automatic Telemetry: specific Agent Node for this task execution
         let agentNode: AgentNode | undefined;
         try {
-            // Root agent node acts as the trace container
-            const rootTraceId = uuidv4();
-            agentNode = new AgentNode(agentId || 'default', rootTraceId, parentTelemetryNodeId, rootTraceId);
-            const inputPayload = (typeof task.input === 'object' && task.input !== null)
-                ? { ...task.input, originalTaskId: task.id }
-                : { value: task.input, originalTaskId: task.id };
-            agentNode.start(inputPayload);
-            telemetry.registerNode(agentNode);
+            const parentNode = parentTelemetryNodeId ? telemetry.getNode(parentTelemetryNodeId) : undefined;
+            if (skipTelemetryNodeCreation && parentNode instanceof AgentNode && parentNode.agentName === (agentId || 'default') && !parentNode.endTime) {
+                agentNode = parentNode;
+            } else {
+                const traceId = parentNode?.traceId || uuidv7();
+                const nodeId = uuidv7();
+                agentNode = new AgentNode(agentId || 'default', nodeId, parentTelemetryNodeId, traceId);
+                const inputPayload = (typeof task.input === 'object' && task.input !== null)
+                    ? { ...task.input, originalTaskId: task.id }
+                    : { value: task.input, originalTaskId: task.id };
+                agentNode.start(inputPayload);
+                telemetry.registerNode(agentNode);
+            }
         } catch { /* ignore telemetry errors to prevent blockers */ }
 
         // Use provided context if present, otherwise create a basic one
@@ -353,6 +466,7 @@ export class TaskEngine {
         if (agentNode) {
             if (!ctx.telemetry) ctx.telemetry = {};
             ctx.telemetry.nodeId = agentNode.id;
+            ctx.telemetry.traceId = agentNode.traceId;
         }
 
         // Preserve A2A requestInput override if provided on initialContext
@@ -405,6 +519,14 @@ export class TaskEngine {
 
         const tenantId = ((ctx as Record<string, unknown>).tenantId || startTenantId || 'default') as string;
         const sessionId = task.id as string;
+        if (agentNode) {
+            Object.assign(agentNode.providerData, {
+                sessionId,
+                tenantId,
+                rootTaskId: task.id,
+                threadId: agentNode.traceId,
+            });
+        }
         const traceparent = createTraceparent();
 
         // Compute manifest provenance (fail-fast on identity mismatch when plugin has both manifests)
@@ -503,10 +625,27 @@ export class TaskEngine {
                 // Capture dependencies for mutate function
                 const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
 
-                // Logic to execute inside retry loop
+                const parentTelemetryId = ctx.telemetry?.nodeId ?? agentNode?.id;
+                const traceForPersist = ctx.telemetry?.traceId ?? agentNode?.traceId;
+                let persistNode: WorkflowNode | undefined;
+                if (parentTelemetryId) {
+                    persistNode = new WorkflowNode('state.persist', parentTelemetryId, undefined, traceForPersist);
+                    persistNode.start({
+                        tenantId,
+                        sessionId,
+                        agentId: (ctx as Record<string, unknown>).agentId as string | undefined,
+                    });
+                    telemetry.registerNode(persistNode);
+                }
+
                 const mutateFn = async (baseSnap: Record<string, unknown>) => {
                     prepareLlmState();
-                    const next = { ...baseSnap, M, ...(cachedLlmState ? { llmState: cachedLlmState } : {}) } as Record<string, unknown>;
+                    const next = {
+                        ...baseSnap,
+                        M,
+                        ...(cachedLlmState ? { llmState: cachedLlmState } : {}),
+                        meta: mergeSnapshotMetaWithCtxTelemetry(baseSnap, ctx),
+                    } as Record<string, unknown>;
 
                     if (prisma) {
                         const cache = new AgentResultCache(prisma);
@@ -516,25 +655,27 @@ export class TaskEngine {
                 };
 
                 try {
-                    await this.snapshotRepo.saveWithRetry({
-                        tenantId,
-                        sessionId,
-                        agentId: typeof (ctx as Record<string, unknown>).agentId === 'string' ? (ctx as Record<string, unknown>).agentId as string : 'default',
-                        mutate: mutateFn
-                    });
-                } catch (e) {
-                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        try {
+                    try {
+                        await this.snapshotRepo.saveWithRetry({
+                            tenantId,
+                            sessionId,
+                            agentId: typeof (ctx as Record<string, unknown>).agentId === 'string' ? (ctx as Record<string, unknown>).agentId as string : 'default',
+                            mutate: mutateFn
+                        });
+                    } catch (e) {
+                        if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
                             const prunedM = pruneSnapshot(M);
-                            // Update local M with pruned version so future saves use it
                             M = prunedM;
-                            // Retry with pruned M
                             await this.snapshotRepo.saveWithRetry({
                                 tenantId,
                                 sessionId: sessionId,
                                 agentId: typeof (ctx as Record<string, unknown>).agentId === 'string' ? (ctx as Record<string, unknown>).agentId as string : 'default',
                                 mutate: async (baseSnap) => {
-                                    const next = { ...baseSnap, M };
+                                    const next = {
+                                        ...baseSnap,
+                                        M,
+                                        meta: mergeSnapshotMetaWithCtxTelemetry(baseSnap, ctx),
+                                    };
                                     if (prisma) {
                                         const cache = new AgentResultCache(prisma);
                                         await offloadArtifacts(next, cache, tenantId);
@@ -542,13 +683,46 @@ export class TaskEngine {
                                     return next;
                                 }
                             });
-                        } catch (retryErr) {
-                            // ...
-                            throw retryErr;
+                        } else {
+                            throw e;
                         }
-                    } else {
-                        throw e;
                     }
+                    if (persistNode) {
+                        persistNode.end({ ok: true }, 'success');
+                        telemetry.endNode(persistNode);
+                    }
+                    if (parentTelemetryId) {
+                        const concepts = M?.memory?.longTerm?.semantic?.concepts;
+                        const semanticConceptCount = Array.isArray(concepts) ? concepts.length : 0;
+                        const vars = (M as Record<string, unknown>).vars as
+                            | Record<string, unknown>
+                            | undefined;
+                        const hasSelectorsInVars = vars != null && vars.selectors != null;
+                        const memSaveNode = new WorkflowNode(
+                            'memory.save_selectors',
+                            parentTelemetryId,
+                            undefined,
+                            traceForPersist
+                        );
+                        memSaveNode.start({
+                            tenantId,
+                            sessionId,
+                            surface: 'working_memory_snapshot',
+                            semanticConceptCount,
+                            hasSelectorsInVars,
+                        });
+                        telemetry.registerNode(memSaveNode);
+                        memSaveNode.end({ ok: true, persisted: true }, 'success');
+                        telemetry.endNode(memSaveNode);
+                    }
+                } catch (e) {
+                    if (persistNode) {
+                        const er = e instanceof Error ? e : new Error(String(e));
+                        persistNode.fail(er);
+                        telemetry.failNode(persistNode, er);
+                        telemetry.endNode(persistNode);
+                    }
+                    throw e;
                 }
             };
 
@@ -642,10 +816,6 @@ export class TaskEngine {
                 }
 
                 if (task.status?.state === 'completed') {
-                    try {
-                        agentNode?.end(task.status);
-                        if (agentNode) telemetry.endNode(agentNode);
-                    } catch { }
                     await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                         taskId: sessionId,
                         artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
@@ -658,6 +828,8 @@ export class TaskEngine {
                         traceparent
                     });
                 }
+
+                this.finalizeAgentNodeTelemetry(agentNode, task);
 
                 if (isStreaming) {
                     // Even in streaming mode, we return the task entity so the caller has the ID and handle.
@@ -687,6 +859,7 @@ export class TaskEngine {
 
             // If this turn requested input, do NOT mark completed; just return current status
             if (task.status?.state === 'input-required' || (ctx as any).__wmSavedThisTurn) {
+                this.finalizeAgentNodeTelemetry(agentNode, task);
                 return task;
             }
 
@@ -703,22 +876,11 @@ export class TaskEngine {
                 traceparent
             });
 
-            // Return the updated task
-            if (agentNode && !agentNode.endTime) {
-                try {
-                    const status = task.status?.state === 'failed' ? 'failure' : 'success';
-                    agentNode.end(task.status, status);
-                    telemetry.endNode(agentNode);
-                } catch { }
-            }
+            this.finalizeAgentNodeTelemetry(agentNode, task);
             return task;
         } catch (error) {
-            try {
-                const err = error instanceof Error ? error : new Error(String(error));
-                agentNode?.fail(err);
-                if (agentNode) telemetry.failNode(agentNode, err);
-            } catch { }
-            log.error('Task engine error', { error: error instanceof Error ? error.message : String(error) });
+            const err = error instanceof Error ? error : new Error(String(error));
+            log.error('Task engine error', { error: err.message });
 
             // Set failure status for non-streaming mode
             if (!isStreaming) {
@@ -727,25 +889,26 @@ export class TaskEngine {
                     message: {
                         role: 'agent',
                         parts: [
-                            { type: 'text', text: `Task execution failed: ${error instanceof Error ? error.message : String(error)}` }
+                            { type: 'text', text: `Task execution failed: ${err.message}` }
                         ]
                     },
                     timestamp: new Date().toISOString()
                 };
+                this.finalizeAgentNodeTelemetry(agentNode, task, err);
                 return task;
             }
 
             // Append failed event and publish status via outbox
             await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.failed', {
                 taskId: sessionId,
-                error: error instanceof Error ? error.message : String(error),
+                error: err.message,
                 traceparent
             });
             await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
                 taskId: sessionId,
                 status: {
                     state: 'failed',
-                    message: { role: 'agent', parts: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] },
+                    message: { role: 'agent', parts: [{ type: 'text', text: err.message }] },
                     timestamp: new Date().toISOString()
                 },
                 final: true,
@@ -753,6 +916,15 @@ export class TaskEngine {
             });
 
             // For streaming, emit a failure event directly
+            task.status = {
+                state: 'failed',
+                message: {
+                    role: 'agent',
+                    parts: [{ type: 'text', text: err.message }]
+                },
+                timestamp: new Date().toISOString()
+            };
+            this.finalizeAgentNodeTelemetry(agentNode, task, err);
             eventBus.publish(taskChannel(task.id), {
                 id: task.id,
                 status: {
@@ -760,7 +932,7 @@ export class TaskEngine {
                     message: {
                         role: 'agent',
                         parts: [
-                            { type: 'text', text: `Task execution failed: ${error instanceof Error ? error.message : String(error)}` }
+                            { type: 'text', text: `Task execution failed: ${err.message}` }
                         ]
                     },
                     timestamp: new Date().toISOString()
@@ -857,7 +1029,7 @@ export class TaskEngine {
 
                     const snap = await this.sessionManager.load(tenantId, sessionId);
                     const base = (snap?.snapshot as Record<string, unknown>) || {};
-                    const token = opts?.__existingToken || uuidv4();
+                    const token = opts?.__existingToken || uuidv7();
                     const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
                     const pending = { ...getPendingInputs(base) };
 

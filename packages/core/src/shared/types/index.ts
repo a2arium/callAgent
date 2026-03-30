@@ -125,6 +125,7 @@ export type TaskContext = {
     // Telemetry Context
     telemetry?: {
         nodeId?: string; // Current node ID (AgentNode or TurnNode)
+        traceId?: string;
     };
 
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
