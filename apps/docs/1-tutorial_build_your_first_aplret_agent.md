@@ -177,7 +177,9 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
     }
 
     if (intent.kind === 'answer_with_llm') {
-      const res = await ctx.llm.call(intent.query);
+      const res = await ctx.llm.call(intent.query, {
+        temperature: 0
+      });
       const text = res[0]?.content ?? 'Ok.';
 
       await ctx.reply(text);

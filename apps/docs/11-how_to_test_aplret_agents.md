@@ -35,6 +35,12 @@ expect(first.timings.totalMs).toBeGreaterThanOrEqual(0);
 
 You can then assert on **`result.traces`** per turn (intent, shield, transition, stage, pendingAfter, llmCalls, toolCalls, childCalls, etc.) without attaching a separate collector.
 
+When asserting `trace.llmCalls`, include contract metadata checks when structured output is expected:
+
+- `trace.llmCalls[n].hasOutputContract === true`
+- `trace.llmCalls[n].outputContractName === '<schema-name>'`
+- `trace.llmCalls[n].outputContractStatus === 'matched'` (or `'failed'`)
+
 A test should be able to access:
 
 - `trace.turn`, `trace.turnId`

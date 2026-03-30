@@ -4,7 +4,7 @@
 
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState, MemoryReader, MemoryWriter } from './types.js';
-import type { Intent, ExecutableAction } from '../types/intent.js';
+import type { Intent } from '../types/intent.js';
 import type {
     Observation,
     ObservationProvenance,
@@ -24,6 +24,7 @@ import type {
 import { summarizeInbox } from '../telemetry/turnTraceHelpers.js';
 import { computeStableHash } from '../telemetry/manifestProvenance.js';
 import { compactModuleOutput } from '../telemetry/turnTraceHelpers.js';
+import type { ExecResult, ExecOutcome } from '../types/execOutcome.js';
 
 type MemoryWriterWithApply = MemoryWriter & {
     __applyToMental?: <S>(m: MentalState<S>) => MentalState<S>;
@@ -34,16 +35,7 @@ const log = logger.createLogger({ prefix: 'oneTurn' });
 export type AttentionSignal = unknown;
 
 export type { Observation, ObservationProvenance, ExecErrorPayload };
-
-export type ExecResult<Data = unknown, ErrorPayload extends ExecErrorPayload = ExecErrorPayload> = {
-    status: 'ok' | 'error';
-    data?: Data;
-    error?: ErrorPayload;
-    receipts?: unknown;
-    correlationId?: string;
-    toolId?: string;
-    ts?: number;
-};
+export type { ExecResult, ExecOutcome };
 
 export type ShieldOutcome =
     | { action: 'pass'; intent: Intent }
@@ -87,14 +79,14 @@ export type Modules<
     ) => MentalState<Sensory> | Promise<MentalState<Sensory>>;
     policy: (m: MentalState<Sensory>, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>;
     shield: (m: MentalState<Sensory>, a: Intent, mem: MemoryReader) => ShieldOutcome;
-    execution: (a: Intent, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
+    execution: (a: Intent, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<ExecOutcome<ExecData, ExecError>>;
     transition: (
         env: EnvironmentState,
-        exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> },
+        exec: ExecOutcome<ExecData, ExecError>,
         m: MentalState<Sensory>,
         mem: MemoryReader
     ) => TransitionOut | Promise<TransitionOut>;
-    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut) => number;
+    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: ExecOutcome<ExecData, ExecError>, outcome: TransitionOut) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => number;
 };
 
@@ -116,7 +108,7 @@ export async function oneTurn<
 ): Promise<{
     m: MentalState<Sensory>;
     outcome: TransitionOut;
-    exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
+    exec: ExecOutcome<ExecData, ExecError>;
     timings: Record<string, number>;
     reward: number;
     stageTrace?: StageTraceEntry;
@@ -297,7 +289,7 @@ export async function oneTurn<
     if (iCtx.telemetry) {
         iCtx.__currentModule = 'execution';
     }
-    let exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
+    let exec: ExecOutcome<ExecData, ExecError>;
     try {
         exec = await runWithTiming('execution', () =>
             mods.execution(toExecute!, ctx, mem, m1)

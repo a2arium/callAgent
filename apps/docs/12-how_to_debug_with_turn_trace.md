@@ -35,7 +35,7 @@ See **How-to: Test APLRET agents** for harness examples using **`collectTraces: 
 
 Each **TurnTrace** can include compact summaries of sub-calls made during that turn:
 
-- **`trace.llmCalls`** — array of **LLMCallTrace** (model, provider, durationMs, input/output tokens, cost, optional module).
+- **`trace.llmCalls`** — array of **LLMCallTrace** (model, provider, durationMs, input/output tokens, cost, optional module, plus optional output-contract metadata: `hasOutputContract`, `outputContractName`, `outputContractStatus`).
 - **`trace.toolCalls`** — array of **ToolCallTrace** (tool name, durationMs, status, optional module).
 - **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, childAgentNodeId, childTraceId, resultSummary, error). Use these to see which child tasks were dispatched or completed in this turn and how they link to the parent turn or child trace.
 

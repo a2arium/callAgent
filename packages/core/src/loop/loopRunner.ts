@@ -1,15 +1,20 @@
-import type { TaskContext } from '../shared/types/index.js';
+import type { TaskContext, TaskInput } from '../shared/types/index.js';
 import {
     oneTurn,
     type Modules,
     type TurnOutcome,
     type TransitionOut,
+    type ExecOutcome,
     type ExecResult,
     type ExecErrorPayload,
     type AttentionSignal,
     type Observation
 } from './oneTurn.js';
 import type { Intent, ExecutableAction } from '../types/intent.js';
+import {
+    LLMRespondedPayloadSchema,
+    ValidationFailedPayloadSchema,
+} from '../types/observation.js';
 import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
@@ -67,6 +72,9 @@ const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
     environment.inbox = normalized;
     return normalized;
 };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null;
 
 export async function runLoop<
     Sensory = unknown,
@@ -429,81 +437,81 @@ export async function runLoop<
         }),
         shield: modules.shield ?? ((m, a, _mem) => {
             try {
-                const level = (m as any)?.hitl || (m as any)?.policyParams?.hitl;
-                const safety = (m as any)?.safety || {};
-                if (!level) return { action: 'pass', intent: a } as any;
-                // guardrails: block tools/subagents without explicit consent
-                if (level === 'guardrails' && (a as any)?.kind && ((a as any).kind === 'call_tool' || (a as any).kind === 'delegate_to_child')) {
-                    (m as any).lastAdvise = { kind: (a as any).kind, policy: 'guardrails' };
-                    return { action: 'defer', askUser: 'Approve action?' } as any;
+                const mWithHitl = m as MentalState & {
+                    hitl?: string;
+                    policyParams?: { hitl?: string };
+                    safety?: { costLimit?: number; piiPatterns?: string[] };
+                    lastAdvise?: unknown;
+                };
+                const level = mWithHitl.hitl ?? mWithHitl.policyParams?.hitl;
+                const safety = mWithHitl.safety ?? {};
+                if (!level) return { action: 'pass', intent: a };
+                if (level === 'guardrails' && (a.kind === 'call_tool' || a.kind === 'delegate_to_child')) {
+                    mWithHitl.lastAdvise = { kind: a.kind, policy: 'guardrails' };
+                    return { action: 'defer', askUser: 'Approve action?' };
                 }
-                // consent: ask user before tools
-                if (level === 'consent' && (a as any)?.kind === 'call_tool') {
-                    (m as any).lastAdvise = { kind: (a as any).kind, tool: (a as any).toolName, toolArgs: (a as any).args, policy: 'consent' };
-                    return { action: 'defer', askUser: `Run tool ${(a as any).toolName}?` } as any;
+                if (level === 'consent' && a.kind === 'call_tool') {
+                    mWithHitl.lastAdvise = { kind: a.kind, tool: a.toolName, toolArgs: a.args, policy: 'consent' };
+                    return { action: 'defer', askUser: `Run tool ${a.toolName}?` };
                 }
-                // cost limit: if action declares cost in args, block if above threshold
-                try {
-                    const cost = Number(((a as any)?.args?.cost) ?? 0);
+                if (a.kind === 'call_tool') {
+                    const cost = Number((isRecord(a.args) ? a.args.cost : 0) ?? 0);
                     if (Number.isFinite(cost) && typeof safety.costLimit === 'number' && cost > safety.costLimit) {
-                        (m as any).lastAdvise = { blocked: 'cost', cost, limit: safety.costLimit };
-                        return { action: 'defer', askUser: `Action cost ${cost} exceeds limit ${safety.costLimit}. Proceed?` } as any;
+                        mWithHitl.lastAdvise = { blocked: 'cost', cost, limit: safety.costLimit };
+                        return { action: 'defer', askUser: `Action cost ${cost} exceeds limit ${safety.costLimit}. Proceed?` };
                     }
-                } catch { /* noop */ }
-                // PII patterns: if args contain strings matching any configured pattern, prompt
-                try {
-                    const patterns: string[] = Array.isArray(safety.piiPatterns) ? safety.piiPatterns : [];
-                    if (patterns.length > 0) {
-                        const regexes = patterns.map(p => new RegExp(p, 'i'));
-                        // Helper to recursively check objects/arrays
-                        const scanForPII = (v: any): boolean => {
-                            if (typeof v === 'string') return regexes.some(r => r.test(v));
-                            if (Array.isArray(v)) return v.some(scanForPII);
-                            if (v && typeof v === 'object') return Object.values(v).some(scanForPII);
-                            return false;
-                        };
-                        const containsPII = scanForPII((a as any)?.args);
-                        if (containsPII) {
-                            (m as any).lastAdvise = { flagged: 'pii' };
-                            return { action: 'defer', askUser: `Action contains potential PII. Proceed?` } as any;
-                        }
-                    }
-                } catch { /* noop */ }
-                // advise: allow but could tag; default pass-through here
-                if (level === 'advise') {
-                    (m as any).lastAdvise = { kind: (a as any).kind, policy: 'advise' };
                 }
-                return { action: 'pass', intent: a } as any;
-            } catch { return { action: 'pass', intent: a } as any; }
+                const patterns = Array.isArray(safety.piiPatterns) ? safety.piiPatterns : [];
+                if (patterns.length > 0 && a.kind === 'call_tool') {
+                    const regexes = patterns.map((p) => new RegExp(p, 'i'));
+                    const scanForPII = (value: unknown): boolean => {
+                        if (typeof value === 'string') return regexes.some((r) => r.test(value));
+                        if (Array.isArray(value)) return value.some(scanForPII);
+                        if (isRecord(value)) return Object.values(value).some(scanForPII);
+                        return false;
+                    };
+                    if (scanForPII(a.args)) {
+                        mWithHitl.lastAdvise = { flagged: 'pii' };
+                        return { action: 'defer', askUser: 'Action contains potential PII. Proceed?' };
+                    }
+                }
+                if (level === 'advise') {
+                    mWithHitl.lastAdvise = { kind: a.kind, policy: 'advise' };
+                }
+                return { action: 'pass', intent: a };
+            } catch {
+                return { action: 'pass', intent: a };
+            }
         }),
-        execution: modules.execution ?? (async (a: any, ctx: any, _mem) => {
-            const kind = (a as any).kind;
+        execution: modules.execution ?? (async (a: Intent, ctx: TaskContext, _mem) => {
             const base: ExecResult = { status: 'ok', ts: Date.now() };
+            const internalCtx = ctx as InternalTaskContext & {
+                flushSnapshot?: (state: { M: MentalState<Sensory>; env: EnvironmentState }) => Promise<void>;
+            };
 
-            if (kind === 'prompt_user') {
-                const handle = await (ctx as any).requestInput((a as any).prompt, {
-                    schema: (a as any).schema,
+            if (a.kind === 'prompt_user') {
+                const handle = await ctx.requestInput(a.prompt, {
+                    schema: a.schema,
                     onProvided: '__onInputProvided'
                 });
-                const token = (handle as any)?.token || '';
-                try { log.info('Execution asking for user input', { token }); } catch { }
+                const token = isRecord(handle) && typeof handle.token === 'string' ? handle.token : '';
+                try { log.info('Execution asking for user input', { token }); } catch { /* noop */ }
                 return {
                     action: { kind: 'prompt_user', token } as ExecutableAction,
                     result: {
                         ...base,
-                        data: { prompt: (a as any).prompt },
+                        data: { prompt: a.prompt },
                         correlationId: token || undefined,
                         toolId: 'user'
                     }
                 };
             }
 
-            if (kind === 'delegate_to_child') {
-                // FLUSH BEFORE DISPATCH: Ensure DB has current state (including M) so child creation (which loads parent) sees valid data.
-                if (typeof (ctx as any).flushSnapshot === 'function') {
+            if (a.kind === 'delegate_to_child') {
+                if (typeof internalCtx.flushSnapshot === 'function') {
                     try {
-                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: (a as any).agentId });
-                        await (ctx as any).flushSnapshot({ M, env });
+                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: a.agentId });
+                        await internalCtx.flushSnapshot({ M, env });
                     } catch (e) {
                         log.warn('Failed to flush snapshot before subagent dispatch', { error: (e as Error).message });
                     }
@@ -511,30 +519,30 @@ export async function runLoop<
                     log.warn('LoopRunner: flushSnapshot not available on context for subagent dispatch');
                 }
 
-                const res = await (ctx as any).sendTaskToAgent((a as any).agentId, (a as any).input, {
+                const res = await ctx.sendTaskToAgent(a.agentId, a.input as TaskInput, {
                     onCompleted: '__onChildCompleted'
                 });
-                const token = (res as any)?.token || (res as any)?.childToken;
+                const token = isRecord(res)
+                    ? (typeof res.token === 'string' ? res.token : undefined)
+                    : undefined;
                 if (token) {
                     return {
                         action: { kind: 'delegate_to_child', token } as ExecutableAction,
-                        result: { ...base, correlationId: token, toolId: (a as any).agentId }
+                        result: { ...base, correlationId: token, toolId: a.agentId }
                     };
                 }
                 return {
                     action: { kind: 'delegate_to_child' } as ExecutableAction,
-                    result: { ...base, data: res, toolId: (a as any).agentId }
+                    result: { ...base, data: res, toolId: a.agentId }
                 };
             }
 
-            if (kind === 'call_tool') {
-                const toolName = (a as any).toolName;
-
-                // FLUSH BEFORE TOOL: Some tools might inspect agent state via DB or side-channels
-                if (typeof (ctx as any).flushSnapshot === 'function') {
+            if (a.kind === 'call_tool') {
+                const toolName = a.toolName;
+                if (typeof internalCtx.flushSnapshot === 'function') {
                     try {
                         log.debug('LoopRunner: calling flushSnapshot before tool', { toolId: toolName });
-                        await (ctx as any).flushSnapshot({ M, env });
+                        await internalCtx.flushSnapshot({ M, env });
                     } catch (e) {
                         log.warn('Failed to flush snapshot before tool execution', { error: (e as Error).message });
                     }
@@ -542,18 +550,18 @@ export async function runLoop<
                     log.debug('LoopRunner: flushSnapshot not available on context for tool execution', { toolId: toolName });
                 }
 
-                if ((a as any).mode === 'async') {
-                    const handle = await (ctx as any).requestTool(toolName, (a as any).args, {
+                if (a.mode === 'async') {
+                    const handle = await ctx.requestTool(toolName, a.args, {
                         onCompleted: '__onToolCompleted'
                     });
-                    const token = (handle as any)?.token || '';
+                    const token = isRecord(handle) && typeof handle.token === 'string' ? handle.token : '';
                     return {
                         action: { kind: 'call_tool', token } as ExecutableAction,
                         result: { ...base, correlationId: token || undefined, toolId: toolName }
                     };
                 }
                 try {
-                    const result = await (ctx as any).tools.invoke(toolName, (a as any).args);
+                    const result = await ctx.tools.invoke(toolName, a.args);
                     return {
                         action: { kind: 'call_tool' } as ExecutableAction,
                         result: { ...base, data: result, toolId: toolName }
@@ -574,28 +582,67 @@ export async function runLoop<
                 }
             }
 
-            if (kind === 'answer_with_llm') {
-                await (ctx as any).reply((a as any).query);
+            if (a.kind === 'answer_with_llm') {
+                const llmConfigured = internalCtx.__llmConfigured === true || typeof ctx.llm?.getHistoryMode === 'function';
+                if (!llmConfigured) {
+                    await ctx.reply(a.query);
+                    return {
+                        action: { kind: 'answer_with_llm', echoed: true } as ExecutableAction,
+                        result: {
+                            ...base,
+                            status: 'error',
+                            error: {
+                                code: 'llm_not_configured',
+                                message: 'No LLM configured; echoed query as fallback.'
+                            },
+                            data: { echoed: true, query: a.query, text: a.query },
+                            toolId: 'language'
+                        }
+                    };
+                }
+
+                const responses = await ctx.llm.call(a.query);
+                const text = typeof responses[0]?.content === 'string' ? responses[0].content : 'No LLM response.';
+                await ctx.reply(text);
                 return {
-                    action: { kind: 'answer_with_llm', echoed: true } as ExecutableAction,
-                    result: { ...base, data: { echoed: true, query: (a as any).query }, toolId: 'language' }
+                    action: { kind: 'answer_with_llm', echoed: false } as ExecutableAction,
+                    result: { ...base, data: { echoed: false, query: a.query, text }, toolId: 'language' }
                 };
             }
 
-            if (kind === 'create_plan') {
-                // Placeholder: In a real agent, this would use an LLM or planner
+            if (a.kind === 'create_plan') {
                 return {
-                    action: { kind: 'internal' } as ExecutableAction,
-                    result: { ...base, data: { planProposed: { id: `plan_${Date.now()}`, goalId: (a as any).goalId, steps: [], status: 'proposed' } }, toolId: 'internal' }
+                    action: { kind: 'internal', done: false } as ExecutableAction,
+                    result: {
+                        ...base,
+                        data: { planProposed: { id: `plan_${Date.now()}`, goalId: a.goalId, steps: [], status: 'proposed' } },
+                        toolId: 'internal'
+                    }
+                };
+            }
+
+            if (a.kind === 'internal') {
+                const maybeDone = a as unknown as Record<string, unknown>;
+                const legacyDone = typeof maybeDone.done === 'boolean' ? maybeDone.done : false;
+                return {
+                    action: { kind: 'internal', done: legacyDone } as ExecutableAction,
+                    result: { ...base, data: { intent: a.intent, done: legacyDone }, toolId: 'internal' }
+                };
+            }
+
+            if (a.kind === 'complete') {
+                return {
+                    action: { kind: 'internal', done: true } as ExecutableAction,
+                    result: { ...base, data: { intent: 'complete', done: true, result: a.result }, toolId: 'internal' }
                 };
             }
 
             return {
-                action: { kind: 'internal', done: (a as any).done || false } as ExecutableAction,
-                result: { ...base, data: { intent: (a as any).intent, done: (a as any).done || false }, toolId: 'internal' }
+                action: { kind: 'internal', done: false } as ExecutableAction,
+                result: { ...base, data: { intent: a.kind, done: false }, toolId: 'internal' }
             };
         }),
-        transition: modules.transition ?? ((env, exec, _m, _mem) => {
+        transition: modules.transition ?? ((env, exec: ExecOutcome<ExecData, ExecError>, _m, _mem) => {
             const { action, result } = exec;
 
             if (result.status === 'ok') {
@@ -625,20 +672,27 @@ export async function runLoop<
                     }
                 }
 
-                if (action.kind === 'internal' && (action as any).done === true) {
-                    return { kind: 'complete', observations: [] as Observation[] } as TransitionOut;
+                if (action.kind === 'internal' && action.done === true) {
+                    return { kind: 'complete' } as TransitionOut;
                 }
 
                 // Planning transitions
-                const data = result.data as any;
+                const data = result.data;
                 const obs: Observation[] = [];
-                if (data?.planProposed) {
+                if (result.toolId === 'language') {
+                    const payload = LLMRespondedPayloadSchema.parse({
+                        hasStructuredOutput: isRecord(data) ? data.echoed === false : false,
+                        contentSummary: isRecord(data) && typeof data.text === 'string' ? data.text.slice(0, 240) : undefined,
+                    });
+                    obs.push({ source: 'internal', kind: 'llm.responded', payload });
+                }
+                if (isRecord(data) && 'planProposed' in data) {
                     obs.push({ source: 'internal', kind: 'plan.proposed', payload: data.planProposed });
                 }
-                if (data?.planUpdated) {
+                if (isRecord(data) && 'planUpdated' in data) {
                     obs.push({ source: 'internal', kind: 'plan.updated', payload: data.planUpdated });
                 }
-                if (data?.planStepUpdated) {
+                if (isRecord(data) && 'planStepUpdated' in data) {
                     obs.push({ source: 'internal', kind: 'plan.step.updated', payload: data.planStepUpdated });
                 }
 
@@ -647,7 +701,7 @@ export async function runLoop<
                         source: 'internal',
                         kind: 'state.noted',
                         payload: {
-                            intent: (action as any).intent || action.kind,
+                            intent: action.kind,
                             reason: 'continue_implicit'
                         }
                     });
@@ -657,7 +711,14 @@ export async function runLoop<
 
             }
 
-            // Error path
+            const errorCode = result.error?.code;
+            if (errorCode === 'schema_mismatch' || errorCode === 'contract_failed' || errorCode === 'llm_not_configured') {
+                const payload = ValidationFailedPayloadSchema.parse({
+                    reason: errorCode === 'llm_not_configured' ? 'llm_not_configured' : 'llm_contract_failed',
+                    error: result.error,
+                });
+                return { kind: 'continue', observations: [{ source: 'internal', kind: 'validation.failed', payload }] } as TransitionOut;
+            }
             return { kind: 'continue', observations: [] as Observation[] } as TransitionOut;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {

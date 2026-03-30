@@ -97,3 +97,23 @@ export const ObservationSchema = z.discriminatedUnion('source', [
 ]);
 
 export type Observation = z.infer<typeof ObservationSchema>;
+
+export const LLMRespondedPayloadSchema = z.object({
+    model: z.string().optional(),
+    contentSummary: z.string().optional(),
+    hasStructuredOutput: z.boolean().optional(),
+    schemaName: z.string().optional(),
+    tokenCount: z.number().optional(),
+});
+
+export type LLMRespondedPayload = z.infer<typeof LLMRespondedPayloadSchema>;
+
+export const ValidationFailedPayloadSchema = z.object({
+    reason: z.string(),
+    schemaName: z.string().optional(),
+    error: ExecErrorPayloadSchema.optional(),
+    zodError: z.unknown().optional(),
+    originalPayload: z.unknown().optional(),
+});
+
+export type ValidationFailedPayload = z.infer<typeof ValidationFailedPayloadSchema>;

@@ -116,7 +116,7 @@ Execution always returns:
 
 ```ts
 export type ExecOutcome<Data = unknown, Err = unknown> = {
-  action: ExecAction;
+  action: ExecutableAction;
   result: ExecResult<Data, Err>;
 };
 ```
@@ -702,7 +702,7 @@ Canonical output:
 
 ```ts
 type ExecOutcome<Data = unknown, Err = unknown> = {
-  action: ExecAction;
+  action: ExecutableAction;
   result: ExecResult<Data, Err>;
 };
 ```

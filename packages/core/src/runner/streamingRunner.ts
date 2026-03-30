@@ -21,6 +21,8 @@ import { extendContextWithStreaming } from '../context/StreamingContext.js';
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
 import { createLLMForTask } from '../llm/LLMFactory.js';
+import type { LLMMessage } from '../shared/types/LLMTypes.js';
+import type { LLMCallOptions, LLMSettings } from '../types/llmContracts.js';
 import { TaskEngine, type TaskEntity } from '../orchestration/taskEngine.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
@@ -249,14 +251,14 @@ export async function runAgentWithStreaming(
         },
         artifacts: artifactsFactory,
         llm: plugin.llmAdapter || {
-            async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]> {
+            async call<T = unknown>(message: LLMMessage, options?: LLMCallOptions): Promise<UniversalChatResponse<T>[]> {
                 agentLogger.warn(`llm.call is stubbed (no LLM adapter configured)`, { message, options });
                 return [{
                     content: "Stubbed LLM response - agent has no llmConfig",
                     role: "assistant"
                 } as UniversalChatResponse<T>];
             },
-            async *stream<T = unknown>(message: string, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>> {
+            async *stream<T = unknown>(message: LLMMessage, options?: LLMCallOptions): AsyncIterable<UniversalStreamResponse<T>> {
                 agentLogger.warn(`llm.stream is stubbed (no LLM adapter configured)`, { message, options });
                 yield {
                     content: "Stubbed LLM response - agent has no llmConfig",
@@ -267,7 +269,7 @@ export async function runAgentWithStreaming(
             addToolResult(id: string, result: string, name: string): void {
                 agentLogger.warn(`llm.addToolResult is stubbed (no LLM adapter configured)`, { id, name });
             },
-            updateSettings(settings: Record<string, any>): void {
+            updateSettings(settings: LLMSettings): void {
                 agentLogger.warn(`llm.updateSettings is stubbed (no LLM adapter configured)`, { settings });
             }
         },

@@ -1,6 +1,7 @@
 import type { TaskInput, TaskStatus, Artifact } from './index.js'; // From core index
 import type { ThoughtEntry, DecisionEntry } from '@a2arium/callagent-memory-engine'; // From memory-engine
 import type { SerializedAgentContext } from '@a2arium/callagent-memory-engine'; // Serialization types from memory-engine
+import type { ILLMCaller } from './LLMTypes.js';
 
 // Re-export serialization types for convenience
 export type { SerializedAgentContext };
@@ -11,20 +12,20 @@ export type { SerializedWorkingMemory, SerializedMemoryContext, RecalledMemoryIt
  * The full TaskContext will be defined in index.ts and will implement/extend this.
  */
 export type MinimalSourceTaskContext = {
-    task: { id: string;[key: string]: any };
+    task: { id: string; [key: string]: unknown };
     tenantId: string;
     getGoal?: () => Promise<string | null>;
     getThoughts?: () => Promise<ThoughtEntry[]>;
     // Add other methods IA2AService's sendTaskToAgent might directly need from sourceCtx *before* targetCtx creation
     // For example, for memory operations *during* serialization.
-    recall?: (query: string, options?: any) => Promise<any[]>;
+    recall?: (query: string, options?: Record<string, unknown>) => Promise<unknown[]>;
     memory?: {
-        semantic?: any; // Placeholder for semantic adapter type if needed by serializer
+        semantic?: unknown; // Placeholder for semantic adapter type if needed by serializer
         mlo?: {
             getAllDecisions?: (agentId?: string) => Promise<Record<string, DecisionEntry>>;
-            [key: string]: any;
+            [key: string]: unknown;
         };
-        [key: string]: any;
+        [key: string]: unknown;
     };
 
     // Add agentId to allow the serializer to get the source agent's ID
@@ -36,8 +37,10 @@ export type MinimalSourceTaskContext = {
         traceId?: string;
     };
     // Add llm and tools for sharing with target context
-    llm?: any;
-    tools?: any;
+    llm?: ILLMCaller;
+    tools?: {
+        invoke(name: string, args: Record<string, unknown>): Promise<unknown>;
+    };
 };
 
 /**

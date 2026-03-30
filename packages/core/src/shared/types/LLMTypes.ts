@@ -6,6 +6,7 @@ import {
     ToolDefinition,
     Usage
 } from 'callllm';
+import type { LLMCallOptions, LLMSettings } from '../../types/llmContracts.js';
 
 // Re-export library types we'll use directly
 export type {
@@ -15,12 +16,14 @@ export type {
     UniversalStreamResponse
 };
 
-// Define our framework-specific interface that matches architecture docs
-export interface ILLMCaller {
-    call<T = unknown>(message: string | any, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]>;
-    stream<T = unknown>(message: string | any, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>>;
+export type LLMMessage = string | Record<string, unknown>;
+
+// Define our framework-specific contract that matches architecture docs
+export type ILLMCaller = {
+    call<T = unknown>(message: LLMMessage, options?: LLMCallOptions): Promise<UniversalChatResponse<T>[]>;
+    stream<T = unknown>(message: LLMMessage, options?: LLMCallOptions): AsyncIterable<UniversalStreamResponse<T>>;
     addToolResult(id: string, result: string, name: string): void;
-    updateSettings(settings: Record<string, any>): void;
+    updateSettings(settings: LLMSettings): void;
     /** Optional: return current conversation messages; includeSystem=true to include system message */
     getMessages?: (includeSystem?: boolean) => unknown;
     /** Optional: set conversation messages (used on restore) */
@@ -33,7 +36,7 @@ export interface ILLMCaller {
     callMcpTool?(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown>;
     /** Get available schemas from an MCP server */
     getMcpServerToolSchemas?(serverName: string): Promise<Record<string, unknown>>;
-}
+};
 
 /**
  * A sealed interface for making LLM generation calls.
@@ -61,21 +64,12 @@ export type PureLLMPort = {
      * Make a non-streaming LLM call for normalization/extraction
      * Returns structured responses - validate with JSON Schema afterward
      */
-    call<T = unknown>(message: string, options?: {
-        /** Temperature (prefer 0 for determinism) */
-        temperature?: number;
-        /** JSON schema for structured output */
-        schema?: Record<string, unknown>;
-        /** Model-specific seed for determinism */
-        seed?: number;
-        /** Other model-specific options */
-        [key: string]: unknown;
-    }): Promise<UniversalChatResponse<T>[]>;
+    call<T = unknown>(message: LLMMessage, options?: LLMCallOptions): Promise<UniversalChatResponse<T>[]>;
 
     /**
      * Streaming variant (rarely needed in pure modules, but available)
      */
-    stream?<T = unknown>(message: string, options?: Record<string, unknown>): AsyncIterable<UniversalStreamResponse<T>>;
+    stream?<T = unknown>(message: LLMMessage, options?: LLMCallOptions): AsyncIterable<UniversalStreamResponse<T>>;
 };
 
 // Configuration for LLM integration
@@ -87,7 +81,7 @@ export type LLMConfig = {
     initialTools?: ToolDefinition[];
     usageCallback?: (usage: Usage) => void;
     historyMode?: 'stateless' | 'dynamic' | 'full';
-    defaultSettings?: Record<string, any>; // Match library settings type
+    defaultSettings?: LLMSettings;
     mcpServers?: {
         [serverName: string]: {
             command: string;

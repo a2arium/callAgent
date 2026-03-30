@@ -36,6 +36,9 @@ export type InternalTaskContext = TaskContext & {
         outputTokens?: number;
         cost?: number;
         module?: string;
+        hasOutputContract?: boolean;
+        outputContractName?: string;
+        outputContractStatus?: 'matched' | 'failed' | 'not_applicable';
     }>;
     /** Tool call summaries for current turn */
     __turnToolCalls?: Array<{
@@ -63,4 +66,6 @@ export type InternalTaskContext = TaskContext & {
     __turnTraceCollector?: TurnTraceCollector;
     /** Session-level manifest provenance restored from snapshot/session metadata on every turn-entry path */
     __manifestProvenance?: ManifestProvenance;
+    /** True when the context has a real configured LLM and not only a fallback stub. */
+    __llmConfigured?: boolean;
 };

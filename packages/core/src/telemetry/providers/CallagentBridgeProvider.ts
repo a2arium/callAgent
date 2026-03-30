@@ -59,6 +59,36 @@ function tokensTotal(u: UsageLike | undefined, inVal: number, outVal: number): n
     return inVal + outVal;
 }
 
+function extractOutputContractMeta(responseFormat: unknown): {
+    hasOutputContract: boolean;
+    outputContractName?: string;
+} {
+    if (responseFormat == null || typeof responseFormat !== 'object') {
+        return { hasOutputContract: false };
+    }
+
+    const format = responseFormat as {
+        type?: string;
+        json_schema?: { name?: string };
+        jsonSchema?: { name?: string };
+        name?: string;
+    };
+
+    const hasContract =
+        format.type === 'json_schema'
+        || typeof format.json_schema === 'object'
+        || typeof format.jsonSchema === 'object';
+
+    const outputContractName = format.json_schema?.name
+        ?? format.jsonSchema?.name
+        ?? format.name;
+
+    return {
+        hasOutputContract: hasContract,
+        ...(typeof outputContractName === 'string' ? { outputContractName } : {}),
+    };
+}
+
 /** Follow parent chain until a node carries traceId (callllm children often only get parent id). */
 function resolveTraceIdFromParentId(parentId: string): string | undefined {
     let pid: string | undefined = parentId;
@@ -286,6 +316,7 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         if (ictx?.__turnLlmCalls) {
             const start = node.startTime ?? 0;
             const durationMs = typeof node.endTime === 'number' ? node.endTime - start : undefined;
+            const contractMeta = extractOutputContractMeta(ctx.responseFormat);
             ictx.__turnLlmCalls.push({
                 model: node.model,
                 provider: (node.providerData as { provider?: string })?.provider,
@@ -293,7 +324,10 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
                 inputTokens: node.usage?.inputTokens,
                 outputTokens: node.usage?.outputTokens,
                 cost: node.pricing?.cost,
-                module: node.module
+                module: node.module,
+                hasOutputContract: contractMeta.hasOutputContract,
+                outputContractName: contractMeta.outputContractName,
+                outputContractStatus: contractMeta.hasOutputContract ? 'matched' : 'not_applicable',
             });
         }
 

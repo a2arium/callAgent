@@ -138,6 +138,8 @@ The `callllm` library handles the heavy lifting:
 2. **Automatic validation** — callllm validates the LLM output against the schema and retries if needed.
 3. **Automatic parsing** — no need to `JSON.parse()`. The parsed object is available in `response.contentObject`.
 
+> Note: `contentObject` is provided by the underlying `callllm` response type. It is convenient and supported in examples, but it is not a framework-owned field with a separate CallAgent compatibility guarantee.
+
 ```ts
 import { z } from 'zod';
 

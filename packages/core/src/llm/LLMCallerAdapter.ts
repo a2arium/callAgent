@@ -8,7 +8,8 @@ import type {
     ToolDefinition,
     Usage
 } from 'callllm';
-import { ILLMCaller, LLMConfig } from '../shared/types/LLMTypes.js';
+import type { ILLMCaller, LLMConfig, LLMMessage } from '../shared/types/LLMTypes.js';
+import type { LLMCallOptions, LLMSettings } from '../types/llmContracts.js';
 import type { UsageRecord } from '../shared/types/index.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
 
@@ -119,8 +120,8 @@ export class LLMCallerAdapter implements ILLMCaller {
      * Make a non-streaming LLM call
      */
     async call<T = unknown>(
-        message: string | any,
-        options?: Record<string, any>
+        message: LLMMessage,
+        options?: LLMCallOptions
     ): Promise<UniversalChatResponse<T>[]> {
         // Set the parent node ID and context for telemetry - bridge will create LLMNode as child and accumulate turn summaries
         try {
@@ -133,8 +134,28 @@ export class LLMCallerAdapter implements ILLMCaller {
         try {
             // Pass through to the callllm library
             // Return the full array of responses from call()
-            const responses = await this.caller.call(message, options) as UniversalChatResponse<unknown>[];
+            const callMessage = this.toCallLLMMessage(message, options);
+            const responses = await this.caller.call(callMessage) as UniversalChatResponse<unknown>[];
             const typedResponses = responses as UniversalChatResponse<T>[];
+
+            if (options?.jsonSchema) {
+                for (const response of typedResponses) {
+                    const hasStructuredOutput = response.contentObject != null;
+                    const metadata = response.metadata ?? {};
+                    response.metadata = {
+                        ...metadata,
+                        validationErrors: hasStructuredOutput
+                            ? metadata.validationErrors
+                            : [
+                                ...(metadata.validationErrors ?? []),
+                                {
+                                    path: ['contentObject'],
+                                    message: 'Structured output missing for contracted response',
+                                },
+                            ],
+                    };
+                }
+            }
 
             // Automatically record usage if not using the callback approach
             if (!options?.usageCallback && this.recordUsage && responses.length > 0) {
@@ -176,8 +197,8 @@ export class LLMCallerAdapter implements ILLMCaller {
      * Make a streaming LLM call
      */
     async *stream<T = unknown>(
-        message: string | any,
-        options?: Record<string, any>
+        message: LLMMessage,
+        options?: LLMCallOptions
     ): AsyncIterable<UniversalStreamResponse<T>> {
         // Set the parent node ID and context for telemetry - bridge will create LLMNode as child and accumulate turn summaries
         try {
@@ -189,7 +210,8 @@ export class LLMCallerAdapter implements ILLMCaller {
 
         try {
             // Call the underlying library's stream method
-            for await (const chunk of this.caller.stream(message, options)) {
+            const callMessage = this.toCallLLMMessage(message, options);
+            for await (const chunk of this.caller.stream(callMessage)) {
                 // If this is the final chunk and we're not using callbacks, record the usage
                 if (chunk.isComplete && !options?.usageCallback && this.recordUsage &&
                     (chunk.metadata?.usage?.costs?.total)) {
@@ -224,7 +246,7 @@ export class LLMCallerAdapter implements ILLMCaller {
     /**
      * Update the default settings for this LLM caller
      */
-    updateSettings(settings: Record<string, unknown>): void {
+    updateSettings(settings: LLMSettings): void {
         this.caller.updateSettings(settings as Record<string, unknown>);
     }
 
@@ -330,5 +352,12 @@ export class LLMCallerAdapter implements ILLMCaller {
         } catch {
             return messages;
         }
+    }
+
+    private toCallLLMMessage(message: LLMMessage, options?: LLMCallOptions): string | Record<string, unknown> {
+        if (typeof message === 'string') {
+            return options != null ? { ...options, text: message } : message;
+        }
+        return options != null ? { ...options, ...message } : message;
     }
 }

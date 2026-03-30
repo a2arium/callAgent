@@ -128,6 +128,9 @@ export const LLMCallTraceSchema = z.object({
     outputTokens: z.number().optional(),
     cost: z.number().optional(),
     module: z.string().optional(),
+    hasOutputContract: z.boolean().optional(),
+    outputContractName: z.string().optional(),
+    outputContractStatus: z.enum(['matched', 'failed', 'not_applicable']).optional(),
 });
 export type LLMCallTrace = z.infer<typeof LLMCallTraceSchema>;
 

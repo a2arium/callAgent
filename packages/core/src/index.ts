@@ -36,8 +36,20 @@ export type {
     ObservationProvenance
 } from './loop/oneTurn.js';
 export type { Modules } from './loop/oneTurn.js';
+export type { ExecOutcome } from './types/execOutcome.js';
+export { ExecOutcomeSchema, ExecResultSchema } from './types/execOutcome.js';
 export { IntentSchema, ExecutableActionSchema } from './types/intent.js';
 export type { Intent, ExecutableAction } from './types/intent.js';
+export type {
+    LLMCallOptions,
+    LLMSettings,
+    LLMOutputContract,
+} from './types/llmContracts.js';
+export {
+    LLMCallOptionsSchema,
+    LLMSettingsSchema,
+    LLMOutputContractSchema,
+} from './types/llmContracts.js';
 export type {
     ChildCompletedPayload,
     ChildCompletedObservation,
@@ -81,7 +93,15 @@ export {
     isExternalEventInput
 } from './shared/types/index.js';
 export { ensureAgentContext } from './shared/types/index.js';
-export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse, ToolDefinition } from './shared/types/LLMTypes.js';
+export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse, ToolDefinition, LLMMessage } from './shared/types/LLMTypes.js';
+export type {
+    LLMRespondedPayload,
+    ValidationFailedPayload,
+} from './types/observation.js';
+export {
+    LLMRespondedPayloadSchema,
+    ValidationFailedPayloadSchema,
+} from './types/observation.js';
 // Removed build utilities - use simple copying instead:
 // "build": "tsc && copyfiles agent.json dist" or "tsc && cp agent.json dist/"
 // Add other exports as needed for the public API 

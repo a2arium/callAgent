@@ -262,7 +262,7 @@ describe('runLoop default execution and transitions', () => {
         expect(ctx.requestTool).toHaveBeenCalledWith('needs-callback', {}, expect.any(Object));
         expect(ctx.tools.invoke).toHaveBeenCalledTimes(2);
         expect(ctx.reply).toHaveBeenCalledWith('hello');
-        expect(transitionResults.map(t => t.kind)).toEqual(['await_input', 'await_child', 'await_child', 'await_child', 'await_tool', 'await_child']);
+        expect(transitionResults.map(t => t.kind)).toEqual(['await_input', 'await_child', 'continue', 'await_child', 'await_tool', 'await_child']);
         expect(result.outcome.kind).toBe('await_input');
     });
 });
