@@ -190,3 +190,10 @@ export { ToolNode } from './telemetry/nodes/ToolNode.js';
 export { FrameworkError, PluginError, ManifestError, TaskExecutionError, AgentError, ConfigurationError, InvariantError, ModuleExecutionError, FrameworkModule, isErrorType } from './utils/errors.js';
 export { throwInvariantError } from './utils/invariantError.js';
 export type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail, InvariantErrorPayload } from './types/invariantError.js';
+
+// Testing Harness exports
+export { createTestHarness, type TestHarness } from './testing/TestHarness.js';
+export { createDeterministicLLMStub, createDeterministicToolStub, type DeterministicLLMStub, type DeterministicToolStub } from './testing/DeterministicStubs.js';
+export { createTestContext } from './testing/TestContext.js';
+export { HarnessAssertionError, createTurnAssertionContext } from './testing/HarnessAssertions.js';
+export { HarnessConfigSchema, type HarnessConfig, type HarnessState, type LLMStubResponse, type TurnAssertionContext, type DeepPartial } from './testing/harnessTypes.js';

@@ -1030,6 +1030,7 @@ export async function runLoop<
                 pendingAfter: summarizePending(env.pending ?? {}),
                 timings: turnTimings,
                 usage,
+                rewards: step.reward !== undefined ? { total: step.reward } : undefined,
                 correlationId,
                 traceId,
                 spanId,
@@ -1140,7 +1141,8 @@ export async function runLoop<
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {
                 kind: 'fail',
-                reason: `turn_${turnIdx}_error: ${error instanceof Error ? error.message : String(error)}`
+                reason: `turn_${turnIdx}_error: ${error instanceof Error ? error.message : String(error)}`,
+                error: error
             };
             // Hygiene: clear current inbox on fatal error to avoid leaking state to next run
             env.inbox.current = [];

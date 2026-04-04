@@ -198,6 +198,7 @@ export const TurnTraceSchema = z.object({
     // Timing and usage
     timings: TurnTimingsSchema,
     usage: TurnUsageSchema.optional(),
+    rewards: z.object({ total: z.number() }).optional(),
 
     // Correlation
     correlationId: z.string().optional(),

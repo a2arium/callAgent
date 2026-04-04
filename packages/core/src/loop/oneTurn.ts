@@ -49,7 +49,7 @@ export type TransitionOut =
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
     | { kind: 'complete'; result?: unknown }
-    | { kind: 'fail'; reason: string };
+    | { kind: 'fail'; reason: string; error?: unknown };
 
 
 // Temporary alias while downstream modules migrate

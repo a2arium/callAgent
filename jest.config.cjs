@@ -53,6 +53,9 @@ const config = {
         '^@a2arium/callagent-types/(.*)$': '<rootDir>/packages/types/src/$1',
         '^@a2arium/callagent-types$': '<rootDir>/packages/types/src/index.ts',
         '^@chat-prisma/(.*)$': '<rootDir>/packages/chat-bridge/src/generated/prisma/$1',
+        '^\\.\\./generated/prisma/index\\.js$': '<rootDir>/packages/chat-bridge/src/generated/prisma/index.js',
+        // Keep explicit .js extension for generated Prisma runtime modules.
+        '^(.*/generated/prisma/.*)\\.js$': '$1.js',
         // Handle .js imports that should resolve to .ts files
         '^(\\.{1,2}/.*)\\.js$': '$1',
     },
