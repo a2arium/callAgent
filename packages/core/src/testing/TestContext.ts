@@ -1,4 +1,12 @@
 import type { TaskContext, TaskHandle, InputHandle, GroupHandle } from '../shared/types/index.js';
+import type {
+    EpisodicEvent,
+    GoalId,
+    GoalNode,
+    TaskContextGoalAddInput,
+    TaskContextGoalUpdatePatch,
+    TaskContextGoalsReadFilter,
+} from '../loop/types.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
 import type { IMemory } from '@a2arium/callagent-types';
 import type { InvariantErrorCode, InvariantErrorDetail, InvariantErrorContext } from '../types/invariantError.js';
@@ -89,13 +97,13 @@ export function createTestContext(
         },
 
         goals: {
-            add: (g) => generateId('goal'),
-            update: (id, patch) => {},
-            remove: (id) => {},
-            clear: (predicate) => {},
-            read: (filter) => []
+            add: (_g: TaskContextGoalAddInput) => generateId('goal'),
+            update: (_id: GoalId, _patch: TaskContextGoalUpdatePatch) => {},
+            remove: (_id: GoalId) => {},
+            clear: (_predicate?: (g: GoalNode) => boolean) => {},
+            read: (_filter?: TaskContextGoalsReadFilter) => [],
         },
-        episodic: { add: (e) => {} },
+        episodic: { add: (_e: EpisodicEvent) => {} },
         thoughts: { add: (t) => {} },
         world: { read: () => ({}) },
         decisions: {

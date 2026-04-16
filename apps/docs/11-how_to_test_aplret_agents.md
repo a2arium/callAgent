@@ -19,6 +19,16 @@ APLRET tests work best as **turn scripts**. Each script is a sequence of:
 
 This model catches bugs that only show up between turns — when data is lost between modules, or when a resume observation is misrouted — and keeps tests readable even when the agent involves LLMs.
 
+## Aligning tests with `flow.md`
+
+When your agent includes **`flow.md`** (recommended for awaits, major branches, or repair loops), treat it as the **behavioral map** tests should reinforce:
+
+- Major **flow table** rows should have at least one test path (dominant success, each material failure, each await/resume).
+- **`### B1`, `B2`, …** branch IDs in `flow.md` should map cleanly to test files or `describe` blocks (e.g. golden / resume / failure splits).
+- Optionally add a **Covered by tests** section at the end of `flow.md` pointing to files.
+
+Authoring rules and format: [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md). Contract expectation: [APLRET contracts](./0-aplret_contracts.md).
+
 ---
 
 ## Quick start
@@ -44,6 +54,23 @@ expect(h.replies()[0]).toBe('Hi there!');
 ```
 
 `createTestHarness(modules)` accepts **the same `Partial<Modules>` bag** used in `createAgent()`. Only provide the modules your test exercises; everything else falls back to framework defaults.
+
+If you started from scaffold output, generated test stubs already match this harness style:
+
+- `minimal` preset: `tests/golden.test.ts`
+- `non-trivial` preset: `tests/golden.test.ts`, `tests/resume.test.ts`, `tests/failure.test.ts`, `tests/invariant.test.ts`
+
+Scaffold entrypoint: [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md).
+
+---
+
+## Verification commands (framework contributors)
+
+When you change `@a2arium/callagent-core` behavior, types, or harness APIs, run from the repository root:
+
+- `yarn test` — full Jest suite.
+- `yarn build` — monorepo build (Turbo).
+- `yarn workspace @a2arium/callagent-core test:types` — `tsd` compile-time checks for exported types (required when public signatures change; see [4.0 readability phase](./todo/4.0-readability-phase-overview.md)).
 
 ---
 
@@ -111,6 +138,16 @@ h.expectComplete();
 | `injectChildFailed({ token, agentId, error })` | `source: 'child', kind: 'child.failed'` |
 | `injectObservation(obs)` | Raw observation (validated via `normalizeObservationInbox`) |
 
+Canonical envelopes used by harness helpers:
+
+```ts
+injectToolCompleted({ token, tool, result })
+// -> { source: 'tool', kind: 'tool.completed', payload: { token, tool, result } }
+
+injectChildCompleted({ token, agentId, result })
+// -> { source: 'child', kind: 'child.completed', payload: { token, agentId, result } }
+```
+
 ### Await token propagation
 
 When a turn ends with `await_tool`, `await_child`, or `await_input`, the framework tracks a **token** that ties the dispatched operation to its resume observation. This token must flow consistently through three places:
@@ -177,9 +214,14 @@ If you enable **`CALLAGENT_DEBUG_HARNESS`**, the log line prints **`state.turnCo
 | `expectInvariantError(fn)` | An `InvariantError` was thrown; passes it to `fn` |
 | `expectModuleError(fn)` | A `ModuleExecutionError` was thrown; passes it to `fn` |
 
-### `expectTurn(fn)` — per-turn trace assertions
+### `expectTurn(fn)` / `expectTurn(index, fn)` — per-turn trace assertions
 
-Passed a `TurnAssertionContext`. All methods throw `HarnessAssertionError` with `expected`, `actual`, and `turn` on mismatch. All methods chain.
+`expectTurn` passes a `TurnAssertionContext`. All methods throw `HarnessAssertionError` with `expected`, `actual`, and `turn` on mismatch. All methods chain.
+
+Selection semantics:
+
+- `expectTurn(fn)` asserts the **latest** trace (`lastTrace()` behavior).
+- `expectTurn(index, fn)` asserts the trace at an **absolute zero-based index** in `allTraces()` (for example, `0` is the first recorded turn).
 
 | Method | Checks |
 |--------|--------|
@@ -208,6 +250,17 @@ h.expectTurn(t => {
     t.expectTransition('await_tool');
     t.expectAwaitToken('tok-abc');
     t.expectMemoryChanged();
+});
+```
+
+Example — asserting an earlier turn after additional turns have run:
+
+```ts
+await h.runTurn(); // trace[0]
+await h.runTurn(); // trace[1]
+
+h.expectTurn(0, t => {
+    t.expectTransition('continue');
 });
 ```
 
@@ -302,6 +355,8 @@ const outcome: ExecOutcome = {
 ## `TurnTrace` reference
 
 Access via `h.lastTrace()` or `h.allTraces()`. Key fields for assertions:
+
+When indexing turns in tests, prefer `expectTurn(index, fn)` (or `allTraces()[index]`) for explicitness.
 
 | Field | Description |
 |-------|-------------|

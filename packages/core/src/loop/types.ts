@@ -102,6 +102,26 @@ export type GoalHierarchy = {
     roots: GoalId[];           // ordered root ids
 };
 
+/** Input accepted by `TaskContext.goals.add` / `addGoal` (subset of fields; server fills timestamps and defaults). */
+export type TaskContextGoalAddInput = {
+    id?: GoalId;
+    title: string;
+    type?: GoalType;
+    priority?: number;
+    parentId?: GoalId;
+    context?: GoalContext;
+};
+
+/** Filter for `TaskContext.goals.read` / `listGoals`. */
+export type TaskContextGoalsReadFilter = {
+    status?: GoalStatus;
+    parentId?: GoalId;
+    type?: GoalType;
+};
+
+/** Allowed patch shape for `TaskContext.goals.update` / `updateGoal`. */
+export type TaskContextGoalUpdatePatch = Partial<Omit<GoalNode, 'id' | 'createdAt'>>;
+
 export type GoalState = {
     hierarchy: GoalHierarchy;
     _index?: { byStatus?: Record<GoalStatus, GoalId[]> }; // optional, computed at load

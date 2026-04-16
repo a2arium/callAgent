@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type { AgentPlugin, CreateAgentPluginOptions } from './types.js';
+import type { Modules } from '../loop/oneTurn.js';
 import { PluginManager } from './pluginManager.js';
 import { fileURLToPath } from 'node:url';
 import { logger } from '@a2arium/callagent-utils';
@@ -69,29 +70,28 @@ export const createAgent = async <
         runtimeManifest: options.runtimeManifest
     });
 
-    // Build loop.modules from either explicit loop or top-level sugar
-    const sugarModules: Record<string, unknown> = {};
-    const moduleKeys: Array<
-        keyof NonNullable<
-            NonNullable<CreateAgentPluginOptions<Sensory, Obs, Alpha, ExecData, ExecError>['loop']>['modules']
-        >
-    > = ['attention', 'perception', 'learning', 'policy', 'shield', 'execution', 'transition'];
-    
-    for (const k of moduleKeys) {
-        const v = (options as any)[k];
-        if (typeof v === 'function') sugarModules[k as string] = v;
-    }
-    
+    // Build loop.modules from either explicit loop or top-level sugar (per-key so TS narrows each module type)
+    type Mods = Modules<Sensory, Obs, Alpha, ExecData, ExecError>;
+    const sugarModules: Partial<Mods> = {};
+    if (typeof options.attention === 'function') sugarModules.attention = options.attention;
+    if (typeof options.perception === 'function') sugarModules.perception = options.perception;
+    if (typeof options.learning === 'function') sugarModules.learning = options.learning;
+    if (typeof options.policy === 'function') sugarModules.policy = options.policy;
+    if (typeof options.shield === 'function') sugarModules.shield = options.shield;
+    if (typeof options.execution === 'function') sugarModules.execution = options.execution;
+    if (typeof options.transition === 'function') sugarModules.transition = options.transition;
+
     const hasSugar = Object.keys(sugarModules).length > 0;
-    const loop = hasSugar ? 
-        { modules: { ...(options.loop?.modules || {}), ...(sugarModules as any) } } : 
-        options.loop;
+    const loop = hasSugar
+        ? { modules: { ...(options.loop?.modules ?? {}), ...sugarModules } }
+        : options.loop;
 
     const plugin: AgentPlugin = {
         resolved,
         handleTask: options.handleTask,
         tenantId: tenantId,
-        loop: loop as any,
+        // AgentPlugin uses default `Modules` type params; agent-specific generics are preserved at `handleTask` / runtime loop wiring.
+        loop: loop as AgentPlugin['loop'],
         llmConfig: options.llmConfig,
         llmAdapter: options.llmAdapter,
     };

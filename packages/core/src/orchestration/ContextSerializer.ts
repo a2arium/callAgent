@@ -258,8 +258,8 @@ export class ContextSerializer {
                 // For A2A context transfer, bypass MLO processing and set goal directly in adapter
                 // This avoids the MLO pipeline size limits and complex object transformations
                 // Try direct setGoal method first (for tests), then fallback to goals.add API
-                if ((ctx as any).goals?.add) {
-                    await (ctx as any).goals.add({ title: goalString });
+                if (ctx.goals?.add) {
+                    await ctx.goals.add({ title: goalString });
                 }
             }
 

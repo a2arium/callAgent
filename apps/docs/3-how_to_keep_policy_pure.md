@@ -61,6 +61,26 @@ If yes, it belongs in:
 
 not in Policy and not in `MentalState`
 
+## Policy and selectors
+
+Policy should stay **sync and `MentalState`-only**, but it should not **deep-read** arbitrary nested paths everywhere. The standard pattern is a **`selectors.ts`** module that exposes a compact **decision-ready view** (e.g. `readPolicyView(m)`), and Policy reads only that view before emitting a **domain-named** intent. That keeps Policy easy to scan and aligns with [APLRET contracts](./0-aplret_contracts.md) and [Agent repository layout](./14-agent_repository_layout_for_aplret.md).
+
+```ts
+// selectors.ts — example (MentalState is your agent’s cognition type from the framework)
+type PolicyView = { hasInvoice: boolean; invoiceId?: string };
+
+export function readPolicyView(m: MentalState): PolicyView {
+  return { hasInvoice: !!m.worldModel?.latestInvoiceId, invoiceId: m.worldModel?.latestInvoiceId };
+}
+
+// policy.ts
+policy: (m) => {
+  const v = readPolicyView(m);
+  if (!v.hasInvoice) return { kind: 'fetch_invoice' };
+  return { kind: 'submit', invoiceId: v.invoiceId! };
+},
+```
+
 ## Rewrite patterns
 
 ### Case 1: “Policy wants config”

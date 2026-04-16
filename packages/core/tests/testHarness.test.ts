@@ -129,6 +129,32 @@ describe('TestHarness', () => {
         expect(h.allTraces()).toHaveLength(2);
     });
 
+    it('supports absolute turn indexing in expectTurn', async () => {
+        const h = createTestHarness(mockModules);
+
+        await h.injectUserInput('hello').runTurn();
+        await h.injectToolCompleted({ token: 'await-me', tool: 'search', result: 'found it' }).runTurn();
+
+        h.expectTurn(0, t => {
+            t.expectTransition('await_tool');
+        });
+
+        h.expectTurn(1, t => {
+            t.expectInboxKinds(['tool.completed']);
+        });
+    });
+
+    it('throws descriptive error for out-of-range expectTurn index', async () => {
+        const h = createTestHarness(mockModules);
+        await h.runTurn();
+
+        expect(() => {
+            h.expectTurn(3, t => {
+                t.expectTransition('complete');
+            });
+        }).toThrow('expectTurn(index, fn): index 3 is out of range');
+    });
+
     it('throws descriptive HarnessAssertionErrors on mismatch', async () => {
         const h = createTestHarness(mockModules);
         await h.runTurn(); // complete

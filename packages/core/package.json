@@ -21,7 +21,7 @@
   "scripts": {
     "prisma:generate": "prisma generate",
     "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma-client && cp -R src/generated/prisma-client/* dist/generated/prisma-client/",
-    "test:types": "tsd --files tests/stageFacadeTypes.test-d.ts",
+    "test:types": "tsd . --files tests/*.test-d.ts",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run",
     "version:patch": "npm version patch",
@@ -38,6 +38,9 @@
     "framework",
     "callagent"
   ],
+  "bin": {
+    "callagent-scaffold": "./dist/scaffold/scaffoldCli.js"
+  },
   "dependencies": {
     "@a2arium/callagent-memory-engine": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
@@ -47,7 +50,8 @@
     "@prisma/client": "7.4.0",
     "callllm": "portal:../../../callLLM",
     "pg": "8.13.3",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "jest": "^29.7.0",

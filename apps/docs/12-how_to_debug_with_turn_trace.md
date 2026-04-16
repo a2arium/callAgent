@@ -28,6 +28,7 @@ Use **`TurnTraceCollector`** when you run the loop in-process and need to assert
 - Pass **`collectTraces: true`** (and optionally **`manifestProvenance`**) to **`runLoop(ctx, M, env, modules, opts)`**.
 - **`runLoop`** returns **`result.traces`** (array of **TurnTrace**) when **`collectTraces`** is true; each element is the trace for one turn.
 - Alternatively, attach a **`TurnTraceCollector`** to **`ctx.__turnTraceCollector`** before running; the loop will push each turn’s trace there and you can call **`collector.getByTurn(n)`**, **`collector.getLast()`**, or **`collector.getAll()`**.
+- Note on API boundaries: collector/indexed access (`result.traces[n]`, `collector.getByTurn(n)`) is separate from harness assertion helpers. In harness tests, use `expectTurn(index, fn)` for indexed assertions or `expectTurn(fn)` for latest-trace assertions.
 
 See **How-to: Test APLRET agents** for harness examples using **`collectTraces: true`** and **`result.traces`**.
 
@@ -58,6 +59,20 @@ Chat output is usually:
 - nondeterministic (LLM variation)
 
 Debug from TurnTrace and the turn pipeline.
+
+## Fault localization by repository layout
+
+TurnTrace shows *what happened*; your **folder layout** shows *where to fix it*. Standard mapping:
+
+| Symptom class | Start here |
+|---------------|------------|
+| Raw payload / schema / wrapper mismatch | `normalizers/` |
+| Wrong remembered fact or summary | `reducers.ts`, Learning |
+| Wrong next intent | `selectors.ts`, `policy.ts` |
+| Tool/LLM/child misbehavior | `effects/` |
+| Wrong await, resume, or terminal outcome | `transition.ts`, and **`flow.md`** for intended procedure |
+
+Then use **`types.ts`** for vocabulary truth and [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md) for the full map.
 
 ## Fast triage
 
@@ -157,7 +172,7 @@ The first wrong turn is usually the real bug.
 
 ### Step 2: Verify the inbox actually contained the expected event
 
-Look at `trace.inboxCurrent`.
+Start with `trace.inboxCurrent` for a fast check.
 
 Ask:
 
@@ -165,7 +180,8 @@ Ask:
 - Is `source` correct?
 - Is `kind` correct?
 - Does it have the expected token?
-- Is payload shape compatible?
+
+Then verify payload shape on the raw observation envelope (`env.inbox.current` in your harness run or session snapshot). `trace.inboxCurrent` is a compact summary view (source/kind/token), not the full payload object.
 
 If the event is missing: the bug is upstream of Perception (Transition/runtime injection/tool/child delivery).
 

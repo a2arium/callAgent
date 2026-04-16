@@ -26,3 +26,12 @@ This document outlines the breakdown of tasks required to fully align the `calla
 - [3.5 Manifest Provenance Tracking in TurnTrace](./3.5-turn-trace-provenance.md)
 - [3.6 Canonical LLM Output Contracts (Enforced)](./3.6-llm-output-contracts.md)
 - [3.7 Testing Harness](./3.7-test-harness.md)
+
+## 4. Readability, repo ergonomics, and documentation corpus
+
+Normative standards and author guides live in [APLRET contracts](../0-aplret_contracts.md), [How-to: `flow.md`](../13-flow_md_for_aplret_agents.md), and [How-to: Agent repository layout](../14-agent_repository_layout_for_aplret.md). Migrations: [4.1 flow.md adoption](../migration/4.1-flow-md-adoption-migration.md), [4.2 repo layout](../migration/4.2-agent-repo-layout-migration.md).
+
+- [4.0 Readability phase overview](./4.0-readability-phase-overview.md)
+- [4.1 `flow.md` standard (templates & tooling)](./4.1-flow-md-standard.md)
+- [4.2 Agent repository layout & patterns (examples & scaffolds)](./4.2-agent-repository-layout-and-patterns.md)
+- [4.3 Framework readability helpers & reference examples](./4.3-framework-readability-helpers-and-examples.md)

@@ -20,7 +20,14 @@ const uuidv7 = uuid.v7;
 
 import { outboxPublisher } from '../eventbus/outboxPublisher.js';
 import { createTraceparent } from '../tracing/Tracing.js';
-import type { MentalState } from '../loop/types.js';
+import type {
+    GoalId,
+    GoalNode,
+    MentalState,
+    TaskContextGoalAddInput,
+    TaskContextGoalUpdatePatch,
+    TaskContextGoalsReadFilter,
+} from '../loop/types.js';
 import { initialM } from '../loop/init.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
@@ -2704,22 +2711,36 @@ export class TaskEngine {
         // Wire Goals API on durable handler context
         try {
             const goals = await import('../loop/goals.js');
-            (ctx as any).addGoal = (node: any) => goals.addGoal(ctx as any, node);
-            (ctx as any).updateGoal = (id: any, patch: any) => goals.updateGoal(ctx as any, id, patch);
-            (ctx as any).moveGoal = (id: any, parentId?: any, order?: any) => goals.moveGoal(ctx as any, id, parentId, order);
-            (ctx as any).completeGoal = (id: any, opts?: any) => goals.completeGoal(ctx as any, id, opts);
-            (ctx as any).failGoal = (id: any) => goals.failGoal(ctx as any, id);
-            (ctx as any).listGoals = (filter?: any) => goals.listGoals(ctx as any, filter);
-            // Minimal goals namespace
-            (ctx as any).goals = {
-                add: (g: any) => goals.addGoal(ctx as any, g),
-                update: (id: string, patch: any) => goals.updateGoal(ctx as any, id, patch),
-                remove: (id: string) => goals.failGoal(ctx as any, id),
-                clear: async (predicate?: (g: any) => boolean) => {
-                    const all = await goals.listGoals(ctx as any, {});
-                    for (const g of all) { if (!predicate || predicate(g as any)) await goals.failGoal(ctx as any, (g as any).id); }
+            const baseCtx = ctx as TaskContext;
+            type CtxWithLegacyGoalFns = TaskContext & {
+                addGoal: (node: TaskContextGoalAddInput) => Promise<GoalId>;
+                updateGoal: (id: GoalId, patch: TaskContextGoalUpdatePatch) => Promise<void>;
+                moveGoal: (id: GoalId, parentId?: GoalId, order?: number) => Promise<void>;
+                completeGoal: (
+                    id: GoalId,
+                    opts?: { cascadeChildren?: boolean; requireNoActiveChildren?: boolean }
+                ) => Promise<void>;
+                failGoal: (id: GoalId) => Promise<void>;
+                listGoals: (filter?: TaskContextGoalsReadFilter) => Promise<GoalNode[]>;
+            };
+            const extended = baseCtx as CtxWithLegacyGoalFns;
+            extended.addGoal = (node) => goals.addGoal(baseCtx, node);
+            extended.updateGoal = (id, patch) => goals.updateGoal(baseCtx, id, patch);
+            extended.moveGoal = (id, parentId, order) => goals.moveGoal(baseCtx, id, parentId, order);
+            extended.completeGoal = (id, opts) => goals.completeGoal(baseCtx, id, opts);
+            extended.failGoal = (id) => goals.failGoal(baseCtx, id);
+            extended.listGoals = (filter) => goals.listGoals(baseCtx, filter);
+            baseCtx.goals = {
+                add: (g) => goals.addGoal(baseCtx, g),
+                update: (id, patch) => goals.updateGoal(baseCtx, id, patch),
+                remove: (id) => goals.failGoal(baseCtx, id),
+                clear: async (predicate?: (g: GoalNode) => boolean) => {
+                    const all = await goals.listGoals(baseCtx, {});
+                    for (const g of all) {
+                        if (!predicate || predicate(g)) await goals.failGoal(baseCtx, g.id);
+                    }
                 },
-                read: (filter?: any) => goals.listGoals(ctx as any, filter)
+                read: (filter?: TaskContextGoalsReadFilter) => goals.listGoals(baseCtx, filter),
             };
         } catch { /* noop */ }
         // Enable A2A from durable handler context - use the proper TaskEngine sendTaskToAgent implementation

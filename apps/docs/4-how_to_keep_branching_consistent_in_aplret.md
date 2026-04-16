@@ -47,6 +47,12 @@ Keep it boring:
 
 **Require:** exhaustiveness.
 
+Learning’s `switch (obs.kind)` assumes a **closed discriminated union** for normalized observations — see [APLRET contracts](./0-aplret_contracts.md) (Observation model). Open `kind: string` shapes defeat exhaustiveness and reviewability.
+
+### `flow.md` and branch IDs
+
+For non-trivial agents, major branches in code should have **named counterparts** in **`flow.md`** (e.g. `### B1: Validation failure`). Stable IDs (`B1`, `B2`, …) tie together code review, tests, and debugging. See [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md).
+
 ### Policy: compact decision branching
 
 **Use:**

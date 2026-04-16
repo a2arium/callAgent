@@ -24,6 +24,18 @@ Policy may decide to use an LLM. Policy never calls an LLM.
 
 This is APLRET Rule 3 (Single Effect Boundary) and Rule 5 (Sync, M-only Policy).
 
+## Where prompts, handlers, and schemas live
+
+Standard repository layout (especially for non-trivial agents):
+
+| Concern | Location |
+|---------|----------|
+| Prompt text / prompt builders | `prompts/` |
+| LLM invocation (handlers) | `effects/llm/` |
+| Structured output schemas (Zod / JSON Schema) | `contracts/llm/` |
+
+This keeps wording discoverable, effects testable, and contracts reusable. Same idea for tools: `effects/tools/` and `contracts/tools/`. Full decision map: [Agent repository layout](./14-agent_repository_layout_for_aplret.md) and [APLRET contracts](./0-aplret_contracts.md).
+
 ---
 
 ## Step 1: Configure LLM for your agent

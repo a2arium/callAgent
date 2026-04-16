@@ -23,6 +23,25 @@ Its goals are:
 - make resume flows replayable and testable
 - make agent implementations predictable for humans and LLMs
 
+## Getting started
+
+**New agents** should start from the scaffold generator so manifests, `tsconfig`, module layout, and harness tests match the recommended structure. For downstream usage, run the scaffold CLI from your project root (see [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md)); the same flow is available via the `callagent-scaffold` **bin** on `@a2arium/callagent-core` or the `scaffoldAgent` API for tooling. `yarn create-agent` is the convenience script used in this monorepo.
+
+Simple scaffold examples (run from your project root):
+
+```bash
+# Minimal
+node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
+  --name my-agent --preset minimal --output ./my-agent
+
+# Non-trivial
+node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
+  --name my-agent --preset non-trivial --output ./my-agent \
+  --uses-llm --uses-tools --uses-children --uses-plans
+```
+
+`--output` is resolved relative to your current working directory. See [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md) for full options and follow-up steps.
+
 ## Core model
 
 APLRET stands for:
@@ -396,6 +415,18 @@ Env:
 - invalid source-kind pairs must fail validation loudly
 - if a new kind becomes common, promote it into the shared taxonomy
 
+### Closed observation vocabulary (required shape)
+
+Perception output (`ObservationNormalized` / agent `Obs`) MUST be modeled as a **closed discriminated union**: each variant has a fixed `source`, `kind`, and typed `payload`.
+
+Anti-patterns (explicitly discouraged):
+
+- `kind: string` with open-ended values
+- `payload: any` or untyped `Record<string, unknown>` as the primary shape
+- mixing transport wrapper archaeology into the union instead of normalizing first
+
+**Source-specific normalizers** are the canonical Perception structure: route the inbox, then delegate to one normalizer per source family (e.g. `normalizers/user.ts`, `normalizers/tool.ts`) so transport quirks stay at the edge. See [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
+
 ---
 
 ## ctx and working memory (runtime context)
@@ -624,6 +655,7 @@ Rules:
 - emits structured perception errors instead of throwing when possible
 - does not update `MentalState`
 - does not perform effects
+- SHOULD route through **source-specific normalizers** (one module or file per source family) instead of inlining all decoding in a single function
 
 ### Learning
 
@@ -642,6 +674,7 @@ Rules:
 - may be async only to load artifacts or perform minimal cognition-related reads needed for the update
 - no external side effects
 - should prefer compact, validated writes
+- SHOULD apply updates through **reducer-style** functions (e.g. `reducers.ts`) — one clear path per normalized observation kind — instead of long imperative mutation chains inline
 
 ### Policy
 
@@ -661,6 +694,7 @@ Rules:
 - no memory writes
 - no access to `env` or `ctx`
 - no artifact loading
+- SHOULD read **decision-ready views** from **selectors** (e.g. `readPolicyView(m)` in `selectors.ts`) rather than scattered deep reads into raw nested `MentalState`
 
 ### Shield
 
@@ -712,6 +746,14 @@ Rules:
 - only effect boundary
 - responsible for timeouts, bounded retries, idempotency keys, correlation ids
 - must not write `MentalState`
+- for non-trivial agents, SHOULD split implementation by concern:
+  - **LLM invocation** handlers under `effects/llm/`
+  - **prompt text / prompt builders** under `prompts/`
+  - **structured LLM output schemas** under `contracts/llm/`
+  - **tool invocation** under `effects/tools/`
+  - **tool argument/result schemas** under `contracts/tools/`
+
+See [How-to: Use LLMs in APLRET](./10-how_to_use_llm_in_aplret.md) and [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
 
 ### Transition
 
@@ -729,6 +771,62 @@ Rules:
 - no external side effects
 - must enforce await invariants
 - if `continue`, must include observations
+
+## Repository structure
+
+APLRET does not mandate a file tree for minimal agents, but **recommended structure** keeps the same concerns visible to humans and to AI-assisted editing. To generate that layout (manifests, modules, tests), use the scaffold in the [tutorial](./1-tutorial_build_your_first_aplret_agent.md).
+
+### Minimal layout (simple agents)
+
+Sufficient when normalization is light, effects are few, and procedural flow is easy to hold in one head:
+
+- `agent.ts` — wiring only (`createAgent({ ... })`)
+- `types.ts` — closed unions: `Obs`, `Intent`, execution payloads, stages
+- `attention.ts`, `perception.ts`, `learning.ts`, `policy.ts`, `shield.ts`, `execution.ts`, `transition.ts` as needed
+- `prompts.ts` / `contracts.ts` (or equivalent) when prompts and schemas stay small
+
+Rule: **grow structure when complexity grows**, not for symmetry.
+
+### Recommended layout (non-trivial agents)
+
+Use when any of the following apply: `await_input` / `await_tool` / `await_child`, multiple major branches, planning or repair loops, structured LLM outputs that steer control, or non-trivial failure paths.
+
+Additional or split locations:
+
+- `flow.md` — canonical **behavioral map** over time (required for non-trivial agents; see below)
+- `selectors.ts` — decision-ready views for Policy
+- `reducers.ts` — cognition writes from normalized observations
+- `normalizers/` — per-source inbox normalization (`user.ts`, `tool.ts`, `child.ts`, `internal.ts`, …)
+- `effects/llm/`, `effects/tools/` — named effect handlers
+- `prompts/` — wording and prompt builders
+- `contracts/llm/`, `contracts/tools/` — Zod/JSON schemas for structured outputs and tools
+
+Full guidance: [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
+
+## `flow.md` behavioral map
+
+For **non-trivial agents**, the repository SHOULD include a **`flow.md`** file adjacent to `agent.ts` that explains **what the agent does over time**: main path, major branches, await/resume points, terminal outcomes, and a short code map.
+
+### When `flow.md` is required
+
+An agent SHOULD include `flow.md` when it uses any of:
+
+- `await_input`, `await_tool`, or `await_child`
+- multiple major branches
+- planning or repair loops driven by LLM or structured plans
+- structured LLM extraction that affects future decisions
+- non-trivial failure or recovery paths
+- behavior that is hard to explain without reading several modules
+
+Simple one-turn agents MAY omit `flow.md`.
+
+### Contract expectations
+
+- **Canonical section order** and content expectations are defined in [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md).
+- **Vocabulary in `flow.md`** (stages, observation kinds, intent kinds, execution result categories) SHOULD match **exact spellings** in `types.ts` and implementation.
+- **Behavior changes** that alter control flow, vocabulary, or terminal semantics SHOULD update `flow.md` in the **same change** (same PR) as the code.
+
+`flow.md` is behavioral documentation; **runtime truth remains code + tests**. It complements the contract and how-tos; it does not replace them.
 
 ---
 
@@ -765,6 +863,7 @@ Rules:
 - handle all cases exhaustively
 - new intent kinds require explicit changes to Policy, Shield, and Execution
 - intent kinds are internal API; do not expose them as A2A skills unless intentional
+- **Domain-named intents:** prefer a **single top-level `kind`** that expresses domain meaning (e.g. `start_fetch`, `complete_success`, `fail`) rather than generic wrappers such as `{ kind: 'internal'; subIntent: ... }` that hide the decision in nested fields. The intent union SHOULD be readable as a one-screen vocabulary.
 
 ### Stage
 
@@ -798,6 +897,7 @@ Rules:
 - each await stage must have a corresponding token.
 - Any stage whose name begins with awaiting_ MUST declare a require: [...] token invariant (StageFacade) OR use the base await stage and the standard pending slot.
 - runtime should reject impossible combinations
+- if the agent maintains **`flow.md`**, the **Stages** subsection there SHOULD list the same stage names as the agent’s stage union / StageFacade configuration (exact spelling).
 
 **StageFacade** (`createStageFacade<St>({ stages, initial, ... })`) is the canonical API for stage management. The returned **`StageFacade<St>`** exposes:
 
@@ -1432,6 +1532,33 @@ Users should not depend on these unless the framework explicitly promotes them:
 * temporary compatibility shims
 * transport-specific wrapper details before normalization
 
+### Documented legacy and sugar (time-boxed)
+
+Until removed in a dedicated change (with migration), the following are **intentional** exceptions to a strict “no compatibility surface” reading:
+
+* Runtime manifest **`runMode: 'legacy'`** when still present — see the manifest spec for semantics and removal plan.
+* **`createAgent` top-level module sugar** — the same functions may be passed as `attention`, `perception`, …, or under `loop.modules`; both paths are supported and typed against `Modules<…>`.
+
+### Public API inventory (single source of truth)
+
+The table below lists **stable or experimental exports** authors and integrators should treat as the framework’s public contract from npm packages. It is maintained alongside changes to `packages/core/src/index.ts` and `packages/types/src/index.ts`. Internal modules under `packages/core/src/**` that are not re-exported here are not supported API.
+
+| Symbol / group | Package | Stability | Notes |
+|----------------|---------|-----------|--------|
+| `createAgent`, `AgentPlugin`, `CreateAgentPluginOptions` | `@a2arium/callagent-core` | stable | Manifest resolution + optional `loop` / top-level module sugar |
+| `TaskContext`, `AgentTaskContext`, `ensureAgentContext` | `@a2arium/callagent-core` | stable | Context passed to agents; use `ensureAgentContext` when narrowing |
+| `TaskContextGoalAddInput`, `TaskContextGoalUpdatePatch`, `TaskContextGoalsReadFilter` | `@a2arium/callagent-core` | stable | Shapes for `ctx.goals.*` when present |
+| Input guards: `isChildCompletionInput`, `isToolCompletionInput`, `isDirectInput`, `isExternalEventInput` | `@a2arium/callagent-core` | stable | Discriminators for resume / external payloads |
+| Loop: `Modules`, `runLoop`, `MentalState`, `EnvironmentState`, `Observation`, `Intent`, `ExecOutcome`, `TurnOutcome`, … | `@a2arium/callagent-core` | stable | See barrel for full type exports |
+| Stage facade: `createStageFacade`, `StageFacade`, `defineControlKeys`, control var accessors | `@a2arium/callagent-core` | stable | |
+| `createTestHarness`, `TestHarness`, deterministic stubs, harness assertion helpers | `@a2arium/callagent-core` | stable | Same `Partial<Modules>` shape as `createAgent` |
+| `scaffoldAgent`, `formatScaffoldError`, `ScaffoldOptionsSchema`, `ScaffoldOptions`, `ScaffoldResult`, `ScaffoldFailure`, `AgentPreset` | `@a2arium/callagent-core` | stable | Programmatic agent scaffolding; published **`bin`** `callagent-scaffold` — see [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md) |
+| Orchestration: `TaskEngine`, `A2AService`, registries, tenant helpers | `@a2arium/callagent-core` | stable / advanced | Prefer documented entrypoints for new agents |
+| Manifests: `AgentCard`, `AgentRuntimeManifest`, `ResolvedManifests`, manifest errors | `@a2arium/callagent-types` (+ re-exports from core) | stable | Zod-backed sources of truth in `callagent-types` |
+| Semantic / working memory types (`IMemory`, semantic filters, …) | `@a2arium/callagent-types` | stable | |
+
+**Rules for contributors:** new or renamed **exported** symbols require an inventory row (or explicit “experimental” marking), type-level tests where applicable (`tsd` / export tests per [types-rules](./todo/types-rules.md)), and a migration note in `apps/docs/migration/` when the change is author-visible.
+
 ### Rule for examples
 
 Reference examples MUST use only stable public surface.
@@ -1590,6 +1717,10 @@ Prefer:
 - one canonical path for each task
 - explicit invariants
 - structured telemetry
+- **closed** observation and intent discriminated unions; **domain-named** intent kinds
+- **selector-driven** Policy and **reducer-driven** Learning
+- **`flow.md`** for non-trivial agents, kept in sync with behavior
+- **normalizers** at the Perception edge; **named** effect handlers and separated **prompts/** / **contracts/** for LLM-heavy agents
 
 Avoid:
 
@@ -1599,6 +1730,11 @@ Avoid:
 - storing raw large payloads in memory
 - mixing cognition with control
 - multiple equivalent public patterns for the same job
+- stringly-typed observation vocabularies (`kind: string`, untyped payloads)
+- deep ad hoc reads of `MentalState` inside Policy instead of selectors
+- long imperative mutation chains in Learning instead of reducers
+- prompt strings and schema definitions buried inside execution handlers when they have grown non-trivial
+- letting **`flow.md`** drift from code after behavior changes
 
 A stable framework gives users less ambiguity, not more.
 

@@ -40,8 +40,13 @@ export async function resolveManifests(
   );
 
   // 1. Validation (Zod)
-  const card = validateManifest(resolvedCard, AgentCardSchema, 'agentCard', cardPath ?? 'inline');
-  const runtime = validateManifest(resolvedRuntime, AgentRuntimeManifestSchema, 'runtimeManifest', runtimePath ?? 'inline');
+  const card = validateManifest<AgentCard>(resolvedCard, AgentCardSchema, 'agentCard', cardPath ?? 'inline');
+  const runtime = validateManifest<AgentRuntimeManifest>(
+    resolvedRuntime,
+    AgentRuntimeManifestSchema,
+    'runtimeManifest',
+    runtimePath ?? 'inline'
+  );
 
   // 2. Identity Matching (Rule 10)
   if (card.name !== runtime.name || card.version !== runtime.version) {
@@ -139,7 +144,7 @@ function validateManifest<T>(
   sourceInfo: string
 ): T {
   try {
-    return schema.parse(data);
+    return schema.parse(data) as T;
   } catch (error) {
     if (error instanceof ZodError) {
       const zodErr = error as { issues?: Array<{ path?: unknown[]; message?: string; expected?: string; received?: string }> };

@@ -5,7 +5,7 @@ const config = {
     testEnvironment: 'node',
 
     // Test discovery
-    roots: ['<rootDir>/packages'],
+    roots: ['<rootDir>/packages', '<rootDir>/apps/examples'],
     testMatch: [
         '**/__tests__/**/*.[jt]s?(x)',
         '**/?(*.)+(spec|test).[jt]s?(x)'

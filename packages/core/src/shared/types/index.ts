@@ -7,7 +7,16 @@ import type { TaskStatus, A2AEvent, Artifact as ProtocolArtifact } from './Strea
 // A2A (Agent-to-Agent) Communication Types
 export * from './A2ATypes.js';
 import type { IMemory } from '@a2arium/callagent-types';
-import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js';
+import type {
+    EpisodicEvent,
+    GoalId,
+    GoalNode,
+    GoalStatus,
+    GoalType,
+    TaskContextGoalAddInput,
+    TaskContextGoalUpdatePatch,
+    TaskContextGoalsReadFilter,
+} from '../../loop/types.js';
 
 // Import from memory-engine to satisfy local usage in TaskContext
 import { Artifact } from '@a2arium/callagent-memory-engine';
@@ -155,13 +164,13 @@ export type TaskContext = {
 
     // Namespaced helpers (minimal, ergonomic)
     goals?: {
-        add: (g: any) => Promise<string> | string;
-        update: (id: string, patch: any) => Promise<void> | void;
-        remove: (id: string) => Promise<void> | void;
-        clear: (predicate?: (g: any) => boolean) => Promise<void> | void;
-        read: (filter?: any) => Promise<any[]> | any[];
+        add: (g: TaskContextGoalAddInput) => Promise<GoalId> | GoalId;
+        update: (id: GoalId, patch: TaskContextGoalUpdatePatch) => Promise<void> | void;
+        remove: (id: GoalId) => Promise<void> | void;
+        clear: (predicate?: (g: GoalNode) => boolean) => Promise<void> | void;
+        read: (filter?: TaskContextGoalsReadFilter) => Promise<GoalNode[]> | GoalNode[];
     };
-    episodic?: { add: (e: any) => void };
+    episodic?: { add: (e: EpisodicEvent) => void };
     thoughts?: { add: (t: { text: string } | string) => Promise<void> | void };
 
     world?: { read: () => Readonly<Record<string, unknown>> };
@@ -276,14 +285,17 @@ export type AgentTaskContext = Required<Pick<TaskContext,
  * }
  * ```
  */
+function isRecord(x: unknown): x is Record<string, unknown> {
+    return typeof x === 'object' && x !== null;
+}
+
 export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
     // Runtime validation to ensure all required methods are present
-    const requiredMethods = [
-        'recall', 'remember', 'sendTaskToAgent'
-    ];
+    const requiredMethods = ['recall', 'remember', 'sendTaskToAgent'] as const;
 
     for (const method of requiredMethods) {
-        if (typeof (ctx as any)[method] !== 'function') {
+        const fn = ctx[method];
+        if (typeof fn !== 'function') {
             throw new Error(`Agent context is missing required method: ${method}. Ensure the agent is run through the proper runner with memory support.`);
         }
     }
@@ -334,20 +346,20 @@ export type InputKind = ChildCompletionInput | ToolCompletionInput | DirectInput
 
 /** True if value is a child agent completion payload. */
 export function isChildCompletionInput(x: unknown): x is ChildCompletionInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'child' && typeof (x as any).token === 'string';
+    return isRecord(x) && x.kind === 'child' && typeof x.token === 'string';
 }
 
 /** True if value is a tool completion payload. */
 export function isToolCompletionInput(x: unknown): x is ToolCompletionInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'tool' && typeof (x as any).token === 'string';
+    return isRecord(x) && x.kind === 'tool' && typeof x.token === 'string';
 }
 
 /** True if value is a direct human input payload. */
 export function isDirectInput(x: unknown): x is DirectInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'input' && 'value' in (x as any);
+    return isRecord(x) && x.kind === 'input' && 'value' in x;
 }
 
 /** True if value is an external event payload. */
 export function isExternalEventInput(x: unknown): x is ExternalEventInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'external' && 'event' in (x as any);
+    return isRecord(x) && x.kind === 'external' && 'event' in x;
 }

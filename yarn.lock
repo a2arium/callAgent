@@ -39,6 +39,9 @@ __metadata:
     tsd: "npm:^0.33.0"
     typescript: "npm:^5.8.3"
     uuid: "npm:^11.1.0"
+    zod: "npm:^4.3.6"
+  bin:
+    callagent-scaffold: ./dist/scaffold/scaffoldCli.js
   languageName: unknown
   linkType: soft
 
@@ -87,7 +90,7 @@ __metadata:
   resolution: "@a2arium/callagent-types@workspace:packages/types"
   dependencies:
     typescript: "npm:^5.8.3"
-    zod: "npm:^3.24.2"
+    zod: "npm:^4.3.6"
   languageName: unknown
   linkType: soft
 
@@ -101,14 +104,23 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@a2arium/flow-reference-agent@workspace:apps/examples/flow-reference-agent":
+  version: 0.0.0-use.local
+  resolution: "@a2arium/flow-reference-agent@workspace:apps/examples/flow-reference-agent"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
+    typescript: "npm:^5.8.3"
+  languageName: unknown
+  linkType: soft
+
 "@a2arium/hello-agent@workspace:apps/examples/hello-agent":
   version: 0.0.0-use.local
   resolution: "@a2arium/hello-agent@workspace:apps/examples/hello-agent"
   dependencies:
     "@a2arium/callagent-core": "workspace:*"
-    "@types/copyfiles": "npm:^2"
-    copyfiles: "npm:^2.4.1"
-    typescript: "npm:^5.9.3"
+    "@a2arium/callagent-types": "workspace:*"
+    typescript: "npm:^5.8.3"
   languageName: unknown
   linkType: soft
 
@@ -1924,13 +1936,6 @@ __metadata:
   dependencies:
     "@types/node": "npm:*"
   checksum: 10c0/2e1cdba2c410f25649e77856505cd60223250fa12dff7a503e492208dbfdd25f62859918f28aba95315251fd1f5e1ffbfca1e25e73037189ab85dd3f8d0a148c
-  languageName: node
-  linkType: hard
-
-"@types/copyfiles@npm:^2":
-  version: 2.4.4
-  resolution: "@types/copyfiles@npm:2.4.4"
-  checksum: 10c0/c57d13c4a4fa85ba052cce3921cc73624a64df40077e2fa9ba704ddf43a2c342e151c0e090531e3366dc5545cc2e48649933aaf501070923f11374fac42f9e2a
   languageName: node
   linkType: hard
 
@@ -7943,16 +7948,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"typescript@npm:^5.9.3":
-  version: 5.9.3
-  resolution: "typescript@npm:5.9.3"
-  bin:
-    tsc: bin/tsc
-    tsserver: bin/tsserver
-  checksum: 10c0/6bd7552ce39f97e711db5aa048f6f9995b53f1c52f7d8667c1abdc1700c68a76a308f579cd309ce6b53646deb4e9a1be7c813a93baaf0a28ccd536a30270e1c5
-  languageName: node
-  linkType: hard
-
 "typescript@patch:typescript@npm%3A^5.8.3#optional!builtin<compat/typescript>":
   version: 5.9.2
   resolution: "typescript@patch:typescript@npm%3A5.9.2#optional!builtin<compat/typescript>::version=5.9.2&hash=5786d5"
@@ -7960,16 +7955,6 @@ __metadata:
     tsc: bin/tsc
     tsserver: bin/tsserver
   checksum: 10c0/34d2a8e23eb8e0d1875072064d5e1d9c102e0bdce56a10a25c0b917b8aa9001a9cf5c225df12497e99da107dc379360bc138163c66b55b95f5b105b50578067e
-  languageName: node
-  linkType: hard
-
-"typescript@patch:typescript@npm%3A^5.9.3#optional!builtin<compat/typescript>":
-  version: 5.9.3
-  resolution: "typescript@patch:typescript@npm%3A5.9.3#optional!builtin<compat/typescript>::version=5.9.3&hash=5786d5"
-  bin:
-    tsc: bin/tsc
-    tsserver: bin/tsserver
-  checksum: 10c0/ad09fdf7a756814dce65bc60c1657b40d44451346858eea230e10f2e95a289d9183b6e32e5c11e95acc0ccc214b4f36289dcad4bf1886b0adb84d711d336a430
   languageName: node
   linkType: hard
 
@@ -8394,14 +8379,14 @@ __metadata:
   languageName: node
   linkType: hard
 
-"zod@npm:4.3.6, zod@npm:^3.25.0 || ^4.0.0":
+"zod@npm:4.3.6, zod@npm:^3.25.0 || ^4.0.0, zod@npm:^4.3.6":
   version: 4.3.6
   resolution: "zod@npm:4.3.6"
   checksum: 10c0/860d25a81ab41d33aa25f8d0d07b091a04acb426e605f396227a796e9e800c44723ed96d0f53a512b57be3d1520f45bf69c0cb3b378a232a00787a2609625307
   languageName: node
   linkType: hard
 
-"zod@npm:^3.23.8, zod@npm:^3.24.2":
+"zod@npm:^3.23.8":
   version: 3.25.76
   resolution: "zod@npm:3.25.76"
   checksum: 10c0/5718ec35e3c40b600316c5b4c5e4976f7fee68151bc8f8d90ec18a469be9571f072e1bbaace10f1e85cf8892ea12d90821b200e980ab46916a6166a4260a983c

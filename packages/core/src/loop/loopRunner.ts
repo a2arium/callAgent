@@ -240,7 +240,11 @@ export async function runLoop<
                 clear: (predicate) => {
                     const current = patches.goalsReplace;
                     if (current) {
-                        const nodes = Object.fromEntries(Object.entries(current.nodes).filter(([_, v]) => predicate ? predicate(v as any) : false));
+                        const nodes = Object.fromEntries(
+                            Object.entries(current.nodes).filter(([_, v]) =>
+                                predicate ? predicate(v) : false
+                            )
+                        );
                         const roots = current.roots.filter(r => !!nodes[r]);
                         patches.goalsReplace = { ...current, nodes, roots };
                     }

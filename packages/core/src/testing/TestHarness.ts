@@ -28,6 +28,7 @@ export type TestHarness<Sensory = unknown> = {
     runTurn(): Promise<TestHarness<Sensory>>;
 
     expectTurn(fn: (t: TurnAssertionContext) => void): TestHarness<Sensory>;
+    expectTurn(index: number, fn: (t: TurnAssertionContext) => void): TestHarness<Sensory>;
     expectComplete(): TestHarness<Sensory>;
     expectFail(): TestHarness<Sensory>;
     expectInvariantError(fn: (e: InvariantError) => void): TestHarness<Sensory>;
@@ -47,20 +48,19 @@ function isObject(item: unknown): item is Record<string, unknown> {
     return item !== null && typeof item === 'object' && !Array.isArray(item);
 }
 
-function mergeDeep(target: any, source: any): any {
-    if (isObject(target) && isObject(source)) {
-        for (const key in source) {
-            if (isObject(source[key])) {
-                if (!target[key]) Object.assign(target, { [key]: {} });
-                mergeDeep(target[key], source[key]);
-            } else {
-                Object.assign(target, { [key]: source[key] });
-            }
-        }
-    } else {
-        return source;
+function mergeDeep(target: unknown, source: unknown): void {
+    if (!isObject(target) || !isObject(source)) {
+        return;
     }
-    return target;
+    for (const key of Object.keys(source)) {
+        const sk = source[key];
+        const tk = target[key];
+        if (isObject(tk) && isObject(sk)) {
+            mergeDeep(tk, sk);
+        } else {
+            target[key] = sk;
+        }
+    }
 }
 
 function isBudgetTurnsExceeded(error: unknown): error is InvariantError {
@@ -113,7 +113,7 @@ export function createTestHarness<
             return harness;
         },
         seedPending(pendingOverride) {
-            state.env.pending = mergeDeep(state.env.pending || {}, pendingOverride);
+            mergeDeep(state.env.pending, pendingOverride);
             return harness;
         },
         seedControlVars(vars) {
@@ -270,8 +270,27 @@ export function createTestHarness<
             return harness;
         },
 
-        expectTurn(fn) {
-            const trace = harness.lastTrace();
+        expectTurn(...args: [((t: TurnAssertionContext) => void)] | [number, (t: TurnAssertionContext) => void]) {
+            const [index, fn] =
+                args.length === 1
+                    ? [undefined, args[0]]
+                    : [args[0], args[1]];
+
+            const trace = (() => {
+                if (index == null) {
+                    return harness.lastTrace();
+                }
+                if (!Number.isInteger(index) || index < 0) {
+                    throw new Error(`expectTurn(index, fn): index must be a non-negative integer. Got ${String(index)}.`);
+                }
+                const selected = state.traces[index];
+                if (!selected) {
+                    throw new Error(
+                        `expectTurn(index, fn): index ${index} is out of range. traces length=${state.traces.length}.`
+                    );
+                }
+                return selected;
+            })();
             const assertionCtx = createTurnAssertionContext(trace);
             fn(assertionCtx);
             return harness;

@@ -22,7 +22,16 @@ export { EngineLocator } from './orchestration/EngineLocator.js';
 export { InteractiveTaskHandler } from './orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
 export type { TaskContext, AgentCard, AgentRuntimeManifest, ResolvedManifests, AgentTaskContext } from './shared/types/index.js';
-export type { MentalState, EnvironmentState, ObservationInbox, MemoryReader, MemoryWriter } from './loop/types.js';
+export type {
+    MentalState,
+    EnvironmentState,
+    ObservationInbox,
+    MemoryReader,
+    MemoryWriter,
+    TaskContextGoalAddInput,
+    TaskContextGoalUpdatePatch,
+    TaskContextGoalsReadFilter,
+} from './loop/types.js';
 export type { ControlState, ControlPendingState } from './loop/types.js';
 export { getPendingToken, controlSnapshot } from './loop/controlHelpers.js';
 export type {
@@ -197,3 +206,13 @@ export { createDeterministicLLMStub, createDeterministicToolStub, type Determini
 export { createTestContext } from './testing/TestContext.js';
 export { HarnessAssertionError, createTurnAssertionContext } from './testing/HarnessAssertions.js';
 export { HarnessConfigSchema, type HarnessConfig, type HarnessState, type LLMStubResponse, type TurnAssertionContext, type DeepPartial } from './testing/harnessTypes.js';
+
+// Agent scaffolding
+export { scaffoldAgent, formatScaffoldError } from './scaffold/scaffoldAgent.js';
+export {
+    ScaffoldOptionsSchema,
+    type AgentPreset,
+    type ScaffoldOptions,
+    type ScaffoldResult,
+    type ScaffoldFailure,
+} from './scaffold/types.js';

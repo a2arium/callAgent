@@ -52,6 +52,8 @@ Stage and stage marks should encode only orchestration facts such as:
 - Stage writes should go through StageFacade, not ad hoc helpers.
 - Invariants should describe control requirements only.
 
+If the agent maintains **`flow.md`**, the **Stages** subsection there should list the **same stage names** as your stage union / `createStageFacade` configuration (exact spelling). That keeps procedural docs, StageFacade, and traces aligned. See [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md).
+
 ## When to use StageFacade
 
 Use StageFacade when your agent has at least one of these:

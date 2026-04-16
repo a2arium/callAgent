@@ -17,11 +17,21 @@ h.expectTurn(t => {
     expectType<TurnAssertionContext>(t.expectIntent('prompt_user'));
 });
 
+h.expectTurn(0, t => {
+    expectType<TurnAssertionContext>(t.expectTransition('continue'));
+});
+
 // @ts-expect-error — invalid shield action
 h.expectTurn(t => t.expectShield('unknown_shield_action'));
 
 // @ts-expect-error — invalid transition kind
 h.expectTurn(t => t.expectTransition('invalid_transition'));
+
+// @ts-expect-error — expectTurn requires callback
+h.expectTurn(0);
+
+// @ts-expect-error — index must be number
+h.expectTurn('0', t => t.expectTransition('continue'));
 
 // Chaining
 expectType<TestHarness>(h.seedMentalState({}));

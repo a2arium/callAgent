@@ -1,0 +1,21 @@
+{
+  "name": "@a2arium/flow-reference-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/agent.js",
+  "exports": {
+    ".": "./dist/agent.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-vm-modules ../../../node_modules/jest/bin/jest.js --config ../../../jest.config.cjs --runTestsByPath tests/golden.test.ts tests/resume.test.ts tests/failure.test.ts tests/invariant.test.ts"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-types": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
