@@ -7,5 +7,6 @@ describe('@a2arium/flow-reference-agent — invariants', () => {
         const prev: MentalState<Sensory> = { memory: { sensory: {} } };
         const next = applyObservation(prev, { kind: 'idle' });
         expect(next).toBe(prev);
+        expect(next.memory.sensory).toEqual({});
     });
 });

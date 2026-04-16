@@ -42,6 +42,29 @@ describe('InboxManager', () => {
             const result = InboxManager.normalizeInbox(input);
             expect(result).toEqual({ current: [obsA], all: [obsA] });
         });
+
+        it('normalizes valid conversation observations without rewriting source', () => {
+            const convoObs = {
+                source: 'conversation',
+                kind: 'message.received',
+                payload: {
+                    kind: 'message.received',
+                    message: {
+                        id: 'msg-inbox-1',
+                        conversation: { kind: 'thread', id: 'thread-inbox-1' },
+                        senderAgentId: 'parent',
+                        recipientAgentId: 'child',
+                        speechAct: 'inform',
+                        content: {},
+                        sequenceNumber: 1,
+                        ts: new Date().toISOString(),
+                    },
+                },
+            };
+            const result = InboxManager.normalizeInbox([convoObs]);
+            expect(result.current[0]).toMatchObject({ source: 'conversation', kind: 'message.received' });
+            expect((result.current[0] as any).payload.message.conversation.id).toBe('thread-inbox-1');
+        });
     });
 
     describe('addObservationToInbox', () => {

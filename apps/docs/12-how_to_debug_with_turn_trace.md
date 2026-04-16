@@ -345,3 +345,20 @@ When an AI proposes a fix, require it to answer:
 - What changed in the turn story after the fix?
 - Which tests were added or updated (and what TurnTrace assertions do they make)?
 
+## Conversation trace fields 
+
+When diagnosing thread-native conversation behavior, inspect:
+
+- `trace.conversation`
+- `trace.incomingMessages`
+- `trace.outgoingMessages`
+- `trace.messageSequenceNumber`
+- `trace.dedupeHit`
+- `trace.deliveryLagMs` (if populated)
+
+Interpretation:
+
+- missing `conversation` on an expected turn usually means no conversation observation was consumed/emitted that turn
+- `dedupeHit: true` indicates idempotent replay path
+- `messageSequenceNumber` should advance only for durably accepted messages
+

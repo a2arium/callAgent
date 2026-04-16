@@ -1,4 +1,5 @@
 import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import type { ConversationMessageRecord, ConversationThreadRecord } from '@a2arium/callagent-memory-engine';
 
 export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
@@ -53,6 +54,79 @@ export class SessionManager {
     async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }) {
         if (!this.store) return [] as Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>;
         return this.store.listEventsSince(params);
+    }
+
+    async createConversationThread(params: {
+        tenantId: string;
+        conversationId: string;
+        ownerAgentId: string;
+        participantAgentId: string;
+    }): Promise<ConversationThreadRecord> {
+        if (!this.store) {
+            throw new Error('Session store is required for conversation threads');
+        }
+        return this.store.createConversationThread(params);
+    }
+
+    async getConversationThread(params: {
+        tenantId: string;
+        conversationId: string;
+    }): Promise<ConversationThreadRecord | null> {
+        if (!this.store) {
+            return null;
+        }
+        return this.store.getConversationThread(params);
+    }
+
+    async updateConversationThreadStatus(params: {
+        tenantId: string;
+        conversationId: string;
+        status: 'open' | 'closed' | 'archived';
+    }): Promise<void> {
+        if (!this.store) {
+            return;
+        }
+        await this.store.updateConversationThreadStatus(params);
+    }
+
+    async appendConversationMessage(params: {
+        tenantId: string;
+        conversationId: string;
+        messageId: string;
+        senderAgentId: string;
+        recipientAgentId: string;
+        speechAct: string;
+        payload: Record<string, unknown>;
+        correlationId?: string;
+        idempotencyKey?: string;
+    }): Promise<ConversationMessageRecord> {
+        if (!this.store) {
+            throw new Error('Session store is required for conversation messages');
+        }
+        return this.store.appendConversationMessage(params);
+    }
+
+    async findConversationMessageByIdempotencyKey(params: {
+        tenantId: string;
+        conversationId: string;
+        senderAgentId: string;
+        idempotencyKey: string;
+    }): Promise<ConversationMessageRecord | null> {
+        if (!this.store) {
+            return null;
+        }
+        return this.store.findConversationMessageByIdempotencyKey(params);
+    }
+
+    async listConversationMessages(params: {
+        tenantId: string;
+        conversationId: string;
+        sinceSequence?: number;
+    }): Promise<ConversationMessageRecord[]> {
+        if (!this.store) {
+            return [];
+        }
+        return this.store.listConversationMessages(params);
     }
 }
 

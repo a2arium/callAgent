@@ -22,6 +22,8 @@ const findInternal = (observations: Observation[]) =>
     observations.find((o): o is ObservationBySource<'internal'> => o?.source === 'internal');
 const findEnv = (observations: Observation[]) =>
     observations.find((o): o is ObservationBySource<'env'> => o?.source === 'env');
+const findConversation = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'conversation'> => o?.source === 'conversation');
 
 const attachInboxAccessors = (
     inbox: Pick<ObservationInbox, 'current' | 'all'> & Partial<ObservationInbox>
@@ -35,6 +37,7 @@ const attachInboxAccessors = (
     define('child', () => findChild(inbox.current));
     define('internal', () => findInternal(inbox.current));
     define('env', () => findEnv(inbox.current));
+    define('conversation', () => findConversation(inbox.current));
     return casted;
 };
 
@@ -46,6 +49,7 @@ export type ObservationInbox = {
     child(): ObservationBySource<'child'> | undefined;
     internal(): ObservationBySource<'internal'> | undefined;
     env(): ObservationBySource<'env'> | undefined;
+    conversation(): ObservationBySource<'conversation'> | undefined;
 };
 
 export type EpisodicEvent = {
@@ -293,7 +297,8 @@ export const normalizeObservationInbox = (
             tool: candidate.tool,
             child: candidate.child,
             internal: candidate.internal,
-            env: candidate.env
+            env: candidate.env,
+            conversation: (candidate as Partial<ObservationInbox>).conversation,
         };
         return attachInboxAccessors(inbox);
     }

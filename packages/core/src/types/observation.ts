@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import {
+    AgentIdSchema,
+    InboundMessageSchema,
+    MessageIdSchema,
+    ThreadRefSchema,
+    ConversationErrorSchema,
+} from '../public-types/conversation/schemas.js';
 
 export const ObservationProvenanceSchema = z.object({
     ts: z.number(),
@@ -93,6 +100,29 @@ export const ObservationSchema = z.discriminatedUnion('source', [
         kind: z.enum(['config.updated', 'clock.tick', 'snapshot.available', 'external.event']), 
         payload: z.unknown(),
         ...BaseObservationProps
+    }),
+    z.object({
+        source: z.literal('conversation'),
+        kind: z.enum(['message.received', 'delivery.failed', 'thread.closed']),
+        payload: z.discriminatedUnion('kind', [
+            z.object({
+                kind: z.literal('message.received'),
+                message: InboundMessageSchema,
+            }),
+            z.object({
+                kind: z.literal('delivery.failed'),
+                thread: ThreadRefSchema,
+                error: ConversationErrorSchema,
+                messageId: MessageIdSchema.optional(),
+                recipientAgentId: AgentIdSchema.optional(),
+            }),
+            z.object({
+                kind: z.literal('thread.closed'),
+                thread: ThreadRefSchema,
+                reason: z.string().optional(),
+            }),
+        ]),
+        ...BaseObservationProps,
     })
 ]);
 

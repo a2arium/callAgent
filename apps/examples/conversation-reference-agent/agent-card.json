@@ -1,0 +1,26 @@
+{
+  "name": "conversation-reference-agent",
+  "version": "0.1.0",
+  "description": "Reference agent for ctx.conversation thread Phase 1 (harness + multi-turn).",
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:3000/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "conversation-thread-demo",
+      "name": "Thread demo",
+      "description": "Opens a fixed thread id, waits for routed delivery, then follow-up + idempotent replay."
+    }
+  ],
+  "url": "http://localhost:3000"
+}

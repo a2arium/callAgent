@@ -17,5 +17,6 @@ describe('@a2arium/flow-reference-agent — failure paths', () => {
         const mem = {} as unknown as MemoryReader;
         const out = transition(env, fakeExecOutcome(), m, mem);
         expect(out.kind).toBe('fail');
+        expect(out).toBeDefined();
     });
 });

@@ -42,6 +42,7 @@ export type { TaskHandle, InputHandle, GroupHandle } from '../../orchestration/H
 export type { A2AEvent, TaskStatus, ProtocolArtifact };
 
 import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../../types/invariantError.js';
+import type { ConversationApi } from '../../public-types/conversation/types.js';
 
 
 // Export the unified Artifact type and interfaces
@@ -197,6 +198,7 @@ export type TaskContext = {
     services: { get: <T = unknown>(name: string) => T | undefined }; // Placeholder for service registry
     getEnv: (key: string, defaultValue?: string) => string | undefined;
     throw: (code: InvariantErrorCode, message: string, detail: InvariantErrorDetail, context?: InvariantErrorContext) => never; // Structured error throw
+    conversation?: ConversationApi;
 
     sendTaskToAgent: {
         /**

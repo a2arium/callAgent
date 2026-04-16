@@ -664,3 +664,21 @@ When a change touches more than one module:
 ## Review comment for PRs
 
 > Please assert the turn trace, not just the final output. A correct APLRET change should be visible in TurnTrace at the point where the new observation enters, where Learning writes the new fact, and where Policy reacts next turn.
+
+## Conversation thread tests
+
+For conversation-enabled agents, add deterministic harness coverage for:
+
+- `ctx.conversation.startThread` success path
+- `ctx.conversation.send` receipts (`accepted | queued | rejected`)
+- idempotency replay (`dedupeHit: true`)
+- thread close behavior
+- follow-up message continuity in the same thread/session binding
+
+Also assert TurnTrace conversation fields when present:
+
+- `conversation`
+- `incomingMessages`
+- `outgoingMessages`
+- `messageSequenceNumber`
+- `dedupeHit`

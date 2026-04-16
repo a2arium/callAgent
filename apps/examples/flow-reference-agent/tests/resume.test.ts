@@ -19,10 +19,14 @@ describe('@a2arium/flow-reference-agent — resume', () => {
             transition,
         });
         await harness.runTurn();
-        expect(harness.lastTrace().transition?.kind).toBe('await_input');
+        const t1 = harness.lastTrace();
+        expect(t1.transition?.kind).toBe('await_input');
+        expect(t1.conversation).toBeUndefined();
 
         harness.injectUserInput({ text: 'resume me' });
         await harness.runTurn();
-        expect(harness.lastTrace().transition?.kind).toBe('complete');
+        const t2 = harness.lastTrace();
+        expect(t2.transition?.kind).toBe('complete');
+        expect(t2.conversation).toBeUndefined();
     });
 });

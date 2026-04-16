@@ -17,6 +17,11 @@ export type TestHarness<Sensory = unknown> = {
     seedMentalState(m: DeepPartial<MentalState<Sensory>>): TestHarness<Sensory>;
     seedPending(pending: Partial<EnvironmentState['pending']>): TestHarness<Sensory>;
     seedControlVars(vars: Record<string, unknown>): TestHarness<Sensory>;
+    seedConversationThread(params: {
+        conversationId: string;
+        ownerAgentId: string;
+        participantAgentId: string;
+    }): Promise<TestHarness<Sensory>>;
 
     injectObservation(obs: Observation): TestHarness<Sensory>;
     injectUserInput(value: unknown): TestHarness<Sensory>;
@@ -125,6 +130,13 @@ export function createTestHarness<
             mergeDeep(pending.controlVars, vars);
             return harness;
         },
+        async seedConversationThread(params) {
+            if (!state.seedConversationThread) {
+                throw new Error('seedConversationThread is not available on this harness');
+            }
+            await state.seedConversationThread(params);
+            return harness;
+        },
 
         injectObservation(obs) {
             const raw = { inbox: { current: [obs], all: [obs] } } as unknown as { inbox: unknown };
@@ -179,6 +191,9 @@ export function createTestHarness<
             (ctx as InternalTaskContext).__turnTraceCollector = localCollector;
 
             try {
+                if (state.pullPersistedConversationObservations) {
+                    await state.pullPersistedConversationObservations();
+                }
                 const res = await runLoop(
                     ctx,
                     state.m,

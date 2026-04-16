@@ -183,3 +183,39 @@ model Outbox {
     @@index([tenantId, topic])
     @@map("outbox")
 }
+
+model ConversationThread {
+    tenantId           String   @map("tenant_id")
+    conversationId     String   @map("conversation_id")
+    ownerAgentId       String   @map("owner_agent_id")
+    participantAgentId String   @map("participant_agent_id")
+    status             String
+    createdAt          DateTime @default(now()) @map("created_at")
+    updatedAt          DateTime @updatedAt @map("updated_at")
+
+    @@id([tenantId, conversationId])
+    @@index([tenantId, ownerAgentId])
+    @@index([tenantId, participantAgentId])
+    @@map("conversation_threads")
+}
+
+model ConversationMessage {
+    id               String   @id @default(cuid())
+    tenantId         String   @map("tenant_id")
+    conversationId   String   @map("conversation_id")
+    sequenceNumber   Int      @map("sequence_number")
+    messageId        String   @map("message_id")
+    senderAgentId    String   @map("sender_agent_id")
+    recipientAgentId String   @map("recipient_agent_id")
+    speechAct        String   @map("speech_act")
+    payload          Json
+    correlationId    String?  @map("correlation_id")
+    idempotencyKey   String?  @map("idempotency_key")
+    createdAt        DateTime @default(now()) @map("created_at")
+
+    @@unique([tenantId, conversationId, sequenceNumber])
+    @@unique([tenantId, conversationId, senderAgentId, idempotencyKey])
+    @@index([tenantId, conversationId])
+    @@index([tenantId, conversationId, createdAt])
+    @@map("conversation_messages")
+}

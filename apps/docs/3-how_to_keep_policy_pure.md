@@ -272,3 +272,11 @@ If any answer is no, the change is probably in the wrong module.
 ## Fast review comment you can leave on a PR
 
 > This change crosses module boundaries. Please show the full turn story: Execution result, Transition outcome, inbox observation, Perception validation, Learning write, Policy read, and tests. Right now the change looks partial and may lose data between turns.
+
+## Conversation APIs
+
+Treat `ctx.conversation.*` exactly like tools/LLMs/child dispatch: Execution-only effects.
+
+- Allowed in Execution: `startThread`, `send`, `close`
+- Forbidden in Policy: direct `ctx.conversation` calls
+- Policy emits intent; Execution performs the conversation side effect; results re-enter through inbox observations

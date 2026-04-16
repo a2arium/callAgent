@@ -146,6 +146,55 @@ describe('runLoop memory wiring and defaults', () => {
         expect(first.timings.totalMs).toBeGreaterThanOrEqual(0);
         expect(Array.isArray(first.inboxCurrent)).toBe(true);
         expect(first.pendingAfter).toBeDefined();
+        expect(first.conversation).toBeUndefined();
+    });
+
+    it('stamps incoming conversation messages into trace when present in inbox', async () => {
+        const ctx: any = {
+            task: { id: 'trace-conversation-task', input: 'x' },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() },
+        };
+        const M: any = initialM(ctx);
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({
+                current: [{
+                    source: 'conversation',
+                    kind: 'message.received',
+                    payload: {
+                        kind: 'message.received',
+                        message: {
+                            id: 'msg-cov-1',
+                            conversation: { kind: 'thread', id: 'thread-cov-1' },
+                            senderAgentId: 'agent-parent',
+                            recipientAgentId: 'agent-child',
+                            speechAct: 'request',
+                            content: { task: 'x' },
+                            sequenceNumber: 1,
+                            ts: new Date().toISOString(),
+                        },
+                    },
+                }],
+                all: [],
+            }),
+        });
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ ok: true }),
+            learning: async (prev: any) => prev,
+            policy: () => ({ kind: 'internal', intent: 'noop' }),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent }),
+            execution: async (intent: any) => ({ action: intent, result: { status: 'ok', data: {} } }),
+            transition: () => ({ kind: 'complete' }),
+        };
+        const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 1, collectTraces: true });
+        const trace = result.traces?.[0];
+        expect(trace?.conversation?.id).toBe('thread-cov-1');
+        expect(trace?.incomingMessages?.[0]?.id).toBe('msg-cov-1');
+        expect(trace?.messageSequenceNumber).toBe(1);
     });
 });
 

@@ -405,4 +405,36 @@ describe('TestHarness', () => {
             t.expectStageAfter('fetching_html');
         });
     });
+
+    it('exposes conversation traces when execution uses ctx.conversation', async () => {
+        const h = createTestHarness({
+            attention: () => 'alpha',
+            perception: () => ({ observed: true }),
+            learning: (mPrev) => mPrev,
+            policy: () => ({ kind: 'internal', intent: 'open_thread' } as Intent),
+            shield: (_m, intent) => ({ action: 'pass', intent }),
+            execution: async (_intent, ctx) => {
+                const receipt = await ctx.conversation!.startThread({
+                    targetAgentId: 'child-agent',
+                    conversationId: 'thread-harness-test',
+                    message: {
+                        senderAgentId: ctx.agentId,
+                        speechAct: 'request',
+                        content: { ping: true },
+                    },
+                });
+                return {
+                    action: { kind: 'internal', done: true },
+                    result: { status: 'ok', data: receipt } as ExecResult,
+                };
+            },
+            transition: () => ({ kind: 'complete' as const }),
+        });
+
+        await h.runTurn();
+        const trace = h.lastTrace();
+        expect(trace.conversation?.id).toBe('thread-harness-test');
+        expect(trace.outgoingMessages?.[0]?.conversationId).toBe('thread-harness-test');
+        expect(trace.messageSequenceNumber).toBe(1);
+    });
 });

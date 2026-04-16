@@ -74,4 +74,40 @@ describe('TaskEngine inbox coordination', () => {
         expect(childCompletions).toHaveLength(1);
         expect(childCompletions[0].payload).toMatchObject({ token: 'child999', childTaskId: 'child-task' });
     });
+
+    it('inbox normalization accepts conversation source in task-engine context', async () => {
+        const { sessionManager } = buildEngine();
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: 'agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                inbox: {
+                    current: [{
+                        source: 'conversation',
+                        kind: 'message.received',
+                        payload: {
+                            kind: 'message.received',
+                            message: {
+                                id: 'msg-te-inbox-1',
+                                conversation: { kind: 'thread', id: 'thread-te-1' },
+                                senderAgentId: 'parent',
+                                recipientAgentId: 'child',
+                                speechAct: 'request',
+                                content: { question: true },
+                                sequenceNumber: 1,
+                                ts: new Date().toISOString(),
+                            },
+                        },
+                    }],
+                    all: [],
+                },
+            },
+        });
+
+        const snap = await sessionManager.load(tenantId, parentTaskId);
+        const inbox = normalizeObservationInbox((snap?.snapshot as any)?.inbox);
+        expect(inbox.current[0]).toMatchObject({ source: 'conversation', kind: 'message.received' });
+    });
 });

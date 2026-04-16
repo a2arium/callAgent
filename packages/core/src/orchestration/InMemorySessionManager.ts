@@ -1,4 +1,9 @@
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import type {
+    ConversationMessageRecord,
+    ConversationThreadRecord,
+    IWorkingMemorySessionStore,
+    WMSessionSnapshot,
+} from '@a2arium/callagent-memory-engine';
 
 /**
  * In-memory implementation of IWorkingMemorySessionStore for testing and CLI usage.
@@ -20,6 +25,8 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         createdAt: string;
     }>>();
     private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
+    private conversationThreads = new Map<string, ConversationThreadRecord>();
+    private conversationMessages = new Map<string, ConversationMessageRecord[]>();
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
         const key = `${tenantId}:${sessionId}`;
@@ -106,11 +113,113 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         this.outbox.push(params);
     }
 
+    async createConversationThread(params: {
+        tenantId: string;
+        conversationId: string;
+        ownerAgentId: string;
+        participantAgentId: string;
+    }): Promise<ConversationThreadRecord> {
+        const key = `${params.tenantId}:${params.conversationId}`;
+        const now = new Date().toISOString();
+        const existing = this.conversationThreads.get(key);
+        if (existing) {
+            return existing;
+        }
+        const created: ConversationThreadRecord = {
+            tenantId: params.tenantId,
+            conversationId: params.conversationId,
+            ownerAgentId: params.ownerAgentId,
+            participantAgentId: params.participantAgentId,
+            status: 'open',
+            createdAt: now,
+            updatedAt: now,
+        };
+        this.conversationThreads.set(key, created);
+        return created;
+    }
+
+    async getConversationThread(params: {
+        tenantId: string;
+        conversationId: string;
+    }): Promise<ConversationThreadRecord | null> {
+        return this.conversationThreads.get(`${params.tenantId}:${params.conversationId}`) ?? null;
+    }
+
+    async updateConversationThreadStatus(params: {
+        tenantId: string;
+        conversationId: string;
+        status: 'open' | 'closed' | 'archived';
+    }): Promise<void> {
+        const key = `${params.tenantId}:${params.conversationId}`;
+        const existing = this.conversationThreads.get(key);
+        if (!existing) {
+            return;
+        }
+        this.conversationThreads.set(key, {
+            ...existing,
+            status: params.status,
+            updatedAt: new Date().toISOString(),
+        });
+    }
+
+    async appendConversationMessage(params: {
+        tenantId: string;
+        conversationId: string;
+        messageId: string;
+        senderAgentId: string;
+        recipientAgentId: string;
+        speechAct: string;
+        payload: Record<string, unknown>;
+        correlationId?: string;
+        idempotencyKey?: string;
+    }): Promise<ConversationMessageRecord> {
+        const key = `${params.tenantId}:${params.conversationId}`;
+        const current = this.conversationMessages.get(key) ?? [];
+        const created: ConversationMessageRecord = {
+            tenantId: params.tenantId,
+            conversationId: params.conversationId,
+            sequenceNumber: current.length + 1,
+            messageId: params.messageId,
+            senderAgentId: params.senderAgentId,
+            recipientAgentId: params.recipientAgentId,
+            speechAct: params.speechAct,
+            payload: params.payload,
+            correlationId: params.correlationId,
+            idempotencyKey: params.idempotencyKey,
+            createdAt: new Date().toISOString(),
+        };
+        current.push(created);
+        this.conversationMessages.set(key, current);
+        return created;
+    }
+
+    async findConversationMessageByIdempotencyKey(params: {
+        tenantId: string;
+        conversationId: string;
+        senderAgentId: string;
+        idempotencyKey: string;
+    }): Promise<ConversationMessageRecord | null> {
+        const current = this.conversationMessages.get(`${params.tenantId}:${params.conversationId}`) ?? [];
+        return current.find((msg) => msg.senderAgentId === params.senderAgentId && msg.idempotencyKey === params.idempotencyKey) ?? null;
+    }
+
+    async listConversationMessages(params: {
+        tenantId: string;
+        conversationId: string;
+        sinceSequence?: number;
+    }): Promise<ConversationMessageRecord[]> {
+        const current = this.conversationMessages.get(`${params.tenantId}:${params.conversationId}`) ?? [];
+        const since = params.sinceSequence ?? 0;
+        return current.filter((msg) => msg.sequenceNumber > since);
+    }
+
     // Helper method for testing/debugging (not part of interface)
     clear(): void {
         this.snapshots.clear();
         this.events.clear();
         this.outbox = [];
+        this.conversationThreads.clear();
+        this.conversationMessages.clear();
     }
 
     // Helper to get all snapshots (for debugging)

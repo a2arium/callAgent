@@ -65,5 +65,34 @@ describe('turnTraceHelpers', () => {
         it('handles empty inbox', () => {
             expect(summarizeInbox([])).toEqual([]);
         });
+
+        it('includes conversation message tokenization metadata', () => {
+            const inbox = [
+                {
+                    source: 'conversation',
+                    kind: 'message.received',
+                    payload: {
+                        kind: 'message.received',
+                        message: {
+                            id: 'msg-1',
+                            conversation: { kind: 'thread', id: 'thread-1' },
+                            senderAgentId: 'a',
+                            recipientAgentId: 'b',
+                            speechAct: 'inform',
+                            content: {},
+                            sequenceNumber: 1,
+                            idempotencyKey: 'idem-1',
+                            ts: new Date().toISOString(),
+                        },
+                    },
+                },
+            ];
+            const summary = summarizeInbox(inbox);
+            expect(summary).toHaveLength(1);
+            expect(summary[0]).toMatchObject({
+                source: 'conversation',
+                kind: 'message.received',
+            });
+        });
     });
 });

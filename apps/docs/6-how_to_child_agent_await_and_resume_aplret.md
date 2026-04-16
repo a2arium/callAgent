@@ -294,3 +294,12 @@ In tests, assert TurnTrace fields:
 - memory hash change on Learning write
 - next intent changes only after Learning write
 
+## Thread conversation interplay
+
+`sendTaskToAgent` remains valid for child-await orchestration.  
+ `ctx.conversation` is used for thread-native messaging.
+
+- Use `sendTaskToAgent` when you want explicit child await semantics (`await_child(token)`).
+- Use `ctx.conversation.startThread/send` when you need durable thread identity and multi-message follow-up.
+- Both paths obey the same APLRET rule: effects in Execution, cognition updates only after observation re-entry.
+

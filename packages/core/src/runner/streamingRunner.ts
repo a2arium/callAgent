@@ -144,14 +144,18 @@ export async function runAgentWithStreaming(
                 transport.handleArtifact(event.artifact);
             }
         } else {
-            // Non-streaming logic (progress only)
-            if ('status' in event) {
+            // Non-streaming: show progress *and* the terminal status (otherwise `Status: completed (FINAL)` never prints).
+            if ('status' in event && 'final' in event) {
                 const s = event.status;
-                // Filter what we show in non-streaming mode to match legacy setupProgressListeners
-                if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
-                    transport.handleStatus(s, false); // Input required is important
+                const isFinal = (event as { final?: boolean }).final === true;
+                if (
+                    isFinal &&
+                    (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')
+                ) {
+                    transport.handleStatus(s, true);
+                } else if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
+                    transport.handleStatus(s, false);
                 } else if (s.state === 'working') {
-                    // Show progress dots/messages? Legacy setupProgressListeners showed them.
                     transport.handleStatus(s, false);
                 }
             }

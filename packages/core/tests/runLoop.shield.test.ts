@@ -41,6 +41,7 @@ describe('runLoop shield safety branches', () => {
         expect(result.M.lastAdvise).toEqual({ flagged: 'pii' });
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('pii-token');
+        expect(result.traces?.[0]?.conversation).toBeUndefined();
     });
 
     it('blocks expensive actions when cost exceeds configured limit', async () => {
@@ -70,5 +71,6 @@ describe('runLoop shield safety branches', () => {
         expect(result.M.lastAdvise).toEqual({ blocked: 'cost', cost: 10, limit: 5 });
         expect(result.outcome.kind).toBe('await_input');
         expect((result.outcome as any).token).toBe('cost-token');
+        expect(result.traces?.[0]?.incomingMessages).toBeUndefined();
     });
 });

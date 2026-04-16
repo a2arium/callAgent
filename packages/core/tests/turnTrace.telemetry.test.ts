@@ -48,6 +48,7 @@ describe('TurnTrace telemetry', () => {
         expect(received[0].turn).toBe(1);
         expect(received[0].turnId).toBe('tid-1');
         expect(received[0].timings.totalMs).toBe(28);
+        expect(received[0].conversation).toBeUndefined();
     });
 
     it('ConsoleProvider has onTurnTrace that builds compact summary', () => {
@@ -66,6 +67,16 @@ describe('TurnTrace telemetry', () => {
             intent: { kind: 'call_tool' },
             shield: { action: 'pass' },
             transition: { kind: 'await_tool' },
+            conversation: { id: 'thread-telemetry-1', kind: 'thread' },
+            outgoingMessages: [{
+                id: 'msg-1',
+                conversationId: 'thread-telemetry-1',
+                kind: 'thread',
+                senderAgentId: 'agent-a',
+                recipientAgentId: 'agent-b',
+                speechAct: 'request',
+                sequenceNumber: 1,
+            }],
             inboxCurrent: [],
             timings: { attentionMs: 0, perceptionMs: 0, learningMs: 0, policyMs: 0, shieldMs: 0, executionMs: 0, transitionMs: 0, totalMs: 100 },
         };

@@ -23,6 +23,14 @@ import type { JsonValue } from '../../types/turnTrace.js';
 import { telemetry } from '../../telemetry/TelemetryCollector.js';
 import { ChildCallNode } from '../../telemetry/nodes/ChildCallNode.js';
 import type { TaskInput } from '../../shared/types/index.js';
+import type { InternalConversationApi } from '../../internal/conversation/types.js';
+import type {
+    CloseConversationOptions,
+    OutboundThreadMessage,
+    SendOptions,
+    StartThreadOptions,
+    ThreadRef,
+} from '../../public-types/conversation/types.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -35,6 +43,7 @@ export interface ApiBinderDependencies {
     backgroundTaskPromises: Set<Promise<void>>;
     handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
+    conversationService: InternalConversationApi;
 }
 
 export class ApiBinder {
@@ -51,6 +60,61 @@ export class ApiBinder {
         const { tenantId, sessionId } = params;
         const agentId = params.agentId ?? ((ctx as any).agentId as string) ?? 'default';
         const flushMentalState = params.flushMentalState;
+        const conversationService = this.deps.conversationService;
+
+        (ctx as TaskContext).conversation = {
+            startThread: async (options: StartThreadOptions) => {
+                const receipt = await conversationService.startThread(tenantId, sessionId, agentId, options);
+                const iCtx = ctx as InternalTaskContext;
+                if (receipt.receipt.status === 'accepted') {
+                    iCtx.__turnConversationSummary = {
+                        id: receipt.thread.id,
+                        kind: receipt.thread.kind,
+                    };
+                    iCtx.__turnConversationSequenceNumber = receipt.receipt.sequenceNumber;
+                    iCtx.__turnConversationDedupeHit = receipt.receipt.dedupeHit;
+                    iCtx.__turnOutgoingConversationMessages?.push({
+                        id: receipt.receipt.messageId,
+                        conversationId: receipt.thread.id,
+                        kind: 'thread',
+                        senderAgentId: options.message.senderAgentId,
+                        recipientAgentId: options.message.recipientAgentId ?? options.targetAgentId,
+                        speechAct: options.message.speechAct,
+                        sequenceNumber: receipt.receipt.sequenceNumber,
+                        correlationId: options.message.correlationId,
+                        idempotencyKey: options.idempotencyKey,
+                    });
+                }
+                return receipt;
+            },
+            send: async (thread: ThreadRef, message: OutboundThreadMessage, options?: SendOptions) => {
+                const receipt = await conversationService.send(tenantId, sessionId, thread, message, options);
+                const iCtx = ctx as InternalTaskContext;
+                iCtx.__turnConversationSummary = {
+                    id: thread.id,
+                    kind: thread.kind,
+                };
+                if (receipt.status === 'accepted') {
+                    iCtx.__turnConversationSequenceNumber = receipt.sequenceNumber;
+                    iCtx.__turnConversationDedupeHit = receipt.dedupeHit;
+                    iCtx.__turnOutgoingConversationMessages?.push({
+                        id: receipt.messageId,
+                        conversationId: thread.id,
+                        kind: 'thread',
+                        senderAgentId: message.senderAgentId,
+                        recipientAgentId: message.recipientAgentId,
+                        speechAct: message.speechAct,
+                        sequenceNumber: receipt.sequenceNumber,
+                        correlationId: message.correlationId,
+                        idempotencyKey: options?.idempotencyKey,
+                    });
+                }
+                return receipt;
+            },
+            close: async (thread: ThreadRef, options?: CloseConversationOptions) => {
+                return conversationService.close(tenantId, thread, options);
+            },
+        };
 
         // Ensure __autoExecuteTool is attached for async tool execution
         // This is needed because startTask uses an external initialContext that doesn't have it

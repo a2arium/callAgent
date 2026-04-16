@@ -104,6 +104,28 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@a2arium/conversation-reference-agent@workspace:apps/examples/conversation-reference-agent":
+  version: 0.0.0-use.local
+  resolution: "@a2arium/conversation-reference-agent@workspace:apps/examples/conversation-reference-agent"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*"
+    typescript: "npm:^5.8.3"
+  languageName: unknown
+  linkType: soft
+
+"@a2arium/conversation-responder-agent@workspace:apps/examples/conversation-responder-agent":
+  version: 0.0.0-use.local
+  resolution: "@a2arium/conversation-responder-agent@workspace:apps/examples/conversation-responder-agent"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
+    "@a2arium/callagent-utils": "workspace:*"
+    typescript: "npm:^5.8.3"
+  languageName: unknown
+  linkType: soft
+
 "@a2arium/flow-reference-agent@workspace:apps/examples/flow-reference-agent":
   version: 0.0.0-use.local
   resolution: "@a2arium/flow-reference-agent@workspace:apps/examples/flow-reference-agent"

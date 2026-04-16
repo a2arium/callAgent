@@ -336,3 +336,14 @@ For non-trivial agents, keep these **small, stable, single-purpose**:
 
 **Closed vocabularies**, **normalized inputs**, **selectors**, **reducers**, **named effects**, **explicit transition**, and **`flow.md`** for non-trivial flow — together they make agents easier to build, review, debug, test, and evolve for both people and AI.
 
+## Conversation module placement
+
+For conversation-enabled agents, keep thread logic discoverable:
+
+- normalize conversation observations in `normalizers/internal.ts` or a dedicated `normalizers/conversation.ts`
+- keep thread send/close execution handlers under `effects/` (for non-trivial agents)
+- keep conversation-derived memory writes in `reducers.ts`
+- keep Policy conversation branching in selector-driven form (`selectors.ts` -> `policy.ts`)
+
+This preserves the same edge-vs-core discipline used for tool and child flows.
+

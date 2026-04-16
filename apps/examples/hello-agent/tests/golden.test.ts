@@ -22,6 +22,8 @@ describe('@a2arium/hello-agent — golden path', () => {
         harness.injectUserInput({ text: 'hello' });
         await harness.runTurn();
 
-        expect(harness.lastTrace().transition?.kind).toBe('complete');
+        const trace = harness.lastTrace();
+        expect(trace.transition?.kind).toBe('complete');
+        expect(trace.conversation).toBeUndefined();
     });
 });

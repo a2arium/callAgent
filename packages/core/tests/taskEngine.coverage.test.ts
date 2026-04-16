@@ -1289,6 +1289,34 @@ describe('TaskEngine orchestration coverage', () => {
         });
     });
 
+    test('startTask binds ctx.conversation thread APIs before loop execution', async () => {
+        const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
+        const store = new FakeSessionStore();
+        const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        runLoopMock.mockResolvedValue({
+            M: { memory: { vars: {} } },
+            outcome: { kind: 'complete', result: { ok: true } },
+            metrics: { timings: {} },
+        });
+
+        await engine.startTask({
+            task: {
+                id: 'conversation-api-task',
+                input: { test: true },
+                status: { state: 'submitted' as const, timestamp: new Date().toISOString() },
+            },
+            isStreaming: false,
+            agentId: 'test-agent',
+            tenantId: 't',
+        });
+
+        const runLoopCtx = runLoopMock.mock.calls[0]?.[0] as { conversation?: Record<string, unknown> } | undefined;
+        expect(runLoopCtx?.conversation).toBeDefined();
+        expect(typeof runLoopCtx?.conversation?.startThread).toBe('function');
+        expect(typeof runLoopCtx?.conversation?.send).toBe('function');
+        expect(typeof runLoopCtx?.conversation?.close).toBe('function');
+    });
+
     // Note: executeTaskHandler tests removed as they test internal implementation details
     // The method is already tested indirectly through public API tests
 });

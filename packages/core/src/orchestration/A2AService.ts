@@ -417,6 +417,83 @@ export class A2AService implements IA2AService {
     }
 
     /**
+     * Build a TaskContext for a thread-bound session (no parent A2A call, no child task id randomization).
+     * Used by conversation recipient activation: task id equals routing session id `${threadId}:${agentId}`.
+     */
+    async buildPassiveConversationContext(params: {
+        plugin: AgentPlugin;
+        tenantId: string;
+        sessionId: string;
+    }): Promise<FullTaskContext> {
+        const { plugin, tenantId, sessionId } = params;
+        const targetAgentId = plugin.resolved.agentCard.name;
+        const minimalSource: MinimalSourceTaskContext = {
+            tenantId,
+            agentId: targetAgentId,
+            task: { id: sessionId, input: { __conversationSession: true } },
+        };
+        const targetSpecificOverrides = {
+            tenantId,
+            agentId: targetAgentId,
+            task: {
+                id: sessionId,
+                input: { __conversationSession: true },
+            },
+            reply: this.createTargetReply(plugin, undefined),
+            progress: this.createTargetProgress(plugin),
+            complete: this.createTargetComplete(plugin),
+            fail: this.createTargetFail(plugin),
+            logger: this.createTargetLogger(plugin),
+            throw: this.createTargetThrow(plugin),
+            recordUsage: this.createTargetRecordUsage(plugin),
+            __activeLoopInbox: undefined,
+            __activeLoopEnv: undefined,
+            __env: undefined,
+            currentTurnNodeId: undefined,
+            telemetry: { nodeId: undefined },
+        };
+        const mergedContext = { ...minimalSource, ...targetSpecificOverrides } as unknown as FullTaskContext;
+
+        const targetCtx = (await extendContextWithMemory(
+            mergedContext,
+            tenantId,
+            targetAgentId,
+            plugin.resolved.runtimeManifest,
+            undefined,
+            await (await import('@a2arium/callagent-memory-engine')).getMemoryPrismaClient()
+        )) as unknown as FullTaskContext;
+
+        if (!(targetCtx as Record<string, unknown>).__mental && !(targetCtx as Record<string, unknown>).M) {
+            const { initialM } = await import('../loop/init.js');
+            (targetCtx as Record<string, unknown>).__mental = initialM(targetCtx);
+        }
+
+        if (plugin.resolved.runtimeManifest.config) {
+            if (!targetCtx.config || typeof targetCtx.config !== 'object') {
+                (targetCtx as Record<string, unknown>).config = {};
+            }
+            (targetCtx.config as Record<string, unknown>).runtimeManifestConfig = plugin.resolved.runtimeManifest.config;
+            (targetCtx as Record<string, unknown>).__runtimeManifestConfig = plugin.resolved.runtimeManifest.config;
+        }
+
+        if (!plugin.llmAdapter && plugin.llmConfig) {
+            targetCtx.llm = createLLMForTask(plugin.llmConfig, targetCtx);
+        } else if (plugin.llmAdapter) {
+            targetCtx.llm = plugin.llmAdapter;
+        }
+
+        targetCtx.sendTaskToAgent = (async (
+            nestedTargetAgent: string,
+            nestedTaskInput: import('../shared/types/index.js').TaskInput,
+            nestedOptions?: unknown
+        ) => {
+            return this.sendTaskToAgent(targetCtx as FullTaskContext, nestedTargetAgent, nestedTaskInput, nestedOptions as A2ACallOptions);
+        }) as FullTaskContext['sendTaskToAgent'];
+
+        return targetCtx;
+    }
+
+    /**
      * Find local agent by name
      */
     async findLocalAgent(agentName: string): Promise<AgentPlugin | null> {

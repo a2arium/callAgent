@@ -361,3 +361,13 @@ If no, the document is stale.
 ## See also
 
 - [Migration: adopting `flow.md`](./migration/4.1-flow-md-adoption-migration.md) — incremental adoption for existing repos.
+
+## Conversation vocabulary 
+
+If the agent uses thread-native conversations, keep `flow.md` vocabulary synchronized with:
+
+- conversation observation kinds: `message.received`, `delivery.failed`, `thread.closed`
+- conversation intents used by Policy (domain-named, not transport wrappers)
+- execution calls to `ctx.conversation.startThread/send/close`
+
+Behavioral rule: flow tables should show where conversation observations enter the inbox and where follow-up sends are emitted.

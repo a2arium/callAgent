@@ -62,6 +62,32 @@ export type InternalTaskContext = TaskContext & {
         error?: JsonValue;
         module?: string;
     }>;
+    __turnIncomingConversationMessages?: Array<{
+        id: string;
+        conversationId: string;
+        kind: 'thread';
+        senderAgentId: string;
+        recipientAgentId: string;
+        speechAct: string;
+        sequenceNumber?: number;
+        correlationId?: string;
+        idempotencyKey?: string;
+    }>;
+    __turnOutgoingConversationMessages?: Array<{
+        id: string;
+        conversationId: string;
+        kind: 'thread';
+        senderAgentId: string;
+        recipientAgentId: string;
+        speechAct: string;
+        sequenceNumber?: number;
+        correlationId?: string;
+        idempotencyKey?: string;
+    }>;
+    __turnConversationSummary?: { id: string; kind: 'thread' };
+    __turnConversationSequenceNumber?: number;
+    __turnConversationDedupeHit?: boolean;
+    __turnConversationDeliveryLagMs?: number;
     /** Session-level turn trace collector (test/debug). */
     __turnTraceCollector?: TurnTraceCollector;
     /** Session-level manifest provenance restored from snapshot/session metadata on every turn-entry path */

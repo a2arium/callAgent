@@ -72,4 +72,21 @@ describe('StreamTransport', () => {
         expect(consoleSpy).toHaveBeenCalledWith('Progress: 50% - Processing');
         expect(consoleSpy).toHaveBeenCalledWith('Message: Processing');
     });
+
+    it('should print terminal lines for completed FINAL including loop outcome and result', () => {
+        const transport = new StreamTransport({ outputType: 'console' });
+        const status: TaskStatus = {
+            state: 'completed',
+            timestamp: '2023-01-01',
+            metadata: { result: { threadId: 't1', exchangeWitness: { x: 1 } } },
+        } as any;
+
+        transport.handleStatus(status, true);
+
+        expect(consoleSpy).toHaveBeenCalledWith('Status: completed (FINAL)');
+        expect(consoleSpy).toHaveBeenCalledWith('Loop outcome: kind: complete');
+        expect(consoleSpy).toHaveBeenCalledWith(
+            'Complete result: {\n  "threadId": "t1",\n  "exchangeWitness": {\n    "x": 1\n  }\n}'
+        );
+    });
 });

@@ -24,7 +24,7 @@ import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
 // Re-export type for convenience
-export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event';
+export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event' | 'conversation';
 
 export interface TurnExecutionParams {
     tenantId: string;

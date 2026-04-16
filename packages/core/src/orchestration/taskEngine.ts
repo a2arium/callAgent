@@ -127,6 +127,12 @@ import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { TurnRunner } from './TurnRunner.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import type { InvariantErrorCode, InvariantErrorDetail } from '../types/invariantError.js';
+import { ConversationService } from '../internal/conversation/ConversationService.js';
+import { ConversationRouter } from '../internal/conversation/ConversationRouter.js';
+import type {
+    ConversationActivateParams,
+    ConversationActivateResult,
+} from '../internal/conversation/types.js';
 
 // Legacy adapters to maintain internal calls if needed, or replace usages.
 
@@ -173,6 +179,7 @@ export class TaskEngine {
     private readonly backgroundTaskPromises = new Set<Promise<void>>();
     private apiBinder: ApiBinder;
     private turnRunner: TurnRunner;
+    private conversationService: ConversationService;
 
     constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
         if (opts?.sessionStore) {
@@ -185,6 +192,14 @@ export class TaskEngine {
             this.sessionManager = new SessionManager(new InMemorySessionManager());
         }
         this.snapshotRepo = new SnapshotRepository(this.sessionManager);
+        this.conversationService = new ConversationService(this.sessionManager, {
+            routeTargetForThread: ({ threadId, recipientAgentId, tenantId }) => ({
+                tenantId,
+                agentId: recipientAgentId,
+                sessionId: `${threadId}:${recipientAgentId}`,
+            }),
+            activateConversationRecipient: (p) => this.ensureConversationActivation(p),
+        });
 
         this.apiBinder = new ApiBinder({
             sessionManager: this.sessionManager,
@@ -194,7 +209,8 @@ export class TaskEngine {
             taskCreationMutex: this.taskCreationMutex,
             backgroundTaskPromises: this.backgroundTaskPromises,
             handleChildCompleted: (p) => this.handleChildCompleted(p),
-            handleToolCompleted: (p) => this.handleToolCompleted(p)
+            handleToolCompleted: (p) => this.handleToolCompleted(p),
+            conversationService: this.conversationService,
         });
 
         this.turnRunner = new TurnRunner(
@@ -217,6 +233,119 @@ export class TaskEngine {
         }
     }
 
+    /**
+     * Cold-start one turn on the thread-bound recipient session after inbox delivery.
+     * Always schedules work in a microtask so nested ctx.conversation.send (B→A→B) does not deadlock
+     * the caller's synchronous activation stack.
+     */
+    async ensureConversationActivation(
+        params: ConversationActivateParams
+    ): Promise<ConversationActivateResult> {
+        return new Promise<ConversationActivateResult>((resolve, reject) => {
+            queueMicrotask(() => {
+                this.runConversationActivationBody(params).then(resolve).catch(reject);
+            });
+        });
+    }
+
+    private async runConversationActivationBody(
+        params: ConversationActivateParams
+    ): Promise<ConversationActivateResult> {
+        const plugin = await globalA2AService.findLocalAgent(params.recipientAgentId);
+        if (!plugin) {
+            const msg = `No local agent registered for id '${params.recipientAgentId}'.`;
+            await this.routeConversationDeliveryFailed({
+                ...params,
+                error: { type: 'PluginMissing', message: msg },
+            });
+            return { ok: false, error: { type: 'PluginMissing', message: msg } };
+        }
+
+        let ctx: TaskContext;
+        try {
+            ctx = await globalA2AService.buildPassiveConversationContext({
+                plugin,
+                tenantId: params.tenantId,
+                sessionId: params.routingSessionId,
+            });
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            await this.routeConversationDeliveryFailed({
+                ...params,
+                error: { type: 'ActivationFailed', message: msg },
+            });
+            return { ok: false, error: { type: 'ActivationFailed', message: msg } };
+        }
+
+        const snap = await this.sessionManager!.load(params.tenantId, params.routingSessionId);
+        const base = (snap?.snapshot as Record<string, unknown>) || {};
+        const prisma = this.getSessionStorePrisma() || (this.sessionManager as unknown as Record<string, unknown>)?.prisma;
+        let M: MentalState = (base.M as MentalState) || initialM(ctx);
+        M =
+            (ArtifactHydrationService.hydrateMentalStateArtifacts(
+                M,
+                prisma,
+                params.tenantId,
+                'conversationActivation'
+            ) as MentalState) || M;
+
+        try {
+            await this.turnRunner.runTurn(
+                ctx,
+                {
+                    tenantId: params.tenantId,
+                    sessionId: params.routingSessionId,
+                    trigger: 'conversation',
+                    isStreaming: false,
+                },
+                { initialM: M, snapshot: base }
+            );
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            log.error('conversation activation runTurn failed', { error: msg, ...params });
+            await this.routeConversationDeliveryFailed({
+                ...params,
+                error: { type: 'RunTurnFailed', message: msg },
+            });
+            return { ok: false, error: { type: 'RunTurnFailed', message: msg } };
+        }
+
+        return { ok: true };
+    }
+
+    private async routeConversationDeliveryFailed(params: {
+        tenantId: string;
+        threadId: string;
+        messageId: string;
+        senderSessionId: string;
+        senderAgentId: string;
+        recipientAgentId: string;
+        error:
+            | { type: 'PluginMissing'; message: string }
+            | { type: 'ActivationFailed'; message: string }
+            | { type: 'RunTurnFailed'; message: string };
+    }): Promise<void> {
+        if (!this.sessionManager) return;
+        const thread = { kind: 'thread' as const, id: params.threadId };
+        const observation: import('../types/observation.js').Observation = {
+            source: 'conversation',
+            kind: 'delivery.failed',
+            payload: {
+                kind: 'delivery.failed',
+                thread,
+                error: params.error,
+                messageId: params.messageId,
+                recipientAgentId: params.recipientAgentId,
+            },
+        };
+        const router = new ConversationRouter(this.sessionManager);
+        await router.routeObservation({
+            tenantId: params.tenantId,
+            sessionId: `${params.threadId}:${params.senderAgentId}`,
+            agentId: params.senderAgentId,
+            observation,
+        });
+    }
 
     private getSessionStorePrisma() {
         return (this.sessionManager as any)?.store?.prisma;

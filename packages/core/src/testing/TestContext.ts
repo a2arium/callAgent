@@ -13,6 +13,32 @@ import type { InvariantErrorCode, InvariantErrorDetail, InvariantErrorContext } 
 import { InvariantError } from '../utils/errors.js';
 import type { DeterministicLLMStub, DeterministicToolStub } from './DeterministicStubs.js';
 import type { HarnessState } from './harnessTypes.js';
+import type { Observation } from '../types/observation.js';
+import { normalizeObservationInbox } from '../loop/types.js';
+import { InMemorySessionManager } from '../orchestration/InMemorySessionManager.js';
+import { SessionManager } from '../orchestration/SessionManager.js';
+import { ConversationService } from '../internal/conversation/ConversationService.js';
+import type {
+    CloseConversationOptions,
+    OutboundThreadMessage,
+    SendOptions,
+    StartThreadOptions,
+    ThreadRef,
+} from '../public-types/conversation/types.js';
+
+function observationDedupeKey(obs: Observation): string {
+    if (obs.source === 'conversation' && obs.kind === 'message.received') {
+        const p = obs.payload as { kind?: string; message?: { id?: string } };
+        if (p?.kind === 'message.received' && p.message?.id) {
+            return `conversation:message.received:${p.message.id}`;
+        }
+    }
+    if (obs.source === 'user' && obs.kind === 'input.provided') {
+        const token = (obs.payload as { token?: string }).token;
+        return `user:input.provided:${token ?? ''}`;
+    }
+    return `${obs.source}:${obs.kind}:${JSON.stringify(obs.payload)}`;
+}
 
 export function createTestContext(
     state: HarnessState,
@@ -34,11 +60,54 @@ export function createTestContext(
         } as unknown as IMemory['episodic'],
     };
 
+    const tenantId = 'test-tenant';
+    const harnessSessionId = state.env.sessionId ?? 'test-session';
+    state.env.sessionId = harnessSessionId;
+    const harnessAgentId = 'test-agent';
+    const conversationStore = new InMemorySessionManager();
+    const conversationSessionManager = new SessionManager(conversationStore);
+    const conversationService = new ConversationService(conversationSessionManager, {
+        routeTargetForThread: ({ threadId, recipientAgentId }) => ({
+            tenantId,
+            sessionId: `${threadId}:${recipientAgentId}`,
+            agentId: recipientAgentId,
+        }),
+        activateConversationRecipient: async () => ({ ok: true }),
+    });
+
+    state.pullPersistedConversationObservations = async () => {
+        const loaded = await conversationSessionManager.load(tenantId, harnessSessionId);
+        const snap = (loaded?.snapshot as { inbox?: unknown } | undefined)?.inbox;
+        const fromSnap = normalizeObservationInbox(snap ?? { current: [], all: [] });
+        const existing = new Set(state.env.inbox.all.map(observationDedupeKey));
+        for (const obs of fromSnap.current) {
+            const k = observationDedupeKey(obs);
+            if (!existing.has(k)) {
+                existing.add(k);
+                state.env.inbox.current.push(obs);
+                state.env.inbox.all.push(obs);
+            }
+        }
+    };
+
+    state.seedConversationThread = async (params: {
+        conversationId: string;
+        ownerAgentId: string;
+        participantAgentId: string;
+    }) => {
+        await conversationSessionManager.createConversationThread({
+            tenantId,
+            conversationId: params.conversationId,
+            ownerAgentId: params.ownerAgentId,
+            participantAgentId: params.participantAgentId,
+        });
+    };
+
     const ctx: TaskContext = {
         get M() { return state.m; },
         set M(val) { state.m = val as typeof state.m; },
-        tenantId: 'test-tenant',
-        agentId: 'test-agent',
+        tenantId,
+        agentId: harnessAgentId,
         task: {
             id: 'test-task-1',
             input: {}
@@ -174,7 +243,61 @@ export function createTestContext(
             id: generateId('group'),
             token: generateId('tok-grp'),
             wait: async () => ({ results: [] })
-        } as unknown as GroupHandle)
+        } as unknown as GroupHandle),
+
+        conversation: {
+            startThread: async (options: StartThreadOptions) => {
+                const receipt = await conversationService.startThread(tenantId, harnessSessionId, harnessAgentId, options);
+                const iCtx = ctx as InternalTaskContext;
+                if (receipt.receipt.status === 'accepted') {
+                    iCtx.__turnConversationSummary = {
+                        id: receipt.thread.id,
+                        kind: receipt.thread.kind,
+                    };
+                    iCtx.__turnConversationSequenceNumber = receipt.receipt.sequenceNumber;
+                    iCtx.__turnConversationDedupeHit = receipt.receipt.dedupeHit;
+                    iCtx.__turnOutgoingConversationMessages?.push({
+                        id: receipt.receipt.messageId,
+                        conversationId: receipt.thread.id,
+                        kind: 'thread',
+                        senderAgentId: options.message.senderAgentId,
+                        recipientAgentId: options.message.recipientAgentId ?? options.targetAgentId,
+                        speechAct: options.message.speechAct,
+                        sequenceNumber: receipt.receipt.sequenceNumber,
+                        correlationId: options.message.correlationId,
+                        idempotencyKey: options.idempotencyKey,
+                    });
+                }
+                return receipt;
+            },
+            send: async (thread: ThreadRef, message: OutboundThreadMessage, options?: SendOptions) => {
+                const receipt = await conversationService.send(tenantId, harnessSessionId, thread, message, options);
+                const iCtx = ctx as InternalTaskContext;
+                iCtx.__turnConversationSummary = {
+                    id: thread.id,
+                    kind: thread.kind,
+                };
+                if (receipt.status === 'accepted') {
+                    iCtx.__turnConversationSequenceNumber = receipt.sequenceNumber;
+                    iCtx.__turnConversationDedupeHit = receipt.dedupeHit;
+                    iCtx.__turnOutgoingConversationMessages?.push({
+                        id: receipt.messageId,
+                        conversationId: thread.id,
+                        kind: 'thread',
+                        senderAgentId: message.senderAgentId,
+                        recipientAgentId: message.recipientAgentId,
+                        speechAct: message.speechAct,
+                        sequenceNumber: receipt.sequenceNumber,
+                        correlationId: message.correlationId,
+                        idempotencyKey: options?.idempotencyKey,
+                    });
+                }
+                return receipt;
+            },
+            close: async (thread: ThreadRef, options?: CloseConversationOptions) => {
+                return conversationService.close(tenantId, thread, options);
+            },
+        },
     };
 
     (ctx as InternalTaskContext).controlVars = {};

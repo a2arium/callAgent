@@ -882,6 +882,12 @@ export async function runLoop<
                 iCtxTurn.__turnLlmCalls = [];
                 iCtxTurn.__turnToolCalls = [];
                 iCtxTurn.__turnChildCalls = [];
+                iCtxTurn.__turnIncomingConversationMessages = [];
+                iCtxTurn.__turnOutgoingConversationMessages = [];
+                iCtxTurn.__turnConversationSummary = undefined;
+                iCtxTurn.__turnConversationSequenceNumber = undefined;
+                iCtxTurn.__turnConversationDedupeHit = undefined;
+                iCtxTurn.__turnConversationDeliveryLagMs = undefined;
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }
@@ -1042,6 +1048,12 @@ export async function runLoop<
                 llmCalls: iCtx.__turnLlmCalls,
                 toolCalls: iCtx.__turnToolCalls,
                 childCalls: iCtx.__turnChildCalls,
+                conversation: iCtx.__turnConversationSummary,
+                incomingMessages: iCtx.__turnIncomingConversationMessages,
+                outgoingMessages: iCtx.__turnOutgoingConversationMessages,
+                messageSequenceNumber: iCtx.__turnConversationSequenceNumber,
+                dedupeHit: iCtx.__turnConversationDedupeHit,
+                deliveryLagMs: iCtx.__turnConversationDeliveryLagMs,
             };
 
             let trace: TurnTrace;
@@ -1086,6 +1098,12 @@ export async function runLoop<
             iCtx.__turnLlmCalls = undefined;
             iCtx.__turnToolCalls = undefined;
             iCtx.__turnChildCalls = undefined;
+            iCtx.__turnIncomingConversationMessages = undefined;
+            iCtx.__turnOutgoingConversationMessages = undefined;
+            iCtx.__turnConversationSummary = undefined;
+            iCtx.__turnConversationSequenceNumber = undefined;
+            iCtx.__turnConversationDedupeHit = undefined;
+            iCtx.__turnConversationDeliveryLagMs = undefined;
 
             log.debug('Transition outcome', {
                 taskId,

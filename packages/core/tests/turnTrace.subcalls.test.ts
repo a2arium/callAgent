@@ -75,6 +75,7 @@ describe('TurnTrace collection and subcalls', () => {
         expect(first.timings.totalMs).toBeGreaterThanOrEqual(0);
         expect(first.timings.attentionMs).toBeDefined();
         expect(first.timings.executionMs).toBeDefined();
+        expect(first.conversation).toBeUndefined();
     });
 
     it('TurnTraceCollector getByTurn returns trace for turn number', async () => {
@@ -88,6 +89,7 @@ describe('TurnTrace collection and subcalls', () => {
             agentCardHash: '',
             runtimeManifestHash: '',
             stageBefore: 'idle',
+            conversation: { id: 'thread-subcalls-1', kind: 'thread' as const },
             inboxCurrent: [],
             timings: { attentionMs: 0, perceptionMs: 0, learningMs: 0, policyMs: 0, shieldMs: 0, executionMs: 0, transitionMs: 0, totalMs: 0 },
         };

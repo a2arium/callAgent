@@ -19,6 +19,7 @@
     "db:setup": "yarn db:migrate && yarn db:generate && yarn db:setup-vectors",
     "db:reset": "prisma migrate reset && yarn db:setup",
     "db:dev": "prisma migrate dev && yarn db:setup-vectors",
+    "print-conversation": "tsx scripts/print-conversation-messages.ts",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run",
     "version:patch": "npm version patch",

@@ -160,6 +160,19 @@ export const ChildCallTraceSchema = z.object({
 });
 export type ChildCallTrace = z.infer<typeof ChildCallTraceSchema>;
 
+export const ConversationMessageSummarySchema = z.object({
+    id: z.string(),
+    conversationId: z.string(),
+    kind: z.literal('thread'),
+    senderAgentId: z.string(),
+    recipientAgentId: z.string(),
+    speechAct: z.string(),
+    sequenceNumber: z.number().int().positive().optional(),
+    correlationId: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+});
+export type ConversationMessageSummary = z.infer<typeof ConversationMessageSummarySchema>;
+
 export const TurnTraceSchema = z.object({
     turn: z.number(),
     turnId: z.string(),
@@ -210,6 +223,17 @@ export const TurnTraceSchema = z.object({
     llmCalls: z.array(LLMCallTraceSchema).optional(),
     toolCalls: z.array(ToolCallTraceSchema).optional(),
     childCalls: z.array(ChildCallTraceSchema).optional(),
+    conversation: z
+        .object({
+            id: z.string(),
+            kind: z.literal('thread'),
+        })
+        .optional(),
+    incomingMessages: z.array(ConversationMessageSummarySchema).optional(),
+    outgoingMessages: z.array(ConversationMessageSummarySchema).optional(),
+    messageSequenceNumber: z.number().int().positive().optional(),
+    dedupeHit: z.boolean().optional(),
+    deliveryLagMs: z.number().optional(),
 
     // Error (if turn failed)
     error: z

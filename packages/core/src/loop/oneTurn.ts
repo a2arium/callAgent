@@ -133,6 +133,37 @@ export async function oneTurn<
     const inboxSnapshot = summarizeInbox(
         Array.isArray(inboxCurrent) ? inboxCurrent : []
     );
+    const conversationIncoming = Array.isArray(inboxCurrent)
+        ? inboxCurrent
+              .filter((obs): obs is Observation & { source: 'conversation'; kind: 'message.received'; payload: { message: { id: string; conversation: { id: string; kind: 'thread' }; senderAgentId: string; recipientAgentId: string; speechAct: string; sequenceNumber?: number; correlationId?: string; idempotencyKey?: string } } } =>
+                  obs?.source === 'conversation' &&
+                  obs?.kind === 'message.received' &&
+                  typeof (obs as { payload?: unknown }).payload === 'object' &&
+                  (obs as { payload?: { kind?: string } }).payload?.kind === 'message.received'
+              )
+              .map((obs) => {
+                  const message = obs.payload.message;
+                  return {
+                      id: message.id,
+                      conversationId: message.conversation.id,
+                      kind: message.conversation.kind,
+                      senderAgentId: message.senderAgentId,
+                      recipientAgentId: message.recipientAgentId,
+                      speechAct: message.speechAct,
+                      sequenceNumber: message.sequenceNumber,
+                      correlationId: message.correlationId,
+                      idempotencyKey: message.idempotencyKey,
+                  };
+              })
+        : [];
+    iCtx.__turnIncomingConversationMessages = conversationIncoming;
+    if (conversationIncoming.length > 0) {
+        iCtx.__turnConversationSummary = {
+            id: conversationIncoming[0].conversationId,
+            kind: 'thread',
+        };
+        iCtx.__turnConversationSequenceNumber = conversationIncoming[conversationIncoming.length - 1].sequenceNumber;
+    }
 
     // MentalState hash before Learning (will be set after we have mPrev)
     let mentalStateBeforeHash: string | undefined;

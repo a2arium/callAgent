@@ -373,6 +373,7 @@ Recommended source taxonomy:
 - `child`
 - `internal`
 - `env`
+- `conversation` (Phase 5.1 thread primitives)
 
 ### Canonical source-kind taxonomy
 
@@ -408,6 +409,12 @@ Env:
 - `env / config.updated`
 - `env / clock.tick`
 - `env / snapshot.available`
+
+Conversation (Phase 5.1):
+
+- `conversation / message.received`
+- `conversation / delivery.failed`
+- `conversation / thread.closed`
 
 ### Taxonomy rules
 
@@ -1003,6 +1010,22 @@ const response = await ctx.llm.call(prompt, {
 
 * LLM calls MUST NOT be placed in Policy, Learning, Perception, Shield, or Transition.
 
+## Conversation usage model
+
+Conversation APIs are effects. They belong in Execution.
+
+### Rule
+
+Policy may decide to send or close conversation messages, but Policy never calls `ctx.conversation.*`.
+
+Use in Execution only:
+
+- `ctx.conversation.startThread(...)`
+- `ctx.conversation.send(...)`
+- `ctx.conversation.close(...)`
+
+Conversation outcomes affect reasoning only after they re-enter through the inbox pipeline as conversation observations.
+
 
 ---
 
@@ -1180,6 +1203,14 @@ type TurnTrace = {
   toolCalls?: ToolCallTrace[];
   childCalls?: ChildCallTrace[];
 
+  // Conversation metadata (optional, compact summary only)
+  conversation?: { id: string; kind: 'thread' };
+  incomingMessages?: ConversationMessageSummary[];
+  outgoingMessages?: ConversationMessageSummary[];
+  messageSequenceNumber?: number;
+  dedupeHit?: boolean;
+  deliveryLagMs?: number;
+
   // Error (if turn failed)
   error?: { code?: string; message: string; module?: FrameworkModule; detail?: JsonValue };
 };
@@ -1199,6 +1230,7 @@ type TurnTrace = {
 - Include execution latency and cost metadata when available (`timings`, `usage`).
 - Include enough data to reconstruct why Policy chose its intent (`intent`, `perception`, `inboxCurrent`).
 - Sub-spans (LLM, tool, child) are logical children of the turn; child execution is linked via `ChildCallNode`.
+- Conversation fields (when present) must stay compact summaries; do not inline full message payload bodies or large artifacts.
 
 ### Correlation requirements
 

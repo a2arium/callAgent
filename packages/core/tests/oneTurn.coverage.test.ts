@@ -62,8 +62,6 @@ describe('oneTurn policy selection and rewards', () => {
 
         expect(policySpy).toHaveBeenCalled();
         
-        const traceBeforeAssert = h.lastTrace();
-        console.log('TRACE IN TEST:', JSON.stringify(traceBeforeAssert, null, 2));
         // Harness executed the correct intent branch!
         h.expectTurn(t => t.expectIntent('answer_with_llm'));
 
@@ -77,6 +75,7 @@ describe('oneTurn policy selection and rewards', () => {
         expect(trace.intent).toBeDefined();
         expect(trace.shield).toBeDefined();
         expect(Array.isArray(trace.inboxCurrent)).toBe(true);
+        expect(trace.conversation).toBeUndefined();
     });
 
     it('uses epsilon stochastic branch when explorationEpsilon triggers', async () => {

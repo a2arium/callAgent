@@ -39,6 +39,14 @@ export type HarnessState<Sensory = unknown> = {
     errors: Error[];
     turnCount: number;
     childDispatches: Array<{ agent: string; input: unknown }>;
+    /** When set, merges conversation deliveries from the session snapshot into `env.inbox` before each `runTurn`. */
+    pullPersistedConversationObservations?: () => Promise<void>;
+    /** Create a `conversation_threads` row so `conversation.send` works in harness (mirrors `startThread`). */
+    seedConversationThread?: (params: {
+        conversationId: string;
+        ownerAgentId: string;
+        participantAgentId: string;
+    }) => Promise<void>;
 };
 
 // --- Turn assertion context ---
