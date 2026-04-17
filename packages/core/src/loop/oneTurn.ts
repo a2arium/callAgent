@@ -135,20 +135,36 @@ export async function oneTurn<
     );
     const conversationIncoming = Array.isArray(inboxCurrent)
         ? inboxCurrent
-              .filter((obs): obs is Observation & { source: 'conversation'; kind: 'message.received'; payload: { message: { id: string; conversation: { id: string; kind: 'thread' }; senderAgentId: string; recipientAgentId: string; speechAct: string; sequenceNumber?: number; correlationId?: string; idempotencyKey?: string } } } =>
-                  obs?.source === 'conversation' &&
-                  obs?.kind === 'message.received' &&
-                  typeof (obs as { payload?: unknown }).payload === 'object' &&
-                  (obs as { payload?: { kind?: string } }).payload?.kind === 'message.received'
-              )
+              .filter((obs): obs is Observation => {
+                  if (obs?.source !== 'conversation') {
+                      return false;
+                  }
+                  const pk = (obs as { payload?: { kind?: string } }).payload?.kind;
+                  return pk === 'message.received' || pk === 'topic.message.received';
+              })
               .map((obs) => {
-                  const message = obs.payload.message;
+                  const message = (obs as { payload: { message: {
+                      id: string;
+                      conversation: { id: string; kind: 'thread' | 'topic' };
+                      senderAgentId: string;
+                      recipientAgentId: string;
+                      recipientMemberId?: string;
+                      speechAct: string;
+                      sequenceNumber?: number;
+                      correlationId?: string;
+                      idempotencyKey?: string;
+                  } } }).payload.message;
                   return {
                       id: message.id,
                       conversationId: message.conversation.id,
                       kind: message.conversation.kind,
                       senderAgentId: message.senderAgentId,
                       recipientAgentId: message.recipientAgentId,
+                      senderMemberId: message.senderAgentId,
+                      recipientMemberId:
+                          message.recipientMemberId !== undefined
+                              ? String(message.recipientMemberId)
+                              : message.recipientAgentId,
                       speechAct: message.speechAct,
                       sequenceNumber: message.sequenceNumber,
                       correlationId: message.correlationId,
@@ -160,7 +176,7 @@ export async function oneTurn<
     if (conversationIncoming.length > 0) {
         iCtx.__turnConversationSummary = {
             id: conversationIncoming[0].conversationId,
-            kind: 'thread',
+            kind: conversationIncoming[0].kind,
         };
         iCtx.__turnConversationSequenceNumber = conversationIncoming[conversationIncoming.length - 1].sequenceNumber;
     }

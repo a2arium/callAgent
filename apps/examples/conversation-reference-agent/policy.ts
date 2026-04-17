@@ -1,7 +1,7 @@
 import type { MentalState, MemoryReader, Intent } from '@a2arium/callagent-core';
 import { logger } from '@a2arium/callagent-utils';
 import type { Sensory } from './types.js';
-import { DEMO_CHILD_AGENT_ID, DEMO_THREAD_ID } from './types.js';
+import { DEMO_CHILD_AGENT_ID, DEMO_THREAD_ID, DEMO_TOPIC_PHASE2_ID } from './types.js';
 
 const log = logger.createLogger({ prefix: 'conversation-reference-agent' });
 
@@ -21,6 +21,20 @@ export function policy(m: MentalState<Sensory>, _mem: MemoryReader): Intent {
             intent: 'conversation_demo_follow_up',
             data: { threadId: DEMO_THREAD_ID, childAgentId: DEMO_CHILD_AGENT_ID },
         };
+    }
+    if (stage === 'want_phase2') {
+        return {
+            kind: 'internal',
+            intent: 'conversation_phase2_run',
+            data: { childAgentId: DEMO_CHILD_AGENT_ID },
+        };
+    }
+    if (stage === 'want_phase2_close') {
+        const topicView = m.memory?.conversation?.topics?.[DEMO_TOPIC_PHASE2_ID];
+        if (topicView?.status === 'closed') {
+            return { kind: 'wait' };
+        }
+        return { kind: 'internal', intent: 'conversation_phase2_close', data: {} };
     }
     if (stage === 'done') {
         log.info('conversation.initiator_complete', {

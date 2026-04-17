@@ -23,18 +23,71 @@ type ConversationThreadRecord = {
     updatedAt: string;
 };
 
+type ConversationKind = 'thread' | 'topic';
+
 type ConversationMessageRecord = {
     tenantId: string;
     conversationId: string;
     sequenceNumber: number;
     messageId: string;
     senderAgentId: string;
-    recipientAgentId: string;
+    senderMemberId: string;
+    recipientAgentId: string | null;
+    conversationKind: ConversationKind;
+    selectorKind: string | null;
     speechAct: string;
     payload: Record<string, unknown>;
     correlationId?: string;
     idempotencyKey?: string;
     createdAt: string;
+};
+
+type ConversationTopicRecord = {
+    tenantId: string;
+    conversationId: string;
+    ownerAgentId: string;
+    status: 'open' | 'closed' | 'archived';
+    defaultSelectorKind: string;
+    defaultSelectorData: Record<string, unknown>;
+    rotationCursor: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+type ConversationTopicMemberRecord = {
+    tenantId: string;
+    conversationId: string;
+    memberId: string;
+    agentId: string;
+    role: 'owner' | 'participant';
+    sessionId: string;
+    registeredAt: string;
+    leftAt: string | null;
+};
+
+type ConversationTopicInviteRecord = {
+    tenantId: string;
+    conversationId: string;
+    token: string;
+    inviteeAgentId: string;
+    inviteeMemberId: string;
+    role: 'owner' | 'participant';
+    sessionIdOverride: string | null;
+    issuedAt: string;
+    consumedAt: string | null;
+};
+
+type ConversationMessageDeliveryRecord = {
+    tenantId: string;
+    conversationId: string;
+    sequenceNumber: number;
+    memberId: string;
+    recipientAgentId: string;
+    sessionId: string;
+    dedupeHit: boolean;
+    status: 'delivered' | 'rejected' | 'queued';
+    error: Record<string, unknown> | null;
+    queuePosition: number | null;
 };
 
 export class WorkingMemorySessionStore {
@@ -320,13 +373,29 @@ export class WorkingMemorySessionStore {
         conversationId: string;
         messageId: string;
         senderAgentId: string;
-        recipientAgentId: string;
+        senderMemberId: string;
+        recipientAgentId: string | null;
+        conversationKind: ConversationKind;
+        selectorKind: string | null;
         speechAct: string;
         payload: Record<string, unknown>;
         correlationId?: string;
         idempotencyKey?: string;
     }): Promise<ConversationMessageRecord> {
-        const { tenantId, conversationId, messageId, senderAgentId, recipientAgentId, speechAct, payload, correlationId, idempotencyKey } = params;
+        const {
+            tenantId,
+            conversationId,
+            messageId,
+            senderAgentId,
+            senderMemberId,
+            recipientAgentId,
+            speechAct,
+            payload,
+            correlationId,
+            idempotencyKey,
+            conversationKind,
+            selectorKind,
+        } = params;
         await this.ensureConnected();
         return this.runWithReconnect(() =>
             this.prisma.$transaction(async (tx) => {
@@ -340,19 +409,22 @@ export class WorkingMemorySessionStore {
                 const sequenceNumber = seqRows[0]?.next_seq ?? 1;
                 await tx.$executeRawUnsafe(
                     `INSERT INTO conversation_messages
-                    (id, tenant_id, conversation_id, sequence_number, message_id, sender_agent_id, recipient_agent_id, speech_act, payload, correlation_id, idempotency_key, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, NOW())`,
+                    (id, tenant_id, conversation_id, sequence_number, message_id, sender_agent_id, sender_member_id, recipient_agent_id, speech_act, payload, correlation_id, idempotency_key, conversation_kind, selector_kind, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, NOW())`,
                     messageId,
                     tenantId,
                     conversationId,
                     sequenceNumber,
                     messageId,
                     senderAgentId,
+                    senderMemberId,
                     recipientAgentId,
                     speechAct,
                     JSON.stringify(payload),
                     correlationId ?? null,
-                    idempotencyKey ?? null
+                    idempotencyKey ?? null,
+                    conversationKind,
+                    selectorKind
                 );
                 return {
                     tenantId,
@@ -360,7 +432,10 @@ export class WorkingMemorySessionStore {
                     sequenceNumber,
                     messageId,
                     senderAgentId,
+                    senderMemberId,
                     recipientAgentId,
+                    conversationKind,
+                    selectorKind,
                     speechAct,
                     payload,
                     correlationId,
@@ -374,20 +449,20 @@ export class WorkingMemorySessionStore {
     async findConversationMessageByIdempotencyKey(params: {
         tenantId: string;
         conversationId: string;
-        senderAgentId: string;
+        senderMemberId: string;
         idempotencyKey: string;
     }): Promise<ConversationMessageRecord | null> {
-        const { tenantId, conversationId, senderAgentId, idempotencyKey } = params;
+        const { tenantId, conversationId, senderMemberId, idempotencyKey } = params;
         await this.ensureConnected();
         const rows = await this.runWithReconnect(() =>
             this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-                `SELECT tenant_id, conversation_id, sequence_number, message_id, sender_agent_id, recipient_agent_id, speech_act, payload, correlation_id, idempotency_key, created_at
+                `SELECT tenant_id, conversation_id, sequence_number, message_id, sender_agent_id, sender_member_id, recipient_agent_id, speech_act, payload, correlation_id, idempotency_key, conversation_kind, selector_kind, created_at
                  FROM conversation_messages
-                 WHERE tenant_id = $1 AND conversation_id = $2 AND sender_agent_id = $3 AND idempotency_key = $4
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND sender_member_id = $3 AND idempotency_key = $4
                  LIMIT 1`,
                 tenantId,
                 conversationId,
-                senderAgentId,
+                senderMemberId,
                 idempotencyKey
             )
         );
@@ -401,7 +476,10 @@ export class WorkingMemorySessionStore {
             sequenceNumber: Number(row.sequence_number),
             messageId: String(row.message_id),
             senderAgentId: String(row.sender_agent_id),
-            recipientAgentId: String(row.recipient_agent_id),
+            senderMemberId: String(row.sender_member_id),
+            recipientAgentId: row.recipient_agent_id == null ? null : String(row.recipient_agent_id),
+            conversationKind: (String(row.conversation_kind ?? 'thread')) as ConversationKind,
+            selectorKind: row.selector_kind == null ? null : String(row.selector_kind),
             speechAct: String(row.speech_act),
             payload: (row.payload as Record<string, unknown>) ?? {},
             correlationId: row.correlation_id == null ? undefined : String(row.correlation_id),
@@ -420,7 +498,7 @@ export class WorkingMemorySessionStore {
         await this.ensureConnected();
         const rows = await this.runWithReconnect(() =>
             this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-                `SELECT tenant_id, conversation_id, sequence_number, message_id, sender_agent_id, recipient_agent_id, speech_act, payload, correlation_id, idempotency_key, created_at
+                `SELECT tenant_id, conversation_id, sequence_number, message_id, sender_agent_id, sender_member_id, recipient_agent_id, speech_act, payload, correlation_id, idempotency_key, conversation_kind, selector_kind, created_at
                  FROM conversation_messages
                  WHERE tenant_id = $1 AND conversation_id = $2 AND sequence_number > $3
                  ORDER BY sequence_number ASC`,
@@ -435,12 +513,436 @@ export class WorkingMemorySessionStore {
             sequenceNumber: Number(row.sequence_number),
             messageId: String(row.message_id),
             senderAgentId: String(row.sender_agent_id),
-            recipientAgentId: String(row.recipient_agent_id),
+            senderMemberId: String(row.sender_member_id),
+            recipientAgentId: row.recipient_agent_id == null ? null : String(row.recipient_agent_id),
+            conversationKind: (String(row.conversation_kind ?? 'thread')) as ConversationKind,
+            selectorKind: row.selector_kind == null ? null : String(row.selector_kind),
             speechAct: String(row.speech_act),
             payload: (row.payload as Record<string, unknown>) ?? {},
             correlationId: row.correlation_id == null ? undefined : String(row.correlation_id),
             idempotencyKey: row.idempotency_key == null ? undefined : String(row.idempotency_key),
             createdAt: new Date(String(row.created_at)).toISOString(),
+        }));
+    }
+
+    async createConversationTopic(params: {
+        tenantId: string;
+        conversationId: string;
+        ownerAgentId: string;
+        defaultSelectorKind: string;
+        defaultSelectorData: Record<string, unknown>;
+        members: Array<{
+            memberId: string;
+            agentId: string;
+            role: 'owner' | 'participant';
+            sessionId: string;
+            registeredAt: string;
+        }>;
+    }): Promise<ConversationTopicRecord> {
+        const { tenantId, conversationId, ownerAgentId, defaultSelectorKind, defaultSelectorData, members } = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `INSERT INTO conversation_topics (tenant_id, conversation_id, owner_agent_id, status, default_selector_kind, default_selector_data, rotation_cursor, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'open', $4, $5::jsonb, NULL, NOW(), NOW())
+                 ON CONFLICT (tenant_id, conversation_id) DO NOTHING`,
+                tenantId,
+                conversationId,
+                ownerAgentId,
+                defaultSelectorKind,
+                JSON.stringify(defaultSelectorData)
+            )
+        );
+        for (const m of members) {
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `INSERT INTO conversation_topic_members (tenant_id, conversation_id, member_id, agent_id, role, session_id, registered_at, left_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7::timestamp, NULL)
+                     ON CONFLICT (tenant_id, conversation_id, member_id) DO NOTHING`,
+                    tenantId,
+                    conversationId,
+                    m.memberId,
+                    m.agentId,
+                    m.role,
+                    m.sessionId,
+                    m.registeredAt
+                )
+            );
+        }
+        const row = await this.getConversationTopic({ tenantId, conversationId });
+        if (!row) {
+            throw new Error('CONVERSATION_TOPIC_CREATE_FAILED');
+        }
+        return row;
+    }
+
+    async getConversationTopic(params: {
+        tenantId: string;
+        conversationId: string;
+    }): Promise<ConversationTopicRecord | null> {
+        const { tenantId, conversationId } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, owner_agent_id, status, default_selector_kind, default_selector_data, rotation_cursor, created_at, updated_at
+                 FROM conversation_topics WHERE tenant_id = $1 AND conversation_id = $2 LIMIT 1`,
+                tenantId,
+                conversationId
+            )
+        );
+        const row = rows[0];
+        if (!row) {
+            return null;
+        }
+        return {
+            tenantId: String(row.tenant_id),
+            conversationId: String(row.conversation_id),
+            ownerAgentId: String(row.owner_agent_id),
+            status: String(row.status) as 'open' | 'closed' | 'archived',
+            defaultSelectorKind: String(row.default_selector_kind),
+            defaultSelectorData: (row.default_selector_data as Record<string, unknown>) ?? {},
+            rotationCursor: row.rotation_cursor == null ? null : String(row.rotation_cursor),
+            createdAt: new Date(String(row.created_at)).toISOString(),
+            updatedAt: new Date(String(row.updated_at)).toISOString(),
+        };
+    }
+
+    async updateConversationTopic(params: {
+        tenantId: string;
+        conversationId: string;
+        patch: Partial<Pick<ConversationTopicRecord, 'status' | 'rotationCursor' | 'defaultSelectorKind' | 'defaultSelectorData'>>;
+    }): Promise<void> {
+        const { tenantId, conversationId, patch } = params;
+        await this.ensureConnected();
+        if (patch.status !== undefined) {
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `UPDATE conversation_topics SET status = $3, updated_at = NOW() WHERE tenant_id = $1 AND conversation_id = $2`,
+                    tenantId,
+                    conversationId,
+                    patch.status
+                )
+            );
+        }
+        if (patch.rotationCursor !== undefined) {
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `UPDATE conversation_topics SET rotation_cursor = $3, updated_at = NOW() WHERE tenant_id = $1 AND conversation_id = $2`,
+                    tenantId,
+                    conversationId,
+                    patch.rotationCursor
+                )
+            );
+        }
+        if (patch.defaultSelectorKind !== undefined) {
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `UPDATE conversation_topics SET default_selector_kind = $3, updated_at = NOW() WHERE tenant_id = $1 AND conversation_id = $2`,
+                    tenantId,
+                    conversationId,
+                    patch.defaultSelectorKind
+                )
+            );
+        }
+        if (patch.defaultSelectorData !== undefined) {
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `UPDATE conversation_topics SET default_selector_data = $3::jsonb, updated_at = NOW() WHERE tenant_id = $1 AND conversation_id = $2`,
+                    tenantId,
+                    conversationId,
+                    JSON.stringify(patch.defaultSelectorData)
+                )
+            );
+        }
+    }
+
+    async listConversationTopicMembers(params: {
+        tenantId: string;
+        conversationId: string;
+        activeOnly?: boolean;
+    }): Promise<ConversationTopicMemberRecord[]> {
+        const { tenantId, conversationId } = params;
+        await this.ensureConnected();
+        const activeClause = params.activeOnly ? 'AND left_at IS NULL' : '';
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, member_id, agent_id, role, session_id, registered_at, left_at
+                 FROM conversation_topic_members
+                 WHERE tenant_id = $1 AND conversation_id = $2 ${activeClause}
+                 ORDER BY registered_at ASC, member_id ASC`,
+                tenantId,
+                conversationId
+            )
+        );
+        return rows.map((row) => ({
+            tenantId: String(row.tenant_id),
+            conversationId: String(row.conversation_id),
+            memberId: String(row.member_id),
+            agentId: String(row.agent_id),
+            role: String(row.role) as 'owner' | 'participant',
+            sessionId: String(row.session_id),
+            registeredAt: new Date(String(row.registered_at)).toISOString(),
+            leftAt: row.left_at == null ? null : new Date(String(row.left_at)).toISOString(),
+        }));
+    }
+
+    async addConversationTopicMember(params: {
+        tenantId: string;
+        conversationId: string;
+        memberId: string;
+        agentId: string;
+        role: 'owner' | 'participant';
+        sessionId: string;
+        registeredAt: string;
+    }): Promise<void> {
+        const p = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `INSERT INTO conversation_topic_members (tenant_id, conversation_id, member_id, agent_id, role, session_id, registered_at, left_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::timestamp, NULL)`,
+                p.tenantId,
+                p.conversationId,
+                p.memberId,
+                p.agentId,
+                p.role,
+                p.sessionId,
+                p.registeredAt
+            )
+        );
+    }
+
+    async leaveConversationTopicMember(params: {
+        tenantId: string;
+        conversationId: string;
+        memberId: string;
+        leftAt: string;
+    }): Promise<void> {
+        const p = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_topic_members SET left_at = $4::timestamp
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND member_id = $3`,
+                p.tenantId,
+                p.conversationId,
+                p.memberId,
+                p.leftAt
+            )
+        );
+    }
+
+    async getConversationTopicMemberByMemberId(params: {
+        tenantId: string;
+        conversationId: string;
+        memberId: string;
+    }): Promise<ConversationTopicMemberRecord | null> {
+        const { tenantId, conversationId, memberId } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, member_id, agent_id, role, session_id, registered_at, left_at
+                 FROM conversation_topic_members
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND member_id = $3 AND left_at IS NULL
+                 LIMIT 1`,
+                tenantId,
+                conversationId,
+                memberId
+            )
+        );
+        const row = rows[0];
+        if (!row) {
+            return null;
+        }
+        return {
+            tenantId: String(row.tenant_id),
+            conversationId: String(row.conversation_id),
+            memberId: String(row.member_id),
+            agentId: String(row.agent_id),
+            role: String(row.role) as 'owner' | 'participant',
+            sessionId: String(row.session_id),
+            registeredAt: new Date(String(row.registered_at)).toISOString(),
+            leftAt: row.left_at == null ? null : new Date(String(row.left_at)).toISOString(),
+        };
+    }
+
+    async listConversationTopicMembersByAgent(params: {
+        tenantId: string;
+        conversationId: string;
+        agentId: string;
+        activeOnly?: boolean;
+    }): Promise<ConversationTopicMemberRecord[]> {
+        const { tenantId, conversationId, agentId } = params;
+        await this.ensureConnected();
+        const activeClause = params.activeOnly ? 'AND left_at IS NULL' : '';
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, member_id, agent_id, role, session_id, registered_at, left_at
+                 FROM conversation_topic_members
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND agent_id = $3 ${activeClause}
+                 ORDER BY registered_at ASC, member_id ASC`,
+                tenantId,
+                conversationId,
+                agentId
+            )
+        );
+        return rows.map((row) => ({
+            tenantId: String(row.tenant_id),
+            conversationId: String(row.conversation_id),
+            memberId: String(row.member_id),
+            agentId: String(row.agent_id),
+            role: String(row.role) as 'owner' | 'participant',
+            sessionId: String(row.session_id),
+            registeredAt: new Date(String(row.registered_at)).toISOString(),
+            leftAt: row.left_at == null ? null : new Date(String(row.left_at)).toISOString(),
+        }));
+    }
+
+    async issueConversationTopicInvite(params: {
+        tenantId: string;
+        conversationId: string;
+        token: string;
+        inviteeAgentId: string;
+        inviteeMemberId: string;
+        role: 'owner' | 'participant';
+        sessionIdOverride: string | null;
+        issuedAt: string;
+    }): Promise<void> {
+        const p = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `INSERT INTO conversation_topic_invites (token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, consumed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamp, NULL)`,
+                p.token,
+                p.tenantId,
+                p.conversationId,
+                p.inviteeAgentId,
+                p.inviteeMemberId,
+                p.role,
+                p.sessionIdOverride,
+                p.issuedAt
+            )
+        );
+    }
+
+    async consumeConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+        consumedAt: string;
+    }): Promise<{
+        conversationId: string;
+        inviteeAgentId: string;
+        inviteeMemberId: string;
+        role: 'owner' | 'participant';
+        sessionIdOverride: string | null;
+    } | null> {
+        const { tenantId, token, consumedAt } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, consumed_at
+                 FROM conversation_topic_invites WHERE token = $1 AND tenant_id = $2 LIMIT 1`,
+                token,
+                tenantId
+            )
+        );
+        const row = rows[0];
+        if (!row || row.consumed_at != null) {
+            return null;
+        }
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_topic_invites SET consumed_at = $2::timestamp WHERE token = $1`,
+                token,
+                consumedAt
+            )
+        );
+        const im = row.invitee_member_id;
+        return {
+            conversationId: String(row.conversation_id),
+            inviteeAgentId: String(row.invitee_agent_id),
+            inviteeMemberId: im == null ? String(row.invitee_agent_id) : String(im),
+            role: String(row.role) as 'owner' | 'participant',
+            sessionIdOverride: row.session_id_override == null ? null : String(row.session_id_override),
+        };
+    }
+
+    async recordConversationMessageDeliveries(params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+        rows: Array<{
+            memberId: string;
+            recipientAgentId: string;
+            sessionId: string;
+            dedupeHit: boolean;
+            status: ConversationMessageDeliveryRecord['status'];
+            error: Record<string, unknown> | null;
+            queuePosition: number | null;
+        }>;
+    }): Promise<void> {
+        const { tenantId, conversationId, sequenceNumber } = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$transaction(async (tx) => {
+                await tx.$executeRawUnsafe(
+                    `DELETE FROM conversation_message_deliveries WHERE tenant_id = $1 AND conversation_id = $2 AND sequence_number = $3`,
+                    tenantId,
+                    conversationId,
+                    sequenceNumber
+                );
+                for (const r of params.rows) {
+                    const id = `dlv_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                    await tx.$executeRawUnsafe(
+                        `INSERT INTO conversation_message_deliveries
+                        (id, tenant_id, conversation_id, sequence_number, member_id, recipient_agent_id, session_id, dedupe_hit, status, error, queue_position)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)`,
+                        id,
+                        tenantId,
+                        conversationId,
+                        sequenceNumber,
+                        r.memberId,
+                        r.recipientAgentId,
+                        r.sessionId,
+                        r.dedupeHit,
+                        r.status,
+                        r.error == null ? null : JSON.stringify(r.error),
+                        r.queuePosition
+                    );
+                }
+            })
+        );
+    }
+
+    async listConversationMessageDeliveries(params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+    }): Promise<ConversationMessageDeliveryRecord[]> {
+        const { tenantId, conversationId, sequenceNumber } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, sequence_number, member_id, recipient_agent_id, session_id, dedupe_hit, status, error, queue_position
+                 FROM conversation_message_deliveries
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND sequence_number = $3`,
+                tenantId,
+                conversationId,
+                sequenceNumber
+            )
+        );
+        return rows.map((row) => ({
+            tenantId: String(row.tenant_id),
+            conversationId: String(row.conversation_id),
+            sequenceNumber: Number(row.sequence_number),
+            memberId: String(row.member_id),
+            recipientAgentId: String(row.recipient_agent_id),
+            sessionId: String(row.session_id),
+            dedupeHit: Boolean(row.dedupe_hit),
+            status: String(row.status) as ConversationMessageDeliveryRecord['status'],
+            error: row.error == null ? null : (row.error as Record<string, unknown>),
+            queuePosition: row.queue_position == null ? null : Number(row.queue_position),
         }));
     }
 }

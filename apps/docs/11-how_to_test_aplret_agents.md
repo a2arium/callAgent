@@ -682,3 +682,32 @@ Also assert TurnTrace conversation fields when present:
 - `outgoingMessages`
 - `messageSequenceNumber`
 - `dedupeHit`
+
+## Conversation topic tests
+
+For topic-enabled agents, add deterministic harness coverage for:
+
+- `ctx.conversation.createTopic` / `invite` / `join` / `leave` / `post` / `close`
+- selector behavior: `broadcast`, `round_robin`, `explicit_recipient`
+- fanout receipts: `accepted | partial | rejected | queued`
+- idempotency replay on topic posts (`dedupeHit: true`)
+- multi-seat behavior (same `agentId`, distinct `memberId`) when Phase 2a is used
+
+Topic observation injection helpers to use in tests:
+
+- `injectTopicMessageReceived(...)`
+- `injectTopicMemberJoined(...)`
+- `injectTopicMemberLeft(...)`
+- `injectTopicClosed(...)`
+- `injectOutboundCommitted(...)`
+
+Notes:
+
+- helper payloads may include `memberId`; if omitted, test fixtures can use `memberId = agentId` for single-seat paths
+- assert projection membership by `memberId` (not just `agentId`) when testing multiplicity
+
+Also assert TurnTrace topic fields when present:
+
+- `topicSelectorDecision.kind`
+- `topicSelectorDecision.resolvedMembers`
+- `fanoutSummary.accepted/rejected/queued/dedupeHits`

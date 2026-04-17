@@ -20,11 +20,22 @@ import { SessionManager } from '../orchestration/SessionManager.js';
 import { ConversationService } from '../internal/conversation/ConversationService.js';
 import type {
     CloseConversationOptions,
+    ConversationRef,
+    FanoutSendReceipt,
     OutboundThreadMessage,
+    OutboundTopicMessage,
     SendOptions,
     StartThreadOptions,
     ThreadRef,
+    TopicCreateOptions,
+    TopicInviteOptions,
+    TopicJoinOptions,
+    TopicLeaveOptions,
+    TopicPostOptions,
+    TopicRef,
 } from '../public-types/conversation/types.js';
+import { MemberIdSchema } from '../public-types/conversation/schemas.js';
+import { stampTopicPostTurnTrace } from '../orchestration/api/topicTurnTraceStamp.js';
 
 function observationDedupeKey(obs: Observation): string {
     if (obs.source === 'conversation' && obs.kind === 'message.received') {
@@ -256,12 +267,15 @@ export function createTestContext(
                     };
                     iCtx.__turnConversationSequenceNumber = receipt.receipt.sequenceNumber;
                     iCtx.__turnConversationDedupeHit = receipt.receipt.dedupeHit;
+                    const ra = options.message.recipientAgentId ?? options.targetAgentId;
                     iCtx.__turnOutgoingConversationMessages?.push({
                         id: receipt.receipt.messageId,
                         conversationId: receipt.thread.id,
                         kind: 'thread',
                         senderAgentId: options.message.senderAgentId,
-                        recipientAgentId: options.message.recipientAgentId ?? options.targetAgentId,
+                        recipientAgentId: ra,
+                        senderMemberId: options.message.senderAgentId,
+                        recipientMemberId: MemberIdSchema.parse(ra),
                         speechAct: options.message.speechAct,
                         sequenceNumber: receipt.receipt.sequenceNumber,
                         correlationId: options.message.correlationId,
@@ -286,6 +300,8 @@ export function createTestContext(
                         kind: 'thread',
                         senderAgentId: message.senderAgentId,
                         recipientAgentId: message.recipientAgentId,
+                        senderMemberId: message.senderAgentId,
+                        recipientMemberId: MemberIdSchema.parse(message.recipientAgentId),
                         speechAct: message.speechAct,
                         sequenceNumber: receipt.sequenceNumber,
                         correlationId: message.correlationId,
@@ -294,8 +310,28 @@ export function createTestContext(
                 }
                 return receipt;
             },
-            close: async (thread: ThreadRef, options?: CloseConversationOptions) => {
-                return conversationService.close(tenantId, thread, options);
+            createTopic: (options: TopicCreateOptions) =>
+                conversationService.createTopic(tenantId, harnessSessionId, harnessAgentId, options),
+            invite: (options: TopicInviteOptions) =>
+                conversationService.invite(tenantId, harnessSessionId, harnessAgentId, options),
+            join: (topic: TopicRef, options: TopicJoinOptions) =>
+                conversationService.join(tenantId, harnessSessionId, harnessAgentId, topic, options),
+            leave: (topic: TopicRef, options?: TopicLeaveOptions) =>
+                conversationService.leave(tenantId, harnessSessionId, harnessAgentId, topic, options),
+            post: async (topic: TopicRef, message: OutboundTopicMessage, options?: TopicPostOptions) => {
+                const receipt: FanoutSendReceipt = await conversationService.post(
+                    tenantId,
+                    harnessSessionId,
+                    harnessAgentId,
+                    topic,
+                    message,
+                    options
+                );
+                stampTopicPostTurnTrace(ctx as InternalTaskContext, topic, options, receipt);
+                return receipt;
+            },
+            close: async (ref: ConversationRef, options?: CloseConversationOptions) => {
+                return conversationService.close(tenantId, harnessSessionId, harnessAgentId, ref, options);
             },
         },
     };

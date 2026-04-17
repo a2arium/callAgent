@@ -12,6 +12,8 @@ import { createTurnAssertionContext, HarnessAssertionError } from './HarnessAsse
 import { InvariantError, ModuleExecutionError } from '../utils/errors.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
+import type { TopicRef, TopicSelector } from '../public-types/conversation/types.js';
+import type { InboundMessage } from '../public-types/conversation/types.js';
 
 export type TestHarness<Sensory = unknown> = {
     seedMentalState(m: DeepPartial<MentalState<Sensory>>): TestHarness<Sensory>;
@@ -29,6 +31,16 @@ export type TestHarness<Sensory = unknown> = {
     injectToolFailed(params: { token: string; tool: string; error?: unknown }): TestHarness<Sensory>;
     injectChildCompleted(params: { token: string; agentId: string; result?: unknown }): TestHarness<Sensory>;
     injectChildFailed(params: { token: string; agentId: string; error?: unknown }): TestHarness<Sensory>;
+
+    /** Topic Phase 2 helpers — construct canonical `source: 'conversation'` observations. */
+    injectTopicMessageReceived(params: {
+        topic: TopicRef;
+        selector: TopicSelector;
+        message: InboundMessage;
+    }): TestHarness<Sensory>;
+    injectTopicMemberJoined(params: { topic: TopicRef; member: { agentId: string; role: 'owner' | 'participant' }; ts: string }): TestHarness<Sensory>;
+    injectTopicMemberLeft(params: { topic: TopicRef; agentId: string; ts: string; reason?: string }): TestHarness<Sensory>;
+    injectTopicClosed(params: { topic: TopicRef; ts: string; reason?: string }): TestHarness<Sensory>;
 
     runTurn(): Promise<TestHarness<Sensory>>;
 
@@ -182,6 +194,51 @@ export function createTestHarness<
                 kind: 'child.failed',
                 payload: { token: params.token, agentId: params.agentId, error: { code: 'E1', message: String(params.error) } }
             });
+        },
+        injectTopicMessageReceived(params) {
+            return harness.injectObservation({
+                source: 'conversation',
+                payload: {
+                    kind: 'topic.message.received',
+                    topic: params.topic,
+                    selector: params.selector,
+                    message: params.message,
+                },
+            } as Observation);
+        },
+        injectTopicMemberJoined(params) {
+            return harness.injectObservation({
+                source: 'conversation',
+                payload: {
+                    kind: 'topic.member.joined',
+                    topic: params.topic,
+                    member: params.member,
+                    ts: params.ts,
+                },
+            } as Observation);
+        },
+        injectTopicMemberLeft(params) {
+            return harness.injectObservation({
+                source: 'conversation',
+                payload: {
+                    kind: 'topic.member.left',
+                    topic: params.topic,
+                    agentId: params.agentId,
+                    ts: params.ts,
+                    ...(params.reason !== undefined ? { reason: params.reason } : {}),
+                },
+            } as Observation);
+        },
+        injectTopicClosed(params) {
+            return harness.injectObservation({
+                source: 'conversation',
+                payload: {
+                    kind: 'topic.closed',
+                    topic: params.topic,
+                    ts: params.ts,
+                    ...(params.reason !== undefined ? { reason: params.reason } : {}),
+                },
+            } as Observation);
         },
 
         async runTurn() {

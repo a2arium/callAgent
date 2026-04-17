@@ -163,9 +163,11 @@ export type ChildCallTrace = z.infer<typeof ChildCallTraceSchema>;
 export const ConversationMessageSummarySchema = z.object({
     id: z.string(),
     conversationId: z.string(),
-    kind: z.literal('thread'),
+    kind: z.enum(['thread', 'topic']),
     senderAgentId: z.string(),
     recipientAgentId: z.string(),
+    senderMemberId: z.string().optional(),
+    recipientMemberId: z.string().optional(),
     speechAct: z.string(),
     sequenceNumber: z.number().int().positive().optional(),
     correlationId: z.string().optional(),
@@ -226,7 +228,7 @@ export const TurnTraceSchema = z.object({
     conversation: z
         .object({
             id: z.string(),
-            kind: z.literal('thread'),
+            kind: z.enum(['thread', 'topic']),
         })
         .optional(),
     incomingMessages: z.array(ConversationMessageSummarySchema).optional(),
@@ -234,6 +236,25 @@ export const TurnTraceSchema = z.object({
     messageSequenceNumber: z.number().int().positive().optional(),
     dedupeHit: z.boolean().optional(),
     deliveryLagMs: z.number().optional(),
+    topicSelectorDecision: z
+        .object({
+            kind: z.enum(['broadcast', 'round_robin', 'explicit_recipient']),
+            resolvedMembers: z.array(
+                z.object({
+                    memberId: z.string(),
+                    agentId: z.string(),
+                })
+            ),
+        })
+        .optional(),
+    fanoutSummary: z
+        .object({
+            accepted: z.number(),
+            rejected: z.number(),
+            queued: z.number(),
+            dedupeHits: z.number(),
+        })
+        .optional(),
 
     // Error (if turn failed)
     error: z

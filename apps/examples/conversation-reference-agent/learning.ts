@@ -25,6 +25,32 @@ export function learning(
             },
         };
     }
+    if (obs.kind === 'user_message' && obs.text === 'phase2') {
+        return {
+            ...prev,
+            memory: {
+                ...prev.memory,
+                sensory: {
+                    ...prev.memory.sensory,
+                    userText: obs.text,
+                    demoStage: 'want_phase2',
+                },
+            },
+        };
+    }
+    if (obs.kind === 'user_message' && obs.text === 'phase2-close') {
+        return {
+            ...prev,
+            memory: {
+                ...prev.memory,
+                sensory: {
+                    ...prev.memory.sensory,
+                    userText: obs.text,
+                    demoStage: 'want_phase2_close',
+                },
+            },
+        };
+    }
     if (obs.kind === 'conversation_delivery') {
         return {
             ...prev,

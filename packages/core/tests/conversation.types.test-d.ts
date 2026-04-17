@@ -1,9 +1,17 @@
 import { expectType, expectError } from 'tsd';
 import type { TaskContext } from '../src/shared/types/index.js';
-import type { SendReceipt, OutboundThreadMessage } from '../src/public-types/conversation/types.js';
+import type {
+    SendReceipt,
+    OutboundThreadMessage,
+    OutboundTopicMessage,
+    ThreadRef,
+    TopicRef,
+} from '../src/public-types/conversation/types.js';
 import type { Observation } from '../src/loop/oneTurn.js';
 
 declare const ctx: TaskContext;
+declare const threadRef: ThreadRef;
+declare const topicRef: TopicRef;
 
 type ConversationApi = NonNullable<TaskContext['conversation']>;
 type StartThreadReturn = Awaited<ReturnType<ConversationApi['startThread']>>;
@@ -31,6 +39,20 @@ if (ctx.conversation) {
             }
         )
     );
+
+    const topicMsg: OutboundTopicMessage = {
+        senderAgentId: 'a',
+        speechAct: 'inform',
+        content: {},
+    };
+    expectError(ctx.conversation.post(threadRef, topicMsg));
+    const threadMsg: OutboundThreadMessage = {
+        senderAgentId: 'a',
+        recipientAgentId: 'b',
+        speechAct: 'inform',
+        content: {},
+    };
+    expectError(ctx.conversation.send(topicRef, threadMsg));
 }
 
 declare const receipt: SendReceipt;
@@ -50,9 +72,8 @@ const _msg: OutboundThreadMessage = {
 };
 expectType<OutboundThreadMessage>(_msg);
 
-const _validObs: Observation = {
+const _validObs = {
     source: 'conversation',
-    kind: 'message.received',
     payload: {
         kind: 'message.received',
         message: {
@@ -66,5 +87,5 @@ const _validObs: Observation = {
             ts: '2020-01-01T00:00:00.000Z',
         },
     },
-};
+} as Observation;
 void _validObs;

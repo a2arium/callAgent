@@ -1,22 +1,55 @@
+import { MemberIdSchema } from './schemas.js';
+import type { MemberId } from './types.js';
+
+/** Validate / brand a runtime string as topic-scoped `MemberId`. */
+export function memberId(s: string): MemberId {
+    return MemberIdSchema.parse(s);
+}
+
 export {
+    MAX_TOPIC_MEMBERS,
     ConversationIdSchema,
     MessageIdSchema,
     CorrelationIdSchema,
     IdempotencyKeySchema,
     AgentIdSchema,
+    MemberIdSchema,
+    ResolvedTopicMemberSchema,
     ThreadRefSchema,
+    TopicRefSchema,
     ConversationRefSchema,
+    TopicMemberRoleSchema,
+    TopicMemberSchema,
+    TopicSelectorSchema,
     ConversationErrorSchema,
     SpeechActSchema,
     OutboundThreadMessageSchema,
+    OutboundTopicMessageSchema,
     InboundMessageSchema,
     SendReceiptSchema,
+    DeliverySummarySchema,
+    FanoutSendReceiptSchema,
     StartThreadOptionsSchema,
     SendOptionsSchema,
     CloseConversationOptionsSchema,
+    TopicCreateOptionsSchema,
+    TopicInviteOptionsSchema,
+    TopicJoinOptionsSchema,
+    TopicLeaveOptionsSchema,
+    TopicPostOptionsSchema,
     StartThreadReceiptSchema,
+    TopicCreateReceiptSchema,
+    TopicInviteReceiptSchema,
+    TopicJoinReceiptSchema,
+    TopicLeaveReceiptSchema,
     CloseConversationReceiptSchema,
 } from './schemas.js';
+
+export {
+    ConversationProjectionSchema,
+    ThreadProjectionEntrySchema,
+    TopicProjectionEntrySchema,
+} from './projection.js';
 
 export type {
     ConversationId,
@@ -24,17 +57,34 @@ export type {
     CorrelationId,
     IdempotencyKey,
     AgentId,
+    MemberId,
+    ResolvedTopicMember,
     ThreadRef,
+    TopicRef,
     ConversationRef,
     ConversationError,
+    TopicMember,
+    TopicSelector,
     OutboundThreadMessage,
+    OutboundTopicMessage,
     InboundMessage,
     SendReceipt,
+    DeliverySummary,
+    FanoutSendReceipt,
     StartThreadOptions,
     SendOptions,
     CloseConversationOptions,
+    TopicCreateOptions,
+    TopicInviteOptions,
+    TopicJoinOptions,
+    TopicLeaveOptions,
+    TopicPostOptions,
     StartThreadReceipt,
+    TopicCreateReceipt,
+    TopicInviteReceipt,
+    TopicJoinReceipt,
+    TopicLeaveReceipt,
     CloseConversationReceipt,
+    ConversationProjection,
     ConversationApi,
 } from './types.js';
-

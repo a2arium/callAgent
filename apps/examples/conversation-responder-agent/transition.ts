@@ -9,6 +9,42 @@ export function transition(
 ): TransitionOut {
     if (exec.action.kind === 'internal' && exec.action.done && exec.result.status === 'ok') {
         const data = exec.result.data;
+        if (data && typeof data === 'object' && 'joinContinue' in data && data.joinContinue === true) {
+            return {
+                kind: 'continue',
+                observations: [
+                    {
+                        source: 'internal',
+                        kind: 'state.noted',
+                        payload: { phase: 'topic_joined' },
+                    },
+                ],
+            };
+        }
+        if (data && typeof data === 'object' && 'topicReplyContinue' in data && data.topicReplyContinue === true) {
+            return {
+                kind: 'continue',
+                observations: [
+                    {
+                        source: 'internal',
+                        kind: 'state.noted',
+                        payload: { phase: 'topic_reply_done' },
+                    },
+                ],
+            };
+        }
+        if (data && typeof data === 'object' && 'leaveContinue' in data && data.leaveContinue === true) {
+            return {
+                kind: 'continue',
+                observations: [
+                    {
+                        source: 'internal',
+                        kind: 'state.noted',
+                        payload: { phase: 'topic_left_done' },
+                    },
+                ],
+            };
+        }
         if (data && typeof data === 'object' && 'replyOutbound' in data && data.replyOutbound === true) {
             const threadId = typeof data.threadId === 'string' ? data.threadId : undefined;
             if (threadId) {

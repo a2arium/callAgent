@@ -112,6 +112,12 @@ Example observation lines:
 - `child/html.fetched`
 ```
 
+For conversation-enabled agents, vocabulary SHOULD include topic semantics where relevant:
+
+- selectors: `broadcast`, `round_robin`, `explicit_recipient`
+- topic observation kinds: `topic.message.received`, `topic.member.joined`, `topic.member.left`, `topic.closed`, `outbound.committed`
+- seat identity: `memberId` (topic-scoped), with `agentId` as routing identity
+
 ### Flow table
 
 **Most important section.** Columns **MUST** include:

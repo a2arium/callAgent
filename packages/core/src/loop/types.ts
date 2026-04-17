@@ -182,6 +182,8 @@ export type MentalState<Sensory = unknown> = {
         decisions?: Record<string, import('../shared/types/index.js').DecisionEntry>;
         scratch?: unknown;       // Optional ephemeral working set (Learning-owned)
         window?: unknown;        // Optional ephemeral window (Learning-owned)
+        /** Policy-safe conversation projection (framework reducer; read-only for Policy). */
+        conversation?: import('../public-types/conversation/projection.js').ConversationProjection;
         longTerm: {
             episodic: EpisodicEvent[];
             semantic: { concepts: SemanticConcept[] };

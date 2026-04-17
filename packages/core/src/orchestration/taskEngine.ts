@@ -327,9 +327,8 @@ export class TaskEngine {
     }): Promise<void> {
         if (!this.sessionManager) return;
         const thread = { kind: 'thread' as const, id: params.threadId };
-        const observation: import('../types/observation.js').Observation = {
+        const observation = {
             source: 'conversation',
-            kind: 'delivery.failed',
             payload: {
                 kind: 'delivery.failed',
                 thread,
@@ -337,7 +336,7 @@ export class TaskEngine {
                 messageId: params.messageId,
                 recipientAgentId: params.recipientAgentId,
             },
-        };
+        } as import('../types/observation.js').Observation;
         const router = new ConversationRouter(this.sessionManager);
         await router.routeObservation({
             tenantId: params.tenantId,

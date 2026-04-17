@@ -1,10 +1,16 @@
 import { z } from 'zod';
 import {
     AgentIdSchema,
+    ConversationErrorSchema,
+    ConversationRefSchema,
+    DeliverySummarySchema,
     InboundMessageSchema,
     MessageIdSchema,
+    MemberIdSchema,
     ThreadRefSchema,
-    ConversationErrorSchema,
+    TopicRefSchema,
+    ResolvedTopicMemberSchema,
+    TopicSelectorSchema,
 } from '../public-types/conversation/schemas.js';
 
 export const ObservationProvenanceSchema = z.object({
@@ -62,6 +68,82 @@ const BaseObservationProps = {
     error: ExecErrorPayloadSchema.optional()
 };
 
+/** Single source of truth: payload.kind drives the event type. */
+export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
+    z.object({
+        kind: z.literal('message.received'),
+        message: InboundMessageSchema,
+    }),
+    z.object({
+        kind: z.literal('delivery.failed'),
+        thread: ThreadRefSchema,
+        error: ConversationErrorSchema,
+        messageId: MessageIdSchema.optional(),
+        recipientAgentId: AgentIdSchema.optional(),
+    }),
+    z.object({
+        kind: z.literal('thread.closed'),
+        thread: ThreadRefSchema,
+        reason: z.string().optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.message.received'),
+        message: InboundMessageSchema,
+        topic: TopicRefSchema,
+        selector: TopicSelectorSchema,
+        recipient: z.object({
+            memberId: MemberIdSchema,
+            agentId: AgentIdSchema,
+        }),
+    }),
+    z.object({
+        kind: z.literal('topic.member.joined'),
+        topic: TopicRefSchema,
+        member: ResolvedTopicMemberSchema,
+        ts: z.string(),
+    }),
+    z.object({
+        kind: z.literal('topic.member.left'),
+        topic: TopicRefSchema,
+        agentId: AgentIdSchema,
+        memberId: MemberIdSchema,
+        reason: z.string().optional(),
+        ts: z.string(),
+    }),
+    z.object({
+        kind: z.literal('topic.closed'),
+        topic: TopicRefSchema,
+        reason: z.string().optional(),
+        ts: z.string(),
+    }),
+    z.object({
+        kind: z.literal('outbound.committed'),
+        ref: ConversationRefSchema,
+        messageId: MessageIdSchema,
+        sequenceNumber: z.number().int().positive(),
+        correlationId: z.string().min(1).optional(),
+        deliveries: z.array(DeliverySummarySchema),
+    }),
+]);
+
+export type ConversationPayload = z.infer<typeof ConversationPayloadSchema>;
+
+export const ConversationObservationSchema = z
+    .object({
+        source: z.literal('conversation'),
+        payload: ConversationPayloadSchema,
+        ...BaseObservationProps,
+    })
+    .transform((o) => ({
+        source: 'conversation' as const,
+        kind: o.payload.kind,
+        payload: o.payload,
+        provenance: o.provenance,
+        error: o.error,
+    }));
+
+export type ConversationObservation = z.infer<typeof ConversationObservationSchema>;
+
 export const ObservationSchema = z.discriminatedUnion('source', [
     z.object({ 
         source: z.literal('user'), 
@@ -101,29 +183,7 @@ export const ObservationSchema = z.discriminatedUnion('source', [
         payload: z.unknown(),
         ...BaseObservationProps
     }),
-    z.object({
-        source: z.literal('conversation'),
-        kind: z.enum(['message.received', 'delivery.failed', 'thread.closed']),
-        payload: z.discriminatedUnion('kind', [
-            z.object({
-                kind: z.literal('message.received'),
-                message: InboundMessageSchema,
-            }),
-            z.object({
-                kind: z.literal('delivery.failed'),
-                thread: ThreadRefSchema,
-                error: ConversationErrorSchema,
-                messageId: MessageIdSchema.optional(),
-                recipientAgentId: AgentIdSchema.optional(),
-            }),
-            z.object({
-                kind: z.literal('thread.closed'),
-                thread: ThreadRefSchema,
-                reason: z.string().optional(),
-            }),
-        ]),
-        ...BaseObservationProps,
-    })
+    ConversationObservationSchema,
 ]);
 
 export type Observation = z.infer<typeof ObservationSchema>;

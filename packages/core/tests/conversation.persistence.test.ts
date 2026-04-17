@@ -73,7 +73,7 @@ describe('Conversation persistence (in-memory store)', () => {
         const found = await sessionManager.findConversationMessageByIdempotencyKey({
             tenantId,
             conversationId: thread.id,
-            senderAgentId: parent,
+            senderMemberId: parent,
             idempotencyKey: 'idem-x',
         });
         expect(found?.sequenceNumber).toBe(2);
@@ -113,7 +113,7 @@ describe('Conversation persistence (in-memory store)', () => {
             },
         });
         const thread = started.thread;
-        await service.close(tenantId, thread);
+        await service.close(tenantId, ownerSession, parent, thread);
         const receipt = await service.send(tenantId, ownerSession, thread, {
             senderAgentId: parent,
             recipientAgentId: child,
@@ -122,7 +122,7 @@ describe('Conversation persistence (in-memory store)', () => {
         });
         expect(receipt.status).toBe('rejected');
         if (receipt.status === 'rejected') {
-            expect(receipt.error.type).toBe('ThreadClosed');
+            expect(receipt.error.type).toBe('ConversationClosed');
         }
     });
 });

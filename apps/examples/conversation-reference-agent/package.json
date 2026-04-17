@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && cp agent-card.json agent-runtime.json dist/",
-    "test": "node --experimental-vm-modules ../../../node_modules/jest/bin/jest.js --config ../../../jest.config.cjs --runTestsByPath tests/golden.test.ts"
+    "test": "node --experimental-vm-modules ../../../node_modules/jest/bin/jest.js --config ../../../jest.config.cjs --runTestsByPath tests/golden.test.ts tests/phase2.demo.test.ts"
   },
   "dependencies": {
     "@a2arium/callagent-core": "workspace:*",

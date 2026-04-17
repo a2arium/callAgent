@@ -362,3 +362,18 @@ Interpretation:
 - `dedupeHit: true` indicates idempotent replay path
 - `messageSequenceNumber` should advance only for durably accepted messages
 
+When diagnosing topic behavior, inspect:
+
+- `trace.conversation` (`kind: 'topic'`)
+- `trace.incomingMessages` / `trace.outgoingMessages`
+- `trace.topicSelectorDecision.kind`
+- `trace.topicSelectorDecision.resolvedMembers` (`{ memberId, agentId }[]`)
+- `trace.fanoutSummary` (`accepted/rejected/queued/dedupeHits`)
+
+Interpretation:
+
+- `resolvedMembers` shows exactly which seats were targeted by selector resolution
+- if `resolvedMembers` is empty on an expected post turn, inspect selector input vs active membership
+- `fanoutSummary.rejected > 0` with non-empty `resolvedMembers` usually indicates queue/busy failures after selection
+- for multi-seat agents, two rows may share `agentId` but differ by `memberId` (this is expected under Phase 2a)
+

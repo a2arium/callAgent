@@ -206,7 +206,10 @@ model ConversationMessage {
     sequenceNumber   Int      @map("sequence_number")
     messageId        String   @map("message_id")
     senderAgentId    String   @map("sender_agent_id")
-    recipientAgentId String   @map("recipient_agent_id")
+    senderMemberId   String   @map("sender_member_id")
+    recipientAgentId String?  @map("recipient_agent_id")
+    conversationKind String   @default("thread") @map("conversation_kind")
+    selectorKind     String?  @map("selector_kind")
     speechAct        String   @map("speech_act")
     payload          Json
     correlationId    String?  @map("correlation_id")
@@ -214,8 +217,73 @@ model ConversationMessage {
     createdAt        DateTime @default(now()) @map("created_at")
 
     @@unique([tenantId, conversationId, sequenceNumber])
-    @@unique([tenantId, conversationId, senderAgentId, idempotencyKey])
+    @@unique([tenantId, conversationId, senderMemberId, idempotencyKey])
     @@index([tenantId, conversationId])
     @@index([tenantId, conversationId, createdAt])
     @@map("conversation_messages")
+}
+
+model ConversationTopic {
+    tenantId            String   @map("tenant_id")
+    conversationId      String   @map("conversation_id")
+    ownerAgentId        String   @map("owner_agent_id")
+    status              String
+    defaultSelectorKind String   @map("default_selector_kind")
+    defaultSelectorData Json     @default("{}") @map("default_selector_data")
+    rotationCursor      String?  @map("rotation_cursor")
+    createdAt           DateTime @default(now()) @map("created_at")
+    updatedAt           DateTime @updatedAt @map("updated_at")
+
+    @@id([tenantId, conversationId])
+    @@map("conversation_topics")
+}
+
+model ConversationTopicMember {
+    tenantId       String    @map("tenant_id")
+    conversationId String    @map("conversation_id")
+    memberId       String    @map("member_id")
+    agentId        String    @map("agent_id")
+    role           String
+    sessionId      String    @map("session_id")
+    registeredAt   DateTime  @default(now()) @map("registered_at")
+    leftAt         DateTime? @map("left_at")
+
+    @@id([tenantId, conversationId, memberId])
+    @@unique([tenantId, conversationId, sessionId])
+    @@index([tenantId, conversationId])
+    @@index([tenantId, conversationId, agentId])
+    @@map("conversation_topic_members")
+}
+
+model ConversationTopicInvite {
+    token              String    @id
+    tenantId           String    @map("tenant_id")
+    conversationId     String    @map("conversation_id")
+    inviteeAgentId     String    @map("invitee_agent_id")
+    inviteeMemberId    String?   @map("invitee_member_id")
+    role               String
+    sessionIdOverride  String?   @map("session_id_override")
+    issuedAt           DateTime  @default(now()) @map("issued_at")
+    consumedAt         DateTime? @map("consumed_at")
+
+    @@index([tenantId, conversationId])
+    @@map("conversation_topic_invites")
+}
+
+model ConversationMessageDelivery {
+    id                String   @id @default(cuid())
+    tenantId          String   @map("tenant_id")
+    conversationId    String   @map("conversation_id")
+    sequenceNumber    Int      @map("sequence_number")
+    memberId          String   @map("member_id")
+    recipientAgentId  String   @map("recipient_agent_id")
+    sessionId         String   @map("session_id")
+    dedupeHit         Boolean  @default(false) @map("dedupe_hit")
+    status            String
+    error             Json?
+    queuePosition     Int?     @map("queue_position")
+
+    @@unique([tenantId, conversationId, sequenceNumber, memberId])
+    @@index([tenantId, conversationId, sequenceNumber])
+    @@map("conversation_message_deliveries")
 }

@@ -1,5 +1,13 @@
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
-import type { ConversationMessageRecord, ConversationThreadRecord } from '@a2arium/callagent-memory-engine';
+import type {
+    ConversationKind,
+    ConversationMessageDeliveryRecord,
+    ConversationMessageRecord,
+    ConversationTopicMemberRecord,
+    ConversationTopicRecord,
+    ConversationThreadRecord,
+    IWorkingMemorySessionStore,
+    WMSessionSnapshot,
+} from '@a2arium/callagent-memory-engine';
 
 export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
@@ -94,7 +102,10 @@ export class SessionManager {
         conversationId: string;
         messageId: string;
         senderAgentId: string;
-        recipientAgentId: string;
+        senderMemberId: string;
+        recipientAgentId: string | null;
+        conversationKind: ConversationKind;
+        selectorKind: string | null;
         speechAct: string;
         payload: Record<string, unknown>;
         correlationId?: string;
@@ -109,7 +120,7 @@ export class SessionManager {
     async findConversationMessageByIdempotencyKey(params: {
         tenantId: string;
         conversationId: string;
-        senderAgentId: string;
+        senderMemberId: string;
         idempotencyKey: string;
     }): Promise<ConversationMessageRecord | null> {
         if (!this.store) {
@@ -127,6 +138,102 @@ export class SessionManager {
             return [];
         }
         return this.store.listConversationMessages(params);
+    }
+
+    async createConversationTopic(params: Parameters<IWorkingMemorySessionStore['createConversationTopic']>[0]): Promise<ConversationTopicRecord> {
+        if (!this.store) {
+            throw new Error('Session store is required for conversation topics');
+        }
+        return this.store.createConversationTopic(params);
+    }
+
+    async getConversationTopic(params: Parameters<IWorkingMemorySessionStore['getConversationTopic']>[0]): Promise<ConversationTopicRecord | null> {
+        if (!this.store) {
+            return null;
+        }
+        return this.store.getConversationTopic(params);
+    }
+
+    async updateConversationTopic(params: Parameters<IWorkingMemorySessionStore['updateConversationTopic']>[0]): Promise<void> {
+        if (!this.store) {
+            return;
+        }
+        await this.store.updateConversationTopic(params);
+    }
+
+    async listConversationTopicMembers(
+        params: Parameters<IWorkingMemorySessionStore['listConversationTopicMembers']>[0]
+    ): Promise<ConversationTopicMemberRecord[]> {
+        if (!this.store) {
+            return [];
+        }
+        return this.store.listConversationTopicMembers(params);
+    }
+
+    async addConversationTopicMember(params: Parameters<IWorkingMemorySessionStore['addConversationTopicMember']>[0]): Promise<void> {
+        if (!this.store) {
+            throw new Error('Session store is required');
+        }
+        await this.store.addConversationTopicMember(params);
+    }
+
+    async leaveConversationTopicMember(params: Parameters<IWorkingMemorySessionStore['leaveConversationTopicMember']>[0]): Promise<void> {
+        if (!this.store) {
+            return;
+        }
+        await this.store.leaveConversationTopicMember(params);
+    }
+
+    async getConversationTopicMemberByMemberId(
+        params: Parameters<IWorkingMemorySessionStore['getConversationTopicMemberByMemberId']>[0]
+    ): Promise<ConversationTopicMemberRecord | null> {
+        if (!this.store) {
+            return null;
+        }
+        return this.store.getConversationTopicMemberByMemberId(params);
+    }
+
+    async listConversationTopicMembersByAgent(
+        params: Parameters<IWorkingMemorySessionStore['listConversationTopicMembersByAgent']>[0]
+    ): Promise<ConversationTopicMemberRecord[]> {
+        if (!this.store) {
+            return [];
+        }
+        return this.store.listConversationTopicMembersByAgent(params);
+    }
+
+    async issueConversationTopicInvite(params: Parameters<IWorkingMemorySessionStore['issueConversationTopicInvite']>[0]): Promise<void> {
+        if (!this.store) {
+            throw new Error('Session store is required');
+        }
+        await this.store.issueConversationTopicInvite(params);
+    }
+
+    async consumeConversationTopicInvite(
+        params: Parameters<IWorkingMemorySessionStore['consumeConversationTopicInvite']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['consumeConversationTopicInvite']> {
+        if (!this.store) {
+            return Promise.resolve(null);
+        }
+        return this.store.consumeConversationTopicInvite(params);
+    }
+
+    async recordConversationMessageDeliveries(
+        params: Parameters<IWorkingMemorySessionStore['recordConversationMessageDeliveries']>[0]
+    ): Promise<void> {
+        if (!this.store) {
+            return;
+        }
+        await this.store.recordConversationMessageDeliveries(params);
+    }
+
+    async listConversationMessageDeliveries(
+        params: Parameters<IWorkingMemorySessionStore['listConversationMessageDeliveries']>[0]
+    ): Promise<ConversationMessageDeliveryRecord[]> {
+        if (!this.store) {
+            return [];
+        }
+        return this.store.listConversationMessageDeliveries(params);
     }
 }
 

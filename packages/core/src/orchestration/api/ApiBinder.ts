@@ -26,11 +26,22 @@ import type { TaskInput } from '../../shared/types/index.js';
 import type { InternalConversationApi } from '../../internal/conversation/types.js';
 import type {
     CloseConversationOptions,
+    ConversationRef,
+    FanoutSendReceipt,
     OutboundThreadMessage,
     SendOptions,
     StartThreadOptions,
     ThreadRef,
+    TopicJoinOptions,
+    TopicLeaveOptions,
+    TopicPostOptions,
+    TopicRef,
+    TopicCreateOptions,
+    TopicInviteOptions,
+    OutboundTopicMessage,
 } from '../../public-types/conversation/types.js';
+import { stampTopicPostTurnTrace } from './topicTurnTraceStamp.js';
+import { MemberIdSchema } from '../../public-types/conversation/schemas.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -73,12 +84,15 @@ export class ApiBinder {
                     };
                     iCtx.__turnConversationSequenceNumber = receipt.receipt.sequenceNumber;
                     iCtx.__turnConversationDedupeHit = receipt.receipt.dedupeHit;
+                    const ra = options.message.recipientAgentId ?? options.targetAgentId;
                     iCtx.__turnOutgoingConversationMessages?.push({
                         id: receipt.receipt.messageId,
                         conversationId: receipt.thread.id,
                         kind: 'thread',
                         senderAgentId: options.message.senderAgentId,
-                        recipientAgentId: options.message.recipientAgentId ?? options.targetAgentId,
+                        recipientAgentId: ra,
+                        senderMemberId: options.message.senderAgentId,
+                        recipientMemberId: MemberIdSchema.parse(ra),
                         speechAct: options.message.speechAct,
                         sequenceNumber: receipt.receipt.sequenceNumber,
                         correlationId: options.message.correlationId,
@@ -103,6 +117,8 @@ export class ApiBinder {
                         kind: 'thread',
                         senderAgentId: message.senderAgentId,
                         recipientAgentId: message.recipientAgentId,
+                        senderMemberId: message.senderAgentId,
+                        recipientMemberId: MemberIdSchema.parse(message.recipientAgentId),
                         speechAct: message.speechAct,
                         sequenceNumber: receipt.sequenceNumber,
                         correlationId: message.correlationId,
@@ -111,8 +127,28 @@ export class ApiBinder {
                 }
                 return receipt;
             },
-            close: async (thread: ThreadRef, options?: CloseConversationOptions) => {
-                return conversationService.close(tenantId, thread, options);
+            createTopic: (options: TopicCreateOptions) =>
+                conversationService.createTopic(tenantId, sessionId, agentId, options),
+            invite: (options: TopicInviteOptions) =>
+                conversationService.invite(tenantId, sessionId, agentId, options),
+            join: (topic: TopicRef, options: TopicJoinOptions) =>
+                conversationService.join(tenantId, sessionId, agentId, topic, options),
+            leave: (topic: TopicRef, options?: TopicLeaveOptions) =>
+                conversationService.leave(tenantId, sessionId, agentId, topic, options),
+            post: async (topic: TopicRef, message: OutboundTopicMessage, options?: TopicPostOptions) => {
+                const receipt: FanoutSendReceipt = await conversationService.post(
+                    tenantId,
+                    sessionId,
+                    agentId,
+                    topic,
+                    message,
+                    options
+                );
+                stampTopicPostTurnTrace(ctx as InternalTaskContext, topic, options, receipt);
+                return receipt;
+            },
+            close: async (ref: ConversationRef, options?: CloseConversationOptions) => {
+                return conversationService.close(tenantId, sessionId, agentId, ref, options);
             },
         };
 

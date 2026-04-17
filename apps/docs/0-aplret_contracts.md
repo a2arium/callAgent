@@ -373,7 +373,7 @@ Recommended source taxonomy:
 - `child`
 - `internal`
 - `env`
-- `conversation` (Phase 5.1 thread primitives)
+- `conversation`  
 
 ### Canonical source-kind taxonomy
 
@@ -410,11 +410,16 @@ Env:
 - `env / clock.tick`
 - `env / snapshot.available`
 
-Conversation (Phase 5.1):
+Conversation:
 
 - `conversation / message.received`
 - `conversation / delivery.failed`
 - `conversation / thread.closed`
+- `conversation / topic.message.received`
+- `conversation / topic.member.joined`
+- `conversation / topic.member.left`
+- `conversation / topic.closed`
+- `conversation / outbound.committed`
 
 ### Taxonomy rules
 
@@ -1022,9 +1027,21 @@ Use in Execution only:
 
 - `ctx.conversation.startThread(...)`
 - `ctx.conversation.send(...)`
+- `ctx.conversation.createTopic(...)`
+- `ctx.conversation.invite(...)`
+- `ctx.conversation.join(...)`
+- `ctx.conversation.leave(...)`
+- `ctx.conversation.post(...)`
 - `ctx.conversation.close(...)`
 
 Conversation outcomes affect reasoning only after they re-enter through the inbox pipeline as conversation observations.
+
+Topic identity model (Phase 2a):
+
+- `memberId` is the seat identity inside a topic.
+- `agentId` remains registry/routing identity.
+- `sessionId` is routing state identity (not logical member identity).
+- if `memberId` is omitted on input, runtime resolves `memberId = agentId` once and emits resolved values on all output/observations.
 
 
 ---
@@ -1204,12 +1221,22 @@ type TurnTrace = {
   childCalls?: ChildCallTrace[];
 
   // Conversation metadata (optional, compact summary only)
-  conversation?: { id: string; kind: 'thread' };
+  conversation?: { id: string; kind: 'thread' | 'topic' };
   incomingMessages?: ConversationMessageSummary[];
   outgoingMessages?: ConversationMessageSummary[];
   messageSequenceNumber?: number;
   dedupeHit?: boolean;
   deliveryLagMs?: number;
+  topicSelectorDecision?: {
+    kind: 'broadcast' | 'round_robin' | 'explicit_recipient';
+    resolvedMembers: Array<{ memberId: string; agentId: string }>;
+  };
+  fanoutSummary?: {
+    accepted: number;
+    rejected: number;
+    queued: number;
+    dedupeHits: number;
+  };
 
   // Error (if turn failed)
   error?: { code?: string; message: string; module?: FrameworkModule; detail?: JsonValue };

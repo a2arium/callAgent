@@ -65,9 +65,11 @@ export type InternalTaskContext = TaskContext & {
     __turnIncomingConversationMessages?: Array<{
         id: string;
         conversationId: string;
-        kind: 'thread';
+        kind: 'thread' | 'topic';
         senderAgentId: string;
         recipientAgentId: string;
+        senderMemberId?: string;
+        recipientMemberId?: string;
         speechAct: string;
         sequenceNumber?: number;
         correlationId?: string;
@@ -76,18 +78,30 @@ export type InternalTaskContext = TaskContext & {
     __turnOutgoingConversationMessages?: Array<{
         id: string;
         conversationId: string;
-        kind: 'thread';
+        kind: 'thread' | 'topic';
         senderAgentId: string;
         recipientAgentId: string;
+        senderMemberId?: string;
+        recipientMemberId?: string;
         speechAct: string;
         sequenceNumber?: number;
         correlationId?: string;
         idempotencyKey?: string;
     }>;
-    __turnConversationSummary?: { id: string; kind: 'thread' };
+    __turnConversationSummary?: { id: string; kind: 'thread' | 'topic' };
     __turnConversationSequenceNumber?: number;
     __turnConversationDedupeHit?: boolean;
     __turnConversationDeliveryLagMs?: number;
+    __turnTopicSelectorDecision?: {
+        kind: 'broadcast' | 'round_robin' | 'explicit_recipient';
+        resolvedMembers: Array<{ memberId: string; agentId: string }>;
+    };
+    __turnFanoutSummary?: {
+        accepted: number;
+        rejected: number;
+        queued: number;
+        dedupeHits: number;
+    };
     /** Session-level turn trace collector (test/debug). */
     __turnTraceCollector?: TurnTraceCollector;
     /** Session-level manifest provenance restored from snapshot/session metadata on every turn-entry path */

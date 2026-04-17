@@ -36,5 +36,11 @@ export class ConversationRouter {
             snapshot,
         });
     }
+
+    async routeObservations(targets: RouteObservationParams[]): Promise<void> {
+        for (const t of targets) {
+            await this.routeObservation(t);
+        }
+    }
 }
 

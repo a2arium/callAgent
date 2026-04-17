@@ -31,6 +31,7 @@ import { summarizePending, aggregateUsage, compactModuleOutput } from '../teleme
 import { generateCorrelationId } from '../tracing/Tracing.js';
 import { v7 as uuidv7 } from 'uuid';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
+import { reduceConversationProjection } from './learning/conversationReducer.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -389,6 +390,15 @@ export async function runLoop<
                 episodic.push(event);
                 ((next as any).memory.longTerm as any).episodic = episodic;
                 (writer as any).episodic?.append?.(event);
+
+                const inboxArr = Array.isArray((obs as { inbox?: Observation[] }).inbox)
+                    ? (obs as { inbox: Observation[] }).inbox
+                    : [];
+                (next as MentalState).memory = (next as MentalState).memory ?? ({} as MentalState['memory']);
+                (next as MentalState).memory.conversation = reduceConversationProjection(
+                    (next as MentalState).memory.conversation,
+                    inboxArr
+                );
 
                 // Learning: Single Writer for M.plans
                 const internal = (obs as any).internal?.();
@@ -888,6 +898,8 @@ export async function runLoop<
                 iCtxTurn.__turnConversationSequenceNumber = undefined;
                 iCtxTurn.__turnConversationDedupeHit = undefined;
                 iCtxTurn.__turnConversationDeliveryLagMs = undefined;
+                iCtxTurn.__turnTopicSelectorDecision = undefined;
+                iCtxTurn.__turnFanoutSummary = undefined;
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }
@@ -1054,6 +1066,8 @@ export async function runLoop<
                 messageSequenceNumber: iCtx.__turnConversationSequenceNumber,
                 dedupeHit: iCtx.__turnConversationDedupeHit,
                 deliveryLagMs: iCtx.__turnConversationDeliveryLagMs,
+                topicSelectorDecision: iCtx.__turnTopicSelectorDecision,
+                fanoutSummary: iCtx.__turnFanoutSummary,
             };
 
             let trace: TurnTrace;
@@ -1104,6 +1118,8 @@ export async function runLoop<
             iCtx.__turnConversationSequenceNumber = undefined;
             iCtx.__turnConversationDedupeHit = undefined;
             iCtx.__turnConversationDeliveryLagMs = undefined;
+            iCtx.__turnTopicSelectorDecision = undefined;
+            iCtx.__turnFanoutSummary = undefined;
 
             log.debug('Transition outcome', {
                 taskId,

@@ -4,7 +4,6 @@ describe('Conversation observation schema', () => {
     it('accepts message.received envelope', () => {
         const parsed = ObservationSchema.parse({
             source: 'conversation',
-            kind: 'message.received',
             payload: {
                 kind: 'message.received',
                 message: {
@@ -26,7 +25,6 @@ describe('Conversation observation schema', () => {
     it('rejects malformed conversation speechAct', () => {
         const result = ObservationSchema.safeParse({
             source: 'conversation',
-            kind: 'message.received',
             payload: {
                 kind: 'message.received',
                 message: {
