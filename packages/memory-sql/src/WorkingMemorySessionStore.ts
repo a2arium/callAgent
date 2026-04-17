@@ -5,21 +5,16 @@ import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
 import { validatePgEnvironment, dumpPgEnvironment } from './pgEnvValidator.js';
 import { getSafePgConfig } from './safePool.js';
+import type {
+    ConversationThreadRecord,
+    ConversationThreadSweepRow,
+    UpdateConversationThreadStatusInput,
+} from '@a2arium/callagent-types';
 
 export type SessionSnapshot = {
     wmVersion: bigint;
     snapshot: Record<string, unknown>;
     agentId: string;
-    updatedAt: string;
-};
-
-type ConversationThreadRecord = {
-    tenantId: string;
-    conversationId: string;
-    ownerAgentId: string;
-    participantAgentId: string;
-    status: 'open' | 'closed' | 'archived';
-    createdAt: string;
     updatedAt: string;
 };
 
@@ -74,7 +69,19 @@ type ConversationTopicInviteRecord = {
     role: 'owner' | 'participant';
     sessionIdOverride: string | null;
     issuedAt: string;
+    expiresAt: string;
+    inviterAgentId: string;
+    inviterMemberId: string;
+    inviterSessionId: string;
     consumedAt: string | null;
+    declinedAt: string | null;
+    declineReason: string | null;
+    deliveryAttemptedAt: string | null;
+    deliveredAt: string | null;
+    deliveryAttempts: number;
+    deliveryFailureReason: string | null;
+    idempotencyKey: string | null;
+    correlationId: string | null;
 };
 
 type ConversationMessageDeliveryRecord = {
@@ -89,6 +96,33 @@ type ConversationMessageDeliveryRecord = {
     error: Record<string, unknown> | null;
     queuePosition: number | null;
 };
+
+function mapConversationTopicInviteRow(row: Record<string, unknown>): ConversationTopicInviteRecord {
+    const inviteeMemberId = row.invitee_member_id == null ? String(row.invitee_agent_id) : String(row.invitee_member_id);
+    return {
+        token: String(row.token),
+        tenantId: String(row.tenant_id),
+        conversationId: String(row.conversation_id),
+        inviteeAgentId: String(row.invitee_agent_id),
+        inviteeMemberId,
+        role: String(row.role) as 'owner' | 'participant',
+        sessionIdOverride: row.session_id_override == null ? null : String(row.session_id_override),
+        issuedAt: new Date(String(row.issued_at)).toISOString(),
+        expiresAt: new Date(String(row.expires_at)).toISOString(),
+        inviterAgentId: String(row.inviter_agent_id),
+        inviterMemberId: String(row.inviter_member_id),
+        inviterSessionId: String(row.inviter_session_id),
+        consumedAt: row.consumed_at == null ? null : new Date(String(row.consumed_at)).toISOString(),
+        declinedAt: row.declined_at == null ? null : new Date(String(row.declined_at)).toISOString(),
+        declineReason: row.decline_reason == null ? null : String(row.decline_reason),
+        deliveryAttemptedAt: row.delivery_attempted_at == null ? null : new Date(String(row.delivery_attempted_at)).toISOString(),
+        deliveredAt: row.delivered_at == null ? null : new Date(String(row.delivered_at)).toISOString(),
+        deliveryAttempts: Number(row.delivery_attempts ?? 0),
+        deliveryFailureReason: row.delivery_failure_reason == null ? null : String(row.delivery_failure_reason),
+        idempotencyKey: row.idempotency_key == null ? null : String(row.idempotency_key),
+        correlationId: row.correlation_id == null ? null : String(row.correlation_id),
+    };
+}
 
 export class WorkingMemorySessionStore {
     private static globalPrisma: PrismaClientType | null = null;
@@ -297,18 +331,20 @@ export class WorkingMemorySessionStore {
         conversationId: string;
         ownerAgentId: string;
         participantAgentId: string;
+        expiresAt?: string | null;
     }): Promise<ConversationThreadRecord> {
-        const { tenantId, conversationId, ownerAgentId, participantAgentId } = params;
+        const { tenantId, conversationId, ownerAgentId, participantAgentId, expiresAt } = params;
         await this.ensureConnected();
         await this.runWithReconnect(() =>
             this.prisma.$executeRawUnsafe(
-                `INSERT INTO conversation_threads (tenant_id, conversation_id, owner_agent_id, participant_agent_id, status, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, 'open', NOW(), NOW())
+                `INSERT INTO conversation_threads (tenant_id, conversation_id, owner_agent_id, participant_agent_id, status, created_at, updated_at, expires_at)
+                 VALUES ($1, $2, $3, $4, 'open', NOW(), NOW(), $5)
                  ON CONFLICT (tenant_id, conversation_id) DO NOTHING`,
                 tenantId,
                 conversationId,
                 ownerAgentId,
-                participantAgentId
+                participantAgentId,
+                expiresAt ?? null
             )
         );
         const row = await this.getConversationThread({ tenantId, conversationId });
@@ -326,7 +362,10 @@ export class WorkingMemorySessionStore {
         await this.ensureConnected();
         const rows = await this.runWithReconnect(() =>
             this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-                `SELECT tenant_id, conversation_id, owner_agent_id, participant_agent_id, status, created_at, updated_at
+                `SELECT tenant_id, conversation_id, owner_agent_id, participant_agent_id, status,
+                        created_at, updated_at,
+                        closed_at, close_reason, close_reason_text, closed_by_agent_id,
+                        archived_at, archived_by_agent_id, archived_reason_text, expires_at
                  FROM conversation_threads
                  WHERE tenant_id = $1 AND conversation_id = $2
                  LIMIT 1`,
@@ -338,34 +377,162 @@ export class WorkingMemorySessionStore {
         if (!row) {
             return null;
         }
+        return WorkingMemorySessionStore.parseConversationThreadRow(row);
+    }
+
+    async updateConversationThreadStatus(params: UpdateConversationThreadStatusInput): Promise<void> {
+        const { tenantId, conversationId } = params;
+        await this.ensureConnected();
+        if (params.kind === 'close') {
+            const { closedAt, closeReason, closeReasonText, closedByAgentId } = params;
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `UPDATE conversation_threads
+                     SET status = 'closed',
+                         closed_at = $3::timestamptz,
+                         close_reason = $4,
+                         close_reason_text = $5,
+                         closed_by_agent_id = $6,
+                         updated_at = NOW()
+                     WHERE tenant_id = $1 AND conversation_id = $2`,
+                    tenantId,
+                    conversationId,
+                    closedAt,
+                    closeReason,
+                    closeReasonText ?? null,
+                    closedByAgentId ?? null
+                )
+            );
+            return;
+        }
+        const { archivedAt, archivedByAgentId, archivedReasonText } = params;
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_threads
+                 SET status = 'archived',
+                     archived_at = $3::timestamptz,
+                     archived_by_agent_id = $4,
+                     archived_reason_text = $5,
+                     updated_at = NOW()
+                 WHERE tenant_id = $1 AND conversation_id = $2`,
+                tenantId,
+                conversationId,
+                archivedAt,
+                archivedByAgentId ?? null,
+                archivedReasonText ?? null
+            )
+        );
+    }
+
+    async refreshConversationThreadExpiry(params: {
+        tenantId: string;
+        conversationId: string;
+        expiresAt: string | null;
+    }): Promise<void> {
+        const { tenantId, conversationId, expiresAt } = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_threads
+                 SET expires_at = $3::timestamptz, updated_at = NOW()
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND status = 'open'`,
+                tenantId,
+                conversationId,
+                expiresAt
+            )
+        );
+    }
+
+    async listConversationThreadsForSweep(params: {
+        tenantId: string;
+        mode: 'expireOpen' | 'archiveClosed';
+        nowIso: string;
+        closedBeforeIso?: string;
+        limit: number;
+    }): Promise<ConversationThreadSweepRow[]> {
+        const { tenantId, mode, nowIso, limit } = params;
+        await this.ensureConnected();
+        if (mode === 'expireOpen') {
+            const rows = await this.runWithReconnect(() =>
+                this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                    `SELECT tenant_id, conversation_id, owner_agent_id, participant_agent_id
+                     FROM conversation_threads
+                     WHERE tenant_id = $1
+                       AND status = 'open'
+                       AND expires_at IS NOT NULL
+                       AND expires_at < $2::timestamptz
+                     ORDER BY expires_at ASC
+                     LIMIT $3
+                     FOR UPDATE SKIP LOCKED`,
+                    tenantId,
+                    nowIso,
+                    limit
+                )
+            );
+            return rows.map((r) => ({
+                tenantId: String(r.tenant_id),
+                conversationId: String(r.conversation_id),
+                ownerAgentId: String(r.owner_agent_id),
+                participantAgentId: String(r.participant_agent_id),
+            }));
+        }
+        const closedBefore = params.closedBeforeIso;
+        if (!closedBefore) {
+            return [];
+        }
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT tenant_id, conversation_id, owner_agent_id, participant_agent_id
+                 FROM conversation_threads
+                 WHERE tenant_id = $1
+                   AND status = 'closed'
+                   AND closed_at IS NOT NULL
+                   AND closed_at < $2::timestamptz
+                 ORDER BY closed_at ASC
+                 LIMIT $3
+                 FOR UPDATE SKIP LOCKED`,
+                tenantId,
+                closedBefore,
+                limit
+            )
+        );
+        return rows.map((r) => ({
+            tenantId: String(r.tenant_id),
+            conversationId: String(r.conversation_id),
+            ownerAgentId: String(r.owner_agent_id),
+            participantAgentId: String(r.participant_agent_id),
+        }));
+    }
+
+    private static parseConversationThreadRow(row: Record<string, unknown>): ConversationThreadRecord {
+        const toIso = (v: unknown): string | null | undefined => {
+            if (v == null) {
+                return v as null | undefined;
+            }
+            return new Date(String(v)).toISOString();
+        };
+        const cr = row.close_reason == null ? null : String(row.close_reason);
+        const closeReason =
+            cr === 'explicit' || cr === 'ttl' ? (cr as ConversationThreadRecord['closeReason']) : null;
         return {
             tenantId: String(row.tenant_id),
             conversationId: String(row.conversation_id),
             ownerAgentId: String(row.owner_agent_id),
             participantAgentId: String(row.participant_agent_id),
-            status: String(row.status) as 'open' | 'closed' | 'archived',
+            status: String(row.status) as ConversationThreadRecord['status'],
             createdAt: new Date(String(row.created_at)).toISOString(),
             updatedAt: new Date(String(row.updated_at)).toISOString(),
+            closedAt: toIso(row.closed_at) ?? null,
+            closeReason,
+            closeReasonText: row.close_reason_text == null ? null : String(row.close_reason_text),
+            closedByAgentId: row.closed_by_agent_id == null ? null : String(row.closed_by_agent_id),
+            archivedAt: toIso(row.archived_at) ?? null,
+            archivedByAgentId:
+                row.archived_by_agent_id == null ? null : String(row.archived_by_agent_id),
+            archivedReasonText:
+                row.archived_reason_text == null ? null : String(row.archived_reason_text),
+            expiresAt: toIso(row.expires_at) ?? null,
         };
-    }
-
-    async updateConversationThreadStatus(params: {
-        tenantId: string;
-        conversationId: string;
-        status: 'open' | 'closed' | 'archived';
-    }): Promise<void> {
-        const { tenantId, conversationId, status } = params;
-        await this.ensureConnected();
-        await this.runWithReconnect(() =>
-            this.prisma.$executeRawUnsafe(
-                `UPDATE conversation_threads
-                 SET status = $3, updated_at = NOW()
-                 WHERE tenant_id = $1 AND conversation_id = $2`,
-                tenantId,
-                conversationId,
-                status
-            )
-        );
     }
 
     async appendConversationMessage(params: {
@@ -807,13 +974,20 @@ export class WorkingMemorySessionStore {
         role: 'owner' | 'participant';
         sessionIdOverride: string | null;
         issuedAt: string;
+        expiresAt: string;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
+        idempotencyKey: string | null;
+        correlationId: string | null;
     }): Promise<void> {
         const p = params;
         await this.ensureConnected();
         await this.runWithReconnect(() =>
             this.prisma.$executeRawUnsafe(
-                `INSERT INTO conversation_topic_invites (token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, consumed_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamp, NULL)`,
+                `INSERT INTO conversation_topic_invites
+                 (token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, expires_at, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at, decline_reason, delivery_attempted_at, delivered_at, delivery_attempts, delivery_failure_reason, idempotency_key, correlation_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamp, $9::timestamp, $10, $11, $12, NULL, NULL, NULL, NULL, NULL, 0, NULL, $13, $14)`,
                 p.token,
                 p.tenantId,
                 p.conversationId,
@@ -821,9 +995,57 @@ export class WorkingMemorySessionStore {
                 p.inviteeMemberId,
                 p.role,
                 p.sessionIdOverride,
-                p.issuedAt
+                p.issuedAt,
+                p.expiresAt,
+                p.inviterAgentId,
+                p.inviterMemberId,
+                p.inviterSessionId,
+                p.idempotencyKey,
+                p.correlationId
             )
         );
+    }
+
+    async findConversationTopicInviteByIdempotencyKey(params: {
+        tenantId: string;
+        conversationId: string;
+        idempotencyKey: string;
+    }): Promise<ConversationTopicInviteRecord | null> {
+        const { tenantId, conversationId, idempotencyKey } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, expires_at, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at, decline_reason, delivery_attempted_at, delivered_at, delivery_attempts, delivery_failure_reason, idempotency_key, correlation_id
+                 FROM conversation_topic_invites
+                 WHERE tenant_id = $1 AND conversation_id = $2 AND idempotency_key = $3
+                 LIMIT 1`,
+                tenantId,
+                conversationId,
+                idempotencyKey
+            )
+        );
+        const row = rows[0];
+        return row ? mapConversationTopicInviteRow(row) : null;
+    }
+
+    async getConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+    }): Promise<ConversationTopicInviteRecord | null> {
+        const { tenantId, token } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, expires_at, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at, decline_reason, delivery_attempted_at, delivered_at, delivery_attempts, delivery_failure_reason, idempotency_key, correlation_id
+                 FROM conversation_topic_invites
+                 WHERE token = $1 AND tenant_id = $2
+                 LIMIT 1`,
+                token,
+                tenantId
+            )
+        );
+        const row = rows[0];
+        return row ? mapConversationTopicInviteRow(row) : null;
     }
 
     async consumeConversationTopicInvite(params: {
@@ -836,19 +1058,22 @@ export class WorkingMemorySessionStore {
         inviteeMemberId: string;
         role: 'owner' | 'participant';
         sessionIdOverride: string | null;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
     } | null> {
         const { tenantId, token, consumedAt } = params;
         await this.ensureConnected();
         const rows = await this.runWithReconnect(() =>
             this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-                `SELECT tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, consumed_at
+                `SELECT tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at
                  FROM conversation_topic_invites WHERE token = $1 AND tenant_id = $2 LIMIT 1`,
                 token,
                 tenantId
             )
         );
         const row = rows[0];
-        if (!row || row.consumed_at != null) {
+        if (!row || row.consumed_at != null || row.declined_at != null) {
             return null;
         }
         await this.runWithReconnect(() =>
@@ -865,7 +1090,171 @@ export class WorkingMemorySessionStore {
             inviteeMemberId: im == null ? String(row.invitee_agent_id) : String(im),
             role: String(row.role) as 'owner' | 'participant',
             sessionIdOverride: row.session_id_override == null ? null : String(row.session_id_override),
+            inviterAgentId: String(row.inviter_agent_id),
+            inviterMemberId: String(row.inviter_member_id),
+            inviterSessionId: String(row.inviter_session_id),
         };
+    }
+
+    async declineConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+        declinedAt: string;
+        reason: string | null;
+    }): Promise<{
+        conversationId: string;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
+        inviteeAgentId: string;
+        inviteeMemberId: string;
+    } | null> {
+        const { tenantId, token, declinedAt, reason } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT conversation_id, invitee_agent_id, invitee_member_id, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at
+                 FROM conversation_topic_invites WHERE token = $1 AND tenant_id = $2 LIMIT 1`,
+                token,
+                tenantId
+            )
+        );
+        const row = rows[0];
+        if (!row || row.consumed_at != null || row.declined_at != null) {
+            return null;
+        }
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_topic_invites
+                 SET consumed_at = $2::timestamp, declined_at = $2::timestamp, decline_reason = $3
+                 WHERE token = $1`,
+                token,
+                declinedAt,
+                reason
+            )
+        );
+        const im = row.invitee_member_id;
+        return {
+            conversationId: String(row.conversation_id),
+            inviterAgentId: String(row.inviter_agent_id),
+            inviterMemberId: String(row.inviter_member_id),
+            inviterSessionId: String(row.inviter_session_id),
+            inviteeAgentId: String(row.invitee_agent_id),
+            inviteeMemberId: im == null ? String(row.invitee_agent_id) : String(im),
+        };
+    }
+
+    async listExpiredConversationTopicInvites(params: {
+        tenantId: string;
+        nowIso: string;
+        limit: number;
+    }): Promise<ConversationTopicInviteRecord[]> {
+        const { tenantId, nowIso, limit } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, expires_at, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at, decline_reason, delivery_attempted_at, delivered_at, delivery_attempts, delivery_failure_reason, idempotency_key, correlation_id
+                 FROM conversation_topic_invites
+                 WHERE tenant_id = $1
+                   AND consumed_at IS NULL
+                   AND declined_at IS NULL
+                   AND expires_at < $2::timestamp
+                 ORDER BY expires_at ASC
+                 LIMIT $3`,
+                tenantId,
+                nowIso,
+                limit
+            )
+        );
+        return rows.map((row) => mapConversationTopicInviteRow(row));
+    }
+
+    async listUndeliveredConversationTopicInvites(params: {
+        tenantId: string;
+        nowIso: string;
+        limit: number;
+    }): Promise<ConversationTopicInviteRecord[]> {
+        const { tenantId, nowIso, limit } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `SELECT token, tenant_id, conversation_id, invitee_agent_id, invitee_member_id, role, session_id_override, issued_at, expires_at, inviter_agent_id, inviter_member_id, inviter_session_id, consumed_at, declined_at, decline_reason, delivery_attempted_at, delivered_at, delivery_attempts, delivery_failure_reason, idempotency_key, correlation_id
+                 FROM conversation_topic_invites
+                 WHERE tenant_id = $1
+                   AND consumed_at IS NULL
+                   AND declined_at IS NULL
+                   AND delivered_at IS NULL
+                   AND expires_at >= $2::timestamp
+                 ORDER BY issued_at ASC
+                 LIMIT $3`,
+                tenantId,
+                nowIso,
+                limit
+            )
+        );
+        return rows.map((row) => mapConversationTopicInviteRow(row));
+    }
+
+    async markConversationTopicInviteDeliveryAttempt(params: {
+        tenantId: string;
+        token: string;
+        attemptedAt: string;
+    }): Promise<number> {
+        const { tenantId, token, attemptedAt } = params;
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() =>
+            this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+                `UPDATE conversation_topic_invites
+                 SET delivery_attempted_at = $3::timestamp,
+                     delivery_attempts = delivery_attempts + 1
+                 WHERE token = $1 AND tenant_id = $2
+                 RETURNING delivery_attempts`,
+                token,
+                tenantId,
+                attemptedAt
+            )
+        );
+        const row = rows[0];
+        return Number(row?.delivery_attempts ?? 0);
+    }
+
+    async markConversationTopicInviteDelivered(params: {
+        tenantId: string;
+        token: string;
+        deliveredAt: string;
+    }): Promise<void> {
+        const { tenantId, token, deliveredAt } = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_topic_invites
+                 SET delivered_at = $3::timestamp,
+                     delivery_failure_reason = NULL
+                 WHERE token = $1 AND tenant_id = $2`,
+                token,
+                tenantId,
+                deliveredAt
+            )
+        );
+    }
+
+    async setConversationTopicInviteDeliveryFailureReason(params: {
+        tenantId: string;
+        token: string;
+        reason: string;
+    }): Promise<void> {
+        const { tenantId, token, reason } = params;
+        await this.ensureConnected();
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_topic_invites
+                 SET delivery_failure_reason = $3
+                 WHERE token = $1 AND tenant_id = $2`,
+                token,
+                tenantId,
+                reason
+            )
+        );
     }
 
     async recordConversationMessageDeliveries(params: {

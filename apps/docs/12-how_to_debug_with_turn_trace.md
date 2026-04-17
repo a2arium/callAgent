@@ -38,7 +38,7 @@ Each **TurnTrace** can include compact summaries of sub-calls made during that t
 
 - **`trace.llmCalls`** — array of **LLMCallTrace** (model, provider, durationMs, input/output tokens, cost, optional module, plus optional output-contract metadata: `hasOutputContract`, `outputContractName`, `outputContractStatus`).
 - **`trace.toolCalls`** — array of **ToolCallTrace** (tool name, durationMs, status, optional module).
-- **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, childAgentNodeId, childTraceId, resultSummary, error). Use these to see which child tasks were dispatched or completed in this turn and how they link to the parent turn or child trace.
+- **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, **`childAgentNodeId`**, **`childTraceId`**, resultSummary, error). Phase 3 onward, **`childTraceId`** / **`childAgentNodeId`** are **reliably present on successful dispatch** when telemetry is available; on failure they are **absent** (not `null`) — test with `typeof x === 'string'`. **Walking parent → child:** use **`trace.childCalls[n].childTraceId`** to correlate with the child agent’s **`TurnTrace`** / telemetry (**`collectTraces`** on the child run or your trace backend).
 
 Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or export traces to your observability backend.
 
@@ -369,6 +369,9 @@ When diagnosing topic behavior, inspect:
 - `trace.topicSelectorDecision.kind`
 - `trace.topicSelectorDecision.resolvedMembers` (`{ memberId, agentId }[]`)
 - `trace.fanoutSummary` (`accepted/rejected/queued/dedupeHits`)
+- `trace.inviteDelivery` (`issued/received/accepted/declined/expired`)
+- `trace.inviteDelivery.received[].autoJoinAttempted`
+- `trace.inviteDelivery.received[].autoJoinError` (typed conversation error when auto-join fails)
 
 Interpretation:
 
@@ -376,4 +379,5 @@ Interpretation:
 - if `resolvedMembers` is empty on an expected post turn, inspect selector input vs active membership
 - `fanoutSummary.rejected > 0` with non-empty `resolvedMembers` usually indicates queue/busy failures after selection
 - for multi-seat agents, two rows may share `agentId` but differ by `memberId` (this is expected under Phase 2a)
+- `inviteDelivery.received` without matching `accepted|declined|expired` indicates an invite is still pending in lifecycle state
 

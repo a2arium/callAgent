@@ -1,4 +1,5 @@
 import { v7 as uuidv7 } from 'uuid';
+import type { ConversationMessageRecord } from '@a2arium/callagent-memory-engine';
 import type { SessionManager } from '../../orchestration/SessionManager.js';
 import type {
     InternalConversationApi,
@@ -6,6 +7,8 @@ import type {
     ConversationActivateParams,
 } from './types.js';
 import type {
+    ArchiveConversationOptions,
+    ArchiveConversationReceipt,
     CloseConversationOptions,
     CloseConversationReceipt,
     ConversationError,
@@ -24,6 +27,8 @@ import type {
     TopicInviteReceipt,
     TopicJoinOptions,
     TopicJoinReceipt,
+    TopicDeclineOptions,
+    TopicDeclineReceipt,
     TopicLeaveOptions,
     TopicLeaveReceipt,
     TopicPostOptions,
@@ -32,10 +37,16 @@ import type {
     TopicSelector,
     DeliverySummary,
 } from '../../public-types/conversation/types.js';
+import type { MessageLogDelivery } from '../../public-types/messageLog/types.js';
 import type { Observation } from '../../types/observation.js';
-import { MAX_TOPIC_MEMBERS, MemberIdSchema } from '../../public-types/conversation/schemas.js';
+import {
+    InviteTokenSchema,
+    MAX_TOPIC_MEMBERS,
+    MemberIdSchema,
+} from '../../public-types/conversation/schemas.js';
 import type { TopicMember } from '../../public-types/conversation/types.js';
 import { ConversationRouter } from './ConversationRouter.js';
+import { wallClock, type Clock } from './Clock.js';
 import {
     resolveTopicSelector,
     topicSelectorFromRecord,
@@ -49,11 +60,22 @@ function effectiveMemberId(m: TopicMember): string {
 import { reconstructFanoutReceiptFromDeliveries } from './fanoutReplay.js';
 
 const MAX_QUEUE_DEPTH = 32;
+const DEFAULT_INVITE_TTL_SECONDS = 60 * 60 * 24;
 
 type QueueState = {
     byThread: Map<string, number>;
     byTopic: Map<string, number>;
 };
+
+function isPgUniqueViolation(err: unknown): boolean {
+    if (err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === '23505') {
+        return true;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.includes('Unique constraint') || msg.includes('duplicate key') || msg.includes('unique constraint');
+}
+
+const BLOCKING_POLL_INTERVAL_MS = 20;
 
 function isInflightSnapshot(snapshot: Record<string, unknown> | undefined): boolean {
     const pending = (snapshot as { pending?: Record<string, Record<string, unknown>> } | undefined)?.pending;
@@ -69,6 +91,7 @@ function isInflightSnapshot(snapshot: Record<string, unknown> | undefined): bool
 
 export class ConversationService implements InternalConversationApi {
     private readonly router: ConversationRouter;
+    private readonly clock: Clock;
     private readonly queueState: QueueState = {
         byThread: new Map(),
         byTopic: new Map(),
@@ -79,6 +102,66 @@ export class ConversationService implements InternalConversationApi {
         private readonly deps: ConversationServiceDeps
     ) {
         this.router = new ConversationRouter(sessionManager);
+        this.clock = deps.clock ?? wallClock;
+    }
+
+    private isThreadReplyForBlocking(obs: unknown, params: { threadId: string; correlationId: string; recipientAgentId: string }): boolean {
+        if (!obs || typeof obs !== 'object') {
+            return false;
+        }
+        const o = obs as { source?: unknown; payload?: unknown };
+        if (o.source !== 'conversation') {
+            return false;
+        }
+        const payload = o.payload as { kind?: string; message?: Record<string, unknown> } | undefined;
+        if (!payload || payload.kind !== 'message.received' || !payload.message) {
+            return false;
+        }
+        const msg = payload.message;
+        const conv = msg.conversation as { id?: string; kind?: string } | undefined;
+        if (!conv || conv.kind !== 'thread' || conv.id !== params.threadId) {
+            return false;
+        }
+        if (msg.correlationId !== params.correlationId) {
+            return false;
+        }
+        if (msg.recipientAgentId !== params.recipientAgentId) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Blocking mode: wait until the sender session observes an inbound thread `message.received`
+     * addressed to the sender with a matching correlation id (typically the other party's reply).
+     */
+    private async waitForBlockingThreadReply(params: {
+        tenantId: string;
+        senderSessionId: string;
+        senderAgentId: string;
+        threadId: string;
+        correlationId: string;
+        deadlineMs: number;
+    }): Promise<'ok' | 'timeout'> {
+        while (this.clock.now().getTime() < params.deadlineMs) {
+            const loaded = await this.sessionManager.load(params.tenantId, params.senderSessionId);
+            const snap = (loaded?.snapshot as Record<string, unknown> | undefined) ?? {};
+            const inbox = snap.inbox as { all?: unknown[] } | undefined;
+            const all = Array.isArray(inbox?.all) ? inbox.all : [];
+            for (const obs of all) {
+                if (
+                    this.isThreadReplyForBlocking(obs, {
+                        threadId: params.threadId,
+                        correlationId: params.correlationId,
+                        recipientAgentId: params.senderAgentId,
+                    })
+                ) {
+                    return 'ok';
+                }
+            }
+            await new Promise<void>((r) => setTimeout(r, BLOCKING_POLL_INTERVAL_MS));
+        }
+        return 'timeout';
     }
 
     private async sessionInflight(tenantId: string, sessionId: string): Promise<boolean> {
@@ -87,19 +170,61 @@ export class ConversationService implements InternalConversationApi {
         return isInflightSnapshot(base);
     }
 
+    private async resolveInviterSeat(
+        tenantId: string,
+        topicId: string,
+        senderSessionId: string,
+        senderAgentId: string
+    ): Promise<{ memberId: string; sessionId: string } | null> {
+        const seats = await this.sessionManager.listConversationTopicMembersByAgent({
+            tenantId,
+            conversationId: topicId,
+            agentId: senderAgentId,
+            activeOnly: true,
+        });
+        if (seats.length === 0) {
+            return null;
+        }
+        const bySession = seats.find((s) => s.sessionId === senderSessionId);
+        const chosen = bySession ?? seats[0];
+        return { memberId: chosen.memberId, sessionId: chosen.sessionId };
+    }
+
     async startThread(
         tenantId: string,
         senderSessionId: string,
         senderAgentId: string,
         options: StartThreadOptions
     ): Promise<StartThreadReceipt> {
+        const awaitMode = options.awaitMode ?? 'deferred';
+        if (awaitMode === 'blocking' && options.message.correlationId === undefined) {
+            const threadId = options.conversationId ?? (`thread-${uuidv7()}` as ThreadRef['id']);
+            const thread: ThreadRef = { kind: 'thread', id: threadId };
+            return {
+                thread,
+                receipt: {
+                    status: 'rejected',
+                    thread,
+                    error: {
+                        type: 'Unsupported',
+                        message: 'blocking startThread requires message.correlationId.',
+                    },
+                },
+            };
+        }
         const threadId = options.conversationId ?? (`thread-${uuidv7()}` as ThreadRef['id']);
         const thread: ThreadRef = { kind: 'thread', id: threadId };
+        const ttlMs = this.deps.resolveThreadTtlMs ? this.deps.resolveThreadTtlMs() : 3600000;
+        const expiresAtIso =
+            ttlMs == null
+                ? null
+                : new Date(this.clock.now().getTime() + ttlMs).toISOString();
         await this.sessionManager.createConversationThread({
             tenantId,
             conversationId: thread.id,
             ownerAgentId: senderAgentId,
             participantAgentId: options.targetAgentId,
+            expiresAt: expiresAtIso,
         });
 
         const sendReceipt = await this.send(
@@ -113,9 +238,16 @@ export class ConversationService implements InternalConversationApi {
             {
                 idempotencyKey: options.idempotencyKey,
                 queueMode: options.queueMode,
+                skipRecipientActivation: options.skipRecipientActivation,
+                awaitMode: options.awaitMode,
+                timeoutMs: options.timeoutMs,
             }
         );
-        return { thread, receipt: sendReceipt };
+        const timedOut =
+            awaitMode === 'blocking' &&
+            sendReceipt.status === 'rejected' &&
+            sendReceipt.error.type === 'ConversationTimeout';
+        return { thread, receipt: sendReceipt, ...(timedOut ? { timedOut: true } : {}) };
     }
 
     async send(
@@ -137,6 +269,20 @@ export class ConversationService implements InternalConversationApi {
             };
         }
         if (threadRecord.status !== 'open') {
+            if (threadRecord.status === 'archived') {
+                return {
+                    status: 'rejected',
+                    thread,
+                    error: { type: 'ConversationClosed', message: 'Conversation thread is archived.' },
+                };
+            }
+            if (threadRecord.closeReason === 'ttl') {
+                return {
+                    status: 'rejected',
+                    thread,
+                    error: { type: 'ThreadExpired', message: 'Conversation thread expired (TTL).' },
+                };
+            }
             return {
                 status: 'rejected',
                 thread,
@@ -146,10 +292,10 @@ export class ConversationService implements InternalConversationApi {
 
         const dedupeKey = options?.idempotencyKey;
         if (dedupeKey) {
-            const existing = await this.sessionManager.findConversationMessageByIdempotencyKey({
+            const existing = await this.deps.messageLog.findByIdempotency({
                 tenantId,
                 conversationId: thread.id,
-                senderMemberId: message.senderAgentId,
+                senderMemberId: MemberIdSchema.parse(message.senderAgentId),
                 idempotencyKey: dedupeKey,
             });
             if (existing) {
@@ -162,6 +308,17 @@ export class ConversationService implements InternalConversationApi {
                     correlationId: existing.correlationId,
                 };
             }
+        }
+
+        if ((options?.awaitMode ?? 'deferred') === 'blocking' && message.correlationId === undefined) {
+            return {
+                status: 'rejected',
+                thread,
+                error: {
+                    type: 'Unsupported',
+                    message: 'blocking send requires message.correlationId.',
+                },
+            };
         }
 
         const target = this.deps.routeTargetForThread({
@@ -202,38 +359,67 @@ export class ConversationService implements InternalConversationApi {
             };
         }
 
-        const messageId = `msg-${uuidv7()}`;
-        const appended = await this.sessionManager.appendConversationMessage({
+        const appendResult = await this.deps.messageLog.append({
             tenantId,
             conversationId: thread.id,
-            messageId,
-            senderAgentId: message.senderAgentId,
-            senderMemberId: message.senderAgentId,
-            recipientAgentId: message.recipientAgentId,
             conversationKind: 'thread',
-            selectorKind: null,
+            senderAgentId: message.senderAgentId,
+            senderMemberId: MemberIdSchema.parse(message.senderAgentId),
+            selectorKind: undefined,
             speechAct: message.speechAct,
             payload: { content: message.content },
             correlationId: message.correlationId,
             idempotencyKey: dedupeKey,
+            deliveries: [
+                {
+                    recipientAgentId: message.recipientAgentId,
+                    recipientMemberId: MemberIdSchema.parse(message.recipientAgentId),
+                    sessionId: target.sessionId,
+                },
+            ],
         });
+        const dedupeHit = appendResult.kind === 'dedupeHit';
+        const messageId = appendResult.messageId;
+        const sequenceNumber = appendResult.sequenceNumber;
+        const ttlMsAfter = this.deps.resolveThreadTtlMs ? this.deps.resolveThreadTtlMs() : 3600000;
+        let threadExpiresAtIso: string | undefined;
+        if (ttlMsAfter != null && !dedupeHit) {
+            threadExpiresAtIso = new Date(this.clock.now().getTime() + ttlMsAfter).toISOString();
+            await this.sessionManager.refreshConversationThreadExpiry({
+                tenantId,
+                conversationId: thread.id,
+                expiresAt: threadExpiresAtIso,
+            });
+        }
 
+        const persistedRows = await this.sessionManager.listConversationMessages({
+            tenantId,
+            conversationId: thread.id,
+        });
+        const persisted = persistedRows.find((r) => r.sequenceNumber === sequenceNumber);
+        const content =
+            persisted?.payload &&
+            typeof persisted.payload === 'object' &&
+            persisted.payload !== null &&
+            'content' in persisted.payload
+                ? (persisted.payload as { content: unknown }).content
+                : message.content;
         const observation = {
             source: 'conversation',
             payload: {
                 kind: 'message.received',
                 message: {
-                    id: appended.messageId,
+                    id: messageId,
                     conversation: thread,
-                    senderAgentId: appended.senderAgentId,
+                    senderAgentId: message.senderAgentId,
                     recipientAgentId: message.recipientAgentId,
                     recipientMemberId: MemberIdSchema.parse(message.recipientAgentId),
                     speechAct: message.speechAct,
-                    content: appended.payload.content,
-                    sequenceNumber: appended.sequenceNumber,
-                    correlationId: appended.correlationId,
-                    idempotencyKey: appended.idempotencyKey,
-                    ts: appended.createdAt,
+                    content,
+                    sequenceNumber,
+                    correlationId: persisted?.correlationId ?? message.correlationId,
+                    idempotencyKey: persisted?.idempotencyKey ?? dedupeKey,
+                    ts: appendResult.createdAt,
                 },
             },
         } as Observation;
@@ -244,24 +430,84 @@ export class ConversationService implements InternalConversationApi {
             observation,
         });
 
-        const activateParams: ConversationActivateParams = {
+        const outboundCommitted = {
+            source: 'conversation',
+            payload: {
+                kind: 'outbound.committed' as const,
+                ref: thread,
+                messageId,
+                sequenceNumber,
+                correlationId: persisted?.correlationId ?? message.correlationId,
+                ...(threadExpiresAtIso !== undefined ? { threadExpiresAt: threadExpiresAtIso } : {}),
+                deliveries: [
+                    {
+                        memberId: MemberIdSchema.parse(message.recipientAgentId),
+                        recipientAgentId: message.recipientAgentId,
+                        sessionId: target.sessionId,
+                        messageId,
+                        sequenceNumber,
+                        dedupeHit,
+                        correlationId: persisted?.correlationId ?? message.correlationId,
+                    },
+                ],
+            },
+        } as Observation;
+        await this.router.routeObservation({
             tenantId,
-            threadId: thread.id,
-            routingSessionId: target.sessionId,
-            recipientAgentId: message.recipientAgentId,
-            messageId: appended.messageId,
-            senderSessionId,
-            senderAgentId: message.senderAgentId,
-        };
-        await this.deps.activateConversationRecipient(activateParams);
+            sessionId: senderSessionId,
+            agentId: message.senderAgentId,
+            observation: outboundCommitted,
+        });
+
+        const skipActivation = options?.skipRecipientActivation === true;
+        if (!skipActivation) {
+            const activateParams: ConversationActivateParams = {
+                kind: 'thread',
+                tenantId,
+                threadId: thread.id,
+                routingSessionId: target.sessionId,
+                recipientAgentId: message.recipientAgentId,
+                messageId,
+                senderSessionId,
+                senderAgentId: message.senderAgentId,
+            };
+            await this.deps.activateConversationRecipient(activateParams);
+        }
+
+        const awaitMode = options?.awaitMode ?? 'deferred';
+        if (awaitMode === 'blocking' && message.correlationId !== undefined) {
+            const timeoutMs = options?.timeoutMs;
+            const deadline =
+                timeoutMs != null && timeoutMs > 0
+                    ? this.clock.now().getTime() + timeoutMs
+                    : Number.MAX_SAFE_INTEGER;
+            const waitResult = await this.waitForBlockingThreadReply({
+                tenantId,
+                senderSessionId,
+                senderAgentId: message.senderAgentId,
+                threadId: thread.id,
+                correlationId: message.correlationId,
+                deadlineMs: deadline,
+            });
+            if (waitResult === 'timeout') {
+                return {
+                    status: 'rejected',
+                    thread,
+                    error: {
+                        type: 'ConversationTimeout',
+                        message: 'Timed out waiting for a correlated inbound message on the sender session.',
+                    },
+                };
+            }
+        }
 
         return {
             status: 'accepted',
             thread,
-            messageId: appended.messageId,
-            sequenceNumber: appended.sequenceNumber,
-            dedupeHit: false,
-            correlationId: appended.correlationId,
+            messageId,
+            sequenceNumber,
+            dedupeHit,
+            correlationId: persisted?.correlationId ?? message.correlationId,
         };
     }
 
@@ -368,7 +614,7 @@ export class ConversationService implements InternalConversationApi {
 
     async invite(
         tenantId: string,
-        _senderSessionId: string,
+        senderSessionId: string,
         senderAgentId: string,
         options: TopicInviteOptions
     ): Promise<TopicInviteReceipt> {
@@ -408,19 +654,104 @@ export class ConversationService implements InternalConversationApi {
         if (clash) {
             return { status: 'rejected', error: { type: 'AlreadyMember', message: 'Session collision.' } };
         }
-        const token = `inv-${uuidv7()}`;
-        const issuedAt = new Date().toISOString();
-        await this.sessionManager.issueConversationTopicInvite({
+        const inviterSeat = await this.resolveInviterSeat(
             tenantId,
-            conversationId: options.topic.id,
-            token,
-            inviteeAgentId: options.invitee.agentId,
-            inviteeMemberId,
-            role: options.invitee.role,
-            sessionIdOverride: options.invitee.sessionIdOverride ?? null,
-            issuedAt,
+            options.topic.id,
+            senderSessionId,
+            senderAgentId
+        );
+        if (!inviterSeat) {
+            return {
+                status: 'rejected',
+                error: { type: 'NotAMember', message: 'Inviter must have an active seat in topic.' },
+            };
+        }
+        const dedupeKey = options.idempotencyKey;
+        if (dedupeKey) {
+            const existing = await this.sessionManager.findConversationTopicInviteByIdempotencyKey({
+                tenantId,
+                conversationId: options.topic.id,
+                idempotencyKey: dedupeKey,
+            });
+            if (existing) {
+                return {
+                    status: 'ok',
+                    token: InviteTokenSchema.parse(existing.token),
+                    expiresAt: existing.expiresAt,
+                };
+            }
+        }
+        const issuedAtDate = this.clock.now();
+        const issuedAt = issuedAtDate.toISOString();
+        const ttlSeconds = options.ttlSeconds ?? DEFAULT_INVITE_TTL_SECONDS;
+        const expiresAt = new Date(issuedAtDate.getTime() + ttlSeconds * 1000).toISOString();
+        const token = `inv-${uuidv7()}`;
+        const idempotencyKeyForStore = dedupeKey ?? null;
+        const correlationIdForStore = options.correlationId ?? null;
+        try {
+            await this.sessionManager.issueConversationTopicInvite({
+                tenantId,
+                conversationId: options.topic.id,
+                token,
+                inviteeAgentId: options.invitee.agentId,
+                inviteeMemberId,
+                role: options.invitee.role,
+                sessionIdOverride: options.invitee.sessionIdOverride ?? null,
+                issuedAt,
+                expiresAt,
+                inviterAgentId: senderAgentId,
+                inviterMemberId: inviterSeat.memberId,
+                inviterSessionId: inviterSeat.sessionId,
+                idempotencyKey: idempotencyKeyForStore,
+                correlationId: correlationIdForStore,
+            });
+        } catch (err) {
+            if (dedupeKey && isPgUniqueViolation(err)) {
+                const raced = await this.sessionManager.findConversationTopicInviteByIdempotencyKey({
+                    tenantId,
+                    conversationId: options.topic.id,
+                    idempotencyKey: dedupeKey,
+                });
+                if (raced) {
+                    return {
+                        status: 'ok',
+                        token: InviteTokenSchema.parse(raced.token),
+                        expiresAt: raced.expiresAt,
+                    };
+                }
+            }
+            throw err;
+        }
+        const issuedPayload = {
+            kind: 'topic.invite.issued' as const,
+            topic: options.topic,
+            invitee: {
+                agentId: options.invitee.agentId,
+                memberId: options.invitee.memberId,
+                role: options.invitee.role,
+            },
+            token: InviteTokenSchema.parse(token),
+            expiresAt,
+            inviterAgentId: senderAgentId,
+            ts: issuedAt,
+            correlationId: options.correlationId,
+        };
+        await this.router.routeObservation({
+            tenantId,
+            sessionId: inviterSeat.sessionId,
+            agentId: senderAgentId,
+            observation: {
+                source: 'conversation',
+                payload: issuedPayload,
+            } as Observation,
         });
-        return { status: 'ok', token };
+        if (this.deps.publishConversationEvent) {
+            await this.deps.publishConversationEvent('conversation.topic.invite.issued', {
+                tenantId,
+                payload: issuedPayload,
+            });
+        }
+        return { status: 'ok', token: InviteTokenSchema.parse(token), expiresAt };
     }
 
     async join(
@@ -430,23 +761,61 @@ export class ConversationService implements InternalConversationApi {
         topic: TopicRef,
         options: TopicJoinOptions
     ): Promise<TopicJoinReceipt> {
+        const invite = await this.sessionManager.getConversationTopicInvite({
+            tenantId,
+            token: String(options.inviteToken),
+        });
+        if (!invite) {
+            return { status: 'rejected', error: { type: 'InviteNotFound', message: 'Invite not found.' } };
+        }
+        if (invite.inviteeAgentId !== senderAgentId) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteTargetMismatch', message: 'Invite not for this agent.' },
+            };
+        }
+        if (invite.consumedAt !== null) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteAlreadyConsumed', message: 'Invite already consumed.' },
+            };
+        }
+        if (Date.parse(invite.expiresAt) < this.clock.now().getTime()) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteExpired', message: 'Invite has expired.' },
+            };
+        }
+        if (invite.conversationId !== topic.id) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteTargetMismatch', message: 'Topic mismatch.' },
+            };
+        }
         const consumed = await this.sessionManager.consumeConversationTopicInvite({
             tenantId,
-            token: options.inviteToken,
-            consumedAt: new Date().toISOString(),
+            token: String(options.inviteToken),
+            consumedAt: this.clock.now().toISOString(),
         });
         if (!consumed) {
-            return { status: 'rejected', error: { type: 'InviteInvalid', message: 'Invalid or used invite.' } };
+            const latest = await this.sessionManager.getConversationTopicInvite({
+                tenantId,
+                token: String(options.inviteToken),
+            });
+            if (latest && Date.parse(latest.expiresAt) < this.clock.now().getTime()) {
+                return {
+                    status: 'rejected',
+                    error: { type: 'InviteExpired', message: 'Invite has expired.' },
+                };
+            }
+            return {
+                status: 'rejected',
+                error: { type: 'InviteAlreadyConsumed', message: 'Invite already consumed.' },
+            };
         }
-        if (consumed.inviteeAgentId !== senderAgentId) {
-            return { status: 'rejected', error: { type: 'InviteInvalid', message: 'Invite not for this agent.' } };
-        }
-        if (consumed.conversationId !== topic.id) {
-            return { status: 'rejected', error: { type: 'InviteInvalid', message: 'Topic mismatch.' } };
-        }
-        const memberIdStr = consumed.inviteeMemberId;
+        const memberIdStr = invite.inviteeMemberId;
         const sessionId = consumed.sessionIdOverride ?? `topic-${topic.id}:${memberIdStr}`;
-        const registeredAt = new Date().toISOString();
+        const registeredAt = this.clock.now().toISOString();
         await this.sessionManager.addConversationTopicMember({
             tenantId,
             conversationId: topic.id,
@@ -485,6 +854,73 @@ export class ConversationService implements InternalConversationApi {
             }))
         );
         return { status: 'ok', topic, member };
+    }
+
+    async decline(
+        tenantId: string,
+        _senderSessionId: string,
+        senderAgentId: string,
+        topic: TopicRef,
+        options: TopicDeclineOptions
+    ): Promise<TopicDeclineReceipt> {
+        const invite = await this.sessionManager.getConversationTopicInvite({
+            tenantId,
+            token: String(options.inviteToken),
+        });
+        if (!invite) {
+            return { status: 'rejected', error: { type: 'InviteNotFound', message: 'Invite not found.' } };
+        }
+        if (invite.inviteeAgentId !== senderAgentId || invite.conversationId !== topic.id) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteTargetMismatch', message: 'Invite target mismatch.' },
+            };
+        }
+        if (invite.consumedAt !== null) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteAlreadyConsumed', message: 'Invite already consumed.' },
+            };
+        }
+        if (Date.parse(invite.expiresAt) < this.clock.now().getTime()) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteExpired', message: 'Invite has expired.' },
+            };
+        }
+        const declinedAt = this.clock.now().toISOString();
+        const declined = await this.sessionManager.declineConversationTopicInvite({
+            tenantId,
+            token: String(options.inviteToken),
+            declinedAt,
+            reason: options.reason ?? null,
+        });
+        if (!declined) {
+            return {
+                status: 'rejected',
+                error: { type: 'InviteAlreadyConsumed', message: 'Invite already consumed.' },
+            };
+        }
+        const declinedObs = {
+            source: 'conversation',
+            payload: {
+                kind: 'topic.invite.declined' as const,
+                topic,
+                token: options.inviteToken,
+                inviteeAgentId: senderAgentId,
+                inviteeMemberId: MemberIdSchema.parse(invite.inviteeMemberId),
+                reason: options.reason,
+                ts: declinedAt,
+                correlationId: undefined,
+            },
+        } as Observation;
+        await this.router.routeObservation({
+            tenantId,
+            sessionId: declined.inviterSessionId,
+            agentId: declined.inviterAgentId,
+            observation: declinedObs,
+        });
+        return { status: 'ok', topic };
     }
 
     async leave(
@@ -615,10 +1051,10 @@ export class ConversationService implements InternalConversationApi {
 
         const dedupeKey = options?.idempotencyKey;
         if (dedupeKey) {
-            const existing = await this.sessionManager.findConversationMessageByIdempotencyKey({
+            const existing = await this.deps.messageLog.findByIdempotency({
                 tenantId,
                 conversationId: topic.id,
-                senderMemberId: senderMemberIdResolved,
+                senderMemberId: MemberIdSchema.parse(senderMemberIdResolved),
                 idempotencyKey: dedupeKey,
             });
             if (existing) {
@@ -627,7 +1063,23 @@ export class ConversationService implements InternalConversationApi {
                     conversationId: topic.id,
                     sequenceNumber: existing.sequenceNumber,
                 });
-                return reconstructFanoutReceiptFromDeliveries(topic, existing, deliveries);
+                const row: ConversationMessageRecord = {
+                    tenantId,
+                    conversationId: topic.id,
+                    sequenceNumber: existing.sequenceNumber,
+                    messageId: existing.messageId,
+                    senderAgentId: existing.senderAgentId,
+                    senderMemberId: String(existing.senderMemberId),
+                    recipientAgentId: null,
+                    conversationKind: 'topic',
+                    selectorKind: existing.selectorKind ?? null,
+                    speechAct: existing.speechAct,
+                    payload: existing.payload as Record<string, unknown>,
+                    correlationId: existing.correlationId,
+                    idempotencyKey: existing.idempotencyKey,
+                    createdAt: existing.createdAt,
+                };
+                return reconstructFanoutReceiptFromDeliveries(topic, row, deliveries);
             }
         }
 
@@ -730,59 +1182,98 @@ export class ConversationService implements InternalConversationApi {
             };
         }
 
-        const messageId = `msg-${uuidv7()}`;
-        const appended = await this.sessionManager.appendConversationMessage({
+        const qpBefore = this.queueState.byTopic.get(topic.id) ?? 0;
+        const logDeliveries: MessageLogDelivery[] = [];
+        for (const s of scans) {
+            const mid = MemberIdSchema.parse(s.memberId);
+            if (s.outcome === 'deliver') {
+                logDeliveries.push({
+                    recipientAgentId: s.agentId,
+                    recipientMemberId: mid,
+                    sessionId: s.sessionId,
+                });
+            } else if (s.outcome === 'queue') {
+                logDeliveries.push({
+                    recipientAgentId: s.agentId,
+                    recipientMemberId: mid,
+                    sessionId: s.sessionId,
+                    status: 'queued',
+                    error: null,
+                    queuePosition: qpBefore + 1,
+                });
+            } else {
+                logDeliveries.push({
+                    recipientAgentId: s.agentId,
+                    recipientMemberId: mid,
+                    sessionId: s.sessionId,
+                    status: 'rejected',
+                    error: { type: 'ThreadBusy', message: 'Recipient session busy.' },
+                    queuePosition: null,
+                });
+            }
+        }
+
+        const appendResult = await this.deps.messageLog.append({
             tenantId,
             conversationId: topic.id,
-            messageId,
-            senderAgentId: message.senderAgentId,
-            senderMemberId: senderMemberIdResolved,
-            recipientAgentId: null,
             conversationKind: 'topic',
+            senderAgentId: message.senderAgentId,
+            senderMemberId: MemberIdSchema.parse(senderMemberIdResolved),
             selectorKind: baseSelector.kind,
             speechAct: message.speechAct,
             payload: { content: message.content },
             correlationId: message.correlationId,
             idempotencyKey: dedupeKey,
+            deliveries: logDeliveries,
         });
+
+        if (appendResult.kind === 'dedupeHit') {
+            const deliveries = await this.sessionManager.listConversationMessageDeliveries({
+                tenantId,
+                conversationId: topic.id,
+                sequenceNumber: appendResult.sequenceNumber,
+            });
+            const rows = await this.sessionManager.listConversationMessages({ tenantId, conversationId: topic.id });
+            const row = rows.find((r) => r.sequenceNumber === appendResult.sequenceNumber);
+            if (row) {
+                return reconstructFanoutReceiptFromDeliveries(topic, row, deliveries);
+            }
+        }
+
+        const messageId = appendResult.messageId;
+        const sequenceNumber = appendResult.sequenceNumber;
+
+        const persistedRows = await this.sessionManager.listConversationMessages({
+            tenantId,
+            conversationId: topic.id,
+        });
+        const persisted = persistedRows.find((r) => r.sequenceNumber === sequenceNumber);
+        const content =
+            persisted?.payload &&
+            typeof persisted.payload === 'object' &&
+            persisted.payload !== null &&
+            'content' in persisted.payload
+                ? (persisted.payload as { content: unknown }).content
+                : message.content;
 
         const selectorUsed: TopicSelector = baseSelector;
         const inboundBase = {
-            id: appended.messageId,
+            id: messageId,
             conversation: topic,
-            senderAgentId: appended.senderAgentId,
+            senderAgentId: message.senderAgentId,
             speechAct: message.speechAct,
-            content: appended.payload.content,
-            sequenceNumber: appended.sequenceNumber,
-            correlationId: appended.correlationId,
-            idempotencyKey: appended.idempotencyKey,
-            ts: appended.createdAt,
+            content,
+            sequenceNumber,
+            correlationId: persisted?.correlationId ?? message.correlationId,
+            idempotencyKey: persisted?.idempotencyKey ?? dedupeKey,
+            ts: appendResult.createdAt,
         };
 
         const accepted: DeliverySummary[] = [];
         const rejected: Array<{ memberId: MemberId; recipientAgentId: string; error: ConversationError }> = [];
 
-        const deliveryRows: Array<{
-            memberId: string;
-            recipientAgentId: string;
-            sessionId: string;
-            dedupeHit: boolean;
-            status: 'delivered' | 'rejected' | 'queued';
-            error: Record<string, unknown> | null;
-            queuePosition: number | null;
-        }> = [];
-
         for (const s of scans) {
             if (s.outcome === 'queue') {
-                deliveryRows.push({
-                    memberId: s.memberId,
-                    recipientAgentId: s.agentId,
-                    sessionId: s.sessionId,
-                    dedupeHit: false,
-                    status: 'queued',
-                    error: null,
-                    queuePosition: (this.queueState.byTopic.get(topic.id) ?? 0) + 1,
-                });
                 rejected.push({
                     memberId: MemberIdSchema.parse(s.memberId),
                     recipientAgentId: s.agentId,
@@ -791,15 +1282,6 @@ export class ConversationService implements InternalConversationApi {
                 continue;
             }
             if (s.outcome === 'reject') {
-                deliveryRows.push({
-                    memberId: s.memberId,
-                    recipientAgentId: s.agentId,
-                    sessionId: s.sessionId,
-                    dedupeHit: false,
-                    status: 'rejected',
-                    error: { type: 'ThreadBusy', message: 'Recipient session busy.' },
-                    queuePosition: null,
-                });
                 rejected.push({
                     memberId: MemberIdSchema.parse(s.memberId),
                     recipientAgentId: s.agentId,
@@ -830,11 +1312,12 @@ export class ConversationService implements InternalConversationApi {
                 observation: obs,
             });
             const activateParams: ConversationActivateParams = {
+                kind: 'thread',
                 tenantId,
                 threadId: topic.id,
                 routingSessionId: s.sessionId,
                 recipientAgentId,
-                messageId: appended.messageId,
+                messageId,
                 senderSessionId,
                 senderAgentId: message.senderAgentId,
             };
@@ -843,36 +1326,20 @@ export class ConversationService implements InternalConversationApi {
                 memberId: recipientMemberId,
                 recipientAgentId,
                 sessionId: s.sessionId,
-                messageId: appended.messageId,
-                sequenceNumber: appended.sequenceNumber,
+                messageId,
+                sequenceNumber,
                 dedupeHit: false,
                 correlationId: message.correlationId,
             });
-            deliveryRows.push({
-                memberId: s.memberId,
-                recipientAgentId,
-                sessionId: s.sessionId,
-                dedupeHit: false,
-                status: 'delivered',
-                error: null,
-                queuePosition: null,
-            });
         }
-
-        await this.sessionManager.recordConversationMessageDeliveries({
-            tenantId,
-            conversationId: topic.id,
-            sequenceNumber: appended.sequenceNumber,
-            rows: deliveryRows,
-        });
 
         const outboundObs = {
             source: 'conversation',
             payload: {
                 kind: 'outbound.committed',
                 ref: topic,
-                messageId: appended.messageId,
-                sequenceNumber: appended.sequenceNumber,
+                messageId,
+                sequenceNumber,
                 correlationId: message.correlationId,
                 deliveries: accepted,
             },
@@ -900,16 +1367,96 @@ export class ConversationService implements InternalConversationApi {
     async close(
         tenantId: string,
         _senderSessionId: string,
-        _senderAgentId: string,
+        senderAgentId: string,
         ref: ConversationRef,
-        _options?: CloseConversationOptions
+        options?: CloseConversationOptions
     ): Promise<CloseConversationReceipt> {
+        if (options?.archiveAfter === true && ref.kind === 'topic') {
+            throw new Error('ArchiveUnsupportedForTopics');
+        }
         if (ref.kind === 'thread') {
-            await this.sessionManager.updateConversationThreadStatus({
+            const row = await this.sessionManager.getConversationThread({
                 tenantId,
                 conversationId: ref.id,
-                status: 'closed',
             });
+            if (!row) {
+                throw new Error('CONVERSATION_THREAD_NOT_FOUND');
+            }
+            if (row.status === 'archived') {
+                throw new Error('ConversationClosed');
+            }
+            const ts = this.clock.now().toISOString();
+            if (row.status === 'closed') {
+                if (options?.archiveAfter === true) {
+                    await this.sessionManager.updateConversationThreadStatus({
+                        kind: 'archive',
+                        tenantId,
+                        conversationId: ref.id,
+                        archivedAt: ts,
+                        archivedByAgentId: senderAgentId,
+                        archivedReasonText: options?.reason ?? null,
+                    });
+                    await this.emitThreadArchivedFanout(tenantId, ref, ts, senderAgentId, options?.reason);
+                    return { ref, closed: true, archived: true };
+                }
+                return { ref, closed: true };
+            }
+            await this.sessionManager.updateConversationThreadStatus({
+                kind: 'close',
+                tenantId,
+                conversationId: ref.id,
+                closedAt: ts,
+                closeReason: 'explicit',
+                closeReasonText: options?.reason ?? null,
+                closedByAgentId: senderAgentId,
+            });
+            const threadClosedObs = {
+                source: 'conversation',
+                payload: {
+                    kind: 'thread.closed' as const,
+                    thread: ref,
+                    ts,
+                    closedBy: senderAgentId,
+                    closedReason: 'explicit' as const,
+                    reasonText: options?.reason,
+                },
+            } as Observation;
+            const ownerTarget = this.deps.routeTargetForThread({
+                tenantId,
+                threadId: ref.id,
+                recipientAgentId: row.ownerAgentId,
+            });
+            const participantTarget = this.deps.routeTargetForThread({
+                tenantId,
+                threadId: ref.id,
+                recipientAgentId: row.participantAgentId,
+            });
+            await this.router.routeObservations([
+                {
+                    tenantId,
+                    sessionId: ownerTarget.sessionId,
+                    agentId: row.ownerAgentId,
+                    observation: threadClosedObs,
+                },
+                {
+                    tenantId,
+                    sessionId: participantTarget.sessionId,
+                    agentId: row.participantAgentId,
+                    observation: threadClosedObs,
+                },
+            ]);
+            if (options?.archiveAfter === true) {
+                await this.sessionManager.updateConversationThreadStatus({
+                    kind: 'archive',
+                    tenantId,
+                    conversationId: ref.id,
+                    archivedAt: ts,
+                    archivedByAgentId: senderAgentId,
+                    archivedReasonText: options?.reason ?? null,
+                });
+                await this.emitThreadArchivedFanout(tenantId, ref, ts, senderAgentId, options?.reason);
+                return { ref, closed: true, archived: true };
+            }
             return { ref, closed: true };
         }
         await this.sessionManager.updateConversationTopic({
@@ -940,5 +1487,88 @@ export class ConversationService implements InternalConversationApi {
             }))
         );
         return { ref, closed: true };
+    }
+
+    async archive(
+        tenantId: string,
+        _senderSessionId: string,
+        senderAgentId: string,
+        ref: ThreadRef,
+        options?: ArchiveConversationOptions
+    ): Promise<ArchiveConversationReceipt> {
+        const row = await this.sessionManager.getConversationThread({
+            tenantId,
+            conversationId: ref.id,
+        });
+        if (!row) {
+            throw new Error('CONVERSATION_THREAD_NOT_FOUND');
+        }
+        if (row.status === 'open') {
+            throw new Error('ThreadNotClosed');
+        }
+        if (row.status === 'archived') {
+            return { ref, archived: true };
+        }
+        const ts = this.clock.now().toISOString();
+        await this.sessionManager.updateConversationThreadStatus({
+            kind: 'archive',
+            tenantId,
+            conversationId: ref.id,
+            archivedAt: ts,
+            archivedByAgentId: senderAgentId,
+            archivedReasonText: options?.reasonText ?? null,
+        });
+        await this.emitThreadArchivedFanout(tenantId, ref, ts, senderAgentId, options?.reasonText);
+        return { ref, archived: true };
+    }
+
+    private async emitThreadArchivedFanout(
+        tenantId: string,
+        ref: ThreadRef,
+        ts: string,
+        archivedBy: string | undefined,
+        reasonText: string | undefined
+    ): Promise<void> {
+        const row = await this.sessionManager.getConversationThread({
+            tenantId,
+            conversationId: ref.id,
+        });
+        if (!row) {
+            return;
+        }
+        const obs = {
+            source: 'conversation',
+            payload: {
+                kind: 'thread.archived' as const,
+                thread: ref,
+                ts,
+                archivedBy,
+                reasonText,
+            },
+        } as Observation;
+        const ownerTarget = this.deps.routeTargetForThread({
+            tenantId,
+            threadId: ref.id,
+            recipientAgentId: row.ownerAgentId,
+        });
+        const participantTarget = this.deps.routeTargetForThread({
+            tenantId,
+            threadId: ref.id,
+            recipientAgentId: row.participantAgentId,
+        });
+        await this.router.routeObservations([
+            {
+                tenantId,
+                sessionId: ownerTarget.sessionId,
+                agentId: row.ownerAgentId,
+                observation: obs,
+            },
+            {
+                tenantId,
+                sessionId: participantTarget.sessionId,
+                agentId: row.participantAgentId,
+                observation: obs,
+            },
+        ]);
     }
 }

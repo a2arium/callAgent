@@ -10,6 +10,10 @@ import { ConsoleProvider } from './providers/ConsoleProvider.js';
 import { OpikProvider } from './providers/OpikProvider.js';
 import { turnOpikDiagEnabled } from './turnOpikDiagEnv.js';
 
+function isTestRuntime(): boolean {
+    return process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+}
+
 export class TelemetryCollector {
     private static instance: TelemetryCollector;
     private providers: TelemetryProvider[] = [];
@@ -22,6 +26,10 @@ export class TelemetryCollector {
     private autoDiscoverProviders() {
         if (process.env.TELEMETRY_CONSOLE === 'true' || process.env.CONSOLE_TELEMETRY === 'true') {
             this.addProvider(new ConsoleProvider());
+        }
+
+        if (isTestRuntime()) {
+            return;
         }
 
         if (process.env.CALLAGENT_OPIK_ENABLED === 'true' || !!process.env.OPIK_API_KEY) {

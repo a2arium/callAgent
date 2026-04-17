@@ -16,6 +16,12 @@ Use this guide when an agent needs to delegate work to a child agent and correct
 - Child dispatch is an effect and happens only in Execution.
 - Child completion re-enters only as a `child.completed` observation.
 
+## Phase 3: `sendTaskToAgent` and threads
+
+`sendTaskToAgent` is implemented over **`ctx.conversation.startThread` / `send`** (plus A2A). That means a **durable thread message** and inbox observations align with direct conversation usage. **`A2ACallOptions.timeout` is enforced** (maps to conversation-level timeouts / races).
+
+To continue an existing thread across multiple child calls, pass **`A2ACallOptions.conversation: ThreadRef`** (thread-only). The child can read the `ThreadRef` from its inbox and answer with **`ctx.conversation.send(threadRef, ...)`**.
+
 ## The canonical flow (two turns)
 
 ### Turn N (dispatch)
@@ -302,4 +308,13 @@ In tests, assert TurnTrace fields:
 - Use `sendTaskToAgent` when you want explicit child await semantics (`await_child(token)`).
 - Use `ctx.conversation.startThread/send` when you need durable thread identity and multi-message follow-up.
 - Both paths obey the same APLRET rule: effects in Execution, cognition updates only after observation re-entry.
+
+## Topic invite interplay (Phase 2b)
+
+Topic invites are conversation effects, not child-await primitives:
+
+- issue invite in Execution via `ctx.conversation.invite(...)`
+- receive invite as `conversation/topic.invite.received` observation on a later turn
+- optionally auto-join when runtime manifest sets `communication.autoJoinInvitedTopics = true`
+- use `ctx.conversation.join(...)` or `ctx.conversation.decline(...)` in Execution; never from Policy directly
 

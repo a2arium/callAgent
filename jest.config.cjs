@@ -1,4 +1,7 @@
 /** @type {import('jest').Config} */
+// Coverage is expensive on the full monorepo; enable with COVERAGE=true (see package.json test:coverage).
+const collectCoverage = process.env.COVERAGE === 'true';
+
 const config = {
     // Use proper ts-jest preset for ESM
     preset: 'ts-jest/presets/default-esm',
@@ -74,9 +77,8 @@ const config = {
         '!apps/',
     ],
 
-    // Coverage settings
-    // Collect coverage and emit a summary table after the run
-    collectCoverage: true,
+    // Coverage settings (opt-in: COVERAGE=true)
+    collectCoverage,
     coverageProvider: 'v8',
     // text -> table + summary at end; lcov -> CI/HTML consumption
     coverageReporters: ['text', 'lcov'],

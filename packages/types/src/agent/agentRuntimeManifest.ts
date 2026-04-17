@@ -80,6 +80,17 @@ export const AgentRuntimeManifestSchema = z.object({
       level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
     }).strict().optional(),
   }).strict().optional(),
+
+  /** Communication behavior hints for framework-level conversation handling */
+  communication: z.object({
+    autoJoinInvitedTopics: z.boolean().optional().default(false),
+    /**
+     * Idle TTL for conversation threads in milliseconds.
+     * When omitted, the framework default (1 hour) applies.
+     * When `null`, TTL is disabled for this agent (threads never auto-expire).
+     */
+    threadTtlMs: z.union([z.number().int().positive(), z.null()]).optional(),
+  }).strict().optional(),
 }).strict();
 
 export type AgentRuntimeManifest = z.infer<typeof AgentRuntimeManifestSchema>;

@@ -14,6 +14,12 @@ export function transition(
 ): TransitionOut {
     if (exec.action.kind === 'internal' && exec.action.done && exec.result.status === 'ok') {
         const data = exec.result.data;
+        if (data?.phase3ArchiveComplete === true) {
+            return {
+                kind: 'complete',
+                result: data,
+            };
+        }
         if (data?.phase2DemoComplete === true) {
             return {
                 kind: 'complete',

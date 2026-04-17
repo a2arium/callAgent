@@ -1,6 +1,7 @@
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
+import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
 import { memberId } from '../src/public-types/conversation/index.js';
 
 describe('topic multiplicity isolation', () => {
@@ -21,6 +22,8 @@ describe('topic multiplicity isolation', () => {
                 agentId: recipientAgentId,
             }),
             activateConversationRecipient: async () => ({ ok: true }),
+            messageLog: createDbMessageLog(sessionManager),
+            resolveThreadTtlMs: () => null,
         });
 
         const created = await service.createTopic(tenantId, ownerSeat1Session, owner, {

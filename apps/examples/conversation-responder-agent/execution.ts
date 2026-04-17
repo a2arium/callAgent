@@ -1,4 +1,5 @@
 import type { TaskContext, MentalState, MemoryReader, Intent, ExecOutcome } from '@a2arium/callagent-core';
+import { inviteToken } from '@a2arium/callagent-core';
 import { logger } from '@a2arium/callagent-utils';
 import type { ExecPayload, ExecError, Sensory } from './types.js';
 import { DEMO_TOPIC_PHASE2_ID } from './types.js';
@@ -48,7 +49,7 @@ export async function execution(
             };
         }
         const topic = { kind: 'topic' as const, id: DEMO_TOPIC_PHASE2_ID };
-        const r = await ctx.conversation.join(topic, { inviteToken: token });
+        const r = await ctx.conversation.join(topic, { inviteToken: inviteToken(token) });
         if (r.status !== 'ok') {
             return {
                 action: { kind: 'internal', done: true },

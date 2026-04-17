@@ -1,6 +1,7 @@
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
+import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
 
 describe('ConversationService topic harness', () => {
     const tenantId = 't-topic-h';
@@ -20,6 +21,8 @@ describe('ConversationService topic harness', () => {
                 agentId: recipient,
             }),
             activateConversationRecipient: async () => ({ ok: true }),
+            messageLog: createDbMessageLog(sessionManager),
+            resolveThreadTtlMs: () => null,
         });
         return { service, sessionManager };
     };

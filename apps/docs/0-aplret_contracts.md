@@ -414,10 +414,16 @@ Conversation:
 
 - `conversation / message.received`
 - `conversation / delivery.failed`
-- `conversation / thread.closed`
+- `conversation / thread.closed` (includes TTL-driven close via `closedReason: 'ttl'` — there is no separate `thread.expired` kind)
+- `conversation / thread.archived`
 - `conversation / topic.message.received`
 - `conversation / topic.member.joined`
 - `conversation / topic.member.left`
+- `conversation / topic.invite.issued`
+- `conversation / topic.invite.received`
+- `conversation / topic.invite.accepted`
+- `conversation / topic.invite.declined`
+- `conversation / topic.invite.expired`
 - `conversation / topic.closed`
 - `conversation / outbound.committed`
 
@@ -1030,9 +1036,15 @@ Use in Execution only:
 - `ctx.conversation.createTopic(...)`
 - `ctx.conversation.invite(...)`
 - `ctx.conversation.join(...)`
+- `ctx.conversation.decline(...)`
 - `ctx.conversation.leave(...)`
 - `ctx.conversation.post(...)`
 - `ctx.conversation.close(...)`
+- `ctx.conversation.archive(...)` (threads only; typed to `ThreadRef` so topics do not compile)
+
+**Thread lifecycle (Phase 3):** Closing emits `thread.closed` to both participants; optional `archiveAfter` on close may emit `thread.archived`. Idle TTL is configured via manifest (`communication.threadTtlMs`); expiry uses the same `thread.closed` observation with `closedReason: 'ttl'`. Policy may read `M.memory.conversation.threads[id]` (status, `closedReason`, `expiresAt`) without calling APIs.
+
+**Durable message log:** Framework wiring exposes a `MessageLog` port (Zod-typed, default DB-backed). Most agents use `ctx.conversation.*` only; custom `MessageLog` adapters are an advanced integration seam.
 
 Conversation outcomes affect reasoning only after they re-enter through the inbox pipeline as conversation observations.
 
@@ -1042,6 +1054,13 @@ Topic identity model (Phase 2a):
 - `agentId` remains registry/routing identity.
 - `sessionId` is routing state identity (not logical member identity).
 - if `memberId` is omitted on input, runtime resolves `memberId = agentId` once and emits resolved values on all output/observations.
+
+Invite lifecycle model (Phase 2b):
+
+- invite capability is a branded `InviteToken`; callers MUST treat it as opaque and MUST NOT synthesize tokens.
+- inviter-facing seat projection keeps `pendingInvites`; invitee-facing inbox projection keeps `invitesInbox`.
+- delivery is two-step: `topic.invite.issued` (inviter seat) then `topic.invite.received` (invitee inbox/session).
+- terminal invite outcomes (`accepted`, `declined`, `expired`) remove the token from both projection surfaces.
 
 
 ---
@@ -1104,7 +1123,7 @@ Child-agent dispatch is an effect. It belongs in Execution.
 
 1. Policy emits `delegate_to_child`
 2. Shield approves/blocks
-3. Execution calls `sendTaskToAgent(..., { awaitCompletion: false })`
+3. Execution calls `sendTaskToAgent(..., { awaitCompletion: false })` (Phase 3 onward this is implemented over `ctx.conversation` + A2A; `A2ACallOptions.timeout` is enforced)
 4. Execution extracts `handle.token` immediately as a primitive string
 5. Execution returns `{ action, result }` with `action.kind = 'child'` and the token
 6. Transition returns `await_child(token)`
@@ -1245,7 +1264,7 @@ type TurnTrace = {
 
 **Manifest provenance persistence/resume:** When TurnTrace is enabled, the runtime stores `ManifestProvenance` (agentCardSource, runtimeManifestSource, agentCardHash, runtimeManifestHash) on the task context and in snapshot meta. On resume, provenance is restored from snapshot so every TurnTrace carries the same provenance for the run. Identity (name/version) must match between Agent Card and Runtime Manifest or the loop will not start.
 
-**Child tracing:** Child-agent dispatch and completion are recorded in `TurnTrace.childCalls[]`. Parent/child traces are linked via `ChildCallNode` (telemetry node type `'child'`) and optional `parentTurnId` / `childTraceId` / `childAgentNodeId` in `ChildCallTrace`.
+**Child tracing:** Child-agent dispatch and completion are recorded in `TurnTrace.childCalls[]`. Parent/child traces are linked via `ChildCallNode` (telemetry node type `'child'`). In `ChildCallTrace`, `childTraceId` and `childAgentNodeId` are **normatively present on successful dispatch** (when telemetry allows) and **absent** on failure — see [`12-how_to_debug_with_turn_trace.md`](./12-how_to_debug_with_turn_trace.md).
 
 ### TurnTrace requirements
 

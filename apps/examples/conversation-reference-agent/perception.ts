@@ -31,6 +31,26 @@ function firstConversationDelivery(env: EnvironmentState): Obs | undefined {
 }
 
 export function perception(env: EnvironmentState, _alpha: unknown, _mem: MemoryReader): Obs {
+    const userObsEarly = env.inbox.current.find((o) => o.source === 'user' && o.kind === 'input.provided');
+    if (userObsEarly) {
+        const payload = userObsEarly.payload as { value?: unknown };
+        let v = payload?.value;
+        if (v && typeof v === 'object' && v !== null && 'value' in v && !('text' in v)) {
+            const inner = (v as { value: unknown }).value;
+            if (inner && typeof inner === 'object' && inner !== null && 'text' in inner) {
+                v = inner;
+            }
+        }
+        const text =
+            typeof v === 'string'
+                ? v
+                : v && typeof v === 'object' && v !== null && 'text' in v
+                  ? String((v as { text: unknown }).text)
+                  : undefined;
+        if (text) {
+            return { kind: 'user_message', text };
+        }
+    }
     const conv = firstConversationDelivery(env);
     if (conv) {
         return conv;
@@ -61,20 +81,5 @@ export function perception(env: EnvironmentState, _alpha: unknown, _mem: MemoryR
             };
         }
     }
-    const userObs = env.inbox.current.find((o) => o.source === 'user' && o.kind === 'input.provided');
-    if (!userObs) {
-        return { kind: 'idle' };
-    }
-    const payload = userObs.payload as { value?: unknown };
-    const v = payload?.value;
-    const text =
-        typeof v === 'string'
-            ? v
-            : v && typeof v === 'object' && v !== null && 'text' in v
-              ? String((v as { text: unknown }).text)
-              : undefined;
-    if (!text) {
-        return { kind: 'idle' };
-    }
-    return { kind: 'user_message', text };
+    return { kind: 'idle' };
 }

@@ -94,6 +94,7 @@ describe('TaskEngine inbox coordination', () => {
                                 conversation: { kind: 'thread', id: 'thread-te-1' },
                                 senderAgentId: 'parent',
                                 recipientAgentId: 'child',
+                                recipientMemberId: 'mem-child',
                                 speechAct: 'request',
                                 content: { question: true },
                                 sequenceNumber: 1,

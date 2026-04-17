@@ -47,7 +47,10 @@ packages/**/src/**/*.d.ts
 
 # Optional build outputs or temp files
 *.js
-*.js.map 
+*.js.map
+
+# Exception: root Jest globalTeardown (ESM; referenced by jest.config.cjs)
+!jest.teardown.js
 
 planned_architecture
 

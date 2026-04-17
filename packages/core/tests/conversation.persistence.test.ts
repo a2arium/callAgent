@@ -1,6 +1,7 @@
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
+import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
 
 describe('Conversation persistence (in-memory store)', () => {
     const tenantId = 't-persist';
@@ -18,6 +19,8 @@ describe('Conversation persistence (in-memory store)', () => {
                 agentId: recipient,
             }),
             activateConversationRecipient: async () => ({ ok: true }),
+            messageLog: createDbMessageLog(sessionManager),
+            resolveThreadTtlMs: () => null,
         });
         return { service, sessionManager };
     };

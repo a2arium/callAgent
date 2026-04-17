@@ -1,18 +1,21 @@
+import type {
+    ConversationThreadRecord,
+    ConversationThreadSweepRow,
+    UpdateConversationThreadStatusInput,
+} from '@a2arium/callagent-types';
+
+export type {
+    ConversationThreadCloseReason,
+    ConversationThreadRecord,
+    ConversationThreadSweepRow,
+    UpdateConversationThreadStatusInput,
+} from '@a2arium/callagent-types';
+
 export type WMSessionSnapshot = {
     wmVersion: bigint;
     snapshot: Record<string, unknown>;
     agentId: string;
     updatedAt: string; // ISO
-};
-
-export type ConversationThreadRecord = {
-    tenantId: string;
-    conversationId: string;
-    ownerAgentId: string;
-    participantAgentId: string;
-    status: 'open' | 'closed' | 'archived';
-    createdAt: string;
-    updatedAt: string;
 };
 
 export type ConversationKind = 'thread' | 'topic';
@@ -67,7 +70,19 @@ export type ConversationTopicInviteRecord = {
     role: 'owner' | 'participant';
     sessionIdOverride: string | null;
     issuedAt: string;
+    expiresAt: string;
+    inviterAgentId: string;
+    inviterMemberId: string;
+    inviterSessionId: string;
     consumedAt: string | null;
+    declinedAt: string | null;
+    declineReason: string | null;
+    deliveryAttemptedAt: string | null;
+    deliveredAt: string | null;
+    deliveryAttempts: number;
+    deliveryFailureReason: string | null;
+    idempotencyKey: string | null;
+    correlationId: string | null;
 };
 
 export type ConversationMessageDeliveryStatus = 'delivered' | 'rejected' | 'queued';
@@ -112,16 +127,26 @@ export interface IWorkingMemorySessionStore {
         conversationId: string;
         ownerAgentId: string;
         participantAgentId: string;
+        expiresAt?: string | null;
     }): Promise<ConversationThreadRecord>;
     getConversationThread(params: {
         tenantId: string;
         conversationId: string;
     }): Promise<ConversationThreadRecord | null>;
-    updateConversationThreadStatus(params: {
+    updateConversationThreadStatus(params: UpdateConversationThreadStatusInput): Promise<void>;
+    refreshConversationThreadExpiry(params: {
         tenantId: string;
         conversationId: string;
-        status: 'open' | 'closed' | 'archived';
+        expiresAt: string | null;
     }): Promise<void>;
+    listConversationThreadsForSweep(params: {
+        tenantId: string;
+        mode: 'expireOpen' | 'archiveClosed';
+        nowIso: string;
+        /** Required when `mode === 'archiveClosed'`: threads with `closed_at` strictly before this ISO are selected. */
+        closedBeforeIso?: string;
+        limit: number;
+    }): Promise<ConversationThreadSweepRow[]>;
     appendConversationMessage(params: {
         tenantId: string;
         conversationId: string;
@@ -210,7 +235,22 @@ export interface IWorkingMemorySessionStore {
         role: 'owner' | 'participant';
         sessionIdOverride: string | null;
         issuedAt: string;
+        expiresAt: string;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
+        idempotencyKey: string | null;
+        correlationId: string | null;
     }): Promise<void>;
+    findConversationTopicInviteByIdempotencyKey(params: {
+        tenantId: string;
+        conversationId: string;
+        idempotencyKey: string;
+    }): Promise<ConversationTopicInviteRecord | null>;
+    getConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+    }): Promise<ConversationTopicInviteRecord | null>;
     consumeConversationTopicInvite(params: {
         tenantId: string;
         token: string;
@@ -221,7 +261,48 @@ export interface IWorkingMemorySessionStore {
         inviteeMemberId: string;
         role: 'owner' | 'participant';
         sessionIdOverride: string | null;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
     } | null>;
+    declineConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+        declinedAt: string;
+        reason: string | null;
+    }): Promise<{
+        conversationId: string;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
+        inviteeAgentId: string;
+        inviteeMemberId: string;
+    } | null>;
+    markConversationTopicInviteDeliveryAttempt(params: {
+        tenantId: string;
+        token: string;
+        attemptedAt: string;
+    }): Promise<number>;
+    markConversationTopicInviteDelivered(params: {
+        tenantId: string;
+        token: string;
+        deliveredAt: string;
+    }): Promise<void>;
+    setConversationTopicInviteDeliveryFailureReason(params: {
+        tenantId: string;
+        token: string;
+        reason: string;
+    }): Promise<void>;
+    listExpiredConversationTopicInvites(params: {
+        tenantId: string;
+        nowIso: string;
+        limit: number;
+    }): Promise<ConversationTopicInviteRecord[]>;
+    listUndeliveredConversationTopicInvites(params: {
+        tenantId: string;
+        nowIso: string;
+        limit: number;
+    }): Promise<ConversationTopicInviteRecord[]>;
     recordConversationMessageDeliveries(params: {
         tenantId: string;
         conversationId: string;

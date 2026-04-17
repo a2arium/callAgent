@@ -25,6 +25,7 @@ import { ChildCallNode } from '../../telemetry/nodes/ChildCallNode.js';
 import type { TaskInput } from '../../shared/types/index.js';
 import type { InternalConversationApi } from '../../internal/conversation/types.js';
 import type {
+    ArchiveConversationOptions,
     CloseConversationOptions,
     ConversationRef,
     FanoutSendReceipt,
@@ -33,6 +34,7 @@ import type {
     StartThreadOptions,
     ThreadRef,
     TopicJoinOptions,
+    TopicDeclineOptions,
     TopicLeaveOptions,
     TopicPostOptions,
     TopicRef,
@@ -42,6 +44,9 @@ import type {
 } from '../../public-types/conversation/types.js';
 import { stampTopicPostTurnTrace } from './topicTurnTraceStamp.js';
 import { MemberIdSchema } from '../../public-types/conversation/schemas.js';
+import type { A2ACallOptions } from '../../shared/types/A2ATypes.js';
+import { bootstrapConversationForSendTaskToAgent } from './bootstrapConversationForSendTaskToAgent.js';
+import { readA2aResultTelemetry } from './a2aResultTelemetry.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -59,6 +64,358 @@ export interface ApiBinderDependencies {
 
 export class ApiBinder {
     constructor(private deps: ApiBinderDependencies) { }
+
+    /**
+     * Shared implementation for `ctx.sendTaskToAgent` (TaskEngine and streaming runner).
+     */
+    static createSendTaskToAgentHandler(
+        deps: ApiBinderDependencies,
+        ctx: TaskContext,
+        bind: { tenantId: string; sessionId: string; agentId: string; flushMentalState: () => Promise<void> }
+    ): TaskContext['sendTaskToAgent'] {
+        const { tenantId, sessionId, agentId, flushMentalState } = bind;
+        const conversationService = deps.conversationService;
+        const fn = async (agent: string, childInput: unknown, options?: A2ACallOptions) => {
+            return ApiBinder.runSendTaskToAgentBody(deps, ctx, { tenantId, sessionId, agentId, flushMentalState }, agent, childInput, options);
+        };
+        return fn as TaskContext['sendTaskToAgent'];
+    }
+
+    private static async runSendTaskToAgentBody(
+        deps: ApiBinderDependencies,
+        ctx: TaskContext,
+        bind: { tenantId: string; sessionId: string; agentId: string; flushMentalState: () => Promise<void> },
+        agent: string,
+        childInput: unknown,
+        options?: A2ACallOptions
+    ): Promise<{ handle: unknown; token: string }> {
+        const { tenantId, sessionId, agentId, flushMentalState } = bind;
+        const conversationService = deps.conversationService;
+        log.debug('[sendTaskToAgent] START', { agent, taskId: sessionId });
+        if (!deps.sessionManager) throw new Error('Session manager not configured');
+        if ((options as { skipFlush?: boolean } | undefined)?.skipFlush !== true) {
+            try {
+                await flushMentalState();
+            } catch {
+                /* noop */
+            }
+        }
+
+        log.debug(`[sendTaskToAgent] Requesting mutex for ${tenantId}:${sessionId}`);
+        let token = (options as { customToken?: string } | undefined)?.customToken;
+        const { handle, token: generatedToken } = await deps.taskCreationMutex.runExclusive(
+            `${tenantId}:${sessionId}`,
+            async () => {
+                return await createTaskHandle(deps.sessionManager!, tenantId, sessionId, agent, childInput);
+            }
+        );
+        if (!token) token = generatedToken;
+
+        const parentId = ctx.telemetry?.nodeId ?? 'root';
+        const parentNode = telemetry.getNode(parentId);
+        const traceId = parentNode?.traceId;
+        const childCallNode = new ChildCallNode(token, parentId, agent, undefined, traceId);
+        childCallNode.start({ token, agentId: agent });
+        telemetry.registerNode(childCallNode);
+
+        const iCtx = ctx as InternalTaskContext;
+        if (iCtx.__turnChildCalls) {
+            iCtx.__turnChildCalls.push({
+                token,
+                agentId: agent,
+                status: 'dispatched',
+                module: iCtx.__currentModule,
+                awaitCompletion: options?.awaitCompletion !== false,
+                childAgentNodeId: childCallNode.id,
+            });
+        }
+
+        const tokenPath = options?.tokenPath ?? 'child.token';
+        const shouldSetToken = options?.setToken !== false;
+        const controlUpdates: Array<[string, unknown]> = [];
+
+        if (shouldSetToken) {
+            controlUpdates.push([tokenPath, token]);
+            writeControlVar(ctx, tokenPath, token);
+        }
+        if (options?.setStage) {
+            controlUpdates.push(['stage', options.setStage]);
+            writeControlVar(ctx, 'stage', options.setStage);
+        }
+
+        const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
+            const tasks = getPendingTasks(baseSnap);
+            if (tasks[token]) {
+                tasks[token].options = {
+                    setToken: shouldSetToken,
+                    tokenPath,
+                    autoClearToken: options?.autoClearToken !== false,
+                    setStage: options?.setStage,
+                };
+                let next = setPendingTasks(baseSnap, tasks);
+                if (controlUpdates.length > 0) {
+                    for (const [path, value] of controlUpdates) {
+                        next = TaskStateUtils.applyControlVarToSnapshot(next, path, value);
+                    }
+                }
+                await deps.sessionManager.saveSnapshot({
+                    tenantId,
+                    sessionId,
+                    agentId: (baseSnap as { meta?: { agentId?: string } })?.meta?.agentId || 'default',
+                    expectedWmVersion: expectedVer,
+                    snapshot: next,
+                });
+            }
+        };
+
+        try {
+            let attempts = 0;
+            const maxAttempts = 3;
+            let saved = false;
+
+            while (attempts < maxAttempts) {
+                attempts++;
+                const snapOptions = await deps.sessionManager.load(tenantId, sessionId);
+                const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
+                const expected = snapOptions?.wmVersion ?? BigInt(0);
+
+                const hasMeta = !!(baseOptions as { meta?: unknown }).meta;
+                const hasM = !!(baseOptions as { M?: unknown }).M;
+                const isVersionZero = expected === BigInt(0);
+
+                if (hasMeta || hasM || isVersionZero) {
+                    await writeOnce(baseOptions, expected);
+                    saved = true;
+                    break;
+                }
+                if (attempts < maxAttempts) await new Promise((r) => setTimeout(r, 200 * attempts));
+            }
+
+            if (!saved) {
+                const snapFinal = await deps.sessionManager.load(tenantId, sessionId);
+                await writeOnce((snapFinal?.snapshot as Record<string, unknown>) || {}, snapFinal?.wmVersion ?? BigInt(0));
+            }
+        } catch (e) {
+            if ((e as Error).message === 'CAS_MISMATCH') {
+                try {
+                    const snapRetry = await deps.sessionManager.load(tenantId, sessionId);
+                    await writeOnce((snapRetry?.snapshot as Record<string, unknown>) || {}, snapRetry?.wmVersion ?? BigInt(0));
+                } catch {
+                    /* noop */
+                }
+            } else throw e;
+        }
+
+        const optAny = (options ?? {}) as {
+            onInputRequired?: unknown;
+            onCompleted?: unknown;
+            onFailed?: unknown;
+        };
+        const handleHooks = handle as unknown as {
+            onInputRequired?: (cb: unknown) => Promise<unknown>;
+            onCompleted?: (cb: unknown) => Promise<unknown>;
+            onFailed?: (cb: unknown) => Promise<unknown>;
+        };
+        if (optAny.onInputRequired) {
+            try {
+                await handleHooks.onInputRequired?.(optAny.onInputRequired);
+            } catch {
+                /* noop */
+            }
+        }
+        if (optAny.onCompleted) {
+            try {
+                await handleHooks.onCompleted?.(optAny.onCompleted);
+            } catch {
+                /* noop */
+            }
+        }
+        if (optAny.onFailed) {
+            try {
+                await handleHooks.onFailed?.(optAny.onFailed);
+            } catch {
+                /* noop */
+            }
+        }
+
+        const awaitCompletion = options?.awaitCompletion !== false;
+        type CtxWithLoop = TaskContext & {
+            __activeLoopInbox?: { current: unknown[]; all: unknown[] };
+            __activeLoopEnv?: { turn?: number; pending?: { children?: Record<string, unknown> } };
+        };
+        const minimalCtx = ctx as CtxWithLoop;
+        const a2aOptions = {
+            tenantId,
+            streaming: options?.streaming === true,
+            parentTenantId: tenantId,
+            parentTaskId: sessionId,
+            parentChildToken: token,
+            skipParentNotification: awaitCompletion,
+            parentTelemetryNodeId: childCallNode.id,
+        };
+
+        const a2aOpts = options;
+        const idempotencyKey =
+            a2aOpts?.childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
+
+        let convoStamp: import('./bootstrapConversationForSendTaskToAgent.js').ConversationBootstrapStamp | undefined;
+        try {
+            convoStamp = await bootstrapConversationForSendTaskToAgent({
+                conversationService,
+                tenantId,
+                senderSessionId: sessionId,
+                senderAgentId: agentId,
+                targetAgent: agent,
+                taskInput: childInput as TaskInput,
+                idempotencyKey,
+                conversation: a2aOpts?.conversation,
+            });
+        } catch (bootErr) {
+            const er = bootErr instanceof Error ? bootErr : new Error(String(bootErr));
+            childCallNode.fail(er);
+            telemetry.failNode(childCallNode, er);
+            telemetry.endNode(childCallNode);
+            if (iCtx.__turnChildCalls) {
+                iCtx.__turnChildCalls.push({
+                    token,
+                    agentId: agent,
+                    status: 'failed',
+                    module: iCtx.__currentModule,
+                    error: { message: er.message },
+                });
+            }
+            throw bootErr;
+        }
+
+        const runA2a = () =>
+            globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as TaskInput, {
+                ...(options || {}),
+                ...a2aOptions,
+            });
+
+        let result: unknown;
+        try {
+            const timeoutMs = a2aOpts?.timeout;
+            if (timeoutMs != null && timeoutMs > 0) {
+                result = await Promise.race([
+                    runA2a(),
+                    new Promise<never>((_, reject) =>
+                        setTimeout(() => reject(new Error('ConversationTimeout')), timeoutMs)
+                    ),
+                ]);
+            } else {
+                result = await runA2a();
+            }
+        } catch (error) {
+            const er = error instanceof Error ? error : new Error(String(error));
+            childCallNode.fail(er);
+            telemetry.failNode(childCallNode, er);
+            telemetry.endNode(childCallNode);
+            if (iCtx.__turnChildCalls) {
+                iCtx.__turnChildCalls.push({
+                    token,
+                    agentId: agent,
+                    status: 'failed',
+                    module: iCtx.__currentModule,
+                    error: { message: error instanceof Error ? error.message : String(error) },
+                });
+            }
+            await deps.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
+                taskId: sessionId,
+                childAgent: agent,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+        }
+
+        const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
+        childCallNode.childTaskId = cleanChildResult.childTaskId;
+        childCallNode.endTime = Date.now();
+        childCallNode.end(cleanChildResult.result, 'success');
+        telemetry.endNode(childCallNode);
+        const a2aTel = readA2aResultTelemetry(result);
+        if (iCtx.__turnChildCalls) {
+            iCtx.__turnChildCalls.push({
+                token,
+                agentId: agent,
+                childTaskId: cleanChildResult.childTaskId,
+                status: 'completed',
+                module: iCtx.__currentModule,
+                childAgentNodeId: childCallNode.id,
+                childTraceId: a2aTel?.childTraceId,
+                resultSummary:
+                    cleanChildResult.result != null
+                        ? compactModuleOutput({ result: cleanChildResult.result })
+                        : undefined,
+            });
+        }
+
+        if (convoStamp && awaitCompletion) {
+            try {
+                await conversationService.close(tenantId, sessionId, agentId, convoStamp.thread, {});
+            } catch (closeErr) {
+                log.warn('[sendTaskToAgent] post-success thread close failed', {
+                    error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+                });
+            }
+        }
+
+        const inbox = (
+            ctx as {
+                __activeLoopInbox?: { current: unknown[]; all: unknown[] };
+                __activeLoopEnv?: { turn?: number; pending?: { children?: Record<string, unknown> } };
+            }
+        ).__activeLoopInbox;
+        if (inbox) {
+            const obs: EngineObservation = {
+                source: 'child',
+                kind: 'child.completed',
+                payload: {
+                    token,
+                    childTaskId: cleanChildResult.childTaskId,
+                    result: cleanChildResult.result,
+                    executionMetadata: cleanChildResult.executionMetadata,
+                },
+                provenance: {
+                    ts: Date.now(),
+                    turn: minimalCtx.__activeLoopEnv?.turn ?? 0,
+                    id: token,
+                    correlationId: token,
+                },
+            };
+
+            inbox.current.push(obs);
+            inbox.all.push(obs);
+
+            const loopEnv = minimalCtx.__activeLoopEnv;
+            if (loopEnv?.pending?.children) {
+                loopEnv.pending.children[token] = {
+                    agent,
+                    input: childInput,
+                };
+            }
+
+            log.debug('✅ SYNC CHILD: Injected completion into active loop inbox', { token, awaitCompletion });
+        } else if (awaitCompletion) {
+            await deps.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
+        }
+
+        if (result && typeof result === 'object') {
+            const h = handle as unknown as Record<string, unknown>;
+            const r = result as Record<string, unknown>;
+            for (const key of Object.keys(result)) {
+                if (key !== 'token') {
+                    try {
+                        h[key] = r[key];
+                    } catch {
+                        /* read-only */
+                    }
+                }
+            }
+            return { handle, token };
+        }
+        return { handle, token };
+    }
 
     public async attachOrchestrationAPIs(
         ctx: TaskContext,
@@ -133,6 +490,8 @@ export class ApiBinder {
                 conversationService.invite(tenantId, sessionId, agentId, options),
             join: (topic: TopicRef, options: TopicJoinOptions) =>
                 conversationService.join(tenantId, sessionId, agentId, topic, options),
+            decline: (topic: TopicRef, options: TopicDeclineOptions) =>
+                conversationService.decline(tenantId, sessionId, agentId, topic, options),
             leave: (topic: TopicRef, options?: TopicLeaveOptions) =>
                 conversationService.leave(tenantId, sessionId, agentId, topic, options),
             post: async (topic: TopicRef, message: OutboundTopicMessage, options?: TopicPostOptions) => {
@@ -149,6 +508,9 @@ export class ApiBinder {
             },
             close: async (ref: ConversationRef, options?: CloseConversationOptions) => {
                 return conversationService.close(tenantId, sessionId, agentId, ref, options);
+            },
+            archive: async (ref: ThreadRef, options?: ArchiveConversationOptions) => {
+                return conversationService.archive(tenantId, sessionId, agentId, ref, options);
             },
         };
 
@@ -381,247 +743,12 @@ export class ApiBinder {
             return { token: toolToken } as any;
         };
 
-        // sendTaskToAgent implementation
-        (ctx as any).sendTaskToAgent = async (agent: string, childInput: unknown, options?: any) => {
-            log.debug('[sendTaskToAgent] START', { agent, taskId: sessionId });
-            if (!this.deps.sessionManager) throw new Error('Session manager not configured');
-            // ... flush logic ...
-            if (options?.skipFlush !== true) {
-                // ... internal flush logic ...
-                try { await flushMentalState(); } catch { }
-            }
-
-            log.debug(`[sendTaskToAgent] Requesting mutex for ${tenantId}:${sessionId}`);
-            let token = options?.customToken;
-            const { handle, token: generatedToken } = await this.deps.taskCreationMutex.runExclusive(
-                `${tenantId}:${sessionId}`,
-                async () => {
-                    return await createTaskHandle(this.deps.sessionManager!, tenantId, sessionId, agent, childInput);
-                }
-            );
-            if (!token) token = generatedToken;
-
-            // Create ChildCallNode under current turn so child AgentNode can be parented to it
-            const parentId = ctx.telemetry?.nodeId ?? 'root';
-            const parentNode = telemetry.getNode(parentId);
-            const traceId = parentNode?.traceId;
-            const childCallNode = new ChildCallNode(token, parentId, agent, undefined, traceId);
-            childCallNode.start({ token, agentId: agent });
-            telemetry.registerNode(childCallNode);
-
-            const iCtx = ctx as InternalTaskContext;
-            if (iCtx.__turnChildCalls) {
-                iCtx.__turnChildCalls.push({
-                    token,
-                    agentId: agent,
-                    status: 'dispatched',
-                    module: iCtx.__currentModule,
-                    awaitCompletion: options?.awaitCompletion !== false
-                });
-            }
-
-            const tokenPath = options?.tokenPath ?? 'child.token';
-            const shouldSetToken = options?.setToken !== false;
-            const controlUpdates: Array<[string, unknown]> = [];
-
-            if (shouldSetToken) {
-                controlUpdates.push([tokenPath, token]);
-                writeControlVar(ctx, tokenPath, token);
-            }
-            if (options?.setStage) {
-                controlUpdates.push(['stage', options.setStage]);
-                writeControlVar(ctx, 'stage', options.setStage);
-            }
-
-            const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
-                const tasks = getPendingTasks(baseSnap);
-                // Integrity checks...
-                // ...
-                if (tasks[token]) {
-                    tasks[token].options = {
-                        setToken: shouldSetToken,
-                        tokenPath,
-                        autoClearToken: options?.autoClearToken !== false,
-                        setStage: options?.setStage
-                    };
-                    let next = setPendingTasks(baseSnap, tasks);
-                    if (controlUpdates.length > 0) {
-                        for (const [path, value] of controlUpdates) {
-                            next = TaskStateUtils.applyControlVarToSnapshot(next, path, value);
-                        }
-                    }
-                    await this.deps.sessionManager.saveSnapshot({
-                        tenantId,
-                        sessionId,
-                        agentId: (baseSnap as any)?.meta?.agentId || 'default',
-                        expectedWmVersion: expectedVer,
-                        snapshot: next
-                    });
-                }
-            };
-
-            // Re-implement retry logic or use SnapshotRepo?
-            // SnapshotRepo.saveWithRetry is good, but writeOnce logic is custom (loaded snapshot might be partial).
-            // For now, I'll keep manual retry to match exactly.
-            try {
-                // Retry loop for loading snapshot
-                let attempts = 0;
-                const maxAttempts = 3;
-                let saved = false;
-
-                while (attempts < maxAttempts) {
-                    attempts++;
-                    const snapOptions = await this.deps.sessionManager.load(tenantId, sessionId);
-                    const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
-                    const expected = snapOptions?.wmVersion ?? BigInt(0);
-
-                    // Integrity Check inside the loop
-                    const hasMeta = !!(baseOptions as any).meta;
-                    const hasM = !!(baseOptions as any).M;
-                    const isVersionZero = expected === BigInt(0);
-
-                    if (hasMeta || hasM || isVersionZero) {
-                        await writeOnce(baseOptions, expected);
-                        saved = true;
-                        break;
-                    }
-                    if (attempts < maxAttempts) await new Promise(r => setTimeout(r, 200 * attempts));
-                }
-
-                if (!saved) {
-                    const snapFinal = await this.deps.sessionManager.load(tenantId, sessionId);
-                    await writeOnce((snapFinal?.snapshot as any) || {}, snapFinal?.wmVersion ?? BigInt(0));
-                }
-
-            } catch (e) {
-                if ((e as Error).message === 'CAS_MISMATCH') {
-                    // retry once
-                    try {
-                        const snapRetry = await this.deps.sessionManager.load(tenantId, sessionId);
-                        await writeOnce((snapRetry?.snapshot as any) || {}, snapRetry?.wmVersion ?? BigInt(0));
-                    } catch { }
-                } else throw e;
-            }
-
-            // ... handler registration ...
-            if (options?.onInputRequired) { try { await (handle as any).onInputRequired(options.onInputRequired); } catch { } }
-            if (options?.onCompleted) { try { await (handle as any).onCompleted(options.onCompleted); } catch { } }
-            if (options?.onFailed) { try { await (handle as any).onFailed(options.onFailed); } catch { } }
-
-            const awaitCompletion = options?.awaitCompletion !== false;
-            type CtxWithLoop = TaskContext & {
-                __activeLoopInbox?: { current: unknown[]; all: unknown[] };
-                __activeLoopEnv?: { turn?: number; pending?: { children?: Record<string, unknown> } };
-            };
-            const minimalCtx = ctx as CtxWithLoop;
-            const a2aOptions = {
-                tenantId,
-                streaming: (options?.streaming) === true,
-                parentTenantId: tenantId,
-                parentTaskId: sessionId,
-                parentChildToken: token,
-                skipParentNotification: awaitCompletion,
-                parentTelemetryNodeId: childCallNode.id
-            };
-
-            let result: unknown;
-            try {
-                result = await globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as TaskInput, {
-                    ...(options || {}),
-                    ...a2aOptions
-                });
-            } catch (error) {
-                const er = error instanceof Error ? error : new Error(String(error));
-                childCallNode.fail(er);
-                telemetry.failNode(childCallNode, er);
-                telemetry.endNode(childCallNode);
-                if (iCtx.__turnChildCalls) {
-                    iCtx.__turnChildCalls.push({
-                        token,
-                        agentId: agent,
-                        status: 'failed',
-                        module: iCtx.__currentModule,
-                        error: { message: error instanceof Error ? error.message : String(error) }
-                    });
-                }
-                await this.deps.sessionManager!.enqueueOutbox(tenantId, 'task.child_dispatch', sessionId, {
-                    taskId: sessionId,
-                    childAgent: agent,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-                throw error;
-            }
-
-            const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
-            childCallNode.childTaskId = cleanChildResult.childTaskId;
-            childCallNode.endTime = Date.now();
-            childCallNode.end(cleanChildResult.result, 'success');
-            telemetry.endNode(childCallNode);
-            if (iCtx.__turnChildCalls) {
-                iCtx.__turnChildCalls.push({
-                    token,
-                    agentId: agent,
-                    childTaskId: cleanChildResult.childTaskId,
-                    status: 'completed',
-                    module: iCtx.__currentModule,
-                    resultSummary: cleanChildResult.result != null 
-                        ? compactModuleOutput({ result: cleanChildResult.result }) 
-                        : undefined
-                });
-            }
-
-            // ... Result handling ...
-            // ✅ ARCHITECTURAL FIX: Always inject child completion into active loop inbox when it exists
-            // This ensures:
-            // 1. The loop's await_child mechanism handles the completion naturally
-            // 2. handleChildCompleted doesn't start a fresh loop (which would lose accumulated mental state)
-            // 3. Both awaitCompletion:true and awaitCompletion:false work correctly
-            const inbox = (ctx as { __activeLoopInbox?: { current: unknown[]; all: unknown[] }; __activeLoopEnv?: { turn?: number; pending?: { children?: Record<string, unknown> } } }).__activeLoopInbox;
-            if (inbox) {
-                const obs: EngineObservation = {
-                    source: 'child',
-                    kind: 'child.completed',
-                    payload: {
-                        token,
-                        childTaskId: cleanChildResult.childTaskId,
-                        result: cleanChildResult.result,
-                        executionMetadata: cleanChildResult.executionMetadata
-                    },
-                    provenance: { ts: Date.now(), turn: minimalCtx.__activeLoopEnv?.turn ?? 0, id: token, correlationId: token }
-                };
-
-                inbox.current.push(obs);
-                inbox.all.push(obs);
-
-                const loopEnv = minimalCtx.__activeLoopEnv;
-                if (loopEnv?.pending?.children) {
-                    loopEnv.pending.children[token] = {
-                        agent,
-                        input: childInput
-                    };
-                }
-
-                log.debug('✅ SYNC CHILD: Injected completion into active loop inbox', { token, awaitCompletion });
-            } else if (awaitCompletion) {
-                // Fallback: no active loop inbox available, use handleChildCompleted
-                await this.deps.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
-            }
-            // Note: When awaitCompletion=false and no inbox, A2AService will call handleChildCompleted via notification
-
-            if (result && typeof result === 'object') {
-                for (const key of Object.keys(result)) {
-                    if (key !== 'token') {
-                        try {
-                            (handle as any)[key] = (result as any)[key];
-                        } catch (e) {
-                            // Skip properties that cannot be set (like read-only descriptors)
-                        }
-                    }
-                }
-                return { handle, token };
-            }
-            return { handle, token };
-        };
+        ctx.sendTaskToAgent = ApiBinder.createSendTaskToAgentHandler(this.deps, ctx, {
+            tenantId,
+            sessionId,
+            agentId,
+            flushMentalState,
+        });
 
         // allTasks implementation
         (ctx as any).allTasks = async (

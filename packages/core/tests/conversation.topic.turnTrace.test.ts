@@ -4,6 +4,7 @@ import type { Intent } from '../src/types/intent.js';
 import type { TaskContext } from '../src/shared/types/index.js';
 import type { ExecOutcome } from '../src/types/execOutcome.js';
 import { TurnTraceSchema } from '../src/types/turnTrace.js';
+import { inviteToken } from '../src/public-types/conversation/index.js';
 
 type Sensory = { run?: boolean };
 type Obs = { kind: 'user' } | { kind: 'idle' };
@@ -84,5 +85,43 @@ describe('TurnTrace topic fan-out stamping', () => {
         ]);
         expect(trace.fanoutSummary?.accepted).toBe(1);
         expect(trace.fanoutSummary?.rejected).toBe(0);
+    });
+
+    it('stamps inviteDelivery.received autoJoinAttempted and typed autoJoinError', async () => {
+        const harness = createTestHarness<Sensory>(
+            {
+                perception: () => ({ kind: 'idle' as const }),
+                learning: (prev) => prev,
+                policy: () => ({ kind: 'wait' as const }),
+                shield: (_m, intent: Intent) => ({ action: 'pass' as const, intent }),
+                execution: async (): Promise<ExecOutcome<ExecPayload, ExecError>> => ({
+                    action: { kind: 'internal', done: true },
+                    result: { status: 'ok', data: {} },
+                }),
+                transition: () => ({ kind: 'complete' as const }),
+            },
+            { autoJoinInvitedTopics: true }
+        );
+
+        const topic = { kind: 'topic' as const, id: 'topic-invite-trace' };
+        harness.injectObservation({
+            source: 'conversation',
+            payload: {
+                kind: 'topic.invite.received',
+                topic,
+                token: inviteToken('inv-trace-1'),
+                expiresAt: '2030-01-01T00:00:00.000Z',
+                role: 'participant',
+                inviterAgentId: 'owner',
+                ts: '2029-01-01T00:00:00.000Z',
+            },
+        } as Observation);
+
+        await harness.runTurn();
+
+        const trace = TurnTraceSchema.parse(harness.lastTrace());
+        expect(trace.inviteDelivery?.received?.[0]?.token).toBe('inv-trace-1');
+        expect(trace.inviteDelivery?.received?.[0]?.autoJoinAttempted).toBe(true);
+        expect(trace.inviteDelivery?.received?.[0]?.autoJoinError?.type).toBe('InviteNotFound');
     });
 });

@@ -347,10 +347,15 @@ export async function runAgentWithStreaming(
 
     // memory registry constructed
 
-    // Add A2A capability - contextWithMemory is already a complete TaskContext
-    (contextWithMemory as any).sendTaskToAgent = async (targetAgent: string, taskInput: TaskInput, options?: any) => {
-        return globalA2AService.sendTaskToAgent(contextWithMemory as any, targetAgent, taskInput, options);
-    };
+    // A2A + conversation bootstrap: delegate to TaskEngine when registered (parity with ApiBinder path)
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    const coreCtx = contextWithMemory as unknown as TaskContext;
+    const streamingSend = engine?.createStreamingSendTaskToAgent(coreCtx);
+    coreCtx.sendTaskToAgent = (
+        streamingSend ??
+        ((targetAgent: string, taskInput: TaskInput, options?: import('../shared/types/A2ATypes.js').A2ACallOptions) =>
+            globalA2AService.sendTaskToAgent(coreCtx, targetAgent, taskInput, options))
+    ) as TaskContext['sendTaskToAgent'];
 
     // The context is now complete - no need for type assertion
     const taskCtx: TaskContext = {

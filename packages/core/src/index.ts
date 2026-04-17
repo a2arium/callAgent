@@ -207,6 +207,7 @@ export { createTestContext } from './testing/TestContext.js';
 export { HarnessAssertionError, createTurnAssertionContext } from './testing/HarnessAssertions.js';
 export { HarnessConfigSchema, type HarnessConfig, type HarnessState, type LLMStubResponse, type TurnAssertionContext, type DeepPartial } from './testing/harnessTypes.js';
 export * from './public-types/conversation/index.js';
+export * from './public-types/messageLog/index.js';
 
 // Agent scaffolding
 export { scaffoldAgent, formatScaffoldError } from './scaffold/scaffoldAgent.js';

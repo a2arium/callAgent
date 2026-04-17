@@ -6,7 +6,9 @@ import type {
     ConversationTopicMemberRecord,
     ConversationTopicRecord,
     ConversationThreadRecord,
+    ConversationThreadSweepRow,
     IWorkingMemorySessionStore,
+    UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
 } from '@a2arium/callagent-memory-engine';
 
@@ -35,6 +37,8 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
     private conversationTopics = new Map<string, ConversationTopicRecord>();
     private topicMembers = new Map<string, ConversationTopicMemberRecord[]>();
     private topicInvites = new Map<string, ConversationTopicInviteRecord>();
+    /** `${tenantId}|${conversationId}|${idempotencyKey}` → invite token */
+    private topicInviteIdempotencyIndex = new Map<string, string>();
     private messageDeliveries = new Map<string, ConversationMessageDeliveryRecord[]>();
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -127,6 +131,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         conversationId: string;
         ownerAgentId: string;
         participantAgentId: string;
+        expiresAt?: string | null;
     }): Promise<ConversationThreadRecord> {
         const key = `${params.tenantId}:${params.conversationId}`;
         const now = new Date().toISOString();
@@ -142,6 +147,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             status: 'open',
             createdAt: now,
             updatedAt: now,
+            expiresAt: params.expiresAt ?? null,
         };
         this.conversationThreads.set(key, created);
         return created;
@@ -154,21 +160,98 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         return this.conversationThreads.get(`${params.tenantId}:${params.conversationId}`) ?? null;
     }
 
-    async updateConversationThreadStatus(params: {
-        tenantId: string;
-        conversationId: string;
-        status: 'open' | 'closed' | 'archived';
-    }): Promise<void> {
+    async updateConversationThreadStatus(params: UpdateConversationThreadStatusInput): Promise<void> {
         const key = `${params.tenantId}:${params.conversationId}`;
         const existing = this.conversationThreads.get(key);
         if (!existing) {
             return;
         }
+        const now = new Date().toISOString();
+        if (params.kind === 'close') {
+            this.conversationThreads.set(key, {
+                ...existing,
+                status: 'closed',
+                closedAt: params.closedAt,
+                closeReason: params.closeReason,
+                closeReasonText: params.closeReasonText ?? null,
+                closedByAgentId: params.closedByAgentId ?? null,
+                updatedAt: now,
+            });
+            return;
+        }
         this.conversationThreads.set(key, {
             ...existing,
-            status: params.status,
+            status: 'archived',
+            archivedAt: params.archivedAt,
+            archivedByAgentId: params.archivedByAgentId ?? null,
+            archivedReasonText: params.archivedReasonText ?? null,
+            updatedAt: now,
+        });
+    }
+
+    async refreshConversationThreadExpiry(params: {
+        tenantId: string;
+        conversationId: string;
+        expiresAt: string | null;
+    }): Promise<void> {
+        const key = `${params.tenantId}:${params.conversationId}`;
+        const existing = this.conversationThreads.get(key);
+        if (!existing || existing.status !== 'open') {
+            return;
+        }
+        this.conversationThreads.set(key, {
+            ...existing,
+            expiresAt: params.expiresAt,
             updatedAt: new Date().toISOString(),
         });
+    }
+
+    async listConversationThreadsForSweep(params: {
+        tenantId: string;
+        mode: 'expireOpen' | 'archiveClosed';
+        nowIso: string;
+        closedBeforeIso?: string;
+        limit: number;
+    }): Promise<ConversationThreadSweepRow[]> {
+        const out: ConversationThreadSweepRow[] = [];
+        const nowMs = Date.parse(params.nowIso);
+        for (const t of this.conversationThreads.values()) {
+            if (t.tenantId !== params.tenantId) {
+                continue;
+            }
+            if (params.mode === 'expireOpen') {
+                if (
+                    t.status === 'open' &&
+                    t.expiresAt != null &&
+                    Date.parse(t.expiresAt) < nowMs
+                ) {
+                    out.push({
+                        tenantId: t.tenantId,
+                        conversationId: t.conversationId,
+                        ownerAgentId: t.ownerAgentId,
+                        participantAgentId: t.participantAgentId,
+                    });
+                }
+            } else if (params.closedBeforeIso) {
+                const beforeMs = Date.parse(params.closedBeforeIso);
+                if (
+                    t.status === 'closed' &&
+                    t.closedAt != null &&
+                    Date.parse(t.closedAt) < beforeMs
+                ) {
+                    out.push({
+                        tenantId: t.tenantId,
+                        conversationId: t.conversationId,
+                        ownerAgentId: t.ownerAgentId,
+                        participantAgentId: t.participantAgentId,
+                    });
+                }
+            }
+            if (out.length >= params.limit) {
+                break;
+            }
+        }
+        return out;
     }
 
     async appendConversationMessage(params: {
@@ -382,6 +465,12 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         role: 'owner' | 'participant';
         sessionIdOverride: string | null;
         issuedAt: string;
+        expiresAt: string;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
+        idempotencyKey: string | null;
+        correlationId: string | null;
     }): Promise<void> {
         const rec: ConversationTopicInviteRecord = {
             tenantId: params.tenantId,
@@ -392,9 +481,53 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             role: params.role,
             sessionIdOverride: params.sessionIdOverride,
             issuedAt: params.issuedAt,
+            expiresAt: params.expiresAt,
+            inviterAgentId: params.inviterAgentId,
+            inviterMemberId: params.inviterMemberId,
+            inviterSessionId: params.inviterSessionId,
             consumedAt: null,
+            declinedAt: null,
+            declineReason: null,
+            deliveryAttemptedAt: null,
+            deliveredAt: null,
+            deliveryAttempts: 0,
+            deliveryFailureReason: null,
+            idempotencyKey: params.idempotencyKey,
+            correlationId: params.correlationId,
         };
         this.topicInvites.set(params.token, rec);
+        if (params.idempotencyKey) {
+            const ik = `${params.tenantId}|${params.conversationId}|${params.idempotencyKey}`;
+            this.topicInviteIdempotencyIndex.set(ik, params.token);
+        }
+    }
+
+    async findConversationTopicInviteByIdempotencyKey(params: {
+        tenantId: string;
+        conversationId: string;
+        idempotencyKey: string;
+    }): Promise<ConversationTopicInviteRecord | null> {
+        const ik = `${params.tenantId}|${params.conversationId}|${params.idempotencyKey}`;
+        const token = this.topicInviteIdempotencyIndex.get(ik);
+        if (!token) {
+            return null;
+        }
+        return this.getConversationTopicInvite({ tenantId: params.tenantId, token });
+    }
+
+    async getConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+    }): Promise<ConversationTopicInviteRecord | null> {
+        const rec = this.topicInvites.get(params.token);
+        if (!rec || rec.tenantId !== params.tenantId) {
+            return null;
+        }
+        return {
+            ...rec,
+            idempotencyKey: rec.idempotencyKey ?? null,
+            correlationId: rec.correlationId ?? null,
+        };
     }
 
     async consumeConversationTopicInvite(params: {
@@ -407,9 +540,12 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         inviteeMemberId: string;
         role: 'owner' | 'participant';
         sessionIdOverride: string | null;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
     } | null> {
         const rec = this.topicInvites.get(params.token);
-        if (!rec || rec.tenantId !== params.tenantId || rec.consumedAt !== null) {
+        if (!rec || rec.tenantId !== params.tenantId || rec.consumedAt !== null || rec.declinedAt !== null) {
             return null;
         }
         this.topicInvites.set(params.token, { ...rec, consumedAt: params.consumedAt });
@@ -419,7 +555,130 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             inviteeMemberId: rec.inviteeMemberId,
             role: rec.role,
             sessionIdOverride: rec.sessionIdOverride,
+            inviterAgentId: rec.inviterAgentId,
+            inviterMemberId: rec.inviterMemberId,
+            inviterSessionId: rec.inviterSessionId,
         };
+    }
+
+    async declineConversationTopicInvite(params: {
+        tenantId: string;
+        token: string;
+        declinedAt: string;
+        reason: string | null;
+    }): Promise<{
+        conversationId: string;
+        inviterAgentId: string;
+        inviterMemberId: string;
+        inviterSessionId: string;
+        inviteeAgentId: string;
+        inviteeMemberId: string;
+    } | null> {
+        const rec = this.topicInvites.get(params.token);
+        if (!rec || rec.tenantId !== params.tenantId || rec.consumedAt !== null || rec.declinedAt !== null) {
+            return null;
+        }
+        this.topicInvites.set(params.token, {
+            ...rec,
+            consumedAt: params.declinedAt,
+            declinedAt: params.declinedAt,
+            declineReason: params.reason,
+        });
+        return {
+            conversationId: rec.conversationId,
+            inviterAgentId: rec.inviterAgentId,
+            inviterMemberId: rec.inviterMemberId,
+            inviterSessionId: rec.inviterSessionId,
+            inviteeAgentId: rec.inviteeAgentId,
+            inviteeMemberId: rec.inviteeMemberId,
+        };
+    }
+
+    async listExpiredConversationTopicInvites(params: {
+        tenantId: string;
+        nowIso: string;
+        limit: number;
+    }): Promise<ConversationTopicInviteRecord[]> {
+        const nowMs = Date.parse(params.nowIso);
+        const rows = Array.from(this.topicInvites.values())
+            .filter(
+                (r) =>
+                    r.tenantId === params.tenantId &&
+                    r.consumedAt === null &&
+                    r.declinedAt === null &&
+                    Date.parse(r.expiresAt) < nowMs
+            )
+            .sort((a, b) => a.expiresAt.localeCompare(b.expiresAt))
+            .slice(0, params.limit);
+        return rows;
+    }
+
+    async listUndeliveredConversationTopicInvites(params: {
+        tenantId: string;
+        nowIso: string;
+        limit: number;
+    }): Promise<ConversationTopicInviteRecord[]> {
+        const rows = Array.from(this.topicInvites.values())
+            .filter(
+                (r) =>
+                    r.tenantId === params.tenantId &&
+                    r.consumedAt === null &&
+                    r.declinedAt === null &&
+                    r.deliveredAt === null &&
+                    Date.parse(r.expiresAt) >= Date.parse(params.nowIso)
+            )
+            .sort((a, b) => a.issuedAt.localeCompare(b.issuedAt))
+            .slice(0, params.limit);
+        return rows;
+    }
+
+    async markConversationTopicInviteDeliveryAttempt(params: {
+        tenantId: string;
+        token: string;
+        attemptedAt: string;
+    }): Promise<number> {
+        const rec = this.topicInvites.get(params.token);
+        if (!rec || rec.tenantId !== params.tenantId) {
+            return 0;
+        }
+        const nextAttempts = rec.deliveryAttempts + 1;
+        this.topicInvites.set(params.token, {
+            ...rec,
+            deliveryAttemptedAt: params.attemptedAt,
+            deliveryAttempts: nextAttempts,
+        });
+        return nextAttempts;
+    }
+
+    async markConversationTopicInviteDelivered(params: {
+        tenantId: string;
+        token: string;
+        deliveredAt: string;
+    }): Promise<void> {
+        const rec = this.topicInvites.get(params.token);
+        if (!rec || rec.tenantId !== params.tenantId) {
+            return;
+        }
+        this.topicInvites.set(params.token, {
+            ...rec,
+            deliveredAt: params.deliveredAt,
+            deliveryFailureReason: null,
+        });
+    }
+
+    async setConversationTopicInviteDeliveryFailureReason(params: {
+        tenantId: string;
+        token: string;
+        reason: string;
+    }): Promise<void> {
+        const rec = this.topicInvites.get(params.token);
+        if (!rec || rec.tenantId !== params.tenantId) {
+            return;
+        }
+        this.topicInvites.set(params.token, {
+            ...rec,
+            deliveryFailureReason: params.reason,
+        });
     }
 
     async recordConversationMessageDeliveries(params: {

@@ -32,6 +32,7 @@ import { generateCorrelationId } from '../tracing/Tracing.js';
 import { v7 as uuidv7 } from 'uuid';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import { reduceConversationProjection } from './learning/conversationReducer.js';
+import { runDefaultAutoJoinInvitedTopics } from '../policy/defaultAutoJoinPolicy.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -59,6 +60,7 @@ type LoopRunnerOptions = {
     latencyMs?: number;
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
+    autoJoinInvitedTopics?: boolean;
 };
 
 const DEFAULT_PROVENANCE: ManifestProvenance = {
@@ -76,6 +78,9 @@ const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null;
+
+const asString = (value: unknown): string | undefined =>
+    typeof value === 'string' ? value : undefined;
 
 export async function runLoop<
     Sensory = unknown,
@@ -900,10 +905,15 @@ export async function runLoop<
                 iCtxTurn.__turnConversationDeliveryLagMs = undefined;
                 iCtxTurn.__turnTopicSelectorDecision = undefined;
                 iCtxTurn.__turnFanoutSummary = undefined;
+                iCtxTurn.__turnInviteAutoJoin = {};
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }
             // -----------------------
+
+            if (opts.autoJoinInvitedTopics === true) {
+                await runDefaultAutoJoinInvitedTopics({ ctx, env, iCtx });
+            }
 
             const memReader = createMemoryReader(m);
             const writer = createMemoryWriter();
@@ -1000,6 +1010,122 @@ export async function runLoop<
                 usage.childCalls = iCtx.__turnChildCalls.length;
             }
 
+            const inviteIssued: Array<{
+                token: string;
+                topicId: string;
+                inviteeAgentId: string;
+                expiresAt: string;
+            }> = [];
+            const inviteReceived: Array<{
+                token: string;
+                topicId: string;
+                inviterAgentId: string;
+                expiresAt: string;
+                autoJoinAttempted: boolean;
+                autoJoinError?: {
+                    type:
+                        | 'InviteNotFound'
+                        | 'InviteExpired'
+                        | 'InviteAlreadyConsumed'
+                        | 'InviteTargetMismatch';
+                    message: string;
+                };
+            }> = [];
+            const inviteAccepted: Array<{
+                token: string;
+                topicId: string;
+                memberId: string;
+                agentId: string;
+            }> = [];
+            const inviteDeclined: Array<{
+                token: string;
+                topicId: string;
+                inviteeAgentId: string;
+                reason?: string;
+            }> = [];
+            const inviteExpired: Array<{
+                token: string;
+                topicId: string;
+                inviteeAgentId: string;
+                expiresAt: string;
+            }> = [];
+            for (const obs of env.inbox.current) {
+                if (obs.source !== 'conversation') continue;
+                const payload = (obs as { payload?: Record<string, unknown> }).payload;
+                const kind = asString(payload?.kind);
+                if (!kind) continue;
+                if (kind === 'topic.invite.issued') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const invitee = payload?.invitee as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviteeAgentId = asString(invitee?.agentId);
+                    const expiresAt = asString(payload?.expiresAt);
+                    if (token && topicId && inviteeAgentId && expiresAt) {
+                        inviteIssued.push({ token, topicId, inviteeAgentId, expiresAt });
+                    }
+                } else if (kind === 'topic.invite.received') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviterAgentId = asString(payload?.inviterAgentId);
+                    const expiresAt = asString(payload?.expiresAt);
+                    if (token && topicId && inviterAgentId && expiresAt) {
+                        const autoJoin = iCtx.__turnInviteAutoJoin?.[token];
+                        inviteReceived.push({
+                            token,
+                            topicId,
+                            inviterAgentId,
+                            expiresAt,
+                            autoJoinAttempted: autoJoin?.attempted === true,
+                            autoJoinError: autoJoin?.error,
+                        });
+                    }
+                } else if (kind === 'topic.invite.accepted') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const member = payload?.member as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const memberId = asString(member?.memberId);
+                    const agentId = asString(member?.agentId);
+                    if (token && topicId && memberId && agentId) {
+                        inviteAccepted.push({ token, topicId, memberId, agentId });
+                    }
+                } else if (kind === 'topic.invite.declined') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviteeAgentId = asString(payload?.inviteeAgentId);
+                    const reason = asString(payload?.reason);
+                    if (token && topicId && inviteeAgentId) {
+                        inviteDeclined.push({ token, topicId, inviteeAgentId, reason });
+                    }
+                } else if (kind === 'topic.invite.expired') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviteeAgentId = asString(payload?.inviteeAgentId);
+                    const expiresAt = asString(payload?.expiresAt);
+                    if (token && topicId && inviteeAgentId && expiresAt) {
+                        inviteExpired.push({ token, topicId, inviteeAgentId, expiresAt });
+                    }
+                }
+            }
+            const inviteDelivery =
+                inviteIssued.length > 0 ||
+                inviteReceived.length > 0 ||
+                inviteAccepted.length > 0 ||
+                inviteDeclined.length > 0 ||
+                inviteExpired.length > 0
+                    ? {
+                          issued: inviteIssued.length > 0 ? inviteIssued : undefined,
+                          received: inviteReceived.length > 0 ? inviteReceived : undefined,
+                          accepted: inviteAccepted.length > 0 ? inviteAccepted : undefined,
+                          declined: inviteDeclined.length > 0 ? inviteDeclined : undefined,
+                          expired: inviteExpired.length > 0 ? inviteExpired : undefined,
+                      }
+                    : undefined;
+
             const tracePayload: TurnTrace = {
                 turn,
                 turnId,
@@ -1068,6 +1194,7 @@ export async function runLoop<
                 deliveryLagMs: iCtx.__turnConversationDeliveryLagMs,
                 topicSelectorDecision: iCtx.__turnTopicSelectorDecision,
                 fanoutSummary: iCtx.__turnFanoutSummary,
+                inviteDelivery,
             };
 
             let trace: TurnTrace;
@@ -1120,6 +1247,7 @@ export async function runLoop<
             iCtx.__turnConversationDeliveryLagMs = undefined;
             iCtx.__turnTopicSelectorDecision = undefined;
             iCtx.__turnFanoutSummary = undefined;
+                iCtx.__turnInviteAutoJoin = undefined;
 
             log.debug('Transition outcome', {
                 taskId,

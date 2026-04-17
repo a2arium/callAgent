@@ -38,6 +38,19 @@ export function learning(
             },
         };
     }
+    if (obs.kind === 'user_message' && obs.text === 'phase3-archive') {
+        return {
+            ...prev,
+            memory: {
+                ...prev.memory,
+                sensory: {
+                    ...prev.memory.sensory,
+                    userText: obs.text,
+                    demoStage: 'want_phase3_archive',
+                },
+            },
+        };
+    }
     if (obs.kind === 'user_message' && obs.text === 'phase2-close') {
         return {
             ...prev,

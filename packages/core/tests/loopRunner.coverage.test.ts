@@ -171,6 +171,7 @@ describe('runLoop memory wiring and defaults', () => {
                             conversation: { kind: 'thread', id: 'thread-cov-1' },
                             senderAgentId: 'agent-parent',
                             recipientAgentId: 'agent-child',
+                            recipientMemberId: 'mem-child',
                             speechAct: 'request',
                             content: { task: 'x' },
                             sequenceNumber: 1,

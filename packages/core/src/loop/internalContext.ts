@@ -102,6 +102,20 @@ export type InternalTaskContext = TaskContext & {
         queued: number;
         dedupeHits: number;
     };
+    __turnInviteAutoJoin?: Record<
+        string,
+        {
+            attempted: boolean;
+            error?: {
+                type:
+                    | 'InviteNotFound'
+                    | 'InviteExpired'
+                    | 'InviteAlreadyConsumed'
+                    | 'InviteTargetMismatch';
+                message: string;
+            };
+        }
+    >;
     /** Session-level turn trace collector (test/debug). */
     __turnTraceCollector?: TurnTraceCollector;
     /** Session-level manifest provenance restored from snapshot/session metadata on every turn-entry path */

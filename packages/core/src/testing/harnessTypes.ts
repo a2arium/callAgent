@@ -4,6 +4,8 @@ import type { Intent } from '../types/intent.js';
 import type { MentalState, EnvironmentState } from '../loop/types.js';
 import type { Observation } from '../types/observation.js';
 import type { TurnTrace, ManifestProvenance } from '../types/turnTrace.js';
+import type { SessionManager } from '../orchestration/SessionManager.js';
+import type { Clock } from '../internal/conversation/Clock.js';
 
 // --- DeepPartial utility ---
 export type DeepPartial<T> = T extends object
@@ -16,6 +18,7 @@ export const HarnessConfigSchema = z.object({
     seedTokens: z.boolean().default(true),
     manifestProvenance: z.custom<ManifestProvenance>().optional(),
     maxTurns: z.number().int().positive().default(1),
+    autoJoinInvitedTopics: z.boolean().default(false),
 }).strict();
 
 export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
@@ -47,6 +50,11 @@ export type HarnessState<Sensory = unknown> = {
         ownerAgentId: string;
         participantAgentId: string;
     }) => Promise<void>;
+    /** Deterministic instant for `ConversationService` invite TTL/expiry (via {@link import('../internal/conversation/Clock.js').Clock}). */
+    inviteClockNowMs?: number;
+    conversationTenantId?: string;
+    conversationSessionManager?: SessionManager;
+    inviteClock?: Clock;
 };
 
 // --- Turn assertion context ---

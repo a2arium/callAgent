@@ -358,6 +358,32 @@ type AgentRuntimeManifestV1 = {
       level?: 'debug' | 'info' | 'warn' | 'error';
     };
   };
+
+  /** Optional communication runtime behavior. */
+  communication?: {
+    /**
+     * When true, the loop attempts `ctx.conversation.join(...)` for
+     * `topic.invite.received` observations before policy evaluation.
+     * Default: false.
+     */
+    autoJoinInvitedTopics?: boolean;
+    /**
+     * Idle thread TTL in milliseconds. Default 3600000 (1 hour). Use `null` to disable TTL for this runtime.
+     */
+    threadTtlMs?: number | null;
+  };
+
+  /**
+   * Thread sweeper (idle TTL + optional auto-archive of closed threads). Defaults are runtime-defined; see migration 5.3.
+   */
+  conversation?: {
+    threadSweeper?: {
+      intervalMs?: number;
+      batchSize?: number;
+      /** Milliseconds after `closed_at` before sweeper may archive a closed thread; `null` disables auto-archive. */
+      autoArchiveAfterMs?: number | null;
+    };
+  };
 };
 ```
 

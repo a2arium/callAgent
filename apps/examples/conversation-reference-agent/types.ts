@@ -18,6 +18,7 @@ export type Sensory = {
         | 'idle'
         | 'want_open'
         | 'want_followup'
+        | 'want_phase3_archive'
         | 'want_phase2'
         | 'want_phase2_close'
         | 'done';
@@ -56,6 +57,8 @@ export type ExecPayload = {
     phase2DemoComplete?: boolean;
     /** Topic closed after `phase2-close` user line. */
     phase2CloseComplete?: boolean;
+    /** Thread archived after `phase3-archive` (Phase 3 close + archive). */
+    phase3ArchiveComplete?: boolean;
     inviteToken?: string;
     /** Round-robin demo: recipient agent id per sequential post (witness). */
     rrRecipients?: string[];

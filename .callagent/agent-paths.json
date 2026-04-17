@@ -1,12 +1,37 @@
 {
+  "conversation-panel-orchestrator-agent": {
+    "module": "../apps/examples/conversation-panel-orchestrator-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-panel-orchestrator-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-panel-orchestrator-agent/agent-runtime.json"
+  },
+  "dist": {
+    "module": "../apps/examples/conversation-panel-orchestrator-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-panel-orchestrator-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-panel-orchestrator-agent/agent-runtime.json"
+  },
+  "conversation-panel-persona-agent": {
+    "module": "../apps/examples/conversation-panel-persona-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-panel-persona-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-panel-persona-agent/agent-runtime.json"
+  },
   "conversation-reference-agent": {
     "module": "../apps/examples/conversation-reference-agent/dist/agent.js",
-    "agentCard": "../apps/examples/conversation-reference-agent/dist/agent-card.json",
-    "runtimeManifest": "../apps/examples/conversation-reference-agent/dist/agent-runtime.json"
+    "agentCard": "../apps/examples/conversation-reference-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-reference-agent/agent-runtime.json"
   },
   "conversation-responder-agent": {
     "module": "../apps/examples/conversation-responder-agent/dist/agent.js",
-    "agentCard": "../apps/examples/conversation-responder-agent/dist/agent-card.json",
-    "runtimeManifest": "../apps/examples/conversation-responder-agent/dist/agent-runtime.json"
+    "agentCard": "../apps/examples/conversation-responder-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-responder-agent/agent-runtime.json"
+  },
+  "flow-reference-agent": {
+    "module": "../apps/examples/flow-reference-agent/dist/agent.js",
+    "agentCard": "../apps/examples/flow-reference-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/flow-reference-agent/agent-runtime.json"
+  },
+  "hello-agent": {
+    "module": "../apps/examples/hello-agent/dist/AgentModule.js",
+    "agentCard": "../apps/examples/hello-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/hello-agent/agent-runtime.json"
   }
 }

@@ -8,11 +8,13 @@ describe('Topic conversation observations', () => {
                 kind: 'topic.message.received',
                 topic: { kind: 'topic', id: 't1' },
                 selector: { kind: 'broadcast' },
+                recipient: { by: 'agentId', agentId: 'b', memberId: 'member-b' },
                 message: {
                     id: 'mid',
                     conversation: { kind: 'topic', id: 't1' },
                     senderAgentId: 'a',
                     recipientAgentId: 'b',
+                    recipientMemberId: 'member-b',
                     speechAct: 'inform',
                     content: {},
                     sequenceNumber: 1,

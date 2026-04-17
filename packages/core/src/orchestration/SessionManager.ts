@@ -2,10 +2,13 @@ import type {
     ConversationKind,
     ConversationMessageDeliveryRecord,
     ConversationMessageRecord,
+    ConversationTopicInviteRecord,
     ConversationTopicMemberRecord,
     ConversationTopicRecord,
     ConversationThreadRecord,
+    ConversationThreadSweepRow,
     IWorkingMemorySessionStore,
+    UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
 } from '@a2arium/callagent-memory-engine';
 
@@ -69,6 +72,7 @@ export class SessionManager {
         conversationId: string;
         ownerAgentId: string;
         participantAgentId: string;
+        expiresAt?: string | null;
     }): Promise<ConversationThreadRecord> {
         if (!this.store) {
             throw new Error('Session store is required for conversation threads');
@@ -86,15 +90,35 @@ export class SessionManager {
         return this.store.getConversationThread(params);
     }
 
-    async updateConversationThreadStatus(params: {
-        tenantId: string;
-        conversationId: string;
-        status: 'open' | 'closed' | 'archived';
-    }): Promise<void> {
+    async updateConversationThreadStatus(params: UpdateConversationThreadStatusInput): Promise<void> {
         if (!this.store) {
             return;
         }
         await this.store.updateConversationThreadStatus(params);
+    }
+
+    async refreshConversationThreadExpiry(params: {
+        tenantId: string;
+        conversationId: string;
+        expiresAt: string | null;
+    }): Promise<void> {
+        if (!this.store) {
+            return;
+        }
+        await this.store.refreshConversationThreadExpiry(params);
+    }
+
+    async listConversationThreadsForSweep(params: {
+        tenantId: string;
+        mode: 'expireOpen' | 'archiveClosed';
+        nowIso: string;
+        closedBeforeIso?: string;
+        limit: number;
+    }): Promise<ConversationThreadSweepRow[]> {
+        if (!this.store) {
+            return [];
+        }
+        return this.store.listConversationThreadsForSweep(params);
     }
 
     async appendConversationMessage(params: {
@@ -209,6 +233,24 @@ export class SessionManager {
         await this.store.issueConversationTopicInvite(params);
     }
 
+    async findConversationTopicInviteByIdempotencyKey(
+        params: Parameters<IWorkingMemorySessionStore['findConversationTopicInviteByIdempotencyKey']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['findConversationTopicInviteByIdempotencyKey']> {
+        if (!this.store) {
+            return Promise.resolve(null);
+        }
+        return this.store.findConversationTopicInviteByIdempotencyKey(params);
+    }
+
+    async getConversationTopicInvite(
+        params: Parameters<IWorkingMemorySessionStore['getConversationTopicInvite']>[0]
+    ): Promise<ConversationTopicInviteRecord | null> {
+        if (!this.store) {
+            return null;
+        }
+        return this.store.getConversationTopicInvite(params);
+    }
+
     async consumeConversationTopicInvite(
         params: Parameters<IWorkingMemorySessionStore['consumeConversationTopicInvite']>[0]
     ): ReturnType<IWorkingMemorySessionStore['consumeConversationTopicInvite']> {
@@ -216,6 +258,60 @@ export class SessionManager {
             return Promise.resolve(null);
         }
         return this.store.consumeConversationTopicInvite(params);
+    }
+
+    async declineConversationTopicInvite(
+        params: Parameters<IWorkingMemorySessionStore['declineConversationTopicInvite']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['declineConversationTopicInvite']> {
+        if (!this.store) {
+            return Promise.resolve(null);
+        }
+        return this.store.declineConversationTopicInvite(params);
+    }
+
+    async listExpiredConversationTopicInvites(
+        params: Parameters<IWorkingMemorySessionStore['listExpiredConversationTopicInvites']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['listExpiredConversationTopicInvites']> {
+        if (!this.store) {
+            return Promise.resolve([]);
+        }
+        return this.store.listExpiredConversationTopicInvites(params);
+    }
+
+    async listUndeliveredConversationTopicInvites(
+        params: Parameters<IWorkingMemorySessionStore['listUndeliveredConversationTopicInvites']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['listUndeliveredConversationTopicInvites']> {
+        if (!this.store) {
+            return Promise.resolve([]);
+        }
+        return this.store.listUndeliveredConversationTopicInvites(params);
+    }
+
+    async markConversationTopicInviteDeliveryAttempt(
+        params: Parameters<IWorkingMemorySessionStore['markConversationTopicInviteDeliveryAttempt']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['markConversationTopicInviteDeliveryAttempt']> {
+        if (!this.store) {
+            return Promise.resolve(0);
+        }
+        return this.store.markConversationTopicInviteDeliveryAttempt(params);
+    }
+
+    async markConversationTopicInviteDelivered(
+        params: Parameters<IWorkingMemorySessionStore['markConversationTopicInviteDelivered']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['markConversationTopicInviteDelivered']> {
+        if (!this.store) {
+            return Promise.resolve();
+        }
+        return this.store.markConversationTopicInviteDelivered(params);
+    }
+
+    async setConversationTopicInviteDeliveryFailureReason(
+        params: Parameters<IWorkingMemorySessionStore['setConversationTopicInviteDeliveryFailureReason']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['setConversationTopicInviteDeliveryFailureReason']> {
+        if (!this.store) {
+            return Promise.resolve();
+        }
+        return this.store.setConversationTopicInviteDeliveryFailureReason(params);
     }
 
     async recordConversationMessageDeliveries(

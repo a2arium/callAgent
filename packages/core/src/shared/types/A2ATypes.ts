@@ -1,5 +1,6 @@
 import type { TaskInput, TaskStatus, Artifact } from './index.js'; // From core index
-import type { ThoughtEntry, DecisionEntry } from '@a2arium/callagent-memory-engine'; // From memory-engine
+import type { ThoughtEntry, DecisionEntry } from '@a2arium/callagent-memory-engine';
+import type { ThreadRef } from '../../public-types/conversation/types.js'; // From memory-engine
 import type { SerializedAgentContext } from '@a2arium/callagent-memory-engine'; // Serialization types from memory-engine
 import type { ILLMCaller } from './LLMTypes.js';
 
@@ -78,6 +79,11 @@ export type A2ACallOptions = {
     setStage?: string;
     /** Explicitly provide a task ID for the child agent (for persistence/resumption) */
     childTaskId?: string;
+    /**
+     * Reuse an existing thread for this dispatch (multi-turn `sendTaskToAgent`).
+     * Thread-only; use `ctx.conversation.startThread` first to obtain a `ThreadRef`.
+     */
+    conversation?: ThreadRef;
 };
 
 /**

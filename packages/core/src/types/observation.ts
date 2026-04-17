@@ -1,12 +1,16 @@
 import { z } from 'zod';
 import {
     AgentIdSchema,
+    CloseReasonSchema,
+    CorrelationIdSchema,
     ConversationErrorSchema,
     ConversationRefSchema,
     DeliverySummarySchema,
     InboundMessageSchema,
+    InviteTokenSchema,
     MessageIdSchema,
     MemberIdSchema,
+    TopicMemberRoleSchema,
     ThreadRefSchema,
     TopicRefSchema,
     ResolvedTopicMemberSchema,
@@ -84,7 +88,17 @@ export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
     z.object({
         kind: z.literal('thread.closed'),
         thread: ThreadRefSchema,
-        reason: z.string().optional(),
+        ts: z.string().datetime(),
+        closedBy: AgentIdSchema.optional(),
+        closedReason: CloseReasonSchema.optional(),
+        reasonText: z.string().min(1).max(500).optional(),
+    }),
+    z.object({
+        kind: z.literal('thread.archived'),
+        thread: ThreadRefSchema,
+        ts: z.string().datetime(),
+        archivedBy: AgentIdSchema.optional(),
+        reasonText: z.string().min(1).max(500).optional(),
     }),
     z.object({
         kind: z.literal('topic.message.received'),
@@ -95,6 +109,59 @@ export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
             memberId: MemberIdSchema,
             agentId: AgentIdSchema,
         }),
+    }),
+    z.object({
+        kind: z.literal('topic.invite.issued'),
+        topic: TopicRefSchema,
+        invitee: z.object({
+            agentId: AgentIdSchema,
+            memberId: MemberIdSchema.optional(),
+            role: TopicMemberRoleSchema,
+        }),
+        token: InviteTokenSchema,
+        expiresAt: z.string().datetime(),
+        inviterAgentId: AgentIdSchema,
+        ts: z.string().datetime(),
+        correlationId: CorrelationIdSchema.optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.invite.received'),
+        topic: TopicRefSchema,
+        token: InviteTokenSchema,
+        expiresAt: z.string().datetime(),
+        role: TopicMemberRoleSchema,
+        inviterAgentId: AgentIdSchema,
+        inviteeMemberId: MemberIdSchema.optional(),
+        ts: z.string().datetime(),
+        correlationId: CorrelationIdSchema.optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.invite.accepted'),
+        topic: TopicRefSchema,
+        token: InviteTokenSchema,
+        member: ResolvedTopicMemberSchema,
+        ts: z.string().datetime(),
+        correlationId: CorrelationIdSchema.optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.invite.declined'),
+        topic: TopicRefSchema,
+        token: InviteTokenSchema,
+        inviteeAgentId: AgentIdSchema,
+        inviteeMemberId: MemberIdSchema.optional(),
+        reason: z.string().max(500).optional(),
+        ts: z.string().datetime(),
+        correlationId: CorrelationIdSchema.optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.invite.expired'),
+        topic: TopicRefSchema,
+        token: InviteTokenSchema,
+        inviteeAgentId: AgentIdSchema,
+        inviteeMemberId: MemberIdSchema.optional(),
+        expiresAt: z.string().datetime(),
+        ts: z.string().datetime(),
+        correlationId: CorrelationIdSchema.optional(),
     }),
     z.object({
         kind: z.literal('topic.member.joined'),
@@ -123,6 +190,10 @@ export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
         sequenceNumber: z.number().int().positive(),
         correlationId: z.string().min(1).optional(),
         deliveries: z.array(DeliverySummarySchema),
+        /**
+         * @remarks Present on thread sends when TTL is enabled: idle-reset `expires_at` after append.
+         */
+        threadExpiresAt: z.string().datetime().optional(),
     }),
 ]);
 

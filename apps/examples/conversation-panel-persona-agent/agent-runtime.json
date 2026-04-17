@@ -1,0 +1,14 @@
+{
+  "name": "conversation-panel-persona-agent",
+  "version": "0.1.0",
+  "runMode": "loop",
+  "budgets": {
+    "maxTurns": 30
+  },
+  "observability": {
+    "turnTrace": {
+      "enabled": true,
+      "level": "summary"
+    }
+  }
+}

@@ -8,6 +8,7 @@ export const CorrelationIdSchema = z.string().min(1);
 export const IdempotencyKeySchema = z.string().min(1);
 export const AgentIdSchema = z.string().min(1);
 export const MemberIdSchema = z.string().min(1).brand<'MemberId'>();
+export const InviteTokenSchema = z.string().min(1).brand<'InviteToken'>();
 
 export const ThreadRefSchema = z.object({
     kind: z.literal('thread'),
@@ -22,6 +23,15 @@ export const TopicRefSchema = z.object({
 export const ConversationRefSchema = z.discriminatedUnion('kind', [ThreadRefSchema, TopicRefSchema]);
 
 export const TopicMemberRoleSchema = z.enum(['owner', 'participant']);
+
+/** Thread row status (public single source of truth). */
+export const ThreadStatusSchema = z.enum(['open', 'closed', 'archived']);
+
+/**
+ * Why a thread entered the `closed` state in policy/projection (not necessarily 1:1 with DB `close_reason`).
+ * @remarks `closedAt` and `closedReason` are both present once a thread is no longer `open` (reducer invariant).
+ */
+export const CloseReasonSchema = z.enum(['explicit', 'ttl', 'archived']);
 
 export const TopicMemberSchema = z.object({
     agentId: AgentIdSchema,
@@ -123,11 +133,39 @@ export const ConversationErrorSchema = z.discriminatedUnion('type', [
         message: z.string(),
     }),
     z.object({
-        type: z.literal('InviteInvalid'),
+        type: z.literal('InviteNotFound'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('InviteExpired'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('InviteAlreadyConsumed'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('InviteTargetMismatch'),
         message: z.string(),
     }),
     z.object({
         type: z.literal('TopicCapacityExceeded'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('ThreadNotClosed'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('ThreadExpired'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('ConversationTimeout'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('ArchiveUnsupportedForTopics'),
         message: z.string(),
     }),
 ]);
@@ -238,15 +276,42 @@ export const StartThreadOptionsSchema = z.object({
     conversationId: ConversationIdSchema.optional(),
     idempotencyKey: IdempotencyKeySchema.optional(),
     queueMode: z.enum(['queue', 'reject']).optional(),
+    /**
+     * @remarks Ignored at runtime when `awaitMode` is `'deferred'` (default); only bounds blocking `startThread` when `awaitMode === 'blocking'`.
+     */
+    timeoutMs: z.number().int().positive().max(24 * 60 * 60 * 1000).optional(),
+    awaitMode: z.enum(['blocking', 'deferred']).optional(),
+    /**
+     * @remarks When `true`, the framework persists and routes the message but does **not** run cold activation on the recipient.
+     * Used only by `sendTaskToAgent` orchestration so `A2AService` runs the child once; agents must not set this from policy.
+     */
+    skipRecipientActivation: z.boolean().optional(),
 });
 
 export const SendOptionsSchema = z.object({
     idempotencyKey: IdempotencyKeySchema.optional(),
     queueMode: z.enum(['queue', 'reject']).optional(),
+    timeoutMs: z.number().int().positive().max(24 * 60 * 60 * 1000).optional(),
+    /**
+     * @remarks Default `deferred`. When `blocking`, the caller waits (up to `timeoutMs` if set) for a `message.received` on the sender session with the same `correlationId` as the outbound message.
+     */
+    awaitMode: z.enum(['blocking', 'deferred']).optional(),
+    /**
+     * @remarks Same semantics as `StartThreadOptions.skipRecipientActivation`; internal orchestration only.
+     */
+    skipRecipientActivation: z.boolean().optional(),
 });
 
+/**
+ * @remarks `archiveAfter` applies only to `thread` refs. For `topic` refs with `archiveAfter: true`, the service returns `ArchiveUnsupportedForTopics`.
+ */
 export const CloseConversationOptionsSchema = z.object({
-    reason: z.string().optional(),
+    reason: z.string().min(1).max(500).optional(),
+    archiveAfter: z.boolean().optional(),
+});
+
+export const ArchiveConversationOptionsSchema = z.object({
+    reasonText: z.string().min(1).max(500).optional(),
 });
 
 export const TopicCreateOptionsSchema = z.object({
@@ -259,10 +324,18 @@ export const TopicCreateOptionsSchema = z.object({
 export const TopicInviteOptionsSchema = z.object({
     topic: TopicRefSchema,
     invitee: TopicMemberSchema,
+    ttlSeconds: z.number().int().positive().max(60 * 60 * 24 * 30).optional(),
+    idempotencyKey: IdempotencyKeySchema.optional(),
+    correlationId: z.string().max(256).optional(),
 });
 
 export const TopicJoinOptionsSchema = z.object({
-    inviteToken: z.string().min(1),
+    inviteToken: InviteTokenSchema,
+});
+
+export const TopicDeclineOptionsSchema = z.object({
+    inviteToken: InviteTokenSchema,
+    reason: z.string().max(500).optional(),
 });
 
 export const TopicLeaveOptionsSchema = z.object({
@@ -278,6 +351,8 @@ export const TopicPostOptionsSchema = z.object({
 export const StartThreadReceiptSchema = z.object({
     thread: ThreadRefSchema,
     receipt: SendReceiptSchema,
+    /** Present when `awaitMode === 'blocking'` and the wait exceeded `timeoutMs`. */
+    timedOut: z.boolean().optional(),
 });
 
 export const TopicCreateReceiptSchema = z.discriminatedUnion('status', [
@@ -295,7 +370,8 @@ export const TopicCreateReceiptSchema = z.discriminatedUnion('status', [
 export const TopicInviteReceiptSchema = z.discriminatedUnion('status', [
     z.object({
         status: z.literal('ok'),
-        token: z.string().min(1),
+        token: InviteTokenSchema,
+        expiresAt: z.string().datetime(),
     }),
     z.object({
         status: z.literal('rejected'),
@@ -308,6 +384,17 @@ export const TopicJoinReceiptSchema = z.discriminatedUnion('status', [
         status: z.literal('ok'),
         topic: TopicRefSchema,
         member: ResolvedTopicMemberSchema,
+    }),
+    z.object({
+        status: z.literal('rejected'),
+        error: ConversationErrorSchema,
+    }),
+]);
+
+export const TopicDeclineReceiptSchema = z.discriminatedUnion('status', [
+    z.object({
+        status: z.literal('ok'),
+        topic: TopicRefSchema,
     }),
     z.object({
         status: z.literal('rejected'),
@@ -329,4 +416,10 @@ export const TopicLeaveReceiptSchema = z.discriminatedUnion('status', [
 export const CloseConversationReceiptSchema = z.object({
     ref: ConversationRefSchema,
     closed: z.boolean(),
+    archived: z.boolean().optional(),
+});
+
+export const ArchiveConversationReceiptSchema = z.object({
+    ref: ThreadRefSchema,
+    archived: z.boolean(),
 });

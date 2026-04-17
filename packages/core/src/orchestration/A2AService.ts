@@ -28,6 +28,7 @@ import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { getCallChainTracker, type CallChainTracker } from './CallChainTracker.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { attachA2aResultTelemetry } from './api/a2aResultTelemetry.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -987,6 +988,10 @@ export class A2AService implements IA2AService {
                                 telemetry.endNode(agentNode);
                             }
 
+                            attachA2aResultTelemetry(cachedResult, {
+                                childTraceId: targetCtx.telemetry?.traceId,
+                                childAgentNodeId: agentNode?.id,
+                            });
                             return cachedResult;
                         }
                     }
@@ -1075,6 +1080,10 @@ export class A2AService implements IA2AService {
                          telemetry.endNode(agentNode);
                     }
 
+                    attachA2aResultTelemetry(result, {
+                        childTraceId: targetCtx.telemetry?.traceId,
+                        childAgentNodeId: agentNode?.id,
+                    });
                     return result;
                 } catch (error) {
                     a2aLogger.error('Target agent execution failed', error, {

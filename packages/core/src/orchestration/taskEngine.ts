@@ -3,6 +3,7 @@ import { LoopRegistry } from './LoopRegistry.js';
 import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import { Artifact } from '../shared/types/index.js'; // Explicitly import Memory Artifact for usage
 import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createDbMessageLog } from '../eventbus/dbMessageLog.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { extendContextWithStreaming } from '../context/StreamingContext.js';
 import { SessionManager } from './SessionManager.js';
@@ -129,6 +130,10 @@ import { throwInvariantError } from '../utils/invariantError.js';
 import type { InvariantErrorCode, InvariantErrorDetail } from '../types/invariantError.js';
 import { ConversationService } from '../internal/conversation/ConversationService.js';
 import { ConversationRouter } from '../internal/conversation/ConversationRouter.js';
+import { InviteDeliveryCoordinator } from '../internal/conversation/InviteDeliveryCoordinator.js';
+import { InviteSweeper } from '../internal/conversation/InviteSweeper.js';
+import { ThreadLifecycleSweeper } from '../internal/conversation/ThreadLifecycleSweeper.js';
+import { wallClock } from '../internal/conversation/Clock.js';
 import type {
     ConversationActivateParams,
     ConversationActivateResult,
@@ -180,6 +185,9 @@ export class TaskEngine {
     private apiBinder: ApiBinder;
     private turnRunner: TurnRunner;
     private conversationService: ConversationService;
+    private inviteDeliveryCoordinator: InviteDeliveryCoordinator;
+    private inviteSweeper: InviteSweeper;
+    private threadLifecycleSweeper: ThreadLifecycleSweeper;
 
     constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
         if (opts?.sessionStore) {
@@ -199,7 +207,30 @@ export class TaskEngine {
                 sessionId: `${threadId}:${recipientAgentId}`,
             }),
             activateConversationRecipient: (p) => this.ensureConversationActivation(p),
+            publishConversationEvent: async (channel, event) => {
+                await eventBus.publish(channel, event);
+            },
+            clock: wallClock,
+            messageLog: createDbMessageLog(this.sessionManager),
+            resolveThreadTtlMs: () => 3600000,
         });
+        this.threadLifecycleSweeper = new ThreadLifecycleSweeper(
+            this.sessionManager,
+            ({ threadId, recipientAgentId, tenantId }) => ({
+                tenantId,
+                agentId: recipientAgentId,
+                sessionId: `${threadId}:${recipientAgentId}`,
+            }),
+            wallClock
+        );
+        this.inviteDeliveryCoordinator = new InviteDeliveryCoordinator(
+            this.sessionManager,
+            eventBus,
+            (params) => this.ensureConversationActivation(params),
+            wallClock
+        );
+        this.inviteDeliveryCoordinator.start();
+        this.inviteSweeper = new InviteSweeper(this.sessionManager, wallClock);
 
         this.apiBinder = new ApiBinder({
             sessionManager: this.sessionManager,
@@ -254,10 +285,12 @@ export class TaskEngine {
         const plugin = await globalA2AService.findLocalAgent(params.recipientAgentId);
         if (!plugin) {
             const msg = `No local agent registered for id '${params.recipientAgentId}'.`;
-            await this.routeConversationDeliveryFailed({
-                ...params,
-                error: { type: 'PluginMissing', message: msg },
-            });
+            if (params.kind === 'thread') {
+                await this.routeConversationDeliveryFailed({
+                    ...params,
+                    error: { type: 'PluginMissing', message: msg },
+                });
+            }
             return { ok: false, error: { type: 'PluginMissing', message: msg } };
         }
 
@@ -270,10 +303,12 @@ export class TaskEngine {
             });
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            await this.routeConversationDeliveryFailed({
-                ...params,
-                error: { type: 'ActivationFailed', message: msg },
-            });
+            if (params.kind === 'thread') {
+                await this.routeConversationDeliveryFailed({
+                    ...params,
+                    error: { type: 'ActivationFailed', message: msg },
+                });
+            }
             return { ok: false, error: { type: 'ActivationFailed', message: msg } };
         }
 
@@ -295,7 +330,7 @@ export class TaskEngine {
                 {
                     tenantId: params.tenantId,
                     sessionId: params.routingSessionId,
-                    trigger: 'conversation',
+                    trigger: params.kind === 'invite' ? 'event' : 'conversation',
                     isStreaming: false,
                 },
                 { initialM: M, snapshot: base }
@@ -303,10 +338,12 @@ export class TaskEngine {
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             log.error('conversation activation runTurn failed', { error: msg, ...params });
-            await this.routeConversationDeliveryFailed({
-                ...params,
-                error: { type: 'RunTurnFailed', message: msg },
-            });
+            if (params.kind === 'thread') {
+                await this.routeConversationDeliveryFailed({
+                    ...params,
+                    error: { type: 'RunTurnFailed', message: msg },
+                });
+            }
             return { ok: false, error: { type: 'RunTurnFailed', message: msg } };
         }
 
@@ -2921,5 +2958,69 @@ export class TaskEngine {
             console.log(`[TaskEngine] Active handles after cleanup delay: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
             console.log(`[TaskEngine] Active requests after cleanup delay: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
         }
+    }
+
+    async triggerExpiredInviteSweep(params: {
+        tenantId: string;
+        nowIso?: string;
+        limit?: number;
+    }): Promise<string[]> {
+        return this.inviteSweeper.runExpirySweep(params);
+    }
+
+    /**
+     * `sendTaskToAgent` identical to the TaskEngine session path (conversation row + A2A + trace stamps).
+     * Used by the streaming runner when this engine is registered via `EngineLocator`.
+     */
+    createStreamingSendTaskToAgent(ctx: TaskContext): TaskContext['sendTaskToAgent'] {
+        return ApiBinder.createSendTaskToAgentHandler(
+            {
+                sessionManager: this.sessionManager!,
+                snapshotRepo: this.snapshotRepo!,
+                getTraceContext: () => ({}),
+                getSessionStorePrisma: () => this.getSessionStorePrisma(),
+                taskCreationMutex: this.taskCreationMutex,
+                backgroundTaskPromises: this.backgroundTaskPromises,
+                handleChildCompleted: (p) => this.handleChildCompleted(p),
+                handleToolCompleted: (p) => this.handleToolCompleted(p),
+                conversationService: this.conversationService,
+            },
+            ctx,
+            {
+                tenantId: ctx.tenantId,
+                sessionId: ctx.task.id,
+                agentId: ctx.agentId,
+                flushMentalState: async () => {
+                    try {
+                        await (ctx as { flushSnapshot?: (s: unknown) => Promise<void> }).flushSnapshot?.({
+                            M: (ctx as { M?: unknown }).M,
+                            env: (ctx as { env?: unknown }).env,
+                        });
+                    } catch {
+                        /* noop */
+                    }
+                },
+            }
+        );
+    }
+
+    async triggerThreadLifecycleSweep(params: {
+        tenantId: string;
+        nowIso?: string;
+        limit?: number;
+        autoArchiveAfterMs?: number | null;
+    }): Promise<{ expiredThreadIds: string[]; archivedThreadIds: string[] }> {
+        return this.threadLifecycleSweeper.sweepTenant(params);
+    }
+
+    async triggerInviteStartupRecoverySweep(params: {
+        tenantId: string;
+        nowIso?: string;
+        limit?: number;
+    }): Promise<string[]> {
+        return this.inviteSweeper.runStartupRecoverySweep({
+            ...params,
+            publish: async (channel, event) => eventBus.publish(channel, event),
+        });
     }
 }

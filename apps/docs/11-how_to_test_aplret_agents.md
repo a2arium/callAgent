@@ -610,6 +610,13 @@ const h = createTestHarness(modules, {
 
 **Practical note:** Multi-turn tests are written as **multiple** `await h.runTurn()` calls (each run appends traces and advances harness / env turn state). The harness implementation may still evolve which config fields are wired through to `runLoop`; if a field appears to have no effect, prefer relying on explicit per-turn scripts and check the current `TestHarness` source for the latest behavior.
 
+### Thread lifecycle and TTL (Phase 3)
+
+- Register a **`TaskEngine`** with **`EngineLocator.setEngine(engine)`** before calling **`harness.tickThreadLifecycleSweep(...)`** (sweeper runs through the engine).
+- Opt into TTL via runtime manifest **`communication.threadTtlMs`** on the agent under test (harness mirrors runtime wiring as implemented in `TestHarness` / `TaskEngine`).
+- Advance time deterministically with **`harness.setInviteClockNow(iso)`** (or the harness clock hooks your agent uses) then call **`tickThreadLifecycleSweep`**; assert a single **`thread.closed`** with **`closedReason === 'ttl'`** in inbox or projection as appropriate.
+- With **`collectTraces: true`**, assert **`TurnTrace.childCalls[n].childTraceId`** matches the child trace when exercising **`sendTaskToAgent`** (see also [`12-how_to_debug_with_turn_trace.md`](./12-how_to_debug_with_turn_trace.md)).
+
 ---
 
 ## Test file organization
@@ -688,10 +695,19 @@ Also assert TurnTrace conversation fields when present:
 For topic-enabled agents, add deterministic harness coverage for:
 
 - `ctx.conversation.createTopic` / `invite` / `join` / `leave` / `post` / `close`
+- `ctx.conversation.decline` typed decline path (`InviteNotFound | InviteExpired | InviteAlreadyConsumed | InviteTargetMismatch`)
 - selector behavior: `broadcast`, `round_robin`, `explicit_recipient`
 - fanout receipts: `accepted | partial | rejected | queued`
 - idempotency replay on topic posts (`dedupeHit: true`)
 - multi-seat behavior (same `agentId`, distinct `memberId`) when Phase 2a is used
+- invite lifecycle: `topic.invite.issued -> topic.invite.received -> accepted|declined|expired`
+- invite delivery replay and sweeper coverage (startup replay of undelivered invites + expiry sweep)
+
+Phase 2b harness helpers for invite time and sweeps (require a conversation session store on the harness `TestContext`; see `TestHarness` / `harnessTypes`):
+
+- `setInviteClockNow(iso)` — pin wall time for `ConversationService` and sweeper
+- `await triggerExpiredInviteSweep({ tenantId?, nowIso?, limit? })` — run `InviteSweeper` expiry pass
+- `await runInviteStartupSweep({ tenantId?, nowIso?, limit? })` — republish undelivered issued invites via an in-memory bus (for deterministic startup-recovery tests)
 
 Topic observation injection helpers to use in tests:
 
@@ -711,3 +727,5 @@ Also assert TurnTrace topic fields when present:
 - `topicSelectorDecision.kind`
 - `topicSelectorDecision.resolvedMembers`
 - `fanoutSummary.accepted/rejected/queued/dedupeHits`
+- `inviteDelivery.issued/received/accepted/declined/expired`
+- `inviteDelivery.received[].autoJoinAttempted` and `inviteDelivery.received[].autoJoinError`

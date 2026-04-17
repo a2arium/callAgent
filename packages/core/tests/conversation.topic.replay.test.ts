@@ -1,6 +1,7 @@
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
+import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
 import { reconstructFanoutReceiptFromDeliveries } from '../src/internal/conversation/fanoutReplay.js';
 import type { ConversationMessageDeliveryRecord } from '@a2arium/callagent-memory-engine';
 
@@ -20,6 +21,8 @@ describe('Topic fan-out idempotency replay', () => {
                 agentId: recipient,
             }),
             activateConversationRecipient: async () => ({ ok: true }),
+            messageLog: createDbMessageLog(sessionManager),
+            resolveThreadTtlMs: () => null,
         });
         return { service, sessionManager };
     };
@@ -44,6 +47,7 @@ describe('Topic fan-out idempotency replay', () => {
                 tenantId,
                 conversationId: topic.id,
                 sequenceNumber: 1,
+                memberId: 'member-peer',
                 recipientAgentId: peer,
                 sessionId: `${topic.id}:${peer}`,
                 dedupeHit: false,
@@ -80,6 +84,7 @@ describe('Topic fan-out idempotency replay', () => {
                 tenantId,
                 conversationId: topic.id,
                 sequenceNumber: 1,
+                memberId: 'member-a1',
                 recipientAgentId: 'a1',
                 sessionId: 's1',
                 dedupeHit: false,
@@ -91,6 +96,7 @@ describe('Topic fan-out idempotency replay', () => {
                 tenantId,
                 conversationId: topic.id,
                 sequenceNumber: 1,
+                memberId: 'member-a2',
                 recipientAgentId: 'a2',
                 sessionId: 's2',
                 dedupeHit: false,

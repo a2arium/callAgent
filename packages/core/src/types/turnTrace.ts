@@ -175,6 +175,72 @@ export const ConversationMessageSummarySchema = z.object({
 });
 export type ConversationMessageSummary = z.infer<typeof ConversationMessageSummarySchema>;
 
+export const InviteDeliveryTraceSchema = z.object({
+    issued: z
+        .array(
+            z.object({
+                token: z.string(),
+                topicId: z.string(),
+                inviteeAgentId: z.string(),
+                expiresAt: z.string(),
+            })
+        )
+        .optional(),
+    received: z
+        .array(
+            z.object({
+                token: z.string(),
+                topicId: z.string(),
+                inviterAgentId: z.string(),
+                expiresAt: z.string(),
+                autoJoinAttempted: z.boolean(),
+                autoJoinError: z
+                    .object({
+                        type: z.enum([
+                            'InviteNotFound',
+                            'InviteExpired',
+                            'InviteAlreadyConsumed',
+                            'InviteTargetMismatch',
+                        ]),
+                        message: z.string(),
+                    })
+                    .optional(),
+            })
+        )
+        .optional(),
+    accepted: z
+        .array(
+            z.object({
+                token: z.string(),
+                topicId: z.string(),
+                memberId: z.string(),
+                agentId: z.string(),
+            })
+        )
+        .optional(),
+    declined: z
+        .array(
+            z.object({
+                token: z.string(),
+                topicId: z.string(),
+                inviteeAgentId: z.string(),
+                reason: z.string().optional(),
+            })
+        )
+        .optional(),
+    expired: z
+        .array(
+            z.object({
+                token: z.string(),
+                topicId: z.string(),
+                inviteeAgentId: z.string(),
+                expiresAt: z.string(),
+            })
+        )
+        .optional(),
+});
+export type InviteDeliveryTrace = z.infer<typeof InviteDeliveryTraceSchema>;
+
 export const TurnTraceSchema = z.object({
     turn: z.number(),
     turnId: z.string(),
@@ -255,6 +321,7 @@ export const TurnTraceSchema = z.object({
             dedupeHits: z.number(),
         })
         .optional(),
+    inviteDelivery: InviteDeliveryTraceSchema.optional(),
 
     // Error (if turn failed)
     error: z

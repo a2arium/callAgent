@@ -1,0 +1,26 @@
+{
+  "name": "conversation-panel-persona-agent",
+  "version": "0.1.0",
+  "description": "One agent, three Phase-2a topic seats (critic / dreamer / realist). LLM voices from Execution.",
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:3000/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "panel-multi-seat",
+      "name": "Panel multi-seat",
+      "description": "Handles critic, dreamer, and realist member seats on the same topic."
+    }
+  ],
+  "url": "http://localhost:3000"
+}

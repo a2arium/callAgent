@@ -117,6 +117,8 @@ For conversation-enabled agents, vocabulary SHOULD include topic semantics where
 - selectors: `broadcast`, `round_robin`, `explicit_recipient`
 - topic observation kinds: `topic.message.received`, `topic.member.joined`, `topic.member.left`, `topic.closed`, `outbound.committed`
 - seat identity: `memberId` (topic-scoped), with `agentId` as routing identity
+- invite lifecycle kinds: `topic.invite.issued`, `topic.invite.received`, `topic.invite.accepted`, `topic.invite.declined`, `topic.invite.expired`
+- invite capability token: `InviteToken` (opaque capability, not derived by policy)
 
 ### Flow table
 
@@ -372,8 +374,8 @@ If no, the document is stale.
 
 If the agent uses thread-native conversations, keep `flow.md` vocabulary synchronized with:
 
-- conversation observation kinds: `message.received`, `delivery.failed`, `thread.closed`
+- conversation observation kinds: `message.received`, `delivery.failed`, `thread.closed`, `thread.archived`
 - conversation intents used by Policy (domain-named, not transport wrappers)
-- execution calls to `ctx.conversation.startThread/send/close`
+- execution calls to `ctx.conversation.startThread/send/close/archive`
 
 Behavioral rule: flow tables should show where conversation observations enter the inbox and where follow-up sends are emitted.

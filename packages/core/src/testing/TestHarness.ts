@@ -14,6 +14,10 @@ import type { InternalTaskContext } from '../loop/internalContext.js';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import type { TopicRef, TopicSelector } from '../public-types/conversation/types.js';
 import type { InboundMessage } from '../public-types/conversation/types.js';
+import { InviteSweeper } from '../internal/conversation/InviteSweeper.js';
+import { InMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
+import { EngineLocator } from '../orchestration/EngineLocator.js';
+import type { TaskEngine } from '../orchestration/taskEngine.js';
 
 export type TestHarness<Sensory = unknown> = {
     seedMentalState(m: DeepPartial<MentalState<Sensory>>): TestHarness<Sensory>;
@@ -58,6 +62,27 @@ export type TestHarness<Sensory = unknown> = {
     replies(): readonly unknown[];
     llmStub(): DeterministicLLMStub;
     toolStub(): DeterministicToolStub;
+
+    /** Pin invite-related time for `ConversationService` / sweeper (ISO-8601). */
+    setInviteClockNow(iso: string): TestHarness<Sensory>;
+    triggerExpiredInviteSweep(params?: {
+        tenantId?: string;
+        nowIso?: string;
+        limit?: number;
+    }): Promise<string[]>;
+    /** Republish undelivered invites to an in-memory bus (coordinator not subscribed unless you wire it). */
+    runInviteStartupSweep(params?: { tenantId?: string; nowIso?: string; limit?: number }): Promise<string[]>;
+
+    /**
+     * Runs `ThreadLifecycleSweeper` via a registered `TaskEngine` (`EngineLocator.setEngine`).
+     * Requires tests that need TTL expiry to register the engine first.
+     */
+    tickThreadLifecycleSweep(params?: {
+        tenantId?: string;
+        nowIso?: string;
+        limit?: number;
+        autoArchiveAfterMs?: number | null;
+    }): Promise<{ expiredThreadIds: string[]; archivedThreadIds: string[] }>;
 };
 
 // Deep merge utility
@@ -256,7 +281,11 @@ export function createTestHarness<
                     state.m,
                     state.env,
                     modules,
-                    { maxTurns: 1, collectTraces: true }
+                    {
+                        maxTurns: 1,
+                        collectTraces: true,
+                        autoJoinInvitedTopics: configParsed.autoJoinInvitedTopics,
+                    }
                 );
                 
                 state.m = res.M;
@@ -426,7 +455,61 @@ export function createTestHarness<
         },
         toolStub() {
             return toolStub;
-        }
+        },
+
+        setInviteClockNow(iso: string) {
+            const ms = Date.parse(iso);
+            if (Number.isNaN(ms)) {
+                throw new Error(`setInviteClockNow: invalid ISO date: ${iso}`);
+            }
+            state.inviteClockNowMs = ms;
+            return harness;
+        },
+
+        async triggerExpiredInviteSweep(params) {
+            const sm = state.conversationSessionManager;
+            const clock = state.inviteClock;
+            if (!sm || !clock) {
+                throw new Error('TestHarness: conversation session store not initialized');
+            }
+            const sweeper = new InviteSweeper(sm, clock);
+            return sweeper.runExpirySweep({
+                tenantId: params?.tenantId ?? state.conversationTenantId ?? 'test-tenant',
+                nowIso: params?.nowIso,
+                limit: params?.limit,
+            });
+        },
+
+        async runInviteStartupSweep(params) {
+            const sm = state.conversationSessionManager;
+            const clock = state.inviteClock;
+            if (!sm || !clock) {
+                throw new Error('TestHarness: conversation session store not initialized');
+            }
+            const bus = new InMemoryEventBus();
+            const sweeper = new InviteSweeper(sm, clock);
+            return sweeper.runStartupRecoverySweep({
+                tenantId: params?.tenantId ?? state.conversationTenantId ?? 'test-tenant',
+                publish: (channel, event) => bus.publish(channel, event),
+                nowIso: params?.nowIso,
+                limit: params?.limit,
+            });
+        },
+
+        async tickThreadLifecycleSweep(params) {
+            const eng = EngineLocator.getEngine<TaskEngine>();
+            if (!eng?.triggerThreadLifecycleSweep) {
+                throw new Error(
+                    'TestHarness.tickThreadLifecycleSweep: register a TaskEngine with EngineLocator.setEngine(engine) first'
+                );
+            }
+            return eng.triggerThreadLifecycleSweep({
+                tenantId: params?.tenantId ?? state.conversationTenantId ?? 'test-tenant',
+                nowIso: params?.nowIso,
+                limit: params?.limit,
+                autoArchiveAfterMs: params?.autoArchiveAfterMs,
+            });
+        },
     };
 
     return harness;

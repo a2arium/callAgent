@@ -185,17 +185,27 @@ model Outbox {
 }
 
 model ConversationThread {
-    tenantId           String   @map("tenant_id")
-    conversationId     String   @map("conversation_id")
-    ownerAgentId       String   @map("owner_agent_id")
-    participantAgentId String   @map("participant_agent_id")
-    status             String
-    createdAt          DateTime @default(now()) @map("created_at")
-    updatedAt          DateTime @updatedAt @map("updated_at")
+    tenantId             String    @map("tenant_id")
+    conversationId       String    @map("conversation_id")
+    ownerAgentId         String    @map("owner_agent_id")
+    participantAgentId   String    @map("participant_agent_id")
+    status               String
+    createdAt            DateTime  @default(now()) @map("created_at")
+    updatedAt            DateTime  @updatedAt @map("updated_at")
+    closedAt             DateTime? @map("closed_at")
+    closeReason          String?   @map("close_reason")
+    closeReasonText      String?   @map("close_reason_text")
+    closedByAgentId      String?   @map("closed_by_agent_id")
+    archivedAt           DateTime? @map("archived_at")
+    archivedByAgentId    String?   @map("archived_by_agent_id")
+    archivedReasonText   String?   @map("archived_reason_text")
+    expiresAt            DateTime? @map("expires_at")
 
     @@id([tenantId, conversationId])
     @@index([tenantId, ownerAgentId])
     @@index([tenantId, participantAgentId])
+    @@index([tenantId, status, expiresAt])
+    @@index([tenantId, status, closedAt])
     @@map("conversation_threads")
 }
 
@@ -264,9 +274,22 @@ model ConversationTopicInvite {
     role               String
     sessionIdOverride  String?   @map("session_id_override")
     issuedAt           DateTime  @default(now()) @map("issued_at")
+    expiresAt          DateTime  @map("expires_at")
+    inviterAgentId     String    @map("inviter_agent_id")
+    inviterMemberId    String    @map("inviter_member_id")
+    inviterSessionId   String    @map("inviter_session_id")
     consumedAt         DateTime? @map("consumed_at")
+    declinedAt         DateTime? @map("declined_at")
+    declineReason      String?   @map("decline_reason")
+    deliveryAttemptedAt DateTime? @map("delivery_attempted_at")
+    deliveredAt        DateTime? @map("delivered_at")
+    deliveryAttempts   Int       @default(0) @map("delivery_attempts")
+    deliveryFailureReason String? @map("delivery_failure_reason")
+    idempotencyKey     String?  @map("idempotency_key")
+    correlationId      String?  @map("correlation_id")
 
     @@index([tenantId, conversationId])
+    @@index([tenantId, expiresAt])
     @@map("conversation_topic_invites")
 }
 

@@ -1,4 +1,6 @@
 import type {
+    ArchiveConversationOptions,
+    ArchiveConversationReceipt,
     CloseConversationOptions,
     CloseConversationReceipt,
     FanoutSendReceipt,
@@ -15,12 +17,15 @@ import type {
     TopicInviteReceipt,
     TopicJoinOptions,
     TopicJoinReceipt,
+    TopicDeclineOptions,
+    TopicDeclineReceipt,
     TopicLeaveOptions,
     TopicLeaveReceipt,
     TopicPostOptions,
     TopicRef,
     ConversationRef,
 } from '../../public-types/conversation/types.js';
+import type { Clock } from './Clock.js';
 
 export type ConversationRouteTarget = {
     tenantId: string;
@@ -29,6 +34,7 @@ export type ConversationRouteTarget = {
 };
 
 export type ConversationActivateParams = {
+    kind: 'thread';
     tenantId: string;
     threadId: string;
     routingSessionId: string;
@@ -36,6 +42,22 @@ export type ConversationActivateParams = {
     messageId: string;
     senderSessionId: string;
     senderAgentId: string;
+} | {
+    kind: 'topic';
+    tenantId: string;
+    topicId: string;
+    routingSessionId: string;
+    recipientAgentId: string;
+    senderSessionId: string;
+    senderAgentId: string;
+} | {
+    kind: 'invite';
+    tenantId: string;
+    topicId: string;
+    routingSessionId: string;
+    recipientAgentId: string;
+    inviterAgentId: string;
+    token: string;
 };
 
 export type ConversationActivateResult =
@@ -45,6 +67,8 @@ export type ConversationActivateResult =
           error: { type: 'PluginMissing' | 'ActivationFailed' | 'RunTurnFailed'; message: string };
       };
 
+import type { MessageLog } from '../../public-types/messageLog/types.js';
+
 export type ConversationServiceDeps = {
     routeTargetForThread: (params: {
         tenantId: string;
@@ -53,6 +77,15 @@ export type ConversationServiceDeps = {
     }) => ConversationRouteTarget;
     /** Run one cold turn on the thread-bound recipient session after inbox delivery. */
     activateConversationRecipient: (params: ConversationActivateParams) => Promise<ConversationActivateResult>;
+    publishConversationEvent?: (channel: string, event: unknown) => Promise<void>;
+    /** Wall clock by default; tests override for deterministic invite TTL/expiry. */
+    clock?: Clock;
+    messageLog: MessageLog;
+    /**
+     * Returns idle TTL in ms for new/sent threads, or `null` to disable TTL.
+     * When omitted from deps, callers should default to 3600000 in the composition root.
+     */
+    resolveThreadTtlMs?: () => number | null;
 };
 
 export type InternalConversationApi = {
@@ -95,6 +128,13 @@ export type InternalConversationApi = {
         topic: TopicRef,
         options?: TopicLeaveOptions
     ) => Promise<TopicLeaveReceipt>;
+    decline: (
+        tenantId: string,
+        senderSessionId: string,
+        senderAgentId: string,
+        topic: TopicRef,
+        options: TopicDeclineOptions
+    ) => Promise<TopicDeclineReceipt>;
     post: (
         tenantId: string,
         senderSessionId: string,
@@ -110,4 +150,11 @@ export type InternalConversationApi = {
         ref: ConversationRef,
         options?: CloseConversationOptions
     ) => Promise<CloseConversationReceipt>;
+    archive: (
+        tenantId: string,
+        senderSessionId: string,
+        senderAgentId: string,
+        ref: ThreadRef,
+        options?: ArchiveConversationOptions
+    ) => Promise<ArchiveConversationReceipt>;
 };

@@ -261,3 +261,12 @@ Fix:
 
 > Branching style is drifting across modules. Please follow the APLRET branching policy: guard-style Perception, reducer-style Learning, compact Policy, pipeline Shield, exhaustive dispatch in Execution and Transition. Ensure new union members are handled exhaustively.
 
+## Conversation invite branching note
+
+When adding topic invite lifecycle behavior, keep the same branching discipline:
+
+- Perception: guard-validate `topic.invite.received|accepted|declined|expired`
+- Learning: reducer cases update `pendingInvites` / `invitesInbox`
+- Execution: exhaustive `Intent` dispatch (`invite`, `join`, `decline`, `leave`, `post`)
+- Transition: emit explicit conversation observations; do not hide invite state transitions in ad-hoc control flags
+

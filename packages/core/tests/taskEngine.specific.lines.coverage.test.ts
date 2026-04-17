@@ -1,7 +1,8 @@
 
 import { jest } from '@jest/globals';
 import path from 'node:path';
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import type { WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 
 import { globalA2AService } from '@a2arium/callagent-core/orchestration/A2AService.js';
 import { PluginManager } from '@a2arium/callagent-core/plugin/pluginManager.js';
@@ -42,84 +43,21 @@ jest.mock('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true
 // Use direct import since we are using regular jest.mock
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
 
-class FakeSessionStore implements IWorkingMemorySessionStore {
-    private snapshots = new Map<string, WMSessionSnapshot>();
-    private events: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
-    private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
-
+class FakeSessionStore extends InMemorySessionManager {
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
-        this.snapshots.set(`${tenantId}:${sessionId}`, {
+        const key = `${tenantId}:${sessionId}`;
+        (this as unknown as { snapshots: Map<string, WMSessionSnapshot> }).snapshots.set(key, {
             wmVersion,
             snapshot,
             agentId,
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
         });
-    }
-
-    getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        return this.snapshots.get(`${tenantId}:${sessionId}`) || null;
-    }
-
-    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
-        return this.getSnapshot(tenantId, sessionId);
-    }
-
-    async writeSnapshotCAS(params: {
-        tenantId: string;
-        sessionId: string;
-        agentId: string;
-        expectedWmVersion: bigint;
-        snapshot: Record<string, unknown>;
-    }): Promise<{ newVersion: bigint }> {
-        const key = `${params.tenantId}:${params.sessionId}`;
-        const current = this.snapshots.get(key);
-        const currentVersion = current?.wmVersion ?? BigInt(0);
-
-        if (current && current.wmVersion !== params.expectedWmVersion) {
-            throw new Error('CAS_MISMATCH');
-        }
-
-        const newVersion = currentVersion + BigInt(1);
-        this.snapshots.set(key, {
-            wmVersion: newVersion,
-            snapshot: params.snapshot,
-            agentId: params.agentId,
-            updatedAt: new Date().toISOString()
-        });
-        return { newVersion };
-    }
-
-    async appendEvent(params: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }): Promise<{ eventId: string; seq: number }> {
-        this.events.push(params);
-        return { eventId: `evt-${this.events.length}`, seq: this.events.length - 1 };
-    }
-
-    async enqueueOutbox(params: { tenantId: string; topic: string; key: string; payload: Record<string, unknown> }): Promise<void> {
-        this.outbox.push(params);
     }
 
     getOutbox() {
-        return this.outbox;
-    }
-
-    async load(tenantId: string, taskId: string): Promise<WMSessionSnapshot | null> {
-        return this.getSnapshot(tenantId, taskId);
-    }
-
-    async consumeBudget(tenantId: string, budgetId: string, amount: number): Promise<void> {
-        // Mock implementation
-    }
-
-    async restoreBudget(tenantId: string, budgetId: string, amount: number): Promise<void> {
-        // Mock implementation
-    }
-
-    close(): void {
-        // Mock implementation
-    }
-
-    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<any[]> {
-        return [];
+        return (this as unknown as {
+            outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }>;
+        }).outbox;
     }
 }
 

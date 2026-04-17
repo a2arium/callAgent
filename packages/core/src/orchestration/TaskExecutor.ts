@@ -29,6 +29,7 @@ export type LoopOpts = {
     latencyMs?: number;
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
+    autoJoinInvitedTopics?: boolean;
 };
 
 export interface ExecuteTurnParams {

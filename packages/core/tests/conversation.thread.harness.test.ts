@@ -1,6 +1,7 @@
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
+import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
 
 describe('ConversationService thread primitives', () => {
     const tenantId = 't-1';
@@ -18,6 +19,8 @@ describe('ConversationService thread primitives', () => {
                 agentId: recipient,
             }),
             activateConversationRecipient: async () => ({ ok: true }),
+            messageLog: createDbMessageLog(sessionManager),
+            resolveThreadTtlMs: () => null,
         });
         return { service, sessionManager };
     };

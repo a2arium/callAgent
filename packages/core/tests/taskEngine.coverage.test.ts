@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.resolve(__dirname, '../src');
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import type { WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
 import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
 import { setPendingExternalEvents, getPendingExternalEvents } from '../src/orchestration/ExternalEventsRegistry.js';
@@ -41,42 +42,73 @@ mockFindLocalAgent.mockResolvedValue({
 
 type EngineObservation = SynthesizeObservation<ObservationConfig & { user: unknown; tool: unknown; child: unknown; internal?: unknown; env?: unknown }>;
 
-class FakeSessionStore implements IWorkingMemorySessionStore {
-    private snapshots = new Map<string, WMSessionSnapshot>();
-    private events: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
-    private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
+class FakeSessionStore extends InMemorySessionManager {
     public failNextSave = false;
     public failNextSaveTooLarge = false;
     public failNextSaveWithSizeError = false;
     public failOnWriteNumber: number | null = null;
     public writeCount = 0;
 
+    private snapshotsMap(): Map<string, WMSessionSnapshot> {
+        return (this as unknown as { snapshots: Map<string, WMSessionSnapshot> }).snapshots;
+    }
+
+    private eventsMap(): Map<
+        string,
+        Array<{
+            eventId: string;
+            seq: number;
+            type: string;
+            payload: Record<string, unknown>;
+            createdAt: string;
+        }>
+    > {
+        return (this as unknown as {
+            events: Map<
+                string,
+                Array<{
+                    eventId: string;
+                    seq: number;
+                    type: string;
+                    payload: Record<string, unknown>;
+                    createdAt: string;
+                }>
+            >;
+        }).events;
+    }
+
+    private outboxArr(): Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> {
+        return (this as unknown as {
+            outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }>;
+        }).outbox;
+    }
+
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
-        // Clone on seed
-        const cloned = JSON.parse(JSON.stringify(snapshot));
-        this.snapshots.set(key, { wmVersion, snapshot: cloned, agentId, updatedAt: new Date().toISOString() });
+        const cloned = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+        this.snapshotsMap().set(key, { wmVersion, snapshot: cloned, agentId, updatedAt: new Date().toISOString() });
     }
 
     getEvents(tenantId: string, sessionId: string) {
-        return this.events.filter(e => e.tenantId === tenantId && e.sessionId === sessionId);
+        const key = `${tenantId}:${sessionId}`;
+        const eventList = this.eventsMap().get(key) || [];
+        return eventList.map((e) => ({ tenantId, sessionId, type: e.type, payload: e.payload }));
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        const snap = this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        const snap = this.snapshotsMap().get(`${tenantId}:${sessionId}`) ?? null;
         if (!snap) return null;
-        // Clone on read
         return {
             ...snap,
-            snapshot: JSON.parse(JSON.stringify(snap.snapshot))
+            snapshot: JSON.parse(JSON.stringify(snap.snapshot)) as Record<string, unknown>,
         };
     }
 
-    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+    override async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
         return this.getSnapshot(tenantId, sessionId);
     }
 
-    async writeSnapshotCAS(params: {
+    override async writeSnapshotCAS(params: {
         tenantId: string;
         sessionId: string;
         agentId: string;
@@ -84,13 +116,13 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         snapshot: Record<string, unknown>;
     }): Promise<{ newVersion: bigint }> {
         const key = `${params.tenantId}:${params.sessionId}`;
-        const current = this.snapshots.get(key);
+        const current = this.snapshotsMap().get(key);
         const currentVersion = current?.wmVersion ?? BigInt(0);
 
         if (this.failNextSave || (this.failOnWriteNumber && this.writeCount + 1 === this.failOnWriteNumber)) {
             this.writeCount++;
-            this.failNextSave = false; // Reset failNextSave if it was triggered
-            this.failOnWriteNumber = null; // Reset failOnWriteNumber if it was triggered
+            this.failNextSave = false;
+            this.failOnWriteNumber = null;
             throw new Error('CAS_MISMATCH');
         }
 
@@ -113,31 +145,62 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         const newVersion = currentVersion + BigInt(1);
 
         this.writeCount++;
-        // Clone on write
-        const cloned = JSON.parse(JSON.stringify(params.snapshot));
-        this.snapshots.set(key, {
+        const cloned = JSON.parse(JSON.stringify(params.snapshot)) as Record<string, unknown>;
+        this.snapshotsMap().set(key, {
             wmVersion: newVersion,
             snapshot: cloned,
             agentId: params.agentId,
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
         });
         return { newVersion };
     }
 
-    async appendEvent(params: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }): Promise<{ eventId: string; seq: number }> {
-        this.events.push(params);
-        return { eventId: `evt-${this.events.length}`, seq: this.events.length - 1 };
+    override async appendEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        type: string;
+        payload: Record<string, unknown>;
+    }): Promise<{ eventId: string; seq: number }> {
+        const key = `${params.tenantId}:${params.sessionId}`;
+        const eventList = this.eventsMap().get(key) || [];
+        const seq = eventList.length;
+        const eventId = `evt_${Date.now()}_${seq}`;
+        eventList.push({
+            eventId,
+            seq,
+            type: params.type,
+            payload: params.payload,
+            createdAt: new Date().toISOString(),
+        });
+        this.eventsMap().set(key, eventList);
+        return { eventId, seq };
     }
 
-    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number; }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>> {
-        return this.events
-            .map((e, idx) => ({ ...e, seq: idx }))
-            .filter(e => e.tenantId === params.tenantId && e.sessionId === params.sessionId && e.seq > params.sinceSeq)
-            .map(e => ({ eventId: `evt-${e.seq}`, seq: e.seq, type: e.type, payload: e.payload, createdAt: new Date().toISOString() }));
+    override async listEventsSince(params: {
+        tenantId: string;
+        sessionId: string;
+        sinceSeq: number;
+    }): Promise<
+        Array<{
+            eventId: string;
+            seq: number;
+            type: string;
+            payload: Record<string, unknown>;
+            createdAt: string;
+        }>
+    > {
+        const key = `${params.tenantId}:${params.sessionId}`;
+        const eventList = this.eventsMap().get(key) || [];
+        return eventList.filter((e) => e.seq > params.sinceSeq);
     }
 
-    async enqueueOutbox(params: { tenantId: string; topic: string; key: string; payload: Record<string, unknown> }): Promise<void> {
-        this.outbox.push(params);
+    override async enqueueOutbox(params: {
+        tenantId: string;
+        topic: string;
+        key: string;
+        payload: Record<string, unknown>;
+    }): Promise<void> {
+        this.outboxArr().push(params);
     }
 }
 

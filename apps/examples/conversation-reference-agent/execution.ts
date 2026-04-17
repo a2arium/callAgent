@@ -264,6 +264,29 @@ export async function execution(
             },
         };
     }
+    if (intent.intent === 'conversation_phase3_close_archive') {
+        const thread = { kind: 'thread' as const, id: DEMO_THREAD_ID };
+        const closed = await ctx.conversation.close(thread, { reason: 'phase3-demo', archiveAfter: true });
+        if (!closed.closed || !closed.archived) {
+            return {
+                action: { kind: 'internal', done: true },
+                result: {
+                    status: 'error',
+                    error: { code: 'phase3_close', message: 'expected close with archiveAfter' },
+                },
+            };
+        }
+        return {
+            action: { kind: 'internal', done: true },
+            result: {
+                status: 'ok',
+                data: {
+                    threadId: DEMO_THREAD_ID,
+                    phase3ArchiveComplete: true,
+                },
+            },
+        };
+    }
     if (intent.intent === 'conversation_phase2_close') {
         const closed = await ctx.conversation.close({ kind: 'topic', id: DEMO_TOPIC_PHASE2_ID }, {});
         if (!closed.closed) {

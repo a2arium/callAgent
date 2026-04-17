@@ -22,6 +22,13 @@ export function policy(m: MentalState<Sensory>, _mem: MemoryReader): Intent {
             data: { threadId: DEMO_THREAD_ID, childAgentId: DEMO_CHILD_AGENT_ID },
         };
     }
+    if (stage === 'want_phase3_archive') {
+        const thr = m.memory?.conversation?.threads?.[DEMO_THREAD_ID];
+        if (thr?.status === 'archived') {
+            return { kind: 'wait' };
+        }
+        return { kind: 'internal', intent: 'conversation_phase3_close_archive', data: {} };
+    }
     if (stage === 'want_phase2') {
         return {
             kind: 'internal',

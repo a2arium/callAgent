@@ -18,7 +18,10 @@ import { normalizeObservationInbox } from '../loop/types.js';
 import { InMemorySessionManager } from '../orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../orchestration/SessionManager.js';
 import { ConversationService } from '../internal/conversation/ConversationService.js';
+import { createDbMessageLog } from '../eventbus/dbMessageLog.js';
+import type { Clock } from '../internal/conversation/Clock.js';
 import type {
+    ArchiveConversationOptions,
     CloseConversationOptions,
     ConversationRef,
     FanoutSendReceipt,
@@ -30,6 +33,7 @@ import type {
     TopicCreateOptions,
     TopicInviteOptions,
     TopicJoinOptions,
+    TopicDeclineOptions,
     TopicLeaveOptions,
     TopicPostOptions,
     TopicRef,
@@ -77,6 +81,15 @@ export function createTestContext(
     const harnessAgentId = 'test-agent';
     const conversationStore = new InMemorySessionManager();
     const conversationSessionManager = new SessionManager(conversationStore);
+    const inviteHarnessClock: Clock = {
+        now: () =>
+            state.inviteClockNowMs != null && !Number.isNaN(state.inviteClockNowMs)
+                ? new Date(state.inviteClockNowMs)
+                : new Date(),
+    };
+    state.conversationTenantId = tenantId;
+    state.conversationSessionManager = conversationSessionManager;
+    state.inviteClock = inviteHarnessClock;
     const conversationService = new ConversationService(conversationSessionManager, {
         routeTargetForThread: ({ threadId, recipientAgentId }) => ({
             tenantId,
@@ -84,6 +97,9 @@ export function createTestContext(
             agentId: recipientAgentId,
         }),
         activateConversationRecipient: async () => ({ ok: true }),
+        clock: inviteHarnessClock,
+        messageLog: createDbMessageLog(conversationSessionManager),
+        resolveThreadTtlMs: () => null,
     });
 
     state.pullPersistedConversationObservations = async () => {
@@ -316,6 +332,8 @@ export function createTestContext(
                 conversationService.invite(tenantId, harnessSessionId, harnessAgentId, options),
             join: (topic: TopicRef, options: TopicJoinOptions) =>
                 conversationService.join(tenantId, harnessSessionId, harnessAgentId, topic, options),
+            decline: (topic: TopicRef, options: TopicDeclineOptions) =>
+                conversationService.decline(tenantId, harnessSessionId, harnessAgentId, topic, options),
             leave: (topic: TopicRef, options?: TopicLeaveOptions) =>
                 conversationService.leave(tenantId, harnessSessionId, harnessAgentId, topic, options),
             post: async (topic: TopicRef, message: OutboundTopicMessage, options?: TopicPostOptions) => {
@@ -332,6 +350,9 @@ export function createTestContext(
             },
             close: async (ref: ConversationRef, options?: CloseConversationOptions) => {
                 return conversationService.close(tenantId, harnessSessionId, harnessAgentId, ref, options);
+            },
+            archive: async (ref: ThreadRef, options?: ArchiveConversationOptions) => {
+                return conversationService.archive(tenantId, harnessSessionId, harnessAgentId, ref, options);
             },
         },
     };
