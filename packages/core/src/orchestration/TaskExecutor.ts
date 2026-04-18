@@ -8,7 +8,6 @@ import { runLoop } from '../loop/loopRunner.js';
 import { pruneSnapshot } from '../loop/hygiene.js';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
 
 import type {
     EnvironmentState,
@@ -30,6 +29,11 @@ export type LoopOpts = {
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;
+    topicSweeper?: {
+        intervalMs: number;
+        batchSize: number;
+        autoArchiveAfterMs: number;
+    };
 };
 
 export interface ExecuteTurnParams {

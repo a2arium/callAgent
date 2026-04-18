@@ -90,6 +90,48 @@ export const AgentRuntimeManifestSchema = z.object({
      * When `null`, TTL is disabled for this agent (threads never auto-expire).
      */
     threadTtlMs: z.union([z.number().int().positive(), z.null()]).optional(),
+    /**
+     * While an agent loop is running, periodically auto-archive **closed** topics older than
+     * `autoArchiveAfterMs` (requires a registered framework `TaskEngine`).
+     * Omit `topicSweeper` to disable scheduled sweeps (manual `triggerTopicLifecycleSweep` still works).
+     */
+    topicSweeper: z
+      .object({
+        intervalMs: z.number().int().positive(),
+        batchSize: z.number().int().positive().max(10_000).optional(),
+        autoArchiveAfterMs: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+    /** When false, other agents cannot open threads targeting this agent (Phase 4d). Default: allow. */
+    threadable: z.boolean().optional(),
+    /**
+     * When true, a topic message delivery cold-starts a turn on this agent. Default false (observation
+     * is queued for the next natural wake).
+     */
+    wakeOnTopicMessage: z.boolean().optional().default(false),
+    /** If set, only these speech acts are accepted for inbound thread/topic deliveries. */
+    acceptedSpeechActs: z
+      .array(
+        z.enum([
+          'question',
+          'answer',
+          'inform',
+          'request',
+          'task',
+          'followup',
+          'signal',
+          'vote',
+          'system',
+        ])
+      )
+      .optional(),
+    /** If set, inbound content must declare a matching `mimeType` when provided as an object. */
+    acceptedContentTypes: z.array(z.string().min(1)).optional(),
+    /** Optional JSON Schema blobs keyed by a stable id (validation hooks may use these in future). */
+    jsonSchemas: z.record(z.string(), z.unknown()).optional(),
+    /** Declared policy capability tokens (e.g. `selector_policy:my.policy`, `stop_custom:my.stop`). */
+    topicPoliciesSupported: z.array(z.string().min(1)).optional(),
   }).strict().optional(),
 }).strict();
 

@@ -25,7 +25,7 @@ describe('Thread TTL and sweeper', () => {
             routeTargetForThread: ({ threadId, recipientAgentId }) => routeTarget(threadId, recipientAgentId),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => 500,
+            resolveThreadTtlMs: (_agentId: string) => 500,
             clock,
         });
 
@@ -86,7 +86,7 @@ describe('Thread TTL and sweeper', () => {
             routeTargetForThread: ({ threadId, recipientAgentId }) => routeTarget(threadId, recipientAgentId),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         const threadId = 'thr-exp-1';
         await sessionManager.createConversationThread({

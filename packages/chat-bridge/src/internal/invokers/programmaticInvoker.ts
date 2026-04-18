@@ -1,4 +1,4 @@
-import { PluginManager, eventBus, taskChannel } from '@a2arium/callagent-core';
+import { PluginManager, createInMemoryEventBus, taskChannel, busEventData, type BusEvent } from '@a2arium/callagent-core';
 import type { BridgeTaskInput, ChatRoute, ChatSender, Invoker, ResultPayload } from '../../types.js';
 
 // Internal types for the invoker
@@ -10,7 +10,7 @@ type ResumeParams = { id: string; token: string; input: BridgeTaskInput; tenantI
 export class ProgrammaticInvoker implements Invoker {
     private static _wmStore: IWorkingMemorySessionStore | undefined;
     private static _engine: TaskEngine | undefined;
-    private static _eventBus = eventBus;
+    private static _eventBus = createInMemoryEventBus();
     private static _taskChannel = taskChannel;
     private static _initialized = false;
 
@@ -18,13 +18,14 @@ export class ProgrammaticInvoker implements Invoker {
 
     private async ensureInitialized() {
         if (ProgrammaticInvoker._initialized) return;
-        const [{ TaskEngine, eventBus, taskChannel }, { WorkingMemorySessionStore }] = await Promise.all([
+        const [{ TaskEngine, createInMemoryEventBus }, { WorkingMemorySessionStore }] = await Promise.all([
             import('@a2arium/callagent-core' as any),
             import('@a2arium/callagent-memory-sql' as any)
         ] as any);
         ProgrammaticInvoker._wmStore = this.deps.sessionStore ?? new (WorkingMemorySessionStore as any)();
-        ProgrammaticInvoker._engine = new TaskEngine({ sessionStore: ProgrammaticInvoker._wmStore });
-        ProgrammaticInvoker._eventBus = eventBus;
+        const bus = createInMemoryEventBus();
+        ProgrammaticInvoker._eventBus = bus;
+        ProgrammaticInvoker._engine = new TaskEngine({ sessionStore: ProgrammaticInvoker._wmStore, eventBus: bus });
         ProgrammaticInvoker._taskChannel = taskChannel;
         ProgrammaticInvoker._initialized = true;
     }
@@ -70,8 +71,11 @@ export class ProgrammaticInvoker implements Invoker {
         };
         let lastTyping = 0;
         let aggregatedText = '';
+        let unsubStart: (() => Promise<void>) | undefined;
 
-        const handler = async (ev: any) => {
+        const handler = async (be: BusEvent) => {
+            const ev = busEventData(be) as any;
+            if (!ev) return;
             if (ev?.artifact) {
                 const parts = ev.artifact.parts || [];
                 // Send text parts
@@ -115,25 +119,26 @@ export class ProgrammaticInvoker implements Invoker {
                         } catch { /* ignore */ }
                     }
                     token = token || 'opaque';
-                    eventBus.unsubscribe(channel, handler);
+                    try { await unsubStart?.(); } catch { }
                     try { console.info(`[invoker] start:input_required id=${id} token=${token}`); } catch { }
                     resolveFn!({ id, status: 'input_required', token, prompt: promptText });
                 }
                 if (st?.state === 'failed' && ev.final === true) {
-                    eventBus.unsubscribe(channel, handler);
+                    try { await unsubStart?.(); } catch { }
                     const errMsg = (st?.message?.parts?.[0]?.text) || 'failed';
                     try { console.warn(`[invoker] start:failed id=${id} error=${errMsg}`); } catch { }
                     resolveFn!({ id, status: 'failed', error: errMsg });
                 }
                 if (st?.state === 'completed' && ev.final === true) {
-                    eventBus.unsubscribe(channel, handler);
+                    try { await unsubStart?.(); } catch { }
                     const output = aggregatedText ? { text: aggregatedText } : { ok: true };
                     try { console.info(`[invoker] start:completed id=${id}`); } catch { }
                     resolveFn!({ id, status: 'completed', output });
                 }
             }
         };
-        eventBus.subscribe(channel, handler);
+        const startSub = await eventBus.subscribe(channel, handler);
+        unsubStart = startSub.unsubscribe;
 
         // Start task in streaming mode
         try { console.info('[invoker] calling engine.startTask now...'); } catch { }
@@ -191,7 +196,10 @@ export class ProgrammaticInvoker implements Invoker {
                 try { console.error('[invoker] resume:sendMessage error', e); } catch { }
             }
         };
-        const handler = async (ev: any) => {
+        let unsubResume: (() => Promise<void>) | undefined;
+        const handler = async (be: BusEvent) => {
+            const ev = busEventData(be) as any;
+            if (!ev) return;
             if (ev?.artifact) {
                 const parts = ev.artifact.parts || [];
                 const text = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
@@ -231,25 +239,26 @@ export class ProgrammaticInvoker implements Invoker {
                         } catch { /* ignore */ }
                     }
                     tkn = tkn || 'opaque';
-                    eventBus.unsubscribe(channel, handler);
+                    try { await unsubResume?.(); } catch { }
                     try { console.info(`[invoker] resume:input_required id=${id} token=${tkn}`); } catch { }
                     resolveFn!({ id, status: 'input_required', token: tkn, prompt: promptText });
                 }
                 if (st?.state === 'failed' && ev.final === true) {
-                    eventBus.unsubscribe(channel, handler);
+                    try { await unsubResume?.(); } catch { }
                     const errMsg = (st?.message?.parts?.[0]?.text) || 'failed';
                     try { console.warn(`[invoker] resume:failed id=${id} error=${errMsg}`); } catch { }
                     resolveFn!({ id, status: 'failed', error: errMsg });
                 }
                 if (st?.state === 'completed' && ev.final === true) {
-                    eventBus.unsubscribe(channel, handler);
+                    try { await unsubResume?.(); } catch { }
                     const output = aggregatedText ? { text: aggregatedText } : { ok: true };
                     try { console.info(`[invoker] resume:completed id=${id}`); } catch { }
                     resolveFn!({ id, status: 'completed', output });
                 }
             }
         };
-        eventBus.subscribe(channel, handler);
+        const resumeSub = await eventBus.subscribe(channel, handler);
+        unsubResume = resumeSub.unsubscribe;
 
         // Resume input and wait for next status
         await engine.resumeInput({ tenantId, taskId: id, token: effectiveToken, input: normalizedInput });

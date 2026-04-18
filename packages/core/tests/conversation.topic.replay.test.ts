@@ -22,7 +22,7 @@ describe('Topic fan-out idempotency replay', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         return { service, sessionManager };
     };
@@ -121,6 +121,7 @@ describe('Topic fan-out idempotency replay', () => {
                 { agentId: peer, role: 'owner' },
                 { agentId: owner, role: 'participant' },
             ],
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(r.status).toBe('rejected');
         if (r.status === 'rejected') {

@@ -68,6 +68,10 @@ export type ConversationActivateResult =
       };
 
 import type { MessageLog } from '../../public-types/messageLog/types.js';
+import type { TopicSelectorPolicyRegistry } from './TopicSelectorPolicyRegistry.js';
+import type { StopPolicyRegistry } from '../../public-types/conversation/stopPolicy.js';
+import type { BackpressureManager, TopicPostBackpressureSample } from './BackpressureManager.js';
+import type { ResolvedAgentCommunication } from './CapabilityValidator.js';
 
 export type ConversationServiceDeps = {
     routeTargetForThread: (params: {
@@ -85,7 +89,21 @@ export type ConversationServiceDeps = {
      * Returns idle TTL in ms for new/sent threads, or `null` to disable TTL.
      * When omitted from deps, callers should default to 3600000 in the composition root.
      */
-    resolveThreadTtlMs?: () => number | null;
+    /**
+     * Thread idle TTL from the **calling agent's** manifest (`communication.threadTtlMs`).
+     * `null` disables TTL; omitted manifest field → framework default (1h) inside the resolver.
+     */
+    resolveThreadTtlMs?: (agentId: string) => number | null;
+    /** Registered `selector_policy` implementations; defaults to an empty registry when omitted. */
+    topicSelectorPolicyRegistry?: TopicSelectorPolicyRegistry;
+    /** Registered `custom` topic stop policies; defaults to an empty registry when omitted. */
+    stopPolicyRegistry?: StopPolicyRegistry;
+    /** Optional dispatch pressure tracking for topic fan-out (Phase 4b). */
+    backpressureManager?: BackpressureManager;
+    /** Manifest `communication` bag for an agent (Phase 4d capabilities). */
+    resolveAgentCommunication?: (agentId: string) => ResolvedAgentCommunication | undefined;
+    /** When true, topic delivery cold-starts a turn on the recipient (default false). */
+    resolveWakeOnTopicMessage?: (agentId: string) => boolean;
 };
 
 export type InternalConversationApi = {
@@ -154,7 +172,27 @@ export type InternalConversationApi = {
         tenantId: string,
         senderSessionId: string,
         senderAgentId: string,
-        ref: ThreadRef,
+        ref: ConversationRef,
         options?: ArchiveConversationOptions
     ) => Promise<ArchiveConversationReceipt>;
+    /** Harness / ApiBinder: capture worst consumer backpressure sample during `post` (optional). */
+    setTopicPostBackpressureSink?(
+        sink: ((sample: TopicPostBackpressureSample | undefined) => void) | undefined
+    ): void;
+    readProjection: (
+        tenantId: string,
+        senderSessionId: string,
+        senderAgentId: string,
+        topic: TopicRef,
+        token: { projectionName: string },
+        options?: import('../../public-types/conversation/topicProjection.js').ReadProjectionOptions
+    ) => Promise<import('../../public-types/conversation/topicProjection.js').ReadProjectionReceipt>;
+    appendSignal: (
+        tenantId: string,
+        senderSessionId: string,
+        senderAgentId: string,
+        topic: TopicRef,
+        input: import('../../public-types/conversation/topicProjection.js').AppendSignalInput,
+        options?: TopicPostOptions
+    ) => Promise<FanoutSendReceipt>;
 };

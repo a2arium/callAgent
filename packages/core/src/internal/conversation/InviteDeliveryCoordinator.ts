@@ -1,4 +1,5 @@
-import type { IEventBus } from '../../eventbus/inMemoryEventBus.js';
+import type { IEventBus } from '../../public-types/eventbus/types.js';
+import type { BusEvent } from '../../public-types/eventbus/schemas.js';
 import { ConversationPayloadSchema } from '../../types/observation.js';
 import type { SessionManager } from '../../orchestration/SessionManager.js';
 import type {
@@ -8,6 +9,7 @@ import type {
 import { ConversationRouter } from './ConversationRouter.js';
 import type { Observation } from '../../types/observation.js';
 import { wallClock, type Clock } from './Clock.js';
+import { busEventData } from '../../eventbus/busEventHelpers.js';
 
 const INVITE_ISSUED_CHANNEL = 'conversation.topic.invite.issued';
 
@@ -30,8 +32,11 @@ function sleep(ms: number): Promise<void> {
 
 export class InviteDeliveryCoordinator {
     private readonly router: ConversationRouter;
-    private readonly handler: (event: unknown) => Promise<void>;
+    private readonly boundHandler = async (event: BusEvent): Promise<void> => {
+        await this.handleInviteIssued(event);
+    };
     private started = false;
+    private unsubscribeInvite: (() => Promise<void>) | undefined;
 
     constructor(
         private readonly sessionManager: SessionManager,
@@ -40,29 +45,30 @@ export class InviteDeliveryCoordinator {
         private readonly clock: Clock = wallClock
     ) {
         this.router = new ConversationRouter(this.sessionManager);
-        this.handler = async (event: unknown): Promise<void> => {
-            await this.handleInviteIssued(event);
-        };
     }
 
-    start(): void {
+    async start(): Promise<void> {
         if (this.started) {
             return;
         }
         this.started = true;
-        this.eventBus.subscribe(INVITE_ISSUED_CHANNEL, this.handler);
+        const { unsubscribe } = await this.eventBus.subscribe(INVITE_ISSUED_CHANNEL, this.boundHandler);
+        this.unsubscribeInvite = unsubscribe;
     }
 
-    stop(): void {
+    async stop(): Promise<void> {
         if (!this.started) {
             return;
         }
         this.started = false;
-        this.eventBus.unsubscribe(INVITE_ISSUED_CHANNEL, this.handler);
+        if (this.unsubscribeInvite) {
+            await this.unsubscribeInvite();
+            this.unsubscribeInvite = undefined;
+        }
     }
 
-    private async handleInviteIssued(event: unknown): Promise<void> {
-        const envelope = event as InviteIssuedEventEnvelope;
+    private async handleInviteIssued(event: BusEvent): Promise<void> {
+        const envelope = busEventData<InviteIssuedEventEnvelope>(event);
         const tenantId = envelope?.tenantId;
         const parsed = ConversationPayloadSchema.safeParse(envelope?.payload);
         if (!parsed.success || parsed.data.kind !== 'topic.invite.issued') {

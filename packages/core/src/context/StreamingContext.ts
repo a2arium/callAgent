@@ -7,9 +7,12 @@ import type {
     Artifact
 } from '../shared/types/StreamingEvents.js';
 // no provider-specific Usage type in public API anymore
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createInMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { logger } from '@a2arium/callagent-utils';
+import { v7 as uuidv7 } from 'uuid';
 
 /**
  * Options for the reply method
@@ -33,11 +36,32 @@ export type InternalEngineEvent =
  * Extend the context with streaming capabilities
  * @param ctx - The task context to extend
  * @param isStreaming - Whether to stream events (true) or buffer until completion (false)
+ * @param eventBusParam - Task engine bus; when omitted, a new in-memory bus is used (standalone runners only).
  */
 export function extendContextWithStreaming(
     ctx: TaskContext,
-    isStreaming: boolean
+    isStreaming: boolean,
+    eventBusParam?: IEventBus
 ): void {
+    const eventBus = eventBusParam ?? createInMemoryEventBus();
+
+    const publishA2aPayload = (taskId: string, data: Record<string, unknown>): void => {
+        void eventBus.publish(
+            createBusEvent({
+                channel: taskChannel(taskId),
+                partitionKey: taskId,
+                cloud: {
+                    id: uuidv7(),
+                    type: 'task.a2a',
+                    source: `/tasks/${taskId}`,
+                    time: new Date().toISOString(),
+                    datacontenttype: 'application/json',
+                    data,
+                },
+            })
+        );
+    };
+
     // Store buffered responses if not streaming
     const buffer = {
         artifacts: [] as Artifact[],
@@ -69,13 +93,15 @@ export function extendContextWithStreaming(
                 };
 
                 if (isStreaming) {
-                    // Emit directly to the event bus for streaming
-                    try { (eventBus as any).__dbgId = (eventBus as any).__dbgId || Math.random().toString(36).slice(2); } catch { }
-                    try { logger.debug('Streaming artifact publish', { channel: taskChannel(event.taskId), busId: (eventBus as any).__dbgId }); } catch { }
-                    eventBus.publish(taskChannel(event.taskId), {
+                    try {
+                        logger.debug('Streaming artifact publish', { channel: taskChannel(event.taskId) });
+                    } catch {
+                        /* noop */
+                    }
+                    publishA2aPayload(event.taskId, {
                         id: event.taskId,
                         artifact,
-                        final: event.opts.lastChunk
+                        final: event.opts.lastChunk,
                     });
                     logger.debug('Streaming artifact', {
                         taskId: event.taskId,
@@ -111,12 +137,18 @@ export function extendContextWithStreaming(
                         event.status.state === 'failed' ||
                         event.status.state === 'canceled';
 
-                    try { (eventBus as any).__dbgId = (eventBus as any).__dbgId || Math.random().toString(36).slice(2); } catch { }
-                    try { logger.debug('Streaming status publish', { channel: taskChannel(event.taskId), busId: (eventBus as any).__dbgId, state: event.status.state }); } catch { }
-                    eventBus.publish(taskChannel(event.taskId), {
+                    try {
+                        logger.debug('Streaming status publish', {
+                            channel: taskChannel(event.taskId),
+                            state: event.status.state,
+                        });
+                    } catch {
+                        /* noop */
+                    }
+                    publishA2aPayload(event.taskId, {
                         id: event.taskId,
                         status: event.status,
-                        final: isFinal
+                        final: isFinal,
                     });
 
                     if (isFinal) {
@@ -140,20 +172,18 @@ export function extendContextWithStreaming(
 
                 // Emit the final status
                 if (isStreaming) {
-                    // Status event with final flag
-                    eventBus.publish(taskChannel(event.taskId), {
+                    publishA2aPayload(event.taskId, {
                         id: event.taskId,
                         status: event.status,
-                        final: isFinal
+                        final: isFinal,
                     });
 
-                    // If there are final artifacts, emit them too
                     if (event.artifacts && event.artifacts.length > 0) {
                         for (const artifact of event.artifacts) {
-                            eventBus.publish(taskChannel(event.taskId), {
+                            publishA2aPayload(event.taskId, {
                                 id: event.taskId,
                                 artifact,
-                                final: false // Only the status is truly final
+                                final: false,
                             });
                         }
                         logger.debug('Emitted final artifacts in streaming mode', {

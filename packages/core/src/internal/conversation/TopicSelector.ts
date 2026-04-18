@@ -1,6 +1,12 @@
-import { MemberIdSchema } from '../../public-types/conversation/schemas.js';
+import { MemberIdSchema, type JsonValue } from '../../public-types/conversation/schemas.js';
 import type { TopicSelector } from '../../public-types/conversation/types.js';
 import type { ConversationTopicRecord } from '@a2arium/callagent-memory-engine';
+import {
+    TopicSelectorPolicyResultSchema,
+    type TopicSelectorPolicyContext,
+} from '../../public-types/conversation/selectorPolicy.js';
+import { paramsHashFromJsonValue } from '../util/canonicalJson.js';
+import type { TopicSelectorPolicyRegistry } from './TopicSelectorPolicyRegistry.js';
 
 export type TopicMemberRow = {
     memberId: string;
@@ -23,9 +29,41 @@ function compareMembers(a: TopicMemberRow, b: TopicMemberRow): number {
     return a.memberId.localeCompare(b.memberId);
 }
 
+function broadcastRecipients(senderMemberId: string, members: TopicMemberRow[]): TopicMemberRow[] {
+    const active = members.filter((m) => m.memberId !== senderMemberId);
+    return [...active].sort(compareMembers);
+}
+
+export type ResolveTopicSelectorOpts = {
+    tenantId: string;
+    topicId: string;
+    sequenceNumber: number;
+    nowIso: string;
+    policyRegistry: TopicSelectorPolicyRegistry;
+};
+
+export type TopicSelectorPolicyForTrace = {
+    policyId: string;
+    paramsHash?: string;
+    outcome: 'selected' | 'abstained_fallback_broadcast';
+};
+
 export type TopicSelectorResolution =
-    | { ok: true; recipients: TopicMemberRow[]; nextRotationCursor: string | null }
-    | { ok: false; error: 'RecipientNotMember' | 'RecipientAmbiguous' };
+    | {
+          ok: true;
+          recipients: TopicMemberRow[];
+          nextRotationCursor: string | null;
+          selectorPolicyForTrace?: TopicSelectorPolicyForTrace;
+      }
+    | {
+          ok: false;
+          error:
+              | 'RecipientNotMember'
+              | 'RecipientAmbiguous'
+              | 'SelectorPolicyNotRegistered'
+              | 'PolicyParamsInvalid'
+              | 'PolicyInternalError';
+      };
 
 /**
  * Resolves recipients for a topic post. Excludes the sender seat by `memberId`.
@@ -35,16 +73,16 @@ export function resolveTopicSelector(
     selector: TopicSelector,
     senderMemberId: string,
     members: TopicMemberRow[],
-    rotationCursor: string | null
+    rotationCursor: string | null,
+    opts: ResolveTopicSelectorOpts
 ): TopicSelectorResolution {
-    const active = members.filter((m) => m.memberId !== senderMemberId);
-
     if (selector.kind === 'broadcast') {
-        const sorted = [...active].sort(compareMembers);
+        const sorted = broadcastRecipients(senderMemberId, members);
         return { ok: true, recipients: sorted, nextRotationCursor: rotationCursor };
     }
 
     if (selector.kind === 'explicit_recipient') {
+        const active = members.filter((m) => m.memberId !== senderMemberId);
         const r = selector.recipient;
         if (r.by === 'memberId') {
             const hit = active.find((m) => m.memberId === r.memberId);
@@ -63,13 +101,92 @@ export function resolveTopicSelector(
         return { ok: true, recipients: [matches[0]!], nextRotationCursor: rotationCursor };
     }
 
-    const ordered = [...active].sort((a, b) => {
-        const t = a.registeredAt.localeCompare(b.registeredAt);
-        if (t !== 0) {
-            return t;
+    if (selector.kind === 'selector_policy') {
+        const policy = opts.policyRegistry.resolve(selector.policyId);
+        if (!policy) {
+            return { ok: false, error: 'SelectorPolicyNotRegistered' };
         }
-        return a.memberId.localeCompare(b.memberId);
-    });
+        let paramsForContext: unknown = selector.params;
+        if (policy.paramsSchema) {
+            const validated = policy.paramsSchema.safeParse(selector.params);
+            if (!validated.success) {
+                return { ok: false, error: 'PolicyParamsInvalid' };
+            }
+            paramsForContext = validated.data;
+        }
+        const active = members.filter((m) => m.memberId !== senderMemberId);
+        const sorted = [...active].sort(compareMembers);
+        if (sorted.length === 0) {
+            return { ok: true, recipients: [], nextRotationCursor: rotationCursor };
+        }
+        const resolvedMembers = sorted.map((m) => ({
+            agentId: m.agentId,
+            memberId: MemberIdSchema.parse(m.memberId),
+            role: m.role,
+            sessionId: m.sessionId,
+        }));
+        const ctx: TopicSelectorPolicyContext = {
+            tenantId: opts.tenantId,
+            topicId: opts.topicId,
+            senderMemberId: MemberIdSchema.parse(senderMemberId),
+            members: resolvedMembers,
+            rotationCursor,
+            sequenceNumber: opts.sequenceNumber,
+            params: paramsForContext as TopicSelectorPolicyContext['params'],
+            nowIso: opts.nowIso,
+        };
+        let raw: unknown;
+        try {
+            raw = policy.select(ctx);
+        } catch {
+            return { ok: false, error: 'PolicyInternalError' };
+        }
+        const parsed = TopicSelectorPolicyResultSchema.safeParse(raw);
+        if (!parsed.success) {
+            return { ok: false, error: 'PolicyInternalError' };
+        }
+        const pr = parsed.data;
+        const ph = paramsHashFromJsonValue(selector.params);
+        if (pr.kind === 'rejected') {
+            if (pr.error.type === 'PolicyAbstain') {
+                return {
+                    ok: true,
+                    recipients: broadcastRecipients(senderMemberId, members),
+                    nextRotationCursor: rotationCursor,
+                    selectorPolicyForTrace: {
+                        policyId: selector.policyId,
+                        paramsHash: ph,
+                        outcome: 'abstained_fallback_broadcast',
+                    },
+                };
+            }
+            if (pr.error.type === 'PolicyParamsInvalid') {
+                return { ok: false, error: 'PolicyParamsInvalid' };
+            }
+            return { ok: false, error: 'PolicyInternalError' };
+        }
+        const byMember = new Map(members.map((m) => [m.memberId, m]));
+        const recipients: TopicMemberRow[] = [];
+        for (const r of pr.recipients) {
+            const row = byMember.get(String(r.memberId));
+            if (!row) {
+                return { ok: false, error: 'PolicyInternalError' };
+            }
+            recipients.push(row);
+        }
+        return {
+            ok: true,
+            recipients,
+            nextRotationCursor: pr.nextRotationCursor,
+            selectorPolicyForTrace: {
+                policyId: selector.policyId,
+                paramsHash: ph,
+                outcome: 'selected',
+            },
+        };
+    }
+
+    const ordered = broadcastRecipients(senderMemberId, members);
     if (ordered.length === 0) {
         return { ok: true, recipients: [], nextRotationCursor: rotationCursor };
     }
@@ -94,6 +211,18 @@ export function topicSelectorFromRecord(record: ConversationTopicRecord): TopicS
     }
     if (k === 'round_robin') {
         return { kind: 'round_robin' };
+    }
+    if (k === 'selector_policy') {
+        const d = record.defaultSelectorData;
+        const policyId = typeof d['policyId'] === 'string' ? d['policyId'] : '';
+        if (policyId.length > 0) {
+            const params = d['params'];
+            return {
+                kind: 'selector_policy',
+                policyId,
+                ...(params !== undefined ? { params: params as JsonValue } : {}),
+            };
+        }
     }
     if (k === 'explicit_recipient') {
         const d = record.defaultSelectorData;
@@ -121,6 +250,13 @@ export function topicSelectorToStorage(selector: TopicSelector): { kind: string;
     }
     if (selector.kind === 'round_robin') {
         return { kind: 'round_robin', data: {} };
+    }
+    if (selector.kind === 'selector_policy') {
+        const data: Record<string, unknown> = { policyId: selector.policyId };
+        if (selector.params !== undefined) {
+            data['params'] = selector.params;
+        }
+        return { kind: 'selector_policy', data };
     }
     const r = selector.recipient;
     if (r.by === 'agentId') {

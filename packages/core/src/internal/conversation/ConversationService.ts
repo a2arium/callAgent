@@ -43,7 +43,11 @@ import {
     InviteTokenSchema,
     MAX_TOPIC_MEMBERS,
     MemberIdSchema,
+    TopicStopPolicySchema,
+    type TopicStopPolicyRule,
 } from '../../public-types/conversation/schemas.js';
+import { SignalKindSchema } from '../../public-types/conversation/signal.js';
+import type { StopPolicyRegistry, TopicStopPolicyContext } from '../../public-types/conversation/stopPolicy.js';
 import type { TopicMember } from '../../public-types/conversation/types.js';
 import { ConversationRouter } from './ConversationRouter.js';
 import { wallClock, type Clock } from './Clock.js';
@@ -53,11 +57,24 @@ import {
     topicSelectorToStorage,
     type TopicMemberRow,
 } from './TopicSelector.js';
+import { createTopicSelectorPolicyRegistry } from './TopicSelectorPolicyRegistry.js';
+import type { TopicSelectorPolicyRegistry } from './TopicSelectorPolicyRegistry.js';
+import { createStopPolicyRegistry } from './StopPolicyRegistry.js';
+import { evaluateTopicStopPolicies } from './TopicStopPolicyEngine.js';
+import { paramsHashFromJsonValue } from '../util/canonicalJson.js';
+import {
+    validateContentTypeAccepted,
+    validateSpeechActAccepted,
+    validateThreadable,
+} from './CapabilityValidator.js';
+import type { AppendSignalInput, ReadProjectionOptions } from '../../public-types/conversation/topicProjection.js';
+import { getTopicProjectionRegistry } from './TopicProjectionRegistry.js';
 
 function effectiveMemberId(m: TopicMember): string {
     return m.memberId !== undefined ? String(m.memberId) : m.agentId;
 }
 import { reconstructFanoutReceiptFromDeliveries } from './fanoutReplay.js';
+import type { TopicPostBackpressureSample } from './BackpressureManager.js';
 
 const MAX_QUEUE_DEPTH = 32;
 const DEFAULT_INVITE_TTL_SECONDS = 60 * 60 * 24;
@@ -92,10 +109,13 @@ function isInflightSnapshot(snapshot: Record<string, unknown> | undefined): bool
 export class ConversationService implements InternalConversationApi {
     private readonly router: ConversationRouter;
     private readonly clock: Clock;
+    private readonly topicSelectorPolicyRegistry: TopicSelectorPolicyRegistry;
+    private readonly stopPolicyRegistry: StopPolicyRegistry;
     private readonly queueState: QueueState = {
         byThread: new Map(),
         byTopic: new Map(),
     };
+    private topicPostBackpressureSink?: (sample: TopicPostBackpressureSample | undefined) => void;
 
     constructor(
         private readonly sessionManager: SessionManager,
@@ -103,6 +123,110 @@ export class ConversationService implements InternalConversationApi {
     ) {
         this.router = new ConversationRouter(sessionManager);
         this.clock = deps.clock ?? wallClock;
+        this.topicSelectorPolicyRegistry =
+            deps.topicSelectorPolicyRegistry ?? createTopicSelectorPolicyRegistry();
+        this.stopPolicyRegistry = deps.stopPolicyRegistry ?? createStopPolicyRegistry();
+    }
+
+    setTopicPostBackpressureSink(
+        sink: ((sample: TopicPostBackpressureSample | undefined) => void) | undefined
+    ): void {
+        this.topicPostBackpressureSink = sink;
+    }
+
+    private async runStopPoliciesAfterSuccessfulTopicAppend(params: {
+        tenantId: string;
+        senderSessionId: string;
+        senderAgentId: string;
+        topic: TopicRef;
+    }): Promise<
+        | undefined
+        | { result: 'stop'; reason?: string }
+        | { result: 'rejected'; error: ConversationError }
+    > {
+        const { tenantId, senderSessionId, senderAgentId, topic } = params;
+        const topicRow = await this.sessionManager.getConversationTopic({
+            tenantId,
+            conversationId: topic.id,
+        });
+        if (!topicRow || topicRow.status !== 'open') {
+            return undefined;
+        }
+        const rulesParsed = TopicStopPolicySchema.array().min(1).safeParse(topicRow.stopPolicies);
+        if (!rulesParsed.success) {
+            return undefined;
+        }
+        const members = await this.sessionManager.listConversationTopicMembers({
+            tenantId,
+            conversationId: topic.id,
+            activeOnly: true,
+        });
+        const msgs = await this.sessionManager.listConversationMessages({
+            tenantId,
+            conversationId: topic.id,
+        });
+        if (msgs.length === 0) {
+            return undefined;
+        }
+        const last = msgs[msgs.length - 1]!;
+        const memberCount = members.length;
+        const totalMessages = msgs.length;
+        const totalRounds = Math.floor(totalMessages / Math.max(1, memberCount));
+        const resolvedMembers = members.map((m) => ({
+            agentId: m.agentId,
+            memberId: MemberIdSchema.parse(m.memberId),
+            role: m.role,
+            sessionId: m.sessionId,
+        }));
+        const ctx: TopicStopPolicyContext = {
+            tenantId,
+            topicId: topic.id,
+            topicCreatedAtIso: topicRow.createdAt,
+            nowIso: this.clock.now().toISOString(),
+            sequenceNumber: last.sequenceNumber,
+            totalMessages,
+            totalRounds,
+            lastMessage: {
+                senderMemberId: MemberIdSchema.parse(last.senderMemberId),
+                speechAct: last.speechAct,
+                sequenceNumber: last.sequenceNumber,
+            },
+            members: resolvedMembers,
+        };
+        const result = evaluateTopicStopPolicies({
+            rules: rulesParsed.data,
+            ctx,
+            messages: msgs,
+            registry: this.stopPolicyRegistry,
+        });
+        if (result.status === 'ok') {
+            return undefined;
+        }
+        if (result.status === 'stop') {
+            await this.close(tenantId, senderSessionId, senderAgentId, topic, {
+                reason: result.reason,
+            });
+            return { result: 'stop', reason: result.reason };
+        }
+        const ts = this.clock.now().toISOString();
+        const obs = {
+            source: 'conversation',
+            payload: {
+                kind: 'topic.stopPolicy.rejected' as const,
+                topic,
+                ts,
+                error: result.error,
+            },
+        } as Observation;
+        await this.router.routeObservations(
+            members.map((m) => ({
+                tenantId,
+                sessionId: m.sessionId,
+                agentId: m.agentId,
+                observation: obs,
+            }))
+        );
+        return { result: 'rejected', error: result.error };
     }
 
     private isThreadReplyForBlocking(obs: unknown, params: { threadId: string; correlationId: string; recipientAgentId: string }): boolean {
@@ -170,6 +294,49 @@ export class ConversationService implements InternalConversationApi {
         return isInflightSnapshot(base);
     }
 
+    private requiredTopicPolicyCapabilityIds(
+        selector: TopicSelector,
+        stopPolicies: readonly TopicStopPolicyRule[]
+    ): string[] {
+        const ids: string[] = [];
+        if (selector.kind === 'selector_policy') {
+            ids.push(`selector_policy:${selector.policyId}`);
+        }
+        for (const p of stopPolicies) {
+            if (p.kind === 'custom') {
+                ids.push(`stop_custom:${p.policyId}`);
+            }
+        }
+        return ids;
+    }
+
+    private async emitTopicPolicyUnsupported(params: {
+        tenantId: string;
+        sessionId: string;
+        agentId: string;
+        topic: TopicRef;
+        details: { agentId: string; missing: string[] }[];
+    }): Promise<void> {
+        if (params.details.length === 0) {
+            return;
+        }
+        const obs = {
+            source: 'conversation',
+            payload: {
+                kind: 'topic.policy.unsupported',
+                topic: params.topic,
+                ts: new Date().toISOString(),
+                unsupported: params.details,
+            },
+        } as Observation;
+        await this.router.routeObservation({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            agentId: params.agentId,
+            observation: obs,
+        });
+    }
+
     private async resolveInviterSeat(
         tenantId: string,
         topicId: string,
@@ -214,7 +381,22 @@ export class ConversationService implements InternalConversationApi {
         }
         const threadId = options.conversationId ?? (`thread-${uuidv7()}` as ThreadRef['id']);
         const thread: ThreadRef = { kind: 'thread', id: threadId };
-        const ttlMs = this.deps.resolveThreadTtlMs ? this.deps.resolveThreadTtlMs() : 3600000;
+        const targetComm = this.deps.resolveAgentCommunication?.(options.targetAgentId);
+        const cap0 = validateThreadable(targetComm, options.targetAgentId);
+        if (cap0) {
+            return { thread, receipt: { status: 'rejected', thread, error: cap0 } };
+        }
+        const cap1 = validateSpeechActAccepted(targetComm, options.message.speechAct);
+        if (cap1) {
+            return { thread, receipt: { status: 'rejected', thread, error: cap1 } };
+        }
+        const cap2 = validateContentTypeAccepted(targetComm, options.message.content);
+        if (cap2) {
+            return { thread, receipt: { status: 'rejected', thread, error: cap2 } };
+        }
+        const ttlMs = this.deps.resolveThreadTtlMs
+            ? this.deps.resolveThreadTtlMs(senderAgentId)
+            : 3600000;
         const expiresAtIso =
             ttlMs == null
                 ? null
@@ -288,6 +470,20 @@ export class ConversationService implements InternalConversationApi {
                 thread,
                 error: { type: 'ConversationClosed', message: 'Conversation thread is closed.' },
             };
+        }
+
+        const recipientComm = this.deps.resolveAgentCommunication?.(message.recipientAgentId);
+        const rc0 = validateThreadable(recipientComm, message.recipientAgentId);
+        if (rc0) {
+            return { status: 'rejected', thread, error: rc0 };
+        }
+        const rc1 = validateSpeechActAccepted(recipientComm, message.speechAct);
+        if (rc1) {
+            return { status: 'rejected', thread, error: rc1 };
+        }
+        const rc2 = validateContentTypeAccepted(recipientComm, message.content);
+        if (rc2) {
+            return { status: 'rejected', thread, error: rc2 };
         }
 
         const dedupeKey = options?.idempotencyKey;
@@ -381,7 +577,9 @@ export class ConversationService implements InternalConversationApi {
         const dedupeHit = appendResult.kind === 'dedupeHit';
         const messageId = appendResult.messageId;
         const sequenceNumber = appendResult.sequenceNumber;
-        const ttlMsAfter = this.deps.resolveThreadTtlMs ? this.deps.resolveThreadTtlMs() : 3600000;
+        const ttlMsAfter = this.deps.resolveThreadTtlMs
+            ? this.deps.resolveThreadTtlMs(message.senderAgentId)
+            : 3600000;
         let threadExpiresAtIso: string | undefined;
         if (ttlMsAfter != null && !dedupeHit) {
             threadExpiresAtIso = new Date(this.clock.now().getTime() + ttlMsAfter).toISOString();
@@ -568,12 +766,28 @@ export class ConversationService implements InternalConversationApi {
             };
         }
 
+        const stopPolicies = TopicStopPolicySchema.array().min(1).parse(options.stopPolicies);
+        const requiredCaps = this.requiredTopicPolicyCapabilityIds(defaultSel, stopPolicies);
+        const unsupportedCaps: { agentId: string; missing: string[] }[] = [];
+        for (const m of options.members) {
+            const comm = this.deps.resolveAgentCommunication?.(m.agentId);
+            const supported = comm?.topicPoliciesSupported;
+            if (!supported || requiredCaps.length === 0) {
+                continue;
+            }
+            const missing = requiredCaps.filter((id) => !supported.includes(id));
+            if (missing.length > 0) {
+                unsupportedCaps.push({ agentId: m.agentId, missing });
+            }
+        }
+
         await this.sessionManager.createConversationTopic({
             tenantId,
             conversationId: topicId,
             ownerAgentId: senderAgentId,
             defaultSelectorKind: storage.kind,
             defaultSelectorData: storage.data,
+            stopPolicies,
             members: memberRows,
         });
 
@@ -584,6 +798,16 @@ export class ConversationService implements InternalConversationApi {
             role: r.role,
             sessionId: r.sessionId,
         }));
+        const ownerSeat = memberRows.find((r) => r.agentId === senderAgentId);
+        if (ownerSeat && unsupportedCaps.length > 0) {
+            await this.emitTopicPolicyUnsupported({
+                tenantId,
+                sessionId: ownerSeat.sessionId,
+                agentId: senderAgentId,
+                topic,
+                details: unsupportedCaps,
+            });
+        }
         for (let i = 0; i < resolvedMembers.length; i++) {
             const joined = resolvedMembers[i]!;
             const observation = {
@@ -750,6 +974,23 @@ export class ConversationService implements InternalConversationApi {
                 tenantId,
                 payload: issuedPayload,
             });
+        }
+        const selInvite = topicSelectorFromRecord(topicRow);
+        const stopParsedInvite = TopicStopPolicySchema.array().min(1).parse(topicRow.stopPolicies);
+        const reqInv = this.requiredTopicPolicyCapabilityIds(selInvite, stopParsedInvite);
+        const commInv = this.deps.resolveAgentCommunication?.(options.invitee.agentId);
+        const supInv = commInv?.topicPoliciesSupported;
+        if (supInv && reqInv.length > 0) {
+            const missingInv = reqInv.filter((id) => !supInv.includes(id));
+            if (missingInv.length > 0) {
+                await this.emitTopicPolicyUnsupported({
+                    tenantId,
+                    sessionId: inviterSeat.sessionId,
+                    agentId: senderAgentId,
+                    topic: options.topic,
+                    details: [{ agentId: options.invitee.agentId, missing: missingInv }],
+                });
+            }
         }
         return { status: 'ok', token: InviteTokenSchema.parse(token), expiresAt };
     }
@@ -1073,6 +1314,7 @@ export class ConversationService implements InternalConversationApi {
                     recipientAgentId: null,
                     conversationKind: 'topic',
                     selectorKind: existing.selectorKind ?? null,
+                    selectorPolicyId: existing.selectorPolicyId != null ? String(existing.selectorPolicyId) : null,
                     speechAct: existing.speechAct,
                     payload: existing.payload as Record<string, unknown>,
                     correlationId: existing.correlationId,
@@ -1096,28 +1338,83 @@ export class ConversationService implements InternalConversationApi {
             sessionId: m.sessionId,
         }));
 
+        const priorMsgs = await this.sessionManager.listConversationMessages({
+            tenantId,
+            conversationId: topic.id,
+        });
+        const nextSequenceNumber =
+            priorMsgs.length === 0
+                ? 1
+                : priorMsgs.reduce((m, r) => Math.max(m, r.sequenceNumber), 0) + 1;
+
         const baseSelector = options?.selector ?? topicSelectorFromRecord(topicRow);
         const sel = resolveTopicSelector(
             baseSelector,
             senderMemberIdResolved,
             memberRows,
-            topicRow.rotationCursor
+            topicRow.rotationCursor,
+            {
+                tenantId,
+                topicId: topic.id,
+                sequenceNumber: nextSequenceNumber,
+                nowIso: this.clock.now().toISOString(),
+                policyRegistry: this.topicSelectorPolicyRegistry,
+            }
         );
 
         if (!sel.ok) {
-            const err =
-                sel.error === 'RecipientAmbiguous'
-                    ? ({ type: 'RecipientAmbiguous' as const, message: 'Multiple seats for agentId.' })
-                    : ({ type: 'RecipientNotMember' as const, message: 'Recipient is not an active member.' });
+            if (sel.error === 'RecipientAmbiguous') {
+                return {
+                    status: 'rejected',
+                    topic,
+                    error: { type: 'RecipientAmbiguous', message: 'Multiple seats for agentId.' },
+                };
+            }
+            if (sel.error === 'RecipientNotMember') {
+                return {
+                    status: 'rejected',
+                    topic,
+                    error: { type: 'RecipientNotMember', message: 'Recipient is not an active member.' },
+                };
+            }
+            if (sel.error === 'SelectorPolicyNotRegistered') {
+                const policyId = baseSelector.kind === 'selector_policy' ? baseSelector.policyId : undefined;
+                return {
+                    status: 'rejected',
+                    topic,
+                    error: {
+                        type: 'SelectorPolicyNotRegistered',
+                        message: 'Selector policy is not registered.',
+                        policyId,
+                    },
+                };
+            }
+            if (sel.error === 'PolicyParamsInvalid') {
+                const policyId = baseSelector.kind === 'selector_policy' ? baseSelector.policyId : undefined;
+                return {
+                    status: 'rejected',
+                    topic,
+                    error: {
+                        type: 'PolicyParamsInvalid',
+                        message: 'Selector policy params are invalid.',
+                        policyId,
+                    },
+                };
+            }
+            const policyId = baseSelector.kind === 'selector_policy' ? baseSelector.policyId : undefined;
             return {
                 status: 'rejected',
                 topic,
-                error: err,
+                error: {
+                    type: 'PolicyInternalError',
+                    message: 'Selector policy failed.',
+                    policyId,
+                },
             };
         }
-        const { recipients, nextRotationCursor } = sel;
+        const { recipients, nextRotationCursor, selectorPolicyForTrace } = sel;
 
-        if (baseSelector.kind === 'round_robin') {
+        if (baseSelector.kind === 'round_robin' || baseSelector.kind === 'selector_policy') {
             await this.sessionManager.updateConversationTopic({
                 tenantId,
                 conversationId: topic.id,
@@ -1127,7 +1424,13 @@ export class ConversationService implements InternalConversationApi {
 
         const queueMode = options?.queueMode ?? 'reject';
 
-        type Scan = { memberId: string; agentId: string; sessionId: string; outcome: 'deliver' | 'queue' | 'reject' };
+        type Scan = {
+            memberId: string;
+            agentId: string;
+            sessionId: string;
+            outcome: 'deliver' | 'queue' | 'reject';
+            rejection?: ConversationError;
+        };
         const scans: Scan[] = [];
         for (const rec of recipients) {
             const inflight = await this.sessionInflight(tenantId, rec.sessionId);
@@ -1146,6 +1449,7 @@ export class ConversationService implements InternalConversationApi {
                         agentId: rec.agentId,
                         sessionId: rec.sessionId,
                         outcome: 'reject',
+                        rejection: { type: 'ThreadBusy', message: 'Recipient session busy.' },
                     });
                 } else {
                     scans.push({
@@ -1161,7 +1465,23 @@ export class ConversationService implements InternalConversationApi {
                     agentId: rec.agentId,
                     sessionId: rec.sessionId,
                     outcome: 'reject',
+                    rejection: { type: 'ThreadBusy', message: 'Recipient session busy.' },
                 });
+            }
+        }
+
+        for (const s of scans) {
+            if (s.outcome !== 'deliver') {
+                continue;
+            }
+            const comm = this.deps.resolveAgentCommunication?.(s.agentId);
+            const capRej =
+                validateThreadable(comm, s.agentId) ??
+                validateSpeechActAccepted(comm, message.speechAct) ??
+                validateContentTypeAccepted(comm, message.content);
+            if (capRej) {
+                s.outcome = 'reject';
+                s.rejection = capRej;
             }
         }
 
@@ -1175,10 +1495,11 @@ export class ConversationService implements InternalConversationApi {
         const allReject =
             scans.length > 0 && scans.every((s) => s.outcome === 'reject');
         if (allReject) {
+            const firstCap = scans.find((s) => s.rejection !== undefined)?.rejection;
             return {
                 status: 'rejected',
                 topic,
-                error: { type: 'ThreadBusy', message: 'All recipients busy.' },
+                error: firstCap ?? { type: 'ThreadBusy', message: 'All recipients busy.' },
             };
         }
 
@@ -1207,7 +1528,7 @@ export class ConversationService implements InternalConversationApi {
                     recipientMemberId: mid,
                     sessionId: s.sessionId,
                     status: 'rejected',
-                    error: { type: 'ThreadBusy', message: 'Recipient session busy.' },
+                    error: s.rejection ?? { type: 'ThreadBusy', message: 'Recipient session busy.' },
                     queuePosition: null,
                 });
             }
@@ -1220,6 +1541,8 @@ export class ConversationService implements InternalConversationApi {
             senderAgentId: message.senderAgentId,
             senderMemberId: MemberIdSchema.parse(senderMemberIdResolved),
             selectorKind: baseSelector.kind,
+            selectorPolicyId:
+                baseSelector.kind === 'selector_policy' ? baseSelector.policyId : undefined,
             speechAct: message.speechAct,
             payload: { content: message.content },
             correlationId: message.correlationId,
@@ -1272,6 +1595,7 @@ export class ConversationService implements InternalConversationApi {
         const accepted: DeliverySummary[] = [];
         const rejected: Array<{ memberId: MemberId; recipientAgentId: string; error: ConversationError }> = [];
 
+        let worstBackpressure: TopicPostBackpressureSample | undefined;
         for (const s of scans) {
             if (s.outcome === 'queue') {
                 rejected.push({
@@ -1285,7 +1609,7 @@ export class ConversationService implements InternalConversationApi {
                 rejected.push({
                     memberId: MemberIdSchema.parse(s.memberId),
                     recipientAgentId: s.agentId,
-                    error: { type: 'ThreadBusy', message: 'Recipient session busy.' },
+                    error: s.rejection ?? { type: 'ThreadBusy', message: 'Recipient session busy.' },
                 });
                 continue;
             }
@@ -1305,33 +1629,65 @@ export class ConversationService implements InternalConversationApi {
                     recipient: { memberId: recipientMemberId, agentId: recipientAgentId },
                 },
             } as Observation;
-            await this.router.routeObservation({
-                tenantId,
-                sessionId: s.sessionId,
-                agentId: recipientAgentId,
-                observation: obs,
-            });
-            const activateParams: ConversationActivateParams = {
-                kind: 'thread',
-                tenantId,
-                threadId: topic.id,
-                routingSessionId: s.sessionId,
-                recipientAgentId,
-                messageId,
-                senderSessionId,
-                senderAgentId: message.senderAgentId,
-            };
-            await this.deps.activateConversationRecipient(activateParams);
-            accepted.push({
-                memberId: recipientMemberId,
-                recipientAgentId,
-                sessionId: s.sessionId,
-                messageId,
-                sequenceNumber,
-                dedupeHit: false,
-                correlationId: message.correlationId,
-            });
+            const consumerKey = String(recipientMemberId);
+            if (this.deps.backpressureManager) {
+                const snap = this.deps.backpressureManager.dispatchStarted(tenantId, consumerKey);
+                const sample: TopicPostBackpressureSample = {
+                    consumerId: consumerKey,
+                    state: snap.state,
+                    unackedCount: snap.unackedCount,
+                };
+                if (!worstBackpressure || sample.unackedCount > worstBackpressure.unackedCount) {
+                    worstBackpressure = sample;
+                }
+            }
+            try {
+                await this.router.routeObservation({
+                    tenantId,
+                    sessionId: s.sessionId,
+                    agentId: recipientAgentId,
+                    observation: obs,
+                });
+                const activateParams: ConversationActivateParams = {
+                    kind: 'thread',
+                    tenantId,
+                    threadId: topic.id,
+                    routingSessionId: s.sessionId,
+                    recipientAgentId,
+                    messageId,
+                    senderSessionId,
+                    senderAgentId: message.senderAgentId,
+                };
+                const wake = this.deps.resolveWakeOnTopicMessage?.(recipientAgentId) === true;
+                if (wake) {
+                    await this.deps.activateConversationRecipient(activateParams);
+                }
+                accepted.push({
+                    memberId: recipientMemberId,
+                    recipientAgentId,
+                    sessionId: s.sessionId,
+                    messageId,
+                    sequenceNumber,
+                    dedupeHit: false,
+                    correlationId: message.correlationId,
+                });
+            } finally {
+                this.deps.backpressureManager?.dispatchAcknowledged(tenantId, consumerKey);
+            }
         }
+        this.topicPostBackpressureSink?.(worstBackpressure);
+
+        const selectorPolicyTrace =
+            selectorPolicyForTrace !== undefined
+                ? {
+                      policyId: selectorPolicyForTrace.policyId,
+                      result:
+                          selectorPolicyForTrace.outcome === 'selected'
+                              ? ('selected' as const)
+                              : ('abstained_fallback_broadcast' as const),
+                      paramsHash: selectorPolicyForTrace.paramsHash,
+                  }
+                : undefined;
 
         const outboundObs = {
             source: 'conversation',
@@ -1342,6 +1698,17 @@ export class ConversationService implements InternalConversationApi {
                 sequenceNumber,
                 correlationId: message.correlationId,
                 deliveries: accepted,
+                selectorKind: baseSelector.kind,
+                topicAppend: {
+                    speechAct: message.speechAct,
+                    payload: { content: message.content },
+                },
+                ...(baseSelector.kind === 'selector_policy'
+                    ? {
+                          selectorPolicyId: baseSelector.policyId,
+                          selectorParamsHash: paramsHashFromJsonValue(baseSelector.params),
+                      }
+                    : {}),
             },
         } as Observation;
         await this.router.routeObservation({
@@ -1351,16 +1718,39 @@ export class ConversationService implements InternalConversationApi {
             observation: outboundObs,
         });
 
+        const stopPolicyTrace = await this.runStopPoliciesAfterSuccessfulTopicAppend({
+            tenantId,
+            senderSessionId,
+            senderAgentId,
+            topic,
+        });
+
         if (accepted.length > 0 && rejected.length === 0) {
-            return { status: 'accepted', topic, deliveries: accepted };
+            return {
+                status: 'accepted',
+                topic,
+                deliveries: accepted,
+                ...(selectorPolicyTrace !== undefined ? { selectorPolicyTrace } : {}),
+                ...(stopPolicyTrace !== undefined ? { stopPolicyTrace } : {}),
+            };
         }
         if (accepted.length > 0 && rejected.length > 0) {
-            return { status: 'partial', topic, accepted, rejected };
+            return {
+                status: 'partial',
+                topic,
+                accepted,
+                rejected,
+                ...(selectorPolicyTrace !== undefined ? { selectorPolicyTrace } : {}),
+                ...(stopPolicyTrace !== undefined ? { stopPolicyTrace } : {}),
+            };
         }
         return {
             status: 'rejected',
             topic,
-            error: { type: 'ThreadBusy', message: 'No recipients could accept delivery.' },
+            error: {
+                type: 'NoEligibleRecipients',
+                message: 'No recipients could accept delivery.',
+            },
         };
     }
 
@@ -1371,19 +1761,22 @@ export class ConversationService implements InternalConversationApi {
         ref: ConversationRef,
         options?: CloseConversationOptions
     ): Promise<CloseConversationReceipt> {
-        if (options?.archiveAfter === true && ref.kind === 'topic') {
-            throw new Error('ArchiveUnsupportedForTopics');
-        }
         if (ref.kind === 'thread') {
             const row = await this.sessionManager.getConversationThread({
                 tenantId,
                 conversationId: ref.id,
             });
             if (!row) {
-                throw new Error('CONVERSATION_THREAD_NOT_FOUND');
+                return {
+                    status: 'rejected',
+                    error: { type: 'ConversationNotFound', message: 'Conversation not found.' },
+                };
             }
             if (row.status === 'archived') {
-                throw new Error('ConversationClosed');
+                return {
+                    status: 'rejected',
+                    error: { type: 'ConversationClosed', message: 'Thread is archived.' },
+                };
             }
             const ts = this.clock.now().toISOString();
             if (row.status === 'closed') {
@@ -1397,9 +1790,9 @@ export class ConversationService implements InternalConversationApi {
                         archivedReasonText: options?.reason ?? null,
                     });
                     await this.emitThreadArchivedFanout(tenantId, ref, ts, senderAgentId, options?.reason);
-                    return { ref, closed: true, archived: true };
+                    return { status: 'ok', ref, closed: true, archived: true };
                 }
-                return { ref, closed: true };
+                return { status: 'ok', ref, closed: true };
             }
             await this.sessionManager.updateConversationThreadStatus({
                 kind: 'close',
@@ -1455,59 +1848,199 @@ export class ConversationService implements InternalConversationApi {
                     archivedReasonText: options?.reason ?? null,
                 });
                 await this.emitThreadArchivedFanout(tenantId, ref, ts, senderAgentId, options?.reason);
-                return { ref, closed: true, archived: true };
+                return { status: 'ok', ref, closed: true, archived: true };
             }
-            return { ref, closed: true };
+            return { status: 'ok', ref, closed: true };
         }
-        await this.sessionManager.updateConversationTopic({
+
+        const topicRow = await this.sessionManager.getConversationTopic({
             tenantId,
             conversationId: ref.id,
-            patch: { status: 'closed' },
         });
-        const ts = new Date().toISOString();
-        const obs = {
-            source: 'conversation',
-            payload: {
-                kind: 'topic.closed',
-                topic: ref,
-                ts,
-            },
-        } as Observation;
-        const active = await this.sessionManager.listConversationTopicMembers({
+        if (!topicRow) {
+            return {
+                status: 'rejected',
+                error: { type: 'ConversationNotFound', message: 'Conversation not found.' },
+            };
+        }
+        if (topicRow.status === 'archived') {
+            return {
+                status: 'rejected',
+                error: { type: 'ConversationClosed', message: 'Topic is archived.' },
+            };
+        }
+        const ts = this.clock.now().toISOString();
+        const closedByMemberId = await this.resolveTopicMemberIdForSession(
             tenantId,
-            conversationId: ref.id,
-            activeOnly: true,
-        });
-        await this.router.routeObservations(
-            active.map((m) => ({
-                tenantId,
-                sessionId: m.sessionId,
-                agentId: m.agentId,
-                observation: obs,
-            }))
+            ref.id,
+            _senderSessionId,
+            senderAgentId
         );
-        return { ref, closed: true };
+
+        if (topicRow.status === 'open') {
+            await this.sessionManager.updateConversationTopic({
+                tenantId,
+                conversationId: ref.id,
+                patch: {
+                    status: 'closed',
+                    closedAt: ts,
+                    closeReason: 'explicit',
+                    closeReasonText: options?.reason ?? null,
+                    closedByAgentId: senderAgentId,
+                    closedByMemberId: closedByMemberId ?? null,
+                },
+            });
+            const topicClosedObs = {
+                source: 'conversation',
+                payload: {
+                    kind: 'topic.closed' as const,
+                    topic: ref,
+                    ts,
+                    reason: options?.reason,
+                    closedBy: senderAgentId,
+                    closedReason: 'explicit' as const,
+                    reasonText: options?.reason,
+                    ...(closedByMemberId !== undefined ? { closedByMemberId } : {}),
+                },
+            } as Observation;
+            const activeOpen = await this.sessionManager.listConversationTopicMembers({
+                tenantId,
+                conversationId: ref.id,
+                activeOnly: true,
+            });
+            await this.router.routeObservations(
+                activeOpen.map((m) => ({
+                    tenantId,
+                    sessionId: m.sessionId,
+                    agentId: m.agentId,
+                    observation: topicClosedObs,
+                }))
+            );
+            if (options?.archiveAfter === true) {
+                await this.sessionManager.updateConversationTopic({
+                    tenantId,
+                    conversationId: ref.id,
+                    patch: {
+                        status: 'archived',
+                        archivedAt: ts,
+                        archivedByAgentId: senderAgentId,
+                        archivedByMemberId: closedByMemberId ?? null,
+                        archivedReasonText: options?.reason ?? null,
+                    },
+                });
+                await this.emitTopicArchivedFanout(
+                    tenantId,
+                    ref,
+                    ts,
+                    senderAgentId,
+                    options?.reason,
+                    closedByMemberId
+                );
+                return { status: 'ok', ref, closed: true, archived: true };
+            }
+            return { status: 'ok', ref, closed: true };
+        }
+
+        if (options?.archiveAfter === true) {
+            const archiveTs = this.clock.now().toISOString();
+            await this.sessionManager.updateConversationTopic({
+                tenantId,
+                conversationId: ref.id,
+                patch: {
+                    status: 'archived',
+                    archivedAt: archiveTs,
+                    archivedByAgentId: senderAgentId,
+                    archivedByMemberId: closedByMemberId ?? null,
+                    archivedReasonText: options?.reason ?? null,
+                },
+            });
+            await this.emitTopicArchivedFanout(
+                tenantId,
+                ref,
+                archiveTs,
+                senderAgentId,
+                options?.reason,
+                closedByMemberId
+            );
+            return { status: 'ok', ref, closed: true, archived: true };
+        }
+        return { status: 'ok', ref, closed: true };
     }
 
     async archive(
         tenantId: string,
         _senderSessionId: string,
         senderAgentId: string,
-        ref: ThreadRef,
+        ref: ConversationRef,
         options?: ArchiveConversationOptions
     ): Promise<ArchiveConversationReceipt> {
+        if (ref.kind === 'topic') {
+            const topicRow = await this.sessionManager.getConversationTopic({
+                tenantId,
+                conversationId: ref.id,
+            });
+            if (!topicRow) {
+                return {
+                    status: 'rejected',
+                    error: { type: 'ConversationNotFound', message: 'Conversation not found.' },
+                };
+            }
+            if (topicRow.status === 'open') {
+                return {
+                    status: 'rejected',
+                    error: { type: 'ConversationNotClosed', message: 'Topic is not closed.' },
+                };
+            }
+            if (topicRow.status === 'archived') {
+                return { status: 'ok', ref, archived: true };
+            }
+            const ts = this.clock.now().toISOString();
+            const archivedByMemberId = await this.resolveTopicMemberIdForSession(
+                tenantId,
+                ref.id,
+                _senderSessionId,
+                senderAgentId
+            );
+            await this.sessionManager.updateConversationTopic({
+                tenantId,
+                conversationId: ref.id,
+                patch: {
+                    status: 'archived',
+                    archivedAt: ts,
+                    archivedByAgentId: senderAgentId,
+                    archivedByMemberId: archivedByMemberId ?? null,
+                    archivedReasonText: options?.reasonText ?? null,
+                },
+            });
+            await this.emitTopicArchivedFanout(
+                tenantId,
+                ref,
+                ts,
+                senderAgentId,
+                options?.reasonText,
+                archivedByMemberId
+            );
+            return { status: 'ok', ref, archived: true };
+        }
+
         const row = await this.sessionManager.getConversationThread({
             tenantId,
             conversationId: ref.id,
         });
         if (!row) {
-            throw new Error('CONVERSATION_THREAD_NOT_FOUND');
+            return {
+                status: 'rejected',
+                error: { type: 'ConversationNotFound', message: 'Conversation not found.' },
+            };
         }
         if (row.status === 'open') {
-            throw new Error('ThreadNotClosed');
+            return {
+                status: 'rejected',
+                error: { type: 'ConversationNotClosed', message: 'Thread is not closed.' },
+            };
         }
         if (row.status === 'archived') {
-            return { ref, archived: true };
+            return { status: 'ok', ref, archived: true };
         }
         const ts = this.clock.now().toISOString();
         await this.sessionManager.updateConversationThreadStatus({
@@ -1519,7 +2052,59 @@ export class ConversationService implements InternalConversationApi {
             archivedReasonText: options?.reasonText ?? null,
         });
         await this.emitThreadArchivedFanout(tenantId, ref, ts, senderAgentId, options?.reasonText);
-        return { ref, archived: true };
+        return { status: 'ok', ref, archived: true };
+    }
+
+    private async resolveTopicMemberIdForSession(
+        tenantId: string,
+        topicId: string,
+        senderSessionId: string,
+        senderAgentId: string
+    ): Promise<MemberId | undefined> {
+        const members = await this.sessionManager.listConversationTopicMembers({
+            tenantId,
+            conversationId: topicId,
+            activeOnly: true,
+        });
+        const match = members.filter((m) => m.sessionId === senderSessionId && m.agentId === senderAgentId);
+        if (match.length === 1) {
+            return MemberIdSchema.parse(match[0]!.memberId);
+        }
+        return undefined;
+    }
+
+    private async emitTopicArchivedFanout(
+        tenantId: string,
+        topicRef: TopicRef,
+        ts: string,
+        archivedBy: string | undefined,
+        reasonText: string | undefined,
+        archivedByMemberId?: MemberId
+    ): Promise<void> {
+        const obs = {
+            source: 'conversation',
+            payload: {
+                kind: 'topic.archived' as const,
+                topic: topicRef,
+                ts,
+                archivedBy,
+                ...(archivedByMemberId !== undefined ? { archivedByMemberId } : {}),
+                reasonText,
+            },
+        } as Observation;
+        const active = await this.sessionManager.listConversationTopicMembers({
+            tenantId,
+            conversationId: topicRef.id,
+            activeOnly: true,
+        });
+        await this.router.routeObservations(
+            active.map((m) => ({
+                tenantId,
+                sessionId: m.sessionId,
+                agentId: m.agentId,
+                observation: obs,
+            }))
+        );
     }
 
     private async emitThreadArchivedFanout(
@@ -1570,5 +2155,113 @@ export class ConversationService implements InternalConversationApi {
                 observation: obs,
             },
         ]);
+    }
+
+    async readProjection(
+        tenantId: string,
+        _senderSessionId: string,
+        senderAgentId: string,
+        topic: TopicRef,
+        token: { projectionName: string },
+        options?: ReadProjectionOptions
+    ): Promise<import('../../public-types/conversation/topicProjection.js').ReadProjectionReceipt> {
+        const topicRow = await this.sessionManager.getConversationTopic({
+            tenantId,
+            conversationId: topic.id,
+        });
+        if (!topicRow) {
+            return { status: 'rejected', error: { type: 'TopicNotFound', message: 'Topic not found.' } };
+        }
+        if (topicRow.status !== 'open') {
+            return {
+                status: 'rejected',
+                error: { type: 'ConversationClosed', message: 'Topic is not open.' },
+            };
+        }
+        const seats = await this.sessionManager.listConversationTopicMembersByAgent({
+            tenantId,
+            conversationId: topic.id,
+            agentId: senderAgentId,
+            activeOnly: true,
+        });
+        if (seats.length === 0) {
+            return { status: 'rejected', error: { type: 'NotAMember', message: 'Sender is not a member.' } };
+        }
+        const def = getTopicProjectionRegistry().get(token.projectionName);
+        if (!def) {
+            return {
+                status: 'rejected',
+                error: {
+                    type: 'ProjectionNotRegistered',
+                    message: `Projection "${token.projectionName}" is not registered.`,
+                    projectionName: token.projectionName,
+                },
+            };
+        }
+        const fromSeq = options?.fromSequence ?? 0;
+        const limit = options?.limit ?? 10_000;
+        const rows = await this.deps.messageLog.read({
+            tenantId,
+            conversationId: topic.id,
+            fromSequence: fromSeq,
+            limit,
+        });
+        let state = def.initial();
+        let lastSeq = 0;
+        const maxSeq = options?.asOfSequence;
+        for (const row of rows) {
+            if (maxSeq !== undefined && row.sequenceNumber > maxSeq) {
+                continue;
+            }
+            state = def.reduce(state, row);
+            lastSeq = row.sequenceNumber;
+        }
+        const parsedState = def.stateSchema.safeParse(state);
+        if (!parsedState.success) {
+            return {
+                status: 'rejected',
+                error: {
+                    type: 'ProjectionStateInvalid',
+                    message: parsedState.error.message,
+                    projectionName: token.projectionName,
+                },
+            };
+        }
+        return { status: 'ok', state: parsedState.data, asOfSequence: lastSeq };
+    }
+
+    async appendSignal(
+        tenantId: string,
+        senderSessionId: string,
+        senderAgentId: string,
+        topic: TopicRef,
+        input: AppendSignalInput,
+        options?: TopicPostOptions
+    ): Promise<FanoutSendReceipt> {
+        const st = SignalKindSchema.safeParse(input.signalType);
+        if (!st.success) {
+            return {
+                status: 'rejected',
+                topic,
+                error: { type: 'InvalidSignalKind', message: st.error.message },
+            };
+        }
+        return this.post(
+            tenantId,
+            senderSessionId,
+            senderAgentId,
+            topic,
+            {
+                senderAgentId,
+                senderMemberId: input.senderMemberId,
+                speechAct: 'signal',
+                content: { signalType: st.data, body: input.payload },
+                correlationId: input.correlationId,
+            },
+            {
+                ...options,
+                idempotencyKey: input.idempotencyKey ?? options?.idempotencyKey,
+            }
+        );
     }
 }

@@ -18,7 +18,7 @@ describe('topic multiplicity namespace safety', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
 
         const created = await service.createTopic(tenantId, 'sess-owner', owner, {
@@ -28,6 +28,7 @@ describe('topic multiplicity namespace safety', () => {
                 { agentId: 'agent-b', memberId: memberId('b#1'), role: 'participant' },
             ],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') {

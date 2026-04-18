@@ -13,7 +13,10 @@ const mockCreateMemoryRegistry = jest.fn<any>();
 
 // Mock other dependencies
 jest.mock('@a2arium/callagent-core/eventbus/outboxPublisher.js', () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+    OutboxPublisher: jest.fn().mockImplementation(() => ({
+        start: jest.fn(),
+        stop: jest.fn(),
+    })),
 }));
 
 jest.mock('@a2arium/callagent-core/loop/loopRunner.js', () => ({

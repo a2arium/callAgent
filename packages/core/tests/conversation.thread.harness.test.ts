@@ -20,7 +20,7 @@ describe('ConversationService thread primitives', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         return { service, sessionManager };
     };

@@ -47,4 +47,22 @@ describe('AgentRuntimeManifestSchema', () => {
         const result = AgentRuntimeManifestSchema.safeParse(runtime);
         expect(result.success).toBe(true);
     });
+
+    it('should validate communication.topicSweeper', () => {
+        const runtime = {
+            name: 'test-agent',
+            version: '1.0.0',
+            runMode: 'loop',
+            communication: {
+                topicSweeper: {
+                    intervalMs: 30_000,
+                    batchSize: 50,
+                    autoArchiveAfterMs: 3_600_000,
+                },
+            },
+        };
+
+        const result = AgentRuntimeManifestSchema.safeParse(runtime);
+        expect(result.success).toBe(true);
+    });
 });

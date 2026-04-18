@@ -1,4 +1,7 @@
+import { MemberIdSchema } from '../../public-types/conversation/schemas.js';
 import type { ConversationProjection } from '../../public-types/conversation/projection.js';
+import type { MessageLogRecord } from '../../public-types/messageLog/schemas.js';
+import { getTopicProjectionRegistry } from '../../internal/conversation/TopicProjectionRegistry.js';
 import type { Observation } from '../../types/observation.js';
 
 function deepFreeze<T>(obj: T): T {
@@ -164,12 +167,34 @@ export function reduceConversationProjection(
                 };
             }
         }
+        if (payload.kind === 'topic.archived') {
+            const id = payload.topic.id;
+            const cur = topics[id];
+            if (cur) {
+                topics[id] = {
+                    ...cur,
+                    status: 'archived',
+                    archivedAt: payload.ts,
+                    archivedByAgentId: payload.archivedBy,
+                    archivedByMemberId: payload.archivedByMemberId,
+                    archivedReasonText: payload.reasonText,
+                };
+            }
+        }
         if (payload.kind === 'topic.closed' || payload.kind === 'thread.closed') {
             if (payload.kind === 'topic.closed') {
                 const id = payload.topic.id;
                 const cur = topics[id];
                 if (cur) {
-                    topics[id] = { ...cur, status: 'closed' };
+                    topics[id] = {
+                        ...cur,
+                        status: 'closed',
+                        closedAt: payload.ts,
+                        closedReason: payload.closedReason,
+                        closedReasonText: payload.reasonText ?? payload.reason,
+                        closedByAgentId: payload.closedBy,
+                        closedByMemberId: payload.closedByMemberId,
+                    };
                 }
             } else {
                 const id = payload.thread.id;
@@ -199,6 +224,7 @@ export function reduceConversationProjection(
                     status: 'archived',
                     archivedAt: payload.ts,
                     archivedByAgentId: payload.archivedBy,
+                    archivedByMemberId: payload.archivedByMemberId,
                     archivedReasonText: payload.reasonText,
                 };
             }
@@ -207,13 +233,47 @@ export function reduceConversationProjection(
             const ref = payload.ref;
             if (ref.kind === 'topic') {
                 const id = ref.id;
-                const cur = topics[id];
-                if (cur) {
-                    topics[id] = {
-                        ...cur,
-                        lastOutboundSequence: payload.sequenceNumber,
-                    };
+                const cur =
+                    topics[id] ??
+                    ({
+                        ref,
+                        status: 'open' as const,
+                        members: [],
+                        currentSelector: { kind: 'broadcast' as const },
+                    } as ConversationProjection['topics'][string]);
+                let nextProjections = cur.topicProjections ? { ...cur.topicProjections } : undefined;
+                if (payload.topicAppend) {
+                    const registry = getTopicProjectionRegistry();
+                    const baseProjs = { ...(nextProjections ?? {}) };
+                    for (const def of registry.all()) {
+                        const prevRaw = baseProjs[def.name];
+                        const prevParsed =
+                            prevRaw !== undefined ? def.stateSchema.safeParse(prevRaw) : undefined;
+                        let state = prevParsed?.success === true ? prevParsed.data : def.initial();
+                        const synthetic: MessageLogRecord = {
+                            messageId: payload.messageId,
+                            sequenceNumber: payload.sequenceNumber,
+                            conversationKind: 'topic',
+                            senderAgentId: '__projection__',
+                            senderMemberId: MemberIdSchema.parse('__projection__'),
+                            speechAct: payload.topicAppend.speechAct,
+                            payload: payload.topicAppend.payload,
+                            correlationId: payload.correlationId,
+                            createdAt: new Date().toISOString(),
+                        };
+                        state = def.reduce(state, synthetic);
+                        const validated = def.stateSchema.safeParse(state);
+                        if (validated.success) {
+                            baseProjs[def.name] = validated.data;
+                        }
+                    }
+                    nextProjections = baseProjs;
                 }
+                topics[id] = {
+                    ...cur,
+                    lastOutboundSequence: payload.sequenceNumber,
+                    ...(nextProjections !== undefined ? { topicProjections: nextProjections } : {}),
+                };
             } else {
                 const id = ref.id;
                 const cur = threads[id];

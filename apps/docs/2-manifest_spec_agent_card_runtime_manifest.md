@@ -371,6 +371,18 @@ type AgentRuntimeManifestV1 = {
      * Idle thread TTL in milliseconds. Default 3600000 (1 hour). Use `null` to disable TTL for this runtime.
      */
     threadTtlMs?: number | null;
+    /**
+     * While a `runLoop` is active, invoke the topic lifecycle sweeper (`triggerTopicLifecycleSweep`) for this
+     * tenant when at least `intervalMs` of wall time has elapsed since the last sweep (checked at the start
+     * of each loop turn). The first check may run immediately. Requires a framework `TaskEngine` on
+     * `EngineLocator` (e.g. CLI / streaming runner). Omit to rely on manual sweeps only. See migration
+     * `5.4a-conversation-phase-4a-…`.
+     */
+    topicSweeper?: {
+      intervalMs: number;
+      batchSize?: number;
+      autoArchiveAfterMs: number;
+    };
   };
 
   /**

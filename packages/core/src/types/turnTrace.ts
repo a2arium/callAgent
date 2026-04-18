@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { StopPolicyFanoutTraceSchema } from '../public-types/conversation/schemas.js';
 import { InvariantErrorPayloadSchema } from './invariantError.js';
 
 /** Module names for turn-failure attribution; must match FrameworkModule in utils/errors.js */
@@ -304,13 +305,26 @@ export const TurnTraceSchema = z.object({
     deliveryLagMs: z.number().optional(),
     topicSelectorDecision: z
         .object({
-            kind: z.enum(['broadcast', 'round_robin', 'explicit_recipient']),
+            kind: z.enum(['broadcast', 'round_robin', 'explicit_recipient', 'selector_policy']),
             resolvedMembers: z.array(
                 z.object({
                     memberId: z.string(),
                     agentId: z.string(),
                 })
             ),
+            selectorPolicy: z
+                .object({
+                    policyId: z.string(),
+                    result: z.enum([
+                        'selected',
+                        'abstained_fallback_broadcast',
+                        'params_invalid',
+                        'not_registered',
+                        'internal_error',
+                    ]),
+                    paramsHash: z.string().optional(),
+                })
+                .optional(),
         })
         .optional(),
     fanoutSummary: z
@@ -321,7 +335,15 @@ export const TurnTraceSchema = z.object({
             dedupeHits: z.number(),
         })
         .optional(),
+    stopPolicy: StopPolicyFanoutTraceSchema.optional(),
     inviteDelivery: InviteDeliveryTraceSchema.optional(),
+    backpressure: z
+        .object({
+            consumerId: z.string(),
+            state: z.enum(['delivered', 'buffered', 'throttled', 'paused', 'dead-lettered']),
+            unackedCount: z.number().int().nonnegative(),
+        })
+        .optional(),
 
     // Error (if turn failed)
     error: z

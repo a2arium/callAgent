@@ -6,6 +6,7 @@ import {
     IdempotencyKeySchema,
     MemberIdSchema,
     MessageIdSchema,
+    SpeechActSchema,
 } from '../conversation/schemas.js';
 
 export const ConversationKindSchema = z.enum(['thread', 'topic']);
@@ -18,7 +19,17 @@ export const MessageLogDeliverySchema = z.object({
     /**
      * @remarks Defaults to `delivered` when omitted (thread sends). Topic fan-out may set `queued` or `rejected` per recipient.
      */
-    status: z.enum(['delivered', 'rejected', 'queued']).optional(),
+    status: z
+        .enum([
+            'delivered',
+            'rejected',
+            'queued',
+            'buffered',
+            'throttled',
+            'paused',
+            'dead-lettered',
+        ])
+        .optional(),
     error: z.record(z.string(), z.unknown()).nullable().optional(),
     queuePosition: z.number().int().nonnegative().nullable().optional(),
 });
@@ -31,7 +42,9 @@ export const MessageLogAppendParamsSchema = z.object({
     senderAgentId: AgentIdSchema,
     senderMemberId: MemberIdSchema,
     selectorKind: z.string().optional(),
-    speechAct: z.string().min(1),
+    /** Present when `selectorKind === 'selector_policy'`. */
+    selectorPolicyId: z.string().min(1).max(120).optional(),
+    speechAct: SpeechActSchema,
     payload: z.unknown(),
     correlationId: CorrelationIdSchema.optional(),
     idempotencyKey: IdempotencyKeySchema.optional(),
@@ -70,7 +83,8 @@ export const MessageLogRecordSchema = z.object({
     senderAgentId: AgentIdSchema,
     senderMemberId: MemberIdSchema,
     selectorKind: z.string().optional(),
-    speechAct: z.string().min(1),
+    selectorPolicyId: z.string().min(1).max(120).optional(),
+    speechAct: SpeechActSchema,
     payload: z.unknown(),
     correlationId: CorrelationIdSchema.optional(),
     idempotencyKey: IdempotencyKeySchema.optional(),

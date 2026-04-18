@@ -173,15 +173,41 @@ model WMEvent {
 }
 
 model Outbox {
-    id        String   @id @default(cuid())
-    tenantId  String   @map("tenant_id")
-    topic     String
-    key       String
-    payload   Json
-    createdAt DateTime @default(now()) @map("created_at")
+    id         String   @id @default(cuid())
+    tenantId   String   @map("tenant_id")
+    topic      String
+    key        String
+    payload    Json
+    retryCount Int      @default(0) @map("retry_count")
+    createdAt  DateTime @default(now()) @map("created_at")
 
     @@index([tenantId, topic])
     @@map("outbox")
+}
+
+model DurableSubscriptionCursor {
+    tenantId       String   @map("tenant_id")
+    streamId       String   @map("stream_id")
+    consumerId     String   @map("consumer_id")
+    sequenceNumber Int      @map("sequence_number")
+    updatedAt      DateTime @map("updated_at")
+
+    @@id([tenantId, streamId, consumerId])
+    @@map("durable_subscription_cursors")
+}
+
+model ConversationDeadLetter {
+    tenantId       String   @map("tenant_id")
+    conversationId String   @map("conversation_id")
+    sequenceNumber Int      @map("sequence_number")
+    consumerId     String   @map("consumer_id")
+    record         Json
+    lastError      String   @map("last_error")
+    attempts       Int
+    deadletteredAt DateTime @map("deadlettered_at")
+
+    @@id([tenantId, conversationId, sequenceNumber, consumerId])
+    @@map("conversation_dead_letter")
 }
 
 model ConversationThread {
@@ -220,6 +246,7 @@ model ConversationMessage {
     recipientAgentId String?  @map("recipient_agent_id")
     conversationKind String   @default("thread") @map("conversation_kind")
     selectorKind     String?  @map("selector_kind")
+    selectorPolicyId String?  @map("selector_policy_id")
     speechAct        String   @map("speech_act")
     payload          Json
     correlationId    String?  @map("correlation_id")
@@ -234,17 +261,28 @@ model ConversationMessage {
 }
 
 model ConversationTopic {
-    tenantId            String   @map("tenant_id")
-    conversationId      String   @map("conversation_id")
-    ownerAgentId        String   @map("owner_agent_id")
+    tenantId            String    @map("tenant_id")
+    conversationId      String    @map("conversation_id")
+    ownerAgentId        String    @map("owner_agent_id")
     status              String
-    defaultSelectorKind String   @map("default_selector_kind")
-    defaultSelectorData Json     @default("{}") @map("default_selector_data")
-    rotationCursor      String?  @map("rotation_cursor")
-    createdAt           DateTime @default(now()) @map("created_at")
-    updatedAt           DateTime @updatedAt @map("updated_at")
+    defaultSelectorKind String    @map("default_selector_kind")
+    defaultSelectorData Json      @default("{}") @map("default_selector_data")
+    stopPolicies        Json      @default("[{\"kind\":\"timeout\",\"afterMs\":86400000}]") @map("stop_policies")
+    rotationCursor      String?   @map("rotation_cursor")
+    closedAt            DateTime? @map("closed_at")
+    closeReason         String?   @map("close_reason")
+    closeReasonText     String?   @map("close_reason_text")
+    closedByAgentId     String?   @map("closed_by_agent_id")
+    closedByMemberId    String?   @map("closed_by_member_id")
+    archivedAt          DateTime? @map("archived_at")
+    archivedByAgentId   String?   @map("archived_by_agent_id")
+    archivedByMemberId  String?   @map("archived_by_member_id")
+    archivedReasonText  String?   @map("archived_reason_text")
+    createdAt           DateTime  @default(now()) @map("created_at")
+    updatedAt           DateTime  @updatedAt @map("updated_at")
 
     @@id([tenantId, conversationId])
+    @@index([tenantId, status, closedAt])
     @@map("conversation_topics")
 }
 

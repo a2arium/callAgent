@@ -5,6 +5,7 @@ import type {
     ConversationTopicInviteRecord,
     ConversationTopicMemberRecord,
     ConversationTopicRecord,
+    ConversationTopicSweepRow,
     ConversationThreadRecord,
     ConversationThreadSweepRow,
     IWorkingMemorySessionStore,
@@ -130,6 +131,7 @@ export class SessionManager {
         recipientAgentId: string | null;
         conversationKind: ConversationKind;
         selectorKind: string | null;
+        selectorPolicyId?: string | null;
         speechAct: string;
         payload: Record<string, unknown>;
         correlationId?: string;
@@ -183,6 +185,17 @@ export class SessionManager {
             return;
         }
         await this.store.updateConversationTopic(params);
+    }
+
+    async listConversationTopicsForSweep(params: {
+        tenantId: string;
+        closedBeforeIso: string;
+        limit: number;
+    }): Promise<ConversationTopicSweepRow[]> {
+        if (!this.store) {
+            return [];
+        }
+        return this.store.listConversationTopicsForSweep(params);
     }
 
     async listConversationTopicMembers(
@@ -330,6 +343,33 @@ export class SessionManager {
             return [];
         }
         return this.store.listConversationMessageDeliveries(params);
+    }
+
+    async getDurableSubscriptionCursor(
+        params: Parameters<IWorkingMemorySessionStore['getDurableSubscriptionCursor']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['getDurableSubscriptionCursor']> {
+        if (!this.store) {
+            return Promise.resolve(null);
+        }
+        return this.store.getDurableSubscriptionCursor(params);
+    }
+
+    async upsertDurableSubscriptionCursor(
+        params: Parameters<IWorkingMemorySessionStore['upsertDurableSubscriptionCursor']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['upsertDurableSubscriptionCursor']> {
+        if (!this.store) {
+            return Promise.resolve();
+        }
+        return this.store.upsertDurableSubscriptionCursor(params);
+    }
+
+    async appendConversationDeadLetter(
+        params: Parameters<IWorkingMemorySessionStore['appendConversationDeadLetter']>[0]
+    ): ReturnType<IWorkingMemorySessionStore['appendConversationDeadLetter']> {
+        if (!this.store) {
+            return Promise.resolve();
+        }
+        return this.store.appendConversationDeadLetter(params);
     }
 }
 

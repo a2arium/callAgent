@@ -1,5 +1,8 @@
 /** @type {import('jest').Config} */
 // Coverage is expensive on the full monorepo; enable with COVERAGE=true (see package.json test:coverage).
+//
+// Heap: a single Jest worker can retain several GB (ts-jest transforms + imported graphs + Jest buffers).
+// package.json sets NODE_OPTIONS=--max-old-space-size=8192 so workers stay under V8's limit on large runs.
 const collectCoverage = process.env.COVERAGE === 'true';
 
 const config = {
@@ -25,6 +28,7 @@ const config = {
             'ts-jest',
             {
                 useESM: true,
+                isolatedModules: true,
                 tsconfig: {
                     target: 'ES2020',
                     module: 'ESNext',
@@ -52,6 +56,8 @@ const config = {
         '^@a2arium/callagent-memory-engine$': '<rootDir>/packages/memory-engine/src/index.ts',
         '^@a2arium/callagent-memory-engine/(.*)$': '<rootDir>/packages/memory-engine/src/$1',
         '^@a2arium/callagent-utils/(.*)$': '<rootDir>/packages/utils/src/$1',
+        '^@a2arium/callagent-eventbus-nats$': '<rootDir>/packages/eventbus-nats/src/index.ts',
+        '^@a2arium/callagent-eventbus-nats/(.*)$': '<rootDir>/packages/eventbus-nats/src/$1',
         '^@a2arium/callagent-utils$': '<rootDir>/packages/utils/src/index.ts',
         '^@a2arium/callagent-types/(.*)$': '<rootDir>/packages/types/src/$1',
         '^@a2arium/callagent-types$': '<rootDir>/packages/types/src/index.ts',

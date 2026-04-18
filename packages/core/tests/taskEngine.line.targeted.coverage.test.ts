@@ -34,9 +34,11 @@ jest.mock('@a2arium/callagent-core/orchestration/A2AService', () => ({
     }
 }));
 
-// Mock outboxPublisher
 jest.mock('@a2arium/callagent-core/eventbus/outboxPublisher', () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+    OutboxPublisher: jest.fn().mockImplementation(() => ({
+        start: jest.fn(),
+        stop: jest.fn(),
+    })),
 }));
 
 // Import system under test

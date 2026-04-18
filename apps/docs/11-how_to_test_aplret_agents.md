@@ -596,9 +596,15 @@ Resume with the same token twice. Assert Execution does not repeat the external 
 
 ```ts
 const h = createTestHarness(modules, {
-    maxTurns: 1,              // schema default; see note below
+    maxTurns: 1,              // schema default; wired into each `runLoop` call (see below)
     deterministicTime: true,
     seedTokens: true,
+    policyPurityStrict: true, // default; forbids Date.now / Math.random in selector & stop policies
+    topicSweeper: {           // optional; turn-aligned TaskEngine topic archive sweeps during `runLoop` (wall clock + intervalMs)
+        intervalMs: 30_000,
+        batchSize: 100,       // optional; default 100 when omitted
+        autoArchiveAfterMs: 3_600_000,
+    },
     manifestProvenance: {
         agentCardSource: 'inline',
         runtimeManifestSource: 'inline',
@@ -608,7 +614,35 @@ const h = createTestHarness(modules, {
 });
 ```
 
-**Practical note:** Multi-turn tests are written as **multiple** `await h.runTurn()` calls (each run appends traces and advances harness / env turn state). The harness implementation may still evolve which config fields are wired through to `runLoop`; if a field appears to have no effect, prefer relying on explicit per-turn scripts and check the current `TestHarness` source for the latest behavior.
+**`maxTurns`:** Each `await h.runTurn()` invokes `runLoop` with this cap. Use **`maxTurns > 1`** when a single test method should iterate the loop several times (e.g. so wall time advances between turns and **`topicSweeper`** can fire more than once). Alternatively, chain multiple **`runTurn()`** calls for multi-turn scenarios.
+
+**`topicSweeper`:** When set, `runLoop` calls **`EngineLocator.getEngine()?.triggerTopicLifecycleSweep(...)`** (same payload shape as manual **`tickTopicLifecycleSweep`**) at the **start of a loop turn** when **`intervalMs`** of wall time has elapsed since the last sweep (first check may run immediately). Requires **`EngineLocator.setEngine(taskEngine)`** before **`runTurn()`**; otherwise sweeps are skipped (debug log). No background timer — gating resets when `runLoop` exits.
+
+**`policyPurityStrict`:** Default **`true`**. Topic **`selector_policy`** and custom **stop** policies registered on the harness must use framework time (**`nowIso`** / **`Clock`**) — not **`Date.now`**, **`Date#getTime`**, or **`Math.random`** inside **`select`** / **`evaluate`**. Set **`policyPurityStrict: false`** only for tests that intentionally exercise impure policies.
+
+**Practical note:** If a config field appears to have no effect, check the current **`TestHarness`** / **`HarnessConfigSchema`** source — behavior is validated at construction time.
+
+### Topic selector / stop policies (Phase 4a harness)
+
+On the same **`ConversationService`** instance backing **`ctx.conversation`**:
+
+- **`harness.registerTopicSelectorPolicy(policy)`** — register a **`TopicSelectorPolicy`** (`policyId`, optional **`paramsSchema`**, **`select`**). Used when posting with **`selector: { kind: 'selector_policy', policyId, params }`**.
+- **`harness.registerStopPolicy(policy)`** — register a **`StopPolicyDefinition`** for **`stopPolicies: [{ kind: 'custom', policyId, ... }]`** on topic create.
+
+**`registerTopicProjection(...)`** (typed shared topic documents, **`readProjection`**) is part of Phase **5.4d** and is not on **`TestHarness`** until that registry ships; use reducer/projection tests or service-level doubles until then.
+
+### Communication manifest & adapters (Phase 4a harness)
+
+Runtime manifest fields under **`communication`** can be mirrored without a full **`PluginManager`** setup:
+
+- **`harness.setCommunicationManifest(patch)`** — deep-merges **`patch`** into harness state (`threadTtlMs`, `autoJoinInvitedTopics`, `topicSweeper`, …). **`resolveThreadTtlMs`** on the harness **`ConversationService`** reads **`threadTtlMs`** from this patch. **`runLoop`** uses merged **`autoJoinInvitedTopics`** and **`topicSweeper`** when **`HarnessConfig`** does not override **`topicSweeper`** (config wins if both are set).
+- **`harness.setCommunicationCapabilities(patch)`** — alias of **`setCommunicationManifest`**.
+- **`harness.useEventBusAdapter(bus)`** — when **`ConversationService`** publishes **`conversation.topic.invite.issued`**, it goes through this **`IEventBus`**.
+- **`harness.useMessageLogAdapter(log)`** — replace the default DB-backed **`MessageLog`** used by **`ctx.conversation`** (getter on service deps).
+- **`harness.useDeterministicBackpressure()`** — reserved flag for future backpressure wiring; no behavioral effect yet.
+- **`harness.resetSignalKindRegistry()`** — reserved no-op until an extension registry exists.
+
+**Strict policy purity:** besides **`policyPurityStrict`**, **`HarnessConfig`** accepts **`strictPolicies`** or **`__strict__`** as aliases (all map to the same flag after parse).
 
 ### Thread lifecycle and TTL (Phase 3)
 
@@ -708,6 +742,8 @@ Phase 2b harness helpers for invite time and sweeps (require a conversation sess
 - `setInviteClockNow(iso)` — pin wall time for `ConversationService` and sweeper
 - `await triggerExpiredInviteSweep({ tenantId?, nowIso?, limit? })` — run `InviteSweeper` expiry pass
 - `await runInviteStartupSweep({ tenantId?, nowIso?, limit? })` — republish undelivered issued invites via an in-memory bus (for deterministic startup-recovery tests)
+- `await tickTopicLifecycleSweep({ tenantId?, nowIso?, limit?, autoArchiveAfterMs? })` — topic closed → archived sweep via **`TaskEngine`** (same **`EngineLocator`** requirement as thread TTL)
+- Optional **`HarnessConfig.topicSweeper`** — while **`runLoop`** is running inside **`runTurn()`**, turn-aligned **`triggerTopicLifecycleSweep`** when wall time satisfies **`intervalMs`**, if a **`TaskEngine`** is registered (mirrors runtime manifest **`communication.topicSweeper`** behavior in **`TurnRunner`**)
 
 Topic observation injection helpers to use in tests:
 
@@ -727,5 +763,6 @@ Also assert TurnTrace topic fields when present:
 - `topicSelectorDecision.kind`
 - `topicSelectorDecision.resolvedMembers`
 - `fanoutSummary.accepted/rejected/queued/dedupeHits`
+- `stopPolicy` — present when a post-append stop rule closes the topic or rejects evaluation (`result: 'stop' | 'rejected'`)
 - `inviteDelivery.issued/received/accepted/declined/expired`
 - `inviteDelivery.received[].autoJoinAttempted` and `inviteDelivery.received[].autoJoinError`

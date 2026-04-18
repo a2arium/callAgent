@@ -21,7 +21,7 @@ describe('Conversation blocking timeout', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         return { service };
     };

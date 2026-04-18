@@ -21,6 +21,25 @@ module.exports = {
           }
         ]
       }
+    },
+    {
+      files: ['packages/core/src/internal/conversation/ConversationService.ts'],
+      rules: {
+        'no-restricted-syntax': [
+          'error',
+          {
+            selector:
+              "AssignmentExpression[left.type='MemberExpression'][left.object.type='MemberExpression'][left.object.property.name='vars']",
+            message: 'Do not assign to ctx.vars.*; use ctx.vars.set()/merge()/update() instead.'
+          },
+          {
+            selector:
+              "ThrowStatement[argument.type='NewExpression'][argument.callee.name='Error']",
+            message:
+              'Do not throw plain Error in ConversationService; use typed ConversationError outcomes or rethrow known errors.'
+          }
+        ]
+      }
     }
   ]
 };

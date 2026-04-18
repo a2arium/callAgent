@@ -30,12 +30,15 @@ export type ConversationMessageRecord = {
     recipientAgentId: string | null;
     conversationKind: ConversationKind;
     selectorKind: string | null;
+    selectorPolicyId: string | null;
     speechAct: string;
     payload: Record<string, unknown>;
     correlationId?: string;
     idempotencyKey?: string;
     createdAt: string;
 };
+
+export type ConversationTopicCloseReason = 'explicit' | 'ttl' | 'archived';
 
 export type ConversationTopicRecord = {
     tenantId: string;
@@ -44,10 +47,28 @@ export type ConversationTopicRecord = {
     status: 'open' | 'closed' | 'archived';
     defaultSelectorKind: string;
     defaultSelectorData: Record<string, unknown>;
+    /** JSON-shaped stop policy rules (validated by core). */
+    stopPolicies: unknown[];
     /** Last-delivered recipient memberId for round_robin; null forces restart-from-first. */
     rotationCursor: string | null;
+    closedAt?: string | null;
+    closeReason?: ConversationTopicCloseReason | null;
+    closeReasonText?: string | null;
+    closedByAgentId?: string | null;
+    closedByMemberId?: string | null;
+    archivedAt?: string | null;
+    archivedByAgentId?: string | null;
+    archivedByMemberId?: string | null;
+    archivedReasonText?: string | null;
     createdAt: string;
     updatedAt: string;
+};
+
+/** Rows eligible for auto-archive sweep (closed, not yet archived, old enough). */
+export type ConversationTopicSweepRow = {
+    tenantId: string;
+    conversationId: string;
+    ownerAgentId: string;
 };
 
 export type ConversationTopicMemberRecord = {
@@ -85,7 +106,14 @@ export type ConversationTopicInviteRecord = {
     correlationId: string | null;
 };
 
-export type ConversationMessageDeliveryStatus = 'delivered' | 'rejected' | 'queued';
+export type ConversationMessageDeliveryStatus =
+    | 'delivered'
+    | 'rejected'
+    | 'queued'
+    | 'buffered'
+    | 'throttled'
+    | 'paused'
+    | 'dead-lettered';
 
 export type ConversationMessageDeliveryRecord = {
     tenantId: string;
@@ -156,6 +184,7 @@ export interface IWorkingMemorySessionStore {
         recipientAgentId: string | null;
         conversationKind: ConversationKind;
         selectorKind: string | null;
+        selectorPolicyId?: string | null;
         speechAct: string;
         payload: Record<string, unknown>;
         correlationId?: string;
@@ -178,6 +207,7 @@ export interface IWorkingMemorySessionStore {
         ownerAgentId: string;
         defaultSelectorKind: string;
         defaultSelectorData: Record<string, unknown>;
+        stopPolicies: unknown[];
         members: Array<{
             memberId: string;
             agentId: string;
@@ -193,8 +223,30 @@ export interface IWorkingMemorySessionStore {
     updateConversationTopic(params: {
         tenantId: string;
         conversationId: string;
-        patch: Partial<Pick<ConversationTopicRecord, 'status' | 'rotationCursor' | 'defaultSelectorKind' | 'defaultSelectorData'>>;
+        patch: Partial<
+            Pick<
+                ConversationTopicRecord,
+                | 'status'
+                | 'rotationCursor'
+                | 'defaultSelectorKind'
+                | 'defaultSelectorData'
+                | 'closedAt'
+                | 'closeReason'
+                | 'closeReasonText'
+                | 'closedByAgentId'
+                | 'closedByMemberId'
+                | 'archivedAt'
+                | 'archivedByAgentId'
+                | 'archivedByMemberId'
+                | 'archivedReasonText'
+            >
+        >;
     }): Promise<void>;
+    listConversationTopicsForSweep(params: {
+        tenantId: string;
+        closedBeforeIso: string;
+        limit: number;
+    }): Promise<ConversationTopicSweepRow[]>;
     listConversationTopicMembers(params: {
         tenantId: string;
         conversationId: string;
@@ -322,4 +374,29 @@ export interface IWorkingMemorySessionStore {
         conversationId: string;
         sequenceNumber: number;
     }): Promise<ConversationMessageDeliveryRecord[]>;
+
+    getDurableSubscriptionCursor(params: {
+        tenantId: string;
+        streamId: string;
+        consumerId: string;
+    }): Promise<{ sequenceNumber: number; updatedAt: string } | null>;
+
+    upsertDurableSubscriptionCursor(params: {
+        tenantId: string;
+        streamId: string;
+        consumerId: string;
+        sequenceNumber: number;
+        updatedAt: string;
+    }): Promise<void>;
+
+    appendConversationDeadLetter(params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+        consumerId: string;
+        record: Record<string, unknown>;
+        lastError: string;
+        attempts: number;
+        deadletteredAt: string;
+    }): Promise<void>;
 }

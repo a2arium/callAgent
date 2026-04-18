@@ -9,6 +9,7 @@ import type {
     ThreadRef,
     TopicRef,
     ConversationError,
+    ArchiveConversationReceipt,
 } from '../src/public-types/conversation/types.js';
 import type { Observation } from '../src/loop/oneTurn.js';
 import type { ThreadStatus, CloseReason } from '../src/public-types/conversation/types.js';
@@ -23,7 +24,7 @@ type ConversationApi = NonNullable<TaskContext['conversation']>;
 type StartThreadReturn = Awaited<ReturnType<ConversationApi['startThread']>>;
 
 if (ctx.conversation) {
-    expectError(ctx.conversation.archive(topicRef, {}));
+    expectType<Promise<ArchiveConversationReceipt>>(ctx.conversation.archive(topicRef, {}));
     expectError(
         ctx.conversation.join(
             topicRef,
@@ -149,11 +150,13 @@ const _badClose: CloseReason = 'expired';
 function exhaustConversationError(e: ConversationError): string {
     switch (e.type) {
         case 'ThreadBusy':
+        case 'NoEligibleRecipients':
         case 'ConversationClosed':
         case 'QueueFull':
         case 'Forbidden':
         case 'Unsupported':
         case 'NotFound':
+        case 'ConversationNotFound':
         case 'PluginMissing':
         case 'ActivationFailed':
         case 'RunTurnFailed':
@@ -171,10 +174,15 @@ function exhaustConversationError(e: ConversationError): string {
         case 'InviteAlreadyConsumed':
         case 'InviteTargetMismatch':
         case 'TopicCapacityExceeded':
-        case 'ThreadNotClosed':
+        case 'SelectorPolicyNotRegistered':
+        case 'PolicyParamsInvalid':
+        case 'PolicyInternalError':
+        case 'StopPolicyNotRegistered':
+        case 'StopPolicyParamsInvalid':
+        case 'StopPolicyInternalError':
+        case 'ConversationNotClosed':
         case 'ThreadExpired':
         case 'ConversationTimeout':
-        case 'ArchiveUnsupportedForTopics':
             return e.type;
         default: {
             const _x: never = e;

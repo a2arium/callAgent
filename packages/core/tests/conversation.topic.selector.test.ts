@@ -1,8 +1,18 @@
 import { resolveTopicSelector } from '../src/internal/conversation/TopicSelector.js';
 import type { TopicMemberRow } from '../src/internal/conversation/TopicSelector.js';
+import { createTopicSelectorPolicyRegistry } from '../src/internal/conversation/TopicSelectorPolicyRegistry.js';
+import type { TopicSelectorPolicy } from '../src/public-types/conversation/selectorPolicy.js';
 import { memberId } from '../src/public-types/conversation/index.js';
 
 describe('TopicSelector', () => {
+    const emptyRegistry = createTopicSelectorPolicyRegistry();
+    const ro = () => ({
+        tenantId: 't',
+        topicId: 'topic',
+        sequenceNumber: 1,
+        nowIso: '2020-01-01T00:00:00.000Z',
+        policyRegistry: emptyRegistry,
+    });
     const owner: TopicMemberRow = {
         memberId: 'owner',
         agentId: 'owner',
@@ -27,7 +37,7 @@ describe('TopicSelector', () => {
 
     it('broadcast orders by role, registeredAt, memberId', () => {
         const members = [p2, owner, p1];
-        const r = resolveTopicSelector({ kind: 'broadcast' }, 'owner', members, null);
+        const r = resolveTopicSelector({ kind: 'broadcast' }, 'owner', members, null, ro());
         expect(r.ok).toBe(true);
         if (!r.ok) {
             return;
@@ -38,14 +48,14 @@ describe('TopicSelector', () => {
 
     it('round_robin advances cursor and rotates deterministically', () => {
         const members = [owner, p1, p2];
-        const a = resolveTopicSelector({ kind: 'round_robin' }, 'owner', members, null);
+        const a = resolveTopicSelector({ kind: 'round_robin' }, 'owner', members, null, ro());
         expect(a.ok).toBe(true);
         if (!a.ok) {
             return;
         }
         expect(a.recipients).toHaveLength(1);
         expect(a.nextRotationCursor).toBe('p1');
-        const b = resolveTopicSelector({ kind: 'round_robin' }, 'owner', members, a.nextRotationCursor);
+        const b = resolveTopicSelector({ kind: 'round_robin' }, 'owner', members, a.nextRotationCursor, ro());
         expect(b.ok).toBe(true);
         if (!b.ok) {
             return;
@@ -60,7 +70,8 @@ describe('TopicSelector', () => {
             { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: 'ghost' } },
             'owner',
             members,
-            null
+            null,
+            ro()
         );
         expect(r.ok).toBe(false);
         if (r.ok) {
@@ -75,7 +86,8 @@ describe('TopicSelector', () => {
             { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: 'p2' } },
             'owner',
             members,
-            null
+            null,
+            ro()
         );
         expect(r.ok).toBe(true);
         if (!r.ok) {
@@ -90,12 +102,54 @@ describe('TopicSelector', () => {
             { kind: 'explicit_recipient', recipient: { by: 'memberId', memberId: memberId('p2') } },
             'owner',
             members,
-            null
+            null,
+            ro()
         );
         expect(r.ok).toBe(true);
         if (!r.ok) {
             return;
         }
         expect(r.recipients[0]!.memberId).toBe('p2');
+    });
+
+    it('selector_policy uses registry and returns first sorted peer', () => {
+        const registry = createTopicSelectorPolicyRegistry();
+        const policy: TopicSelectorPolicy = {
+            policyId: 'first.peer',
+            select(ctx) {
+                const rest = ctx.members.filter((m) => String(m.memberId) !== String(ctx.senderMemberId));
+                const sorted = [...rest].sort((a, b) => String(a.memberId).localeCompare(String(b.memberId)));
+                const pick = sorted[0];
+                if (!pick) {
+                    return { kind: 'rejected', error: { type: 'PolicyAbstain', message: 'none' } };
+                }
+                return {
+                    kind: 'selected',
+                    recipients: [pick],
+                    nextRotationCursor: String(pick.memberId),
+                };
+            },
+        };
+        registry.register(policy);
+        const members = [owner, p1, p2];
+        const r = resolveTopicSelector(
+            { kind: 'selector_policy', policyId: 'first.peer' },
+            'owner',
+            members,
+            null,
+            {
+                tenantId: 't',
+                topicId: 'topic',
+                sequenceNumber: 1,
+                nowIso: '2020-01-01T00:00:00.000Z',
+                policyRegistry: registry,
+            }
+        );
+        expect(r.ok).toBe(true);
+        if (!r.ok) {
+            return;
+        }
+        expect(r.recipients.map((x) => x.memberId)).toEqual(['p1']);
+        expect(r.selectorPolicyForTrace?.policyId).toBe('first.peer');
     });
 });

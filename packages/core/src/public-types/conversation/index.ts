@@ -11,6 +11,17 @@ export function inviteToken(s: string): InviteToken {
     return InviteTokenSchema.parse(s);
 }
 
+export { SignalKindSchema, type SignalKind } from './signal.js';
+
+export {
+    TopicStopPolicyContextSchema,
+    TopicStopPolicyEvaluationDecisionSchema,
+    type TopicStopPolicyContext,
+    type TopicStopPolicyEvaluationDecision,
+    type StopPolicyDefinition,
+    type StopPolicyRegistry,
+} from './stopPolicy.js';
+
 export {
     MAX_TOPIC_MEMBERS,
     ConversationIdSchema,
@@ -20,6 +31,7 @@ export {
     AgentIdSchema,
     MemberIdSchema,
     InviteTokenSchema,
+    JsonValueSchema,
     ResolvedTopicMemberSchema,
     ThreadRefSchema,
     TopicRefSchema,
@@ -27,6 +39,9 @@ export {
     TopicMemberRoleSchema,
     TopicMemberSchema,
     TopicSelectorSchema,
+    TopicStopPolicySchema,
+    SelectorPolicyFanoutTraceSchema,
+    StopPolicyFanoutTraceSchema,
     ConversationErrorSchema,
     SpeechActSchema,
     OutboundThreadMessageSchema,
@@ -53,6 +68,13 @@ export {
     CloseConversationReceiptSchema,
 } from './schemas.js';
 
+export type { TopicStopPolicyRule, StopPolicyFanoutTrace } from './schemas.js';
+
+export {
+    TopicSelectorPolicyContextSchema,
+    TopicSelectorPolicyResultSchema,
+} from './selectorPolicy.js';
+
 export {
     ConversationProjectionSchema,
     ThreadProjectionEntrySchema,
@@ -60,6 +82,7 @@ export {
 } from './projection.js';
 
 export type {
+    JsonValue,
     ConversationId,
     MessageId,
     CorrelationId,
@@ -99,3 +122,21 @@ export type {
     ConversationProjection,
     ConversationApi,
 } from './types.js';
+
+export type {
+    TopicSelectorPolicy,
+    TopicSelectorPolicyContext,
+    TopicSelectorPolicyResult,
+} from './selectorPolicy.js';
+
+export {
+    defineTopicProjection,
+    ReadProjectionOptionsSchema,
+    ReadProjectionReceiptSchema,
+    AppendSignalInputSchema,
+    type TopicProjectionToken,
+    type TopicProjectionDefinition,
+    type ReadProjectionOptions,
+    type ReadProjectionReceipt,
+    type AppendSignalInput,
+} from './topicProjection.js';

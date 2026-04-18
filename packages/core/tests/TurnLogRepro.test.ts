@@ -6,6 +6,7 @@ import { PluginManager } from '../src/plugin/pluginManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ApiBinder } from '../src/orchestration/api/ApiBinder.js';
 import { EngineLocator } from '../src/orchestration/EngineLocator.js';
+import { createInMemoryEventBus } from '../src/eventbus/inMemoryEventBus.js';
 
 describe('Turn Logic & Logging Verification', () => {
     let a2a: A2AService;
@@ -17,7 +18,7 @@ describe('Turn Logic & Logging Verification', () => {
         const mockPrisma = {} as any;
         sessionManager = new SessionManager(() => mockPrisma);
         const apiBinder = new ApiBinder(sessionManager, () => mockPrisma);
-        turnRunner = new TurnRunner(sessionManager, apiBinder, () => mockPrisma);
+        turnRunner = new TurnRunner(sessionManager, apiBinder, () => mockPrisma, createInMemoryEventBus());
         a2a = new A2AService();
 
         mockEngine = {
@@ -97,7 +98,7 @@ describe('Turn Logic & Logging Verification', () => {
             attachOrchestrationAPIs: jest.fn().mockResolvedValue(undefined)
         };
 
-        const tr = new TurnRunner(mockSessionManager as any, mockApiBinder as any, () => ({}));
+        const tr = new TurnRunner(mockSessionManager as any, mockApiBinder as any, () => ({}), createInMemoryEventBus());
 
         const ctx: any = { agentId: 'test-agent', task: { id: 'test-task-id', input: 'hello' } };
         const params: any = {

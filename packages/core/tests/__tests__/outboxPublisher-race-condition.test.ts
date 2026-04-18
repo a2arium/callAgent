@@ -1,5 +1,7 @@
 import { jest } from '@jest/globals';
+import type { PrismaClient } from '../../src/generated/prisma-client/index.js';
 import { OutboxPublisher } from '../../src/eventbus/outboxPublisher.js';
+import { createInMemoryEventBus } from '../../src/eventbus/inMemoryEventBus.js';
 
 describe('OutboxPublisher Race Condition Tests', () => {
     let publisher: OutboxPublisher;
@@ -11,27 +13,40 @@ describe('OutboxPublisher Race Condition Tests', () => {
 
     beforeEach(() => {
         scheduledTimeouts = new Set();
-        
+
         // Spy on setTimeout/clearTimeout to track scheduled timers
         setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((fn: any, delay?: number) => {
             const id = realSetTimeout(fn as TimerHandler, delay) as unknown as NodeJS.Timeout;
             scheduledTimeouts.add(id);
             return id;
         });
-        
+
         clearTimeoutSpy = jest.spyOn(global, 'clearTimeout').mockImplementation((id: any) => {
             scheduledTimeouts.delete(id as NodeJS.Timeout);
             return realClearTimeout(id as any);
         });
 
-        publisher = new OutboxPublisher();
+        const mockPrisma = {
+            outbox: {
+                findMany: jest.fn().mockResolvedValue([]),
+                delete: jest.fn().mockResolvedValue(undefined),
+                update: jest.fn().mockResolvedValue(undefined),
+            },
+            conversationDeadLetter: {
+                create: jest.fn().mockResolvedValue(undefined),
+            },
+        };
+
+        publisher = new OutboxPublisher({
+            eventBus: createInMemoryEventBus(),
+            getPrisma: () => mockPrisma as unknown as PrismaClient,
+            pollIntervalMs: 100,
+        });
     });
 
     afterEach(() => {
-        publisher.stop();
-        if (typeof publisher.disconnect === 'function') {
-            publisher.disconnect();
-        }
+        publisher?.stop();
+        void publisher?.disconnect?.();
         setTimeoutSpy.mockRestore();
         clearTimeoutSpy.mockRestore();
     });

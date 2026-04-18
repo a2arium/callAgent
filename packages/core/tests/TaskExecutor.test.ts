@@ -53,7 +53,6 @@ await jest.unstable_mockModule(resolve(srcDir, 'loop/hygiene.ts'), () => ({
 }));
 
 await jest.unstable_mockModule(resolve(srcDir, 'eventbus/taskEventEmitter.ts'), () => ({ taskChannel: { emit: jest.fn() } }));
-await jest.unstable_mockModule(resolve(srcDir, 'eventbus/inMemoryEventBus.ts'), () => ({ eventBus: { emit: jest.fn() } }));
 await jest.unstable_mockModule(resolve(srcDir, 'orchestration/ArtifactHydrationService.ts'), () => ({ ArtifactHydrationService: { hydrate: jest.fn() } }));
 await jest.unstable_mockModule(resolve(srcDir, 'orchestration/InboxManager.ts'), () => ({ InboxManager: { normalizeInbox: jest.fn(x => x), mergeInboxes: jest.fn() } }));
 

@@ -13,7 +13,8 @@ import { InboxManager, EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import { AgentResultCache, hydrateArtifacts } from '@a2arium/callagent-memory-engine';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
@@ -46,7 +47,8 @@ export class TurnRunner {
     constructor(
         private sessionManager: SessionManager,
         private apiBinder: ApiBinder,
-        private getSessionStorePrisma: () => any
+        private getSessionStorePrisma: () => any,
+        private readonly eventBus: IEventBus
     ) { }
 
     /**
@@ -327,6 +329,23 @@ export class TurnRunner {
                 const communication = plugin?.resolved.runtimeManifest.communication;
                 if (hitl) { try { (M as Record<string, unknown>).hitl = hitl; } catch { } }
 
+                const topicSw = communication?.topicSweeper;
+                const topicSweeperResolved =
+                    topicSw &&
+                    typeof topicSw.intervalMs === 'number' &&
+                    topicSw.intervalMs > 0 &&
+                    typeof topicSw.autoArchiveAfterMs === 'number' &&
+                    topicSw.autoArchiveAfterMs > 0
+                        ? {
+                              intervalMs: topicSw.intervalMs,
+                              batchSize:
+                                  typeof topicSw.batchSize === 'number' && topicSw.batchSize > 0
+                                      ? topicSw.batchSize
+                                      : 100,
+                              autoArchiveAfterMs: topicSw.autoArchiveAfterMs,
+                          }
+                        : undefined;
+
                 if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
                     loopOpts = persistedBudgets;
                 } else if (manifestBudgets && typeof manifestBudgets === 'object') {
@@ -340,6 +359,9 @@ export class TurnRunner {
                     env.budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
                 }
                 loopOpts.autoJoinInvitedTopics = communication?.autoJoinInvitedTopics === true;
+                if (topicSweeperResolved !== undefined) {
+                    loopOpts.topicSweeper = topicSweeperResolved;
+                }
             } catch (err) {
                 // ignore
             }
@@ -404,12 +426,27 @@ export class TurnRunner {
 
                 // Publish final event
                 try {
-                    eventBus.publish(taskChannel(sessionId), {
-                        id: sessionId,
-                        status: taskResult.status,
-                        final: true
-                    } as any);
-                } catch { }
+                    void this.eventBus.publish(
+                        createBusEvent({
+                            channel: taskChannel(sessionId),
+                            partitionKey: sessionId,
+                            cloud: {
+                                id: uuidv7(),
+                                type: 'task.status',
+                                source: `/tasks/${sessionId}`,
+                                time: new Date().toISOString(),
+                                datacontenttype: 'application/json',
+                                data: {
+                                    id: sessionId,
+                                    status: taskResult.status,
+                                    final: true,
+                                },
+                            },
+                        })
+                    );
+                } catch {
+                    /* noop */
+                }
             } else if (outcome.kind === 'fail') {
                 taskResult.status = { state: 'failed', timestamp: new Date().toISOString() };
             }

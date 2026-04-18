@@ -1,4 +1,5 @@
 import { resolveTopicSelector, type TopicMemberRow } from '../src/internal/conversation/TopicSelector.js';
+import { createTopicSelectorPolicyRegistry } from '../src/internal/conversation/TopicSelectorPolicyRegistry.js';
 
 describe('topic multiplicity rotation', () => {
     it('restarts from first active member when cursor points to missing member', () => {
@@ -26,7 +27,19 @@ describe('topic multiplicity rotation', () => {
             },
         ];
 
-        const resolved = resolveTopicSelector({ kind: 'round_robin' }, 'a#1', members, 'missing-seat');
+        const resolved = resolveTopicSelector(
+            { kind: 'round_robin' },
+            'a#1',
+            members,
+            'missing-seat',
+            {
+                tenantId: 't',
+                topicId: 'topic',
+                sequenceNumber: 1,
+                nowIso: '2020-01-01T00:00:00.000Z',
+                policyRegistry: createTopicSelectorPolicyRegistry(),
+            }
+        );
         expect(resolved.ok).toBe(true);
         if (!resolved.ok) {
             return;

@@ -1,6 +1,8 @@
 import type { StageTraceEntry } from '../types/stageFacade.js';
 import type { TaskContext } from '../shared/types/index.js';
 import type { EnvironmentState, ControlState, MentalState } from './types.js';
+import type { StopPolicyFanoutTrace } from '../public-types/conversation/schemas.js';
+import type { TopicPostBackpressureSample } from '../internal/conversation/BackpressureManager.js';
 import type { TurnUsage, ManifestProvenance, JsonValue } from '../types/turnTrace.js';
 import type { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 
@@ -93,8 +95,18 @@ export type InternalTaskContext = TaskContext & {
     __turnConversationDedupeHit?: boolean;
     __turnConversationDeliveryLagMs?: number;
     __turnTopicSelectorDecision?: {
-        kind: 'broadcast' | 'round_robin' | 'explicit_recipient';
+        kind: 'broadcast' | 'round_robin' | 'explicit_recipient' | 'selector_policy';
         resolvedMembers: Array<{ memberId: string; agentId: string }>;
+        selectorPolicy?: {
+            policyId: string;
+            result:
+                | 'selected'
+                | 'abstained_fallback_broadcast'
+                | 'params_invalid'
+                | 'not_registered'
+                | 'internal_error';
+            paramsHash?: string;
+        };
     };
     __turnFanoutSummary?: {
         accepted: number;
@@ -102,6 +114,10 @@ export type InternalTaskContext = TaskContext & {
         queued: number;
         dedupeHits: number;
     };
+    /** Topic stop-policy outcome after a successful topic `post` (from receipt.stopPolicyTrace). */
+    __turnStopPolicy?: StopPolicyFanoutTrace;
+    /** Worst backpressure sample observed during topic `post` fan-out (Phase 4b). */
+    __turnBackpressure?: TopicPostBackpressureSample;
     __turnInviteAutoJoin?: Record<
         string,
         {

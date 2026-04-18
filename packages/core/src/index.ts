@@ -155,9 +155,39 @@ export {
     type TenantMetrics
 } from './plugin/TenantMetrics.js';
 // Event bus and task channel helpers
-export { eventBus } from './eventbus/inMemoryEventBus.js';
+export { createInMemoryEventBus, InMemoryEventBus } from './eventbus/inMemoryEventBus.js';
+export type { IEventBus, BusEventHandler } from './public-types/eventbus/types.js';
+export { BusEventSchema, CloudEventSchema } from './public-types/eventbus/schemas.js';
+export type { BusEvent, CloudEvent } from './public-types/eventbus/schemas.js';
+export { createBusEvent, busEventData } from './eventbus/busEventHelpers.js';
 export { taskChannel } from './eventbus/taskEventEmitter.js';
-export { outboxPublisher } from './eventbus/outboxPublisher.js';
+export { OutboxPublisher } from './eventbus/outboxPublisher.js';
+export {
+    createInProcessDurableSubscription,
+    createNatsJetStreamDurableSubscription,
+    type DurableSubscriptionPersistence,
+} from './eventbus/inProcessDurableSubscription.js';
+export {
+    resolveTransportAdapters,
+    TransportAdapterConfigSchema,
+    EventBusAdapterConfigSchema,
+    MessageLogAdapterConfigSchema,
+    type TransportAdapterConfig,
+    type ResolvedTransportAdapters,
+} from './orchestration/AdapterFactory.js';
+export {
+    AdapterErrorThrowable,
+    AdapterErrorSchema,
+    isAdapterErrorThrowable,
+    type AdapterError,
+} from './public-types/eventbus/error.js';
+export {
+    BackpressureManager,
+    DEFAULT_BACKPRESSURE_THRESHOLDS,
+    type BackpressureConsumerState,
+    type BackpressureThresholds,
+    type TopicPostBackpressureSample,
+} from './internal/conversation/BackpressureManager.js';
 
 // TurnTrace
 export type {
@@ -203,11 +233,24 @@ export type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail, I
 // Testing Harness exports
 export { createTestHarness, type TestHarness } from './testing/TestHarness.js';
 export { createDeterministicLLMStub, createDeterministicToolStub, type DeterministicLLMStub, type DeterministicToolStub } from './testing/DeterministicStubs.js';
-export { createTestContext } from './testing/TestContext.js';
+export { createTestContext, type CreateTestContextOptions } from './testing/TestContext.js';
 export { HarnessAssertionError, createTurnAssertionContext } from './testing/HarnessAssertions.js';
-export { HarnessConfigSchema, type HarnessConfig, type HarnessState, type LLMStubResponse, type TurnAssertionContext, type DeepPartial } from './testing/harnessTypes.js';
+export {
+    HarnessConfigSchema,
+    type HarnessConfig,
+    type HarnessState,
+    type LLMStubResponse,
+    type TurnAssertionContext,
+    type DeepPartial,
+    type HarnessCommunicationManifestPatch,
+} from './testing/harnessTypes.js';
+export * from './testing/index.js';
 export * from './public-types/conversation/index.js';
 export * from './public-types/messageLog/index.js';
+export {
+    topicTranscriptProjectionToken,
+    ensureBuiltinTopicProjectionsRegistered,
+} from './internal/conversation/builtinTopicProjections.js';
 
 // Agent scaffolding
 export { scaffoldAgent, formatScaffoldError } from './scaffold/scaffoldAgent.js';

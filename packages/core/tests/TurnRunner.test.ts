@@ -1,4 +1,5 @@
 import { TurnRunner } from '../src/orchestration/TurnRunner.js';
+import { createInMemoryEventBus } from '../src/eventbus/inMemoryEventBus.js';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ApiBinder } from '../src/orchestration/api/ApiBinder.js';
@@ -28,7 +29,8 @@ describe('TurnRunner', () => {
         turnRunner = new TurnRunner(
             sessionManager,
             apiBinder,
-            () => undefined // no prisma
+            () => undefined, // no prisma
+            createInMemoryEventBus()
         );
         ctx = {
             task: { id: sessionId, input: {} },

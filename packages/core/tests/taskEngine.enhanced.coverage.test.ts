@@ -38,8 +38,12 @@ await jest.unstable_mockModule(a2aPath, () => ({
     }
 } as any));
 
+const mockOutboxPublisherStart = jest.fn().mockImplementation(() => undefined);
 await jest.unstable_mockModule(outboxPath, () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+    OutboxPublisher: jest.fn().mockImplementation(() => ({
+        start: mockOutboxPublisherStart,
+        stop: jest.fn(),
+    })),
 }));
 
 await jest.unstable_mockModule(loopRunnerPath, () => ({
@@ -569,23 +573,21 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
         });
 
         test('handles outbox publisher startup failures', async () => {
-            // Mock outbox publisher to fail on start
-            await jest.unstable_mockModule(outboxPath, () => ({
-                outboxPublisher: {
-                    start: jest.fn().mockRejectedValue(new Error('OUTBOX_STARTUP_ERROR')),
-                    stop: jest.fn()
-                }
-            }));
+            const prev = process.env.DISABLE_OUTBOX_PUBLISHER;
+            delete process.env.DISABLE_OUTBOX_PUBLISHER;
+            mockOutboxPublisherStart.mockImplementationOnce(() => {
+                throw new Error('OUTBOX_STARTUP_ERROR');
+            });
 
-            const { TaskEngine: TaskEngineWithFailingOutbox } = await import(taskEnginePath);
+            const engine = new TaskEngine({
+                sessionStore: new FakeSessionStore() as any,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+            expect(engine).toBeDefined();
 
-            expect(() => {
-                const engine = new TaskEngineWithFailingOutbox({
-                    sessionStore: new FakeSessionStore() as any,
-                    handlerInvoker: { invoke: jest.fn() } as any
-                });
-                expect(engine).toBeDefined();
-            }).not.toThrow();
+            mockOutboxPublisherStart.mockReset();
+            mockOutboxPublisherStart.mockImplementation(() => undefined);
+            process.env.DISABLE_OUTBOX_PUBLISHER = prev;
         });
     });
 

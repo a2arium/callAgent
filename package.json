@@ -24,8 +24,8 @@
     "start": "node packages/core/dist/runner/runnerCli.js",
     "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
-    "test": "node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
-    "test:coverage": "COVERAGE=true node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "test": "NODE_OPTIONS='--max-old-space-size=8192' node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "test:coverage": "NODE_OPTIONS='--max-old-space-size=8192' COVERAGE=true node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "create-agent": "node packages/core/dist/scaffold/scaffoldCli.js",
     "run:hello": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}'",
     "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}' --no-resolve-deps",
@@ -53,6 +53,7 @@
   "license": "ISC",
   "devDependencies": {
     "@jest/test-sequencer": "29.7.0",
+    "@testcontainers/nats": "^11.14.0",
     "@types/aws-lambda": "^8.10.152",
     "@types/express": "^5.0.1",
     "@types/jest": "^29.5.14",

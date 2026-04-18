@@ -42,8 +42,12 @@ await jest.unstable_mockModule(a2aPath, () => ({
 }));
 const { globalA2AService } = await import(a2aPath) as any;
 
+const mockOutboxPublisherStart = jest.fn().mockImplementation(() => undefined);
 await jest.unstable_mockModule(outboxPath, () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+    OutboxPublisher: jest.fn().mockImplementation(() => ({
+        start: mockOutboxPublisherStart,
+        stop: jest.fn(),
+    })),
 }));
 
 await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
@@ -1112,10 +1116,11 @@ describe('TaskEngine Coverage Improvement Tests', () => {
         });
 
         test('handles constructor with failing outboxPublisher startup', async () => {
-            // Mock outboxPublisher to throw during startup
-            const outboxModule = await import(outboxPath);
-            const originalStart = (outboxModule as any).outboxPublisher.start;
-            (outboxModule as any).outboxPublisher.start = (jest.fn() as any).mockRejectedValue(new Error('Outbox startup failed') as any);
+            const prev = process.env.DISABLE_OUTBOX_PUBLISHER;
+            delete process.env.DISABLE_OUTBOX_PUBLISHER;
+            mockOutboxPublisherStart.mockImplementationOnce(() => {
+                throw new Error('Outbox startup failed');
+            });
 
             const engine = new TaskEngine({
                 sessionStore: new FailingSessionStore(),
@@ -1124,8 +1129,9 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             expect(engine).toBeDefined();
 
-            // Restore original method
-            (outboxModule as any).outboxPublisher.start = originalStart;
+            mockOutboxPublisherStart.mockReset();
+            mockOutboxPublisherStart.mockImplementation(() => undefined);
+            process.env.DISABLE_OUTBOX_PUBLISHER = prev;
         });
 
         test('handles constructor with sessionStore but no outboxPublisher', () => {

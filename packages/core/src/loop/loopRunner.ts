@@ -33,6 +33,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import { reduceConversationProjection } from './learning/conversationReducer.js';
 import { runDefaultAutoJoinInvitedTopics } from '../policy/defaultAutoJoinPolicy.js';
+import { EngineLocator } from '../orchestration/EngineLocator.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -61,6 +62,12 @@ type LoopRunnerOptions = {
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;
+    /** When set with a registered `TaskEngine`, `runLoop` invokes `triggerTopicLifecycleSweep` when `intervalMs` of wall time has elapsed since the last sweep (checked between turns). */
+    topicSweeper?: {
+        intervalMs: number;
+        batchSize: number;
+        autoArchiveAfterMs: number;
+    };
 };
 
 const DEFAULT_PROVENANCE: ManifestProvenance = {
@@ -108,8 +115,11 @@ export async function runLoop<
 
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
-    try { log.info('LoopRunner started', { maxTurns }); } catch { }
-    console.log(`[LoopRunner] STARTED. MaxTurns: ${maxTurns}, LatencyMs: ${opts.latencyMs}, TaskId: ${taskId}`);
+    try {
+        log.info('LoopRunner started', { maxTurns, latencyMs: opts.latencyMs, taskId });
+    } catch {
+        /* noop */
+    }
 
     const inbox = ensureInbox(env);
 
@@ -812,6 +822,59 @@ export async function runLoop<
         loopWillRun: maxTurns > 0
     });
 
+    const topicSweeperOpts = opts.topicSweeper;
+    const tenantIdForSweep = typeof ctx.tenantId === 'string' && ctx.tenantId.length > 0 ? ctx.tenantId : undefined;
+    type TopicSweeperEngineHandle = {
+        triggerTopicLifecycleSweep?: (p: {
+            tenantId: string;
+            nowIso?: string;
+            limit?: number;
+            autoArchiveAfterMs?: number | null;
+        }) => Promise<{ archivedTopicIds: string[] }>;
+    };
+    let topicSweeperEngine: TopicSweeperEngineHandle | null = null;
+    /** `0` means "due immediately" on the first check between turns. */
+    let nextTopicSweepDueAt = 0;
+    if (
+        topicSweeperOpts &&
+        topicSweeperOpts.intervalMs > 0 &&
+        topicSweeperOpts.autoArchiveAfterMs > 0 &&
+        tenantIdForSweep
+    ) {
+        const eng = EngineLocator.getEngine<TopicSweeperEngineHandle>();
+        if (eng?.triggerTopicLifecycleSweep) {
+            topicSweeperEngine = eng;
+            nextTopicSweepDueAt = 0;
+        } else {
+            log.debug('Topic sweeper schedule skipped: no TaskEngine with triggerTopicLifecycleSweep on EngineLocator', {
+                taskId,
+            });
+        }
+    }
+
+    const runTopicSweeperIfDue = async (): Promise<void> => {
+        if (!topicSweeperOpts || !tenantIdForSweep || !topicSweeperEngine?.triggerTopicLifecycleSweep) {
+            return;
+        }
+        const now = Date.now();
+        if (nextTopicSweepDueAt !== 0 && now < nextTopicSweepDueAt) {
+            return;
+        }
+        try {
+            await topicSweeperEngine.triggerTopicLifecycleSweep({
+                tenantId: tenantIdForSweep,
+                limit: topicSweeperOpts.batchSize,
+                autoArchiveAfterMs: topicSweeperOpts.autoArchiveAfterMs,
+            });
+        } catch (e) {
+            log.warn('Topic lifecycle sweep tick failed', {
+                error: e instanceof Error ? e.message : String(e),
+                tenantId: tenantIdForSweep,
+            });
+        }
+        nextTopicSweepDueAt = Date.now() + topicSweeperOpts.intervalMs;
+    };
+
     for (let turnIdx = 0; turnIdx < maxTurns; turnIdx++) {
         // ✅ FIX: Only increment turn if this is NOT the first iteration of this loop call.
         // The first turn count is now incremented by TaskExecutor before initialization.
@@ -825,6 +888,7 @@ export async function runLoop<
             console.log(`[runLoop] Iteration ${turnIdx}: env.turn=${(env as any).turn}, turn scope variable=${turn}`);
         }
 
+        await runTopicSweeperIfDue();
 
         // Update logging context with current turn number
         updateLoggingContext({ turn });
@@ -905,6 +969,8 @@ export async function runLoop<
                 iCtxTurn.__turnConversationDeliveryLagMs = undefined;
                 iCtxTurn.__turnTopicSelectorDecision = undefined;
                 iCtxTurn.__turnFanoutSummary = undefined;
+                iCtxTurn.__turnStopPolicy = undefined;
+                iCtxTurn.__turnBackpressure = undefined;
                 iCtxTurn.__turnInviteAutoJoin = {};
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
@@ -1194,7 +1260,9 @@ export async function runLoop<
                 deliveryLagMs: iCtx.__turnConversationDeliveryLagMs,
                 topicSelectorDecision: iCtx.__turnTopicSelectorDecision,
                 fanoutSummary: iCtx.__turnFanoutSummary,
+                stopPolicy: iCtx.__turnStopPolicy,
                 inviteDelivery,
+                backpressure: iCtx.__turnBackpressure,
             };
 
             let trace: TurnTrace;
@@ -1247,7 +1315,9 @@ export async function runLoop<
             iCtx.__turnConversationDeliveryLagMs = undefined;
             iCtx.__turnTopicSelectorDecision = undefined;
             iCtx.__turnFanoutSummary = undefined;
-                iCtx.__turnInviteAutoJoin = undefined;
+            iCtx.__turnStopPolicy = undefined;
+            iCtx.__turnBackpressure = undefined;
+            iCtx.__turnInviteAutoJoin = undefined;
 
             log.debug('Transition outcome', {
                 taskId,
@@ -1328,9 +1398,7 @@ export async function runLoop<
         }
 
 
-        // Stop on await_* or terminal
-        // 🔍 DEBUG: Log loop continuation check
-        console.log(`[LoopRunner] Checking outcome. Kind: ${outcome.kind}`);
+        // Stop on await_* or terminal (do not log every iteration — Jest captures console output and long suites can OOM)
         if (outcome.kind !== 'continue') {
             // ✅ RADICAL FIX: If await_child but child result is ALREADY in inbox, continue instead of exiting!
             // This prevents the race condition where:
@@ -1544,8 +1612,6 @@ export async function runLoop<
                 { type: 'budget_exceeded', budget: 'turns', limit: maxTurns, actual: turnIdx + 1 }
             );
         }
-
-
 
     }
 

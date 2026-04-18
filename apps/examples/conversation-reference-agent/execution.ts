@@ -107,6 +107,7 @@ export async function execution(
                 },
             ],
             defaultSelector: { kind: 'round_robin' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         if (created.status === 'rejected') {
             return {
@@ -267,7 +268,7 @@ export async function execution(
     if (intent.intent === 'conversation_phase3_close_archive') {
         const thread = { kind: 'thread' as const, id: DEMO_THREAD_ID };
         const closed = await ctx.conversation.close(thread, { reason: 'phase3-demo', archiveAfter: true });
-        if (!closed.closed || !closed.archived) {
+        if (closed.status !== 'ok' || !closed.closed || !closed.archived) {
             return {
                 action: { kind: 'internal', done: true },
                 result: {
@@ -289,7 +290,7 @@ export async function execution(
     }
     if (intent.intent === 'conversation_phase2_close') {
         const closed = await ctx.conversation.close({ kind: 'topic', id: DEMO_TOPIC_PHASE2_ID }, {});
-        if (!closed.closed) {
+        if (closed.status !== 'ok' || !closed.closed) {
             return {
                 action: { kind: 'internal', done: true },
                 result: { status: 'error', error: { code: 'p2_close', message: 'close did not persist' } },

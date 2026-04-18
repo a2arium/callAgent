@@ -5,7 +5,14 @@ import type { TurnTrace } from '../types/turnTrace.js';
 import { runLoop } from '../loop/loopRunner.js';
 import { initialM } from '../loop/init.js';
 import { normalizeObservationInbox } from '../loop/types.js';
-import { HarnessConfigSchema, type HarnessConfig, type HarnessState, type DeepPartial, type TurnAssertionContext } from './harnessTypes.js';
+import {
+    HarnessConfigSchema,
+    type HarnessConfig,
+    type HarnessState,
+    type DeepPartial,
+    type TurnAssertionContext,
+    type HarnessCommunicationManifestPatch,
+} from './harnessTypes.js';
 import { createDeterministicLLMStub, createDeterministicToolStub, type DeterministicLLMStub, type DeterministicToolStub } from './DeterministicStubs.js';
 import { createTestContext } from './TestContext.js';
 import { createTurnAssertionContext, HarnessAssertionError } from './HarnessAssertions.js';
@@ -14,8 +21,14 @@ import type { InternalTaskContext } from '../loop/internalContext.js';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import type { TopicRef, TopicSelector } from '../public-types/conversation/types.js';
 import type { InboundMessage } from '../public-types/conversation/types.js';
+import type { TopicSelectorPolicy } from '../public-types/conversation/selectorPolicy.js';
+import type { StopPolicyDefinition } from '../public-types/conversation/stopPolicy.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
+import type { MessageLog } from '../public-types/messageLog/types.js';
 import { InviteSweeper } from '../internal/conversation/InviteSweeper.js';
 import { InMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
+import { v7 as uuidv7 } from 'uuid';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
 import type { TaskEngine } from '../orchestration/taskEngine.js';
 
@@ -45,6 +58,33 @@ export type TestHarness<Sensory = unknown> = {
     injectTopicMemberJoined(params: { topic: TopicRef; member: { agentId: string; role: 'owner' | 'participant' }; ts: string }): TestHarness<Sensory>;
     injectTopicMemberLeft(params: { topic: TopicRef; agentId: string; ts: string; reason?: string }): TestHarness<Sensory>;
     injectTopicClosed(params: { topic: TopicRef; ts: string; reason?: string }): TestHarness<Sensory>;
+
+    /**
+     * Register a topic selector policy on the harness `ConversationService` (same registry as `ctx.conversation` uses).
+     */
+    registerTopicSelectorPolicy(policy: TopicSelectorPolicy): TestHarness<Sensory>;
+    /** Register a custom stop policy on the harness `ConversationService`. */
+    registerStopPolicy(policy: StopPolicyDefinition): TestHarness<Sensory>;
+
+    /**
+     * Deep-merge a **`communication`** slice (as on `AgentRuntimeManifest`) into harness state.
+     * Affects **`resolveThreadTtlMs`**, **`runLoop` `autoJoinInvitedTopics`**, and optional **`topicSweeper`**
+     * when not overridden by **`HarnessConfig`**.
+     */
+    setCommunicationManifest(patch: HarnessCommunicationManifestPatch): TestHarness<Sensory>;
+    /** Alias of **`setCommunicationManifest`** (capability-oriented naming). */
+    setCommunicationCapabilities(patch: HarnessCommunicationManifestPatch): TestHarness<Sensory>;
+    /** Route **`publishConversationEvent`** from the harness `ConversationService` through this bus. */
+    useEventBusAdapter(bus: IEventBus): TestHarness<Sensory>;
+    /** Replace the default session-backed **`MessageLog`** for **`ctx.conversation`**. */
+    useMessageLogAdapter(log: MessageLog): TestHarness<Sensory>;
+    /**
+     * Reserved hook for future deterministic backpressure (Phase 5.4c+). Sets an internal flag only;
+     * does not change behavior yet.
+     */
+    useDeterministicBackpressure(): TestHarness<Sensory>;
+    /** Reserved for extension signal registry resets; no-op today. */
+    resetSignalKindRegistry(): TestHarness<Sensory>;
 
     runTurn(): Promise<TestHarness<Sensory>>;
 
@@ -83,6 +123,13 @@ export type TestHarness<Sensory = unknown> = {
         limit?: number;
         autoArchiveAfterMs?: number | null;
     }): Promise<{ expiredThreadIds: string[]; archivedThreadIds: string[] }>;
+    /** Runs `TopicLifecycleSweeper` via a registered `TaskEngine` (`EngineLocator.setEngine`). */
+    tickTopicLifecycleSweep(params?: {
+        tenantId?: string;
+        nowIso?: string;
+        limit?: number;
+        autoArchiveAfterMs?: number | null;
+    }): Promise<{ archivedTopicIds: string[] }>;
 };
 
 // Deep merge utility
@@ -144,7 +191,9 @@ export function createTestHarness<
     const llmStub = createDeterministicLLMStub();
     const toolStub = createDeterministicToolStub();
 
-    const ctx = createTestContext(state, llmStub, toolStub);
+    const ctx = createTestContext(state, llmStub, toolStub, {
+        policyPurityStrict: configParsed.policyPurityStrict,
+    });
     
     // Seed initial MentalState
     state.m = initialM(ctx) as MentalState<Sensory>;
@@ -266,6 +315,63 @@ export function createTestHarness<
             } as Observation);
         },
 
+        registerTopicSelectorPolicy(policy) {
+            const reg = state.harnessTopicSelectorPolicyRegistry;
+            if (!reg) {
+                throw new Error('TestHarness.registerTopicSelectorPolicy: harness conversation registries are not initialized');
+            }
+            reg.register(policy);
+            return harness;
+        },
+
+        registerStopPolicy(policy) {
+            const reg = state.harnessStopPolicyRegistry;
+            if (!reg) {
+                throw new Error('TestHarness.registerStopPolicy: harness conversation registries are not initialized');
+            }
+            reg.register(policy);
+            return harness;
+        },
+
+        setCommunicationManifest(patch) {
+            state.harnessCommunication = {
+                ...(state.harnessCommunication ?? {}),
+                ...patch,
+                ...(patch.topicSweeper !== undefined
+                    ? {
+                          topicSweeper: {
+                              ...(state.harnessCommunication?.topicSweeper ?? {}),
+                              ...patch.topicSweeper,
+                          },
+                      }
+                    : {}),
+            };
+            return harness;
+        },
+
+        setCommunicationCapabilities(patch) {
+            return harness.setCommunicationManifest(patch);
+        },
+
+        useEventBusAdapter(bus) {
+            state.harnessEventBus = bus;
+            return harness;
+        },
+
+        useMessageLogAdapter(log) {
+            state.harnessMessageLogOverride = log;
+            return harness;
+        },
+
+        useDeterministicBackpressure() {
+            state.harnessDeterministicBackpressure = true;
+            return harness;
+        },
+
+        resetSignalKindRegistry() {
+            return harness;
+        },
+
         async runTurn() {
             state.errors.length = 0; // Clear errors locally for this turn
             
@@ -276,15 +382,31 @@ export function createTestHarness<
                 if (state.pullPersistedConversationObservations) {
                     await state.pullPersistedConversationObservations();
                 }
+                const tw =
+                    configParsed.topicSweeper !== undefined
+                        ? configParsed.topicSweeper
+                        : state.harnessCommunication?.topicSweeper;
+                const topicSweeperOpts =
+                    tw !== undefined
+                        ? {
+                              intervalMs: tw.intervalMs,
+                              batchSize: tw.batchSize ?? 100,
+                              autoArchiveAfterMs: tw.autoArchiveAfterMs,
+                          }
+                        : undefined;
+                const autoJoinInvitedTopics =
+                    configParsed.autoJoinInvitedTopics === true ||
+                    state.harnessCommunication?.autoJoinInvitedTopics === true;
                 const res = await runLoop(
                     ctx,
                     state.m,
                     state.env,
                     modules,
                     {
-                        maxTurns: 1,
+                        maxTurns: configParsed.maxTurns,
                         collectTraces: true,
-                        autoJoinInvitedTopics: configParsed.autoJoinInvitedTopics,
+                        autoJoinInvitedTopics,
+                        ...(topicSweeperOpts !== undefined ? { topicSweeper: topicSweeperOpts } : {}),
                     }
                 );
                 
@@ -490,7 +612,21 @@ export function createTestHarness<
             const sweeper = new InviteSweeper(sm, clock);
             return sweeper.runStartupRecoverySweep({
                 tenantId: params?.tenantId ?? state.conversationTenantId ?? 'test-tenant',
-                publish: (channel, event) => bus.publish(channel, event),
+                publish: async (channel, event) => {
+                    await bus.publish(
+                        createBusEvent({
+                            channel,
+                            cloud: {
+                                id: uuidv7(),
+                                type: channel,
+                                source: '/conversation/events',
+                                time: new Date().toISOString(),
+                                datacontenttype: 'application/json',
+                                data: event,
+                            },
+                        })
+                    );
+                },
                 nowIso: params?.nowIso,
                 limit: params?.limit,
             });
@@ -504,6 +640,21 @@ export function createTestHarness<
                 );
             }
             return eng.triggerThreadLifecycleSweep({
+                tenantId: params?.tenantId ?? state.conversationTenantId ?? 'test-tenant',
+                nowIso: params?.nowIso,
+                limit: params?.limit,
+                autoArchiveAfterMs: params?.autoArchiveAfterMs,
+            });
+        },
+
+        async tickTopicLifecycleSweep(params) {
+            const eng = EngineLocator.getEngine<TaskEngine>();
+            if (!eng?.triggerTopicLifecycleSweep) {
+                throw new Error(
+                    'TestHarness.tickTopicLifecycleSweep: register a TaskEngine with EngineLocator.setEngine(engine) first'
+                );
+            }
+            return eng.triggerTopicLifecycleSweep({
                 tenantId: params?.tenantId ?? state.conversationTenantId ?? 'test-tenant',
                 nowIso: params?.nowIso,
                 limit: params?.limit,

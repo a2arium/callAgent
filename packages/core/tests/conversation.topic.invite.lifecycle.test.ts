@@ -1,4 +1,6 @@
-import { InMemoryEventBus } from '../src/eventbus/inMemoryEventBus.js';
+import { createInMemoryEventBus } from '../src/eventbus/inMemoryEventBus.js';
+import { createBusEvent } from '../src/eventbus/busEventHelpers.js';
+import { v7 as uuidv7 } from 'uuid';
 import { InviteDeliveryCoordinator } from '../src/internal/conversation/InviteDeliveryCoordinator.js';
 import { InviteSweeper } from '../src/internal/conversation/InviteSweeper.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
@@ -35,10 +37,10 @@ describe('Topic invite lifecycle', () => {
         throw new Error('Timed out waiting for condition');
     };
 
-    const createRuntime = () => {
+    const createRuntime = async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
-        const bus = new InMemoryEventBus();
+        const bus = createInMemoryEventBus();
         const service = new ConversationService(sessionManager, {
             routeTargetForThread: ({ threadId, recipientAgentId }) => ({
                 tenantId,
@@ -47,25 +49,38 @@ describe('Topic invite lifecycle', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             publishConversationEvent: async (channel, event) => {
-                await bus.publish(channel, event);
+                await bus.publish(
+                    createBusEvent({
+                        channel,
+                        cloud: {
+                            id: uuidv7(),
+                            type: channel,
+                            source: '/conversation/events',
+                            time: new Date().toISOString(),
+                            datacontenttype: 'application/json',
+                            data: event,
+                        },
+                    })
+                );
             },
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         const coordinator = new InviteDeliveryCoordinator(sessionManager, bus, async () => ({ ok: true }));
-        coordinator.start();
+        await coordinator.start();
         const sweeper = new InviteSweeper(sessionManager);
         return { service, sessionManager, coordinator, sweeper };
     };
 
     it('invite emits issued and coordinator delivers received', async () => {
-        const { service, sessionManager } = createRuntime();
+        const { service, sessionManager } = await createRuntime();
         const created = await service.createTopic(tenantId, ownerSession, owner, {
             topicId: 'topic-invite-1',
             members: [
                 { agentId: owner, role: 'owner' },
             ],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') return;
@@ -89,11 +104,12 @@ describe('Topic invite lifecycle', () => {
     });
 
     it('expired sweep emits topic.invite.expired to inviter seat', async () => {
-        const { service, sessionManager, sweeper } = createRuntime();
+        const { service, sessionManager, sweeper } = await createRuntime();
         const created = await service.createTopic(tenantId, ownerSession, owner, {
             topicId: 'topic-invite-expire',
             members: [{ agentId: owner, role: 'owner' }],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') return;

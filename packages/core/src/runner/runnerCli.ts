@@ -5,10 +5,10 @@ import { TaskEngine } from '../orchestration/taskEngine.js';
 import { registerHandler } from '../orchestration/HandlerRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { A2AEvent } from '../shared/types/StreamingEvents.js';
-import { outboxPublisher } from '../eventbus/outboxPublisher.js';
+import type { BusEvent } from '../public-types/eventbus/schemas.js';
+import { busEventData } from '../eventbus/busEventHelpers.js';
 import path from 'node:path';
 import { logger } from '@a2arium/callagent-utils';
 
@@ -226,25 +226,35 @@ async function main(): Promise<void> {
         // Subscribe to this session's events so we can show output and detect completion
         const channel = taskChannel(sessionId);
         let completed = false;
-        const onEvent = (ev: A2AEvent) => {
+        let unsubResume: (() => Promise<void>) | undefined;
+        const sub = await engine.eventBus.subscribe(channel, async (be: BusEvent) => {
+            const ev = busEventData<A2AEvent>(be);
+            if (!ev) {
+                return;
+            }
             if ('artifact' in ev) {
-                const text = ev.artifact.parts?.filter(p => (p as any).type === 'text')
-                    .map(p => (p as any).text)
+                const text = ev.artifact.parts
+                    ?.filter(p => (p as { type?: string }).type === 'text')
+                    .map(p => (p as { text?: string }).text)
                     .filter(Boolean)
                     .join('');
                 if (text) console.log(text);
             } else if ('status' in ev) {
                 const s = ev.status;
                 if (s.state === 'working' && s.message?.parts) {
-                    const text = s.message.parts.filter(p => (p as any).type === 'text').map(p => (p as any).text).filter(Boolean).join(' ');
+                    const text = s.message.parts
+                        .filter(p => (p as { type?: string }).type === 'text')
+                        .map(p => (p as { text?: string }).text)
+                        .filter(Boolean)
+                        .join(' ');
                     if (text) console.log(text);
                 }
                 if (ev.final && (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')) {
                     completed = true;
                 }
             }
-        };
-        eventBus.subscribe(channel, onEvent);
+        });
+        unsubResume = sub.unsubscribe;
 
         try {
             console.log(`Submitting input... sessionId=${sessionId} token=${token}`);
@@ -263,8 +273,16 @@ async function main(): Promise<void> {
         }
 
         // Cleanup
-        eventBus.unsubscribe(channel, onEvent as any);
-        try { outboxPublisher.stop(); } catch { }
+        try {
+            await unsubResume?.();
+        } catch {
+            /* noop */
+        }
+        try {
+            engine.stopOutboxPublisher();
+        } catch {
+            /* noop */
+        }
         await store.close?.();
         return;
     }

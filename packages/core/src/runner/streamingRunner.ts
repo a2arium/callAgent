@@ -14,10 +14,14 @@ import { AgentError, InvariantError, ModuleExecutionError, TaskExecutionError } 
 import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../types/invariantError.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createInMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
+import { createBusEvent, busEventData } from '../eventbus/busEventHelpers.js';
+import type { BusEvent } from '../public-types/eventbus/schemas.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
-import { outboxPublisher } from '../eventbus/outboxPublisher.js';
 import { extendContextWithStreaming } from '../context/StreamingContext.js';
+import * as uuid from 'uuid';
+const uuidv7 = uuid.v7;
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
 import { createLLMForTask } from '../llm/LLMFactory.js';
@@ -102,6 +106,7 @@ export async function runAgentWithStreaming(
 
     // --- Create Task Context ---
     const taskId = `local-task-${Date.now()}`;
+    const runnerEventBus = createInMemoryEventBus();
 
     // Initialize Services
     const runnerState = new RunnerStateService();
@@ -131,12 +136,11 @@ export async function runAgentWithStreaming(
     // Determine log method for debug logs (debug -> stdout, warn -> stderr)
     const logDebugMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
 
-    eventBus.subscribe(channel, (event: A2AEvent) => {
-        // If not streaming, we might only want progress updates?
-        // Original logic:
-        // isStreaming -> handleStatusEvent & handleArtifactEvent
-        // !isStreaming -> setupProgressListeners (which only logs status if it's input-required or debug-like)
-
+    await runnerEventBus.subscribe(channel, async (be: BusEvent) => {
+        const event = busEventData<A2AEvent>(be);
+        if (!event) {
+            return;
+        }
         if (options.isStreaming) {
             if ('status' in event) {
                 transport.handleStatus(event.status, !!event.final);
@@ -144,7 +148,6 @@ export async function runAgentWithStreaming(
                 transport.handleArtifact(event.artifact);
             }
         } else {
-            // Non-streaming: show progress *and* the terminal status (otherwise `Status: completed (FINAL)` never prints).
             if ('status' in event && 'final' in event) {
                 const s = event.status;
                 const isFinal = (event as { final?: boolean }).final === true;
@@ -153,7 +156,7 @@ export async function runAgentWithStreaming(
                     (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')
                 ) {
                     transport.handleStatus(s, true);
-                } else if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
+                } else if (s.state === 'input-required' || (s.state as unknown) === 'waiting_input') {
                     transport.handleStatus(s, false);
                 } else if (s.state === 'working') {
                     transport.handleStatus(s, false);
@@ -391,7 +394,7 @@ export async function runAgentWithStreaming(
     };
 
     // Extend the context with streaming capabilities
-    extendContextWithStreaming(taskCtx, options.isStreaming);
+    extendContextWithStreaming(taskCtx, options.isStreaming, runnerEventBus);
 
     // --- Check Cache Before Agent Execution ---
     if (cacheEnabled) {
@@ -418,7 +421,24 @@ export async function runAgentWithStreaming(
                             timestamp: new Date().toISOString(),
                             metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
                         } as any;
-                        try { eventBus.publish(taskChannel(taskId), { id: taskId, status: finalStatus, final: true } as any); } catch { }
+                        try {
+                            void runnerEventBus.publish(
+                                createBusEvent({
+                                    channel: taskChannel(taskId),
+                                    partitionKey: taskId,
+                                    cloud: {
+                                        id: uuidv7(),
+                                        type: 'task.a2a',
+                                        source: `/tasks/${taskId}`,
+                                        time: new Date().toISOString(),
+                                        datacontenttype: 'application/json',
+                                        data: { id: taskId, status: finalStatus, final: true },
+                                    },
+                                })
+                            );
+                        } catch {
+                            /* noop */
+                        }
                     } catch (error) {
                         agentLogger.error('Failed to replay cached result in streaming mode', error);
                         await taskCtx.fail(error);
@@ -459,14 +479,29 @@ export async function runAgentWithStreaming(
     }
 
     // If caching enabled, subscribe to final completion to persist result using original input as key
+    let cacheUnsubscribe: (() => Promise<void>) | undefined;
     if (cacheEnabled) {
         const channel = taskChannel(taskId);
-        const cacheListener = async (event: A2AEvent) => {
-            agentLogger.debug(`Cache listener received event`, { hasStatus: 'status' in event, final: (event as any).final, state: (event as any).status?.state });
-            if ('status' in event && event.final === true && (event.status as any)?.state === 'completed') {
+        const cacheListener = async (be: BusEvent): Promise<void> => {
+            const event = busEventData<A2AEvent>(be);
+            if (!event) {
+                return;
+            }
+            agentLogger.debug(`Cache listener received event`, {
+                hasStatus: 'status' in event,
+                final: (event as { final?: boolean }).final,
+                state: (event as { status?: { state?: string } }).status?.state,
+            });
+            if (
+                'status' in event &&
+                event.final === true &&
+                (event.status as { state?: string })?.state === 'completed'
+            ) {
                 try {
-                    const resultToCache = (event.status as any)?.metadata?.result;
-                    agentLogger.info(`Caching result for agent ${plugin.resolved.agentCard.name}`, { hasResult: resultToCache !== undefined });
+                    const resultToCache = (event.status as { metadata?: { result?: unknown } })?.metadata?.result;
+                    agentLogger.info(`Caching result for agent ${plugin.resolved.agentCard.name}`, {
+                        hasResult: resultToCache !== undefined,
+                    });
                     if (resultToCache !== undefined) {
                         try {
                             const cache = await ensureAgentResultCache();
@@ -486,11 +521,20 @@ export async function runAgentWithStreaming(
                 } catch (error) {
                     agentLogger.error('Failed to cache agent result on completion', error);
                 } finally {
-                    try { eventBus.unsubscribe(channel, cacheListener as any); } catch { }
+                    try {
+                        await cacheUnsubscribe?.();
+                    } catch {
+                        /* noop */
+                    }
                 }
             }
         };
-        try { eventBus.subscribe(channel, cacheListener as any); } catch { }
+        try {
+            const sub = await runnerEventBus.subscribe(channel, cacheListener);
+            cacheUnsubscribe = sub.unsubscribe;
+        } catch {
+            /* noop */
+        }
     }
 
     // --- Execute via Task Engine ---
@@ -565,7 +609,11 @@ export async function runAgentWithStreaming(
                     }
                     try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
                     try { await (await import('@a2arium/callagent-memory-engine')).disconnectMemoryPrismaClient(); } catch { }
-                    try { (outboxPublisher as any)?.stop?.(); } catch { }
+                    try {
+                        engine.stopOutboxPublisher();
+                    } catch {
+                        /* noop */
+                    }
                 }
             } catch (error: unknown) {
                 // Use agentLogger here for error
@@ -747,14 +795,16 @@ function pickBackends<T>(allBackends: Record<string, T>, names: string[]): Recor
 /**
  * Set up listeners for progress events only (for non-streaming mode)
  */
-function setupProgressListeners(taskId: string): void {
+function setupProgressListeners(taskId: string, bus: IEventBus): void {
     const channel = taskChannel(taskId);
-
-    // Add event listener for this task channel
-    eventBus.subscribe(channel, (event: A2AEvent) => {
+    void bus.subscribe(channel, async (be: BusEvent) => {
+        const event = busEventData<A2AEvent>(be);
+        if (!event || !('status' in event)) {
+            return;
+        }
         if ('status' in event) {
             const s = event.status;
-            if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
+            if (s.state === 'input-required' || (s.state as unknown) === 'waiting_input') {
                 console.log(`Status: waiting_input`);
                 const promptText = s.message?.parts
                     ?.filter(part => part.type === 'text')
@@ -762,15 +812,12 @@ function setupProgressListeners(taskId: string): void {
                     .filter(Boolean)
                     .join(' ');
                 if (promptText) console.log(`Prompt: ${promptText}`);
-                const token = (s as any).metadata?.token;
+                const token = (s as { metadata?: { token?: string } }).metadata?.token;
                 if (token) console.log(`Token: ${token}`);
-                // Also display session id for convenience
                 console.log(`Session: ${event.id}`);
             } else if (s.state === 'working') {
-                // Check for progress percentage first
                 const progressPercentage = s.metadata?.progress;
                 if (s.message?.parts) {
-                    // Display progress messages for working states
                     const textParts = s.message.parts
                         .filter(part => part.type === 'text')
                         .map(part => (part as { text?: string }).text)
@@ -783,17 +830,10 @@ function setupProgressListeners(taskId: string): void {
                         }
                     }
                 } else if (typeof progressPercentage === 'number') {
-                    // Just show percentage if no message
                     console.log(`Progress: ${progressPercentage}%`);
                 }
             }
         }
-
-        // Unsubscribe when task is complete
-        if ('status' in event && (event.status.state === 'completed' || event.status.state === 'failed')) {
-            eventBus.unsubscribe(channel, setupProgressListeners);
-        }
     });
-
     runnerLogger.debug(`Set up progress listeners for task channel: ${channel}`);
-} 
+}

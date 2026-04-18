@@ -2,8 +2,14 @@ import type { TaskContext, TaskInput } from '../shared/types/index.js';
 import { LoopRegistry } from './LoopRegistry.js';
 import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import { Artifact } from '../shared/types/index.js'; // Explicitly import Memory Artifact for usage
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createInMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
 import { createDbMessageLog } from '../eventbus/dbMessageLog.js';
+import type { DurableSubscriptionPersistence } from '../eventbus/inProcessDurableSubscription.js';
+import { wrapMessageLogWithTopicStream } from '../eventbus/messageLogTopicStream.js';
+import type { MessageLog } from '../public-types/messageLog/types.js';
+import type { DurableSubscription } from '../public-types/messageLog/durableSubscription.types.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { extendContextWithStreaming } from '../context/StreamingContext.js';
 import { SessionManager } from './SessionManager.js';
@@ -19,7 +25,8 @@ import { globalA2AService } from './A2AService.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
-import { outboxPublisher } from '../eventbus/outboxPublisher.js';
+import { OutboxPublisher } from '../eventbus/outboxPublisher.js';
+import { BackpressureManager } from '../internal/conversation/BackpressureManager.js';
 import { createTraceparent } from '../tracing/Tracing.js';
 import type {
     GoalId,
@@ -129,10 +136,12 @@ import { TurnRunner } from './TurnRunner.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import type { InvariantErrorCode, InvariantErrorDetail } from '../types/invariantError.js';
 import { ConversationService } from '../internal/conversation/ConversationService.js';
+import { ensureBuiltinTopicProjectionsRegistered } from '../internal/conversation/builtinTopicProjections.js';
 import { ConversationRouter } from '../internal/conversation/ConversationRouter.js';
 import { InviteDeliveryCoordinator } from '../internal/conversation/InviteDeliveryCoordinator.js';
 import { InviteSweeper } from '../internal/conversation/InviteSweeper.js';
 import { ThreadLifecycleSweeper } from '../internal/conversation/ThreadLifecycleSweeper.js';
+import { TopicLifecycleSweeper } from '../internal/conversation/TopicLifecycleSweeper.js';
 import { wallClock } from '../internal/conversation/Clock.js';
 import type {
     ConversationActivateParams,
@@ -173,6 +182,9 @@ class KeyedMutex {
 
 export class TaskEngine {
     static testOverrides?: TaskEngineTestOverrides;
+    readonly eventBus: IEventBus;
+    private readonly backpressureManager = new BackpressureManager();
+    private outboxPublisherInstance?: OutboxPublisher;
     private sessionManager?: SessionManager;
     private snapshotRepo?: SnapshotRepository;
     private taskExecutorInitialized = false;
@@ -188,8 +200,29 @@ export class TaskEngine {
     private inviteDeliveryCoordinator: InviteDeliveryCoordinator;
     private inviteSweeper: InviteSweeper;
     private threadLifecycleSweeper: ThreadLifecycleSweeper;
+    private topicLifecycleSweeper: TopicLifecycleSweeper;
+    private transportClose?: () => Promise<void>;
+    /** When adapters are resolved via `resolveTransportAdapters`, wired here for projections / extensions. */
+    readonly createDurableSubscription?: (ctx: {
+        tenantId: string;
+        persistence: DurableSubscriptionPersistence;
+    }) => DurableSubscription;
 
-    constructor(opts?: { sessionStore?: IWorkingMemorySessionStore; handlerInvoker?: DurableHandlerInvoker }) {
+    constructor(opts?: {
+        sessionStore?: IWorkingMemorySessionStore;
+        handlerInvoker?: DurableHandlerInvoker;
+        eventBus?: IEventBus;
+        /** Inner `MessageLog` (before `wrapMessageLogWithTopicStream`). Defaults to `createDbMessageLog(sessionManager)`. */
+        messageLog?: MessageLog;
+        createDurableSubscription?: (ctx: {
+            tenantId: string;
+            persistence: DurableSubscriptionPersistence;
+        }) => DurableSubscription;
+        transportClose?: () => Promise<void>;
+    }) {
+        this.transportClose = opts?.transportClose;
+        this.createDurableSubscription = opts?.createDurableSubscription;
+        this.eventBus = opts?.eventBus ?? createInMemoryEventBus();
         if (opts?.sessionStore) {
             this.sessionManager = new SessionManager(opts.sessionStore);
         } else {
@@ -199,6 +232,7 @@ export class TaskEngine {
             log.warn('For production, configure a database-backed SessionStore');
             this.sessionManager = new SessionManager(new InMemorySessionManager());
         }
+        ensureBuiltinTopicProjectionsRegistered();
         this.snapshotRepo = new SnapshotRepository(this.sessionManager);
         this.conversationService = new ConversationService(this.sessionManager, {
             routeTargetForThread: ({ threadId, recipientAgentId, tenantId }) => ({
@@ -208,11 +242,42 @@ export class TaskEngine {
             }),
             activateConversationRecipient: (p) => this.ensureConversationActivation(p),
             publishConversationEvent: async (channel, event) => {
-                await eventBus.publish(channel, event);
+                await this.eventBus.publish(
+                    createBusEvent({
+                        channel,
+                        cloud: {
+                            id: uuidv7(),
+                            type: channel,
+                            source: '/conversation/events',
+                            time: new Date().toISOString(),
+                            datacontenttype: 'application/json',
+                            data: event,
+                        },
+                    })
+                );
             },
             clock: wallClock,
-            messageLog: createDbMessageLog(this.sessionManager),
-            resolveThreadTtlMs: () => 3600000,
+            messageLog: wrapMessageLogWithTopicStream({
+                inner: opts?.messageLog ?? createDbMessageLog(this.sessionManager),
+                eventBus: this.eventBus,
+            }),
+            backpressureManager: this.backpressureManager,
+            resolveThreadTtlMs: (agentId: string) => {
+                const plugin = PluginManager.findAgent(agentId);
+                const raw = plugin?.resolved.runtimeManifest.communication?.threadTtlMs;
+                if (raw === null) {
+                    return null;
+                }
+                if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+                    return raw;
+                }
+                return 3600000;
+            },
+            resolveAgentCommunication: (agentId: string) =>
+                PluginManager.findAgent(agentId)?.resolved.runtimeManifest.communication,
+            resolveWakeOnTopicMessage: (agentId: string) =>
+                PluginManager.findAgent(agentId)?.resolved.runtimeManifest.communication?.wakeOnTopicMessage ===
+                true,
         });
         this.threadLifecycleSweeper = new ThreadLifecycleSweeper(
             this.sessionManager,
@@ -223,13 +288,16 @@ export class TaskEngine {
             }),
             wallClock
         );
+        this.topicLifecycleSweeper = new TopicLifecycleSweeper(this.sessionManager, wallClock);
         this.inviteDeliveryCoordinator = new InviteDeliveryCoordinator(
             this.sessionManager,
-            eventBus,
+            this.eventBus,
             (params) => this.ensureConversationActivation(params),
             wallClock
         );
-        this.inviteDeliveryCoordinator.start();
+        void this.inviteDeliveryCoordinator.start().catch((err) => {
+            log.warn('InviteDeliveryCoordinator.start failed', err as { message?: string });
+        });
         this.inviteSweeper = new InviteSweeper(this.sessionManager, wallClock);
 
         this.apiBinder = new ApiBinder({
@@ -247,7 +315,8 @@ export class TaskEngine {
         this.turnRunner = new TurnRunner(
             this.sessionManager!,
             this.apiBinder,
-            () => this.getSessionStorePrisma()
+            () => this.getSessionStorePrisma(),
+            this.eventBus
         );
 
         if (opts?.handlerInvoker) {
@@ -260,7 +329,15 @@ export class TaskEngine {
         // Ensure outbox publisher is running (unless disabled for tests)
         // In test environments, we don't want background services running
         if (!process.env.DISABLE_OUTBOX_PUBLISHER) {
-            try { outboxPublisher.start(); } catch { /* noop */ }
+            this.outboxPublisherInstance = new OutboxPublisher({
+                eventBus: this.eventBus,
+                getPrisma: () => this.getSessionStorePrisma() ?? null,
+            });
+            try {
+                this.outboxPublisherInstance.start();
+            } catch {
+                /* noop */
+            }
         }
     }
 
@@ -913,17 +990,39 @@ export class TaskEngine {
             await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, { taskId: sessionId, status: { state: 'working', timestamp: new Date().toISOString() }, traceparent });
             // Emit initial working status locally too so CLI can see the taskId
             try {
-                eventBus.publish(taskChannel(sessionId), {
-                    id: sessionId,
-                    status: { state: 'working', timestamp: new Date().toISOString(), message: { role: 'agent', parts: [{ type: 'text', text: `Task started: ${sessionId}` }] } },
-                    final: false
-                } as any);
-            } catch { }
+                void this.eventBus.publish(
+                    createBusEvent({
+                        channel: taskChannel(sessionId),
+                        partitionKey: sessionId,
+                        cloud: {
+                            id: uuidv7(),
+                            type: 'task.status',
+                            source: `/tasks/${sessionId}`,
+                            time: new Date().toISOString(),
+                            datacontenttype: 'application/json',
+                            data: {
+                                id: sessionId,
+                                status: {
+                                    state: 'working',
+                                    timestamp: new Date().toISOString(),
+                                    message: {
+                                        role: 'agent',
+                                        parts: [{ type: 'text', text: `Task started: ${sessionId}` }],
+                                    },
+                                },
+                                final: false,
+                            },
+                        },
+                    })
+                );
+            } catch {
+                /* noop */
+            }
             const initialWm = (session?.snapshot as Record<string, unknown>) || {};
             const { wm: wmAfterStart } = decide(initialWm, { t: 'task.started' });
 
             // Extend the context with streaming capabilities
-            extendContextWithStreaming(ctx, isStreaming);
+            extendContextWithStreaming(ctx, isStreaming, this.eventBus);
             // carry runMode from agent manifest via streaming runner if present; default loop
             // FIX: Don't prematurely default to 'loop' here, wait until we check the manifest
             // if (!(ctx as any).runMode) { (ctx as any).runMode = 'loop'; }
@@ -1097,20 +1196,31 @@ export class TaskEngine {
                 timestamp: new Date().toISOString()
             };
             this.finalizeAgentNodeTelemetry(agentNode, task, err);
-            eventBus.publish(taskChannel(task.id), {
-                id: task.id,
-                status: {
-                    state: 'failed',
-                    message: {
-                        role: 'agent',
-                        parts: [
-                            { type: 'text', text: `Task execution failed: ${err.message}` }
-                        ]
+            void this.eventBus.publish(
+                createBusEvent({
+                    channel: taskChannel(task.id),
+                    partitionKey: task.id,
+                    cloud: {
+                        id: uuidv7(),
+                        type: 'task.status',
+                        source: `/tasks/${task.id}`,
+                        time: new Date().toISOString(),
+                        datacontenttype: 'application/json',
+                        data: {
+                            id: task.id,
+                            status: {
+                                state: 'failed',
+                                message: {
+                                    role: 'agent',
+                                    parts: [{ type: 'text', text: `Task execution failed: ${err.message}` }],
+                                },
+                                timestamp: new Date().toISOString(),
+                            },
+                            final: true,
+                        },
                     },
-                    timestamp: new Date().toISOString()
-                },
-                final: true
-            });
+                })
+            );
         }
     }
 
@@ -1176,7 +1286,11 @@ export class TaskEngine {
             (ctx as any).tenantId = tenantId;
             if (agentName) (ctx as any).agentId = agentName;
             // Ensure replies in this resumed turn are streamed to chat
-            try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
+            try {
+                extendContextWithStreaming(ctx, true, this.eventBus);
+            } catch {
+                /* noop */
+            }
 
             // Attach requestInput implementation (same as in startTask) so agent can ask for more input
             const sessionId = taskId;
@@ -1354,13 +1468,30 @@ export class TaskEngine {
                 const channel = taskChannel(taskId);
                 try {
                     if (taskResult.status) {
-                        eventBus.publish(channel, {
-                            id: taskId,
-                            status: taskResult.status,
-                            final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
-                        } as any);
+                        void this.eventBus.publish(
+                            createBusEvent({
+                                channel,
+                                partitionKey: taskId,
+                                cloud: {
+                                    id: uuidv7(),
+                                    type: 'task.status',
+                                    source: `/tasks/${taskId}`,
+                                    time: new Date().toISOString(),
+                                    datacontenttype: 'application/json',
+                                    data: {
+                                        id: taskId,
+                                        status: taskResult.status,
+                                        final:
+                                            taskResult.status.state === 'completed' ||
+                                            taskResult.status.state === 'failed',
+                                    },
+                                },
+                            })
+                        );
                     }
-                } catch { }
+                } catch {
+                    /* noop */
+                }
             }
         } catch (e) {
             try { console.error('[TaskEngine] resumeInput auto-resume failed:', e instanceof Error ? e.message : String(e), e instanceof Error ? e.stack : ''); } catch { }
@@ -1499,13 +1630,30 @@ export class TaskEngine {
             const channel = taskChannel(taskId);
             try {
                 if (taskResult.status) {
-                    eventBus.publish(channel, {
-                        id: taskId,
-                        status: taskResult.status,
-                        final: taskResult.status.state === 'completed' || taskResult.status.state === 'failed'
-                    } as any);
+                    void this.eventBus.publish(
+                        createBusEvent({
+                            channel,
+                            partitionKey: taskId,
+                            cloud: {
+                                id: uuidv7(),
+                                type: 'task.status',
+                                source: `/tasks/${taskId}`,
+                                time: new Date().toISOString(),
+                                datacontenttype: 'application/json',
+                                data: {
+                                    id: taskId,
+                                    status: taskResult.status,
+                                    final:
+                                        taskResult.status.state === 'completed' ||
+                                        taskResult.status.state === 'failed',
+                                },
+                            },
+                        })
+                    );
                 }
-            } catch { }
+            } catch {
+                /* noop */
+            }
         } catch { }
     }
 
@@ -1877,7 +2025,11 @@ export class TaskEngine {
                 if (!(ctx as any).task) {
                     (ctx as any).task = { id: parentTaskId, input: {} };
                 }
-                try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
+                try {
+                    extendContextWithStreaming(ctx, true, this.eventBus);
+                } catch {
+                    /* noop */
+                }
                 // --- START RETRY LOOP ---
                 let resumeSuccess = false;
                 let resumeRetryCount = 0;
@@ -2221,7 +2373,30 @@ export class TaskEngine {
                                 throwOnSaveFailure: true // Rethrow CAS/save errors to trigger retry loop
                             });
                             const channel = taskChannel(parentTaskId);
-                            try { eventBus.publish(channel, { id: parentTaskId, status: taskStatus, final: taskStatus.state === 'completed' || taskStatus.state === 'failed' } as any); } catch { }
+                            try {
+                                void this.eventBus.publish(
+                                    createBusEvent({
+                                        channel,
+                                        partitionKey: parentTaskId,
+                                        cloud: {
+                                            id: uuidv7(),
+                                            type: 'task.status',
+                                            source: `/tasks/${parentTaskId}`,
+                                            time: new Date().toISOString(),
+                                            datacontenttype: 'application/json',
+                                            data: {
+                                                id: parentTaskId,
+                                                status: taskStatus,
+                                                final:
+                                                    taskStatus.state === 'completed' ||
+                                                    taskStatus.state === 'failed',
+                                            },
+                                        },
+                                    })
+                                );
+                            } catch {
+                                /* noop */
+                            }
 
                             resumeSuccess = true;
                         } catch (e) {
@@ -2872,7 +3047,11 @@ export class TaskEngine {
         } catch { /* noop */ }
         // LLM state restoration now happens immediately after LLM creation above (lines 1551-1564)
         // Ensure restored context can emit streaming events to the same task channel
-        try { extendContextWithStreaming(ctx, true); } catch { /* noop */ }
+        try {
+            extendContextWithStreaming(ctx, true, this.eventBus);
+        } catch {
+            /* noop */
+        }
         // Wire Goals API on durable handler context
         try {
             const goals = await import('../loop/goals.js');
@@ -3013,6 +3192,15 @@ export class TaskEngine {
         return this.threadLifecycleSweeper.sweepTenant(params);
     }
 
+    async triggerTopicLifecycleSweep(params: {
+        tenantId: string;
+        nowIso?: string;
+        limit?: number;
+        autoArchiveAfterMs?: number | null;
+    }): Promise<{ archivedTopicIds: string[] }> {
+        return this.topicLifecycleSweeper.sweepTenant(params);
+    }
+
     async triggerInviteStartupRecoverySweep(params: {
         tenantId: string;
         nowIso?: string;
@@ -3020,7 +3208,30 @@ export class TaskEngine {
     }): Promise<string[]> {
         return this.inviteSweeper.runStartupRecoverySweep({
             ...params,
-            publish: async (channel, event) => eventBus.publish(channel, event),
+            publish: async (channel, event) => {
+                await this.eventBus.publish(
+                    createBusEvent({
+                        channel,
+                        cloud: {
+                            id: uuidv7(),
+                            type: channel,
+                            source: '/conversation/invite-sweeper',
+                            time: new Date().toISOString(),
+                            datacontenttype: 'application/json',
+                            data: event,
+                        },
+                    })
+                );
+            },
         });
+    }
+
+    stopOutboxPublisher(): void {
+        this.outboxPublisherInstance?.stop();
+    }
+
+    /** Close optional broker connections when `TaskEngine` was constructed with `transportClose` from `resolveTransportAdapters`. */
+    async closeTransportAdapters(): Promise<void> {
+        await this.transportClose?.();
     }
 }

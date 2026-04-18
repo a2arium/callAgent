@@ -10,6 +10,7 @@ import {
     InviteTokenSchema,
     MessageIdSchema,
     MemberIdSchema,
+    SpeechActSchema,
     TopicMemberRoleSchema,
     ThreadRefSchema,
     TopicRefSchema,
@@ -98,6 +99,7 @@ export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
         thread: ThreadRefSchema,
         ts: z.string().datetime(),
         archivedBy: AgentIdSchema.optional(),
+        archivedByMemberId: MemberIdSchema.optional(),
         reasonText: z.string().min(1).max(500).optional(),
     }),
     z.object({
@@ -180,8 +182,37 @@ export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
     z.object({
         kind: z.literal('topic.closed'),
         topic: TopicRefSchema,
+        ts: z.string().datetime(),
         reason: z.string().optional(),
-        ts: z.string(),
+        closedBy: AgentIdSchema.optional(),
+        closedReason: CloseReasonSchema.optional(),
+        reasonText: z.string().min(1).max(500).optional(),
+        closedByMemberId: MemberIdSchema.optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.archived'),
+        topic: TopicRefSchema,
+        ts: z.string().datetime(),
+        archivedBy: AgentIdSchema.optional(),
+        archivedByMemberId: MemberIdSchema.optional(),
+        reasonText: z.string().min(1).max(500).optional(),
+    }),
+    z.object({
+        kind: z.literal('topic.stopPolicy.rejected'),
+        topic: TopicRefSchema,
+        ts: z.string().datetime(),
+        error: ConversationErrorSchema,
+    }),
+    z.object({
+        kind: z.literal('topic.policy.unsupported'),
+        topic: TopicRefSchema,
+        ts: z.string().datetime(),
+        unsupported: z.array(
+            z.object({
+                agentId: AgentIdSchema,
+                missing: z.array(z.string().min(1)),
+            })
+        ),
     }),
     z.object({
         kind: z.literal('outbound.committed'),
@@ -194,6 +225,18 @@ export const ConversationPayloadSchema = z.discriminatedUnion('kind', [
          * @remarks Present on thread sends when TTL is enabled: idle-reset `expires_at` after append.
          */
         threadExpiresAt: z.string().datetime().optional(),
+        selectorKind: z
+            .enum(['broadcast', 'round_robin', 'explicit_recipient', 'selector_policy'])
+            .optional(),
+        selectorPolicyId: z.string().min(1).max(120).optional(),
+        selectorParamsHash: z.string().min(1).optional(),
+        /** Present on topic posts: drives `topicProjections` fold in Learning. */
+        topicAppend: z
+            .object({
+                speechAct: SpeechActSchema,
+                payload: z.unknown(),
+            })
+            .optional(),
     }),
 ]);
 

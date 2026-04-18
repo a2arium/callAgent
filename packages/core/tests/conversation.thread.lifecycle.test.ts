@@ -21,7 +21,7 @@ describe('ConversationService thread lifecycle (close / archive)', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         return { service, sessionManager };
     };
@@ -75,13 +75,16 @@ describe('ConversationService thread lifecycle (close / archive)', () => {
             reason: 'done',
             archiveAfter: true,
         });
-        expect(receipt.archived).toBe(true);
+        expect(receipt.status).toBe('ok');
+        if (receipt.status === 'ok') {
+            expect(receipt.archived).toBe(true);
+        }
 
         const ownerKinds = await loadInboxKinds(sessionManager, ownerSessionId);
         expect(ownerKinds.filter((k) => k === 'thread.archived').length).toBeGreaterThanOrEqual(1);
     });
 
-    it('archive(open thread) throws ThreadNotClosed', async () => {
+    it('archive(open thread) returns ConversationNotClosed', async () => {
         const { service } = createService();
         const started = await service.startThread(tenantId, ownerSessionId, senderAgentId, {
             targetAgentId: recipientAgentId,
@@ -95,25 +98,34 @@ describe('ConversationService thread lifecycle (close / archive)', () => {
         if (started.receipt.status !== 'accepted') {
             return;
         }
-        await expect(
-            service.archive(tenantId, ownerSessionId, senderAgentId, started.thread, {})
-        ).rejects.toThrow('ThreadNotClosed');
+        const ar = await service.archive(tenantId, ownerSessionId, senderAgentId, started.thread, {});
+        expect(ar.status).toBe('rejected');
+        if (ar.status === 'rejected') {
+            expect(ar.error.type).toBe('ConversationNotClosed');
+        }
     });
 
-    it('close(topic, { archiveAfter: true }) throws ArchiveUnsupportedForTopics', async () => {
-        const { service } = createService();
+    it('close(topic, { archiveAfter: true }) closes and archives topic', async () => {
+        const { service, sessionManager } = createService();
         const created = await service.createTopic(tenantId, ownerSessionId, senderAgentId, {
             topicId: 'topic-arch-test',
             members: [{ agentId: senderAgentId, role: 'owner', sessionIdOverride: ownerSessionId }],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') {
             return;
         }
-        await expect(
-            service.close(tenantId, ownerSessionId, senderAgentId, created.topic, { archiveAfter: true })
-        ).rejects.toThrow('ArchiveUnsupportedForTopics');
+        const receipt = await service.close(tenantId, ownerSessionId, senderAgentId, created.topic, {
+            archiveAfter: true,
+        });
+        expect(receipt.status).toBe('ok');
+        if (receipt.status === 'ok') {
+            expect(receipt.archived).toBe(true);
+        }
+        const kinds = await loadInboxKinds(sessionManager, ownerSessionId);
+        expect(kinds.filter((k) => k === 'topic.archived').length).toBeGreaterThanOrEqual(1);
     });
 
     it('send on closed thread returns ConversationClosed', async () => {

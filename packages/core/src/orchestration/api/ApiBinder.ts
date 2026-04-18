@@ -495,23 +495,35 @@ export class ApiBinder {
             leave: (topic: TopicRef, options?: TopicLeaveOptions) =>
                 conversationService.leave(tenantId, sessionId, agentId, topic, options),
             post: async (topic: TopicRef, message: OutboundTopicMessage, options?: TopicPostOptions) => {
-                const receipt: FanoutSendReceipt = await conversationService.post(
-                    tenantId,
-                    sessionId,
-                    agentId,
-                    topic,
-                    message,
-                    options
-                );
-                stampTopicPostTurnTrace(ctx as InternalTaskContext, topic, options, receipt);
-                return receipt;
+                const iCtx = ctx as InternalTaskContext;
+                conversationService.setTopicPostBackpressureSink?.((sample) => {
+                    iCtx.__turnBackpressure = sample;
+                });
+                try {
+                    const receipt: FanoutSendReceipt = await conversationService.post(
+                        tenantId,
+                        sessionId,
+                        agentId,
+                        topic,
+                        message,
+                        options
+                    );
+                    stampTopicPostTurnTrace(iCtx, topic, options, receipt);
+                    return receipt;
+                } finally {
+                    conversationService.setTopicPostBackpressureSink?.(undefined);
+                }
             },
             close: async (ref: ConversationRef, options?: CloseConversationOptions) => {
                 return conversationService.close(tenantId, sessionId, agentId, ref, options);
             },
-            archive: async (ref: ThreadRef, options?: ArchiveConversationOptions) => {
+            archive: async (ref: ConversationRef, options?: ArchiveConversationOptions) => {
                 return conversationService.archive(tenantId, sessionId, agentId, ref, options);
             },
+            readProjection: async (topic, token, options) =>
+                conversationService.readProjection(tenantId, sessionId, agentId, topic, token, options),
+            appendSignal: async (topic, input, options) =>
+                conversationService.appendSignal(tenantId, sessionId, agentId, topic, input, options),
         };
 
         // Ensure __autoExecuteTool is attached for async tool execution

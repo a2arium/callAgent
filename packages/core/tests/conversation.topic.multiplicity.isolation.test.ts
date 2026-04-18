@@ -23,7 +23,7 @@ describe('topic multiplicity isolation', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
 
         const created = await service.createTopic(tenantId, ownerSeat1Session, owner, {
@@ -34,6 +34,7 @@ describe('topic multiplicity isolation', () => {
                 { agentId: peer, role: 'participant', sessionIdOverride: peerSession },
             ],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') {

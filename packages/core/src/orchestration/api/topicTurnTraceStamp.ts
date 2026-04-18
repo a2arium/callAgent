@@ -84,9 +84,19 @@ export function stampTopicPostTurnTrace(
 ): void {
     iCtx.__turnConversationSummary = { id: topic.id, kind: 'topic' };
     const selectorKind = options?.selector?.kind ?? 'broadcast';
+    const trace = receipt.status === 'accepted' || receipt.status === 'partial' ? receipt.selectorPolicyTrace : undefined;
     iCtx.__turnTopicSelectorDecision = {
         kind: selectorKind,
         resolvedMembers: resolvedMembersFromReceipt(receipt),
+        ...(trace !== undefined && selectorKind === 'selector_policy'
+            ? {
+                  selectorPolicy: {
+                      policyId: trace.policyId,
+                      result: trace.result,
+                      paramsHash: trace.paramsHash,
+                  },
+              }
+            : {}),
     };
     iCtx.__turnFanoutSummary = fanoutSummaryFromReceipt(receipt);
     const seq = firstSequenceNumber(receipt);
@@ -96,5 +106,11 @@ export function stampTopicPostTurnTrace(
     const dedupe = firstDedupeHit(receipt);
     if (dedupe !== undefined) {
         iCtx.__turnConversationDedupeHit = dedupe;
+    }
+    if (receipt.status === 'accepted' || receipt.status === 'partial') {
+        iCtx.__turnStopPolicy =
+            receipt.stopPolicyTrace !== undefined ? receipt.stopPolicyTrace : undefined;
+    } else {
+        iCtx.__turnStopPolicy = undefined;
     }
 }

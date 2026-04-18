@@ -21,7 +21,7 @@ describe('Topic invite idempotency', () => {
             activateConversationRecipient: async () => ({ ok: true }),
             clock: wallClock,
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         return { service, sessionManager };
     };
@@ -32,6 +32,7 @@ describe('Topic invite idempotency', () => {
             topicId: 'topic-idem-1',
             members: [{ agentId: owner, role: 'owner' }],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') return;

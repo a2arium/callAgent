@@ -10,7 +10,7 @@ import type {
     MessageLogRecord,
 } from '../public-types/messageLog/types.js';
 import type { ConversationMessageRecord } from '@a2arium/callagent-memory-engine';
-import { MemberIdSchema } from '../public-types/conversation/schemas.js';
+import { MemberIdSchema, SpeechActSchema } from '../public-types/conversation/schemas.js';
 
 function toRecord(row: ConversationMessageRecord): MessageLogRecord {
     return {
@@ -20,7 +20,8 @@ function toRecord(row: ConversationMessageRecord): MessageLogRecord {
         senderAgentId: row.senderAgentId,
         senderMemberId: MemberIdSchema.parse(row.senderMemberId),
         selectorKind: row.selectorKind ?? undefined,
-        speechAct: row.speechAct,
+        selectorPolicyId: row.selectorPolicyId ?? undefined,
+        speechAct: SpeechActSchema.parse(row.speechAct),
         payload: row.payload,
         correlationId: row.correlationId,
         idempotencyKey: row.idempotencyKey,
@@ -61,6 +62,7 @@ export function createDbMessageLog(sessionManager: SessionManager): MessageLog {
                 recipientAgentId: params.deliveries[0]?.recipientAgentId ?? null,
                 conversationKind: params.conversationKind,
                 selectorKind: params.selectorKind ?? null,
+                selectorPolicyId: params.selectorPolicyId ?? null,
                 speechAct: params.speechAct,
                 payload: payloadRecord,
                 correlationId: params.correlationId,

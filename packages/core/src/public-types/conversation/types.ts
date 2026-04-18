@@ -34,6 +34,7 @@ import type {
     AgentIdSchema,
     MemberIdSchema,
     InviteTokenSchema,
+    JsonValueSchema,
     TopicMemberSchema,
     TopicSelectorSchema,
     ResolvedTopicMemberSchema,
@@ -42,6 +43,12 @@ import type {
     ThreadStatusSchema,
 } from './schemas.js';
 import type { ConversationProjectionSchema } from './projection.js';
+import type {
+    AppendSignalInput,
+    ReadProjectionOptions,
+    ReadProjectionReceipt,
+    TopicProjectionToken,
+} from './topicProjection.js';
 
 export type ConversationId = z.infer<typeof ConversationIdSchema>;
 export type MessageId = z.infer<typeof MessageIdSchema>;
@@ -50,6 +57,7 @@ export type IdempotencyKey = z.infer<typeof IdempotencyKeySchema>;
 export type AgentId = z.infer<typeof AgentIdSchema>;
 export type MemberId = z.infer<typeof MemberIdSchema>;
 export type InviteToken = z.infer<typeof InviteTokenSchema>;
+export type JsonValue = z.infer<typeof JsonValueSchema>;
 export type ResolvedTopicMember = z.infer<typeof ResolvedTopicMemberSchema>;
 
 export type ThreadRef = z.infer<typeof ThreadRefSchema>;
@@ -114,7 +122,17 @@ export type ConversationApi = {
         options?: CloseConversationOptions
     ) => Promise<CloseConversationReceipt>;
     archive: (
-        ref: ThreadRef,
+        ref: ConversationRef,
         options?: ArchiveConversationOptions
     ) => Promise<ArchiveConversationReceipt>;
+    readProjection: (
+        topic: TopicRef,
+        token: TopicProjectionToken<unknown>,
+        options?: ReadProjectionOptions
+    ) => Promise<ReadProjectionReceipt>;
+    appendSignal: (
+        topic: TopicRef,
+        input: AppendSignalInput,
+        options?: TopicPostOptions
+    ) => Promise<FanoutSendReceipt>;
 };

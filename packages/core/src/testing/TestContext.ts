@@ -18,7 +18,12 @@ import { normalizeObservationInbox } from '../loop/types.js';
 import { InMemorySessionManager } from '../orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../orchestration/SessionManager.js';
 import { ConversationService } from '../internal/conversation/ConversationService.js';
+import { createTopicSelectorPolicyRegistry } from '../internal/conversation/TopicSelectorPolicyRegistry.js';
+import { createStopPolicyRegistry } from '../internal/conversation/StopPolicyRegistry.js';
 import { createDbMessageLog } from '../eventbus/dbMessageLog.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
+import { v7 as uuidv7 } from 'uuid';
+import { wrapStopPolicyRegistry, wrapTopicSelectorPolicyRegistry } from './policyPurityHarness.js';
 import type { Clock } from '../internal/conversation/Clock.js';
 import type {
     ArchiveConversationOptions,
@@ -55,11 +60,17 @@ function observationDedupeKey(obs: Observation): string {
     return `${obs.source}:${obs.kind}:${JSON.stringify(obs.payload)}`;
 }
 
+export type CreateTestContextOptions = {
+    policyPurityStrict?: boolean;
+};
+
 export function createTestContext(
     state: HarnessState,
     llmStub: DeterministicLLMStub,
-    toolStub: DeterministicToolStub
+    toolStub: DeterministicToolStub,
+    options?: CreateTestContextOptions
 ): TaskContext {
+    const policyPurityStrict = options?.policyPurityStrict !== false;
     let taskCounter = 0;
     const generateId = (prefix: string) => `${prefix}-${++taskCounter}`;
 
@@ -90,6 +101,14 @@ export function createTestContext(
     state.conversationTenantId = tenantId;
     state.conversationSessionManager = conversationSessionManager;
     state.inviteClock = inviteHarnessClock;
+    const topicSelectorPolicyRegistry = wrapTopicSelectorPolicyRegistry(
+        createTopicSelectorPolicyRegistry(),
+        policyPurityStrict
+    );
+    const stopPolicyRegistry = wrapStopPolicyRegistry(createStopPolicyRegistry(), policyPurityStrict);
+    state.harnessTopicSelectorPolicyRegistry = topicSelectorPolicyRegistry;
+    state.harnessStopPolicyRegistry = stopPolicyRegistry;
+    const defaultMessageLog = createDbMessageLog(conversationSessionManager);
     const conversationService = new ConversationService(conversationSessionManager, {
         routeTargetForThread: ({ threadId, recipientAgentId }) => ({
             tenantId,
@@ -98,8 +117,39 @@ export function createTestContext(
         }),
         activateConversationRecipient: async () => ({ ok: true }),
         clock: inviteHarnessClock,
-        messageLog: createDbMessageLog(conversationSessionManager),
-        resolveThreadTtlMs: () => null,
+        get messageLog() {
+            return state.harnessMessageLogOverride ?? defaultMessageLog;
+        },
+        publishConversationEvent: async (channel, event) => {
+            const bus = state.harnessEventBus;
+            if (bus) {
+                await bus.publish(
+                    createBusEvent({
+                        channel,
+                        cloud: {
+                            id: uuidv7(),
+                            type: channel,
+                            source: '/conversation/events',
+                            time: new Date().toISOString(),
+                            datacontenttype: 'application/json',
+                            data: event,
+                        },
+                    })
+                );
+            }
+        },
+        resolveThreadTtlMs: (_agentId: string) => {
+            const raw = state.harnessCommunication?.threadTtlMs;
+            if (raw === null) {
+                return null;
+            }
+            if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+                return raw;
+            }
+            return null;
+        },
+        topicSelectorPolicyRegistry,
+        stopPolicyRegistry,
     });
 
     state.pullPersistedConversationObservations = async () => {
@@ -351,9 +401,13 @@ export function createTestContext(
             close: async (ref: ConversationRef, options?: CloseConversationOptions) => {
                 return conversationService.close(tenantId, harnessSessionId, harnessAgentId, ref, options);
             },
-            archive: async (ref: ThreadRef, options?: ArchiveConversationOptions) => {
+            archive: async (ref: ConversationRef, options?: ArchiveConversationOptions) => {
                 return conversationService.archive(tenantId, harnessSessionId, harnessAgentId, ref, options);
             },
+            readProjection: async (topic, token, options) =>
+                conversationService.readProjection(tenantId, harnessSessionId, harnessAgentId, topic, token, options),
+            appendSignal: async (topic, input, options) =>
+                conversationService.appendSignal(tenantId, harnessSessionId, harnessAgentId, topic, input, options),
         },
     };
 

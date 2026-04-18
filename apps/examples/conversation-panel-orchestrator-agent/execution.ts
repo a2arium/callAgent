@@ -80,6 +80,7 @@ export async function execution(
             { agentId: PANEL_SEAT_AGENT_ID, memberId: SEAT_REALIST, role: 'participant' },
         ],
         defaultSelector: { kind: 'broadcast' },
+        stopPolicies: [{ kind: 'timeout', afterMs: 86_400_000 }],
     });
     if (created.status !== 'ok') {
         return {
@@ -143,7 +144,7 @@ export async function execution(
     }
 
     const closed = await ctx.conversation.close(topicRef, {});
-    if (!closed.closed) {
+    if (closed.status !== 'ok' || !closed.closed) {
         return {
             action: { kind: 'internal', done: true },
             result: { status: 'error', error: { code: 'close_failed', message: 'topic close failed' } },

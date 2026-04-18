@@ -19,14 +19,12 @@ const setupTeardown = async () => {
         const requests = process._getActiveRequests ? process._getActiveRequests().length : 'unknown';
         console.log(`[SuiteTeardown] Active handles: ${handles}, Active requests: ${requests}`);
         
-        // Stop outboxPublisher if it's running (per-suite cleanup)
         try {
-            const { outboxPublisher } = await import('./packages/core/src/eventbus/outboxPublisher.js');
-            if (outboxPublisher && typeof outboxPublisher.stop === 'function') {
-                outboxPublisher.stop();
-            }
-        } catch (error) {
-            // Ignore - global teardown will handle it
+            const { EngineLocator } = await import('./packages/core/src/orchestration/EngineLocator.js');
+            const engine = EngineLocator.getEngine();
+            engine?.stopOutboxPublisher?.();
+        } catch {
+            /* noop */
         }
     });
 };

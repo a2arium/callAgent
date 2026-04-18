@@ -18,7 +18,7 @@ import { logger, withLoggingContext } from '@a2arium/callagent-utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { EngineLocator } from './EngineLocator.js';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
@@ -768,12 +768,28 @@ export class A2AService implements IA2AService {
                             ? parts.map(p => (typeof p === 'string' ? `${prefix} ${p}` : p?.text ? `${prefix} ${p.text}` : '')).filter(Boolean).join('\n')
                             : parts?.text ? `${prefix} ${parts.text}` : '';
                     if (text) {
-                        eventBus.publish(taskChannel(parent.parentTaskId), {
-                            artifact: {
-                                name: 'response', index: 0, append: false, lastChunk: false,
-                                parts: [{ type: 'text', text }]
-                            }
-                        } as any);
+                        void getRequiredEngine().eventBus.publish(
+                            createBusEvent({
+                                channel: taskChannel(parent.parentTaskId),
+                                partitionKey: parent.parentTaskId,
+                                cloud: {
+                                    id: uuidv7(),
+                                    type: 'task.a2a',
+                                    source: `/tasks/${parent.parentTaskId}`,
+                                    time: new Date().toISOString(),
+                                    datacontenttype: 'application/json',
+                                    data: {
+                                        artifact: {
+                                            name: 'response',
+                                            index: 0,
+                                            append: false,
+                                            lastChunk: false,
+                                            parts: [{ type: 'text', text }],
+                                        },
+                                    },
+                                },
+                            })
+                        );
                     }
                 } catch { /* noop */ }
             }

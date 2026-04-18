@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { SignalKindSchema } from './signal.js';
+
 export const MAX_TOPIC_MEMBERS = 64;
 
 export const ConversationIdSchema = z.string().min(1);
@@ -9,6 +11,15 @@ export const IdempotencyKeySchema = z.string().min(1);
 export const AgentIdSchema = z.string().min(1);
 export const MemberIdSchema = z.string().min(1).brand<'MemberId'>();
 export const InviteTokenSchema = z.string().min(1).brand<'InviteToken'>();
+
+const JsonPrimitiveSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+export type JsonValue =
+    | z.infer<typeof JsonPrimitiveSchema>
+    | { [key: string]: JsonValue }
+    | JsonValue[];
+export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+    z.union([JsonPrimitiveSchema, z.array(JsonValueSchema), z.record(z.string(), JsonValueSchema)])
+);
 
 export const ThreadRefSchema = z.object({
     kind: z.literal('thread'),
@@ -57,11 +68,20 @@ export const TopicSelectorSchema = z.discriminatedUnion('kind', [
             z.object({ by: z.literal('memberId'), memberId: MemberIdSchema }),
         ]),
     }),
+    z.object({
+        kind: z.literal('selector_policy'),
+        policyId: z.string().min(1).max(120),
+        params: JsonValueSchema.optional(),
+    }),
 ]);
 
 export const ConversationErrorSchema = z.discriminatedUnion('type', [
     z.object({
         type: z.literal('ThreadBusy'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('NoEligibleRecipients'),
         message: z.string(),
     }),
     z.object({
@@ -82,6 +102,10 @@ export const ConversationErrorSchema = z.discriminatedUnion('type', [
     }),
     z.object({
         type: z.literal('NotFound'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('ConversationNotFound'),
         message: z.string(),
     }),
     z.object({
@@ -153,7 +177,37 @@ export const ConversationErrorSchema = z.discriminatedUnion('type', [
         message: z.string(),
     }),
     z.object({
-        type: z.literal('ThreadNotClosed'),
+        type: z.literal('SelectorPolicyNotRegistered'),
+        message: z.string(),
+        policyId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('PolicyParamsInvalid'),
+        message: z.string(),
+        policyId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('PolicyInternalError'),
+        message: z.string(),
+        policyId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('StopPolicyNotRegistered'),
+        message: z.string(),
+        policyId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('StopPolicyParamsInvalid'),
+        message: z.string(),
+        policyId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('StopPolicyInternalError'),
+        message: z.string(),
+        policyId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('ConversationNotClosed'),
         message: z.string(),
     }),
     z.object({
@@ -165,7 +219,36 @@ export const ConversationErrorSchema = z.discriminatedUnion('type', [
         message: z.string(),
     }),
     z.object({
-        type: z.literal('ArchiveUnsupportedForTopics'),
+        type: z.literal('ProjectionNotRegistered'),
+        message: z.string(),
+        projectionName: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('ProjectionStateInvalid'),
+        message: z.string(),
+        projectionName: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('InvalidSignalKind'),
+        message: z.string(),
+    }),
+    z.object({
+        type: z.literal('RecipientNotThreadable'),
+        message: z.string(),
+        agentId: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('SpeechActNotAccepted'),
+        message: z.string(),
+        speechAct: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('ContentTypeNotAccepted'),
+        message: z.string(),
+        contentType: z.string().optional(),
+    }),
+    z.object({
+        type: z.literal('JsonSchemaValidationFailed'),
         message: z.string(),
     }),
 ]);
@@ -175,6 +258,11 @@ export const SpeechActSchema = z.enum([
     'answer',
     'inform',
     'request',
+    'task',
+    'followup',
+    'signal',
+    'vote',
+    'system',
 ]);
 
 export const OutboundThreadMessageSchema = z.object({
@@ -238,11 +326,35 @@ export const DeliverySummarySchema = z.object({
     correlationId: CorrelationIdSchema.optional(),
 });
 
+export const SelectorPolicyFanoutTraceSchema = z.object({
+    policyId: z.string(),
+    result: z.enum([
+        'selected',
+        'abstained_fallback_broadcast',
+        'params_invalid',
+        'not_registered',
+        'internal_error',
+    ]),
+    paramsHash: z.string().optional(),
+});
+
+/** Outcome of topic stop-policy evaluation after a successful topic append (for receipts / TurnTrace). Omitted when policies are not evaluated or all rules continue. */
+export const StopPolicyFanoutTraceSchema = z.discriminatedUnion('result', [
+    z.object({ result: z.literal('stop'), reason: z.string().optional() }),
+    z.object({
+        result: z.literal('rejected'),
+        error: ConversationErrorSchema,
+    }),
+]);
+export type StopPolicyFanoutTrace = z.infer<typeof StopPolicyFanoutTraceSchema>;
+
 export const FanoutSendReceiptSchema = z.discriminatedUnion('status', [
     z.object({
         status: z.literal('accepted'),
         topic: TopicRefSchema,
         deliveries: z.array(DeliverySummarySchema),
+        selectorPolicyTrace: SelectorPolicyFanoutTraceSchema.optional(),
+        stopPolicyTrace: StopPolicyFanoutTraceSchema.optional(),
     }),
     z.object({
         status: z.literal('partial'),
@@ -255,6 +367,8 @@ export const FanoutSendReceiptSchema = z.discriminatedUnion('status', [
                 error: ConversationErrorSchema,
             })
         ),
+        selectorPolicyTrace: SelectorPolicyFanoutTraceSchema.optional(),
+        stopPolicyTrace: StopPolicyFanoutTraceSchema.optional(),
     }),
     z.object({
         status: z.literal('queued'),
@@ -303,7 +417,7 @@ export const SendOptionsSchema = z.object({
 });
 
 /**
- * @remarks `archiveAfter` applies only to `thread` refs. For `topic` refs with `archiveAfter: true`, the service returns `ArchiveUnsupportedForTopics`.
+ * @remarks `archiveAfter: true` closes then archives in one orchestration path for both `thread` and `topic` refs.
  */
 export const CloseConversationOptionsSchema = z.object({
     reason: z.string().min(1).max(500).optional(),
@@ -314,10 +428,41 @@ export const ArchiveConversationOptionsSchema = z.object({
     reasonText: z.string().min(1).max(500).optional(),
 });
 
+export const TopicStopPolicySchema = z.discriminatedUnion('kind', [
+    z.object({
+        kind: z.literal('maxTurns'),
+        n: z.number().int().positive().max(10_000),
+    }),
+    z.object({
+        kind: z.literal('maxRounds'),
+        n: z.number().int().positive().max(10_000),
+    }),
+    z.object({
+        kind: z.literal('timeout'),
+        afterMs: z.number().int().positive().max(30 * 24 * 60 * 60 * 1000),
+    }),
+    z.object({
+        kind: z.literal('signalBased'),
+        signals: z.array(SignalKindSchema).min(1),
+        requiredCount: z.number().int().positive().optional(),
+    }),
+    z.object({
+        kind: z.literal('custom'),
+        policyId: z.string().min(1).max(120),
+        params: JsonValueSchema.optional(),
+    }),
+]);
+
+export type TopicStopPolicyRule = z.infer<typeof TopicStopPolicySchema>;
+
 export const TopicCreateOptionsSchema = z.object({
     topicId: ConversationIdSchema.optional(),
     members: z.array(TopicMemberSchema).min(1),
     defaultSelector: TopicSelectorSchema.optional(),
+    /**
+     * At least one stop rule; evaluated in order after each successful topic append.
+     */
+    stopPolicies: z.array(TopicStopPolicySchema).min(1),
     idempotencyKey: IdempotencyKeySchema.optional(),
 });
 
@@ -413,13 +558,27 @@ export const TopicLeaveReceiptSchema = z.discriminatedUnion('status', [
     }),
 ]);
 
-export const CloseConversationReceiptSchema = z.object({
-    ref: ConversationRefSchema,
-    closed: z.boolean(),
-    archived: z.boolean().optional(),
-});
+export const CloseConversationReceiptSchema = z.discriminatedUnion('status', [
+    z.object({
+        status: z.literal('ok'),
+        ref: ConversationRefSchema,
+        closed: z.boolean(),
+        archived: z.boolean().optional(),
+    }),
+    z.object({
+        status: z.literal('rejected'),
+        error: ConversationErrorSchema,
+    }),
+]);
 
-export const ArchiveConversationReceiptSchema = z.object({
-    ref: ThreadRefSchema,
-    archived: z.boolean(),
-});
+export const ArchiveConversationReceiptSchema = z.discriminatedUnion('status', [
+    z.object({
+        status: z.literal('ok'),
+        ref: ConversationRefSchema,
+        archived: z.boolean(),
+    }),
+    z.object({
+        status: z.literal('rejected'),
+        error: ConversationErrorSchema,
+    }),
+]);

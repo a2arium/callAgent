@@ -242,7 +242,10 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         globalA2AService: { sendTaskToAgent: sendMock, findLocalAgent: findMock }
     } as any));
     await jest.unstable_mockModule(path.resolve(srcDir, 'eventbus/outboxPublisher.ts'), () => ({
-        outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+        OutboxPublisher: jest.fn().mockImplementation(() => ({
+            start: jest.fn(),
+            stop: jest.fn(),
+        })),
     }));
     await jest.unstable_mockModule(path.resolve(srcDir, 'loop/loopRunner.ts'), () => ({
         runLoop: (...args: any[]) => runLoopMock(...args)

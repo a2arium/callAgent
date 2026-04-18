@@ -3,6 +3,8 @@ import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
 import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
 
+const DEFAULT_TOPIC_STOP = [{ kind: 'timeout' as const, afterMs: 86_400_000 }];
+
 describe('ConversationService topic harness', () => {
     const tenantId = 't-topic-h';
     const session = 'sess-1';
@@ -22,7 +24,7 @@ describe('ConversationService topic harness', () => {
             }),
             activateConversationRecipient: async () => ({ ok: true }),
             messageLog: createDbMessageLog(sessionManager),
-            resolveThreadTtlMs: () => null,
+            resolveThreadTtlMs: (_agentId: string) => null,
         });
         return { service, sessionManager };
     };
@@ -41,6 +43,7 @@ describe('ConversationService topic harness', () => {
                 },
             ],
             defaultSelector: { kind: 'round_robin' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') {
@@ -71,6 +74,7 @@ describe('ConversationService topic harness', () => {
                 { agentId: p2, role: 'participant' },
             ],
             defaultSelector: { kind: 'round_robin' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') {
@@ -109,6 +113,7 @@ describe('ConversationService topic harness', () => {
                 { agentId: p1, role: 'participant' },
             ],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
         });
         expect(created.status).toBe('ok');
         if (created.status !== 'ok') {
@@ -138,13 +143,17 @@ describe('ConversationService topic harness', () => {
                 { agentId: p1, role: 'participant' },
             ],
             defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
         });
         if (created.status !== 'ok') {
             throw new Error('create failed');
         }
         const topic = created.topic;
         const closed = await service.close(tenantId, session, owner, topic, {});
-        expect(closed.closed).toBe(true);
+        expect(closed.status).toBe('ok');
+        if (closed.status === 'ok') {
+            expect(closed.closed).toBe(true);
+        }
         const post = await service.post(
             tenantId,
             session,

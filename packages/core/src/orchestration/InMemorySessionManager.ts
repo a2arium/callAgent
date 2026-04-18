@@ -7,6 +7,7 @@ import type {
     ConversationTopicRecord,
     ConversationThreadRecord,
     ConversationThreadSweepRow,
+    ConversationTopicSweepRow,
     IWorkingMemorySessionStore,
     UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
@@ -40,6 +41,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
     /** `${tenantId}|${conversationId}|${idempotencyKey}` → invite token */
     private topicInviteIdempotencyIndex = new Map<string, string>();
     private messageDeliveries = new Map<string, ConversationMessageDeliveryRecord[]>();
+    private durableCursors = new Map<string, { sequenceNumber: number; updatedAt: string }>();
 
     async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
         const key = `${tenantId}:${sessionId}`;
@@ -263,6 +265,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         recipientAgentId: string | null;
         conversationKind: ConversationKind;
         selectorKind: string | null;
+        selectorPolicyId?: string | null;
         speechAct: string;
         payload: Record<string, unknown>;
         correlationId?: string;
@@ -280,6 +283,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             recipientAgentId: params.recipientAgentId,
             conversationKind: params.conversationKind,
             selectorKind: params.selectorKind,
+            selectorPolicyId: params.selectorPolicyId ?? null,
             speechAct: params.speechAct,
             payload: params.payload,
             correlationId: params.correlationId,
@@ -321,6 +325,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         ownerAgentId: string;
         defaultSelectorKind: string;
         defaultSelectorData: Record<string, unknown>;
+        stopPolicies: unknown[];
         members: Array<{
             memberId: string;
             agentId: string;
@@ -342,7 +347,17 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             status: 'open',
             defaultSelectorKind: params.defaultSelectorKind,
             defaultSelectorData: params.defaultSelectorData,
+            stopPolicies: [...params.stopPolicies],
             rotationCursor: null,
+            closedAt: null,
+            closeReason: null,
+            closeReasonText: null,
+            closedByAgentId: null,
+            closedByMemberId: null,
+            archivedAt: null,
+            archivedByAgentId: null,
+            archivedByMemberId: null,
+            archivedReasonText: null,
             createdAt: now,
             updatedAt: now,
         };
@@ -371,7 +386,24 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
     async updateConversationTopic(params: {
         tenantId: string;
         conversationId: string;
-        patch: Partial<Pick<ConversationTopicRecord, 'status' | 'rotationCursor' | 'defaultSelectorKind' | 'defaultSelectorData'>>;
+        patch: Partial<
+            Pick<
+                ConversationTopicRecord,
+                | 'status'
+                | 'rotationCursor'
+                | 'defaultSelectorKind'
+                | 'defaultSelectorData'
+                | 'closedAt'
+                | 'closeReason'
+                | 'closeReasonText'
+                | 'closedByAgentId'
+                | 'closedByMemberId'
+                | 'archivedAt'
+                | 'archivedByAgentId'
+                | 'archivedByMemberId'
+                | 'archivedReasonText'
+            >
+        >;
     }): Promise<void> {
         const key = `${params.tenantId}:${params.conversationId}`;
         const existing = this.conversationTopics.get(key);
@@ -383,6 +415,36 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             ...params.patch,
             updatedAt: new Date().toISOString(),
         });
+    }
+
+    async listConversationTopicsForSweep(params: {
+        tenantId: string;
+        closedBeforeIso: string;
+        limit: number;
+    }): Promise<ConversationTopicSweepRow[]> {
+        const out: ConversationTopicSweepRow[] = [];
+        const beforeMs = Date.parse(params.closedBeforeIso);
+        for (const t of this.conversationTopics.values()) {
+            if (t.tenantId !== params.tenantId) {
+                continue;
+            }
+            if (
+                t.status === 'closed' &&
+                t.archivedAt == null &&
+                t.closedAt != null &&
+                Date.parse(t.closedAt) < beforeMs
+            ) {
+                out.push({
+                    tenantId: t.tenantId,
+                    conversationId: t.conversationId,
+                    ownerAgentId: t.ownerAgentId,
+                });
+            }
+            if (out.length >= params.limit) {
+                break;
+            }
+        }
+        return out;
     }
 
     async listConversationTopicMembers(params: {
@@ -719,6 +781,42 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         return this.messageDeliveries.get(`${params.tenantId}:${params.conversationId}:${params.sequenceNumber}`) ?? [];
     }
 
+    async getDurableSubscriptionCursor(params: {
+        tenantId: string;
+        streamId: string;
+        consumerId: string;
+    }): Promise<{ sequenceNumber: number; updatedAt: string } | null> {
+        const key = `${params.tenantId}:${params.streamId}:${params.consumerId}`;
+        return this.durableCursors.get(key) ?? null;
+    }
+
+    async upsertDurableSubscriptionCursor(params: {
+        tenantId: string;
+        streamId: string;
+        consumerId: string;
+        sequenceNumber: number;
+        updatedAt: string;
+    }): Promise<void> {
+        const key = `${params.tenantId}:${params.streamId}:${params.consumerId}`;
+        this.durableCursors.set(key, {
+            sequenceNumber: params.sequenceNumber,
+            updatedAt: params.updatedAt,
+        });
+    }
+
+    async appendConversationDeadLetter(_params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+        consumerId: string;
+        record: Record<string, unknown>;
+        lastError: string;
+        attempts: number;
+        deadletteredAt: string;
+    }): Promise<void> {
+        // In-memory store discards DLQ rows (durable subscription tests use SQL store for persistence checks).
+    }
+
     // Helper method for testing/debugging (not part of interface)
     clear(): void {
         this.snapshots.clear();
@@ -730,6 +828,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         this.topicMembers.clear();
         this.topicInvites.clear();
         this.messageDeliveries.clear();
+        this.durableCursors.clear();
     }
 
     // Helper to get all snapshots (for debugging)

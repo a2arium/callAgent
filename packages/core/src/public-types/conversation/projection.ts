@@ -21,8 +21,10 @@ export const ThreadProjectionEntrySchema = z.object({
     closedReason: CloseReasonSchema.optional(),
     closedReasonText: z.string().optional(),
     closedByAgentId: AgentIdSchema.optional(),
+    closedByMemberId: MemberIdSchema.optional(),
     archivedAt: z.string().datetime().optional(),
     archivedByAgentId: AgentIdSchema.optional(),
+    archivedByMemberId: MemberIdSchema.optional(),
     archivedReasonText: z.string().optional(),
     expiresAt: z.string().datetime().optional(),
 });
@@ -51,6 +53,17 @@ export const TopicProjectionEntrySchema = z.object({
             })
         )
         .optional(),
+    closedAt: z.string().datetime().optional(),
+    closedReason: CloseReasonSchema.optional(),
+    closedReasonText: z.string().optional(),
+    closedByAgentId: AgentIdSchema.optional(),
+    closedByMemberId: MemberIdSchema.optional(),
+    archivedAt: z.string().datetime().optional(),
+    archivedByAgentId: AgentIdSchema.optional(),
+    archivedByMemberId: MemberIdSchema.optional(),
+    archivedReasonText: z.string().optional(),
+    /** Learning-materialized named topic projections (`readProjection` / reducer). */
+    topicProjections: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const ConversationProjectionSchema = z.object({
