@@ -1,5 +1,8 @@
 # Agent Dependencies Documentation
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 The callAgent framework provides a powerful agent dependency system that automatically resolves and loads dependent agents for A2A (Agent-to-Agent) communication.
 
 ## Quick Start
@@ -23,13 +26,18 @@ yarn run-agent apps/examples/hello-to-llm-demo/dist/AgentModule.js '{}' --no-res
    {
      "scripts": {
        "agent-index": "node node_modules/@a2arium/callagent-core/dist/runner/agentsCli.js index",
-       "agent-index:fast": "node node_modules/@a2arium/callagent-core/dist/runner/agentsCli.js index --allowSourceFallback"
+      "agent-index:fast": "node node_modules/@a2arium/callagent-core/dist/runner/agentsCli.js index"
      }
    }
 ```
 
-- The index builder performs a deep scan of your workspaces, validates manifests, and writes a
-  canonical map (`agentName -> module path`) to `.callagent/agent-paths.json`.
+- The index builder performs a deep scan of your workspaces, validates manifests, and writes
+  `.callagent/agent-paths.json` with either:
+  - legacy string entries: `{ "agent-name": "relative/module.js" }`
+  - structured entries: `{ "agent-name": { "module": "...", "agentCard": "...", "runtimeManifest": "..." } }`
+- Do not mix legacy and structured shapes in one file.
+- `--allowSourceFallback` only changes which module paths are written into the index.
+  It does not make plain Node runtimes import `.ts` directly.
 - The local runner loads this file automatically on startup, so `ctx.sendTaskToAgent`
   has deterministic lookups with zero filename heuristics.
 - Build warnings highlight missing or duplicate agents early, keeping CI reliable.

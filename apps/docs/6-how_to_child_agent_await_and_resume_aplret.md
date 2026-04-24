@@ -138,12 +138,12 @@ Rules:
 ### Step 3: Transition to await_child using the same token
 
 ```ts
-transition: (_env, exec) => {
+transition: (_env, exec, _m, _mem) => {
   if (exec.action.kind === 'child') {
     return { kind: 'await_child', token: exec.action.token };
   }
 
-  return { kind: 'continue', observations: [] };
+  return { kind: 'complete', result: { ok: true } };
 };
 ```
 

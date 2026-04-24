@@ -153,7 +153,7 @@ execution: async (intent, ctx, m) => {
 ### Step 6: Package plan into an observation in Transition
 
 ```ts
-transition: (_env, exec) => {
+transition: (_env, exec, _m, _mem) => {
   if (exec.result.status === 'ok' && exec.result.data?.plan) {
     return {
       kind: 'continue',
@@ -167,7 +167,7 @@ transition: (_env, exec) => {
     };
   }
 
-  return { kind: 'continue', observations: [] };
+  return { kind: 'complete', result: { ok: true } };
 };
 ```
 

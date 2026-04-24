@@ -78,8 +78,9 @@ function parseArgs(): {
     // Check for required agent file path
     if (!agentFileArg) {
         cliLogger.error(`Missing required argument: agent file path`);
-        console.error("Usage: yarn run-agent <path-to-agent-module.ts> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id] [--resolve-deps|--no-resolve-deps]");
-        console.error(`Example: yarn run-agent examples/hello-agent/AgentModule.ts '{"name": "World"}' --stream --format=json --tenant=customer-123 --resolve-deps`);
+        console.error("Usage: yarn run-agent <path-to-agent-module.js> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id] [--resolve-deps|--no-resolve-deps]");
+        console.error("For TypeScript sources, use `yarn dev` or run Node with a TS loader (tsx / --loader ts-node/esm).");
+        console.error(`Example: yarn run-agent examples/hello-agent/dist/AgentModule.js '{"name": "World"}' --stream --format=json --tenant=customer-123 --resolve-deps`);
         process.exit(1);
     }
 

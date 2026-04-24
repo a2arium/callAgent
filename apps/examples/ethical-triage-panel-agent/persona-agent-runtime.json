@@ -1,0 +1,20 @@
+{
+  "name": "ethical-triage-persona-agent",
+  "version": "0.1.0",
+  "runMode": "loop",
+  "budgets": {
+    "maxTurns": 120
+  },
+  "communication": {
+    "wakeOnTopicMessage": true,
+    "threadable": true,
+    "acceptedSpeechActs": ["inform", "question", "answer", "followup"],
+    "acceptedContentTypes": ["application/json", "text/plain"]
+  },
+  "observability": {
+    "turnTrace": {
+      "enabled": true,
+      "level": "summary"
+    }
+  }
+}

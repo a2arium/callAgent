@@ -1,5 +1,8 @@
 # Loop-First Agent Persistence and Auto-Resume
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 ## Overview
 
 The loop-first agent architecture eliminates the need for explicit durable handlers through an "always-auto-resume" model. When agents await events (user input, tool completion, child agent completion), the engine automatically resumes execution by running one additional loop turn after appending an observation to `env.inbox.current`. All agents should read inputs exclusively from the inbox observation queue. This document covers the technical implementation of auto-resume, MentalState persistence, and event-driven continuation.
@@ -162,9 +165,9 @@ MentalState is persisted when loop turns produce await outcomes:
 
 1. **Transition returns `await_input`**:
    ```typescript
-   transition: (env, exec, M) => {
-       if (exec.kind === 'ask_user') {
-           return { kind: 'await_input', token: exec.token };
+   transition: (env, exec, m, mem) => {
+       if (exec.action.kind === 'ask_user') {
+           return { kind: 'await_input', token: exec.action.token };
        }
        // → Engine persists M and exits
    }
@@ -172,9 +175,9 @@ MentalState is persisted when loop turns produce await outcomes:
 
 2. **Transition returns `await_tool` or `await_child`**:
    ```typescript
-   transition: (env, exec, M) => {
-       if (exec.kind === 'tool' && exec.token) {
-           return { kind: 'await_tool', token: exec.token };
+   transition: (env, exec, m, mem) => {
+       if (exec.action.kind === 'tool' && exec.action.token) {
+           return { kind: 'await_tool', token: exec.action.token };
        }
        // → Engine persists M and waits for tool completion
    }
@@ -248,14 +251,14 @@ export default createAgent({
                 return { kind: 'internal', done: true };
             },
             
-            transition: (env, exec, M) => {
-                if (exec.kind === 'ask_user') {
-                    return { kind: 'await_input', token: exec.token };
+            transition: (env, exec, m, mem) => {
+                if (exec.action.kind === 'ask_user') {
+                    return { kind: 'await_input', token: exec.action.token };
                 }
-                if (exec.kind === 'language') {
+                if (exec.action.kind === 'language') {
                     return { kind: 'complete' };
                 }
-                return { kind: 'continue' };
+                return { kind: 'complete', result: { ok: true } };
             }
         }
     },
@@ -341,11 +344,11 @@ export default createAgent({
                 return { kind: 'ask_user', prompt: 'Step 1: Choose category' };
             },
             
-            transition: (env, exec, M) => {
-                if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
-                if (exec.kind === 'subagent' && exec.token) return { kind: 'await_child', token: exec.token };
-                if (exec.kind === 'language') return { kind: 'complete' };
-                return { kind: 'continue' };
+            transition: (env, exec, m, mem) => {
+                if (exec.action.kind === 'ask_user') return { kind: 'await_input', token: exec.action.token };
+                if (exec.action.kind === 'subagent' && exec.action.token) return { kind: 'await_child', token: exec.action.token };
+                if (exec.action.kind === 'language') return { kind: 'complete' };
+                return { kind: 'complete', result: { ok: true } };
             }
         }
     },
@@ -440,9 +443,9 @@ Error: MentalState lost after resume
 
 **Debug**: Check MentalState before/after persistence:
 ```typescript
-transition: (env, exec, M) => {
+transition: (env, exec, m, mem) => {
     console.log('MentalState before await:', JSON.stringify(M, null, 2));
-    if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
+    if (exec.action.kind === 'ask_user') return { kind: 'await_input', token: exec.action.token };
 }
 ```
 
@@ -511,10 +514,10 @@ export default createAgent({
                 }
                 return { kind: 'ask_user', prompt: 'Choose option:' };
             },
-            transition: (env, exec, M) => {
-                if (exec.kind === 'ask_user') return { kind: 'await_input', token: exec.token };
-                if (exec.kind === 'language') return { kind: 'complete' };
-                return { kind: 'continue' };
+            transition: (env, exec, m, mem) => {
+                if (exec.action.kind === 'ask_user') return { kind: 'await_input', token: exec.action.token };
+                if (exec.action.kind === 'language') return { kind: 'complete' };
+                return { kind: 'complete', result: { ok: true } };
             }
         }
     },

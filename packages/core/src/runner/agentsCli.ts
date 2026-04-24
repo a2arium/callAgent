@@ -47,7 +47,7 @@ Commands:
 Options:
   --out=<path>     Output path for index (index command)
   --cwd=<path>     Working directory (defaults to process.cwd())
-  --allowSourceFallback  Include .ts modules when matching .js files are missing
+  --allowSourceFallback  Include .ts/.mts/.cts in index when .js is missing (index only; runtime still needs .js or TS loader)
   --index=<path>   Index path for load command (defaults to ${DEFAULT_AGENT_INDEX_PATH})
 
 Examples:

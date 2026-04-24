@@ -99,4 +99,39 @@ describe('TopicStopPolicy', () => {
         const row = await sessionManager.getConversationTopic({ tenantId, conversationId: topic.id });
         expect(row?.status).toBe('closed');
     });
+
+    it('signalBased closes the topic when appendSignal uses signalType in message content', async () => {
+        const { service, sessionManager } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-stop-signal',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: [
+                {
+                    kind: 'signalBased',
+                    signals: ['x-example.signal-stop'],
+                    requiredCount: 1,
+                },
+            ],
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+        const topic = created.topic;
+        const sig = await service.appendSignal(
+            tenantId,
+            session,
+            owner,
+            topic,
+            { signalType: 'x-example.signal-stop', payload: { ok: true } },
+            { selector: { kind: 'broadcast' } }
+        );
+        expect(sig.status).toBe('accepted');
+        const row = await sessionManager.getConversationTopic({ tenantId, conversationId: topic.id });
+        expect(row?.status).toBe('closed');
+    });
 });

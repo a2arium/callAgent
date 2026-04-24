@@ -460,6 +460,7 @@ it('shield vetoes dangerous actions', async () => {
 - Terminal state then another await → `InvariantError` with `detail.type === 'transition_invariant'`
 - StageFacade missing required key → `InvariantError` with `detail.type === 'stage_invariant'`; assert `e.invariant.detail.required`
 - Module failure → `ModuleExecutionError` with typed `module` field
+- Canonical envelope reference: `./16-observation_envelope_and_validation.md`
 
 ```ts
 it('throws InvariantError when transition awaits without token', async () => {
@@ -515,7 +516,7 @@ const h = createTestHarness<Sensory>({
         action: { kind: 'call_tool', token: 'tok-abc' },
         result: { status: 'ok', data: null },
     }),
-    transition: (_env, _exec, m: MentalState<Sensory>) =>
+    transition: (_env, _exec, m: MentalState<Sensory>, _mem: MemoryReader) =>
         m.memory.sensory?.userInput
             ? { kind: 'await_tool' as const, token: 'tok-abc' }
             : { kind: 'complete' as const },

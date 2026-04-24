@@ -137,6 +137,7 @@ Primary fields:
 - `inboxCurrent`
 - `perception`
 - invariant errors (if present — inspect via `instanceof InvariantError` and `e.invariant.detail.type` narrowing, or `instanceof ModuleExecutionError` for module failures). Invalid observation envelopes are injected as `source: 'internal', kind: 'validation.failed'` into the inbox rather than thrown.
+- canonical envelope and validation reference: `./16-observation_envelope_and_validation.md`
 
 ### E) Configuration drift
 

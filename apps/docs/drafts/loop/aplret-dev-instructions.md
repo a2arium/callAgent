@@ -1,5 +1,8 @@
 # A-P-L-R-E-T Architecture with Stage Dispatcher Pattern
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 **Production-Ready Agent Architecture for callagent Framework**
 
 TODO: define recordUsage method
@@ -354,7 +357,7 @@ export const agent = createAgent<Sensory, Obs, AttentionSignal, unknown, ExecErr
     return { action: { kind: 'internal', done: true }, result: { status: 'ok', toolId: 'internal' } };
   },
 
-  transition: (_env, exec): TurnOutcome<ObservationConfig> => {
+  transition: (_env, exec, _m, _mem): TurnOutcome<ObservationConfig> => {
     if (exec.action.kind === 'ask_user') return { kind: 'await_input', token: exec.action.token };
     return { kind: 'complete', result: { ok: true } };
   }
@@ -1201,7 +1204,7 @@ export const agent = createAgent({
 ### Transition
 
 ```typescript
-transition: (env: EnvironmentState, exec: ExecutableAction, m: MentalState) => TurnOutcome
+transition: (env: EnvironmentState, exec: ExecOutcome, m: MentalState, mem: MemoryReader) => TransitionOut
 ```
 
 **Purpose**: Control loop flow based on execution result.
@@ -1213,7 +1216,7 @@ type MyConfig = {
   internal: { value: string };
 };
 
-transition: (env: EnvironmentState<MyConfig>, exec, m): TurnOutcome<MyConfig> => {
+transition: (env: EnvironmentState<MyConfig>, exec, m, mem): TransitionOut<MyConfig> => {
   // Await outcomes
   if (exec.kind === 'ask_user') {
     return { kind: 'await_input', token: exec.token };
@@ -1476,7 +1479,7 @@ execution: async (intent, ctx) => {
 }
 
 // 3. Pause parent loop until child completes
-transition: (env, exec) => {
+transition: (env, exec, _m, _mem) => {
   const result = exec.result;
   
   // Pause parent - child will auto-inject completion into inbox when done
@@ -1485,7 +1488,7 @@ transition: (env, exec) => {
   }
   
   // Other transitions...
-  return { kind: 'continue', observations: [] };
+  return { kind: 'complete', result: { ok: true } };
 }
 
 // 4. Handle child completion in Perception with clean structure

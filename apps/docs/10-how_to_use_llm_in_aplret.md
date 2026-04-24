@@ -628,7 +628,7 @@ export default createAgent({
     };
   },
 
-  transition: (_env, exec) => {
+  transition: (_env, exec, _m, _mem) => {
     if (exec.action.kind === 'ask_user') {
       return { kind: 'await_input', token: exec.action.token };
     }
@@ -659,7 +659,7 @@ export default createAgent({
       return { kind: 'complete', result: exec.result.data };
     }
 
-    return { kind: 'continue', observations: [] };
+    return { kind: 'complete', result: { ok: false, reason: 'no_transition_match' } };
   }
 }, import.meta.url);
 ```

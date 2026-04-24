@@ -16,6 +16,16 @@
       "types": "./dist/generated/prisma-client/index.d.ts",
       "import": "./dist/generated/prisma-client/index.js",
       "default": "./dist/generated/prisma-client/index.js"
+    },
+    "./unstable": {
+      "types": "./dist/unstable.d.ts",
+      "import": "./dist/unstable.js",
+      "default": "./dist/unstable.js"
+    },
+    "./testing/contracts": {
+      "types": "./dist/testing/contracts.d.ts",
+      "import": "./dist/testing/contracts.js",
+      "default": "./dist/testing/contracts.js"
     }
   },
   "scripts": {

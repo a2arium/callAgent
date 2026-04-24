@@ -280,6 +280,7 @@ export function transition(
     _m: MentalState<Sensory>,
     _mem: MemoryReader
 ): TransitionOut {
+    // See docs: apps/docs/16-observation_envelope_and_validation.md for valid envelope shapes.
     if (exec.action.kind === 'prompt_user') {
         return { kind: 'await_input', token: exec.action.token };
     }
@@ -329,6 +330,21 @@ import { execution } from '../execution.js';
 import { transition } from '../transition.js';
 
 describe('${pkg} — golden path', () => {
+    it('awaits input when inbox is empty', async () => {
+        const harness = createTestHarness({
+            attention,
+            perception,
+            learning,
+            policy,
+            shield,
+            execution,
+            transition,
+        });
+
+        await harness.runTurn();
+        expect(harness.lastTrace().transition?.kind).toBe('await_input');
+    });
+
     it('completes after user input', async () => {
         const harness = createTestHarness({
             attention,

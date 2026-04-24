@@ -780,7 +780,12 @@ Purpose: convert execution results into control flow and next-turn observations.
 Contract:
 
 ```ts
-transition(env, exec, m) => TurnOutcome
+transition(
+  env: EnvironmentState,
+  exec: ExecOutcome,
+  m: MentalState,
+  mem: MemoryReader
+) => TransitionOut
 ```
 
 Rules:
@@ -789,6 +794,20 @@ Rules:
 - no external side effects
 - must enforce await invariants
 - if `continue`, must include observations
+
+### Suspending the loop (`await_input` / `await_tool` / `await_child`)
+
+`continue` is not a sleep mode. It must carry at least one observation; returning
+`{ kind: 'continue', observations: [] }` violates runtime invariants and triggers
+`CONTINUE_WITHOUT_OBSERVATIONS`.
+
+To pause and wait for future work, return one of the explicit await outcomes:
+
+- `{ kind: 'await_input', token }` when waiting for user input
+- `{ kind: 'await_tool', token }` when waiting for async tool completion
+- `{ kind: 'await_child', token }` when waiting for child completion
+
+`complete` is terminal for the task/turn outcome and should not be used as pause semantics.
 
 ## Repository structure
 
@@ -1764,7 +1783,7 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
     };
   },
 
-  transition: (_env, exec) => {
+  transition: (_env, exec, _m, _mem) => {
     if (exec.action.kind === 'ask_user') {
       return {
         kind: 'await_input',

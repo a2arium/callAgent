@@ -8,9 +8,11 @@
 // - Placeholders for future capabilities (world model, emotion, reward)
 import { Observation, ObservationSchema } from '../types/observation.js';
 import { PlanState, PlanStep, Plan, PlanId } from '../types/plan.js';
+import { logger } from '@a2arium/callagent-utils';
 
 
 export type ObservationBySource<Source> = Extract<Observation, { source: Source }>;
+const loopTypesLogger = logger.createLogger({ prefix: 'LoopTypes' });
 
 const findUser = (observations: Observation[]) =>
     observations.find((o): o is ObservationBySource<'user'> => o?.source === 'user');
@@ -260,9 +262,14 @@ export const normalizeObservationInbox = (
             if (parsed.success) {
                 result.push(parsed.data);
             } else {
+                loopTypesLogger.warn('Invalid observation envelope; injecting validation.failed', {
+                    error: parsed.error.message
+                });
                 if (process.env.CALLAGENT_DEBUG_INBOX) {
-                    // eslint-disable-next-line no-console
-                    console.warn('[normalizeObservationInbox] Invalid observation envelope, injecting validation.failed:', parsed.error.message);
+                    loopTypesLogger.debug('Invalid observation envelope details', {
+                        zodError: parsed.error.format(),
+                        originalPayload: item
+                    });
                 }
                 // Inject validation.failed observation per APLRET contract so Perception/Learning can handle it
                 result.push({

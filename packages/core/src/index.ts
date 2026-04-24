@@ -244,13 +244,16 @@ export {
     type DeepPartial,
     type HarnessCommunicationManifestPatch,
 } from './testing/harnessTypes.js';
-export * from './testing/index.js';
 export * from './public-types/conversation/index.js';
 export * from './public-types/messageLog/index.js';
 export {
     topicTranscriptProjectionToken,
     ensureBuiltinTopicProjectionsRegistered,
 } from './internal/conversation/builtinTopicProjections.js';
+export {
+    getTopicProjectionRegistry,
+    type TopicProjectionRegistry,
+} from './internal/conversation/TopicProjectionRegistry.js';
 
 // Agent scaffolding
 export { scaffoldAgent, formatScaffoldError } from './scaffold/scaffoldAgent.js';

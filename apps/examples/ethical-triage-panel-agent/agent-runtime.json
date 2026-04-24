@@ -1,0 +1,20 @@
+{
+  "name": "ethical-triage-moderator-agent",
+  "version": "0.1.0",
+  "runMode": "loop",
+  "budgets": {
+    "maxTurns": 40
+  },
+  "communication": {
+    "wakeOnTopicMessage": true,
+    "threadable": true,
+    "acceptedSpeechActs": ["inform", "question", "answer", "followup", "signal"],
+    "acceptedContentTypes": ["application/json", "text/plain"]
+  },
+  "observability": {
+    "turnTrace": {
+      "enabled": true,
+      "level": "summary"
+    }
+  }
+}

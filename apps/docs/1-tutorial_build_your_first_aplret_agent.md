@@ -251,7 +251,7 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
     };
   },
 
-  transition: (_env, exec) => {
+  transition: (_env, exec, _m, _mem) => {
     if (exec.action.kind === 'prompt_user') {
       return {
         kind: 'await_input',

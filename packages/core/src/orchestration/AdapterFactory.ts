@@ -53,6 +53,14 @@ export type ResolvedTransportAdapters = {
     close?: () => Promise<void>;
 };
 
+function isModuleNotFoundError(err: unknown): boolean {
+    if (!err || typeof err !== 'object') {
+        return false;
+    }
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND';
+}
+
 type NatsTransportModule = {
     createNatsTransportAdapters: (opts: {
         servers: string[];
@@ -71,13 +79,18 @@ type NatsTransportModule = {
 
 async function loadNatsModule(): Promise<NatsTransportModule> {
     try {
-        return (await import('@a2arium/callagent-eventbus-nats')) as NatsTransportModule;
-    } catch {
-        throw new AdapterErrorThrowable({
-            kind: 'AdapterNotInstalled',
-            adapterId: 'nats',
-            packageName: '@a2arium/callagent-eventbus-nats',
-        });
+        /** Non-literal specifier so `tsc` does not pull workspace sources into the core program graph. */
+        const pkg = `@a2arium/${'callagent-eventbus-nats'}`;
+        return (await import(pkg)) as NatsTransportModule;
+    } catch (err) {
+        if (isModuleNotFoundError(err)) {
+            throw new AdapterErrorThrowable({
+                kind: 'AdapterNotInstalled',
+                adapterId: 'nats',
+                packageName: '@a2arium/callagent-eventbus-nats',
+            });
+        }
+        throw err;
     }
 }
 

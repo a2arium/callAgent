@@ -338,6 +338,7 @@ turbo run test --filter=packages/core
 The framework uses **ESM modules** throughout. When developing:
 
 - Use `yarn dev` for rapid TypeScript iteration
+- Use `yarn run-agent` with compiled `.js` agent module paths; use `yarn dev` (or TS loaders) for `.ts` source modules
 - All relative imports require explicit `.js` extensions
 - Use `import.meta.url` for agent module resolution
 

@@ -1,5 +1,8 @@
 # TaskEngine and A2AService Integration
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 ## Overview
 
 The TaskEngine and A2AService work together to provide seamless agent-to-agent communication with proper parent-child correlation, handler registration, and context management. This document covers the technical architecture, integration patterns, and implementation details of how these systems coordinate.
@@ -113,9 +116,9 @@ async sendTaskToAgent(ctx, targetAgent, taskInput) {
 }
 
 // Parent Transition returns await_child
-transition: (env, exec, M) => {
-    if (exec.kind === 'subagent' && exec.token) {
-        return { kind: 'await_child', token: exec.token };
+transition: (env, exec, m, mem) => {
+    if (exec.action.kind === 'subagent' && exec.action.token) {
+        return { kind: 'await_child', token: exec.action.token };
     }
     // ...
 }

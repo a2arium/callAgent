@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe } from '@jest/globals';
+import { createNatsJetStreamDurableSubscription } from '@a2arium/callagent-core';
 import {
-    createNatsJetStreamDurableSubscription,
     runDurableSubscriptionContract,
     runEventBusContract,
     runMessageLogContract,
-} from '@a2arium/callagent-core';
+} from '@a2arium/callagent-core/testing/contracts';
 import { InMemorySessionManager } from '../../core/src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../../core/src/orchestration/SessionManager.js';
 import { createNatsTransportAdapters } from '../src/index.js';

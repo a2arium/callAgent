@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PluginManager } from './pluginManager.js';
 import { logger } from '@a2arium/callagent-utils';
-import { DEFAULT_AGENT_INDEX_PATH, AgentIndexEntry, AgentIndexRecord } from './AgentIndexBuilder.js';
+import { DEFAULT_AGENT_INDEX_PATH, AgentIndexEntry } from './AgentIndexBuilder.js';
 
 const loaderLogger = logger.createLogger({ prefix: 'AgentIndexLoader' });
 
@@ -24,12 +24,30 @@ export interface LoadAgentIndexOptions {
     silent?: boolean;
 }
 
-type IndexShape = AgentIndexRecord | Record<string, string>;
+type RawIndexShape = Record<string, unknown>;
 
 const toAbsolute = (value: string, baseDir: string): string => path.resolve(baseDir, value);
+const isTypeScriptModulePath = (modulePath: string): boolean => /\.(ts|mts|cts)$/i.test(modulePath);
+const hasTypeScriptRuntimeSupport = (): boolean => {
+    const argv = process.execArgv.join(' ');
+    return argv.includes('ts-node') || argv.includes('tsx');
+};
 
-const isAgentIndexRecord = (value: IndexShape): value is AgentIndexRecord => {
-    return Object.values(value).every(entry => typeof entry === 'object');
+const normalizeEntry = (entry: unknown): AgentIndexEntry | null => {
+    if (typeof entry === 'string') {
+        return { module: entry };
+    }
+    if (entry && typeof entry === 'object') {
+        const candidate = entry as Partial<AgentIndexEntry>;
+        if (typeof candidate.module === 'string') {
+            return {
+                module: candidate.module,
+                agentCard: typeof candidate.agentCard === 'string' ? candidate.agentCard : null,
+                runtimeManifest: typeof candidate.runtimeManifest === 'string' ? candidate.runtimeManifest : null
+            };
+        }
+    }
+    return null;
 };
 
 export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promise<{ loaded: string[]; skipped: string[] }> {
@@ -41,10 +59,10 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
         return { loaded: [], skipped: [] };
     }
 
-    let json: IndexShape;
+    let json: RawIndexShape;
     try {
         const content = await fs.readFile(indexPath, 'utf8');
-        json = JSON.parse(content) as IndexShape;
+        json = JSON.parse(content) as RawIndexShape;
     } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
             if (!options.silent) {
@@ -62,13 +80,18 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
     const skippedAgents: string[] = [];
     const manifestByAgent = new Map<string, string | undefined>();
 
-    const entries: AgentIndexRecord = isAgentIndexRecord(json)
-        ? json
-        : Object.fromEntries(
-              Object.entries(json).map(([name, module]) => [name, { module } as AgentIndexEntry])
-          );
-
-    for (const [agentName, entry] of Object.entries(entries)) {
+    for (const [agentName, rawEntry] of Object.entries(json)) {
+        const entry = normalizeEntry(rawEntry);
+        if (!entry) {
+            skippedAgents.push(agentName);
+            if (!options.silent) {
+                loaderLogger.warn('Skipping malformed agent index entry. Expected string module path or object with string `module`.', {
+                    agentName,
+                    entryType: rawEntry === null ? 'null' : typeof rawEntry
+                });
+            }
+            continue;
+        }
         const modulePath = entry.module;
         if (!modulePath) {
             skippedAgents.push(agentName);
@@ -86,6 +109,33 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
             }
 
             manifestByAgent.set(agentName, agentCardPath || runtimeManifestPath);
+
+            if (isTypeScriptModulePath(absoluteModulePath) && !hasTypeScriptRuntimeSupport()) {
+                skippedAgents.push(agentName);
+                if (!options.silent) {
+                    loaderLogger.warn(
+                        'Agent index points to a TypeScript module that this runtime cannot import directly. ' +
+                            'Compile the agent to .js or run with a TypeScript loader (for example tsx or ts-node/esm).',
+                        {
+                            agentName,
+                            modulePath: absoluteModulePath
+                        }
+                    );
+                }
+                try {
+                    const discovered = await PluginManager.loadAgent(agentName);
+                    if (discovered) {
+                        loadedAgents.push(agentName);
+                    }
+                } catch (fallbackError) {
+                    if (!options.silent) {
+                        loaderLogger.error('Fallback discovery failed for TypeScript index entry', fallbackError, {
+                            agentName
+                        });
+                    }
+                }
+                continue;
+            }
 
             const moduleUrl = pathToFileURL(absoluteModulePath).href;
             const agentModule = await import(moduleUrl);

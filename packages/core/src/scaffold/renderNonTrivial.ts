@@ -112,6 +112,7 @@ import type { Obs } from '../types.js';
 
 /** Normalize user inbox rows into agent Obs. */
 export function normalizeUserObservation(obs: Observation): Obs | null {
+    // See docs: apps/docs/16-observation_envelope_and_validation.md for envelope rules.
     if (obs.source !== 'user' || obs.kind !== 'input.provided') {
         return null;
     }

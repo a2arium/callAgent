@@ -1,5 +1,8 @@
 ## Loop Architecture Overview
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 This document describes the loop-first execution model (Attention → Perception → Learning → Policy → Shield → Execution → Transition) with auto-resume capabilities and how it integrates with MentalState persistence and TaskEngine.
 
 - MentalState `snapshot.M` is the single source of truth, persisted at turn boundaries and before await exits.
@@ -82,22 +85,22 @@ Standard transition patterns for auto-resume:
 ```ts
 loop: {
   modules: {
-    transition: (env, exec, M) => {
+    transition: (env, exec, m, mem) => {
       // Auto-resume outcomes
-      if (exec.kind === 'ask_user') {
-        return { kind: 'await_input', token: exec.token };
+      if (exec.action.kind === 'ask_user') {
+        return { kind: 'await_input', token: exec.action.token };
       }
-      if (exec.kind === 'tool' && exec.token) {
-        return { kind: 'await_tool', token: exec.token };
+      if (exec.action.kind === 'tool' && exec.action.token) {
+        return { kind: 'await_tool', token: exec.action.token };
       }
-      if (exec.kind === 'subagent' && exec.token) {
-        return { kind: 'await_child', token: exec.token };
+      if (exec.action.kind === 'subagent' && exec.action.token) {
+        return { kind: 'await_child', token: exec.action.token };
       }
       
       // Terminal outcomes
-      if (exec.kind === 'language') return { kind: 'complete' };
+      if (exec.action.kind === 'language') return { kind: 'complete' };
       
-      return { kind: 'continue' };
+      return { kind: 'complete', result: { ok: true } };
     }
   }
 }

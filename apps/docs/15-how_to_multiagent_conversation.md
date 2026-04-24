@@ -74,7 +74,7 @@ Turn N (sender):
   Policy emits intent            → { kind: 'internal', intent: 'send_greeting' }
   Shield passes                  → { action: 'pass' }
   Execution calls ctx.conversation.{startThread|send|post|invite|...}
-  Transition returns { kind: 'continue', observations: [] }
+  Transition returns { kind: 'await_input' | 'await_tool' | 'await_child', token }
 
 Turn N (recipient, if wakeOnTopicMessage/wakeOnThread triggers):
   Runtime injects observation into env.inbox.current

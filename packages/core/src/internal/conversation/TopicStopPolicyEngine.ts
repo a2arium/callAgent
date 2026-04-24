@@ -13,12 +13,12 @@ export type TopicStopPolicyEngineResult =
     | { status: 'stop'; reason?: string }
     | { status: 'error'; error: ConversationError };
 
-function extractSignalKind(payload: Record<string, unknown>): string | undefined {
+/** Reads `signalType` from persisted signal message content (`appendSignal` shape). */
+function extractSignalType(payload: Record<string, unknown>): string | undefined {
     const c = payload.content;
-    if (c && typeof c === 'object' && c !== null && 'signalKind' in c) {
-        return String((c as { signalKind?: unknown }).signalKind);
-    }
-    return undefined;
+    return c && typeof c === 'object' && 'signalType' in c
+        ? String((c as { signalType: unknown }).signalType)
+        : undefined;
 }
 
 type BuiltinDecision = { kind: 'continue' } | { kind: 'stop'; reason?: string };
@@ -51,7 +51,7 @@ function evaluateBuiltin(
                 if (m.speechAct !== 'signal') {
                     continue;
                 }
-                const sk = extractSignalKind(m.payload);
+                const sk = extractSignalType(m.payload);
                 if (sk === undefined) {
                     continue;
                 }
