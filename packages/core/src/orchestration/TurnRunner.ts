@@ -17,6 +17,11 @@ import type { IEventBus } from '../public-types/eventbus/types.js';
 import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
+import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
+import {
+    filterInboxCurrentByConversationDeliveryKeys,
+    readConsumedConversationDeliveryKeysFromMeta,
+} from '../loop/conversationInboxIdentity.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
@@ -139,7 +144,13 @@ export class TurnRunner {
             // 5. Environment & Inbox Setup
             const startTurnTotal = Number((base as any)?.meta?.turn) || 0;
 
-            let envInbox = InboxManager.normalizeInbox((base as any)?.inbox);
+            const consumedDeliveryKeys = readConsumedConversationDeliveryKeysFromMeta(
+                (base as { meta?: unknown })?.meta
+            );
+            let envInbox = filterInboxCurrentByConversationDeliveryKeys(
+                InboxManager.normalizeInbox((base as { inbox?: unknown })?.inbox),
+                consumedDeliveryKeys
+            );
             // Hydrate
             envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
                 envInbox,
@@ -323,7 +334,9 @@ export class TurnRunner {
             // Restore budgets
             let loopOpts: LoopOpts = {};
             try {
-                const persistedBudgets = (base as Record<string, unknown>)?.meta as { maxTurns?: number; latencyMs?: number } | undefined;
+                const persistedBudgets = readLoopBudgetsFromSnapshotMeta(
+                    (base as Record<string, unknown>)?.meta
+                );
                 const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                 const hitl = plugin?.resolved.runtimeManifest.hitl;
                 const communication = plugin?.resolved.runtimeManifest.communication;

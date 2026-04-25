@@ -86,6 +86,15 @@ Turn N (recipient, if wakeOnTopicMessage/wakeOnThread triggers):
 
 `M.memory.conversation` is populated by the default **`reduceConversationProjection`** — treat it as **read-only** in Policy.
 
+### Inbound delivery, completion, and `Transition`
+
+There is **no** `ctx.conversation.ack` (or any other participant-side) API to acknowledge a thread or topic delivery. A delivery is an observation on `env.inbox.current`; the runtime may wake a member (e.g. with `wakeOnTopicMessage: true`); in the loop, **a completed turn after your agent has handled the message** is the canonical “done with this delivery” signal.
+
+- **`{ kind: 'complete', ... }`**: use when the agent is finished for this run after handling the inbound (including a topic or thread message). This is the usual outcome after processing a `message.received` / `topic.message.received` unless you intentionally schedule more work in the same loop.
+- **`{ kind: 'continue', observations: [...] }`**: use when you intentionally add **at least one** new observation so the **next** internal turn has something to process. Do not use `continue` merely to “stay in the loop” with no new work.
+
+**Diagnostics:** seeing the same conversation `message.id` appear again in `env.inbox.current` on a later turn without a new post is a **framework bug**; open an issue (include `TurnTrace`). In contrast, **increasing** `message.id` values in the log is normal agent protocol traffic (e.g. replies and new posts from peers).
+
 ---
 
 ## Step 1: Enable conversation on your agent
@@ -359,12 +368,12 @@ type FanoutSendReceipt =
     topic: { kind: 'topic', id },
     selector: { kind: 'round_robin' },      // kind only; opaque for explicit_recipient
     recipient: { memberId, agentId },
-    message: { ...InboundMessage }
+    message: { ...InboundMessage }           // includes senderAgentId + senderMemberId
   }
 }
 ```
 
-Perception must narrow on `recipient.memberId` to know which seat was addressed. In the canonical panel example, each Perception run routes only messages where `recipient.memberId` matches the loop session's seat.
+Perception must narrow on `recipient.memberId` to know which seat was addressed. For multi-seat same-agent topics, use `message.senderMemberId` (not only `senderAgentId`) to identify which seat spoke. In the canonical panel example, each Perception run routes only messages where `recipient.memberId` matches the loop session's seat.
 
 ### Leaving
 
@@ -736,7 +745,7 @@ Every conversation inbound enters `env.inbox.current` as `{ source: 'conversatio
 | `delivery.failed` | Sender | `thread`, `error`, `messageId?`, `recipientAgentId?` |
 | `thread.closed` | Both participants | `thread`, `ts`, `closedBy?`, `closedReason?`, `reasonText?` |
 | `thread.archived` | Both participants | `thread`, `ts`, `archivedBy?`, `reasonText?` |
-| `topic.message.received` | Selected recipients | `topic`, `selector`, `recipient.{memberId, agentId}`, `message` |
+| `topic.message.received` | Selected recipients | `topic`, `selector`, `recipient.{memberId, agentId}`, `message` (`senderAgentId`, `senderMemberId`, `recipientMemberId`, ...) |
 | `topic.invite.issued` | Inviter | `topic`, `invitee`, `token`, `expiresAt`, `inviterAgentId` |
 | `topic.invite.received` | Invitee | `topic`, `token`, `expiresAt`, `role`, `inviterAgentId` |
 | `topic.invite.accepted` | Inviter & joiner | `topic`, `token`, `member` |

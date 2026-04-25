@@ -77,6 +77,7 @@ describe('turnTraceHelpers', () => {
                             id: 'msg-1',
                             conversation: { kind: 'thread', id: 'thread-1' },
                             senderAgentId: 'a',
+                            senderMemberId: 'a',
                             recipientAgentId: 'b',
                             speechAct: 'inform',
                             content: {},

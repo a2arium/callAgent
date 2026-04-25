@@ -170,6 +170,7 @@ describe('runLoop memory wiring and defaults', () => {
                             id: 'msg-cov-1',
                             conversation: { kind: 'thread', id: 'thread-cov-1' },
                             senderAgentId: 'agent-parent',
+                            senderMemberId: 'agent-parent',
                             recipientAgentId: 'agent-child',
                             recipientMemberId: 'mem-child',
                             speechAct: 'request',
@@ -196,6 +197,77 @@ describe('runLoop memory wiring and defaults', () => {
         expect(trace?.conversation?.id).toBe('thread-cov-1');
         expect(trace?.incomingMessages?.[0]?.id).toBe('msg-cov-1');
         expect(trace?.messageSequenceNumber).toBe(1);
+    });
+
+    it('filters transition re-emit of consumed message.received and replaces with state.noted on continue', async () => {
+        const threadObs = {
+            source: 'conversation',
+            kind: 'message.received',
+            payload: {
+                kind: 'message.received',
+                message: {
+                    id: 'm-loop-dup',
+                    conversation: { kind: 'thread' as const, id: 'th-drain' },
+                    senderAgentId: 'o',
+                    senderMemberId: 'o',
+                    recipientAgentId: 'p',
+                    recipientMemberId: 'p',
+                    speechAct: 'inform' as const,
+                    content: {},
+                    sequenceNumber: 1,
+                    ts: new Date().toISOString(),
+                },
+            },
+        };
+        const reEmit: typeof threadObs = {
+            ...threadObs,
+            payload: {
+                ...threadObs.payload,
+                message: { ...threadObs.payload.message },
+            },
+        };
+        let turn = 0;
+        const ctx: Record<string, unknown> = {
+            task: { id: 'loop-drain-task', input: 'x' },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() },
+        };
+        const M: Record<string, unknown> = initialM(ctx);
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({
+                current: [threadObs],
+                all: [threadObs],
+            }),
+        });
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ ok: true }),
+            learning: async (prev: unknown) => prev,
+            policy: () => ({ kind: 'internal', intent: 'noop' }),
+            shield: (_m: unknown, intent: unknown) => ({ action: 'pass', intent }),
+            execution: async (intent: unknown) => ({ action: intent, result: { status: 'ok', data: {} } }),
+            transition: () => {
+                if (turn === 0) {
+                    turn += 1;
+                    return { kind: 'continue', observations: [reEmit] };
+                }
+                return { kind: 'await_input', token: 'halt' };
+            },
+        };
+        const result = await runLoop(ctx, M, env, modules as never, { maxTurns: 2, collectTraces: true });
+        expect(turn).toBe(1);
+        expect(result.traces?.length).toBeGreaterThanOrEqual(2);
+        const second = result.traces?.[1];
+        expect(second?.inboxCurrent?.[0]?.kind).toBe('state.noted');
+        const nThreadInAll = env.inbox.all.filter(
+            (o) =>
+                (o as { source?: string; payload?: { kind?: string } }).source === 'conversation' &&
+                (o as { payload?: { kind?: string } }).payload?.kind === 'message.received'
+        );
+        expect(nThreadInAll.length).toBe(1);
     });
 });
 

@@ -285,6 +285,7 @@ export const InboundMessageSchema = z.object({
     id: MessageIdSchema,
     conversation: ConversationRefSchema,
     senderAgentId: AgentIdSchema,
+    senderMemberId: MemberIdSchema,
     recipientAgentId: AgentIdSchema,
     recipientMemberId: MemberIdSchema,
     speechAct: SpeechActSchema,

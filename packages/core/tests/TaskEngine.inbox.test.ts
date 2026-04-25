@@ -93,6 +93,7 @@ describe('TaskEngine inbox coordination', () => {
                                 id: 'msg-te-inbox-1',
                                 conversation: { kind: 'thread', id: 'thread-te-1' },
                                 senderAgentId: 'parent',
+                                senderMemberId: 'parent',
                                 recipientAgentId: 'child',
                                 recipientMemberId: 'mem-child',
                                 speechAct: 'request',

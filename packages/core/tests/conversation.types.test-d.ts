@@ -114,6 +114,7 @@ const _validObs = {
             id: 'm1',
             conversation: { kind: 'thread', id: 't1' },
             senderAgentId: 'a',
+            senderMemberId: 'a',
             recipientAgentId: 'b',
             speechAct: 'inform',
             content: {},

@@ -48,11 +48,19 @@ yarn run-agent apps/examples/streaming-agent/dist/AgentModule.js '{"query":"Tell
 - `--stream`: Enable streaming mode (default: false)
 - `--format=<format>`: Output format, one of 'console', 'json', or 'sse' (default: 'console')
 - `--output=<file>`: Write output to the specified file as well as stdout
+- `--max-turns=<n>`: Override loop turn budget with a positive integer
 
 ### Runtime note
 
 - `yarn run-agent` uses compiled JS (`node .../dist/runnerCli.js`)
 - For TypeScript source modules, use `yarn dev` or a Node TS loader (`tsx` / `--loader ts-node/esm`)
+
+### Conversation visibility note
+
+- In non-streaming mode, `runnerCli` reports root-task completion and exits; it does not wait indefinitely for every conversation/topic seat session.
+- Use `--stream` when you need live `ctx.reply(...)` output while topic fanout turns are being activated.
+- For durable end-state checks, prefer conversation projections/transcripts or message-log-backed assertions over console output alone.
+- For multi-seat topics, attribute speakers by `topic.message.received.payload.message.senderMemberId` (not only `senderAgentId`).
 
 ### Predefined Scripts
 

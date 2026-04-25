@@ -8,6 +8,11 @@ import { runLoop } from '../loop/loopRunner.js';
 import { pruneSnapshot } from '../loop/hygiene.js';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import {
+    filterInboxCurrentByConversationDeliveryKeys,
+    readConsumedConversationDeliveryKeysFromMeta,
+    writeConsumedConversationDeliveryKeysToMeta,
+} from '../loop/conversationInboxIdentity.js';
 
 import type {
     EnvironmentState,
@@ -16,6 +21,7 @@ import type {
 import type { TaskStatus } from '../shared/types/StreamingEvents.js';
 import type { TurnOutcome } from '../loop/oneTurn.js';
 import type { TaskContext } from '../shared/types/index.js';
+import type { InternalTaskContext } from '../loop/internalContext.js';
 import type { ManifestProvenance } from '../types/turnTrace.js';
 import { SessionManager } from './SessionManager.js';
 
@@ -287,6 +293,8 @@ export class TaskExecutor {
             // Success? line 2309 publish final completion.
         }
 
+        (ctx as InternalTaskContext).__conversationConsumedDeliveryKeys = undefined;
+
         return { M: mNext, outcome, metrics, taskStatus };
     }
 
@@ -330,12 +338,25 @@ export class TaskExecutor {
         const expected = snapNow?.wmVersion ?? BigInt(0);
         const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
         const prevMeta = (baseNow as any).meta || {};
+        const consumedKeysFromSnapshot = readConsumedConversationDeliveryKeysFromMeta(prevMeta);
+        const consumedKeysFromRun =
+            (ctx as InternalTaskContext).__conversationConsumedDeliveryKeys ?? new Set<string>();
+        const consumedKeys = new Set<string>([
+            ...consumedKeysFromSnapshot,
+            ...consumedKeysFromRun,
+        ]);
         const nextMeta = {
             ...prevMeta,
             turn: env.turn,
             budgets: loopOpts,
             ...(ctx.telemetry ? { telemetry: ctx.telemetry } : {})
         };
+        if (consumedKeysFromRun.size > 0) {
+            Object.assign(
+                nextMeta,
+                writeConsumedConversationDeliveryKeysToMeta(nextMeta, consumedKeysFromRun)
+            );
+        }
 
         // FIX: Add/Clear awaiting
         if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
@@ -351,9 +372,16 @@ export class TaskExecutor {
         }
 
         // Merge Inbox (Lost Update Fix)
-        const remoteInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
+        const remoteInbox = filterInboxCurrentByConversationDeliveryKeys(
+            InboxManager.normalizeInbox((baseNow as any)?.inbox),
+            consumedKeys
+        );
         const pendingChildren = env.pending?.children ?? {};
-        let nextInbox = InboxManager.mergeInboxes(InboxManager.normalizeInbox(env.inbox), remoteInbox, pendingChildren);
+        const localInbox = filterInboxCurrentByConversationDeliveryKeys(
+            InboxManager.normalizeInbox(env.inbox),
+            consumedKeys
+        );
+        let nextInbox = InboxManager.mergeInboxes(localInbox, remoteInbox, pendingChildren);
 
         if (prune) {
             nextInbox = InboxManager.normalizeInbox(pruneSnapshot(nextInbox as any) as any);

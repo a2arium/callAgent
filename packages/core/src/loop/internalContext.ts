@@ -138,4 +138,6 @@ export type InternalTaskContext = TaskContext & {
     __manifestProvenance?: ManifestProvenance;
     /** True when the context has a real configured LLM and not only a fallback stub. */
     __llmConfigured?: boolean;
+    /** Conversation delivery keys consumed by this run, persisted as an internal drain cursor. */
+    __conversationConsumedDeliveryKeys?: Set<string>;
 };

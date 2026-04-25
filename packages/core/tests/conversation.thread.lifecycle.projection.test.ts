@@ -63,6 +63,7 @@ describe('conversationReducer thread lifecycle projection', () => {
                         id: MessageIdSchema.parse('msg-exp-1'),
                         conversation: thread,
                         senderAgentId: a1,
+                        senderMemberId: MemberIdSchema.parse(a1),
                         recipientAgentId: a2,
                         recipientMemberId: MemberIdSchema.parse(a2),
                         speechAct: 'inform',

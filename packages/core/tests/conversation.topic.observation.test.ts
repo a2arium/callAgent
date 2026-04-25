@@ -13,6 +13,7 @@ describe('Topic conversation observations', () => {
                     id: 'mid',
                     conversation: { kind: 'topic', id: 't1' },
                     senderAgentId: 'a',
+                    senderMemberId: 'member-a',
                     recipientAgentId: 'b',
                     recipientMemberId: 'member-b',
                     speechAct: 'inform',

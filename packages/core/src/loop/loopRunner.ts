@@ -34,6 +34,10 @@ import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import { reduceConversationProjection } from './learning/conversationReducer.js';
 import { runDefaultAutoJoinInvitedTopics } from '../policy/defaultAutoJoinPolicy.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
+import {
+    conversationInboxDeliveryKey,
+    conversationInboxDeliveryKeyFromTurnSummary,
+} from './conversationInboxIdentity.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
@@ -1031,6 +1035,20 @@ export async function runLoop<
 
             outcome = step.outcome;
 
+            const consumedConversationMessageKeys: ReadonlySet<string> = new Set(
+                (iCtx.__turnIncomingConversationMessages ?? []).map((msg) =>
+                    conversationInboxDeliveryKeyFromTurnSummary(msg)
+                )
+            );
+            if (consumedConversationMessageKeys.size > 0) {
+                const accumulated =
+                    iCtx.__conversationConsumedDeliveryKeys ?? new Set<string>();
+                for (const key of consumedConversationMessageKeys) {
+                    accumulated.add(key);
+                }
+                iCtx.__conversationConsumedDeliveryKeys = accumulated;
+            }
+
             const totalMs =
                 (step.timings?.attentionMs ?? 0) +
                 (step.timings?.perceptionMs ?? 0) +
@@ -1351,11 +1369,39 @@ export async function runLoop<
             }
 
             if (observations.length > 0) {
-                inbox.all.push(...observations);
-                inbox.current = [...observations];
+                const duplicateFiltered = observations.filter((obs) => {
+                    const k = conversationInboxDeliveryKey(obs);
+                    if (k === undefined) {
+                        return true;
+                    }
+                    if (consumedConversationMessageKeys.has(k)) {
+                        return false;
+                    }
+                    return true;
+                });
+                let nextCurrent = duplicateFiltered;
+                if (
+                    outcome.kind === 'continue' &&
+                    nextCurrent.length === 0 &&
+                    observations.length > 0
+                ) {
+                    nextCurrent = [
+                        {
+                            source: 'internal',
+                            kind: 'state.noted',
+                            payload: { reason: 'conversation_reemit_suppressed' },
+                        } as Observation,
+                    ];
+                }
+                if (nextCurrent.length > 0) {
+                    inbox.all.push(...nextCurrent);
+                    inbox.current = [...nextCurrent];
+                } else {
+                    env.inbox.current = [];
+                }
             } else {
-                // Hygiene: avoid having "phantom" observations by mistake 
-                // if next turn starts without them being cleared. 
+                // Hygiene: avoid having "phantom" observations by mistake
+                // if next turn starts without them being cleared.
                 // Perception is responsible for filling them.
                 env.inbox.current = [];
             }

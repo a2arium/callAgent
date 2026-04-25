@@ -84,4 +84,42 @@ describe('AgentIndexLoader TypeScript runtime guard', () => {
 
         fs.rmSync(root, { recursive: true, force: true });
     });
+
+    test('does not abort when import throws a value that cannot be passed to String()', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'callagent-index-loader-bad-throw-'));
+        const nullProtoThrower = path.join(root, 'throws-null-proto.mjs');
+        const emptyModule = path.join(root, 'empty.mjs');
+        const indexPath = path.join(root, '.callagent', 'agent-paths.json');
+
+        fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+        fs.writeFileSync(nullProtoThrower, 'throw Object.create(null);\n', 'utf8');
+        fs.writeFileSync(emptyModule, 'export {};\n', 'utf8');
+        fs.writeFileSync(
+            indexPath,
+            JSON.stringify({
+                'throws-null-proto': { module: '../throws-null-proto.mjs' },
+                'empty-not-registered': { module: '../empty.mjs' }
+            }),
+            'utf8'
+        );
+
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+        await expect(
+            loadAgentIndex({
+                cwd: root,
+                indexPath: '.callagent/agent-paths.json',
+                silent: false
+            })
+        ).resolves.toMatchObject({
+            skipped: expect.arrayContaining(['throws-null-proto', 'empty-not-registered'])
+        });
+
+        expect(warnSpy).toHaveBeenCalledWith(
+            expect.stringContaining('[AgentIndexLoader] Failed to load agent from index entry. Falling back to discovery.'),
+            expect.objectContaining({ agentName: 'throws-null-proto' })
+        );
+
+        fs.rmSync(root, { recursive: true, force: true });
+    });
 });

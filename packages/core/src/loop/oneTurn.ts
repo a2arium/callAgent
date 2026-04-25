@@ -147,6 +147,7 @@ export async function oneTurn<
                       id: string;
                       conversation: { id: string; kind: 'thread' | 'topic' };
                       senderAgentId: string;
+                      senderMemberId: string;
                       recipientAgentId: string;
                       recipientMemberId?: string;
                       speechAct: string;
@@ -160,7 +161,7 @@ export async function oneTurn<
                       kind: message.conversation.kind,
                       senderAgentId: message.senderAgentId,
                       recipientAgentId: message.recipientAgentId,
-                      senderMemberId: message.senderAgentId,
+                      senderMemberId: message.senderMemberId,
                       recipientMemberId:
                           message.recipientMemberId !== undefined
                               ? String(message.recipientMemberId)

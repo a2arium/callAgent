@@ -133,6 +133,7 @@ import { SnapshotRepository } from './persistence/SnapshotRepository.js';
 import { ApiBinder } from './api/ApiBinder.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { TurnRunner } from './TurnRunner.js';
+import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import type { InvariantErrorCode, InvariantErrorDetail } from '../types/invariantError.js';
 import { ConversationService } from '../internal/conversation/ConversationService.js';
@@ -2338,7 +2339,9 @@ export class TaskEngine {
                         let loopOpts: { maxTurns?: number; latencyMs?: number; manifestProvenance?: ManifestProvenance } = {};
                         try {
                             // Restore budgets from snapshot first, then fallback to manifest
-                            const persistedBudgets = (latestBase as Record<string, unknown>)?.meta as { maxTurns?: number; latencyMs?: number } | undefined;
+                            const persistedBudgets = readLoopBudgetsFromSnapshotMeta(
+                                (latestBase as Record<string, unknown>)?.meta
+                            );
                             const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                             const hitl = plugin?.resolved.runtimeManifest.hitl;
                             if (hitl) { try { (M as any).hitl = hitl; } catch { } }

@@ -1,7 +1,11 @@
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { ConversationService } from '../src/internal/conversation/ConversationService.js';
+import { ConversationRouter } from '../src/internal/conversation/ConversationRouter.js';
+import { conversationInboxDeliveryKey } from '../src/loop/conversationInboxIdentity.js';
+import { normalizeObservationInbox } from '../src/loop/types.js';
 import { createDbMessageLog } from '../src/eventbus/dbMessageLog.js';
+import type { Observation } from '../src/types/observation.js';
 
 const DEFAULT_TOPIC_STOP = [{ kind: 'timeout' as const, afterMs: 86_400_000 }];
 
@@ -132,6 +136,141 @@ describe('ConversationService topic harness', () => {
         if (r.status === 'rejected') {
             expect(r.error.type).toBe('RecipientNotMember');
         }
+    });
+
+    it('ConversationRouter is idempotent when the same topic delivery is routed again', async () => {
+        const { service, sessionManager } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-dup-r',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+        const topic = created.topic;
+        const post = await service.post(
+            tenantId,
+            session,
+            owner,
+            topic,
+            { senderAgentId: owner, speechAct: 'inform', content: { n: 1 } },
+            { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+        );
+        expect(post.status).toBe('accepted');
+        if (post.status !== 'accepted') {
+            return;
+        }
+        const sessionId = `topic-${topic.id}:participant-1`;
+        const loaded = await sessionManager.load(tenantId, sessionId);
+        const snapshot = (loaded?.snapshot as { inbox?: unknown } | null | undefined) ?? {};
+        const inbox0 = normalizeObservationInbox(snapshot.inbox);
+        const allLen0 = inbox0.all.length;
+        const topicReceived = inbox0.all.find(
+            (o) => (o as { payload?: { kind?: string } }).payload?.kind === 'topic.message.received'
+        ) as Observation | undefined;
+        expect(topicReceived).toBeDefined();
+        if (topicReceived === undefined) {
+            return;
+        }
+        const router = new ConversationRouter(sessionManager);
+        await router.routeObservation({
+            tenantId,
+            sessionId,
+            agentId: p1,
+            observation: topicReceived,
+        });
+        const afterDup = await sessionManager.load(tenantId, sessionId);
+        const inbox1 = normalizeObservationInbox(
+            (afterDup?.snapshot as { inbox?: unknown } | null | undefined)?.inbox
+        );
+        expect(inbox1.all.length).toBe(allLen0);
+    });
+
+    it('ConversationRouter removes consumed stale current deliveries before routing a later topic message', async () => {
+        const { service, sessionManager } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-stale-r',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+        const topic = created.topic;
+        const first = await service.post(
+            tenantId,
+            session,
+            owner,
+            topic,
+            { senderAgentId: owner, speechAct: 'inform', content: { phase: 'initial' } },
+            { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+        );
+        expect(first.status).toBe('accepted');
+        if (first.status !== 'accepted') {
+            return;
+        }
+        const sessionId = `topic-${topic.id}:participant-1`;
+        const loaded = await sessionManager.load(tenantId, sessionId);
+        const baseSnapshot = (loaded?.snapshot as Record<string, unknown> | undefined) ?? {};
+        const inbox0 = normalizeObservationInbox(baseSnapshot.inbox);
+        const stale = inbox0.current.find(
+            (o) => (o as { payload?: { kind?: string } }).payload?.kind === 'topic.message.received'
+        ) as Observation | undefined;
+        expect(stale).toBeDefined();
+        if (stale === undefined || loaded === null) {
+            return;
+        }
+        const staleKey = conversationInboxDeliveryKey(stale);
+        expect(staleKey).toBeDefined();
+        if (staleKey === undefined) {
+            return;
+        }
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId,
+            agentId: p1,
+            expectedWmVersion: loaded.wmVersion,
+            snapshot: {
+                ...baseSnapshot,
+                inbox: {
+                    ...inbox0,
+                    current: [stale],
+                },
+                meta: {
+                    ...((baseSnapshot as { meta?: Record<string, unknown> }).meta ?? {}),
+                    conversationConsumedDeliveryKeys: [staleKey],
+                },
+            },
+        });
+        const second = await service.post(
+            tenantId,
+            session,
+            owner,
+            topic,
+            { senderAgentId: owner, speechAct: 'inform', content: { phase: 'critique' } },
+            { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+        );
+        expect(second.status).toBe('accepted');
+        const afterSecond = await sessionManager.load(tenantId, sessionId);
+        const inbox1 = normalizeObservationInbox(
+            (afterSecond?.snapshot as { inbox?: unknown } | null | undefined)?.inbox
+        );
+        const currentKeys = inbox1.current
+            .map((obs) => conversationInboxDeliveryKey(obs as Observation))
+            .filter((key): key is string => key !== undefined);
+        expect(currentKeys).not.toContain(staleKey);
+        expect(currentKeys).toHaveLength(1);
     });
 
     it('close topic then post is ConversationClosed', async () => {

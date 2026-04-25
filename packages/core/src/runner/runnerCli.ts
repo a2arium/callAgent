@@ -69,8 +69,23 @@ function parseArgs(): {
         outputFile?: string;
         tenantId?: string;
         resolveDeps?: boolean;
+        maxTurns?: number;
     };
 } {
+    const parsePositiveIntegerFlag = (raw: string | undefined, flag: string): number => {
+        if (!raw) {
+            cliLogger.error(`Missing value for ${flag}`);
+            console.error(`Missing value for ${flag}. Expected a positive integer.`);
+            process.exit(1);
+        }
+        if (!/^[1-9]\d*$/.test(raw)) {
+            cliLogger.error(`Invalid ${flag} value`, undefined, { value: raw });
+            console.error(`Invalid ${flag} value: ${raw}. Expected a positive integer.`);
+            process.exit(1);
+        }
+        return Number.parseInt(raw, 10);
+    };
+
     // Basic args (required)
     const agentFileArg = process.argv[2];
     const inputJsonArg = process.argv[3] || '{}';
@@ -102,7 +117,8 @@ function parseArgs(): {
         outputType: 'console' as 'json' | 'sse' | 'console',
         outputFile: undefined as string | undefined,
         tenantId: undefined as string | undefined,
-        resolveDeps: true  // Default to true for dependency resolution
+        resolveDeps: true, // Default to true for dependency resolution
+        maxTurns: undefined as number | undefined,
     };
 
     // Look for flags in remaining arguments
@@ -127,6 +143,12 @@ function parseArgs(): {
                 console.error(`Tenant ID cannot be empty`);
                 process.exit(1);
             }
+        } else if (arg.startsWith('--max-turns=')) {
+            const raw = arg.split('=')[1];
+            options.maxTurns = parsePositiveIntegerFlag(raw, '--max-turns');
+        } else if (arg === '--max-turns') {
+            options.maxTurns = parsePositiveIntegerFlag(process.argv[i + 1], '--max-turns');
+            i += 1;
         } else if (arg === '--resolve-deps') {
             options.resolveDeps = true;
         } else if (arg === '--no-resolve-deps') {
@@ -140,7 +162,8 @@ function parseArgs(): {
         format: options.outputType,
         outputFile: options.outputFile,
         tenantId: options.tenantId || 'default (from agent/env)',
-        resolveDeps: options.resolveDeps
+        resolveDeps: options.resolveDeps,
+        maxTurns: options.maxTurns,
     });
 
     return {

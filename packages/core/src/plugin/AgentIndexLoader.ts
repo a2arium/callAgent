@@ -50,6 +50,22 @@ const normalizeEntry = (entry: unknown): AgentIndexEntry | null => {
     return null;
 };
 
+/** Avoid `String(unknown)` when a thrown value blocks primitive conversion (e.g. null-prototype object). */
+const formatUnknownThrownValue = (value: unknown): string => {
+    if (value instanceof Error) {
+        return value.message;
+    }
+    try {
+        return String(value);
+    } catch {
+        try {
+            return Object.prototype.toString.call(value);
+        } catch {
+            return '<unrepresentable thrown value>';
+        }
+    }
+};
+
 export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promise<{ loaded: string[]; skipped: string[] }> {
     const cwd = options.cwd ?? process.cwd();
     const indexPath = path.resolve(cwd, options.indexPath ?? DEFAULT_AGENT_INDEX_PATH);
@@ -158,13 +174,13 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
             }
 
             loadedAgents.push(agentName);
-        } catch (error) {
+        } catch (error: unknown) {
             skippedAgents.push(agentName);
             if (!options.silent) {
                 loaderLogger.warn('Failed to load agent from index entry. Falling back to discovery.', {
                     agentName,
                     modulePath: absoluteModulePath,
-                    error: error instanceof Error ? error.message : String(error)
+                    error: formatUnknownThrownValue(error)
                 });
             }
             try {
@@ -203,9 +219,17 @@ export async function loadAgentIndex(options: LoadAgentIndexOptions = {}): Promi
 
 export async function loadAgentIndexIfPresent(options: LoadAgentIndexOptions = {}): Promise<void> {
     try {
+        const cwd = options.cwd ?? process.cwd();
+        const resolvedIndexPath = path.resolve(cwd, options.indexPath ?? DEFAULT_AGENT_INDEX_PATH);
         const result = await loadAgentIndex({ ...options, silent: false });
         if (!result.loaded.length && !result.skipped.length) {
-            loaderLogger.warn(`Agent index not found. Run "yarn agent-index" to generate ${DEFAULT_AGENT_INDEX_PATH}. Falling back to smart discovery.`);
+            loaderLogger.warn(
+                `Agent index not found. Run "yarn agent-index" to generate ${DEFAULT_AGENT_INDEX_PATH}. Falling back to smart discovery.`,
+                {
+                    cwd,
+                    indexPath: resolvedIndexPath,
+                }
+            );
         }
     } catch (error) {
         loaderLogger.error('Agent index load failed', error);

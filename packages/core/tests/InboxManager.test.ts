@@ -53,6 +53,7 @@ describe('InboxManager', () => {
                         id: 'msg-inbox-1',
                         conversation: { kind: 'thread', id: 'thread-inbox-1' },
                         senderAgentId: 'parent',
+                        senderMemberId: 'parent',
                         recipientAgentId: 'child',
                         recipientMemberId: 'mem-child',
                         speechAct: 'inform',
