@@ -45,6 +45,14 @@ import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
 
+const parsePositiveInt = (value: string | undefined, fallback: number): number => {
+    if (value === undefined) {
+        return fallback;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
 // Detect if running in dev mode with ts-node
 const isDevMode = process.argv[0].includes('ts-node') || process.argv[1].includes('ts-node');
 
@@ -591,9 +599,14 @@ export async function runAgentWithStreaming(
                         'Task execution failed';
                     throw new AgentError(failMsg, agentName, { taskId: taskCtx.task.id });
                 }
-                // Wait for any background tool executions (e.g. async requestTool) to complete
-                // This is critical for await_tool outcomes where the loop exits but __autoExecuteTool is still running
-                await engine.waitForBackgroundTasks(60000);
+                // Wait for any background tool executions or nonblocking conversation wakeups to complete.
+                // CLI runs must not validate/exit while the active task graph still has background turns in flight.
+                const backgroundTaskTimeoutMs = parsePositiveInt(
+                    process.env.CALLAGENT_BACKGROUND_TASK_TIMEOUT_MS ??
+                    process.env.REAL_RUN_TIMEOUT_MS,
+                    60000
+                );
+                await engine.waitForBackgroundTasks(backgroundTaskTimeoutMs, { throwOnTimeout: true });
                 logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
                 if (!options.isStreaming) {
                     logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);

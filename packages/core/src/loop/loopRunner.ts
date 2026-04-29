@@ -66,6 +66,12 @@ type LoopRunnerOptions = {
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;
+    onTurnCheckpoint?: (state: {
+        M: MentalState;
+        env: EnvironmentState;
+        outcome: TurnOutcome;
+        consumedConversationMessageKeys: ReadonlySet<string>;
+    }) => Promise<void>;
     /** When set with a registered `TaskEngine`, `runLoop` invokes `triggerTopicLifecycleSweep` when `intervalMs` of wall time has elapsed since the last sweep (checked between turns). */
     topicSweeper?: {
         intervalMs: number;
@@ -1406,6 +1412,14 @@ export async function runLoop<
                 env.inbox.current = [];
             }
 
+            if (consumedConversationMessageKeys.size > 0 && opts.onTurnCheckpoint) {
+                await opts.onTurnCheckpoint({
+                    M: m,
+                    env,
+                    outcome,
+                    consumedConversationMessageKeys,
+                });
+            }
 
             timings.push(step.timings || {});
             rewards.push(step.reward || 0);

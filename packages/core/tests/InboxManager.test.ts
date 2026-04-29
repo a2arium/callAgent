@@ -140,5 +140,81 @@ describe('InboxManager', () => {
             // And current shouldn't change if it wasn't there?
             // Implementation checks `alreadyHasInCurrent`.
         });
+
+        it('preserves remote conversation current observations routed during an active turn', () => {
+            const localInbox: any = {
+                current: [{ source: 'internal', kind: 'state.noted', payload: { local: true } }],
+                all: [{ source: 'internal', kind: 'state.noted', payload: { local: true } }],
+            };
+            const remoteConversationObs: any = {
+                source: 'conversation',
+                kind: 'topic.message.received',
+                payload: {
+                    kind: 'topic.message.received',
+                    message: {
+                        id: 'msg-concurrent-topic-1',
+                        conversation: { kind: 'topic', id: 'topic-concurrent' },
+                        senderAgentId: 'critic-agent',
+                        senderMemberId: 'critic',
+                        recipientAgentId: 'orchestrator-agent',
+                        recipientMemberId: 'orchestrator',
+                        speechAct: 'inform',
+                        content: { phase: 'triage_critique_reply' },
+                        sequenceNumber: 10,
+                        ts: new Date().toISOString(),
+                    },
+                    topic: { kind: 'topic', id: 'topic-concurrent' },
+                    selector: {
+                        kind: 'explicit_recipient',
+                        recipient: { by: 'memberId', memberId: 'orchestrator' },
+                    },
+                    recipient: { memberId: 'orchestrator', agentId: 'orchestrator-agent' },
+                },
+            };
+            const remoteInbox: any = {
+                current: [remoteConversationObs],
+                all: [remoteConversationObs],
+            };
+
+            const result = InboxManager.mergeInboxes(localInbox, remoteInbox, {});
+
+            expect(result.all).toContain(remoteConversationObs);
+            expect(result.current).toContain(remoteConversationObs);
+        });
+
+        it('does not duplicate a remote conversation delivery already present locally', () => {
+            const conversationObs: any = {
+                source: 'conversation',
+                kind: 'topic.message.received',
+                payload: {
+                    kind: 'topic.message.received',
+                    message: {
+                        id: 'msg-concurrent-topic-2',
+                        conversation: { kind: 'topic', id: 'topic-concurrent' },
+                        senderAgentId: 'critic-agent',
+                        senderMemberId: 'critic',
+                        recipientAgentId: 'orchestrator-agent',
+                        recipientMemberId: 'orchestrator',
+                        speechAct: 'inform',
+                        content: {},
+                        sequenceNumber: 11,
+                        ts: new Date().toISOString(),
+                    },
+                    topic: { kind: 'topic', id: 'topic-concurrent' },
+                    selector: {
+                        kind: 'explicit_recipient',
+                        recipient: { by: 'memberId', memberId: 'orchestrator' },
+                    },
+                    recipient: { memberId: 'orchestrator', agentId: 'orchestrator-agent' },
+                },
+            };
+            const localInbox: any = { current: [conversationObs], all: [conversationObs] };
+            const remoteInbox: any = { current: [conversationObs], all: [conversationObs] };
+
+            const result = InboxManager.mergeInboxes(localInbox, remoteInbox, {});
+
+            expect(result.all).toHaveLength(1);
+            expect(result.current).toHaveLength(1);
+        });
     });
 });

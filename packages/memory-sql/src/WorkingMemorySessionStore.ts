@@ -111,7 +111,7 @@ type ConversationMessageDeliveryRecord = {
     recipientAgentId: string;
     sessionId: string;
     dedupeHit: boolean;
-    status: 'delivered' | 'rejected' | 'queued';
+    status: 'delivered' | 'rejected' | 'queued' | 'buffered' | 'throttled' | 'paused' | 'dead-lettered';
     error: Record<string, unknown> | null;
     queuePosition: number | null;
 };
@@ -1460,6 +1460,50 @@ export class WorkingMemorySessionStore {
         }));
     }
 
+    async updateConversationMessageDelivery(params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+        memberId: string;
+        status: ConversationMessageDeliveryRecord['status'];
+        error?: Record<string, unknown> | null;
+        queuePosition?: number | null;
+    }): Promise<void> {
+        const { tenantId, conversationId, sequenceNumber, memberId } = params;
+        await this.ensureConnected();
+        const setQueuePosition = params.queuePosition !== undefined;
+        if (setQueuePosition) {
+            await this.runWithReconnect(() =>
+                this.prisma.$executeRawUnsafe(
+                    `UPDATE conversation_message_deliveries
+                     SET status = $1, error = $2::jsonb, queue_position = $3
+                     WHERE tenant_id = $4 AND conversation_id = $5 AND sequence_number = $6 AND member_id = $7`,
+                    params.status,
+                    params.error == null ? null : JSON.stringify(params.error),
+                    params.queuePosition,
+                    tenantId,
+                    conversationId,
+                    sequenceNumber,
+                    memberId
+                )
+            );
+            return;
+        }
+        await this.runWithReconnect(() =>
+            this.prisma.$executeRawUnsafe(
+                `UPDATE conversation_message_deliveries
+                 SET status = $1, error = $2::jsonb
+                 WHERE tenant_id = $3 AND conversation_id = $4 AND sequence_number = $5 AND member_id = $6`,
+                params.status,
+                params.error == null ? null : JSON.stringify(params.error),
+                tenantId,
+                conversationId,
+                sequenceNumber,
+                memberId
+            )
+        );
+    }
+
     async getDurableSubscriptionCursor(params: {
         tenantId: string;
         streamId: string;
@@ -1539,4 +1583,3 @@ export class WorkingMemorySessionStore {
         );
     }
 }
-

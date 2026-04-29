@@ -17,7 +17,8 @@ export const MessageLogDeliverySchema = z.object({
     recipientMemberId: MemberIdSchema,
     sessionId: z.string().min(1),
     /**
-     * @remarks Defaults to `delivered` when omitted (thread sends). Topic fan-out may set `queued` or `rejected` per recipient.
+     * @remarks Defaults to `delivered` when omitted. Conversation routing can set `buffered` before recipient snapshot commit,
+     * then promote to `delivered` or `dead-lettered`.
      */
     status: z
         .enum([

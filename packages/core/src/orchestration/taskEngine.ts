@@ -95,6 +95,21 @@ export type {
 
 const log = logger.createLogger({ prefix: 'TaskEngine' });
 
+const delay = (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+type PendingConversationActivation = {
+    params: ConversationActivateParams;
+    waiters: Array<{
+        resolve: (value: ConversationActivateResult) => void;
+        reject: (reason?: unknown) => void;
+    }>;
+};
+
+type WaitForBackgroundTasksOptions = {
+    throwOnTimeout?: boolean;
+};
+
 /**
  * Merge ctx.telemetry into snapshot meta on every persist path (not only TaskExecutor.saveSnapshot).
  * Without this, a flush before tool await can drop meta.telemetry; tool resume then lacks traceId and
@@ -202,6 +217,9 @@ export class TaskEngine {
     private inviteSweeper: InviteSweeper;
     private threadLifecycleSweeper: ThreadLifecycleSweeper;
     private topicLifecycleSweeper: TopicLifecycleSweeper;
+    private readonly activeConversationActivations = new Set<string>();
+    private readonly pendingConversationActivations = new Map<string, PendingConversationActivation>();
+    private readonly recentConversationActivationTargets = new Map<string, ConversationActivateParams>();
     private transportClose?: () => Promise<void>;
     /** When adapters are resolved via `resolveTransportAdapters`, wired here for projections / extensions. */
     readonly createDurableSubscription?: (ctx: {
@@ -241,7 +259,8 @@ export class TaskEngine {
                 agentId: recipientAgentId,
                 sessionId: `${threadId}:${recipientAgentId}`,
             }),
-            activateConversationRecipient: (p) => this.ensureConversationActivation(p),
+            activateConversationRecipient: (p) =>
+                this.trackBackgroundTask(this.ensureConversationActivation(p)),
             publishConversationEvent: async (channel, event) => {
                 await this.eventBus.publish(
                     createBusEvent({
@@ -350,10 +369,181 @@ export class TaskEngine {
     async ensureConversationActivation(
         params: ConversationActivateParams
     ): Promise<ConversationActivateResult> {
+        this.rememberConversationActivationTarget(params);
         return new Promise<ConversationActivateResult>((resolve, reject) => {
             queueMicrotask(() => {
-                this.runConversationActivationBody(params).then(resolve).catch(reject);
+                this.runConversationActivationSerial(params).then(resolve).catch(reject);
             });
+        });
+    }
+
+    private async runConversationActivationSerial(
+        params: ConversationActivateParams
+    ): Promise<ConversationActivateResult> {
+        const activationKey = `${params.tenantId}:${params.routingSessionId}`;
+        if (this.activeConversationActivations.has(activationKey)) {
+            return new Promise<ConversationActivateResult>((resolve, reject) => {
+                const existing = this.pendingConversationActivations.get(activationKey);
+                if (existing !== undefined) {
+                    existing.params = params;
+                    existing.waiters.push({ resolve, reject });
+                    return;
+                }
+                this.pendingConversationActivations.set(activationKey, {
+                    params,
+                    waiters: [{ resolve, reject }],
+                });
+            });
+        }
+
+        this.activeConversationActivations.add(activationKey);
+        let result: ConversationActivateResult = { ok: true };
+        try {
+            result = await this.drainConversationActivations(activationKey, {
+                params,
+                waiters: [],
+            });
+        } finally {
+            result = (await this.releaseConversationActivation(activationKey)) ?? result;
+        }
+        return result;
+    }
+
+    private async runTaskSessionExclusive<T>(
+        tenantId: string,
+        sessionId: string,
+        body: () => Promise<T>
+    ): Promise<T> {
+        const activationKey = `${tenantId}:${sessionId}`;
+        if (this.activeConversationActivations.has(activationKey)) {
+            return body();
+        }
+
+        this.activeConversationActivations.add(activationKey);
+        try {
+            const result = await body();
+            await this.drainConversationActivations(activationKey);
+            return result;
+        } finally {
+            await this.releaseConversationActivation(activationKey);
+        }
+    }
+
+    private async drainConversationActivations(
+        activationKey: string,
+        firstActivation?: PendingConversationActivation
+    ): Promise<ConversationActivateResult> {
+        let nextActivation: PendingConversationActivation | undefined = firstActivation;
+        let result: ConversationActivateResult = { ok: true };
+        let drainedTurns = 0;
+        while (nextActivation !== undefined || this.pendingConversationActivations.has(activationKey)) {
+            if (nextActivation === undefined) {
+                nextActivation = this.shiftPendingConversationActivation(activationKey);
+            }
+            if (nextActivation === undefined) {
+                break;
+            }
+            const currentActivation = nextActivation;
+            const currentParams = currentActivation.params;
+            drainedTurns += 1;
+            try {
+                result = await this.runConversationActivationBody(currentParams);
+                for (const waiter of currentActivation.waiters) {
+                    waiter.resolve(result);
+                }
+            } catch (err) {
+                for (const waiter of currentActivation.waiters) {
+                    waiter.reject(err);
+                }
+                throw err;
+            }
+            nextActivation = this.shiftPendingConversationActivation(activationKey);
+            if (
+                nextActivation === undefined &&
+                drainedTurns < 32 &&
+                await this.hasCurrentInboundConversationDelivery(currentParams)
+            ) {
+                nextActivation = { params: currentParams, waiters: [] };
+            }
+        }
+        return result;
+    }
+
+    private shiftPendingConversationActivation(activationKey: string): PendingConversationActivation | undefined {
+        const nextActivation = this.pendingConversationActivations.get(activationKey);
+        if (nextActivation !== undefined) {
+            this.pendingConversationActivations.delete(activationKey);
+        }
+        return nextActivation;
+    }
+
+    private async releaseConversationActivation(
+        activationKey: string
+    ): Promise<ConversationActivateResult | undefined> {
+        if (!this.pendingConversationActivations.has(activationKey)) {
+            this.activeConversationActivations.delete(activationKey);
+            return undefined;
+        }
+        const nextActivation = this.shiftPendingConversationActivation(activationKey);
+        this.activeConversationActivations.delete(activationKey);
+        if (nextActivation === undefined) {
+            return undefined;
+        }
+        this.activeConversationActivations.add(activationKey);
+        let result: ConversationActivateResult = { ok: true };
+        try {
+            result = await this.drainConversationActivations(activationKey, nextActivation);
+        } finally {
+            result = (await this.releaseConversationActivation(activationKey)) ?? result;
+        }
+        return result;
+    }
+
+    private trackBackgroundTask<T>(promise: Promise<T>): Promise<T> {
+        let tracked: Promise<void>;
+        tracked = promise
+            .then(() => undefined, () => undefined)
+            .finally(() => {
+                this.backgroundTaskPromises.delete(tracked);
+            });
+        this.backgroundTaskPromises.add(tracked);
+        return promise;
+    }
+
+    private rememberConversationActivationTarget(params: ConversationActivateParams): void {
+        this.recentConversationActivationTargets.set(
+            `${params.tenantId}:${params.routingSessionId}`,
+            params
+        );
+    }
+
+    private async reconcileCurrentConversationDeliveries(): Promise<number> {
+        let scheduled = 0;
+        const targets = Array.from(this.recentConversationActivationTargets.values());
+        for (const params of targets) {
+            if (await this.hasCurrentInboundConversationDelivery(params)) {
+                scheduled += 1;
+                this.trackBackgroundTask(this.ensureConversationActivation(params));
+            }
+        }
+        return scheduled;
+    }
+
+    private async hasCurrentInboundConversationDelivery(
+        params: ConversationActivateParams | undefined
+    ): Promise<boolean> {
+        if (!params || !this.sessionManager) {
+            return false;
+        }
+        const loaded = await this.sessionManager.load(params.tenantId, params.routingSessionId);
+        const snapshot = (loaded?.snapshot as Record<string, unknown> | undefined) ?? {};
+        const inbox = normalizeObservationInbox((snapshot as { inbox?: unknown }).inbox);
+        return inbox.current.some((obs) => {
+            if (obs.source !== 'conversation') {
+                return false;
+            }
+            const kind = (obs as { payload?: { kind?: string } }).payload?.kind;
+            return kind === 'message.received' || kind === 'topic.message.received';
         });
     }
 
@@ -410,8 +600,9 @@ export class TaskEngine {
                     sessionId: params.routingSessionId,
                     trigger: params.kind === 'invite' ? 'event' : 'conversation',
                     isStreaming: false,
+                    throwOnSaveFailure: true,
                 },
-                { initialM: M, snapshot: base }
+                { initialM: M }
             );
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -1070,16 +1261,18 @@ export class TaskEngine {
             if (runMode === 'legacy') {
                 await runLegacy();
             } else {
-                const taskResult = await this.turnRunner.runTurn(ctx, {
-                    tenantId,
-                    sessionId,
-                    trigger: 'start',
-                    isStreaming,
-                    input: task.input
-                }, {
-                    initialM: M,
-                    snapshot: baseSnap
-                });
+                const taskResult = await this.runTaskSessionExclusive(tenantId, sessionId, () =>
+                    this.turnRunner.runTurn(ctx, {
+                        tenantId,
+                        sessionId,
+                        trigger: 'start',
+                        isStreaming,
+                        input: task.input
+                    }, {
+                        initialM: M,
+                        snapshot: baseSnap
+                    })
+                );
 
                 if (taskResult) {
                     task.status = taskResult.status;
@@ -1455,16 +1648,18 @@ export class TaskEngine {
             if (runMode === 'legacy') {
                 await this.executeTaskHandler(ctx);
             } else {
-                const taskResult = await this.turnRunner.runTurn(ctx, {
-                    tenantId,
-                    sessionId: taskId,
-                    trigger: 'resume',
-                    isStreaming: false,
-                    input: { token } // Reflect input token in result if needed
-                }, {
-                    initialM: M,
-                    snapshot: baseNow
-                });
+                const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
+                    this.turnRunner.runTurn(ctx, {
+                        tenantId,
+                        sessionId: taskId,
+                        trigger: 'resume',
+                        isStreaming: false,
+                        input: { token } // Reflect input token in result if needed
+                    }, {
+                        initialM: M,
+                        snapshot: baseNow
+                    })
+                );
 
                 const channel = taskChannel(taskId);
                 try {
@@ -1560,17 +1755,19 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
 
-            const taskResult = await this.turnRunner.runTurn(ctx, {
-                tenantId,
-                sessionId: taskId,
-                trigger: 'tool',
-                toolToken: token,
-                toolResult: result,
-                isStreaming: false
-            }, {
-                initialM: M,
-                snapshot: baseNow
-            });
+            const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
+                this.turnRunner.runTurn(ctx, {
+                    tenantId,
+                    sessionId: taskId,
+                    trigger: 'tool',
+                    toolToken: token,
+                    toolResult: result,
+                    isStreaming: false
+                }, {
+                    initialM: M,
+                    snapshot: baseNow
+                })
+            );
             // Note: TurnRunner.runTurn already publishes the completion event via eventBus,
             // so we don't need to publish again here.
         } catch { /* ignore resume errors */ }
@@ -1615,18 +1812,20 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
 
-            const taskResult = await this.turnRunner.runTurn(ctx, {
-                tenantId,
-                sessionId: taskId,
-                trigger: 'event',
-                eventToken: token,
-                eventType: entry?.type,
-                eventPayload: payload,
-                isStreaming: false
-            }, {
-                initialM: M,
-                snapshot: baseNow
-            });
+            const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
+                this.turnRunner.runTurn(ctx, {
+                    tenantId,
+                    sessionId: taskId,
+                    trigger: 'event',
+                    eventToken: token,
+                    eventType: entry?.type,
+                    eventPayload: payload,
+                    isStreaming: false
+                }, {
+                    initialM: M,
+                    snapshot: baseNow
+                })
+            );
 
             const channel = taskChannel(taskId);
             try {
@@ -3102,30 +3301,63 @@ export class TaskEngine {
      * Useful for tests to ensure all background work finishes before test cleanup
      * @param timeoutMs Maximum time to wait (default: 5000ms)
      */
-    async waitForBackgroundTasks(timeoutMs: number = 5000): Promise<void> {
+    async waitForBackgroundTasks(
+        timeoutMs: number = 5000,
+        options: WaitForBackgroundTasksOptions = {}
+    ): Promise<void> {
         const initialCount = this.backgroundTaskPromises.size;
-        if (initialCount === 0) {
-            if (process.env.DEBUG_BACKGROUND_TASKS) {
+        if (process.env.DEBUG_BACKGROUND_TASKS) {
+            if (initialCount === 0) {
                 console.log('[TaskEngine] No background tasks to wait for');
             }
-            return;
-        }
-
-        if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Waiting for ${initialCount} background task(s), timeout=${timeoutMs}ms`);
             console.log(`[TaskEngine] Active handles before wait: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
             console.log(`[TaskEngine] Active requests before wait: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
         }
 
-        const promises = Array.from(this.backgroundTaskPromises);
         const startTime = Date.now();
-        await Promise.race([
-            Promise.allSettled(promises),
-            new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
-        ]);
+        const deadline = startTime + timeoutMs;
+        const idleGraceMs = Math.min(250, Math.max(25, timeoutMs));
+        while (Date.now() < deadline) {
+            const remainingMs = deadline - Date.now();
+            if (remainingMs <= 0) {
+                break;
+            }
+            if (this.backgroundTaskPromises.size === 0) {
+                const reconciled = await this.reconcileCurrentConversationDeliveries();
+                if (reconciled > 0) {
+                    continue;
+                }
+                await delay(Math.min(idleGraceMs, remainingMs));
+                const reconciledAfterGrace = await this.reconcileCurrentConversationDeliveries();
+                if (reconciledAfterGrace > 0) {
+                    continue;
+                }
+                if (this.backgroundTaskPromises.size === 0) {
+                    break;
+                }
+                continue;
+            }
+            const promises = Array.from(this.backgroundTaskPromises);
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            try {
+                await Promise.race([
+                    Promise.allSettled(promises),
+                    new Promise<void>((resolve) => {
+                        timeout = setTimeout(resolve, remainingMs);
+                    })
+                ]);
+            } finally {
+                if (timeout !== undefined) {
+                    clearTimeout(timeout);
+                }
+            }
+        }
         const elapsed = Date.now() - startTime;
 
         const remainingCount = this.backgroundTaskPromises.size;
+        const activeConversationActivations = Array.from(this.activeConversationActivations);
+        const pendingConversationActivations = Array.from(this.pendingConversationActivations.keys());
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Wait completed after ${elapsed}ms, remaining promises=${remainingCount}`);
             console.log(`[TaskEngine] Active handles after wait: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
@@ -3134,11 +3366,22 @@ export class TaskEngine {
 
         // Give a bit more time for async cleanup after promises resolve
         // This ensures resources like Prisma connections are closed
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await delay(100);
 
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Active handles after cleanup delay: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
             console.log(`[TaskEngine] Active requests after cleanup delay: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
+        }
+        if (
+            options.throwOnTimeout === true &&
+            (remainingCount > 0 || activeConversationActivations.length > 0 || pendingConversationActivations.length > 0)
+        ) {
+            throw new Error(
+                `Background task drain incomplete after ${elapsed}ms: ` +
+                `remainingPromises=${remainingCount}, ` +
+                `activeConversationActivations=${activeConversationActivations.length}, ` +
+                `pendingConversationActivations=${pendingConversationActivations.length}`
+            );
         }
     }
 

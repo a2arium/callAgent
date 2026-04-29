@@ -369,6 +369,15 @@ export interface IWorkingMemorySessionStore {
             queuePosition: number | null;
         }>;
     }): Promise<void>;
+    updateConversationMessageDelivery(params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+        memberId: string;
+        status: ConversationMessageDeliveryStatus;
+        error?: Record<string, unknown> | null;
+        queuePosition?: number | null;
+    }): Promise<void>;
     listConversationMessageDeliveries(params: {
         tenantId: string;
         conversationId: string;

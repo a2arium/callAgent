@@ -118,3 +118,85 @@ export function filterInboxCurrentByConversationDeliveryKeys(
     });
     return normalized;
 }
+
+export function preserveConversationInboxForSnapshot(
+    candidateSnapshot: Record<string, unknown>,
+    remoteSnapshot: Record<string, unknown> | undefined
+): Record<string, unknown> {
+    const remoteInbox = normalizeObservationInbox((remoteSnapshot as { inbox?: unknown } | undefined)?.inbox);
+    const hasRemoteConversation = remoteInbox.all.some(isConversationObservation) ||
+        remoteInbox.current.some(isConversationObservation);
+    if (!hasRemoteConversation) {
+        return candidateSnapshot;
+    }
+
+    const candidateInbox = normalizeObservationInbox((candidateSnapshot as { inbox?: unknown }).inbox);
+    const candidateMeta = normalizeMeta(candidateSnapshot.meta);
+    const remoteMeta = normalizeMeta(remoteSnapshot?.meta);
+    const consumedKeys = new Set<string>([
+        ...readConsumedConversationDeliveryKeysFromMeta(remoteMeta),
+        ...readConsumedConversationDeliveryKeysFromMeta(candidateMeta),
+    ]);
+
+    const nextAll = [...candidateInbox.all];
+    for (const obs of remoteInbox.all) {
+        if (isConversationObservation(obs)) {
+            appendObservationIfMissing(nextAll, obs);
+        }
+    }
+
+    const nextCurrent = candidateInbox.current.filter((obs) => {
+        if (!isConversationObservation(obs)) {
+            return true;
+        }
+        const key = conversationInboxDeliveryKey(obs as Observation);
+        return key === undefined || !consumedKeys.has(key);
+    });
+    for (const obs of remoteInbox.current) {
+        if (!isConversationObservation(obs)) {
+            continue;
+        }
+        const key = conversationInboxDeliveryKey(obs as Observation);
+        if (key !== undefined && consumedKeys.has(key)) {
+            continue;
+        }
+        appendObservationIfMissing(nextCurrent, obs);
+    }
+
+    const nextMeta = consumedKeys.size > 0
+        ? writeConsumedConversationDeliveryKeysToMeta(candidateMeta, consumedKeys)
+        : candidateMeta;
+
+    return {
+        ...candidateSnapshot,
+        meta: nextMeta,
+        inbox: {
+            ...candidateInbox,
+            all: nextAll,
+            current: nextCurrent,
+        },
+    };
+}
+
+function normalizeMeta(meta: unknown): Record<string, unknown> {
+    if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) {
+        return {};
+    }
+    return { ...(meta as Record<string, unknown>) };
+}
+
+function isConversationObservation(obs: unknown): obs is Observation {
+    return (obs as { source?: unknown } | undefined)?.source === 'conversation';
+}
+
+function appendObservationIfMissing(target: Observation[], obs: Observation): void {
+    const key = conversationObservationMergeKey(obs);
+    if (!target.some((existing) => conversationObservationMergeKey(existing) === key)) {
+        target.push(obs);
+    }
+}
+
+function conversationObservationMergeKey(obs: Observation): string {
+    const key = conversationInboxDeliveryKey(obs);
+    return key !== undefined ? `conversation-delivery:${key}` : `conversation-observation:${JSON.stringify(obs)}`;
+}

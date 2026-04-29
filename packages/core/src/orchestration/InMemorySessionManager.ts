@@ -781,6 +781,35 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         return this.messageDeliveries.get(`${params.tenantId}:${params.conversationId}:${params.sequenceNumber}`) ?? [];
     }
 
+    async updateConversationMessageDelivery(params: {
+        tenantId: string;
+        conversationId: string;
+        sequenceNumber: number;
+        memberId: string;
+        status: ConversationMessageDeliveryRecord['status'];
+        error?: Record<string, unknown> | null;
+        queuePosition?: number | null;
+    }): Promise<void> {
+        const key = `${params.tenantId}:${params.conversationId}:${params.sequenceNumber}`;
+        const rows = this.messageDeliveries.get(key);
+        if (!rows) {
+            return;
+        }
+        this.messageDeliveries.set(
+            key,
+            rows.map((row) =>
+                row.memberId === params.memberId
+                    ? {
+                          ...row,
+                          status: params.status,
+                          error: params.error === undefined ? row.error : params.error,
+                          queuePosition: params.queuePosition === undefined ? row.queuePosition : params.queuePosition,
+                      }
+                    : row
+            )
+        );
+    }
+
     async getDurableSubscriptionCursor(params: {
         tenantId: string;
         streamId: string;

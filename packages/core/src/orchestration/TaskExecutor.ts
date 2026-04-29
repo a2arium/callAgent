@@ -182,7 +182,27 @@ export class TaskExecutor {
             const { LoopRegistry } = await import('./LoopRegistry.js');
             LoopRegistry.__activeLoopContexts.set(sessionId, ctx);
             try {
-                const result = await runLoop(ctx, M, env, overrides, loopOpts);
+                const result = await runLoop(ctx, M, env, overrides, {
+                    ...loopOpts,
+                    onTurnCheckpoint: async (state) => {
+                        if (!sessionManager || state.consumedConversationMessageKeys.size === 0) {
+                            return;
+                        }
+                        await TaskExecutor.saveSnapshot({
+                            sessionManager,
+                            tenantId,
+                            sessionId,
+                            agentId,
+                            env: state.env,
+                            M,
+                            mNext: state.M,
+                            outcome: state.outcome,
+                            loopOpts,
+                            ctx,
+                            getSessionStorePrisma
+                        });
+                    },
+                });
                 if (process.env.DEBUG_BACKGROUND_TASKS) {
                     console.log('[TaskExecutor] runLoop result:', {
                         hasResult: !!result,

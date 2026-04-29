@@ -18,10 +18,6 @@ import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
-import {
-    filterInboxCurrentByConversationDeliveryKeys,
-    readConsumedConversationDeliveryKeysFromMeta,
-} from '../loop/conversationInboxIdentity.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
@@ -44,6 +40,7 @@ export interface TurnExecutionParams {
     eventToken?: string;
     eventPayload?: unknown;
     eventType?: string;
+    throwOnSaveFailure?: boolean;
 }
 
 const log = logger.createLogger({ prefix: 'TurnRunner' });
@@ -74,7 +71,7 @@ export class TurnRunner {
         }
     ): Promise<TaskEntity> {
         const { tenantId, sessionId, trigger, isStreaming } = params;
-        console.log(`[TurnRunner] runTurn called: trigger=${trigger}, sessionId=${sessionId}, toolToken=${params.toolToken}`);
+        log.debug('runTurn called', { trigger, sessionId, toolToken: params.toolToken });
 
         // Telemetry state
         let turnNode: TurnNode | undefined;
@@ -144,13 +141,7 @@ export class TurnRunner {
             // 5. Environment & Inbox Setup
             const startTurnTotal = Number((base as any)?.meta?.turn) || 0;
 
-            const consumedDeliveryKeys = readConsumedConversationDeliveryKeysFromMeta(
-                (base as { meta?: unknown })?.meta
-            );
-            let envInbox = filterInboxCurrentByConversationDeliveryKeys(
-                InboxManager.normalizeInbox((base as { inbox?: unknown })?.inbox),
-                consumedDeliveryKeys
-            );
+            let envInbox = InboxManager.normalizeInbox((base as { inbox?: unknown })?.inbox);
             // Hydrate
             envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
                 envInbox,
@@ -158,7 +149,6 @@ export class TurnRunner {
                 tenantId,
                 trigger
             );
-
             // Inject initial input if present (start OR resume)
             if (trigger === 'start' && params.input) {
                 const inputObservation: EngineObservation = {
@@ -387,9 +377,9 @@ export class TurnRunner {
                 sessionManager: this.sessionManager,
                 tenantId, sessionId, agentId: agentId || 'default',
                 isStreaming,
-                getSessionStorePrisma: this.getSessionStorePrisma
+                getSessionStorePrisma: this.getSessionStorePrisma,
+                throwOnSaveFailure: params.throwOnSaveFailure === true
             });
-
             // explicit flush at end of turn (if not already flushed)
             if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
                 try { await flushMentalState(); } catch (e) {

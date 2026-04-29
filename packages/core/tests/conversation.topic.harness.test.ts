@@ -20,17 +20,26 @@ describe('ConversationService topic harness', () => {
     const create = () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
+        const activations: Array<{ kind: string; routingSessionId: string; recipientAgentId: string }> = [];
         const service = new ConversationService(sessionManager, {
             routeTargetForThread: ({ threadId, recipientAgentId: recipient }) => ({
                 tenantId,
                 sessionId: `${threadId}:${recipient}`,
                 agentId: recipient,
             }),
-            activateConversationRecipient: async () => ({ ok: true }),
+            activateConversationRecipient: async (params) => {
+                activations.push({
+                    kind: params.kind,
+                    routingSessionId: params.routingSessionId,
+                    recipientAgentId: params.recipientAgentId,
+                });
+                return { ok: true };
+            },
             messageLog: createDbMessageLog(sessionManager),
             resolveThreadTtlMs: (_agentId: string) => null,
+            resolveWakeOnTopicMessage: () => true,
         });
-        return { service, sessionManager };
+        return { service, sessionManager, activations };
     };
 
     it('createTopic with 3 members, broadcast delivers to both others', async () => {
@@ -66,6 +75,199 @@ describe('ConversationService topic harness', () => {
         if (r.status === 'accepted') {
             expect(r.deliveries.map((d) => d.recipientAgentId).sort()).toEqual([p1, p2].sort());
         }
+    });
+
+    it('marks topic delivery delivered only after recipient snapshot routing commits', async () => {
+        const { service, sessionManager, activations } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-h-delivery-status',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+
+        const posted = await service.post(
+            tenantId,
+            session,
+            owner,
+            created.topic,
+            { senderAgentId: owner, speechAct: 'inform', content: { status: 'committed' } },
+            { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+        );
+
+        expect(posted.status).toBe('accepted');
+        if (posted.status !== 'accepted') {
+            return;
+        }
+        const deliveryRows = await sessionManager.listConversationMessageDeliveries({
+            tenantId,
+            conversationId: created.topic.id,
+            sequenceNumber: posted.deliveries[0]!.sequenceNumber,
+        });
+        expect(deliveryRows).toHaveLength(1);
+        expect(deliveryRows[0]?.status).toBe('delivered');
+        expect(activations).toContainEqual({
+            kind: 'topic',
+            routingSessionId: `topic-${created.topic.id}:${p1}`,
+            recipientAgentId: p1,
+        });
+    });
+
+    it('persists topic deliveries with canonical top-level observation kind', async () => {
+        const { service, sessionManager } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-h-envelope-kind',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+
+        const posted = await service.post(
+            tenantId,
+            session,
+            owner,
+            created.topic,
+            {
+                senderAgentId: owner,
+                speechAct: 'request',
+                content: { body: { phase: 'suite_phase_request', phaseId: 'integrated_review' } },
+            },
+            { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+        );
+        expect(posted.status).toBe('accepted');
+
+        const participantSnapshot = await sessionManager.load(
+            tenantId,
+            `topic-${created.topic.id}:${p1}`
+        );
+        const current = ((participantSnapshot?.snapshot as any)?.inbox?.current ?? []) as any[];
+        const delivered = current.find((obs) => obs?.payload?.kind === 'topic.message.received');
+        expect(delivered).toMatchObject({
+            source: 'conversation',
+            kind: 'topic.message.received',
+            payload: {
+                kind: 'topic.message.received',
+                message: {
+                    recipientMemberId: p1,
+                    content: { body: { phase: 'suite_phase_request', phaseId: 'integrated_review' } },
+                },
+            },
+        });
+    });
+
+    it('does not await cross-session topic wake activation before returning post receipt', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        let activationStarted = false;
+        const service = new ConversationService(sessionManager, {
+            routeTargetForThread: ({ threadId, recipientAgentId: recipient }) => ({
+                tenantId,
+                sessionId: `${threadId}:${recipient}`,
+                agentId: recipient,
+            }),
+            activateConversationRecipient: async () => {
+                activationStarted = true;
+                await new Promise(() => undefined);
+                return { ok: true };
+            },
+            messageLog: createDbMessageLog(sessionManager),
+            resolveThreadTtlMs: (_agentId: string) => null,
+            resolveWakeOnTopicMessage: () => true,
+        });
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-h-nonblocking-wake',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+
+        const posted = await Promise.race([
+            service.post(
+                tenantId,
+                session,
+                owner,
+                created.topic,
+                { senderAgentId: owner, speechAct: 'inform', content: { status: 'wake-hangs' } },
+                { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+            ),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('post blocked on wake')), 50)),
+        ]);
+
+        expect(posted.status).toBe('accepted');
+        expect(activationStarted).toBe(true);
+        const deliveryRows = await sessionManager.listConversationMessageDeliveries({
+            tenantId,
+            conversationId: created.topic.id,
+            sequenceNumber: posted.status === 'accepted' ? posted.deliveries[0]!.sequenceNumber : -1,
+        });
+        expect(deliveryRows[0]?.status).toBe('delivered');
+    });
+
+    it('marks topic delivery dead-lettered when recipient snapshot routing fails', async () => {
+        const { service, sessionManager } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-h-delivery-dead-letter',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') {
+            return;
+        }
+
+        const originalSave = sessionManager.saveSnapshot.bind(sessionManager);
+        (sessionManager as unknown as { saveSnapshot: typeof sessionManager.saveSnapshot }).saveSnapshot = async (params) => {
+            if (params.sessionId === `topic-${created.topic.id}:${p1}`) {
+                throw new Error('ROUTE_FAILED');
+            }
+            return originalSave(params);
+        };
+
+        await expect(
+            service.post(
+                tenantId,
+                session,
+                owner,
+                created.topic,
+                { senderAgentId: owner, speechAct: 'inform', content: { status: 'route-fails' } },
+                { selector: { kind: 'explicit_recipient', recipient: { by: 'agentId', agentId: p1 } } }
+            )
+        ).rejects.toThrow('ROUTE_FAILED');
+
+        const messages = await sessionManager.listConversationMessages({ tenantId, conversationId: created.topic.id });
+        const deliveryRows = await sessionManager.listConversationMessageDeliveries({
+            tenantId,
+            conversationId: created.topic.id,
+            sequenceNumber: messages[0]!.sequenceNumber,
+        });
+        expect(deliveryRows).toHaveLength(1);
+        expect(deliveryRows[0]?.status).toBe('dead-lettered');
+        expect(deliveryRows[0]?.error?.message).toBe('ROUTE_FAILED');
     });
 
     it('round_robin two posts hit different recipients when two participants', async () => {
@@ -271,6 +473,84 @@ describe('ConversationService topic harness', () => {
             .filter((key): key is string => key !== undefined);
         expect(currentKeys).not.toContain(staleKey);
         expect(currentKeys).toHaveLength(1);
+    });
+
+    it('ConversationRouter retries delivery injection when an active turn saves the session first', async () => {
+        const { sessionManager } = create();
+        const sessionId = 'topic-topic-router-race:orchestrator';
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId,
+            agentId: owner,
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                inbox: { current: [], all: [] },
+                meta: { agentId: owner },
+            },
+        });
+
+        const originalSave = sessionManager.saveSnapshot.bind(sessionManager);
+        let firstRouteSave = true;
+        (sessionManager as unknown as { saveSnapshot: typeof sessionManager.saveSnapshot }).saveSnapshot = async (params) => {
+            if (firstRouteSave) {
+                firstRouteSave = false;
+                await originalSave({
+                    tenantId: params.tenantId,
+                    sessionId: params.sessionId,
+                    agentId: params.agentId,
+                    expectedWmVersion: params.expectedWmVersion,
+                    snapshot: {
+                        inbox: { current: [], all: [] },
+                        meta: { agentId: params.agentId, activeTurnSavedFirst: true },
+                    },
+                });
+                throw new Error('CAS_MISMATCH');
+            }
+            return originalSave(params);
+        };
+
+        const router = new ConversationRouter(sessionManager);
+        const observation = {
+            source: 'conversation',
+            payload: {
+                kind: 'topic.message.received',
+                message: {
+                    id: 'msg-router-race',
+                    conversation: { kind: 'topic', id: 'topic-router-race' },
+                    senderAgentId: p1,
+                    senderMemberId: 'participant-1',
+                    recipientAgentId: owner,
+                    recipientMemberId: 'orchestrator',
+                    speechAct: 'inform',
+                    content: { phase: 'triage_critique_reply' },
+                    sequenceNumber: 10,
+                    ts: new Date().toISOString(),
+                },
+                topic: { kind: 'topic', id: 'topic-router-race' },
+                selector: {
+                    kind: 'explicit_recipient',
+                    recipient: { by: 'memberId', memberId: 'orchestrator' },
+                },
+                recipient: { memberId: 'orchestrator', agentId: owner },
+            },
+        } as Observation;
+
+        await router.routeObservation({
+            tenantId,
+            sessionId,
+            agentId: owner,
+            observation,
+        });
+
+        const loaded = await sessionManager.load(tenantId, sessionId);
+        const snapshot = (loaded?.snapshot as Record<string, unknown>) ?? {};
+        const inbox = normalizeObservationInbox(snapshot.inbox);
+        expect((snapshot.meta as { activeTurnSavedFirst?: boolean } | undefined)?.activeTurnSavedFirst).toBe(true);
+        expect(
+            inbox.current.some(
+                (obs) => (obs as { payload?: { message?: { id?: string } } }).payload?.message?.id === 'msg-router-race'
+            )
+        ).toBe(true);
     });
 
     it('close topic then post is ConversationClosed', async () => {

@@ -28,7 +28,6 @@ const config = {
             'ts-jest',
             {
                 useESM: true,
-                isolatedModules: true,
                 tsconfig: {
                     target: 'ES2020',
                     module: 'ESNext',
@@ -101,7 +100,7 @@ const config = {
     setupFilesAfterEnv: ['<rootDir>/jest.setup.mjs'],
     // Global teardown runs ONCE after all tests
     globalTeardown: '<rootDir>/jest.teardown.js',
-    verbose: true,
+    verbose: process.env.JEST_VERBOSE === '1',
 
     // Stability tweaks
     maxWorkers: '50%',

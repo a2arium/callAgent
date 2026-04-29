@@ -79,6 +79,19 @@ import type { TopicPostBackpressureSample } from './BackpressureManager.js';
 const MAX_QUEUE_DEPTH = 32;
 const DEFAULT_INVITE_TTL_SECONDS = 60 * 60 * 24;
 
+function errorToDeliveryPayload(err: unknown): Record<string, unknown> {
+    if (err instanceof Error) {
+        return {
+            type: err.name || 'Error',
+            message: err.message,
+        };
+    }
+    return {
+        type: 'Error',
+        message: String(err),
+    };
+}
+
 type QueueState = {
     byThread: Map<string, number>;
     byTopic: Map<string, number>;
@@ -132,6 +145,13 @@ export class ConversationService implements InternalConversationApi {
         sink: ((sample: TopicPostBackpressureSample | undefined) => void) | undefined
     ): void {
         this.topicPostBackpressureSink = sink;
+    }
+
+    private scheduleConversationActivation(params: ConversationActivateParams): void {
+        void this.deps.activateConversationRecipient(params).catch(() => {
+            // Activation is best-effort after durable routing. The recipient session can be
+            // reactivated later because the observation has already been persisted.
+        });
     }
 
     private async runStopPoliciesAfterSuccessfulTopicAppend(params: {
@@ -571,6 +591,7 @@ export class ConversationService implements InternalConversationApi {
                     recipientAgentId: message.recipientAgentId,
                     recipientMemberId: MemberIdSchema.parse(message.recipientAgentId),
                     sessionId: target.sessionId,
+                    status: 'buffered',
                 },
             ],
         });
@@ -622,12 +643,33 @@ export class ConversationService implements InternalConversationApi {
                 },
             },
         } as Observation;
-        await this.router.routeObservation({
-            tenantId: target.tenantId,
-            sessionId: target.sessionId,
-            agentId: target.agentId,
-            observation,
-        });
+        try {
+            await this.router.routeObservation({
+                tenantId: target.tenantId,
+                sessionId: target.sessionId,
+                agentId: target.agentId,
+                observation,
+            });
+            await this.sessionManager.updateConversationMessageDelivery({
+                tenantId,
+                conversationId: thread.id,
+                sequenceNumber,
+                memberId: message.recipientAgentId,
+                status: 'delivered',
+                error: null,
+                queuePosition: null,
+            });
+        } catch (err) {
+            await this.sessionManager.updateConversationMessageDelivery({
+                tenantId,
+                conversationId: thread.id,
+                sequenceNumber,
+                memberId: message.recipientAgentId,
+                status: 'dead-lettered',
+                error: errorToDeliveryPayload(err),
+            });
+            throw err;
+        }
 
         const outboundCommitted = {
             source: 'conversation',
@@ -1073,7 +1115,33 @@ export class ConversationService implements InternalConversationApi {
             role: consumed.role,
             sessionId,
         };
-        const obs = {
+        const acceptedObs = {
+            source: 'conversation',
+            payload: {
+                kind: 'topic.invite.accepted',
+                topic,
+                token: InviteTokenSchema.parse(String(options.inviteToken)),
+                member,
+                ts: registeredAt,
+                correlationId: invite.correlationId ?? undefined,
+            },
+        } as Observation;
+        await this.router.routeObservations([
+            {
+                tenantId,
+                sessionId: consumed.inviterSessionId,
+                agentId: consumed.inviterAgentId,
+                observation: acceptedObs,
+            },
+            {
+                tenantId,
+                sessionId,
+                agentId: senderAgentId,
+                observation: acceptedObs,
+            },
+        ]);
+
+        const joinedObs = {
             source: 'conversation',
             payload: {
                 kind: 'topic.member.joined',
@@ -1092,9 +1160,31 @@ export class ConversationService implements InternalConversationApi {
                 tenantId,
                 sessionId: m.sessionId,
                 agentId: m.agentId,
-                observation: obs,
+                observation: joinedObs,
             }))
         );
+        const activationTargets = new Map<string, { sessionId: string; agentId: string }>();
+        activationTargets.set(`${consumed.inviterAgentId}:${consumed.inviterSessionId}`, {
+            sessionId: consumed.inviterSessionId,
+            agentId: consumed.inviterAgentId,
+        });
+        for (const m of active) {
+            activationTargets.set(`${m.agentId}:${m.sessionId}`, {
+                sessionId: m.sessionId,
+                agentId: m.agentId,
+            });
+        }
+        for (const target of activationTargets.values()) {
+            this.scheduleConversationActivation({
+                kind: 'topic',
+                tenantId,
+                topicId: topic.id,
+                routingSessionId: target.sessionId,
+                recipientAgentId: target.agentId,
+                senderSessionId: sessionId,
+                senderAgentId,
+            });
+        }
         return { status: 'ok', topic, member };
     }
 
@@ -1513,6 +1603,7 @@ export class ConversationService implements InternalConversationApi {
                     recipientAgentId: s.agentId,
                     recipientMemberId: mid,
                     sessionId: s.sessionId,
+                    status: 'buffered',
                 });
             } else if (s.outcome === 'queue') {
                 logDeliveries.push({
@@ -1650,19 +1741,27 @@ export class ConversationService implements InternalConversationApi {
                     agentId: recipientAgentId,
                     observation: obs,
                 });
-                const activateParams: ConversationActivateParams = {
-                    kind: 'thread',
+                await this.sessionManager.updateConversationMessageDelivery({
                     tenantId,
-                    threadId: topic.id,
+                    conversationId: topic.id,
+                    sequenceNumber,
+                    memberId: String(recipientMemberId),
+                    status: 'delivered',
+                    error: null,
+                    queuePosition: null,
+                });
+                const activateParams: ConversationActivateParams = {
+                    kind: 'topic',
+                    tenantId,
+                    topicId: topic.id,
                     routingSessionId: s.sessionId,
                     recipientAgentId,
-                    messageId,
                     senderSessionId,
                     senderAgentId: message.senderAgentId,
                 };
                 const wake = this.deps.resolveWakeOnTopicMessage?.(recipientAgentId) === true;
                 if (wake) {
-                    await this.deps.activateConversationRecipient(activateParams);
+                    this.scheduleConversationActivation(activateParams);
                 }
                 accepted.push({
                     memberId: recipientMemberId,
@@ -1673,6 +1772,16 @@ export class ConversationService implements InternalConversationApi {
                     dedupeHit: false,
                     correlationId: message.correlationId,
                 });
+            } catch (err) {
+                await this.sessionManager.updateConversationMessageDelivery({
+                    tenantId,
+                    conversationId: topic.id,
+                    sequenceNumber,
+                    memberId: String(recipientMemberId),
+                    status: 'dead-lettered',
+                    error: errorToDeliveryPayload(err),
+                });
+                throw err;
             } finally {
                 this.deps.backpressureManager?.dispatchAcknowledged(tenantId, consumerKey);
             }

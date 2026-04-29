@@ -1,712 +1,411 @@
-# CallAgent - APLRET AI Agent Framework 🤖
+# callAgent
 
-A production-ready TypeScript AI agent framework implementing the **APLRET** (Attention → Perception → Learning → Reasoning/Policy → Shield → Execution → Transition) brain-inspired architecture with comprehensive **A2A** (Agent-to-Agent) communication support.
+callAgent is a TypeScript framework for building agents with the APLRET architecture:
 
-## 🏗️ Architecture Overview
+`Attention -> Perception -> Learning -> Reasoning/Policy -> Shield -> Execution -> Transition`
 
-CallAgent implements a **brain-inspired cognitive loop** with six explicit modules plus a safety guard:
+The project is also referred to as the APLRET framework. The canonical contract is [apps/docs/0-aplret_contracts.md](apps/docs/0-aplret_contracts.md). When README guidance and the contracts differ, the contracts document wins.
 
-```mermaid
-flowchart LR
-    A[Attention] --> P[Perception]
-    P --> L[Learning]
-    L --> R[Policy/Reasoning]
-    R --> S[Shield]
-    S --> E[Execution]
-    E --> T[Transition]
-    T -.-> A
+## Why Use It
+
+Most agent code becomes hard to change when reasoning, memory writes, tool calls, LLM calls, retries, and transport details live in the same function. callAgent gives those concerns explicit places to live.
+
+Use it when you need agents that:
+
+- survive multi-turn workflows with input/tool/child-agent resumes
+- sleep while waiting and wake with state restored
+- keep reasoning state separate from runtime control state
+- use LLMs and tools without hiding effects inside Policy
+- store compact, durable memory instead of bloated prompt history
+- coordinate multiple agents through durable threads and topics
+- produce traces you can test and debug turn by turn
+
+The tradeoff is intentional structure. Simple agents stay small; non-trivial agents get a layout that remains readable after the third branch, retry path, or integration.
+
+## What APLRET Enforces
+
+APLRET is a turn-based architecture built around explicit boundaries:
+
+- **Perception reads only the current inbox**: runtime input arrives as observations in `env.inbox.current`.
+- **Learning is the only writer of cognition**: durable reasoning state lives in `MentalState`.
+- **Policy is synchronous and M-only**: no `ctx`, no `env`, no I/O, no LLM calls.
+- **Execution is the only effect boundary**: LLM calls, tools, user replies, child agents, and conversation APIs live here.
+- **Transition controls flow**: `continue`, `await_input`, `await_tool`, `await_child`, `complete`, or `fail`.
+- **TurnTrace is the debugging unit**: one structured trace per turn, with compact module output and provenance.
+
+The intended data flow is:
+
+```txt
+Execution -> ExecOutcome -> Transition -> Observation[]
+  -> env.inbox.current on the next turn
+  -> Perception -> Learning -> MentalState -> Policy
 ```
 
-### Core Components
+## Packages
 
-- **🎯 APLRET Cognitive Architecture**: Six explicit modules implementing brain-inspired intelligence
-- **🔄 A2A Communication**: Automatic dependency resolution and agent-to-agent communication
-- **🧠 Typed Intent System**: Policy emits discriminated unions, Execution handles exhaustively
-- **📡 Stage Dispatcher Pattern**: Explicit control flow with typed stages and runtime invariants
-- **⚡ Effect Safety**: Budget-aware, timeout-protected external calls with automatic retries
-- **💾 Memory System**: Multi-layered memory with semantic, episodic, and working memory support
-- **🌊 Streaming Support**: Real-time response streaming via Server-Sent Events (SSE)
+This repository is a Yarn workspace monorepo.
 
-## 🚀 Quick Start
+| Package | Purpose |
+|---------|---------|
+| `@a2arium/callagent-core` | Runtime loop, `createAgent`, orchestration, test harness, TurnTrace, StageFacade, scaffold API |
+| `@a2arium/callagent-types` | Shared types, manifest schemas, public error types |
+| `@a2arium/callagent-memory-engine` | Memory registry and working memory facade |
+| `@a2arium/callagent-memory-sql` | SQL-backed memory/session persistence with Prisma |
+| `@a2arium/callagent-chat-bridge` | Chat routing, session mapping, and reply bridge |
+| `@a2arium/callagent-eventbus-nats` | Optional NATS JetStream adapters for event bus, message log, and transport |
+| `@a2arium/callagent-utils` | Shared utilities and logging |
 
-### 1. Installation
+## Feature Overview
+
+### APLRET Runtime
+
+The loop makes each turn explicit. Perception normalizes observations, Learning writes cognition, Policy chooses a typed intent, Shield guards it, Execution performs effects, and Transition decides whether to continue, await, complete, or fail.
+
+This gives you stable places for code review and tests:
+
+- closed `Obs`, `Intent`, and `Stage` unions in `types.ts`
+- selector-driven Policy
+- reducer-style Learning
+- named effect handlers
+- structured execution outcomes and transition outcomes
+
+### Memory
+
+callAgent treats memory as cognition, not a scratchpad.
+
+The core contract is `MentalState`:
+
+- `memory.sensory`: latest normalized facts needed by Policy
+- `memory.window` / `memory.scratch`: short-lived working sets
+- `memory.longTerm.semantic`: durable facts and entities
+- `memory.longTerm.episodic`: compact history and audit summaries
+- `memory.longTerm.procedural`: durable skills or routines
+- `worldModel`, `goalState`, and `plans`: decision-ready cognition
+
+Only Learning writes `MentalState`. Policy reads it synchronously. Execution may read it to act, but does not mutate it.
+
+For persistence, `@a2arium/callagent-memory-engine` provides the memory registry/facade layer and `@a2arium/callagent-memory-sql` provides SQL-backed storage with Prisma/PostgreSQL. Large payloads should be kept as artifact handles plus compact derived facts, not inline memory blobs. See [Memory model](apps/docs/0-aplret_contracts.md#memory-model), [Artifact model](apps/docs/7-how_to_use_artifacts_correctly_aplret.md), and [memory-sql setup](packages/memory-sql/README.md).
+
+### Persistent State and Wake-Up
+
+Agents are not forced to stay hot while waiting. When a turn ends with `await_input`, `await_tool`, or `await_child`, the runtime persists the task snapshot: `MentalState`, inbox history, pending tokens, control state, manifest provenance, LLM state when configured, and other resume metadata.
+
+When the awaited event arrives later, the task wakes up from that snapshot. The next turn sees the restored cognition and control state plus the new observation in `env.inbox.current`. That means long-running workflows can pause between user replies, tool completions, child-agent completions, or conversation deliveries without losing where they were.
+
+With SQL-backed session storage, this state can survive process restarts and cross-runtime delivery. In-memory storage is useful for tests and local development, but not for production durability.
+
+### Event Bus, Outbox, and Transports
+
+The core runtime includes typed event-bus and message-log surfaces for durable orchestration:
+
+- `IEventBus` publishes typed `BusEvent` envelopes.
+- `MessageLog` stores ordered conversation messages.
+- Outbox publishing lets persisted work be dispatched reliably.
+- Durable subscription support tracks cursors, retries, and dead-letter paths.
+- In-memory adapters are useful for local development and tests.
+- `@a2arium/callagent-eventbus-nats` adds optional NATS JetStream adapters for cross-runtime event bus and message log use.
+
+Most agent authors do not call these directly; they use higher-level APIs such as `ctx.conversation.*`, the task engine, and the test harness. Integrators can swap adapters at the composition root. See [multi-agent conversation](apps/docs/15-how_to_multiagent_conversation.md), [event bus migration notes](apps/docs/migration/5.4b-conversation-phase-4b-durable-subscription-and-outbox-bus-wiring-migration.md), and [NATS adapter notes](apps/docs/migration/5.4c-conversation-phase-4c-cross-runtime-transport-adapters-migration.md).
+
+### Multi-Agent Conversations
+
+callAgent supports durable agent-to-agent conversation primitives:
+
+- **Threads**: 1:1 ordered exchanges between two agents.
+- **Topics**: N-member rooms with broadcast, round-robin, explicit recipient, selector policies, invites, stop policies, and projections.
+- **MessageLog**: the durable ordered record of conversation messages.
+
+The rule is the same as every other effect: Policy may decide to send, post, close, or archive, but only Execution calls `ctx.conversation.*`. Inbound messages re-enter cognition as `conversation` observations.
+
+See [apps/docs/15-how_to_multiagent_conversation.md](apps/docs/15-how_to_multiagent_conversation.md).
+
+### LLMs, Tools, Children, and Artifacts
+
+LLMs, tools, and child-agent dispatch are effects. Policy emits typed intents; Execution performs the call; Transition emits observations; Learning writes the result into cognition on a later turn.
+
+For structured LLM/tool output, define explicit contracts with Zod or JSON Schema. For large data, use artifact handles and store compact facts in memory. See [LLM usage](apps/docs/10-how_to_use_llm_in_aplret.md), [child-agent await/resume](apps/docs/6-how_to_child_agent_await_and_resume_aplret.md), and [artifacts](apps/docs/7-how_to_use_artifacts_correctly_aplret.md).
+
+### Testing and Observability
+
+Every turn can emit one `TurnTrace` with compact module outputs, stage transitions, intent, shield outcome, execution result, transition outcome, timings, usage, and sub-call summaries.
+
+The test harness lets you inject observations, run turns, resume awaited tokens, and assert traces directly. This is much more stable than checking only final text. See [testing](apps/docs/11-how_to_test_aplret_agents.md) and [TurnTrace debugging](apps/docs/12-how_to_debug_with_turn_trace.md).
+
+### Chat Bridge
+
+`@a2arium/callagent-chat-bridge` normalizes chat messages from Telegram, Slack, web chat, or custom networks; maps chat sessions to agent tasks; routes start vs resume; forwards replies/progress/input-required events; and supports optional realtime publishing.
+
+See [packages/chat-bridge/README.md](packages/chat-bridge/README.md).
+
+## Installation
+
+For a normal agent project:
+
 ```bash
-# Install the framework
-npm install @a2arium/callagent-core
-
-# Optional: SQL memory persistence
-npm install @a2arium/callagent-memory-sql
+yarn add @a2arium/callagent-core @a2arium/callagent-types
 ```
 
-### 2. Create Your First APLRET Agent
-```typescript
-import { createAgent } from '@a2arium/callagent-core';
+or:
 
-// Define typed stages for explicit control flow
-type Stage = 'idle' | 'awaiting_input' | 'completed';
-
-// Define typed intents (Policy decides WHAT to do)
-type Intent =
-  | { kind: 'prompt_user' }
-  | { kind: 'answer_with_llm'; query: string };
-
-// Create typed façade for ctx.vars
-const V = {
-  stage: (ctx) => ctx.vars.get('stage') ?? 'idle',
-  setStage: (ctx, stage) => ctx.vars.set('stage', stage),
-  token: (ctx) => ctx.vars.get('token'),
-  setToken: (ctx, token) => ctx.vars.set('token', token),
-  completeCalled: (ctx) => Boolean(ctx.vars.get('completeCalled')),
-  setCompleteCalled: (ctx, v) => ctx.vars.set('completeCalled', v)
-};
-
-export const agent = createAgent({
-  manifest: {
-    name: 'my-agent',
-    version: '1.0.0',
-    runMode: 'loop',
-    budgets: { maxTurns: 5 }
-  },
-  llmConfig: {
-    provider: 'openai',
-    modelAliasOrName: 'fast',
-    systemPrompt: 'You are a helpful assistant.',
-    historyMode: 'dynamic'
-  },
-
-  // A - Attention: What to focus on
-  attention: (m, env) => ({
-    wantPrompt: !env.inbox.current.some(o => o.source === 'user')
-  }),
-
-  // P - Perception: Normalize input
-  perception: (env) => {
-    const latest = env.inbox.current.find(o => o.source === 'user');
-    const value = (latest?.payload as { value?: string | { text?: string } })?.value;
-    const text = typeof value === 'string' ? value : value?.text;
-    return {
-      text,
-      eventType: latest ? 'user_message' : 'idle'
-    };
-  },
-
-  // L - Learning: Update MentalState (immutable, pure)
-  learning: (prev, _action, obs) => ({
-    ...prev,
-    memory: {
-      ...prev.memory,
-      sensory: { current: obs.text }
-    }
-  }),
-
-  // R - Policy: Decide WHAT to do (pure function of MentalState)
-  policy: (m): Intent => {
-    const userText = m.memory?.sensory?.current;
-    return userText
-      ? { kind: 'answer_with_llm', query: userText }
-      : { kind: 'prompt_user' };
-  },
-
-  // S - Shield: Safety checks
-  shield: (m, intent) => ({
-    action: 'pass',
-    intent
-  }),
-
-  // E - Execution: HOW to do it (stage dispatcher)
-  execution: async (intent, ctx, m) => {
-    const stage = V.stage(ctx);
-
-    if (stage === 'idle' && intent.kind === 'prompt_user') {
-      await ctx.reply('How can I help you?');
-
-      // ✅ NEW: Input-first approach with automatic token and stage management
-      const handle = await ctx.requestInput('Your message', {
-        setStage: 'awaiting_input'  // Automatically sets stage and token
-      });
-      const token = handle.token;
-
-      return { kind: 'ask_user', token };
-    }
-
-    if (stage === 'awaiting_input' && intent.kind === 'answer_with_llm') {
-      const response = await ctx.llm.call(intent.query);
-      await ctx.reply(response[0]?.content);
-      ctx.complete(100, 'completed');
-      V.setCompleteCalled(ctx, true);
-      V.setStage(ctx, 'completed');
-      return { kind: 'internal', done: true };
-    }
-
-    return { kind: 'internal', done: true };
-  },
-
-  // T - Transition: Control loop flow
-  transition: (_env, exec, ctx) => {
-    if (exec.kind === 'ask_user') {
-      return { kind: 'await_input', token: exec.token };
-    }
-    if (V.completeCalled(ctx)) {
-      return { kind: 'complete', result: { ok: true } };
-    }
-    return { kind: 'continue' };
-  }
-}, import.meta.url);
+```bash
+npm install @a2arium/callagent-core @a2arium/callagent-types
 ```
 
-### 3. Run Your Agent
-```typescript
-import { agent } from './my-agent.js';
+Add persistence when you need SQL-backed memory/session storage:
 
-const result = await agent.execute({
-  input: "Hello, agent!"
-});
-
-console.log(result);
+```bash
+yarn add @a2arium/callagent-memory-engine @a2arium/callagent-memory-sql
 ```
 
----
+Add optional integrations as needed:
 
-## 📚 Documentation
-
-- **[APLRET Architecture Guide](apps/docs/loop/aplret-stage-dispatcher.md)** - Complete APLRET implementation guide (2,400+ lines)
-- **[A2A Communication](docs/a2a/architecture.md)** - Agent-to-agent communication protocols
-- **[Memory System](docs/memory/)** - Multi-layered memory architecture
-- **[Examples](apps/examples/)** - 20+ production-ready example agents
-
----
-
-## ✨ Key Features
-
-### 🧠 APLRET Cognitive Architecture
-- **Brain-inspired design** based on cognitive science research
-- **Six explicit modules**: Attention → Perception → Learning → Policy → Shield → Execution → Transition
-- **Typed intent system** for clear reasoning and exhaustive handling
-- **Stage dispatcher pattern** with runtime invariants
-
-### 🔄 A2A Communication
-- **Automatic dependency resolution** with topological loading
-- **Agent-to-agent delegation** via `ctx.sendTaskToAgent()`
-- **Circular dependency detection** with clear error messages
-- **Multi-agent coordination** patterns
-
-### ⚡ Effect Safety & Performance
-- **Budget-aware execution** with automatic cost tracking
-- **Timeout protection** and automatic retries for external calls
-- **Streaming support** via Server-Sent Events (SSE)
-- **LLM conversation history** persistence across async operations
-
-### 💾 Advanced Memory System
-- **Multi-layered memory**: Semantic, Episodic, and Working memory
-- **SQL persistence** with Prisma ORM
-- **Tenant isolation** and permission management
-- **Memory lifecycle** orchestration
-
-### 🛡️ Production-Ready Safety
-- **Shield module** for PII detection and policy enforcement
-- **Pure functional modules** for predictable behavior
-- **Type safety** with discriminated unions and exhaustive matching
-- **Runtime invariants** for stage validation
-
----
-
-## 🎯 Agent Types
-
-### 1. **Simple Agents**
-For basic request-response patterns with minimal configuration.
-
-### 2. **Loop Agents** (APLRET)
-For complex conversational agents requiring:
-- Multi-turn conversations with context persistence
-- Complex decision-making and planning
-- Tool coordination and external service integration
-- Human-in-the-loop workflows
-
-### 3. **Multi-Agent Systems**
-For distributed systems requiring:
-- Agent specialization and delegation
-- Coordinated task execution
-- Hierarchical agent architectures
-
----
-
-## 🏗️ Project Structure
-
-```
-callagent/
-├── packages/
-│   ├── core/           # APLRET framework engine
-│   ├── memory-sql/     # SQL memory persistence
-│   ├── types/          # Shared TypeScript types
-│   ├── utils/          # Utilities and logging
-│   └── chat-bridge/    # External integrations
-├── apps/
-│   ├── examples/       # 20+ example agents
-│   │   ├── hello-agent/           # Simple greeting agent
-│   │   ├── loop-agent-mini/       # APLRET demo with LLM history
-│   │   ├── interactive-a2a-demo/  # Multi-agent communication
-│   │   ├── memory-usage/          # Memory system demo
-│   │   └── ...                    # Many more examples
-│   └── docs/           # Comprehensive documentation
-├── planned_architecture/  # Detailed design specs
-└── scripts/            # Build utilities
+```bash
+yarn add @a2arium/callagent-chat-bridge
+yarn add @a2arium/callagent-eventbus-nats
 ```
 
----
+This repo uses Yarn 4 workspaces. For framework development:
 
-## 🚀 Development Setup
-
-### Install Dependencies
 ```bash
 yarn install
+yarn build
+yarn test
 ```
 
-### Build the Framework
+## Start a New Agent
+
+Use the scaffold first. It creates manifests, TypeScript config, module files, and tests that match the framework contracts.
+
+In a downstream project after installing `@a2arium/callagent-core`:
+
+```bash
+node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
+  --name my-agent --preset minimal --output ./my-agent
+```
+
+For a non-trivial agent with a `flow.md` map, normalizers, selectors, reducers, and test stubs:
+
+```bash
+node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
+  --name my-agent --preset non-trivial --output ./my-agent \
+  --uses-llm --uses-tools --uses-children --uses-plans
+```
+
+Inside this monorepo, use the convenience script:
+
+```bash
+yarn create-agent --name my-agent --preset minimal --output apps/examples/my-agent
+```
+
+The scaffold produces an `agent.ts` that wires modules through `createAgent(...)`. `createAgent` resolves `agent-card.json` and `agent-runtime.json` by default relative to the agent module. It returns an agent plugin promise; the framework loaders and existing examples export that result directly.
+
+After scaffolding:
+
+```bash
+cd my-agent
+yarn install
+yarn build
+yarn test
+```
+
+## Minimal Agent Shape
+
+A minimal agent usually has:
+
+```txt
+my-agent/
+  agent.ts
+  types.ts
+  attention.ts
+  perception.ts
+  learning.ts
+  policy.ts
+  shield.ts
+  execution.ts
+  transition.ts
+  agent-card.json
+  agent-runtime.json
+  tests/golden.test.ts
+```
+
+The wiring stays small:
+
+```ts
+import { createAgent } from '@a2arium/callagent-core';
+import { attention } from './attention.js';
+import { perception } from './perception.js';
+import { learning } from './learning.js';
+import { policy } from './policy.js';
+import { shield } from './shield.js';
+import { execution } from './execution.js';
+import { transition } from './transition.js';
+import type { Sensory, Obs, ExecPayload, ExecError } from './types.js';
+
+export default createAgent<Sensory, Obs, unknown, ExecPayload, ExecError>(
+  {
+    attention,
+    perception,
+    learning,
+    policy,
+    shield,
+    execution,
+    transition,
+  },
+  import.meta.url
+);
+```
+
+For the complete canonical example, see [apps/docs/0-aplret_contracts.md](apps/docs/0-aplret_contracts.md#minimal-canonical-example) and [apps/docs/1-tutorial_build_your_first_aplret_agent.md](apps/docs/1-tutorial_build_your_first_aplret_agent.md).
+
+## Basic Usage
+
+Build and test a scaffolded agent:
+
+```bash
+cd my-agent
+yarn build
+yarn test
+```
+
+Inside this monorepo, run the minimal example:
+
+```bash
+yarn workspace @a2arium/hello-agent build
+yarn run:hello
+```
+
+The runner sends JSON input to the agent. The agent receives it as a `user / input.provided` observation, Perception normalizes it, Learning stores the compact fact, Policy chooses the next intent, Execution replies, and Transition completes the run.
+
+## Manifests
+
+Every agent has two manifests:
+
+- `agent-card.json`: public A2A discovery contract.
+- `agent-runtime.json`: local callAgent runtime configuration.
+
+The runtime enforces that `name` and `version` match between both manifests. Default resolution is:
+
+1. inline manifest source passed to `createAgent`
+2. explicit path source passed to `createAgent`
+3. default files next to the agent module
+
+See [apps/docs/2-manifest_spec_agent_card_runtime_manifest.md](apps/docs/2-manifest_spec_agent_card_runtime_manifest.md).
+
+## Testing
+
+APLRET agents should be tested as turn scripts:
+
+1. seed or inject observations
+2. run a turn
+3. assert `TurnTrace`
+4. inject resume observations for awaited inputs, tools, or children
+5. repeat until complete or failed
+
+The core package exports `createTestHarness`, deterministic LLM/tool stubs, and assertion helpers. Scaffolded agents include starter tests.
+
+Framework contributor commands:
+
 ```bash
 yarn build
+yarn test
+yarn workspace @a2arium/callagent-core test:types
 ```
 
-### Run Examples
+The full test suite is intentionally broad and can be noisy. For agent work, prefer focused harness tests plus the relevant workspace tests.
+
+See [apps/docs/11-how_to_test_aplret_agents.md](apps/docs/11-how_to_test_aplret_agents.md) and [apps/docs/12-how_to_debug_with_turn_trace.md](apps/docs/12-how_to_debug_with_turn_trace.md).
+
+## Repository Layout
+
+Important top-level paths:
+
+```txt
+packages/
+  core/
+  types/
+  memory-engine/
+  memory-sql/
+  chat-bridge/
+  eventbus-nats/
+  utils/
+
+apps/
+  docs/
+  examples/
+  functions/
+
+planned_architecture/
+scripts/
+```
+
+Non-trivial agents should keep behavior visible:
+
+- `types.ts`: closed `Obs`, intent, stage, and execution unions.
+- `flow.md`: behavior over turns, branches, awaits, and terminal outcomes.
+- `normalizers/`: source-specific inbox normalization.
+- `selectors.ts`: decision-ready views for Policy.
+- `reducers.ts`: Learning-owned cognition updates.
+- `effects/`: named execution-side effect handlers.
+- `contracts/`: Zod or JSON schemas for structured LLM/tool output.
+- `prompts/`: prompt builders and wording.
+
+See [apps/docs/14-agent_repository_layout_for_aplret.md](apps/docs/14-agent_repository_layout_for_aplret.md) and [apps/docs/13-flow_md_for_aplret_agents.md](apps/docs/13-flow_md_for_aplret_agents.md).
+
+## Examples
+
+Current example agents:
+
+| Example | Purpose |
+|---------|---------|
+| [hello-agent](apps/examples/hello-agent/) | Minimal scaffolded APLRET loop |
+| [flow-reference-agent](apps/examples/flow-reference-agent/) | Non-trivial reference layout with `flow.md`, selectors, reducers, normalizers, effects, prompts, contracts, and tests |
+| [conversation-reference-agent](apps/examples/conversation-reference-agent/) | Canonical thread initiator example |
+| [conversation-responder-agent](apps/examples/conversation-responder-agent/) | Companion thread responder |
+| [conversation-panel-orchestrator-agent](apps/examples/conversation-panel-orchestrator-agent/) | Panel orchestration example |
+| [conversation-panel-persona-agent](apps/examples/conversation-panel-persona-agent/) | Persona seat for panel-style conversation |
+| [ethical-triage-panel-agent](apps/examples/ethical-triage-panel-agent/) | Moderated topic/panel example with projections, selectors, stop policy, and transcript output |
+
+Useful monorepo commands:
+
 ```bash
-# Simple agent
+yarn workspace @a2arium/hello-agent build
 yarn run:hello
 
-# APLRET loop agent with streaming
-yarn run:loop-mini:dev
-
-# Multi-agent demo
-yarn run:interactive-a2a
-
-# All available scripts
-yarn run:llm
-yarn run:memory
-yarn run:csv-parser
-yarn run:data-analyzer
-
-# Telegram bridge demo (requires setup)
-yarn run:telegram-demo
+yarn workspace @a2arium/flow-reference-agent build
+yarn workspace @a2arium/flow-reference-agent test
 ```
 
-### Telegram Bridge Demo Setup
-
-The Telegram bridge demo requires additional setup since it connects to external services:
-
-1. **Copy environment template:**
-```bash
-cp apps/examples/telegram-bridge-demo/env.example apps/examples/telegram-bridge-demo/.env
-```
-
-2. **Fill in environment variables in `.env`:**
-```bash
-# Get from @BotFather on Telegram
-CM_TG_BOT_TOKEN="your-telegram-bot-token"
-# Port for webhook (88 works well for local)
-CM_TG_WEBHOOK_PORT=88
-# Your Telegram chat ID for testing
-CM_TG_CHAT_ID="your-chat-id"
-# PostgreSQL database for session storage
-CHAT_DATABASE_URL="postgres://user:pass@host:5432/dbname"
-```
-
-3. **Run the demo:**
-```bash
-# Development mode (no build needed)
-yarn run:telegram-demo:dev
-
-# Production mode (requires build)
-yarn run:telegram-demo
-```
-
-The demo starts a webhook server that receives Telegram messages and responds using the enhanced input-first `requestInput` API with automatic token and stage management.
-
-### Development Commands
-```bash
-# Run tests
-yarn test
-
-# Lint all packages
-turbo run lint
-
-# Build all packages
-turbo run build
-
-# Run specific package tests
-turbo run test --filter=packages/core
-```
-
-### TypeScript Development
-The framework uses **ESM modules** throughout. When developing:
-
-- Use `yarn dev` for rapid TypeScript iteration
-- Use `yarn run-agent` with compiled `.js` agent module paths; use `yarn dev` (or TS loaders) for `.ts` source modules
-- All relative imports require explicit `.js` extensions
-- Use `import.meta.url` for agent module resolution
-
-## 🔄 A2A Communication & Multi-Agent Systems
-
-The framework provides comprehensive **Agent-to-Agent (A2A) communication** with automatic dependency resolution:
-
-### Core A2A Features
-- **Automatic Dependency Resolution**: Agents declare dependencies in manifests
-- **Topological Loading**: Dependencies loaded in correct order with circular dependency detection
-- **Agent Delegation**: Call other agents via `ctx.sendTaskToAgent()`
-- **Multi-Agent Coordination**: Support for hierarchical agent systems
-
-### Quick Multi-Agent Example
-
-```typescript
-// agent.json
-{
-  "name": "coordinator-agent",
-  "dependencies": {
-    "agents": ["data-processor", "report-generator"]
-  }
-}
-
-// AgentModule.ts
-export default createAgent({
-  manifest: 'agent.json',
-
-  async handleTask(ctx) {
-    // Delegate to specialized agents
-    const data = await ctx.sendTaskToAgent('data-processor', {
-      source: ctx.input.dataSource
-    });
-
-    const report = await ctx.sendTaskToAgent('report-generator', {
-      data: data.processed
-    });
-
-    return { report: report.content };
-  }
-}, import.meta.url);
-```
-
-### APLRET Multi-Agent Patterns
-
-For complex multi-agent systems using the APLRET architecture:
-
-```typescript
-export default createAgent({
-  manifest: {
-    name: 'orchestrator',
-    runMode: 'loop',
-    dependencies: { agents: ['specialist-1', 'specialist-2'] }
-  },
-
-  // APLRET modules for multi-agent coordination
-  policy: (m): Intent => {
-    const task = m.worldModel.currentTask;
-
-    if (task.type === 'data_analysis') {
-      return {
-        kind: 'delegate_to_child',
-        childAgentId: 'data-analyst',
-        input: task.data
-      };
-    }
-
-    if (task.type === 'report_generation') {
-      return {
-        kind: 'delegate_to_child',
-        childAgentId: 'report-writer',
-        input: task.analysis
-      };
-    }
-
-    return { kind: 'prompt_user' };
-  },
-
-  execution: async (intent, ctx) => {
-    if (intent.kind === 'delegate_to_child') {
-      const handle = await ctx.sendTaskToAgent(intent.childAgentId, intent.input);
-      V.setToken(ctx, handle.token);
-      V.setStage(ctx, 'awaiting_child');
-      return { kind: 'subagent', token: handle.token };
-    }
-
-    // Handle other intents...
-  },
-
-  // ... other APLRET modules
-}, import.meta.url);
-```
-
-## 🌊 Streaming Support
-
-The framework supports both **buffered and streaming responses**:
-
-- **Buffered Mode**: Complete response after task completion
-- **Streaming Mode**: Real-time partial results via Server-Sent Events (SSE)
-
-Agent code remains identical - the framework handles the delivery method automatically.
-
-### Streaming Example
-
-```typescript
-export default createAgent({
-  async handleTask(ctx) {
-    // Send progress updates
-    await ctx.progress({
-      state: 'processing',
-      progress: 25
-    });
-
-    // Stream partial content
-    await ctx.reply([{
-      type: 'text',
-      text: 'Processing step 1...'
-    }], { append: true });
-
-    // Continue processing...
-    await ctx.progress({ progress: 50 });
-
-    // Complete the task
-    ctx.complete(100, 'completed');
-    return { result: 'Task completed successfully' };
-  }
-}, import.meta.url);
-```
-
-### Try Streaming Examples
-
-```bash
-# Streaming APLRET agent
-yarn run:loop-mini
-
-# Interactive multi-agent demo with streaming
-yarn run:interactive-a2a
-```
-
----
-
-## 🛠️ Advanced Usage
-
-### External API Integration with Effect Safety
-
-```typescript
-import { runEffect } from '@a2arium/callagent-core';
-
-export default createAgent({
-  execution: async (intent, ctx) => {
-    if (intent.kind === 'fetch_external_data') {
-      // ✅ Safe external API call with timeout and retries
-      const data = await runEffect(
-        () => fetch(intent.url).then(r => r.json()),
-        { timeoutMs: 10000, maxRetries: 3 }
-      );
-
-      await ctx.reply(`Data fetched: ${JSON.stringify(data)}`);
-      return { kind: 'internal', done: true };
-    }
-  }
-}, import.meta.url);
-```
-
-### Memory System Integration
-
-```typescript
-export default createAgent({
-  learning: (prev, _action, obs) => {
-    // Store conversation in semantic memory
-    if (obs.text) {
-      return {
-        ...prev,
-        memory: {
-          ...prev.memory,
-          sensory: { current: obs.text },
-          longTerm: {
-            ...prev.memory.longTerm,
-            episodic: [
-              ...prev.memory.longTerm.episodic,
-              {
-                t: Date.now(),
-                content: obs.text,
-                type: 'user_message'
-              }
-            ]
-          }
-        }
-      };
-    }
-
-    return prev;
-  },
-
-  policy: (m) => {
-    // Use memory for context-aware decisions
-    const recentHistory = m.memory.longTerm.episodic.slice(-5);
-    const context = recentHistory.map(e => e.content).join('\n');
-
-    return {
-      kind: 'answer_with_llm',
-      query: m.memory.sensory.current,
-      context
-    };
-  }
-}, import.meta.url);
-```
-
----
-
-## 📖 Learn More
-
-### Documentation
-- **[APLRET Architecture Guide](apps/docs/loop/aplret-stage-dispatcher.md)** - Complete implementation guide
-- **[A2A Communication](planned_architecture/a2a_specs/)** - Multi-agent protocols
-- **[Memory System](planned_architecture/memory/)** - Memory architecture details
-- **[API Reference](packages/core/)** - Full API documentation
-
-### Examples
-- **[Hello Agent](apps/examples/hello-agent/)** - Simple starter agent
-- **[APLRET Mini Demo](apps/examples/loop-agent-mini/)** - Minimal APLRET implementation
-- **[Interactive A2A Demo](apps/examples/interactive-a2a-demo/)** - Multi-agent communication
-- **[Memory Usage](apps/examples/memory-usage/)** - Memory system demonstration
-- **[20+ More Examples](apps/examples/)** - Covering all framework features
-
-### Architecture Papers
-- **[Brain-Inspired Foundation Agents](https://arxiv.org/abs/2504.01990)** - Academic foundation for APLRET
-- **[Planned Architecture](planned_architecture/)** - Complete design specifications
-
-## 📦 Package Documentation
-
-- **[@a2arium/callagent-core](packages/core/README.md)** - APLRET framework and agent creation
-- **[@a2arium/callagent-memory-sql](packages/memory-sql/README.md)** - SQL-based memory persistence
-- **[@a2arium/callagent-types](packages/types/README.md)** - Shared TypeScript types
-- **[@a2arium/callagent-utils](packages/utils/README.md)** - Shared utilities
-
----
-
-## 🏗️ Production Deployment
-
-### Database Setup
-
-For production use with persistent memory:
-
-```bash
-# Set database URL (environment variable or config)
-export MEMORY_DATABASE_URL="postgresql://user:pass@localhost:5432/yourdb"
-
-# Initialize database schema
-npx @a2arium/callagent-memory-sql setup
-
-# Optional: View database with Prisma Studio
-npx @a2arium/callagent-memory-sql studio
-```
-
-### Environment-Agnostic Design
-
-CallAgent is designed for **production environments**:
-
-- ✅ **No file system dependencies** (environment-agnostic configuration)
-- ✅ **Container-ready** (Docker, Kubernetes support)
-- ✅ **Cloud-native** (works with managed databases, secret managers)
-- ✅ **Multi-tenant support** with isolation and permissions
-
-### Production Configuration
-
-```typescript
-// Production agent with environment-specific config
-export const agent = createAgent({
-  manifest: {
-    name: 'production-agent',
-    runMode: 'loop',
-    budgets: { maxTurns: 10 }
-  },
-
-  // APLRET modules as shown in quick start
-  // ...
-}, import.meta.url);
-
-// Initialize with your deployment platform's configuration
-await agent.initialize({
-  database: {
-    url: await getSecret('MEMORY_DATABASE_URL')
-  },
-  llm: {
-    apiKey: await getSecret('LLM_API_KEY'),
-    provider: 'your-provider'
-  }
-});
-```
-
----
-
-## 🔧 Framework Development
-
-### Development Environment
-
-This monorepo uses **Turborepo** and **Yarn workspaces** for modular development:
-
-```bash
-# Install dependencies
-yarn install
-
-# Build all packages
-turbo run build
-
-# Run tests
-turbo run test
-
-# Run specific package tests
-turbo run test --filter=packages/core
-
-# Development mode with hot reload
-yarn dev examples/loop-agent-mini/AgentModule.ts '{}'
-```
-
-### Project Structure
-
-```
-callagent/
-├── packages/
-│   ├── core/           # APLRET framework engine
-│   ├── memory-sql/     # SQL memory persistence
-│   ├── types/          # Shared TypeScript types
-│   ├── utils/          # Logging and utilities
-│   └── chat-bridge/    # External platform integrations
-├── apps/
-│   ├── examples/       # 20+ example agents demonstrating patterns
-│   └── docs/           # APLRET documentation
-├── planned_architecture/  # Comprehensive design specifications
-└── scripts/            # Build and development utilities
-```
-
-### TypeScript & ESM
-
-The framework uses **modern TypeScript** with **ES modules**:
-
-- `"type": "module"` in all `package.json` files
-- `"module": "nodenext"` and `"moduleResolution": "nodenext"` in TypeScript configs
-- Explicit `.js` extensions for relative imports
-- `import.meta.url` for agent module resolution
-
-### Environment Configuration
-
-For framework development, use the root `.env` file for shared configuration. The framework automatically handles environment propagation during development while remaining environment-agnostic in production.
-
-### Contributing
-
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for:
-- Development setup and testing
-- Code style and conventions
-- Pull request process
-- Release process
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-## 🤝 Community
-
-- **Documentation**: [Complete APLRET Guide](apps/docs/loop/aplret-stage-dispatcher.md)
-- **Issues**: [GitHub Issues](https://github.com/your-repo/callagent/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-repo/callagent/discussions)
-
----
-
-**CallAgent** - Production-ready APLRET architecture with comprehensive A2A communication support. 
+## Documentation Map
+
+Canonical docs in `apps/docs`:
+
+| Document | Use it for |
+|----------|------------|
+| [0-aplret_contracts.md](apps/docs/0-aplret_contracts.md) | Stable APLRET contracts and public API discipline |
+| [1-tutorial_build_your_first_aplret_agent.md](apps/docs/1-tutorial_build_your_first_aplret_agent.md) | First agent tutorial and scaffold workflow |
+| [2-manifest_spec_agent_card_runtime_manifest.md](apps/docs/2-manifest_spec_agent_card_runtime_manifest.md) | Agent Card and Runtime Manifest rules |
+| [3-how_to_keep_policy_pure.md](apps/docs/3-how_to_keep_policy_pure.md) | Policy purity and effect boundaries |
+| [5-how_to_use_stage_facade_in_aplret.md](apps/docs/5-how_to_use_stage_facade_in_aplret.md) | StageFacade and control invariants |
+| [10-how_to_use_llm_in_aplret.md](apps/docs/10-how_to_use_llm_in_aplret.md) | LLM effects and structured output contracts |
+| [11-how_to_test_aplret_agents.md](apps/docs/11-how_to_test_aplret_agents.md) | Harness and TurnTrace testing |
+| [12-how_to_debug_with_turn_trace.md](apps/docs/12-how_to_debug_with_turn_trace.md) | TurnTrace debugging |
+| [13-flow_md_for_aplret_agents.md](apps/docs/13-flow_md_for_aplret_agents.md) | `flow.md` format |
+| [14-agent_repository_layout_for_aplret.md](apps/docs/14-agent_repository_layout_for_aplret.md) | Agent repository layout |
+| [15-how_to_multiagent_conversation.md](apps/docs/15-how_to_multiagent_conversation.md) | Threads, topics, selectors, projections, and transports |
+| [16-observation_envelope_and_validation.md](apps/docs/16-observation_envelope_and_validation.md) | Observation envelopes and validation |
+
+Migration notes live in [apps/docs/migration](apps/docs/migration). Drafts and future work live under `apps/docs/drafts` and `apps/docs/todo`.
+
+## Contributor Rules
+
+Treat the framework as a contract:
+
+- Keep public API changes aligned with the inventory in [apps/docs/0-aplret_contracts.md](apps/docs/0-aplret_contracts.md#public-api-inventory-single-source-of-truth).
+- Add type-level tests when exported types change.
+- Add or update migration notes for author-visible behavior changes.
+- Reference examples should use stable public surfaces only.
+- Keep README claims tied to actual packages, examples, and docs in the repo.
+
+## License
+
+Package licenses are declared in each package's `package.json`.

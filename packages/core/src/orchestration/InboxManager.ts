@@ -1,6 +1,8 @@
 import { logger } from '@a2arium/callagent-utils';
 import { normalizeObservationInbox, type ObservationInbox } from '../loop/types.js';
 import type { Observation } from '../loop/oneTurn.js';
+import { conversationInboxDeliveryKey } from '../loop/conversationInboxIdentity.js';
+import type { Observation as ConversationObservation } from '../types/observation.js';
 
 const log = logger.createLogger({ prefix: 'InboxManager' });
 
@@ -39,8 +41,9 @@ export class InboxManager {
     }
 
     /**
-     * Merge remote inbox items into local inbox to preserve concurrent child completions.
-     * This prevents the "Lost Update" bug where parent overwrites child completion observations.
+     * Merge remote inbox items into local inbox to preserve concurrent runtime deliveries.
+     * This prevents lost updates where an active turn overwrites observations routed into
+     * the same session while the turn was running.
      * 
      * @param localInbox - The local inbox from env (what the parent saw during execution)
      * @param remoteInbox - The remote inbox from DB (may contain concurrent updates)
@@ -62,30 +65,44 @@ export class InboxManager {
             pendingChildrenKeys: Object.keys(pendingChildren)
         });
 
-        // Add child completion observations from remote that we don't have locally
+        const appendIfMissing = (obs: EngineObservation, includeCurrent: boolean): boolean => {
+            const key = observationMergeKey(obs);
+            const hasInAll = merged.all.some((existing) => observationMergeKey(existing) === key);
+            if (!hasInAll) {
+                merged.all.push(obs);
+            }
+            if (includeCurrent) {
+                const hasInCurrent = merged.current.some((existing) => observationMergeKey(existing) === key);
+                if (!hasInCurrent) {
+                    merged.current.push(obs);
+                }
+            }
+            return !hasInAll;
+        };
+
+        // Add child completion observations from remote that we don't have locally.
         for (const obs of remoteAll) {
             if (obs.kind === 'child.completed') {
                 const token = (obs.payload as any)?.token;
                 log.debug('mergeInboxes: Found child.completed in remote', { token, hasToken: !!token });
                 // Only merge if this is a pending child AND not already in local
                 if (token && pendingChildren[token]) {
-                    const alreadyHasInAll = merged.all.some(
-                        o => o.kind === 'child.completed' && (o.payload as any)?.token === token
-                    );
-                    if (!alreadyHasInAll) {
-                        merged.all.push(obs);
-                        // Also add to current so it gets processed on next turn
-                        const alreadyHasInCurrent = merged.current.some(
-                            o => o.kind === 'child.completed' && (o.payload as any)?.token === token
-                        );
-                        if (!alreadyHasInCurrent) {
-                            merged.current.push(obs);
-                        }
+                    if (appendIfMissing(obs, true)) {
                         log.info('mergeInboxes: ✅ Preserved concurrent child completion', { token });
                     } else {
                         log.debug('mergeInboxes: Already has observation in local', { token });
                     }
                 }
+            }
+        }
+
+        // Add conversation observations routed while this turn was active. These are
+        // already filtered by consumed delivery keys by the caller, so current entries
+        // here are unconsumed and must remain visible on the next turn.
+        const remoteCurrent = remoteInbox?.current ?? [];
+        for (const obs of remoteAll) {
+            if (obs.source === 'conversation') {
+                appendIfMissing(obs, remoteCurrent.some((current) => observationMergeKey(current) === observationMergeKey(obs)));
             }
         }
 
@@ -97,4 +114,18 @@ export class InboxManager {
 
         return merged;
     }
+}
+
+function observationMergeKey(obs: EngineObservation): string {
+    const conversationKey = conversationInboxDeliveryKey(obs as unknown as ConversationObservation);
+    if (conversationKey !== undefined) {
+        return `conversation-delivery:${conversationKey}`;
+    }
+    if (obs.kind === 'child.completed') {
+        const token = (obs.payload as { token?: unknown } | undefined)?.token;
+        if (typeof token === 'string' && token.length > 0) {
+            return `child.completed:${token}`;
+        }
+    }
+    return `observation:${JSON.stringify(obs)}`;
 }

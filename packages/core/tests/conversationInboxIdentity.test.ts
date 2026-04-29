@@ -4,12 +4,40 @@ import {
     conversationInboxDeliveryKeyFromTurnSummary,
     filterInboxCurrentByConversationDeliveryKeys,
     inboxAllHasConversationDeliveryKey,
+    preserveConversationInboxForSnapshot,
     readConsumedConversationDeliveryKeysFromMeta,
     writeConsumedConversationDeliveryKeysToMeta,
 } from '../src/loop/conversationInboxIdentity.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
+import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { readLoopBudgetsFromSnapshotMeta } from '../src/orchestration/loopOptsFromSnapshotMeta.js';
 import type { Observation } from '../src/types/observation.js';
+
+function topicMessage(id: string, recipientMemberId = 'orchestrator'): Observation {
+    return {
+        source: 'conversation',
+        kind: 'topic.message.received',
+        payload: {
+            kind: 'topic.message.received',
+            message: {
+                id,
+                conversation: { kind: 'topic', id: 'topic-1' },
+                senderAgentId: 'participant-agent',
+                senderMemberId: 'skeptical_fact_checker',
+                recipientAgentId: 'owner-agent',
+                recipientMemberId,
+                speechAct: 'answer',
+                content: { body: { phase: 'suite_agent_contribution', phaseId: 'synthesis' } },
+                sequenceNumber: 23,
+                ts: '2020-01-01T00:00:00.000Z',
+            },
+            topic: { kind: 'topic', id: 'topic-1' },
+            selector: { kind: 'explicit_recipient', recipient: { by: 'memberId', memberId: recipientMemberId } },
+            recipient: { memberId: recipientMemberId, agentId: 'owner-agent' },
+        },
+    } as Observation;
+}
 
 describe('conversationInboxIdentity', () => {
     it('matches observation key to turn summary key for thread message.received', () => {
@@ -146,6 +174,93 @@ describe('conversationInboxIdentity', () => {
         );
         expect([...readConsumedConversationDeliveryKeysFromMeta(meta)]).toEqual(['k1', 'k2']);
         expect(meta.existing).toBe(true);
+    });
+
+    it('preserves remote conversation deliveries when a stale snapshot candidate lacks them', () => {
+        const delivered = topicMessage('msg-preserve');
+        const merged = preserveConversationInboxForSnapshot(
+            {
+                inbox: { current: [], all: [] },
+                meta: { local: true },
+            },
+            {
+                inbox: { current: [delivered], all: [delivered] },
+                meta: { remote: true },
+            }
+        );
+        const inbox = normalizeObservationInbox(merged.inbox);
+        expect(inbox.all.map((obs) => (obs as any).payload?.message?.id)).toContain('msg-preserve');
+        expect(inbox.current.map((obs) => (obs as any).payload?.message?.id)).toContain('msg-preserve');
+    });
+
+    it('preserves consumed conversation deliveries in all but not current', () => {
+        const delivered = topicMessage('msg-consumed');
+        const key = conversationInboxDeliveryKey(delivered);
+        expect(key).toBeDefined();
+        if (!key) return;
+
+        const merged = preserveConversationInboxForSnapshot(
+            {
+                inbox: { current: [], all: [] },
+                meta: writeConsumedConversationDeliveryKeysToMeta({}, new Set([key])),
+            },
+            {
+                inbox: { current: [delivered], all: [delivered] },
+                meta: {},
+            }
+        );
+        const inbox = normalizeObservationInbox(merged.inbox);
+        expect(inbox.all.map((obs) => (obs as any).payload?.message?.id)).toContain('msg-consumed');
+        expect(inbox.current.map((obs) => (obs as any).payload?.message?.id)).not.toContain('msg-consumed');
+    });
+
+    it('SessionManager.saveSnapshot preserves routed conversation delivery from stale candidate with fresh expected version', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        const tenantId = 'tenant-preserve';
+        const sessionId = 'owner-session';
+        const agentId = 'owner-agent';
+        const staleBase = {
+            inbox: { current: [], all: [] },
+            meta: { agentId },
+            M: { memory: { sensory: { stage: 'phase_requested' } } },
+        };
+
+        const first = await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId,
+            agentId,
+            expectedWmVersion: BigInt(0),
+            snapshot: staleBase,
+        });
+        const routed = topicMessage('msg-routed');
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId,
+            agentId,
+            expectedWmVersion: first?.newVersion ?? BigInt(1),
+            snapshot: {
+                ...staleBase,
+                inbox: { current: [routed], all: [routed] },
+            },
+        });
+        const current = await sessionManager.load(tenantId, sessionId);
+
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId,
+            agentId,
+            expectedWmVersion: current?.wmVersion ?? BigInt(2),
+            snapshot: {
+                ...staleBase,
+                M: { memory: { sensory: { stage: 'phase_complete' } } },
+            },
+        });
+
+        const after = await sessionManager.load(tenantId, sessionId);
+        const inbox = normalizeObservationInbox((after?.snapshot as any)?.inbox);
+        expect(inbox.all.map((obs) => (obs as any).payload?.message?.id)).toContain('msg-routed');
+        expect(inbox.current.map((obs) => (obs as any).payload?.message?.id)).toContain('msg-routed');
     });
 });
 

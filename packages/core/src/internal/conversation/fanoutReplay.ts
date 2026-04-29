@@ -38,7 +38,9 @@ export function reconstructFanoutReceiptFromDeliveries(
     }));
 
     const delivered = deliveries.filter((d) => d.status === 'delivered');
-    const rejectedRows = deliveries.filter((d) => d.status === 'rejected');
+    const rejectedRows = deliveries.filter((d) =>
+        ['rejected', 'buffered', 'throttled', 'paused', 'dead-lettered'].includes(d.status)
+    );
     const queuedRows = deliveries.filter((d) => d.status === 'queued');
 
     const allDelivered = delivered.length === deliveries.length;

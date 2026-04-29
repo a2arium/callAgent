@@ -12,6 +12,7 @@ import type {
     UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
 } from '@a2arium/callagent-memory-engine';
+import { preserveConversationInboxForSnapshot } from '../loop/conversationInboxIdentity.js';
 
 export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
@@ -40,9 +41,16 @@ export class SessionManager {
             return null;
         }
 
+        const loaded = await this.store.getSessionSnapshot(params.tenantId, params.sessionId);
+        const snapshotToWrite = preserveConversationInboxForSnapshot(
+            params.snapshot,
+            loaded?.snapshot as Record<string, unknown> | undefined
+        );
+        const paramsToWrite = { ...params, snapshot: snapshotToWrite };
+
         // Enforce WM snapshot size cap (bytes)
         try {
-            const serialized = JSON.stringify(params.snapshot);
+            const serialized = JSON.stringify(snapshotToWrite);
             const envCap = Number(process.env.WM_SNAPSHOT_MAX_BYTES);
             const maxBytes = Number.isFinite(envCap) && envCap > 0 ? envCap : 2 * 1024 * 1024; // 2MB default cap
             if (serialized.length > maxBytes) {
@@ -54,7 +62,7 @@ export class SessionManager {
             throw new Error('WM_SNAPSHOT_SERIALIZE_FAILED');
         }
 
-        const result = await this.store.writeSnapshotCAS(params);
+        const result = await this.store.writeSnapshotCAS(paramsToWrite);
         return result;
     }
 
@@ -336,6 +344,15 @@ export class SessionManager {
         await this.store.recordConversationMessageDeliveries(params);
     }
 
+    async updateConversationMessageDelivery(
+        params: Parameters<IWorkingMemorySessionStore['updateConversationMessageDelivery']>[0]
+    ): Promise<void> {
+        if (!this.store) {
+            return;
+        }
+        await this.store.updateConversationMessageDelivery(params);
+    }
+
     async listConversationMessageDeliveries(
         params: Parameters<IWorkingMemorySessionStore['listConversationMessageDeliveries']>[0]
     ): Promise<ConversationMessageDeliveryRecord[]> {
@@ -372,5 +389,3 @@ export class SessionManager {
         return this.store.appendConversationDeadLetter(params);
     }
 }
-
-
