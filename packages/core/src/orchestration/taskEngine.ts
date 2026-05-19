@@ -28,6 +28,8 @@ const uuidv7 = uuid.v7;
 import { OutboxPublisher } from '../eventbus/outboxPublisher.js';
 import { BackpressureManager } from '../internal/conversation/BackpressureManager.js';
 import { createTraceparent } from '../tracing/Tracing.js';
+import { mapWorkingMemoryEventToRuntimeStream } from '../streaming/sessionEventMapper.js';
+import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
 import type {
     GoalId,
     GoalNode,
@@ -276,6 +278,22 @@ export class TaskEngine {
                     })
                 );
             },
+            publishRuntimeEvent: async ({ sessionId, event }) => {
+                await this.eventBus.publish(
+                    createBusEvent({
+                        channel: taskChannel(sessionId),
+                        partitionKey: sessionId,
+                        cloud: {
+                            id: event.id,
+                            type: event.type,
+                            source: `/tasks/${sessionId}`,
+                            time: event.ts,
+                            datacontenttype: 'application/json',
+                            data: event,
+                        },
+                    })
+                );
+            },
             clock: wallClock,
             messageLog: wrapMessageLogWithTopicStream({
                 inner: opts?.messageLog ?? createDbMessageLog(this.sessionManager),
@@ -330,6 +348,7 @@ export class TaskEngine {
             handleChildCompleted: (p) => this.handleChildCompleted(p),
             handleToolCompleted: (p) => this.handleToolCompleted(p),
             conversationService: this.conversationService,
+            eventBus: this.eventBus,
         });
 
         this.turnRunner = new TurnRunner(
@@ -704,6 +723,15 @@ export class TaskEngine {
                 await this.flushContextSnapshot(tenantId, sessionId, agentId, ctx);
             }
         });
+        try {
+            bindRuntimeCognitionStream({
+                ctx,
+                eventBus: this.eventBus,
+                tenantId,
+                sessionId,
+                agentId,
+            });
+        } catch { /* noop */ }
     }
 
     // Flush current MentalState and LLM state into snapshot (no vars; worldModel/scratch are persisted via M)
@@ -1722,7 +1750,34 @@ export class TaskEngine {
         };
         (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, toolObservation);
         const saveResult = await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-        await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', { token });
+        const toolCompletedPayload = { token, toolName: entry?.name, resultPreview: result };
+        const toolCompletedEvent = await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', toolCompletedPayload);
+        if (toolCompletedEvent) {
+            const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
+                eventId: toolCompletedEvent.eventId,
+                seq: toolCompletedEvent.seq,
+                type: 'task.tool_completed',
+                payload: toolCompletedPayload,
+                createdAt: new Date().toISOString(),
+            }, {
+                taskId,
+                tenantId,
+                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId,
+            });
+            if (runtimeEvent) {
+                void this.eventBus.publish(createBusEvent({
+                    channel: taskChannel(taskId),
+                    cloud: {
+                        id: runtimeEvent.id,
+                        type: runtimeEvent.type,
+                        source: `/tasks/${taskId}`,
+                        time: runtimeEvent.ts,
+                        datacontenttype: 'application/json',
+                        data: runtimeEvent,
+                    },
+                }));
+            }
+        }
 
         // Check if there's an active loop
         const activeCtx = LoopRegistry.__activeLoopContexts?.get(taskId);
@@ -2192,7 +2247,39 @@ export class TaskEngine {
             }
 
             try {
-                await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', { token, childTaskId, result });
+                const childCompletedPayload = {
+                    token,
+                    childTaskId: cleanChildResult.childTaskId || childTaskId || token,
+                    agentId: childAgentId,
+                    resultPreview: cleanChildResult.result,
+                };
+                const childCompletedEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', childCompletedPayload);
+                if (childCompletedEvent) {
+                    const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
+                        eventId: childCompletedEvent.eventId,
+                        seq: childCompletedEvent.seq,
+                        type: 'task.child_completed',
+                        payload: childCompletedPayload,
+                        createdAt: new Date().toISOString(),
+                    }, {
+                        taskId: parentTaskId,
+                        tenantId,
+                        agentId: parentAgentId,
+                    });
+                    if (runtimeEvent) {
+                        void this.eventBus.publish(createBusEvent({
+                            channel: taskChannel(parentTaskId),
+                            cloud: {
+                                id: runtimeEvent.id,
+                                type: runtimeEvent.type,
+                                source: `/tasks/${parentTaskId}`,
+                                time: runtimeEvent.ts,
+                                datacontenttype: 'application/json',
+                                data: runtimeEvent,
+                            },
+                        }));
+                    }
+                }
             } catch (eventError) {
                 log.warn('Failed to append child completion event, likely due to closed connection', {
                     error: (eventError as Error).message,
@@ -2572,6 +2659,7 @@ export class TaskEngine {
                                 tenantId, sessionId: parentTaskId, agentId: agentName || 'default',
                                 isStreaming: false,
                                 getSessionStorePrisma: () => this.getSessionStorePrisma(),
+                                eventBus: this.eventBus,
                                 throwOnSaveFailure: true // Rethrow CAS/save errors to trigger retry loop
                             });
                             const channel = taskChannel(parentTaskId);
@@ -2738,7 +2826,42 @@ export class TaskEngine {
             }
         }
 
-        await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_input_required', { token, childTaskId, prompt, schema, childOnProvided });
+        const childInputRequiredPayload = {
+            token,
+            childTaskId,
+            agentId: (entry as { target?: string } | undefined)?.target,
+            prompt,
+            schema,
+            childOnProvided,
+            childInputToken,
+        };
+        const childInputRequiredEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_input_required', childInputRequiredPayload);
+        if (childInputRequiredEvent) {
+            const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
+                eventId: childInputRequiredEvent.eventId,
+                seq: childInputRequiredEvent.seq,
+                type: 'task.child_input_required',
+                payload: childInputRequiredPayload,
+                createdAt: new Date().toISOString(),
+            }, {
+                taskId: parentTaskId,
+                tenantId,
+                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId,
+            });
+            if (runtimeEvent) {
+                void this.eventBus.publish(createBusEvent({
+                    channel: taskChannel(parentTaskId),
+                    cloud: {
+                        id: runtimeEvent.id,
+                        type: runtimeEvent.type,
+                        source: `/tasks/${parentTaskId}`,
+                        time: runtimeEvent.ts,
+                        datacontenttype: 'application/json',
+                        data: runtimeEvent,
+                    },
+                }));
+            }
+        }
         try { log.debug('Child input required processing', { token, handlerName, childOnProvided, childTaskId }); } catch { }
         if (!alreadyDelivered && handlerName && this.handlerInvoker) {
             log.debug('Invoking parent handler', { handlerName, token });
@@ -2847,7 +2970,39 @@ export class TaskEngine {
         delete tasks[token];
         let next = setPendingTasks(base, tasks);
         await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-        await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_failed', { token, childTaskId, error: error instanceof Error ? error.message : String(error) });
+        const childFailedPayload = {
+            token,
+            childTaskId,
+            agentId: (entry as { target?: string } | undefined)?.target,
+            error: error instanceof Error ? error.message : String(error),
+        };
+        const childFailedEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_failed', childFailedPayload);
+        if (childFailedEvent) {
+            const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
+                eventId: childFailedEvent.eventId,
+                seq: childFailedEvent.seq,
+                type: 'task.child_failed',
+                payload: childFailedPayload,
+                createdAt: new Date().toISOString(),
+            }, {
+                taskId: parentTaskId,
+                tenantId,
+                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId,
+            });
+            if (runtimeEvent) {
+                void this.eventBus.publish(createBusEvent({
+                    channel: taskChannel(parentTaskId),
+                    cloud: {
+                        id: runtimeEvent.id,
+                        type: runtimeEvent.type,
+                        source: `/tasks/${parentTaskId}`,
+                        time: runtimeEvent.ts,
+                        datacontenttype: 'application/json',
+                        data: runtimeEvent,
+                    },
+                }));
+            }
+        }
         if (handlerName && this.handlerInvoker) {
             await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: error });
         }
@@ -3288,6 +3443,15 @@ export class TaskEngine {
                 },
                 read: (filter?: TaskContextGoalsReadFilter) => goals.listGoals(baseCtx, filter),
             };
+        } catch { /* noop */ }
+        try {
+            bindRuntimeCognitionStream({
+                ctx,
+                eventBus: this.eventBus,
+                tenantId,
+                sessionId: taskId,
+                agentId: (ctx as any).agentId || snap?.agentId || 'default',
+            });
         } catch { /* noop */ }
         // Enable A2A from durable handler context - use the proper TaskEngine sendTaskToAgent implementation
         // NOTE: sendTaskToAgent is already defined in attachOrchestrationAPIs with the correct logic.

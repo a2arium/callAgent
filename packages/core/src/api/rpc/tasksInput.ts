@@ -15,7 +15,9 @@ export async function handleTasksInput(req: Request, res: Response): Promise<voi
             return sendError(res, -32602, 'Invalid params: id, token, and input are required');
         }
 
-        const tenantId = (req as any).tenantId || 'default';
+        const tenantId = typeof params.tenantId === 'string'
+            ? params.tenantId
+            : (req as any).tenantId || 'default';
         const idempotencyKey = (req.header('Idempotency-Key') || params.idempotencyKey) as string | undefined;
         const cached = getIdempotent(tenantId, params.id, params.token, idempotencyKey);
         if (cached) {
@@ -47,5 +49,4 @@ function getEngineOrRespond(res: Response): TaskEngine | null {
     }
     return engine;
 }
-
 

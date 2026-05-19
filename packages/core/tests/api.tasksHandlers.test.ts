@@ -21,15 +21,19 @@ describe('API RPC handlers', () => {
 
     it('handleTasksSend validates params and returns result', async () => {
         const res = fakeRes();
-        await handleTasksSend({ body: { params: { id: 't1', foo: 'bar' }, id: 1 } } as any, res);
-        expect(mockEngine.startTask).toHaveBeenCalled();
+        await handleTasksSend({ body: { params: { id: 't1', foo: 'bar', agentId: 'agent-a', tenantId: 'tenant-a' }, id: 1 } } as any, res);
+        expect(mockEngine.startTask).toHaveBeenCalledWith(expect.objectContaining({
+            agentId: 'agent-a',
+            tenantId: 'tenant-a',
+            task: expect.objectContaining({ id: 't1' }),
+        }));
         expect(res.body?.result?.status?.state).toBe('completed');
     });
 
     it('handleTasksInput handles engine call and idempotency cache', async () => {
         const res = fakeRes();
-        await handleTasksInput({ body: { params: { id: 't1', token: 'tok', input: { a: 1 } }, id: 2 }, header: () => undefined } as any, res);
-        expect(mockEngine.resumeInput).toHaveBeenCalledWith(expect.objectContaining({ taskId: 't1', token: 'tok' }));
+        await handleTasksInput({ body: { params: { id: 't1', token: 'tok', input: { a: 1 }, tenantId: 'tenant-a' }, id: 2 }, header: () => undefined } as any, res);
+        expect(mockEngine.resumeInput).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-a', taskId: 't1', token: 'tok' }));
         expect(res.body?.result).toEqual({ ok: true });
     });
 });

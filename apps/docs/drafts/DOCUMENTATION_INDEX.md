@@ -11,6 +11,7 @@ This document provides an index of all documentation in the CallAgent framework,
 - [Agent Runner](./runner.md) - CLI tool for running agents (with auto-resume support)
 - [Usage Tracking](./usage-tracking.md) - Usage metrics and monitoring
 - [Telemetry & Observability](./telemetry.md) - Tracing, Opik integration, and zero-code configuration
+- [Runtime Streaming Contract](../17-runtime_streaming_contract.md) - Canonical runtime stream events, visibility, SSE, chat bridge, and finality rules
 
 ### Loop-First Architecture
 - [Loop Overview](./loop/overview.md) - Loop execution model with auto-resume
@@ -55,6 +56,7 @@ This document provides an index of all documentation in the CallAgent framework,
 - **Auto-Resume Issues**: [Loop-First Persistence](./durable-handlers-and-persistence.md#debugging-and-troubleshooting)
 - **Loop Module Problems**: [Loop Modules](./loop/modules.md#troubleshooting)
 - **A2A Auto-Resume**: [TaskEngine A2A Integration](./task-engine-a2a-integration.md)
+- **Runtime Streaming**: [Runtime Streaming Contract](../17-runtime_streaming_contract.md)
 
 ## Documentation by Complexity Level
 
@@ -76,6 +78,7 @@ This document provides an index of all documentation in the CallAgent framework,
 3. [Durable Handlers and Persistence](./durable-handlers-and-persistence.md)
 4. [TaskEngine A2A Integration](./task-engine-a2a-integration.md)
 5. [MLO Architecture](./memory/mlo-architecture.md)
+6. [Runtime Streaming Contract](../17-runtime_streaming_contract.md)
 
 ## Recently Added Documentation
 

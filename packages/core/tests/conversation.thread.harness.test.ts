@@ -12,6 +12,7 @@ describe('ConversationService thread primitives', () => {
     const createService = () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
+        const runtimeEvents: unknown[] = [];
         const service = new ConversationService(sessionManager, {
             routeTargetForThread: ({ threadId, recipientAgentId: recipient }) => ({
                 tenantId,
@@ -19,10 +20,13 @@ describe('ConversationService thread primitives', () => {
                 agentId: recipient,
             }),
             activateConversationRecipient: async () => ({ ok: true }),
+            publishRuntimeEvent: async ({ event }) => {
+                runtimeEvents.push(event);
+            },
             messageLog: createDbMessageLog(sessionManager),
             resolveThreadTtlMs: (_agentId: string) => null,
         });
-        return { service, sessionManager };
+        return { service, sessionManager, runtimeEvents };
     };
 
     it('starts thread and accepts initial message', async () => {
@@ -37,6 +41,46 @@ describe('ConversationService thread primitives', () => {
         });
         expect(started.thread.kind).toBe('thread');
         expect(started.receipt.status).toBe('accepted');
+    });
+
+    it('publishes debug runtime events for thread send and receive', async () => {
+        const { service, runtimeEvents } = createService();
+        const started = await service.startThread(tenantId, ownerSessionId, senderAgentId, {
+            targetAgentId: recipientAgentId,
+            message: {
+                senderAgentId,
+                speechAct: 'request',
+                content: { task: 'analyze' },
+            },
+        });
+
+        expect(started.receipt.status).toBe('accepted');
+        expect(runtimeEvents).toEqual([
+            expect.objectContaining({
+                taskId: expect.stringContaining(recipientAgentId),
+                type: 'conversation.message.received',
+                visibility: 'debug',
+                data: expect.objectContaining({
+                    conversationId: started.thread.id,
+                    kind: 'thread',
+                    senderAgentId,
+                    recipientAgentId,
+                    speechAct: 'request',
+                }),
+            }),
+            expect.objectContaining({
+                taskId: ownerSessionId,
+                type: 'conversation.message.sent',
+                visibility: 'debug',
+                data: expect.objectContaining({
+                    conversationId: started.thread.id,
+                    kind: 'thread',
+                    senderAgentId,
+                    recipientAgentId,
+                    speechAct: 'request',
+                }),
+            }),
+        ]);
     });
 
     it('dedupes by idempotency key', async () => {
@@ -117,4 +161,3 @@ describe('ConversationService thread primitives', () => {
         expect(receipt.status).toBe('rejected');
     });
 });
-

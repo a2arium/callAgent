@@ -6,6 +6,7 @@ export * from './config/index.js';
 export * from './plugin/types.js';
 export * from './plugin/createAgent.js';
 export * from './runner/streamingRunner.js';
+export { createApiRouter } from './api/router.js';
 export {
     buildAgentIndex,
     type AgentIndexBuildResult,
@@ -21,7 +22,14 @@ export { TaskEngine } from './orchestration/taskEngine.js';
 export { EngineLocator } from './orchestration/EngineLocator.js';
 export { InteractiveTaskHandler } from './orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
-export type { TaskContext, AgentCard, AgentRuntimeManifest, ResolvedManifests, AgentTaskContext } from './shared/types/index.js';
+export type {
+    A2AEvent,
+    TaskContext,
+    AgentCard,
+    AgentRuntimeManifest,
+    ResolvedManifests,
+    AgentTaskContext
+} from './shared/types/index.js';
 export type {
     MentalState,
     EnvironmentState,
@@ -103,6 +111,51 @@ export {
 } from './shared/types/index.js';
 export { ensureAgentContext } from './shared/types/index.js';
 export type { LLMConfig, UniversalChatResponse, UniversalStreamResponse, ToolDefinition, LLMMessage } from './shared/types/LLMTypes.js';
+export {
+    RUNTIME_STREAM_EVENT_VERSION,
+    RuntimeStreamEventSchema,
+    RuntimeStreamEnvelopeBaseSchema,
+    RuntimeStreamMessagePartSchema,
+    RuntimeStreamTaskStateSchema,
+    StreamChannelSchema,
+    StreamVisibilitySchema,
+    isTerminalRuntimeStreamStatus,
+} from './streaming/runtimeStreamEvents.js';
+export type {
+    RuntimeStreamEvent,
+    RuntimeStreamMessagePart,
+    RuntimeStreamTaskState,
+    RuntimeStreamVisibility,
+    RuntimeStreamChannel,
+    RuntimeStreamTaskStatusEvent,
+} from './streaming/runtimeStreamEvents.js';
+export {
+    projectRuntimeStreamPublic,
+    projectRuntimeStreamDebug,
+    projectRuntimeStreamSse,
+    projectRuntimeStreamChat,
+} from './streaming/projections.js';
+export {
+    mapA2AEventToRuntimeStream,
+} from './streaming/a2aMapper.js';
+export type {
+    A2AToRuntimeStreamOptions,
+} from './streaming/a2aMapper.js';
+export {
+    WorkingMemoryRuntimeStreamEventSchema,
+    mapWorkingMemoryEventToRuntimeStream,
+} from './streaming/sessionEventMapper.js';
+export {
+    bindRuntimeCognitionStream,
+} from './streaming/cognitionRuntimePublisher.js';
+export type {
+    WorkingMemoryRuntimeStreamEvent,
+    WorkingMemoryToRuntimeStreamOptions,
+} from './streaming/sessionEventMapper.js';
+export type {
+    RuntimeStreamSseProjectionEvent,
+    RuntimeStreamChatProjectionEvent,
+} from './streaming/projections.js';
 export type {
     LLMRespondedPayload,
     ValidationFailedPayload,

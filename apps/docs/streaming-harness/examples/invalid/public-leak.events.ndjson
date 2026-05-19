@@ -1,0 +1,2 @@
+{"version":"2026-05-02","id":"evt-leak-000","seq":0,"taskId":"task-leak","tenantId":"tenant-test","agentId":"leaky-agent","ts":"2026-05-03T00:04:00.000Z","type":"task.status","visibility":"public","channel":"user","data":{"state":"working","terminal":false,"metadata":{"rawToolArgs":{"query":"secret"}}}}
+

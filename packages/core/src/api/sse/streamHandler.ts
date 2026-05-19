@@ -9,6 +9,36 @@ import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engin
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine } from '../../orchestration/taskEngine.js';
+import { mapA2AEventToRuntimeStream } from '../../streaming/a2aMapper.js';
+import { projectRuntimeStreamSse } from '../../streaming/projections.js';
+import { RuntimeStreamEventSchema, isTerminalRuntimeStreamStatus, type RuntimeStreamEvent } from '../../streaming/runtimeStreamEvents.js';
+import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
+
+function requestedVisibility(req: Request): 'public' | 'debug' {
+    const query = req.query as Record<string, unknown> | undefined;
+    return query?.visibility === 'debug' ? 'debug' : 'public';
+}
+
+function shouldCloseSseStream(be: BusEvent, event: A2AEvent, tenantId: string): boolean {
+    try {
+        const runtimeEvents = mapA2AEventToRuntimeStream(event, {
+            id: be.eventId,
+            seq: 0,
+            ts: be.ts,
+            tenantId,
+        });
+        return projectRuntimeStreamSse(runtimeEvents).some((projected) => projected.closesStream);
+    } catch {
+        if (!event || typeof event !== 'object') {
+            return false;
+        }
+        if (!('status' in event) || event.final !== true) {
+            return false;
+        }
+        const state = event.status?.state;
+        return state === 'completed' || state === 'failed' || state === 'canceled';
+    }
+}
 
 /**
  * Handles Server-Sent Events (SSE) streaming for a task
@@ -29,14 +59,36 @@ export async function handleSSE(
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const sessionStore: IWorkingMemorySessionStore = store || (new (WorkingMemorySessionStore as any)());
     const lastEventIdHeader = req.get('Last-Event-ID');
     const sinceSeq = lastEventIdHeader ? parseInt(lastEventIdHeader, 10) : 0;
+    const visibility = requestedVisibility(req);
+
+    const writeCanonicalEvent = (event: RuntimeStreamEvent): void => {
+        const projected = projectRuntimeStreamSse([event], visibility)[0];
+        if (!projected || res.writableEnded) return;
+        res.write(`id: ${projected.id}\n`);
+        res.write(`event: ${projected.event}\n`);
+        res.write(`data: ${JSON.stringify(projected.data)}\n\n`);
+    };
 
     if (sinceSeq > 0 && Number.isFinite(sinceSeq)) {
         try {
+            const sessionStore: IWorkingMemorySessionStore = store || (new (WorkingMemorySessionStore as any)());
             const missed = await (sessionStore as any).listEventsSince({ tenantId, sessionId: taskId, sinceSeq });
             for (const ev of missed) {
+                const runtimeEvents = mapWorkingMemoryEventToRuntimeStream({
+                    eventId: ev.eventId,
+                    seq: ev.seq,
+                    type: ev.type,
+                    payload: ev.payload,
+                    createdAt: ev.createdAt,
+                }, { taskId, tenantId });
+                if (runtimeEvents.length > 0) {
+                    for (const runtimeEvent of runtimeEvents) {
+                        writeCanonicalEvent(runtimeEvent);
+                    }
+                    continue;
+                }
                 const cloud = {
                     specversion: '1.0',
                     id: String(ev.seq),
@@ -77,12 +129,30 @@ export async function handleSSE(
 
     const holder: { unsub?: () => Promise<void> } = {};
     const { unsubscribe } = await bus.subscribe(channel, async (be: BusEvent) => {
-        const event = busEventData<A2AEvent>(be);
-        if (!event) {
+        const data = busEventData<unknown>(be);
+        if (!data) {
             return;
         }
+        const parsedRuntimeEvent = RuntimeStreamEventSchema.safeParse(data);
+        if (parsedRuntimeEvent.success) {
+            writeCanonicalEvent(parsedRuntimeEvent.data);
+            if (isTerminalRuntimeStreamStatus(parsedRuntimeEvent.data)) {
+                try {
+                    await holder.unsub?.();
+                } catch {
+                    /* noop */
+                }
+                res.end();
+            }
+            return;
+        }
+
+        if (!data || typeof data !== 'object') {
+            return;
+        }
+        const event = data as A2AEvent;
         writeEvent(event);
-        if ('final' in event && event.final === true) {
+        if (shouldCloseSseStream(be, event, tenantId)) {
             try {
                 await holder.unsub?.();
             } catch {

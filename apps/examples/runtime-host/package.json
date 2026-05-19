@@ -1,0 +1,24 @@
+{
+  "name": "@a2arium/runtime-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-memory-sql": "workspace:*",
+    "dotenv": "^17.3.1",
+    "express": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.14.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,87 +1,53 @@
-# Live Updates (Realtime)
+# Live Updates
 
-The chat bridge supports real-time status updates for loop-first agents with auto-resume capabilities.
+The chat bridge receives live task updates from the canonical runtime stream.
+The normative streaming contract is
+[Runtime Streaming Contract](../../17-runtime_streaming_contract.md).
 
 ## Delivery Options
 
-- **SSE**: Stream events over EventSource (server-hosted SSE)
-- **WebSockets via broker** (e.g., Ably): Publish ChatEvents to `channelKey = ${network}:${conversationId}` and subscribe from client
+- SSE from task endpoints such as `tasks/sendSubscribe` and `tasks/resubscribe`.
+- Programmatic streaming through `StreamingInvoker.startStream(...)` and
+  `resumeStream(...)`.
+- Compatibility streaming through `Invoker.start(..., sink)` and
+  `Invoker.resume(..., sink)`.
+- Realtime broker publishing through `RealtimePublisher` using
+  `channelKey = ${network}:${conversationId}`.
 
-## Auto-Resume Status Events
+## Bridge Behavior
 
-The bridge publishes these status events when a RealtimePublisher is provided:
+`Bridge` passes a canonical runtime sink to invokers. Streaming-capable invokers
+call the sink as runtime events arrive. The bridge then projects public runtime
+events into chat sends and realtime `ChatEvent`s.
 
-### Core Status Events
-- `input_required`: Agent awaiting user input (with `token` in metadata)
-- `working`: Agent processing or awaiting tool/child completion
-- `completed`: Agent finished successfully
-- `failed`: Agent encountered an error
-- `cancelled`: Agent was cancelled
+Invokers that ignore the sink are still supported. In that case the bridge uses
+the final `ResultPayload` fallback.
 
-### Auto-Resume Events
-- **Input provided → auto-resume**: `input_required` → (user input) → `working` → `completed`/`failed`
-- **Tool completion → auto-resume**: `working` (awaiting tool) → (tool result) → `working` (processing) → `completed`/`failed`
-- **Child completion → auto-resume**: `working` (awaiting child) → (child result) → `working` (processing) → `completed`/`failed`
+## Realtime Events
 
-## Event Payload Structure
-
-```typescript
-type ChatEvent = {
-  type: 'status' | 'message' | 'error';
-  conversationId: string;
-  taskId: string;
-  timestamp: string;
-  data: {
-    status?: 'input_required' | 'working' | 'completed' | 'failed' | 'cancelled';
-    token?: string;           // For input_required events
-    awaiting?: string;        // For working events: 'tool' | 'child'
-    message?: ChatMessage;    // For message events
-    error?: string;          // For error events
-  };
-};
+```ts
+type ChatEvent =
+  | { type: 'reply'; taskId: string; seq: number; ts: string; text: string }
+  | { type: 'progress'; taskId: string; seq: number; ts: string; pct?: number; status?: string }
+  | { type: 'input_required'; taskId: string; seq: number; ts: string; token: string; prompt?: string }
+  | { type: 'completed'; taskId: string; seq: number; ts: string; output?: unknown }
+  | { type: 'error'; taskId: string; seq: number; ts: string; code?: string; message: string }
+  | { type: 'media'; taskId: string; seq: number; ts: string; media: unknown };
 ```
 
-## Client Implementation
+## Projection Rules
 
-```typescript
-// SSE example
-const eventSource = new EventSource(`/chat/${conversationId}/stream`);
+| Runtime event | Chat/realtime behavior |
+|---|---|
+| `task.status` working | typing/progress |
+| `artifact.delta` text | message/reply |
+| `artifact.delta` media | media |
+| `artifact.delta` markup | markup |
+| `input.required` | prompt user and store token |
+| terminal `task.status` completed | completion and session clear |
+| terminal `task.status` failed/canceled | error and session clear |
+| debug/private events | hidden |
 
-eventSource.onmessage = (event) => {
-  const chatEvent: ChatEvent = JSON.parse(event.data);
-  
-  switch (chatEvent.data.status) {
-    case 'input_required':
-      // Show input prompt, store token for response
-      showInputPrompt(chatEvent.data.token);
-      break;
-      
-    case 'working':
-      // Show loading indicator
-      if (chatEvent.data.awaiting) {
-        showStatus(`Waiting for ${chatEvent.data.awaiting}...`);
-      } else {
-        showStatus('Processing...');
-      }
-      break;
-      
-    case 'completed':
-      hideStatus();
-      break;
-      
-    case 'failed':
-      showError(chatEvent.data.error || 'Task failed');
-      break;
-  }
-};
-
-// Provide input (triggers auto-resume)
-async function provideInput(token: string, value: string) {
-  await fetch(`/tasks/${taskId}/input`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, input: value })
-  });
-  // Auto-resume will trigger new status events
-}
-```
+`ctx.progress(...)` maps to public non-terminal `task.status` and can become a
+`progress` realtime event. `artifact.lastChunk` maps to artifact completion only;
+the stream closes only on terminal task status.

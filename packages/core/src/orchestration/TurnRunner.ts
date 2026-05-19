@@ -22,6 +22,7 @@ import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
+import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
@@ -137,6 +138,15 @@ export class TurnRunner {
                 agentId: (ctx as any).agentId || 'default',
                 flushMentalState
             });
+            try {
+                bindRuntimeCognitionStream({
+                    ctx,
+                    eventBus: this.eventBus,
+                    tenantId,
+                    sessionId,
+                    agentId: (ctx as any).agentId || 'default',
+                });
+            } catch { /* noop */ }
 
             // 5. Environment & Inbox Setup
             const startTurnTotal = Number((base as any)?.meta?.turn) || 0;
@@ -378,6 +388,7 @@ export class TurnRunner {
                 tenantId, sessionId, agentId: agentId || 'default',
                 isStreaming,
                 getSessionStorePrisma: this.getSessionStorePrisma,
+                eventBus: this.eventBus,
                 throwOnSaveFailure: params.throwOnSaveFailure === true
             });
             // explicit flush at end of turn (if not already flushed)

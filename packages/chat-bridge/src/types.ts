@@ -1,3 +1,5 @@
+import type { RuntimeStreamEvent } from '@a2arium/callagent-core';
+
 export type Network = 'telegram' | 'slack' | 'web' | string;
 
 export type Attachment = {
@@ -107,9 +109,20 @@ export type ResultPayload =
     | { id: string; status: 'failed'; error: string }
     | { id: string; status: 'input_required'; token: string; prompt?: string };
 
+export type StartParams = { id: string; input: BridgeTaskInput; agentId: string; tenantId?: string; route: ChatRoute };
+
+export type ResumeParams = { id: string; token: string; input: BridgeTaskInput; tenantId?: string; route: ChatRoute };
+
+export type RuntimeStreamSink = (event: RuntimeStreamEvent) => void | Promise<void>;
+
+export type StreamingInvoker = {
+    startStream: (params: StartParams) => AsyncIterable<RuntimeStreamEvent>;
+    resumeStream: (params: ResumeParams) => AsyncIterable<RuntimeStreamEvent>;
+};
+
 export type Invoker = {
-    start: (params: { id: string; input: BridgeTaskInput; agentId: string; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
-    resume: (params: { id: string; token: string; input: BridgeTaskInput; tenantId?: string; route: ChatRoute }) => Promise<ResultPayload>;
+    start: (params: StartParams, sink?: RuntimeStreamSink) => Promise<ResultPayload>;
+    resume: (params: ResumeParams, sink?: RuntimeStreamSink) => Promise<ResultPayload>;
 };
 
 export type BridgeOptions = {
@@ -135,4 +148,3 @@ export type BridgeOptions = {
 export type Bridge = {
     handleIncomingMessage(msg: MessageNormalized): Promise<void>;
 };
-

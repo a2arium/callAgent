@@ -8,6 +8,8 @@ import { runLoop } from '../loop/loopRunner.js';
 import { pruneSnapshot } from '../loop/hygiene.js';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
+import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
 import {
     filterInboxCurrentByConversationDeliveryKeys,
     readConsumedConversationDeliveryKeysFromMeta,
@@ -54,6 +56,7 @@ export interface ExecuteTurnParams {
     agentId: string;
     isStreaming: boolean;
     getSessionStorePrisma: () => any; // Pass as callback or interface
+    eventBus?: IEventBus;
     throwOnSaveFailure?: boolean;
 }
 
@@ -72,7 +75,7 @@ export class TaskExecutor {
         const {
             ctx, M, env, overrides, loopOpts,
             sessionManager, tenantId, sessionId, agentId,
-            isStreaming, getSessionStorePrisma, throwOnSaveFailure
+            isStreaming, getSessionStorePrisma, eventBus, throwOnSaveFailure
         } = params;
 
         // ✅ FIX: Increment turn count immediately so initialization logs reflect the correct turn
@@ -165,6 +168,14 @@ export class TaskExecutor {
                     error: memErr instanceof Error ? memErr.message : String(memErr)
                 });
                 // Continue with stub memory - better than crashing
+            }
+        }
+
+        if (eventBus) {
+            try {
+                bindRuntimeCognitionStream({ ctx, eventBus, tenantId, sessionId, agentId });
+            } catch {
+                /* noop */
             }
         }
 

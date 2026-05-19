@@ -3,7 +3,6 @@ import type { Request, Response } from 'express';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
-import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 
 /**
  * Handler for the tasks/sendSubscribe method
@@ -29,13 +28,20 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
 
         // Send initial response (acknowledgement)
         // Don't await the task completion - we'll stream updates
-        engine.startTask({ task, isStreaming: true }).catch((error: unknown) => {
+        engine.startTask({
+            task,
+            isStreaming: true,
+            agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
+            tenantId: typeof params.tenantId === 'string' ? params.tenantId : undefined,
+        }).catch((error: unknown) => {
             console.error('Error in streaming task execution:', error);
         });
 
         // Hand off to SSE handler (never returns - response is managed by SSE)
-        const tenantId = (req as any).tenantId || 'default';
-        await handleSSE(req, res, task.id, new (WorkingMemorySessionStore as any)(), tenantId);
+        const tenantId = typeof params.tenantId === 'string'
+            ? params.tenantId
+            : (req as any).tenantId || 'default';
+        await handleSSE(req, res, task.id, undefined, tenantId);
     } catch (error: unknown) {
         console.error('Error handling tasks/sendSubscribe:', error);
         sendError(

@@ -101,7 +101,7 @@ export function extendContextWithStreaming(
                     publishA2aPayload(event.taskId, {
                         id: event.taskId,
                         artifact,
-                        final: event.opts.lastChunk,
+                        final: false,
                     });
                     logger.debug('Streaming artifact', {
                         taskId: event.taskId,

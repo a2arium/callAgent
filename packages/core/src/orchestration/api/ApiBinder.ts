@@ -47,6 +47,10 @@ import { MemberIdSchema } from '../../public-types/conversation/schemas.js';
 import type { A2ACallOptions } from '../../shared/types/A2ATypes.js';
 import { bootstrapConversationForSendTaskToAgent } from './bootstrapConversationForSendTaskToAgent.js';
 import { readA2aResultTelemetry } from './a2aResultTelemetry.js';
+import type { IEventBus } from '../../public-types/eventbus/types.js';
+import { createBusEvent } from '../../eventbus/busEventHelpers.js';
+import { taskChannel } from '../../eventbus/taskEventEmitter.js';
+import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -60,6 +64,7 @@ export interface ApiBinderDependencies {
     handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
     conversationService: InternalConversationApi;
+    eventBus?: IEventBus;
 }
 
 export class ApiBinder {
@@ -257,6 +262,35 @@ export class ApiBinder {
         const a2aOpts = options;
         const idempotencyKey =
             a2aOpts?.childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
+
+        const childStartedPayload = { token, agentId: agent };
+        const childStartedEvent = await deps.sessionManager.appendEvent(tenantId, sessionId, 'task.child_started', childStartedPayload);
+        if (deps.eventBus) {
+            const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
+                eventId: childStartedEvent.eventId,
+                seq: childStartedEvent.seq,
+                type: 'task.child_started',
+                payload: childStartedPayload,
+                createdAt: new Date().toISOString(),
+            }, {
+                taskId: sessionId,
+                tenantId,
+                agentId,
+            });
+            if (runtimeEvent) {
+                void deps.eventBus.publish(createBusEvent({
+                    channel: taskChannel(sessionId),
+                    cloud: {
+                        id: runtimeEvent.id,
+                        type: runtimeEvent.type,
+                        source: `/tasks/${sessionId}`,
+                        time: runtimeEvent.ts,
+                        datacontenttype: 'application/json',
+                        data: runtimeEvent,
+                    },
+                }));
+            }
+        }
 
         let convoStamp: import('./bootstrapConversationForSendTaskToAgent.js').ConversationBootstrapStamp | undefined;
         try {
@@ -737,7 +771,34 @@ export class ApiBinder {
                     return setPendingTools(baseSnap, toolsNow);
                 }
             });
-            await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', { token: toolToken, toolName });
+            const toolRequestedPayload = { token: toolToken, toolName, argsPreview: args };
+            const toolRequestedEvent = await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', toolRequestedPayload);
+            if (this.deps.eventBus) {
+                const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
+                    eventId: toolRequestedEvent.eventId,
+                    seq: toolRequestedEvent.seq,
+                    type: 'task.tool_requested',
+                    payload: toolRequestedPayload,
+                    createdAt: new Date().toISOString(),
+                }, {
+                    taskId: sessionId,
+                    tenantId,
+                    agentId,
+                });
+                if (runtimeEvent) {
+                    void this.deps.eventBus.publish(createBusEvent({
+                        channel: taskChannel(sessionId),
+                        cloud: {
+                            id: runtimeEvent.id,
+                            type: runtimeEvent.type,
+                            source: `/tasks/${sessionId}`,
+                            time: runtimeEvent.ts,
+                            datacontenttype: 'application/json',
+                            data: runtimeEvent,
+                        },
+                    }));
+                }
+            }
 
             (ctx as any).__wmSavedThisTurn = true;
 

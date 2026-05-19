@@ -68,6 +68,7 @@ export type ConversationActivateResult =
       };
 
 import type { MessageLog } from '../../public-types/messageLog/types.js';
+import type { RuntimeStreamEvent } from '../../streaming/runtimeStreamEvents.js';
 import type { TopicSelectorPolicyRegistry } from './TopicSelectorPolicyRegistry.js';
 import type { StopPolicyRegistry } from '../../public-types/conversation/stopPolicy.js';
 import type { BackpressureManager, TopicPostBackpressureSample } from './BackpressureManager.js';
@@ -82,6 +83,7 @@ export type ConversationServiceDeps = {
     /** Run one cold turn on the thread-bound recipient session after inbox delivery. */
     activateConversationRecipient: (params: ConversationActivateParams) => Promise<ConversationActivateResult>;
     publishConversationEvent?: (channel: string, event: unknown) => Promise<void>;
+    publishRuntimeEvent?: (params: { sessionId: string; event: RuntimeStreamEvent }) => Promise<void>;
     /** Wall clock by default; tests override for deterministic invite TTL/expiry. */
     clock?: Clock;
     messageLog: MessageLog;

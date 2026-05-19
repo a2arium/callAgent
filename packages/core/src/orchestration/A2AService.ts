@@ -29,6 +29,11 @@ import { getCallChainTracker, type CallChainTracker } from './CallChainTracker.j
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { attachA2aResultTelemetry } from './api/a2aResultTelemetry.js';
+import {
+    RUNTIME_STREAM_EVENT_VERSION,
+    RuntimeStreamEventSchema,
+    type RuntimeStreamMessagePart,
+} from '../streaming/runtimeStreamEvents.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
@@ -553,7 +558,11 @@ export class A2AService implements IA2AService {
             },
 
             // Override I/O methods to add target-agent prefixing and logging
-            reply: this.createTargetReply(targetPlugin, (options as any).parentTenantId && (options as any).parentTaskId ? { tenantId: (options as any).parentTenantId, parentTaskId: (options as any).parentTaskId } : undefined),
+            reply: this.createTargetReply(targetPlugin, (options as any).parentTenantId && (options as any).parentTaskId ? {
+                tenantId: (options as any).parentTenantId,
+                parentTaskId: (options as any).parentTaskId,
+                parentChildToken: (options as any).parentChildToken,
+            } : undefined),
             progress: this.createTargetProgress(targetPlugin),
             complete: this.createTargetComplete(targetPlugin),
             fail: this.createTargetFail(targetPlugin),
@@ -736,7 +745,7 @@ export class A2AService implements IA2AService {
     /**
      * Create target-specific reply function
      */
-    private createTargetReply(targetPlugin: AgentPlugin, parent?: { tenantId: string; parentTaskId: string }) {
+    private createTargetReply(targetPlugin: AgentPlugin, parent?: { tenantId: string; parentTaskId: string; parentChildToken?: string }) {
         return async (parts: any) => {
             const prefix = `[${targetPlugin.resolved.agentCard.name}]`;
 
@@ -768,7 +777,40 @@ export class A2AService implements IA2AService {
                             ? parts.map(p => (typeof p === 'string' ? `${prefix} ${p}` : p?.text ? `${prefix} ${p.text}` : '')).filter(Boolean).join('\n')
                             : parts?.text ? `${prefix} ${parts.text}` : '';
                     if (text) {
-                        void getRequiredEngine().eventBus.publish(
+                        const engine = getRequiredEngine();
+                        const now = new Date().toISOString();
+                        const debugParts: RuntimeStreamMessagePart[] = [{ type: 'text', text }];
+                        const childMessage = RuntimeStreamEventSchema.parse({
+                            version: RUNTIME_STREAM_EVENT_VERSION,
+                            id: uuidv7(),
+                            seq: Date.now(),
+                            taskId: parent.parentTaskId,
+                            tenantId: parent.tenantId,
+                            ts: now,
+                            type: 'child.message',
+                            visibility: 'debug',
+                            channel: 'debug',
+                            data: {
+                                ...(parent.parentChildToken ? { token: parent.parentChildToken } : {}),
+                                agentId: targetPlugin.resolved.agentCard.name,
+                                parts: debugParts,
+                            },
+                        });
+                        void engine.eventBus.publish(
+                            createBusEvent({
+                                channel: taskChannel(parent.parentTaskId),
+                                partitionKey: parent.parentTaskId,
+                                cloud: {
+                                    id: childMessage.id,
+                                    type: childMessage.type,
+                                    source: `/tasks/${parent.parentTaskId}`,
+                                    time: childMessage.ts,
+                                    datacontenttype: 'application/json',
+                                    data: childMessage,
+                                },
+                            })
+                        );
+                        void engine.eventBus.publish(
                             createBusEvent({
                                 channel: taskChannel(parent.parentTaskId),
                                 partitionKey: parent.parentTaskId,

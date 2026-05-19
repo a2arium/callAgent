@@ -25,7 +25,12 @@ export async function handleTasksSend(req: Request, res: Response): Promise<void
         if (!engine) return;
 
         // Process in buffered mode (not streaming)
-        const resultTask = await engine.startTask({ task, isStreaming: false });
+        const resultTask = await engine.startTask({
+            task,
+            isStreaming: false,
+            agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
+            tenantId: typeof params.tenantId === 'string' ? params.tenantId : undefined,
+        });
 
         // Send the JSON-RPC response with the complete task results
         res.json({

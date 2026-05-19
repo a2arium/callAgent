@@ -1,20 +1,74 @@
-import { PluginManager, createInMemoryEventBus, taskChannel, busEventData, type BusEvent } from '@a2arium/callagent-core';
-import type { BridgeTaskInput, ChatRoute, ChatSender, Invoker, ResultPayload } from '../../types.js';
+import {
+    PluginManager,
+    createInMemoryEventBus,
+    taskChannel,
+    busEventData,
+    mapA2AEventToRuntimeStream,
+    projectRuntimeStreamChat,
+    isTerminalRuntimeStreamStatus,
+    type A2AEvent,
+    type BusEvent,
+    type IEventBus,
+    type RuntimeStreamEvent,
+} from '@a2arium/callagent-core';
+import type { BridgeTaskInput, ChatRoute, ChatSender, Invoker, ResultPayload, ResumeParams, RuntimeStreamSink, StartParams, StreamingInvoker } from '../../types.js';
+import {
+    createStreamForwardState,
+    forwardChatProjectionEvent,
+    type ForwardedStreamResult,
+    type StreamForwardState,
+} from './chatProjectionForwarder.js';
+import { consumeRuntimeStreamAsResult } from './runtimeStreamResult.js';
 
 // Internal types for the invoker
-type TaskEngine = any;
-type IWorkingMemorySessionStore = any;
-type StartParams = { id: string; input: BridgeTaskInput; agentId: string; tenantId?: string; route: ChatRoute };
-type ResumeParams = { id: string; token: string; input: BridgeTaskInput; tenantId?: string; route: ChatRoute };
+type TaskEngine = {
+    startTask(params: {
+        task: { id: string; input: BridgeTaskInput };
+        isStreaming: boolean;
+        agentId: string;
+        tenantId: string;
+    }): Promise<unknown>;
+    resumeInput(params: {
+        tenantId: string;
+        taskId: string;
+        token: string;
+        input: BridgeTaskInput;
+    }): Promise<unknown>;
+};
+type WorkingMemoryEvent = {
+    type?: string;
+    payload?: {
+        token?: unknown;
+        prompt?: unknown;
+    };
+};
+type IWorkingMemorySessionStore = {
+    listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<WorkingMemoryEvent[]>;
+};
+type ProgrammaticInvokerRuntime = {
+    engine: TaskEngine;
+    eventBus: IEventBus;
+    taskChannel: typeof taskChannel;
+    wmStore: IWorkingMemorySessionStore;
+};
+type ProgrammaticInvokerDeps = {
+    chatSender: ChatSender;
+    sessionStore?: IWorkingMemorySessionStore;
+    runtime?: ProgrammaticInvokerRuntime;
+};
+type RuntimeStreamQueueItem =
+    | { kind: 'events'; events: RuntimeStreamEvent[] }
+    | { kind: 'error'; error: unknown }
+    | { kind: 'done' };
 
-export class ProgrammaticInvoker implements Invoker {
+export class ProgrammaticInvoker implements Invoker, StreamingInvoker {
     private static _wmStore: IWorkingMemorySessionStore | undefined;
     private static _engine: TaskEngine | undefined;
     private static _eventBus = createInMemoryEventBus();
     private static _taskChannel = taskChannel;
     private static _initialized = false;
 
-    constructor(private readonly deps: { chatSender: ChatSender; sessionStore?: any }) { }
+    constructor(private readonly deps: ProgrammaticInvokerDeps) { }
 
     private async ensureInitialized() {
         if (ProgrammaticInvoker._initialized) return;
@@ -30,7 +84,158 @@ export class ProgrammaticInvoker implements Invoker {
         ProgrammaticInvoker._initialized = true;
     }
 
-    async start(params: StartParams): Promise<ResultPayload> {
+    private async getRuntime(): Promise<ProgrammaticInvokerRuntime> {
+        if (this.deps.runtime) {
+            return this.deps.runtime;
+        }
+
+        await this.ensureInitialized();
+        const { _engine, _eventBus, _taskChannel, _wmStore } = ProgrammaticInvoker;
+        if (!_engine || !_wmStore) {
+            throw new Error('ProgrammaticInvoker runtime was not initialized');
+        }
+
+        return {
+            engine: _engine,
+            eventBus: _eventBus,
+            taskChannel: _taskChannel,
+            wmStore: _wmStore,
+        };
+    }
+
+    private async recoverInputToken(params: {
+        wmStore: IWorkingMemorySessionStore;
+        tenantId: string;
+        taskId: string;
+        token: string;
+        prompt?: string;
+    }): Promise<{ token: string; prompt?: string }> {
+        let { token, prompt } = params;
+        if (token && token !== 'opaque') {
+            return { token, prompt };
+        }
+
+        try {
+            const events = await params.wmStore.listEventsSince({
+                tenantId: params.tenantId,
+                sessionId: params.taskId,
+                sinceSeq: 0,
+            });
+            const last = [...events].reverse().find((event) => event.type === 'task.input_required');
+            const recoveredToken = last?.payload?.token;
+            const recoveredPrompt = last?.payload?.prompt;
+            token = typeof recoveredToken === 'string' ? recoveredToken : token;
+            prompt = typeof recoveredPrompt === 'string' ? recoveredPrompt : prompt;
+        } catch {
+            /* ignore */
+        }
+
+        return { token: token || 'opaque', prompt };
+    }
+
+    private async forwardBusEventToChat(params: {
+        be: BusEvent;
+        route: ChatRoute;
+        tenantId: string;
+        state: StreamForwardState;
+    }): Promise<ForwardedStreamResult> {
+        const runtimeEvents = this.mapBusEventToRuntimeStream(params.be, params.tenantId);
+        if (!runtimeEvents) {
+            return { kind: 'continue' };
+        }
+
+        const chatEvents = projectRuntimeStreamChat(runtimeEvents);
+        for (const chatEvent of chatEvents) {
+            const result = await forwardChatProjectionEvent({
+                sender: this.deps.chatSender,
+                route: params.route,
+                state: params.state,
+                event: chatEvent,
+            });
+            if (result.kind !== 'continue') {
+                return result;
+            }
+        }
+
+        return { kind: 'continue' };
+    }
+
+    private mapBusEventToRuntimeStream(be: BusEvent, tenantId: string): RuntimeStreamEvent[] | undefined {
+        const ev = busEventData<A2AEvent>(be);
+        if (!ev) return undefined;
+
+        try {
+            return mapA2AEventToRuntimeStream(ev, {
+                id: be.eventId,
+                seq: 0,
+                ts: be.ts,
+                tenantId,
+            });
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async *streamBusRuntimeEvents(params: {
+        taskId: string;
+        tenantId: string;
+        startExecution: (runtime: ProgrammaticInvokerRuntime) => Promise<unknown>;
+    }): AsyncIterable<RuntimeStreamEvent> {
+        const runtime = await this.getRuntime();
+        const channel = runtime.taskChannel(params.taskId);
+        const queue: RuntimeStreamQueueItem[] = [];
+        let wake: (() => void) | undefined;
+        let unsubscribe: (() => Promise<void>) | undefined;
+
+        const push = (item: RuntimeStreamQueueItem) => {
+            queue.push(item);
+            wake?.();
+            wake = undefined;
+        };
+
+        const subscription = await runtime.eventBus.subscribe(channel, async (be: BusEvent) => {
+            const events = this.mapBusEventToRuntimeStream(be, params.tenantId);
+            if (!events || events.length === 0) return;
+            push({ kind: 'events', events });
+            if (events.some((event) => isTerminalRuntimeStreamStatus(event))) {
+                push({ kind: 'done' });
+                try { await unsubscribe?.(); } catch { }
+            }
+        });
+        unsubscribe = subscription.unsubscribe;
+
+        void params.startExecution(runtime).catch((error) => {
+            push({ kind: 'error', error });
+            push({ kind: 'done' });
+        });
+
+        try {
+            while (true) {
+                if (queue.length === 0) {
+                    await new Promise<void>((resolve) => { wake = resolve; });
+                }
+                const item = queue.shift();
+                if (!item) continue;
+                if (item.kind === 'done') break;
+                if (item.kind === 'error') throw item.error;
+                for (const event of item.events) {
+                    yield event;
+                }
+            }
+        } finally {
+            try { await unsubscribe?.(); } catch { }
+        }
+    }
+
+    async start(params: StartParams, sink?: RuntimeStreamSink): Promise<ResultPayload> {
+        if (sink) {
+            return consumeRuntimeStreamAsResult({
+                taskId: params.id,
+                events: this.startStream(params),
+                sink,
+            });
+        }
+
         const { id, input, agentId, tenantId = 'default', route } = params;
         const normalizedInput: BridgeTaskInput = {
             route,
@@ -40,17 +245,12 @@ export class ProgrammaticInvoker implements Invoker {
             raw: input.raw
         };
         try { console.info(`[invoker] start: id=${id} agentId=${agentId} tenantId=${tenantId}`); } catch { }
-        const effectiveTenantId = 'default';
         // Ensure agent is loaded or discoverable
         if (!PluginManager.findAgent(agentId)) {
             await PluginManager.loadAgentWithDependencies(agentId).catch(() => null);
         }
 
-        await this.ensureInitialized();
-        const engine = ProgrammaticInvoker._engine;
-        const eventBus = ProgrammaticInvoker._eventBus;
-        const taskChannel = ProgrammaticInvoker._taskChannel;
-        const wmStore = ProgrammaticInvoker._wmStore;
+        const { engine, eventBus, taskChannel, wmStore } = await this.getRuntime();
 
         // Subscribe to streaming events and forward to chat
         const channel = taskChannel(id);
@@ -61,80 +261,21 @@ export class ProgrammaticInvoker implements Invoker {
         } catch { }
         let resolveFn: (r: ResultPayload) => void;
         const done = new Promise<ResultPayload>((resolve) => { resolveFn = resolve; });
-        const sendSafe = async (text: string) => {
-            try {
-                console.info('[invoker] start:sendMessage', { route, text });
-                await this.deps.chatSender.sendMessage(route, text);
-            } catch (e) {
-                try { console.error('[invoker] start:sendMessage error', e); } catch { }
-            }
-        };
-        let lastTyping = 0;
-        let aggregatedText = '';
+        const forwardState = createStreamForwardState();
         let unsubStart: (() => Promise<void>) | undefined;
 
         const handler = async (be: BusEvent) => {
-            const ev = busEventData(be) as any;
-            if (!ev) return;
-            if (ev?.artifact) {
-                const parts = ev.artifact.parts || [];
-                // Send text parts
-                const text = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
-                try { console.info('[invoker] start:artifact', { text }); } catch { }
-                if (text) { aggregatedText += text; }
-                // Send media parts if supported
-                for (const p of parts) {
-                    if (typeof this.deps.chatSender.sendMedia === 'function' && (p?.type === 'image' || p?.type === 'file' || p?.type === 'audio' || p?.type === 'video')) {
-                        const media: any = { type: p.type, url: p.url, bytesBase64: p.bytesBase64, mime: p.mime, filename: p.filename, caption: p.caption };
-                        try { await this.deps.chatSender.sendMedia!(route, media); } catch { }
-                    }
-                    if (p?.type === 'text' && p?.format) {
-                        try { await this.deps.chatSender.sendMessage(route, p.text, { parseMode: p.format === 'html' ? 'html' as any : p.format }); } catch { }
-                    } else if (p?.type === 'markup' && p?.value) {
-                        try { await this.deps.chatSender.sendMarkup!(route, typeof p.value === 'string' ? JSON.parse(p.value) : p.value); } catch { }
-                    }
-                }
-            }
-            if (ev?.status) {
-                try { console.debug(`[invoker] start:event status=${ev.status?.state} final=${ev.final === true}`); } catch { }
-                const st = ev.status;
-                // progress/working → typing indicator (throttle)
-                if (st?.state === 'working' && typeof this.deps.chatSender.sendTyping === 'function') {
-                    const now = Date.now();
-                    if (now - lastTyping > 1000) {
-                        lastTyping = now;
-                        try { await this.deps.chatSender.sendTyping!(route); } catch { }
-                    }
-                }
-                if (st?.state === 'input-required') {
-                    let token = st?.metadata?.token as string | undefined;
-                    const hadParts = Array.isArray(st?.message?.parts) && (st!.message!.parts!.length > 0);
-                    let promptText: string | undefined = hadParts ? undefined : (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
-                    if (!token) {
-                        try {
-                            const events = await wmStore.listEventsSince({ tenantId, sessionId: id, sinceSeq: 0 });
-                            const last = [...events].reverse().find((e: any) => e.type === 'task.input_required');
-                            token = last?.payload?.token || token;
-                            promptText = (last?.payload?.prompt as string | undefined) || promptText;
-                        } catch { /* ignore */ }
-                    }
-                    token = token || 'opaque';
-                    try { await unsubStart?.(); } catch { }
-                    try { console.info(`[invoker] start:input_required id=${id} token=${token}`); } catch { }
-                    resolveFn!({ id, status: 'input_required', token, prompt: promptText });
-                }
-                if (st?.state === 'failed' && ev.final === true) {
-                    try { await unsubStart?.(); } catch { }
-                    const errMsg = (st?.message?.parts?.[0]?.text) || 'failed';
-                    try { console.warn(`[invoker] start:failed id=${id} error=${errMsg}`); } catch { }
-                    resolveFn!({ id, status: 'failed', error: errMsg });
-                }
-                if (st?.state === 'completed' && ev.final === true) {
-                    try { await unsubStart?.(); } catch { }
-                    const output = aggregatedText ? { text: aggregatedText } : { ok: true };
-                    try { console.info(`[invoker] start:completed id=${id}`); } catch { }
-                    resolveFn!({ id, status: 'completed', output });
-                }
+            const result = await this.forwardBusEventToChat({ be, route, tenantId, state: forwardState });
+            if (result.kind === 'input_required') {
+                const recovered = await this.recoverInputToken({ wmStore, tenantId, taskId: id, token: result.token, prompt: result.prompt });
+                try { await unsubStart?.(); } catch { }
+                resolveFn!({ id, status: 'input_required', token: recovered.token, prompt: recovered.prompt });
+            } else if (result.kind === 'failed') {
+                try { await unsubStart?.(); } catch { }
+                resolveFn!({ id, status: 'failed', error: result.error });
+            } else if (result.kind === 'completed') {
+                try { await unsubStart?.(); } catch { }
+                resolveFn!({ id, status: 'completed', output: result.output });
             }
         };
         const startSub = await eventBus.subscribe(channel, handler);
@@ -146,7 +287,39 @@ export class ProgrammaticInvoker implements Invoker {
         return done;
     }
 
-    async resume(params: ResumeParams): Promise<ResultPayload> {
+    async *startStream(params: StartParams): AsyncIterable<RuntimeStreamEvent> {
+        const { id, input, agentId, tenantId = 'default', route } = params;
+        if (!PluginManager.findAgent(agentId)) {
+            await PluginManager.loadAgentWithDependencies(agentId).catch(() => null);
+        }
+        const normalizedInput: BridgeTaskInput = {
+            route,
+            text: input.text,
+            attachments: input.attachments,
+            replyToMessageId: input.replyToMessageId,
+            raw: input.raw,
+        };
+        yield* this.streamBusRuntimeEvents({
+            taskId: id,
+            tenantId,
+            startExecution: (runtime) => runtime.engine.startTask({
+                task: { id, input: normalizedInput },
+                isStreaming: true,
+                agentId,
+                tenantId,
+            }),
+        });
+    }
+
+    async resume(params: ResumeParams, sink?: RuntimeStreamSink): Promise<ResultPayload> {
+        if (sink) {
+            return consumeRuntimeStreamAsResult({
+                taskId: params.id,
+                events: this.resumeStream(params),
+                sink,
+            });
+        }
+
         const { id, token, input, tenantId = 'default', route } = params;
         const normalizedInput: BridgeTaskInput = {
             route,
@@ -157,18 +330,14 @@ export class ProgrammaticInvoker implements Invoker {
         };
         try { console.info(`[invoker] resume: id=${id} token=${token} tenantId=${tenantId}`); } catch { }
 
-        await this.ensureInitialized();
-        const engine = ProgrammaticInvoker._engine;
-        const eventBus = ProgrammaticInvoker._eventBus;
-        const taskChannel = ProgrammaticInvoker._taskChannel;
-        const wmStore = ProgrammaticInvoker._wmStore;
+        const { engine, eventBus, taskChannel, wmStore } = await this.getRuntime();
 
         let effectiveToken = token;
         if (!effectiveToken || effectiveToken === 'opaque') {
             try {
                 const events = await wmStore.listEventsSince({ tenantId, sessionId: id, sinceSeq: 0 });
-                const last = [...events].reverse().find((e: any) => e.type === 'task.input_required');
-                if (last?.payload?.token) {
+                const last = [...events].reverse().find((event) => event.type === 'task.input_required');
+                if (typeof last?.payload?.token === 'string') {
                     effectiveToken = last.payload.token;
                     try { console.info(`[invoker] resume: recovered token=${effectiveToken} for id=${id}`); } catch { }
                 }
@@ -184,77 +353,22 @@ export class ProgrammaticInvoker implements Invoker {
             if (!busAny.__dbgId) busAny.__dbgId = Math.random().toString(36).slice(2);
             console.info(`[invoker] resume:bus channel=${channel} busId=${busAny.__dbgId}`);
         } catch { }
-        let lastTyping = 0;
-        let aggregatedText = '';
+        const forwardState = createStreamForwardState();
         let resolveFn: (r: ResultPayload) => void;
         const done = new Promise<ResultPayload>((resolve) => { resolveFn = resolve; });
-        const sendSafe = async (text: string) => {
-            try {
-                console.info('[invoker] resume:sendMessage', { route, text });
-                await this.deps.chatSender.sendMessage(route, text);
-            } catch (e) {
-                try { console.error('[invoker] resume:sendMessage error', e); } catch { }
-            }
-        };
         let unsubResume: (() => Promise<void>) | undefined;
         const handler = async (be: BusEvent) => {
-            const ev = busEventData(be) as any;
-            if (!ev) return;
-            if (ev?.artifact) {
-                const parts = ev.artifact.parts || [];
-                const text = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
-                try { console.info('[invoker] resume:artifact', { text }); } catch { }
-                if (text) { aggregatedText += text; }
-                for (const p of parts) {
-                    // Forward media parts (aligned with start() handler)
-                    if (typeof this.deps.chatSender.sendMedia === 'function' && (p?.type === 'image' || p?.type === 'file' || p?.type === 'audio' || p?.type === 'video')) {
-                        const media: any = { type: p.type, url: p.url, bytesBase64: p.bytesBase64, mime: p.mime, filename: p.filename, caption: p.caption };
-                        try { await this.deps.chatSender.sendMedia!(route, media); } catch { }
-                    }
-                    if (p?.type === 'text' && p?.format) {
-                        try { await this.deps.chatSender.sendMessage(route, p.text, { parseMode: p.format === 'html' ? 'html' as any : p.format }); } catch { }
-                    } else if (typeof this.deps.chatSender.sendMarkup === 'function' && p?.type === 'markup' && p?.value) {
-                        try { await this.deps.chatSender.sendMarkup!(route, typeof p.value === 'string' ? JSON.parse(p.value) : p.value); } catch { }
-                    }
-                }
-            }
-            if (ev?.status) {
-                try { console.debug(`[invoker] resume:event status=${ev.status?.state} final=${ev.final === true}`); } catch { }
-                const st = ev.status;
-                if (st?.state === 'working' && typeof this.deps.chatSender.sendTyping === 'function') {
-                    const now = Date.now();
-                    if (now - lastTyping > 1000) { lastTyping = now; try { await this.deps.chatSender.sendTyping!(route); } catch { } }
-                }
-                if (st?.state === 'input-required') {
-                    let tkn = st?.metadata?.token as string | undefined;
-                    const hadParts = Array.isArray(st?.message?.parts) && (st!.message!.parts!.length > 0);
-                    let promptText: string | undefined = hadParts ? undefined : (st?.message?.parts?.[0]?.text as string | undefined) || undefined;
-                    // Extract token from event store if not in metadata (aligned with start() handler)
-                    if (!tkn) {
-                        try {
-                            const events = await wmStore.listEventsSince({ tenantId, sessionId: id, sinceSeq: 0 });
-                            const last = [...events].reverse().find((e: any) => e.type === 'task.input_required');
-                            tkn = last?.payload?.token || tkn;
-                            promptText = (last?.payload?.prompt as string | undefined) || promptText;
-                        } catch { /* ignore */ }
-                    }
-                    tkn = tkn || 'opaque';
-                    try { await unsubResume?.(); } catch { }
-                    try { console.info(`[invoker] resume:input_required id=${id} token=${tkn}`); } catch { }
-                    resolveFn!({ id, status: 'input_required', token: tkn, prompt: promptText });
-                }
-                if (st?.state === 'failed' && ev.final === true) {
-                    try { await unsubResume?.(); } catch { }
-                    const errMsg = (st?.message?.parts?.[0]?.text) || 'failed';
-                    try { console.warn(`[invoker] resume:failed id=${id} error=${errMsg}`); } catch { }
-                    resolveFn!({ id, status: 'failed', error: errMsg });
-                }
-                if (st?.state === 'completed' && ev.final === true) {
-                    try { await unsubResume?.(); } catch { }
-                    const output = aggregatedText ? { text: aggregatedText } : { ok: true };
-                    try { console.info(`[invoker] resume:completed id=${id}`); } catch { }
-                    resolveFn!({ id, status: 'completed', output });
-                }
+            const result = await this.forwardBusEventToChat({ be, route, tenantId, state: forwardState });
+            if (result.kind === 'input_required') {
+                const recovered = await this.recoverInputToken({ wmStore, tenantId, taskId: id, token: result.token, prompt: result.prompt });
+                try { await unsubResume?.(); } catch { }
+                resolveFn!({ id, status: 'input_required', token: recovered.token, prompt: recovered.prompt });
+            } else if (result.kind === 'failed') {
+                try { await unsubResume?.(); } catch { }
+                resolveFn!({ id, status: 'failed', error: result.error });
+            } else if (result.kind === 'completed') {
+                try { await unsubResume?.(); } catch { }
+                resolveFn!({ id, status: 'completed', output: result.output });
             }
         };
         const resumeSub = await eventBus.subscribe(channel, handler);
@@ -263,5 +377,39 @@ export class ProgrammaticInvoker implements Invoker {
         // Resume input and wait for next status
         await engine.resumeInput({ tenantId, taskId: id, token: effectiveToken, input: normalizedInput });
         return done;
+    }
+
+    async *resumeStream(params: ResumeParams): AsyncIterable<RuntimeStreamEvent> {
+        const { id, token, input, tenantId = 'default', route } = params;
+        const runtime = await this.getRuntime();
+        let effectiveToken = token;
+        if (!effectiveToken || effectiveToken === 'opaque') {
+            try {
+                const events = await runtime.wmStore.listEventsSince({ tenantId, sessionId: id, sinceSeq: 0 });
+                const last = [...events].reverse().find((event) => event.type === 'task.input_required');
+                if (typeof last?.payload?.token === 'string') {
+                    effectiveToken = last.payload.token;
+                }
+            } catch {
+                /* ignore */
+            }
+        }
+        const normalizedInput: BridgeTaskInput = {
+            route,
+            text: input.text,
+            attachments: input.attachments,
+            replyToMessageId: input.replyToMessageId,
+            raw: input.raw,
+        };
+        yield* this.streamBusRuntimeEvents({
+            taskId: id,
+            tenantId,
+            startExecution: (streamRuntime) => streamRuntime.engine.resumeInput({
+                tenantId,
+                taskId: id,
+                token: effectiveToken,
+                input: normalizedInput,
+            }),
+        });
     }
 }

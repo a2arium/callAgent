@@ -40,6 +40,11 @@ import type {
 import type { MessageLogDelivery } from '../../public-types/messageLog/types.js';
 import type { Observation } from '../../types/observation.js';
 import {
+    RUNTIME_STREAM_EVENT_VERSION,
+    RuntimeStreamEventSchema,
+    type RuntimeStreamEvent,
+} from '../../streaming/runtimeStreamEvents.js';
+import {
     InviteTokenSchema,
     MAX_TOPIC_MEMBERS,
     MemberIdSchema,
@@ -145,6 +150,46 @@ export class ConversationService implements InternalConversationApi {
         sink: ((sample: TopicPostBackpressureSample | undefined) => void) | undefined
     ): void {
         this.topicPostBackpressureSink = sink;
+    }
+
+    private async publishConversationRuntimeEvent(params: {
+        sessionId: string;
+        tenantId: string;
+        type: 'conversation.message.sent' | 'conversation.message.received';
+        id: string;
+        seq: number;
+        ts: string;
+        conversationId: string;
+        conversationKind: 'thread' | 'topic';
+        messageId: string;
+        senderAgentId?: string;
+        recipientAgentId?: string;
+        speechAct?: string;
+    }): Promise<void> {
+        if (!this.deps.publishRuntimeEvent) return;
+
+        const event: RuntimeStreamEvent = RuntimeStreamEventSchema.parse({
+            version: RUNTIME_STREAM_EVENT_VERSION,
+            id: params.id,
+            seq: params.seq,
+            taskId: params.sessionId,
+            tenantId: params.tenantId,
+            ts: params.ts,
+            type: params.type,
+            visibility: 'debug',
+            channel: 'debug',
+            data: {
+                conversationId: params.conversationId,
+                kind: params.conversationKind,
+                messageId: params.messageId,
+                ...(params.senderAgentId ? { senderAgentId: params.senderAgentId } : {}),
+                ...(params.recipientAgentId ? { recipientAgentId: params.recipientAgentId } : {}),
+                ...(params.speechAct ? { speechAct: params.speechAct } : {}),
+                sequenceNumber: params.seq,
+            },
+        });
+
+        await this.deps.publishRuntimeEvent({ sessionId: params.sessionId, event });
     }
 
     private scheduleConversationActivation(params: ConversationActivateParams): void {
@@ -659,6 +704,20 @@ export class ConversationService implements InternalConversationApi {
                 error: null,
                 queuePosition: null,
             });
+            await this.publishConversationRuntimeEvent({
+                sessionId: target.sessionId,
+                tenantId,
+                type: 'conversation.message.received',
+                id: `${messageId}:received:${target.sessionId}`,
+                seq: sequenceNumber,
+                ts: appendResult.createdAt,
+                conversationId: thread.id,
+                conversationKind: 'thread',
+                messageId,
+                senderAgentId: message.senderAgentId,
+                recipientAgentId: message.recipientAgentId,
+                speechAct: message.speechAct,
+            });
         } catch (err) {
             await this.sessionManager.updateConversationMessageDelivery({
                 tenantId,
@@ -698,6 +757,20 @@ export class ConversationService implements InternalConversationApi {
             sessionId: senderSessionId,
             agentId: message.senderAgentId,
             observation: outboundCommitted,
+        });
+        await this.publishConversationRuntimeEvent({
+            sessionId: senderSessionId,
+            tenantId,
+            type: 'conversation.message.sent',
+            id: `${messageId}:sent:${senderSessionId}`,
+            seq: sequenceNumber,
+            ts: appendResult.createdAt,
+            conversationId: thread.id,
+            conversationKind: 'thread',
+            messageId,
+            senderAgentId: message.senderAgentId,
+            recipientAgentId: message.recipientAgentId,
+            speechAct: message.speechAct,
         });
 
         const skipActivation = options?.skipRecipientActivation === true;
@@ -1750,6 +1823,20 @@ export class ConversationService implements InternalConversationApi {
                     error: null,
                     queuePosition: null,
                 });
+                await this.publishConversationRuntimeEvent({
+                    sessionId: s.sessionId,
+                    tenantId,
+                    type: 'conversation.message.received',
+                    id: `${messageId}:received:${s.sessionId}`,
+                    seq: sequenceNumber,
+                    ts: appendResult.createdAt,
+                    conversationId: topic.id,
+                    conversationKind: 'topic',
+                    messageId,
+                    senderAgentId: message.senderAgentId,
+                    recipientAgentId,
+                    speechAct: message.speechAct,
+                });
                 const activateParams: ConversationActivateParams = {
                     kind: 'topic',
                     tenantId,
@@ -1827,6 +1914,19 @@ export class ConversationService implements InternalConversationApi {
             sessionId: senderSeat.sessionId,
             agentId: senderAgentId,
             observation: outboundObs,
+        });
+        await this.publishConversationRuntimeEvent({
+            sessionId: senderSeat.sessionId,
+            tenantId,
+            type: 'conversation.message.sent',
+            id: `${messageId}:sent:${senderSeat.sessionId}`,
+            seq: sequenceNumber,
+            ts: appendResult.createdAt,
+            conversationId: topic.id,
+            conversationKind: 'topic',
+            messageId,
+            senderAgentId: message.senderAgentId,
+            speechAct: message.speechAct,
         });
 
         const stopPolicyTrace = await this.runStopPoliciesAfterSuccessfulTopicAppend({

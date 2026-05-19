@@ -21,6 +21,7 @@ describe('ConversationService topic harness', () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
         const activations: Array<{ kind: string; routingSessionId: string; recipientAgentId: string }> = [];
+        const runtimeEvents: unknown[] = [];
         const service = new ConversationService(sessionManager, {
             routeTargetForThread: ({ threadId, recipientAgentId: recipient }) => ({
                 tenantId,
@@ -35,11 +36,14 @@ describe('ConversationService topic harness', () => {
                 });
                 return { ok: true };
             },
+            publishRuntimeEvent: async ({ event }) => {
+                runtimeEvents.push(event);
+            },
             messageLog: createDbMessageLog(sessionManager),
             resolveThreadTtlMs: (_agentId: string) => null,
             resolveWakeOnTopicMessage: () => true,
         });
-        return { service, sessionManager, activations };
+        return { service, sessionManager, activations, runtimeEvents };
     };
 
     it('createTopic with 3 members, broadcast delivers to both others', async () => {
@@ -75,6 +79,54 @@ describe('ConversationService topic harness', () => {
         if (r.status === 'accepted') {
             expect(r.deliveries.map((d) => d.recipientAgentId).sort()).toEqual([p1, p2].sort());
         }
+    });
+
+    it('publishes debug runtime events for topic post send and receive', async () => {
+        const { service, runtimeEvents } = create();
+        const created = await service.createTopic(tenantId, session, owner, {
+            topicId: 'topic-runtime-1',
+            members: [
+                { agentId: owner, role: 'owner' },
+                { agentId: p1, role: 'participant' },
+            ],
+            defaultSelector: { kind: 'broadcast' },
+            stopPolicies: DEFAULT_TOPIC_STOP,
+        });
+        expect(created.status).toBe('ok');
+        if (created.status !== 'ok') return;
+
+        const result = await service.post(tenantId, session, owner, created.topic, {
+            senderAgentId: owner,
+            speechAct: 'inform',
+            content: { text: 'hello topic' },
+        });
+
+        expect(result.status).toBe('accepted');
+        expect(runtimeEvents).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: expect.stringContaining(p1),
+                type: 'conversation.message.received',
+                visibility: 'debug',
+                data: expect.objectContaining({
+                    conversationId: 'topic-runtime-1',
+                    kind: 'topic',
+                    senderAgentId: owner,
+                    recipientAgentId: p1,
+                    speechAct: 'inform',
+                }),
+            }),
+            expect.objectContaining({
+                taskId: expect.stringContaining(owner),
+                type: 'conversation.message.sent',
+                visibility: 'debug',
+                data: expect.objectContaining({
+                    conversationId: 'topic-runtime-1',
+                    kind: 'topic',
+                    senderAgentId: owner,
+                    speechAct: 'inform',
+                }),
+            }),
+        ]));
     });
 
     it('marks topic delivery delivered only after recipient snapshot routing commits', async () => {
