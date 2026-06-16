@@ -4,11 +4,13 @@ Last updated: 2026-06-16.
 
 ## Stage
 
-**Design + research complete. POC not started. No production code changed.**
+**Phase 0 scaffold complete** — kernel seam, driver routing, composition bootstrap,
+Scenario 0 parity test, and D5 full-suite gate passed (170 suites / 936 tests).
+Hatchet POC not started.
 
 This workspace was created after the research outcomes in
-`apps/docs/drafts/orchestrator-substrate-requirements.md` (§13). The vendor
-decision is open; Hatchet is the first POC candidate.
+`apps/docs/drafts/orchestrator-substrate-requirements.md` (§13). Hatchet is the
+first POC candidate.
 
 ## Decisions captured (ADRs — all "Proposed")
 
@@ -48,10 +50,14 @@ decision is open; Hatchet is the first POC candidate.
 - `specs/worker-runtime.md` — what a Hatchet worker process must construct
   (composition root, process-global hazards, cross-process bus).
 - `specs/deletion-inventory.md` — line-referenced marked-for-deletion list.
+- `specs/driver-sync-api.md` — sync vs async driver API (Phase 0 shim vs Hatchet).
+- `specs/composition-roots-scope.md` — which entry points use shared bootstrap.
+- `specs/child-completion-routing.md` — why `handleChildCompleted` stays on
+  `executeTurn` until Phase 2.
 
 ## Production code added
 
-- Phase 0.1 (kernel seam, additive — not yet wired into `TaskEngine`):
+- Phase 0.1 (kernel seam, additive):
   - `packages/core/src/runtime/runtimeDriver.ts` — `RuntimeDriver` scheduling
     port + wake/ids types.
   - `packages/core/src/runtime/turnExecutor.ts` — `TurnExecutor` segment port,
@@ -61,13 +67,70 @@ decision is open; Hatchet is the first POC candidate.
     (immediate background segments, local timers, child/outbox delegation).
   - `packages/core/src/runtime/index.ts` — internal barrel (NOT re-exported from
     the public package index, so the public surface is unchanged — D1).
-  - Tests: `packages/core/tests/runtime/*` (15 tests, green). Existing
-    `TurnRunner` / `TaskExecutor` suites still pass; full-package `tsc` clean.
+  - Tests: `packages/core/tests/runtime/outcomeToBoundary.test.ts`,
+    `inProcessRuntimeDriver.test.ts` (15 tests).
+
+- Phase 0.2 (`TurnExecutor` backed by real `TurnRunner.runTurn`):
+  - `packages/core/src/runtime/segmentWakeApplicator.ts` — applies wakes to
+    snapshot before `runTurn` (mirrors TaskEngine prep paths).
+  - `packages/core/src/runtime/inMemorySegmentDedupe.ts` — in-process idempotency.
+  - `packages/core/src/runtime/turnRunnerSegmentExecutor.ts` — `TurnExecutor`
+    wrapping `TurnRunner.runTurn` + wake applicator.
+  - Tests: `segmentWakeApplicator.test.ts`,
+    `turnRunnerSegmentExecutor.integration.test.ts` (start → await_input →
+    resume → complete; duplicate idempotency key no-op). **21 runtime tests green.**
+
+- Phase 0.3 (composition-root injection — **done**):
+  - `packages/core/src/runtime/buildInProcessRuntimeStack.ts` — wires
+    `TurnRunnerSegmentExecutor` + `InProcessRuntimeDriver`.
+  - `TaskEngine` constructor builds/holds default `runtimeDriver`; optional
+    `opts.runtimeDriver` override for tests/future Hatchet adapter.
+  - `waitForBackgroundTasks` also drains `InProcessRuntimeDriver.waitForIdle()`.
+  - Wake/scheduling paths routed through `runtimeDriver`:
+    - `startTask` → `enqueueStartSync` (sync await via `prepared` turn invocation)
+    - `resumeInput` → `enqueueResumeSync` (`input` wake, idempotency
+      `${taskId}:input:${token}`)
+    - `handleToolCompleted` → `enqueueResumeSync` (`tool` wake)
+    - `handleExternalEventOccurred` → `enqueueResumeSync` (`external` wake)
+    - `ensureConversationActivation` → `enqueueResumeSync` (`conversation` wake)
+  - `PreparedTurnInvocation` on `RunSegmentParams` preserves exact pre-mutated
+    ctx/snapshot semantics (no double applicator mutation).
+  - **Deferred:** `handleChildCompleted` still calls `TaskExecutor.executeTurn`
+    directly (~2656); background `enqueueStart`/`enqueueResume` (fire-and-forget)
+    not yet used by TaskEngine call sites.
+
+- Phase 0.4 (shared composition bootstrap — **done**):
+  - `packages/core/src/runtime/bootstrapCompositionRoot.ts` — single bootstrap for
+    API host and future worker: `TaskEngine` + event bus + `EngineLocator` +
+    optional `registerAgents` hook.
+  - `bootstrapCompositionRoot` exported from public `@a2arium/callagent-core`
+    index (no orchestrator types on public surface — D1).
+  - `bootstrapCompositionRootInternal` + full runtime barrel on
+    `@a2arium/callagent-core/unstable` for worker/driver packages.
+  - `TaskEngine.getCompositionRuntimeDriver()` + `InProcessRuntimeDriver.getTurnExecutor()`
+    for composition-root access.
+  - `apps/examples/runtime-host/src/server.ts` migrated to shared bootstrap.
+  - Tests: `bootstrapCompositionRoot.test.ts` (4 tests). **25 runtime tests green.**
+
+- Phase 0 review follow-ups (**done**):
+  - `isSyncRuntimeDriver()` duck-type guard replaces `instanceof` in routing.
+  - POC Scenario 0 automated: `scenario0.inProcessParity.test.ts`.
+  - Driver routing tests: `taskEngineDriverRouting.test.ts`.
+  - `runnerCli` migrated to `bootstrapCompositionRoot`.
+  - ADR 0001 updated to segment terminology.
 
 ## Production code changed
 
-- None yet. Phase 0.1 is purely additive; nothing imports the seam yet. Wiring
-  into the `TaskEngine` composition root is Phase 0.3.
+- `packages/core/src/orchestration/taskEngine.ts` — holds default
+  `InProcessRuntimeDriver` at composition root; routes start/resume/tool/
+  external/conversation wakes through `enqueueStartSync` / `enqueueResumeSync`.
+- `packages/core/src/runtime/inProcessRuntimeDriver.ts` — sync segment await
+  (`runSegmentAwait`, `enqueueStartSync`, `enqueueResumeSync`).
+- `packages/core/src/runtime/turnExecutor.ts` — `PreparedTurnInvocation` +
+  optional `taskEntity` on `SegmentResult`.
+- `packages/core/src/unstable.ts` — exports internal runtime composition +
+  runtime seam barrel for worker bootstrap.
+- `apps/examples/runtime-host/src/server.ts` — uses `bootstrapCompositionRoot`.
 
 ## Marked for deletion (pending POC + per-surface migration)
 
@@ -76,7 +139,18 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Tested
 
-- Nothing yet. POC scenarios live in `harness/poc-scenarios.md`.
+- `packages/core/tests/runtime/*` — 29 tests (mapper, driver, wake applicator,
+  segment executor, bootstrap, Scenario 0 parity, driver routing).
+- `TaskEngine.sync`, `TaskEngine.inbox`, `TaskEngine.async_race` — pass with
+  driver-routed call sites.
+- All `packages/core/tests/TaskEngine*` suites — pass (151 tests).
+- **D5:** full monorepo suite — 170 passed, 936 tests, 2 skipped (2026-06-16).
+
+## Next action
+
+Phase 0 scaffold + D5 are done. Next: Phase 1 Hatchet outbox dispatch
+(`packages/driver-hatchet`). Child completion routing deferred per
+`specs/child-completion-routing.md` until Phase 2 prerequisites.
 
 ## Open questions (carried from requirements §11)
 
@@ -97,12 +171,3 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 - Parity harness: golden canonical-event traces proving in-process and Hatchet
   drivers are equivalent (ADR 0007 parity test needs a home/format).
 
-## Next action
-
-Phase 0.1 (seam types + `InProcessRuntimeDriver` + tests) is done. Next:
-
-- Phase 0.2: implement a `TurnExecutor` backed by the real `TurnRunner.runTurn`,
-  tested against an in-memory engine (start → input → resume → complete).
-- Phase 0.3: wire the driver at the `TaskEngine` composition root behind a
-  default `in-process` selection; run the full suite (D5).
-- Phase 0.4: extract the shared bootstrap for the future worker; final D1/D5.

@@ -12,10 +12,8 @@ const port = Number(process.env.PORT ?? 8790);
 async function main(): Promise<void> {
     const [
         {
-            EngineLocator,
-            TaskEngine,
+            bootstrapCompositionRoot,
             createApiRouter,
-            createInMemoryEventBus,
         },
         {
             DEMO_AGENT_ID,
@@ -30,14 +28,14 @@ async function main(): Promise<void> {
         import('@a2arium/callagent-memory-sql'),
     ]);
 
-    await registerDemoAgent();
-
-    const eventBus = createInMemoryEventBus();
     const sessionStore = process.env.MEMORY_DATABASE_URL
         ? new WorkingMemorySessionStore()
         : undefined;
-    const engine = new TaskEngine({ eventBus, sessionStore });
-    EngineLocator.setEngine(engine);
+
+    const { engine, shutdown: shutdownComposition } = await bootstrapCompositionRoot({
+        registerAgents: registerDemoAgent,
+        taskEngine: { sessionStore },
+    });
 
     const app = express();
     app.use(express.json({ limit: '1mb' }));
@@ -67,7 +65,7 @@ async function main(): Promise<void> {
 
     const shutdown = async () => {
         console.log('Stopping runtime host...');
-        EngineLocator.setEngine(null);
+        shutdownComposition();
         await new Promise<void>((resolve) => server.close(() => resolve()));
     };
 

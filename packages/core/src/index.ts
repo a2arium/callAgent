@@ -19,6 +19,12 @@ export { ContextSerializer } from './orchestration/ContextSerializer.js';
 export { A2AService, globalA2AService } from './orchestration/A2AService.js';
 export { TaskEngine } from './orchestration/taskEngine.js';
 export { EngineLocator } from './orchestration/EngineLocator.js';
+export {
+    bootstrapCompositionRoot,
+    type BootstrapCompositionRootParams,
+    type RuntimeCompositionRoot,
+    type TaskEngineOptions,
+} from './runtime/bootstrapCompositionRoot.js';
 export { InteractiveTaskHandler } from './orchestration/InteractiveTaskResult.js';
 export { Artifact } from './shared/types/index.js';
 export type {

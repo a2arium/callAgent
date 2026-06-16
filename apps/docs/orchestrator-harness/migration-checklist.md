@@ -5,14 +5,14 @@ harness checklist style.
 
 ## Kernel seam (Phase 0)
 
-- [ ] Define `TurnExecutor.runSegment` port over `TaskExecutor`/`runLoop`
+- [x] Define `TurnExecutor.runSegment` port over `TaskExecutor`/`runLoop`
       (segment = run to next durable boundary; `continue` stays in-process).
-- [ ] Define `RuntimeDriver` port in `packages/core`.
-- [ ] Implement `InProcessRuntimeDriver` reproducing current behavior.
-- [ ] Inject driver at composition root; default in-process.
-- [ ] Extract shared bootstrap (agents/tools/plugins/memory/LLM/bus) reusable by
+- [x] Define `RuntimeDriver` port in `packages/core`.
+- [x] Implement `InProcessRuntimeDriver` reproducing current behavior.
+- [x] Inject driver at composition root; default in-process.
+- [x] Extract shared bootstrap (agents/tools/plugins/memory/LLM/bus) reusable by
       a worker (`specs/worker-runtime.md`).
-- [ ] Full test suite passes unchanged (D5).
+- [x] Full test suite passes unchanged (D5) — 170 suites / 936 tests green (2026-06-16).
 - [ ] No orchestrator types above the adapter package (D1).
 - [ ] `packages/core` public surface unchanged (type tests green).
 

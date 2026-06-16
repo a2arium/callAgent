@@ -21,9 +21,11 @@ fit.
 
 Introduce a small kernel seam:
 
-- `TurnExecutor`: advances one task by one APLRET turn from a persisted snapshot
-  and an inbox event, then persists the new snapshot and returns the outcome.
-- `RuntimeDriver`: decides when/how the next turn is scheduled and what wakes it.
+- `TurnExecutor`: runs one **segment** — one `runLoop` execution advanced to the
+  next durable boundary (await / sleep / terminal) — from a persisted snapshot and
+  wake, then persists and returns `SegmentResult.boundary`. Internal `continue`
+  turns stay in-process (ADR 0002).
+- `RuntimeDriver`: decides when/how the next segment is scheduled and what wakes it.
 
 There are two drivers:
 

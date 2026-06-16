@@ -7,3 +7,8 @@ export { ConversationService } from './internal/conversation/ConversationService
 export { createDbMessageLog } from './eventbus/dbMessageLog.js';
 export { InMemorySessionManager } from './orchestration/InMemorySessionManager.js';
 export { SessionManager } from './orchestration/SessionManager.js';
+export {
+    bootstrapCompositionRootInternal,
+    type RuntimeCompositionRootInternal,
+} from './runtime/bootstrapCompositionRoot.js';
+export * from './runtime/index.js';

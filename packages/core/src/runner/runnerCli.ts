@@ -1,10 +1,9 @@
 import 'dotenv/config';
 import { runAgentWithStreaming } from './streamingRunner.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
-import { TaskEngine } from '../orchestration/taskEngine.js';
+import { bootstrapCompositionRoot } from '../runtime/bootstrapCompositionRoot.js';
 import { registerHandler } from '../orchestration/HandlerRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
-import { EngineLocator } from '../orchestration/EngineLocator.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { A2AEvent } from '../shared/types/StreamingEvents.js';
 import type { BusEvent } from '../public-types/eventbus/schemas.js';
@@ -225,8 +224,10 @@ async function main(): Promise<void> {
         }
         const store = new WorkingMemorySessionStore();
         await store.connect();
-        const engine = new TaskEngine({ sessionStore: store });
-        try { EngineLocator.setEngine(engine as any); } catch { }
+        const { engine } = await bootstrapCompositionRoot({
+            taskEngine: { sessionStore: store },
+            registerEngineLocator: true,
+        });
         // If handlersFile provided, also load agent and its dependencies so ctx.sendTaskToAgent can find children
         if (handlersFile) {
             try {

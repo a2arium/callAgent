@@ -11,8 +11,20 @@
  * package's public index; agent authors must never depend on it (ADR 0001).
  */
 
+import type { MentalState } from '../loop/types.js';
 import type { TurnOutcome } from '../loop/oneTurn.js';
+import type { TurnExecutionParams } from '../orchestration/TurnRunner.js';
+import type { TaskContext } from '../shared/types/index.js';
+import type { TaskEntity } from '../orchestration/types.js';
 import type { RuntimeWakeEvent } from './runtimeDriver.js';
+
+/** Pre-built runTurn invocation; skips wake applicator (snapshot already prepared). */
+export type PreparedTurnInvocation = {
+    ctx: TaskContext;
+    turnParams: TurnExecutionParams;
+    initialM?: MentalState;
+    snapshot?: Record<string, unknown>;
+};
 
 /** How a segment was woken. Mirrors the trigger taxonomy of the runtime. */
 export type TurnTrigger =
@@ -74,6 +86,8 @@ export type SegmentResult = {
     taskStatus: SegmentTaskStatus;
     traceId?: string;
     turnTraceId?: string;
+    /** Populated when the segment ran via a prepared turn invocation. */
+    taskEntity?: TaskEntity;
 };
 
 export type RunSegmentParams = {
@@ -82,6 +96,8 @@ export type RunSegmentParams = {
     agentId?: string;
     wake: TurnWake;
     idempotencyKey: string;
+    /** When set, invoke runTurn directly without wake applicator mutation. */
+    prepared?: PreparedTurnInvocation;
 };
 
 /**

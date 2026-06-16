@@ -20,7 +20,13 @@ import type {
     RuntimeWakeEvent,
     ScheduleTimerParams,
 } from './runtimeDriver.js';
-import type { RunSegmentParams, TurnExecutor, TurnWake } from './turnExecutor.js';
+import type {
+    PreparedTurnInvocation,
+    RunSegmentParams,
+    SegmentResult,
+    TurnExecutor,
+    TurnWake,
+} from './turnExecutor.js';
 
 const log = logger.createLogger({ prefix: 'InProcessRuntimeDriver' });
 
@@ -86,7 +92,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private readonly scheduler: TimerScheduler;
 
     /** In-flight background work, so tests and shutdown can await quiescence. */
-    private readonly inFlight = new Set<Promise<void>>();
+    private readonly inFlight = new Set<Promise<unknown>>();
     /** Scheduled timers keyed by timerId, plus a reverse index per task. */
     private readonly timers = new Map<string, unknown>();
     private readonly timersByTask = new Map<string, Set<string>>();
@@ -109,6 +115,11 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
         this.scheduler = deps.scheduler ?? defaultScheduler;
     }
 
+    /** Composition-root access for worker bootstrap (Phase 0.4). */
+    getTurnExecutor(): TurnExecutor {
+        return this.turnExecutor;
+    }
+
     async enqueueStart(params: EnqueueStartParams): Promise<void> {
         this.runSegmentInBackground({
             tenantId: params.tenantId,
@@ -127,6 +138,55 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             idempotencyKey: params.idempotencyKey,
             wake: wakeEventToTurnWake(params.event),
         });
+    }
+
+    /**
+     * Synchronous start: awaits segment completion. Used when the caller must
+     * observe the turn result before returning (e.g. `startTask` loop mode).
+     */
+    async enqueueStartSync(
+        params: EnqueueStartParams & { prepared?: PreparedTurnInvocation }
+    ): Promise<SegmentResult> {
+        return this.runSegmentAwait({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            idempotencyKey: params.idempotencyKey,
+            wake: { trigger: 'start', input: params.input },
+            prepared: params.prepared,
+        });
+    }
+
+    /**
+     * Synchronous resume: awaits segment completion. Preserves today's awaited
+     * auto-resume paths while routing through the in-process driver.
+     */
+    async enqueueResumeSync(
+        params: EnqueueResumeParams & { prepared?: PreparedTurnInvocation }
+    ): Promise<SegmentResult> {
+        return this.runSegmentAwait({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            idempotencyKey: params.idempotencyKey,
+            wake: wakeEventToTurnWake(params.event),
+            prepared: params.prepared,
+        });
+    }
+
+    /** Runs one segment to completion (tracked for `waitForIdle`). */
+    async runSegmentAwait(params: RunSegmentParams): Promise<SegmentResult> {
+        const tracked: Promise<unknown> = this.turnExecutor
+            .runSegment(params)
+            .catch((error: unknown) => {
+                this.onSegmentError(error, params);
+                throw error;
+            })
+            .finally(() => {
+                this.inFlight.delete(tracked);
+            });
+        this.inFlight.add(tracked);
+        return tracked as Promise<SegmentResult>;
     }
 
     async enqueueChildDispatch(params: EnqueueChildDispatchParams): Promise<void> {
@@ -203,7 +263,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     }
 
     private runSegmentInBackground(params: RunSegmentParams): void {
-        const tracked: Promise<void> = this.turnExecutor
+        const tracked: Promise<unknown> = this.turnExecutor
             .runSegment(params)
             .then(
                 () => undefined,
@@ -242,4 +302,22 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             }
         }
     }
+}
+
+/** Phase 0 sync extensions — not part of the async `RuntimeDriver` port (see driver-sync-api.md). */
+export type SyncRuntimeDriver = RuntimeDriver & {
+    enqueueStartSync(
+        params: EnqueueStartParams & { prepared?: PreparedTurnInvocation }
+    ): Promise<SegmentResult>;
+    enqueueResumeSync(
+        params: EnqueueResumeParams & { prepared?: PreparedTurnInvocation }
+    ): Promise<SegmentResult>;
+};
+
+export function isSyncRuntimeDriver(driver: RuntimeDriver): driver is SyncRuntimeDriver {
+    const candidate = driver as SyncRuntimeDriver;
+    return (
+        typeof candidate.enqueueStartSync === 'function' &&
+        typeof candidate.enqueueResumeSync === 'function'
+    );
 }

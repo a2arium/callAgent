@@ -67,6 +67,14 @@ import { pruneSnapshot } from '../loop/hygiene.js';
 import { ArtifactHydrationService, HYDRATED_ARTIFACT_HANDLE_SYMBOL } from './ArtifactHydrationService.js';
 import { InboxManager, type EngineObservation, type EngineObservationInbox } from './InboxManager.js';
 import { TaskExecutor } from './TaskExecutor.js';
+import {
+    buildInProcessRuntimeStack,
+    InProcessRuntimeDriver,
+    isSyncRuntimeDriver,
+    type PreparedTurnInvocation,
+    type RuntimeDriver,
+    type RuntimeWakeEvent,
+} from '../runtime/index.js';
 
 
 
@@ -149,7 +157,7 @@ import { PathUtils } from './utils/PathUtils.js';
 import { SnapshotRepository } from './persistence/SnapshotRepository.js';
 import { ApiBinder } from './api/ApiBinder.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
-import { TurnRunner } from './TurnRunner.js';
+import { TurnRunner, type TurnExecutionParams } from './TurnRunner.js';
 import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import type { InvariantErrorCode, InvariantErrorDetail } from '../types/invariantError.js';
@@ -214,6 +222,8 @@ export class TaskEngine {
     private readonly backgroundTaskPromises = new Set<Promise<void>>();
     private apiBinder: ApiBinder;
     private turnRunner: TurnRunner;
+    /** Phase 0.3: scheduling seam; default is in-process (ADR 0001). */
+    private readonly runtimeDriver: RuntimeDriver;
     private conversationService: ConversationService;
     private inviteDeliveryCoordinator: InviteDeliveryCoordinator;
     private inviteSweeper: InviteSweeper;
@@ -240,6 +250,8 @@ export class TaskEngine {
             persistence: DurableSubscriptionPersistence;
         }) => DurableSubscription;
         transportClose?: () => Promise<void>;
+        /** Override the default in-process runtime driver (tests / future Hatchet adapter). */
+        runtimeDriver?: RuntimeDriver;
     }) {
         this.transportClose = opts?.transportClose;
         this.createDurableSubscription = opts?.createDurableSubscription;
@@ -358,6 +370,15 @@ export class TaskEngine {
             this.eventBus
         );
 
+        this.runtimeDriver =
+            opts?.runtimeDriver ??
+            buildInProcessRuntimeStack({
+                turnRunner: this.turnRunner,
+                sessionManager: this.sessionManager!,
+                createContext: (task) =>
+                    this.createContext({ id: task.id, input: task.input as TaskInput }),
+            }).runtimeDriver;
+
         if (opts?.handlerInvoker) {
             this.handlerInvoker = opts.handlerInvoker;
         } else {
@@ -446,6 +467,60 @@ export class TaskEngine {
         } finally {
             await this.releaseConversationActivation(activationKey);
         }
+    }
+
+    /**
+     * Phase 0.3: route a prepared turn through the runtime driver while preserving
+     * today's synchronous await semantics and TaskEngine-prepared ctx/snapshot.
+     */
+    private async runPreparedTurnThroughDriver(params: {
+        operation: 'start' | 'resume';
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        idempotencyKey: string;
+        input?: unknown;
+        resumeEvent?: RuntimeWakeEvent;
+        ctx: TaskContext;
+        turnParams: TurnExecutionParams;
+        initialM?: MentalState;
+        snapshot?: Record<string, unknown>;
+    }): Promise<TaskEntity> {
+        const prepared: PreparedTurnInvocation = {
+            ctx: params.ctx,
+            turnParams: params.turnParams,
+            initialM: params.initialM,
+            snapshot: params.snapshot,
+        };
+
+        if (isSyncRuntimeDriver(this.runtimeDriver)) {
+            const segmentResult =
+                params.operation === 'start'
+                    ? await this.runtimeDriver.enqueueStartSync({
+                          tenantId: params.tenantId,
+                          taskId: params.taskId,
+                          agentId: params.agentId,
+                          idempotencyKey: params.idempotencyKey,
+                          input: params.input ?? {},
+                          prepared,
+                      })
+                    : await this.runtimeDriver.enqueueResumeSync({
+                          tenantId: params.tenantId,
+                          taskId: params.taskId,
+                          agentId: params.agentId,
+                          idempotencyKey: params.idempotencyKey,
+                          event: params.resumeEvent!,
+                          prepared,
+                      });
+            if (segmentResult.taskEntity !== undefined) {
+                return segmentResult.taskEntity;
+            }
+        }
+
+        return this.turnRunner.runTurn(params.ctx, params.turnParams, {
+            initialM: params.initialM,
+            snapshot: params.snapshot,
+        });
     }
 
     private async drainConversationActivations(
@@ -612,17 +687,28 @@ export class TaskEngine {
             ) as MentalState) || M;
 
         try {
-            await this.turnRunner.runTurn(
+            await this.runPreparedTurnThroughDriver({
+                operation: 'resume',
+                tenantId: params.tenantId,
+                taskId: params.routingSessionId,
+                agentId: params.recipientAgentId,
+                idempotencyKey: `${params.routingSessionId}:conversation:${params.kind}`,
+                resumeEvent: {
+                    kind: 'conversation',
+                    token: params.routingSessionId,
+                    messageId: params.routingSessionId,
+                    data: { kind: params.kind === 'invite' ? 'invite.received' : 'message.received' },
+                },
                 ctx,
-                {
+                turnParams: {
                     tenantId: params.tenantId,
                     sessionId: params.routingSessionId,
                     trigger: params.kind === 'invite' ? 'event' : 'conversation',
                     isStreaming: false,
                     throwOnSaveFailure: true,
                 },
-                { initialM: M }
-            );
+                initialM: M,
+            });
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             log.error('conversation activation runTurn failed', { error: msg, ...params });
@@ -1290,15 +1376,23 @@ export class TaskEngine {
                 await runLegacy();
             } else {
                 const taskResult = await this.runTaskSessionExclusive(tenantId, sessionId, () =>
-                    this.turnRunner.runTurn(ctx, {
+                    this.runPreparedTurnThroughDriver({
+                        operation: 'start',
                         tenantId,
-                        sessionId,
-                        trigger: 'start',
-                        isStreaming,
-                        input: task.input
-                    }, {
+                        taskId: sessionId,
+                        agentId: typeof agentId === 'string' ? agentId : undefined,
+                        idempotencyKey: `${sessionId}:start`,
+                        input: task.input,
+                        ctx,
+                        turnParams: {
+                            tenantId,
+                            sessionId,
+                            trigger: 'start',
+                            isStreaming,
+                            input: task.input,
+                        },
                         initialM: M,
-                        snapshot: baseSnap
+                        snapshot: baseSnap,
                     })
                 );
 
@@ -1677,15 +1771,23 @@ export class TaskEngine {
                 await this.executeTaskHandler(ctx);
             } else {
                 const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
-                    this.turnRunner.runTurn(ctx, {
+                    this.runPreparedTurnThroughDriver({
+                        operation: 'resume',
                         tenantId,
-                        sessionId: taskId,
-                        trigger: 'resume',
-                        isStreaming: false,
-                        input: { token } // Reflect input token in result if needed
-                    }, {
+                        taskId,
+                        agentId: agentName,
+                        idempotencyKey: `${taskId}:input:${token}`,
+                        resumeEvent: { kind: 'input', token, value: input },
+                        ctx,
+                        turnParams: {
+                            tenantId,
+                            sessionId: taskId,
+                            trigger: 'resume',
+                            isStreaming: false,
+                            input: { token },
+                        },
                         initialM: M,
-                        snapshot: baseNow
+                        snapshot: baseNow,
                     })
                 );
 
@@ -1811,16 +1913,24 @@ export class TaskEngine {
             await this.attachAndRestoreLLM(ctx, agentName, M);
 
             const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
-                this.turnRunner.runTurn(ctx, {
+                this.runPreparedTurnThroughDriver({
+                    operation: 'resume',
                     tenantId,
-                    sessionId: taskId,
-                    trigger: 'tool',
-                    toolToken: token,
-                    toolResult: result,
-                    isStreaming: false
-                }, {
+                    taskId,
+                    agentId: agentName,
+                    idempotencyKey: `${taskId}:tool:${token}`,
+                    resumeEvent: { kind: 'tool', token, result },
+                    ctx,
+                    turnParams: {
+                        tenantId,
+                        sessionId: taskId,
+                        trigger: 'tool',
+                        toolToken: token,
+                        toolResult: result,
+                        isStreaming: false,
+                    },
                     initialM: M,
-                    snapshot: baseNow
+                    snapshot: baseNow,
                 })
             );
             // Note: TurnRunner.runTurn already publishes the completion event via eventBus,
@@ -1868,17 +1978,30 @@ export class TaskEngine {
             await this.attachAndRestoreLLM(ctx, agentName, M);
 
             const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
-                this.turnRunner.runTurn(ctx, {
+                this.runPreparedTurnThroughDriver({
+                    operation: 'resume',
                     tenantId,
-                    sessionId: taskId,
-                    trigger: 'event',
-                    eventToken: token,
-                    eventType: entry?.type,
-                    eventPayload: payload,
-                    isStreaming: false
-                }, {
+                    taskId,
+                    agentId: agentName,
+                    idempotencyKey: `${taskId}:external:${token}`,
+                    resumeEvent: {
+                        kind: 'external',
+                        token,
+                        type: entry?.type ?? 'external',
+                        data: payload,
+                    },
+                    ctx,
+                    turnParams: {
+                        tenantId,
+                        sessionId: taskId,
+                        trigger: 'event',
+                        eventToken: token,
+                        eventType: entry?.type,
+                        eventPayload: payload,
+                        isStreaming: false,
+                    },
                     initialM: M,
-                    snapshot: baseNow
+                    snapshot: baseNow,
                 })
             );
 
@@ -2653,6 +2776,8 @@ export class TaskEngine {
                         }
                         loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
                         try {
+                            // Child resume still uses executeTurn directly — see
+                            // apps/docs/orchestrator-harness/specs/child-completion-routing.md
                             const { taskStatus } = await TaskExecutor.executeTurn({
                                 ctx, M, env, overrides, loopOpts,
                                 sessionManager: this.sessionManager,
@@ -3461,6 +3586,14 @@ export class TaskEngine {
     }
 
     /**
+     * Composition-root access to the scheduling driver (Phase 0.4).
+     * Framework/worker bootstrap only — not for agent handlers.
+     */
+    getCompositionRuntimeDriver(): RuntimeDriver {
+        return this.runtimeDriver;
+    }
+
+    /**
      * Wait for all background task promises to complete
      * Useful for tests to ensure all background work finishes before test cleanup
      * @param timeoutMs Maximum time to wait (default: 5000ms)
@@ -3516,6 +3649,9 @@ export class TaskEngine {
                     clearTimeout(timeout);
                 }
             }
+        }
+        if (this.runtimeDriver instanceof InProcessRuntimeDriver) {
+            await this.runtimeDriver.waitForIdle();
         }
         const elapsed = Date.now() - startTime;
 

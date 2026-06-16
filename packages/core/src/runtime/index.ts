@@ -28,6 +28,7 @@ export type {
     SegmentTaskStatus,
     SegmentResult,
     RunSegmentParams,
+    PreparedTurnInvocation,
 } from './turnExecutor.js';
 
 export { outcomeToBoundary, boundaryToTaskStatus } from './turnExecutor.js';
@@ -35,8 +36,36 @@ export { outcomeToBoundary, boundaryToTaskStatus } from './turnExecutor.js';
 export {
     InProcessRuntimeDriver,
     wakeEventToTurnWake,
+    isSyncRuntimeDriver,
 } from './inProcessRuntimeDriver.js';
 export type {
     InProcessRuntimeDriverDeps,
     TimerScheduler,
+    SyncRuntimeDriver,
 } from './inProcessRuntimeDriver.js';
+
+export { applyWakeToSnapshot, prepareSegmentWake } from './segmentWakeApplicator.js';
+export type { PreparedSegmentWake } from './segmentWakeApplicator.js';
+
+export { createInMemorySegmentDedupe } from './inMemorySegmentDedupe.js';
+export type { SegmentDedupe } from './inMemorySegmentDedupe.js';
+
+export { TurnRunnerSegmentExecutor } from './turnRunnerSegmentExecutor.js';
+export type { TurnRunnerSegmentExecutorDeps } from './turnRunnerSegmentExecutor.js';
+
+export { buildInProcessRuntimeStack } from './buildInProcessRuntimeStack.js';
+export type {
+    BuildInProcessRuntimeStackParams,
+    InProcessRuntimeStack,
+} from './buildInProcessRuntimeStack.js';
+
+export {
+    bootstrapCompositionRoot,
+    bootstrapCompositionRootInternal,
+} from './bootstrapCompositionRoot.js';
+export type {
+    BootstrapCompositionRootParams,
+    RuntimeCompositionRoot,
+    RuntimeCompositionRootInternal,
+    TaskEngineOptions,
+} from './bootstrapCompositionRoot.js';
