@@ -24,6 +24,26 @@ Goal: make the loop driver pluggable without changing behavior.
 
 Deletes: nothing. This phase only adds seams.
 
+## Hatchet docs (Phases 1–5)
+
+Before any Hatchet adapter, task definition, SDK call, or ops procedure: consult
+the vendored docs at `apps/docs/external/hatchet-docs/` (`@hatchet-docs` in
+Cursor) for the relevant page(s). ADRs and specs capture decisions and caveats,
+but SDK/API details, guarantees, and edge cases must be verified against the
+source docs — do not implement from ADR summaries alone.
+
+Phase-to-page mapping (read the pages that match the work):
+
+| Phase | Primary hatchet-docs pages |
+|---|---|
+| 1 — outbox | workers, tasks, retries, self-hosting dashboard |
+| 2 — durable loop | `durable-execution`, `durable-tasks`, `child-spawning`, `concurrency` |
+| 3 — event wakes | `durable-event-waits`, events API |
+| 4 — timers | `durable-sleep`, `scheduled-runs` (missed-schedule caveat, ADR 0003) |
+| 5 — production | self-hosting HA/upgrade/retention, Prometheus metrics |
+
+See also the key-page list in `README.md` § Hatchet docs reference.
+
 ## Phase 1 — Hatchet outbox dispatch
 
 Goal: lowest cognition risk, highest ops value. Prove the Hatchet integration,

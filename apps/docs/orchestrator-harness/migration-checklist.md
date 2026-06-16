@@ -18,6 +18,9 @@ harness checklist style.
 
 ## Hatchet adapter (Phases 1–4)
 
+- [ ] Relevant `apps/docs/external/hatchet-docs/` pages read before each Hatchet
+      task/SDK change (see `implementation-plan.md` § Hatchet docs); ADR summaries
+      are not sufficient for API details.
 - [ ] New `packages/driver-hatchet` workspace; no upward imports.
 - [ ] Worker process builds full composition root + initializes `EngineLocator`
       for itself (`specs/worker-runtime.md`).

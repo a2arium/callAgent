@@ -51,11 +51,23 @@ decision is open; Hatchet is the first POC candidate.
 
 ## Production code added
 
-- None yet.
+- Phase 0.1 (kernel seam, additive — not yet wired into `TaskEngine`):
+  - `packages/core/src/runtime/runtimeDriver.ts` — `RuntimeDriver` scheduling
+    port + wake/ids types.
+  - `packages/core/src/runtime/turnExecutor.ts` — `TurnExecutor` segment port,
+    `SegmentBoundary`/`SegmentResult`, and pure `outcomeToBoundary` /
+    `boundaryToTaskStatus` mappers.
+  - `packages/core/src/runtime/inProcessRuntimeDriver.ts` — `InProcessRuntimeDriver`
+    (immediate background segments, local timers, child/outbox delegation).
+  - `packages/core/src/runtime/index.ts` — internal barrel (NOT re-exported from
+    the public package index, so the public surface is unchanged — D1).
+  - Tests: `packages/core/tests/runtime/*` (15 tests, green). Existing
+    `TurnRunner` / `TaskExecutor` suites still pass; full-package `tsc` clean.
 
 ## Production code changed
 
-- None yet.
+- None yet. Phase 0.1 is purely additive; nothing imports the seam yet. Wiring
+  into the `TaskEngine` composition root is Phase 0.3.
 
 ## Marked for deletion (pending POC + per-surface migration)
 
@@ -87,6 +99,10 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Implement the kernel seam: `TurnExecutor` port + `InProcessRuntimeDriver`
-extracted from today's `TaskEngine` behavior, proving D1/D5 (no type leakage;
-in-process default tests unchanged) before any Hatchet wiring.
+Phase 0.1 (seam types + `InProcessRuntimeDriver` + tests) is done. Next:
+
+- Phase 0.2: implement a `TurnExecutor` backed by the real `TurnRunner.runTurn`,
+  tested against an in-memory engine (start → input → resume → complete).
+- Phase 0.3: wire the driver at the `TaskEngine` composition root behind a
+  default `in-process` selection; run the full suite (D5).
+- Phase 0.4: extract the shared bootstrap for the future worker; final D1/D5.

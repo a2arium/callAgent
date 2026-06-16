@@ -92,7 +92,12 @@ In particular:
 
 ## Hatchet docs reference
 
-Vendored Hatchet docs live at `apps/docs/external/hatchet-docs/`. Key pages:
+Vendored Hatchet docs live at `apps/docs/external/hatchet-docs/` (`@hatchet-docs`
+in Cursor). **Before any Hatchet implementation work (Phases 1–5), read the
+relevant pages here** — ADRs record our decisions, but SDK/API semantics and
+guarantees must be verified against these docs.
+
+Key pages:
 
 - `pages/v1/durable-execution.mdx`, `durable-tasks.mdx`
 - `pages/v1/durable-sleep.mdx`, `durable-event-waits.mdx`
