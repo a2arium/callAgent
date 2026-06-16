@@ -308,13 +308,474 @@ weighted criteria. "Disqualifier" rows are pass/fail.
 
 ## 11. Open Questions
 
-- Does the substrate **replace** the `OutboxPublisher` and in-process durable
-  subscription, or wrap them? (R-D3)
-- For interactive chat, do we keep hot resumes fully in-process and only push
-  timers/awaits/children to the substrate? (R-N1)
-- One global worker vs. per-tenant workers for isolation/fairness? (R-F6, R-N4)
-- How do we reconcile the substrate's run history UI with `TurnTrace` and the
-  telemetry tree without duplicating storage? (R-O3)
-- Cancellation semantics mid-turn: cooperative checkpoints vs. await-boundary
-  only? (R-F9)
+Resolved answers live in [§13 Research outcomes](#13-research-outcomes). Remaining open items:
+
+- **C2** — total infra cost at expected volume (deferred until production sizing).
+- **C3** — HA / RPO-RTO for orchestrator state vs snapshot DB (deferred until production scope).
+- **B10** — upgrade drill with active timers/runs (production gate; optional in POC unless timers migrate).
+- **B11** — 100k-run volume / retention storage test (after functional POC gates pass).
+
+Former §11 items now decided in §13: outbox reconciliation (A2), hybrid latency (A1), worker topology (A5), TurnTrace/UI split (A4), cancellation v1 semantics (A6).
+
+## 12. Additional Research Questions
+
+Use these before and during the Hatchet-first POC. Each question should have a
+written answer (even "deferred") before committing to a vendor.
+
+### A. Pre-POC design decisions (answer before writing adapter code)
+
+| # | Question | Why it matters | How to answer |
+|---|----------|----------------|---------------|
+| A1 | **Hybrid latency model**: which `RuntimeDriver` operations stay in-process vs go through the substrate in production? | R-N1 — a queue hop on every chat resume may break SSE/chat UX. | Decide default config: e.g. in-process `enqueueResume` for interactive paths; substrate for `scheduleTimer`, outbox dispatch, child dispatch. Document per-surface overrides. |
+| A2 | **Outbox reconciliation**: does the substrate replace `OutboxPublisher`, consume the outbox table, or coexist during migration? | R-D3 — two delivery paths for the same event type is forbidden. | Write a one-page migration sequence: Phase 1 substrate dispatches outbox rows → retire poll loop when proven. Define the cutover flag. |
+| A3 | **Conversation vs task scope**: does the substrate own conversation/message-log delivery, or only task turn scheduling (`startTask` / `resumeInput` / timers / children)? | Avoid scope creep; NATS/eventbus already exists for conversation. | Explicit boundary doc: substrate = task driver; `IEventBus` / `MessageLog` / NATS = conversation transport unless a later phase says otherwise. |
+| A4 | **Ops UI expectations**: is the orchestrator dashboard alone sufficient for R-O1, or do we need a callAgent ops layer (deep links run → task → `TurnTrace`)? | R-O1, R-O3 — no vendor shows APLRET cognition natively. | Mock the operator workflow on paper: "task failed at 3am — what screens do I use?" If gaps exist, define minimum callAgent ops additions. |
+| A5 | **Worker topology**: one global worker pool vs per-tenant workers vs co-located with the API host? | R-F6, R-N4, R-OP4 — affects fairness, blast radius, and streaming host layout. | Match to deployment model (`runtime-host`, future multi-tenant SaaS). Start with one pool + concurrency keys; note when to split. |
+| A6 | **Cancellation semantics**: cancel only at await boundaries, or attempt mid-turn cooperative cancel? | R-F9 — mid-turn cancel needs checkpoints in Execution/loop. | Prefer await-boundary cancel for v1 unless a concrete product need exists. Document interaction with snapshot + pending tokens. |
+
+### B. Hatchet POC validation (answer during spike; gates vendor decision)
+
+| # | Question | Why it matters | How to answer |
+|---|----------|----------------|---------------|
+| B1 | Does a **worker crash mid-turn** result in safe redelivery without corrupting snapshot state? | R-F8, P3 | Kill worker during `aplret.resume`; verify CAS/idempotency; confirm at-most-one effective turn. |
+| B2 | Does a **durable timer** (`scheduleTimer` / `sleepUntil`) survive control-plane and worker restarts? | R-F2 | Schedule timer 5+ min out; restart Hatchet engine and workers; verify fire + idempotent handler. |
+| B3 | Is **duplicate resume** (same `idempotencyKey` / token) a no-op at the effect boundary? | R-F3, R-D5 | Send duplicate `aplret.resume` jobs; assert one observation applied, one turn advanced. |
+| B4 | Does **per-task serialization** work via concurrency key (`tenantId:taskId`, limit 1)? | R-F5 | Concurrent resumes for same task; measure CAS retry rate vs serialized execution. |
+| B5 | Can the **dashboard search/filter** by `tenantId`, `agentId`, `taskId`, `traceId`, `token` via `additionalMetadata`? | R-O1, R-D1 | Attach metadata on every run; search in UI under realistic volume (100+ runs). |
+| B6 | Does the UI support **retry, cancel, replay**, and failed-run inspection with attempt history? | R-O5 | Fail a job deliberately; perform each manual op from UI; note gaps vs R-O5 wording ("DLQ" vs "failed runs"). |
+| B7 | Is the **self-hosted dashboard fully functional** without Hatchet Cloud (no cloud-only features needed)? | R-OP1 disqualifier | Deploy via self-host docs only; checklist every R-O1/R-O5 feature. |
+| B8 | What is **p95 latency overhead** for substrate-scheduled resume vs in-process resume? | R-N1 | Benchmark both paths on the POC scenario; set acceptable threshold (e.g. <50ms added for hot path). |
+| B9 | How does Hatchet handle **child fan-out × N** and parent resume when children complete out of order or one fails? | R-F10 | Run 5-child scenario from POC plan; verify parent token wiring and partial failure. |
+| B10 | What is the **upgrade path** for the self-hosted control plane without losing scheduled timers or in-flight runs? | R-OP1 ops | Upgrade Hatchet version in staging; document rollback procedure. |
+| B11 | What is **log/run retention** default, and can it meet our ops needs? | R-O2, R-O6 | Read retention config; test log export / OTel if needed. |
+| B12 | What is the **minimal production infra** (Postgres only vs Postgres + RabbitMQ)? | R-OP2 | Deploy "simple" and "production" self-host profiles; note extra deps and when each is required. |
+
+### C. Operational and organizational (answer before production commitment)
+
+| # | Question | Why it matters | How to answer |
+|---|----------|----------------|---------------|
+| C1 | Who **owns on-call** for the substrate control plane (Hatchet engine, DB, optional RabbitMQ)? | R-OP1 — self-host is free in license, not in ops cost. | Assign team/role; estimate upgrade cadence and incident runbooks. |
+| C2 | What is **total infra cost** (compute, Postgres, RabbitMQ, monitoring) at expected task volume? | R-OP7 | Size for N tasks/day, M concurrent agents; compare to Hatchet Cloud pricing as sanity check. |
+| C3 | Do we have **HA requirements** (multi-AZ, backup/restore for orchestrator state)? | Production readiness | Define RPO/RTO for orchestrator DB vs callAgent snapshot DB (may differ). |
+| C4 | How do **alerts** fire on DLQ growth, stuck tasks, elevated failure rate? | R-O6 | Wire Prometheus/OTel from Hatchet; define alert rules; test one synthetic failure. |
+
+### D. Integration with callAgent (answer during POC implementation)
+
+| # | Question | Why it matters | How to answer |
+|---|----------|----------------|---------------|
+| D1 | Where is `RuntimeDriver` **injected** at the composition root without leaking types upward? | P5, P6, R-SEAM-* | Prototype injection in `runtime-host` / `TaskEngine` constructor; verify agents unchanged. |
+| D2 | Which **`taskEngine.ts` surfaces** move to the driver first (timers, outbox, resume, child)? | R-M1 | Map call sites (`setTimeout`, `OutboxPublisher`, child-resume loops) to driver methods; estimate deletion target (R-M4). |
+| D3 | How do substrate run IDs map to **`traceId` / `taskId`** for cross-UI navigation? | R-D1, R-O3 | Store mapping in run metadata + optional small `driver_runs` table if needed. |
+| D4 | Does existing **`IdempotencyStore`** cover all substrate-delivered operations, or do we need new keys? | R-F3 | Audit `tasks/input`, tool resume, child complete paths; define key derivation (`token`, `taskId:operation`). |
+| D5 | Do **`InProcessRuntimeDriver` tests** pass unchanged when driver is default? | R-M3, R-OP5 | Run full test suite with in-process driver; add adapter tests behind feature flag. |
+
+### E. Fallback paths (answer only if Hatchet POC fails relevant gates)
+
+| # | Question | Why it matters | How to answer |
+|---|----------|----------------|---------------|
+| E1 | If Hatchet fails **maturity/crash recovery** (B1, B10), does **Temporal Activity-only** pass the same POC scenario? | Fallback baseline | Build minimal Temporal adapter for same gates; compare ops burden (C1–C3). |
+| E2 | If Hatchet fails **ops/UI** but passes durability, is **pg-boss / graphile-worker** on existing Postgres enough for Phase 1 (timers + outbox only)? | R-OP2 middle path | 2-day spike: durable dispatch + timer; accept thinner UI; revisit Hatchet/Temporal later. |
+| E3 | If considering **Inngest**, does **SSPL** permit our use case (self-hosted substrate embedded in or distributed with callAgent)? | R-OP1, R-OP7 | Legal review of server license + Section 13 service obligations before any POC. |
+| E4 | Is **Trigger.dev** ever viable for substrate if self-hosted **checkpoints** ship later? | Re-evaluate only if requirements soften | Revisit only if v4+ self-host gains checkpoint parity; until then remain rejected for R-F2. |
+
+### F. Decision checklist (all must be green before vendor commitment)
+
+- [x] A1–A6 answered in writing — see [§13](#13-research-outcomes)
+- [ ] B1–B12 executed in Hatchet POC (or explicitly waived with rationale)
+- [ ] C1–C4 acceptable for production timeline (C1/C4 answered; C2/C3 deferred)
+- [ ] D1–D5 demonstrated in `runtime-host` or equivalent
+- [x] E* fallback paths documented — see [§13](#13-research-outcomes)
+- [x] No second unreconciled delivery path for outbox (A2 design decided)
+- [x] Hybrid latency model documented (A1); [ ] benchmarked (B8)
+- [x] `InProcessRuntimeDriver` remains default; substrate opt-in per deployment (design decided; D5 to prove in POC)
+
+## 13. Research outcomes
+
+> Status: research complete for pre-POC design; Hatchet POC not yet executed.
+> Vendor commitment: **not yet** — proceed to Hatchet-first POC with gates below.
+
+### Executive conclusion
+
+**Hatchet remains the best first POC candidate.** Do not commit to Hatchet as the
+production substrate until POC gates pass. **Temporal** is the durability/ops
+maturity fallback. **Inngest** requires legal review before any POC (SSPL).
+**Trigger.dev** is rejected for this substrate (self-hosted checkpoint gap).
+
+Primary risk discovered during research: Hatchet **does not automatically run
+missed scheduled tasks** after control-plane downtime. Therefore
+`scheduleTimer` must never be Hatchet-only; callAgent must own timer
+reconciliation (see [Timer reconciliation](#timer-reconciliation)).
+
+```text
+POC Hatchet first, scoped to:
+  1. outbox dispatch
+  2. async resume delivery
+  3. child dispatch (after 1–2)
+  4. timers only after B2 passes OR TimerReconciler is proven
+
+Keep interactive chat/SSE resumes in-process by default.
 ```
+
+### Pre-POC design decisions (A1–A6)
+
+#### A1 — Hybrid latency model
+
+| `RuntimeDriver` operation | Default production path | Reason |
+|---|---|---|
+| `enqueueStart` | Hatchet | New task start can tolerate a queue hop. |
+| `enqueueResume` (active chat/SSE) | In-process | Avoid queue latency on interactive UX (R-N1). |
+| `enqueueResume` (tool/webhook/external) | Hatchet | Retry, crash recovery, operator visibility. |
+| `scheduleTimer` | Hatchet + `TimerReconciler` | Only after B2/reconciler proven; never Hatchet-only. |
+| `enqueueChildDispatch` | Hatchet (Phase 3+) | Fan-out/fan-in; correctness-sensitive. |
+| Outbox dispatch | Hatchet (Phase 1) | Highest value, lowest cognition risk. |
+| `cancel` | Hybrid | Mark snapshot first; cancel Hatchet runs where applicable. |
+
+Hatchet is not a sub-millisecond dispatch system; do not require the async
+resume path to satisfy active chat latency.
+
+#### A2 — Outbox reconciliation
+
+Hatchet **consumes the existing outbox table**; it does not create a parallel
+delivery path.
+
+```text
+Phase 0: OutboxPublisher remains authoritative.
+Phase 1: HatchetOutboxDispatcher behind feature flag.
+Phase 2: Hatchet claims outbox rows by type/surface.
+Phase 3: Exactly one delivery path active per event type.
+Phase 4: Compare delivery counts, retries, failures, duplicates.
+Phase 5: Disable old poll loop for proven event types.
+Phase 6: Delete old code after production soak.
+```
+
+Invariant: **for a given outbox event type, exactly one delivery mechanism is
+authoritative.**
+
+#### A3 — Conversation vs task scope
+
+Substrate owns **task scheduling only**:
+
+```text
+In scope:  startTask, resumeInput, tool/child/timer resume, child dispatch, outbox dispatch
+Out of scope: MessageLog, conversation transport, NATS/IEventBus, SSE/chat bridge, TurnTrace storage
+```
+
+#### A4 — Ops UI expectations
+
+Hatchet dashboard alone is **not sufficient** for full R-O1/R-O3. Use Hatchet UI
+plus a small callAgent ops layer.
+
+Hatchet does not understand `MentalState`, pending tokens, `TurnTrace`, APLRET
+turn boundaries, or `wmVersion`. Minimum addition: `driver_runs` table (see
+[D3 mapping](#d3--run-id-mapping)) and deep links from failed Hatchet run →
+callAgent task snapshot / `TurnTrace`.
+
+**Metadata caveat:** Hatchet run filtering with multiple `additional_metadata`
+pairs uses logical **OR**; event filtering uses **AND**. Use composite keys for
+reliable operator lookup: `tenantTaskKey`, `tenantTraceKey`, `taskTokenKey`.
+
+#### A5 — Worker topology
+
+Start with **one global worker pool per environment**; split by tenant/workload
+only when metrics prove it needed.
+
+```text
+runtime-host API
+  └─ InProcessRuntimeDriver (hot chat/SSE path)
+
+hatchet-worker pool
+  ├─ aplret.start
+  ├─ aplret.resume.async
+  ├─ aplret.timer.fire
+  ├─ aplret.child.dispatch
+  └─ aplret.outbox.dispatch
+```
+
+Fairness controls:
+
+```text
+per-task serialization: tenantId:taskId, limit 1
+tenant fairness: tenantId (Group Round Robin)
+rate limits: agentId or llmProvider key
+```
+
+#### A6 — Cancellation semantics (v1)
+
+**Await-boundary / task-boundary cancellation only** — not mid-turn preemption.
+
+```text
+cancel(taskId):
+  1. callAgent marks cancellation intent in snapshot/task state.
+  2. pending tokens become non-resumable (idempotency + cancelled flag).
+  3. queued Hatchet jobs cancelled where possible.
+  4. running turn finishes current effect boundary.
+  5. next await/resume boundary observes cancellation and stops.
+```
+
+Edge cases:
+
+- If Hatchet job is already running when snapshot is marked cancelled → let
+  current turn finish; block subsequent resumes.
+- If Hatchet cancel API fails after snapshot update → reconciler scans for
+  cancelled tasks with queued Hatchet runs.
+
+Mid-turn cooperative cancel requires APLRET loop / Execution changes; defer beyond
+v1.
+
+### Hard rules (from research — non-negotiable in POC)
+
+1. **One Hatchet task per `RuntimeDriver` operation** — not one Hatchet workflow
+   per APLRET task.
+2. **Use regular Hatchet tasks** for opaque `engine.*` calls — not Hatchet
+   durable tasks (durable tasks require deterministic replay; APLRET turns are
+   non-deterministic per P4).
+3. **Idempotency enforced in callAgent** (`IdempotencyStore` + CAS) — not in
+   Hatchet. Hatchet may show duplicate attempts; business effects must change once.
+4. **Snapshots remain cognition source of truth** — Hatchet payloads carry IDs
+   and small event data only (P2).
+5. **No orchestrator types above the adapter package** (P6).
+
+### Phased adoption order
+
+| Phase | Surface | Notes |
+|---|---|---|
+| 1 | Outbox dispatch | Lowest cognition risk; highest ops value. |
+| 2 | Async resume (tool/webhook/external) | B1/B3/B4/B8 gates. |
+| 3 | Child dispatch / fan-in | Parent-token wiring stays in callAgent. |
+| 4 | Timers + `TimerReconciler` | Only after B2 or reconciler proven; never Hatchet-only. |
+| 5 | Hot chat/SSE resume | Keep in-process unless benchmarks prove safe (unlikely). |
+
+Deletion target (`taskEngine.ts`): hand-rolled `setTimeout`, inline outbox
+polling, child-resume race logic, CAS retry loops that exist only because
+scheduling is not serialized — **only after** each surface is migrated and
+reversible (R-M4).
+
+### Timer reconciliation
+
+Hatchet docs: missed scheduled tasks are **not** automatically run when the
+service comes back online. `TimerReconciler` is a **required callAgent
+component**, not an optional fallback.
+
+```text
+On startup and every N minutes:
+  scan pending tokens where expiresAt <= now AND not yet fired
+  enqueue aplret.timer.fire with idempotencyKey = taskId:token:timer
+  engine treats duplicate fire as no-op (IdempotencyStore + CAS)
+```
+
+Source of truth: callAgent snapshots / pending tokens. Hatchet dispatches and
+retries; callAgent owns timer registry and expiry semantics.
+
+### Hatchet POC task model
+
+Use Hatchet as a **task driver**, not the APLRET workflow brain:
+
+```text
+aplret.start           -> engine.startTask(...)
+aplret.resume.async    -> engine.resumeInput(...)
+aplret.timer.fire      -> engine.resumeInput(timer event)
+aplret.child.dispatch  -> engine.startTask(child); child completion resumes parent via callAgent token
+aplret.outbox.dispatch -> claim outbox row -> publish event -> mark delivered
+```
+
+Required metadata on every run:
+
+```ts
+{
+  tenantId, agentId, taskId, traceId, spanId, token,
+  idempotencyKey, operation,
+  tenantTaskKey: `${tenantId}:${taskId}`,
+  tenantTraceKey: `${tenantId}:${traceId}`,
+  taskTokenKey: `${taskId}:${token}`,
+}
+```
+
+### Package and injection boundaries (D1)
+
+```text
+packages/core              -> RuntimeDriver type, InProcessRuntimeDriver
+packages/driver-hatchet    -> HatchetRuntimeDriver, worker handlers, task defs
+apps/examples/runtime-host -> selects driver from config
+```
+
+```ts
+const runtimeDriver =
+  config.driver === 'hatchet'
+    ? createHatchetRuntimeDriver(...)
+    : createInProcessRuntimeDriver(...);
+
+const taskEngine = new TaskEngine({ /* ... */, runtimeDriver });
+```
+
+No agent code imports Hatchet types.
+
+#### D3 — Run ID mapping
+
+`driver_runs` table (authoritative for exact joins; Hatchet metadata for search):
+
+```sql
+driver_runs(
+  id, provider, provider_run_id, provider_task_run_id,
+  tenant_id, agent_id, task_id, token, trace_id, span_id,
+  idempotency_key, operation, status, created_at, updated_at
+)
+```
+
+Hatchet run history is **ops convenience** (default retention ~30 days). Long-term
+audit relies on `TurnTrace`, snapshots, and callAgent telemetry — not Hatchet
+alone.
+
+#### D4 — Idempotency keys
+
+| Operation | Key |
+|---|---|
+| `startTask` | `taskId:start` |
+| input resume | `token:input` or `token` if globally unique |
+| tool resume | `token:tool` |
+| child completion | `parentTaskId:token:childTaskId` |
+| timer fire | `taskId:token:timerId` |
+| outbox publish | `outboxRowId:eventType` |
+
+#### D5 — Testing layout
+
+```text
+Default (CI/local):  InProcessRuntimeDriver only; no Hatchet/Docker
+Adapter integration: HATCHET_ENABLED=true; Docker Compose (not Lite)
+```
+
+### Idempotency / DLQ semantics
+
+- **DLQ-equivalent:** Hatchet failed terminal run + replay/cancel/filter — a
+  literal queue named DLQ is not required (R-F4/R-O5).
+- **Duplicate delivery:** Hatchet may retry; callAgent must no-op at effect
+  boundary.
+
+### Minimal production infra (B12)
+
+| Mode | Use |
+|---|---|
+| Hatchet Lite | Local smoke only — not for POC gates |
+| Docker Compose (Postgres + RabbitMQ) | **POC and production default** |
+| Kubernetes + external Postgres | Production HA path |
+
+Assume **Postgres + RabbitMQ + API/engine/dashboard + workers** for real
+production unless benchmarks prove Postgres-only is sufficient.
+
+### Operational decisions (C1, C4)
+
+| Area | Owner |
+|---|---|
+| Hatchet API/engine/dashboard, Postgres/RabbitMQ backups | Platform/runtime infra |
+| `RuntimeDriver` semantics, idempotency/CAS correctness | callAgent runtime owner |
+| Operator runbooks | Shared |
+| Incident triage | Platform first, runtime second |
+
+Minimum alerts: `driver_failed_runs_total`, `hatchet_queue_depth`, retry/reassignment
+rate, `outbox_oldest_unpublished_age_seconds`, `timer_lag_seconds`,
+`resume_duplicate_noop_total`, `cas_conflict_total`, `orphan_pending_token_total`.
+
+Hatchet Prometheus metrics available in self-hosted mode; wire alongside
+callAgent driver metrics.
+
+### Fallback paths (E1–E4)
+
+| Candidate | Status |
+|---|---|
+| **Temporal** (Activity-only) | Fallback if Hatchet fails B1/B3/B7 or upgrade safety (B10). Heavier ops; workflow code must stay deterministic — only Activities call `engine.*`. |
+| **pg-boss / Graphile Worker** | Phase 1 only (outbox + simple delayed jobs) if Hatchet fails ops/UI but passes durability. No rich R-O1 UI. |
+| **Inngest** | Blocked until legal confirms SSPL acceptable for embedded/distributed substrate. |
+| **Trigger.dev** | Rejected until self-hosted checkpoint parity is documented and production-supported. |
+
+### POC environment
+
+Use **Docker Compose production profile** from day one of the POC — not Hatchet
+Lite — so B1/B7/B12 results are representative.
+
+### POC pass/fail criteria
+
+#### Must pass (POC blockers — vendor decision)
+
+| Gate | Test |
+|---|---|
+| **B1** | Kill worker during `aplret.resume`; one effective state transition; duplicate redelivery no-op |
+| **B3** | Two resume jobs, same `idempotencyKey`; one observation applied |
+| **B5** | 100+ runs; operator finds failed run by `tenantTaskKey` / `traceId` in <30s |
+| **B6** | Failed run shows payload, error, attempts, logs; replay/cancel from UI |
+| **B7** | Self-hosted dashboard fully usable without Cloud; B7a–c security acceptable |
+| **D1** | No Hatchet types above adapter; injection at composition root |
+| **D5** | Full test suite passes with `InProcessRuntimeDriver` default |
+
+**B7 security sub-gates:** dashboard behind VPN/OAuth/reverse-proxy; scoped API
+tokens; no Cloud account required for R-O1/R-O5.
+
+#### Must pass or mitigated (timers)
+
+| Gate | Test |
+|---|---|
+| **B2** | Timer survives worker/engine restart; downtime-during-`fireAt` handled by `TimerReconciler` |
+
+If B2 fails **and** reconciler cannot close the gap → Hatchet limited to outbox +
+async resume only.
+
+#### Should pass (non-blockers for Phase 1)
+
+| Gate | Test |
+|---|---|
+| **B4** | Per-task serialization; CAS retry rate near zero |
+| **B8** | Async resume p95 overhead documented; hot path stays in-process |
+| **B9** | 5-child fan-out; out-of-order completion; one child fails/retries |
+
+#### Production gates (not POC blockers)
+
+| Gate | When |
+|---|---|
+| **B10** | Upgrade drill with active timers/runs; ops runbook |
+| **B11** | 100k synthetic runs; Postgres size, dashboard speed, retention |
+| **C2** | Cost model at expected volume |
+| **C3** | HA / RPO-RTO per state type |
+
+#### Pivot rules
+
+```text
+B1 or B3 or B7 fail     -> Temporal Activity-only POC
+B2 fails + no reconciler -> Hatchet for outbox + async resume only; no timer ownership
+B5 or B6 fail           -> Re-evaluate Hatchet vs Temporal vs pg-boss (Phase 1)
+```
+
+### POC scenario (acceptance script)
+
+```text
+startTask
+→ one turn produces await_tool token
+→ schedule expiresAt timer (Phase 4)
+→ resume with tool result before timer fires
+→ duplicate resume arrives
+→ child dispatch fan-out x5
+→ one child fails/retries
+→ worker dies mid-turn
+→ parent resumes after all children
+→ operator searches by taskId / traceId
+→ operator cancels task
+→ operator replays failed operation
+```
+
+### Decision state summary
+
+| Item | Status |
+|---|---|
+| Pre-POC design (A1–A6) | Done |
+| Vendor commitment | Not yet |
+| POC authorization | Yes — Hatchet-first, scoped |
+| Timer model | Hatchet dispatches + callAgent `TimerReconciler` |
+| Default driver | `InProcessRuntimeDriver` |
+| Next artifact | Implement port + in-process driver, then `packages/driver-hatchet` Phase 1 (outbox) |
+
+### Recommended implementation order
+
+1. `RuntimeDriver` port + `InProcessRuntimeDriver` in `packages/core`
+2. Hatchet Docker Compose environment
+3. POC Phase 1: `aplret.outbox.dispatch` + metadata + `driver_runs`
+4. POC Phase 2: `aplret.resume.async` (B1/B3/B4/B8)
+5. POC Phase 3: `aplret.child.dispatch` (B9)
+6. POC Phase 4: `aplret.timer.fire` + `TimerReconciler` (B2)
+7. Production gates: B10, B11, C2, C3
