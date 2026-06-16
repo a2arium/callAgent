@@ -33,6 +33,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         createdAt: string;
     }>>();
     private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
+    private outboxSeq = 0;
     private conversationThreads = new Map<string, ConversationThreadRecord>();
     private conversationMessages = new Map<string, ConversationMessageRecord[]>();
     private conversationTopics = new Map<string, ConversationTopicRecord>();
@@ -123,9 +124,10 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         topic: string;
         key: string;
         payload: Record<string, unknown>;
-    }): Promise<void> {
-        // In production, this would persist to database for reliable delivery
+    }): Promise<{ id: string }> {
         this.outbox.push(params);
+        this.outboxSeq += 1;
+        return { id: `mem-outbox-${this.outboxSeq}` };
     }
 
     async createConversationThread(params: {

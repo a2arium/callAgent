@@ -60,7 +60,16 @@ export type ScheduleTimerParams = RuntimeDriverIds & {
     payload?: unknown;
 };
 export type CancelParams = RuntimeDriverIds & { reason: string };
-export type DispatchOutboxParams = { outboxRowId: string; eventType: string };
+export type DispatchOutboxParams = {
+    outboxRowId: string;
+    eventType: string;
+    tenantId?: string;
+    taskId?: string;
+    agentId?: string;
+    traceId?: string;
+    spanId?: string;
+    token?: string;
+};
 
 /**
  * The scheduling seam. `enqueue*` resolve once the unit is *scheduled*, not once

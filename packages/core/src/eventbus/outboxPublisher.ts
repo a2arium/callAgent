@@ -1,39 +1,19 @@
 import { PrismaClient } from '../generated/prisma-client/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
-import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
 import { getSafePgConfig } from '../pgStartupDiagnostic.js';
 import type { IEventBus } from '../public-types/eventbus/types.js';
-import { createBusEvent } from './busEventHelpers.js';
-import { taskChannel } from './taskEventEmitter.js';
+import {
+    deleteOutboxRow,
+    dispatchOutboxRow,
+    handleOutboxDispatchFailure,
+    shouldPollerSkipOutboxRow,
+    type OutboxRow,
+} from './outboxDispatch.js';
 
 const log = logger.createLogger({ prefix: 'OutboxPublisher' });
 
 type PrismaClientType = InstanceType<typeof PrismaClient>;
-
-type OutboxRow = {
-    id: string;
-    tenantId: string;
-    topic: string;
-    key: string;
-    payload: unknown;
-    createdAt: Date;
-    retryCount: number;
-};
-
-function outboxChannel(row: { topic: string; key: string }): string {
-    if (
-        row.topic === 'task.status' ||
-        row.topic === 'task.input_required' ||
-        row.topic === 'task.child_dispatch'
-    ) {
-        return taskChannel(row.key);
-    }
-    if (row.topic.startsWith('conversation.')) {
-        return row.topic;
-    }
-    return row.topic;
-}
 
 export type OutboxPublisherOptions = {
     eventBus: IEventBus;
@@ -154,64 +134,20 @@ export class OutboxPublisher {
             take: 50,
         })) as unknown as OutboxRow[];
         for (const row of rows) {
+            if (shouldPollerSkipOutboxRow(row)) {
+                continue;
+            }
             try {
-                await this.dispatch(row);
-                await this.prisma.outbox.delete({ where: { id: row.id } }).catch((deleteError: { code?: string; message?: string }) => {
-                    if (deleteError.code === 'P2025' || deleteError.message?.includes('No record was found')) {
-                        log.debug('Outbox record already deleted by another process', { id: row.id });
-                        return;
-                    }
-                    throw deleteError;
-                });
+                await dispatchOutboxRow({ eventBus: this.eventBus, row });
+                await deleteOutboxRow({ prisma: this.prisma, id: row.id });
             } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e);
-                log.error('Failed to dispatch outbox row', e as { message?: string }, { id: row.id, topic: row.topic });
-                const nextRetry = (row.retryCount ?? 0) + 1;
-                if (nextRetry >= this.maxRetries) {
-                    try {
-                        await this.prisma.conversationDeadLetter.create({
-                            data: {
-                                tenantId: row.tenantId,
-                                conversationId: `outbox:${row.topic}`,
-                                sequenceNumber: 0,
-                                consumerId: row.id,
-                                record: row.payload as object,
-                                lastError: msg.length > 2000 ? `${msg.slice(0, 2000)}…` : msg,
-                                attempts: nextRetry,
-                                deadletteredAt: new Date(),
-                            },
-                        });
-                    } catch (dlqErr) {
-                        log.error('Dead-letter insert failed', dlqErr as { message?: string }, { id: row.id });
-                    }
-                    await this.prisma.outbox.delete({ where: { id: row.id } }).catch(() => undefined);
-                    continue;
-                }
-                await this.prisma.outbox
-                    .update({
-                        where: { id: row.id },
-                        data: { retryCount: nextRetry },
-                    })
-                    .catch(() => undefined);
+                await handleOutboxDispatchFailure({
+                    prisma: this.prisma,
+                    row,
+                    error: e,
+                    maxRetries: this.maxRetries,
+                });
             }
         }
-    }
-
-    private async dispatch(row: OutboxRow): Promise<void> {
-        const channel = outboxChannel(row);
-        await this.eventBus.publish(
-            createBusEvent({
-                channel,
-                partitionKey: row.key,
-                cloud: {
-                    id: row.id,
-                    type: row.topic,
-                    source: `/tenants/${row.tenantId}/tasks/${row.key}`,
-                    time: row.createdAt.toISOString(),
-                    datacontenttype: 'application/json',
-                    data: row.payload,
-                },
-            })
-        );
     }
 }

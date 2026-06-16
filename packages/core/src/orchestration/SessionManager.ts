@@ -13,9 +13,31 @@ import type {
     WMSessionSnapshot,
 } from '@a2arium/callagent-memory-engine';
 import { preserveConversationInboxForSnapshot } from '../loop/conversationInboxIdentity.js';
+import {
+    resolveOutboxDispatchContext,
+    type OutboxDispatchContext,
+} from '../eventbus/outboxDispatch.js';
+
+export type OutboxEnqueuedRef = {
+    outboxRowId: string;
+    eventType: string;
+    tenantId: string;
+    key: string;
+    traceId?: string;
+    agentId?: string;
+    token?: string;
+};
+
+export type { OutboxDispatchContext };
 
 export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
+
+    private onOutboxEnqueued?: (ref: OutboxEnqueuedRef) => void | Promise<void>;
+
+    setOnOutboxEnqueued(handler: (ref: OutboxEnqueuedRef) => void | Promise<void>): void {
+        this.onOutboxEnqueued = handler;
+    }
 
     async load(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
         if (!this.store) {
@@ -66,9 +88,28 @@ export class SessionManager {
         return result;
     }
 
-    async enqueueOutbox(tenantId: string, topic: string, key: string, payload: Record<string, unknown>) {
+    async enqueueOutbox(
+        tenantId: string,
+        topic: string,
+        key: string,
+        payload: Record<string, unknown>,
+        dispatchContext?: OutboxDispatchContext
+    ): Promise<{ id: string } | void> {
         if (!this.store) return;
-        await this.store.enqueueOutbox({ tenantId, topic, key, payload });
+        const result = await this.store.enqueueOutbox({ tenantId, topic, key, payload });
+        if (result?.id && this.onOutboxEnqueued) {
+            const ctx = resolveOutboxDispatchContext(payload, dispatchContext);
+            await this.onOutboxEnqueued({
+                outboxRowId: result.id,
+                eventType: topic,
+                tenantId,
+                key,
+                traceId: ctx.traceId,
+                agentId: ctx.agentId,
+                token: ctx.token,
+            });
+        }
+        return result;
     }
 
     async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }) {

@@ -88,7 +88,7 @@ export class SnapshotRepository {
     /**
      * Helper to enqueue outcome/status to outbox.
      */
-    async enqueueOutbox(tenantId: string, type: string, traceId: string, payload: Record<string, unknown>): Promise<void> {
+    async enqueueOutbox(tenantId: string, type: string, traceId: string, payload: Record<string, unknown>): Promise<{ id: string } | void> {
         return this.sessionManager.enqueueOutbox(tenantId, type, traceId, payload);
     }
 }

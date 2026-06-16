@@ -26,6 +26,7 @@ import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
 import { OutboxPublisher } from '../eventbus/outboxPublisher.js';
+import { isHatchetOutboxTopic } from '../eventbus/outboxDispatch.js';
 import { BackpressureManager } from '../internal/conversation/BackpressureManager.js';
 import { createTraceparent } from '../tracing/Tracing.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../streaming/sessionEventMapper.js';
@@ -71,9 +72,11 @@ import {
     buildInProcessRuntimeStack,
     InProcessRuntimeDriver,
     isSyncRuntimeDriver,
+    type InProcessRuntimeStack,
     type PreparedTurnInvocation,
     type RuntimeDriver,
     type RuntimeWakeEvent,
+    type TurnExecutor,
 } from '../runtime/index.js';
 
 
@@ -224,6 +227,8 @@ export class TaskEngine {
     private turnRunner: TurnRunner;
     /** Phase 0.3: scheduling seam; default is in-process (ADR 0001). */
     private readonly runtimeDriver: RuntimeDriver;
+    /** In-process turn executor retained even when an outer driver wraps scheduling. */
+    private readonly compositionTurnExecutor: TurnExecutor;
     private conversationService: ConversationService;
     private inviteDeliveryCoordinator: InviteDeliveryCoordinator;
     private inviteSweeper: InviteSweeper;
@@ -252,6 +257,8 @@ export class TaskEngine {
         transportClose?: () => Promise<void>;
         /** Override the default in-process runtime driver (tests / future Hatchet adapter). */
         runtimeDriver?: RuntimeDriver;
+        /** Wrap the default in-process stack driver (e.g. Hatchet outbox delegation). */
+        runtimeDriverFactory?: (stack: InProcessRuntimeStack) => RuntimeDriver;
     }) {
         this.transportClose = opts?.transportClose;
         this.createDurableSubscription = opts?.createDurableSubscription;
@@ -370,14 +377,31 @@ export class TaskEngine {
             this.eventBus
         );
 
+        const inProcessStack = buildInProcessRuntimeStack({
+            turnRunner: this.turnRunner,
+            sessionManager: this.sessionManager!,
+            createContext: (task) =>
+                this.createContext({ id: task.id, input: task.input as TaskInput }),
+        });
+        this.compositionTurnExecutor = inProcessStack.turnExecutor;
         this.runtimeDriver =
             opts?.runtimeDriver ??
-            buildInProcessRuntimeStack({
-                turnRunner: this.turnRunner,
-                sessionManager: this.sessionManager!,
-                createContext: (task) =>
-                    this.createContext({ id: task.id, input: task.input as TaskInput }),
-            }).runtimeDriver;
+            opts?.runtimeDriverFactory?.(inProcessStack) ??
+            inProcessStack.runtimeDriver;
+
+        this.sessionManager.setOnOutboxEnqueued(async (ref) => {
+            if (isHatchetOutboxTopic(ref.eventType)) {
+                await this.runtimeDriver.dispatchOutbox({
+                    outboxRowId: ref.outboxRowId,
+                    eventType: ref.eventType,
+                    tenantId: ref.tenantId,
+                    taskId: ref.key,
+                    agentId: ref.agentId,
+                    traceId: ref.traceId,
+                    token: ref.token,
+                });
+            }
+        });
 
         if (opts?.handlerInvoker) {
             this.handlerInvoker = opts.handlerInvoker;
@@ -3593,6 +3617,11 @@ export class TaskEngine {
         return this.runtimeDriver;
     }
 
+    /** In-process segment kernel — stable even when an outer driver wraps scheduling. */
+    getCompositionTurnExecutor(): TurnExecutor {
+        return this.compositionTurnExecutor;
+    }
+
     /**
      * Wait for all background task promises to complete
      * Useful for tests to ensure all background work finishes before test cleanup
@@ -3652,6 +3681,13 @@ export class TaskEngine {
         }
         if (this.runtimeDriver instanceof InProcessRuntimeDriver) {
             await this.runtimeDriver.waitForIdle();
+        } else {
+            const delegate = (
+                this.runtimeDriver as { getDelegate?: () => RuntimeDriver }
+            ).getDelegate?.();
+            if (delegate instanceof InProcessRuntimeDriver) {
+                await delegate.waitForIdle();
+            }
         }
         const elapsed = Date.now() - startTime;
 

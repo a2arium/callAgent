@@ -1,24 +1,21 @@
 {
-  "name": "@a2arium/runtime-host",
+  "name": "@a2arium/hatchet-worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/server.js",
+  "main": "dist/main.js",
   "scripts": {
-    "dev": "tsx src/server.ts",
+    "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js"
+    "start": "node dist/main.js"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "workspace:*",
     "@a2arium/callagent-driver-hatchet": "workspace:*",
     "@a2arium/callagent-eventbus-nats": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
-    "dotenv": "^17.3.1",
-    "express": "^5.0.1"
+    "dotenv": "^17.3.1"
   },
   "devDependencies": {
-    "@types/express": "^5.0.1",
     "@types/node": "^22.14.1",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"

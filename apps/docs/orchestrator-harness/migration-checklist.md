@@ -21,12 +21,12 @@ harness checklist style.
 - [ ] Relevant `apps/docs/external/hatchet-docs/` pages read before each Hatchet
       task/SDK change (see `implementation-plan.md` § Hatchet docs); ADR summaries
       are not sufficient for API details.
-- [ ] New `packages/driver-hatchet` workspace; no upward imports.
+- [x] New `packages/driver-hatchet` workspace; no upward imports.
 - [ ] Worker process builds full composition root + initializes `EngineLocator`
-      for itself (`specs/worker-runtime.md`).
-- [ ] Cross-process bus (NATS) provisioned; worker can publish stream events to
+      for itself (`specs/worker-runtime.md`). *(Phase 1 worker is outbox-only.)*
+- [x] Cross-process bus (NATS) provisioned; worker can publish stream events to
       the API host (ADR 0007).
-- [ ] `aplret.outbox.dispatch` consumes outbox; in-process poll is fallback.
+- [x] `aplret.outbox.dispatch` consumes outbox; in-process poll is fallback.
 - [ ] `aplret.segment` child task = `runSegment` (run to next durable boundary).
 - [ ] `aplret.task` durable loop: spawn → branch → wait/sleep/spawn → repeat;
       no `continue` crosses the boundary.
@@ -34,7 +34,7 @@ harness checklist style.
 - [ ] External + conversation wakes pushed as Hatchet events (ADR 0008); durable
       event waits resume.
 - [ ] Timers via durable sleep; `TimerReconciler` implemented.
-- [ ] `driver_runs` table + composite metadata keys.
+- [x] `driver_runs` table + composite metadata keys.
 
 ## Idempotency & ordering
 

@@ -55,6 +55,28 @@ model Outbox {
   @@map("outbox")
 }
 
+model DriverRun {
+  id                String   @id @default(cuid())
+  provider          String   @default("hatchet")
+  providerRunId     String?  @unique @map("provider_run_id")
+  providerTaskRunId String?  @map("provider_task_run_id")
+  tenantId          String   @map("tenant_id")
+  agentId           String?  @map("agent_id")
+  taskId            String?  @map("task_id")
+  token             String?
+  traceId           String?  @map("trace_id")
+  spanId            String?  @map("span_id")
+  idempotencyKey    String?  @map("idempotency_key")
+  operation         String
+  status            String
+  outboxRowId       String?  @map("outbox_row_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, taskId])
+  @@map("driver_runs")
+}
+
 model DurableSubscriptionCursor {
   tenantId       String   @map("tenant_id")
   streamId       String   @map("stream_id")

@@ -4,9 +4,11 @@ Last updated: 2026-06-16.
 
 ## Stage
 
-**Phase 0 scaffold complete** — kernel seam, driver routing, composition bootstrap,
-Scenario 0 parity test, and D5 full-suite gate passed (170 suites / 936 tests).
-Hatchet POC not started.
+**Phase 1 outbox dispatch implemented** — Hatchet-backed `aplret.outbox.dispatch`,
+`driver_runs` mapping, NATS cross-process bus wiring, worker app, and Docker
+Compose POC env. Task scheduling remains in-process; outbox delivery is opt-in
+via `CALLAGENT_OUTBOX_DISPATCHER=hatchet`. Manual POC gates B5–B7 are **runnable** via
+`apps/hatchet-poc/README.md` (not yet validated in CI).
 
 This workspace was created after the research outcomes in
 `apps/docs/drafts/orchestrator-substrate-requirements.md` (§13). Hatchet is the
@@ -119,6 +121,26 @@ first POC candidate.
   - `runnerCli` migrated to `bootstrapCompositionRoot`.
   - ADR 0001 updated to segment terminology.
 
+- Phase 1 (Hatchet outbox dispatch — **done**):
+  - `packages/core/src/eventbus/outboxDispatch.ts` — shared dispatch helpers +
+    hatchet topic flags; `OutboxPublisher` refactored to use them.
+  - `SessionManager.setOnOutboxEnqueued` + row id return from `enqueueOutbox`.
+  - `packages/driver-hatchet` — `HatchetRuntimeDriver` (delegating wrapper),
+    `aplret.outbox.dispatch` task, `driver_runs` repository, bootstrap helper.
+  - `driver_runs` Prisma model + migration (`packages/memory-sql`).
+  - `apps/hatchet-worker` — minimal outbox worker entry point.
+  - `apps/hatchet-poc/` — Docker Compose (Hatchet + NATS + callAgent Postgres)
+    + manual runbook.
+  - `apps/examples/runtime-host` — opt-in hatchet outbox mode via env flags.
+  - Tests: `outboxDispatch.test.ts`, `packages/driver-hatchet/tests/*`.
+  - Phase 1 hardening (review follow-up):
+    - `traceId` / `agentId` / `token` threaded from outbox payload → Hatchet metadata.
+    - Terminal Hatchet failure dead-letters + deletes outbox row (no poison rows).
+    - Inline dispatch fallback when `runNoWait` trigger fails.
+    - `driver_runs.provider_run_id` unique + Prisma upsert.
+    - Known limitation: publish-then-delete may duplicate events on Hatchet redelivery
+      until ADR 0009 per-effect idempotency (Phase 2).
+
 ## Production code changed
 
 - `packages/core/src/orchestration/taskEngine.ts` — holds default
@@ -144,13 +166,14 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 - `TaskEngine.sync`, `TaskEngine.inbox`, `TaskEngine.async_race` — pass with
   driver-routed call sites.
 - All `packages/core/tests/TaskEngine*` suites — pass (151 tests).
-- **D5:** full monorepo suite — 170 passed, 936 tests, 2 skipped (2026-06-16).
+- **D5:** full monorepo suite — 174 passed, 952+ tests, 64 skipped (2026-06-16).
 
 ## Next action
 
-Phase 0 scaffold + D5 are done. Next: Phase 1 Hatchet outbox dispatch
-(`packages/driver-hatchet`). Child completion routing deferred per
-`specs/child-completion-routing.md` until Phase 2 prerequisites.
+Phase 1 code + D5 are done. Next: run manual POC gates B5–B7, then Phase 2 durable
+`aplret.task` loop (requires durable dedupe ADR 0005, per-effect idempotency ADR 0009,
+full worker bootstrap). Run `yarn hatchet:poc:up` and follow
+`apps/hatchet-poc/README.md` for B5–B7.
 
 ## Open questions (carried from requirements §11)
 

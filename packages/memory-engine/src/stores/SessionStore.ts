@@ -149,7 +149,7 @@ export interface IWorkingMemorySessionStore {
         topic: string;
         key: string;
         payload: Record<string, unknown>;
-    }): Promise<void>;
+    }): Promise<{ id: string } | void>;
     createConversationThread(params: {
         tenantId: string;
         conversationId: string;

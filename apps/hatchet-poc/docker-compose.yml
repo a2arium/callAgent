@@ -1,0 +1,135 @@
+version: "3.8"
+
+services:
+  callagent-postgres:
+    image: postgres:15.6
+    command: postgres -c 'max_connections=200'
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: callagent
+      POSTGRES_PASSWORD: callagent
+      POSTGRES_DB: callagent
+    ports:
+      - "5433:5432"
+    volumes:
+      - callagent_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d callagent -U callagent"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  nats:
+    image: nats:2.10
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  hatchet-postgres:
+    image: postgres:15.6
+    command: postgres -c 'max_connections=1000'
+    restart: unless-stopped
+    hostname: hatchet-postgres
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: hatchet
+      POSTGRES_DB: hatchet
+    ports:
+      - "5435:5432"
+    volumes:
+      - hatchet_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d hatchet -U hatchet"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  hatchet-rabbitmq:
+    image: rabbitmq:3-management
+    hostname: hatchet-rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    volumes:
+      - hatchet_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  hatchet-migration:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:latest
+    command: /hatchet/hatchet-migrate
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+    depends_on:
+      hatchet-postgres:
+        condition: service_healthy
+
+  hatchet-setup-config:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:latest
+    command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+      SERVER_MSGQUEUE_RABBITMQ_URL: amqp://user:password@hatchet-rabbitmq:5672/
+      SERVER_AUTH_COOKIE_DOMAIN: localhost:8080
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_DEFAULT_ENGINE_VERSION: V1
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-migration:
+        condition: service_completed_successfully
+      hatchet-rabbitmq:
+        condition: service_healthy
+      hatchet-postgres:
+        condition: service_healthy
+
+  hatchet-engine:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:latest
+    command: /hatchet/hatchet-engine --config /hatchet/config
+    restart: on-failure
+    ports:
+      - "7077:7070"
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+
+  hatchet-dashboard:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:latest
+    command: sh ./entrypoint.sh --config /hatchet/config
+    ports:
+      - "8080:80"
+    restart: on-failure
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+
+volumes:
+  callagent_postgres_data:
+  hatchet_postgres_data:
+  hatchet_rabbitmq_data:
+  hatchet_certs:
+  hatchet_config:

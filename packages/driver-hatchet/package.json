@@ -1,0 +1,35 @@
+{
+  "name": "@a2arium/callagent-driver-hatchet",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-memory-sql": "workspace:*",
+    "@hatchet-dev/typescript-sdk": "^1.24.2",
+    "@prisma/client": "^7.4.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.14.1",
+    "jest": "^29.7.0",
+    "typescript": "^5.8.3"
+  },
+  "license": "MIT",
+  "description": "Hatchet runtime driver and worker handlers for CallAgent orchestrator substrate."
+}

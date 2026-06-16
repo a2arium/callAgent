@@ -32,9 +32,32 @@ async function main(): Promise<void> {
         ? new WorkingMemorySessionStore()
         : undefined;
 
+    let hatchetBootstrap: ReturnType<typeof resolveHatchetOutboxBootstrap> | undefined;
+    let transportClose: (() => Promise<void>) | undefined;
+    let eventBus: Awaited<
+        ReturnType<typeof import('@a2arium/callagent-eventbus-nats').createNatsJetStreamEventBusStandalone>
+    >['eventBus'] | undefined;
+
+    if (process.env.CALLAGENT_OUTBOX_DISPATCHER?.toLowerCase() === 'hatchet') {
+        const { createNatsJetStreamEventBusStandalone } = await import(
+            '@a2arium/callagent-eventbus-nats'
+        );
+        const { resolveHatchetOutboxBootstrap } = await import('@a2arium/callagent-driver-hatchet');
+        const natsUrl = process.env.NATS_URL ?? 'nats://localhost:4222';
+        const nats = await createNatsJetStreamEventBusStandalone({ servers: [natsUrl] });
+        eventBus = nats.eventBus;
+        transportClose = nats.close;
+        hatchetBootstrap = resolveHatchetOutboxBootstrap({ sessionStore, eventBus });
+    }
+
     const { engine, shutdown: shutdownComposition } = await bootstrapCompositionRoot({
         registerAgents: registerDemoAgent,
-        taskEngine: { sessionStore },
+        taskEngine: {
+            sessionStore,
+            eventBus,
+            transportClose,
+            runtimeDriverFactory: hatchetBootstrap?.runtimeDriverFactory,
+        },
     });
 
     const app = express();

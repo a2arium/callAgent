@@ -218,6 +218,11 @@ export class WorkingMemorySessionStore {
         await this.disconnect();
     }
 
+    /** Composition-root access to the underlying Prisma client (worker / driver bootstrap). */
+    getPrismaClient(): PrismaClientType {
+        return this.prisma;
+    }
+
     /**
      * Establish a connection immediately so callers can detect connectivity issues early.
      */
@@ -339,10 +344,20 @@ export class WorkingMemorySessionStore {
         topic: string;
         key: string;
         payload: Record<string, unknown>;
-    }): Promise<void> {
+    }): Promise<{ id: string }> {
         const { tenantId, topic, key, payload } = params;
         await this.ensureConnected();
-        await this.runWithReconnect(() => this.prisma.outbox.create({ data: { tenantId, topic, key, payload: payload as unknown as any } }));
+        const row = await this.runWithReconnect(() =>
+            this.prisma.outbox.create({
+                data: {
+                    tenantId,
+                    topic,
+                    key,
+                    payload: payload as unknown as Prisma.InputJsonValue,
+                },
+            })
+        );
+        return { id: row.id };
     }
 
     async createConversationThread(params: {

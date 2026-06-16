@@ -19,7 +19,7 @@ import { TaskEngine } from '../orchestration/taskEngine.js';
 import type { DurableHandlerInvoker } from '../orchestration/DurableHandlerInvoker.js';
 import type { RuntimeDriver } from './runtimeDriver.js';
 import type { TurnExecutor } from './turnExecutor.js';
-import { InProcessRuntimeDriver } from './inProcessRuntimeDriver.js';
+import type { InProcessRuntimeStack } from './buildInProcessRuntimeStack.js';
 
 /** Options forwarded to {@link TaskEngine} during bootstrap. */
 export type TaskEngineOptions = {
@@ -33,6 +33,7 @@ export type TaskEngineOptions = {
     }) => DurableSubscription;
     transportClose?: () => Promise<void>;
     runtimeDriver?: RuntimeDriver;
+    runtimeDriverFactory?: (stack: InProcessRuntimeStack) => RuntimeDriver;
 };
 
 export type BootstrapCompositionRootParams = {
@@ -90,7 +91,7 @@ export async function bootstrapCompositionRootInternal(
     }
 
     const runtimeDriver = engine.getCompositionRuntimeDriver();
-    const turnExecutor = resolveTurnExecutor(runtimeDriver);
+    const turnExecutor = engine.getCompositionTurnExecutor();
 
     return {
         engine,
@@ -102,13 +103,4 @@ export async function bootstrapCompositionRootInternal(
         },
         waitForIdle: (timeoutMs?: number) => engine.waitForBackgroundTasks(timeoutMs),
     };
-}
-
-function resolveTurnExecutor(driver: RuntimeDriver): TurnExecutor {
-    if (driver instanceof InProcessRuntimeDriver) {
-        return driver.getTurnExecutor();
-    }
-    throw new Error(
-        'bootstrapCompositionRootInternal: turnExecutor is only available for InProcessRuntimeDriver'
-    );
 }
