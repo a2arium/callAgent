@@ -1,120 +1,187 @@
 # @a2arium/callagent-core
 
-The core framework for the CallAgent AI agent system, providing agent orchestration, memory management, and A2A (Agent-to-Agent) communication capabilities.
+Core runtime package for callAgent, a TypeScript framework for durable, testable AI agents.
+
+Use this package when an agent needs more than a single prompt call: multi-turn state, explicit policy/effect boundaries, tool or LLM effects, input resumes, child-agent resumes, conversation threads, and turn-level traces you can test.
+
+Provider SDKs help you call a model. `@a2arium/callagent-core` helps you operate an agent.
 
 ## Installation
 
 ```bash
-npm install @a2arium/callagent-core
+npm install @a2arium/callagent-core @a2arium/callagent-types
 ```
-
-or with yarn:
 
 ```bash
-yarn add @a2arium/callagent-core
+yarn add @a2arium/callagent-core @a2arium/callagent-types
+pnpm add @a2arium/callagent-core @a2arium/callagent-types
 ```
 
-## Quick Start
+Requirements:
 
-### Basic Agent Creation
+- Node.js `>=20`
+- ESM import support
+- TypeScript declarations are included
 
-```typescript
-import { createAgent, AgentManifest } from '@a2arium/callagent-core';
+## Create An Agent
 
-const manifest: AgentManifest = {
-  name: 'hello-agent',
-  version: '1.0.0',
-  description: 'A simple greeting agent',
-  inputs: {
-    name: { type: 'string', required: true }
+The recommended starting point is the scaffold. It creates the APLRET module files, manifests, TypeScript config, and a starter test.
+
+```bash
+npx callagent-scaffold --name my-agent --preset minimal --output ./my-agent
+```
+
+For a larger agent with a `flow.md`, selectors, reducers, effect folders, prompts, contracts, and test stubs:
+
+```bash
+npx callagent-scaffold \
+  --name my-agent \
+  --preset non-trivial \
+  --output ./my-agent \
+  --uses-llm \
+  --uses-tools \
+  --uses-children \
+  --uses-plans
+```
+
+Inside a scaffolded agent:
+
+```bash
+yarn install
+yarn build
+yarn test
+```
+
+## Minimal Shape
+
+A minimal callAgent agent is a set of typed modules wired through `createAgent`.
+
+```ts
+import { createAgent } from '@a2arium/callagent-core';
+import { attention } from './attention.js';
+import { perception } from './perception.js';
+import { learning } from './learning.js';
+import { policy } from './policy.js';
+import { shield } from './shield.js';
+import { execution } from './execution.js';
+import { transition } from './transition.js';
+import type { Sensory, Obs, ExecPayload, ExecError } from './types.js';
+
+export default createAgent<Sensory, Obs, unknown, ExecPayload, ExecError>(
+  {
+    attention,
+    perception,
+    learning,
+    policy,
+    shield,
+    execution,
+    transition,
   },
-  outputs: {
-    message: { type: 'string' }
-  }
-};
-
-class HelloAgent {
-  async execute(inputs: { name: string }) {
-    return {
-      message: `Hello, ${inputs.name}!`
-    };
-  }
-}
-
-const agent = createAgent(manifest, new HelloAgent());
-
-// Use the agent
-const result = await agent.execute({ name: 'World' });
-console.log(result.message); // "Hello, World!"
+  import.meta.url
+);
 ```
 
-### Agent with Memory
+The nearby `agent-card.json` and `agent-runtime.json` describe the public A2A card and local runtime manifest. The runtime validates that both manifests agree on identity.
 
-```typescript
-import { createAgent, WorkingMemoryRegistry } from '@a2arium/callagent-core';
+## How The Runtime Thinks
 
-class MemoryAgent {
-  constructor(private memory: WorkingMemoryRegistry) {}
+callAgent uses the APLRET loop:
 
-  async execute(inputs: { message: string }) {
-    // Store in working memory
-    await this.memory.store('user_message', inputs.message);
-    
-    // Retrieve from memory
-    const stored = await this.memory.recall('user_message');
-    
-    return {
-      echo: `You said: ${stored?.content || 'nothing'}`
-    };
-  }
-}
-
-const agent = createAgent(manifest, new MemoryAgent(workingMemory));
+```txt
+Attention -> Perception -> Learning -> Policy -> Shield -> Execution -> Transition
 ```
 
-### Tag Normalization
+The important boundaries are:
 
-All tags are automatically normalized to lowercase for consistent searching:
+- Perception reads the current inbox and normalizes observations.
+- Learning is the only writer of durable cognition.
+- Policy is synchronous and reads decision-ready state only.
+- Shield validates or blocks the selected intent.
+- Execution performs effects: LLM calls, tools, replies, child agents, and conversation APIs.
+- Transition decides whether the task continues, waits, completes, or fails.
 
-```typescript
-// These all work the same way:
-await memory.remember('key', data, { tags: ['RIGA', 'Events'] });
-await memory.recall('events'); // Finds items tagged with 'Events', 'EVENTS', 'events', etc.
+This structure is intentionally heavier than a direct model call. It pays off when workflows branch, pause, resume, retry, call tools, call children, or need reproducible traces.
+
+## Public Entry Points
+
+Stable root imports:
+
+```ts
+import {
+  createAgent,
+  createTestHarness,
+  createStageFacade,
+  TaskEngine,
+  type TaskContext,
+  type TurnTrace,
+} from '@a2arium/callagent-core';
 ```
 
-### A2A Communication
+Runner-specific APIs live under an explicit subpath:
 
-```typescript
-import { A2AService } from '@a2arium/callagent-core';
+```ts
+import { runAgentWithStreaming } from '@a2arium/callagent-core/runner';
+```
 
-const a2aService = new A2AService();
+Experimental APIs live under:
 
-// Register agents
-await a2aService.registerAgent('greeting-agent', greetingAgent);
-await a2aService.registerAgent('translation-agent', translationAgent);
+```ts
+import { /* unstable APIs */ } from '@a2arium/callagent-core/unstable';
+```
 
-// Call another agent
-const result = await a2aService.callAgent('translation-agent', {
-  text: 'Hello',
-  targetLanguage: 'spanish'
+This package is currently ESM-only. CommonJS support should not be assumed until a real CJS build is published.
+
+## Testing Agents
+
+Use the test harness to assert turns instead of checking only final text.
+
+```ts
+import { createTestHarness } from '@a2arium/callagent-core';
+import { attention } from '../attention.js';
+import { perception } from '../perception.js';
+import { learning } from '../learning.js';
+import { policy } from '../policy.js';
+import { shield } from '../shield.js';
+import { execution } from '../execution.js';
+import { transition } from '../transition.js';
+
+const harness = createTestHarness({
+  attention,
+  perception,
+  learning,
+  policy,
+  shield,
+  execution,
+  transition,
+});
+
+await harness.runTurn();
+
+harness.expectTurn((turn) => {
+  turn.expectTransition('complete');
 });
 ```
 
-## Features
+Scaffolded agents include starter tests. For larger workflows, assert `TurnTrace`, pending tokens, resume observations, tool outputs, and child completions.
 
-- **Agent Framework**: Create and manage AI agents with typed inputs/outputs
-- **Memory System**: Working, episodic, semantic, and neural memory types
-- **A2A Communication**: Agent-to-Agent messaging and coordination
-- **Caching**: Built-in result caching for performance optimization
-- **Streaming**: Real-time streaming of agent outputs
-- **TypeScript Support**: Full type safety and IntelliSense
+## Optional Packages
 
-## Dependencies
+Install these only when needed:
 
-- `@a2arium/callagent-types`: Core type definitions
-- `@a2arium/callagent-memory-sql`: SQL-based memory persistence
-- `@a2arium/callagent-utils`: Shared utilities
+- `@a2arium/callagent-memory-sql`: PostgreSQL/Prisma-backed memory and session persistence.
+- `@a2arium/callagent-chat-bridge`: Telegram, Slack, web chat, or custom chat routing.
+- `@a2arium/callagent-eventbus-nats`: NATS JetStream event bus and message log adapters.
+
+## Documentation
+
+- Root overview: ../../README.md
+- Release/package strategy: ../../docs/release-strategy.md
+- APLRET contracts: ../../apps/docs/0-aplret_contracts.md
+- First agent tutorial: ../../apps/docs/1-tutorial_build_your_first_aplret_agent.md
+- Testing guide: ../../apps/docs/11-how_to_test_aplret_agents.md
+- TurnTrace debugging: ../../apps/docs/12-how_to_debug_with_turn_trace.md
+- Multi-agent conversations: ../../apps/docs/15-how_to_multiagent_conversation.md
 
 ## License
 
-MIT 
+MIT

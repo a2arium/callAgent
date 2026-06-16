@@ -18,12 +18,16 @@ export class TelemetryCollector {
     private static instance: TelemetryCollector;
     private providers: TelemetryProvider[] = [];
     private nodeRegistry = new Map<string, TelemetryNode>();
+    private defaultProvidersInitialized = false;
 
-    private constructor() {
-        this.autoDiscoverProviders();
-    }
+    private constructor() { }
 
-    private autoDiscoverProviders() {
+    public initializeDefaultProviders(): void {
+        if (this.defaultProvidersInitialized) {
+            return;
+        }
+        this.defaultProvidersInitialized = true;
+
         if (process.env.TELEMETRY_CONSOLE === 'true' || process.env.CONSOLE_TELEMETRY === 'true') {
             this.addProvider(new ConsoleProvider());
         }
@@ -57,14 +61,17 @@ export class TelemetryCollector {
     public clearProviders(): void {
         this.providers = [];
         this.nodeRegistry.clear();
+        this.defaultProvidersInitialized = true;
     }
 
     public registerNode(node: TelemetryNode): void {
+        this.initializeDefaultProviders();
         this.nodeRegistry.set(node.id, node);
         this.broadcast(p => p.onNodeStart(node));
     }
 
     public endNode(node: TelemetryNode): void {
+        this.initializeDefaultProviders();
         this.broadcast(p => p.onNodeEnd(node));
         // We might want to keep it in registry for later reference or clear it
         // For now, let's keep it to allow usage updates after end (e.g. async cost calculation)
@@ -72,10 +79,12 @@ export class TelemetryCollector {
     }
 
     public failNode(node: TelemetryNode, error: Error): void {
+        this.initializeDefaultProviders();
         this.broadcast(p => p.onNodeFailure(node, error));
     }
 
     public updateUsage(node: TelemetryNode): void {
+        this.initializeDefaultProviders();
         this.broadcast(p => p.onUsageUpdate(node, node.usage));
     }
 
@@ -106,6 +115,7 @@ export class TelemetryCollector {
 
     /** Emit the assembled TurnTrace to all providers. Called exactly once per turn by loopRunner. */
     public emitTurnTrace(trace: TurnTrace): void {
+        this.initializeDefaultProviders();
         if (turnOpikDiagEnabled()) {
             log.info('[CALLAGENT_DEBUG_TURN_OPIK] TelemetryCollector.emitTurnTrace → providers', {
                 providerNames: this.providers.map((p) => p.name),

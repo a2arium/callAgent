@@ -53,8 +53,10 @@ const parsePositiveInt = (value: string | undefined, fallback: number): number =
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-// Detect if running in dev mode with ts-node
-const isDevMode = process.argv[0].includes('ts-node') || process.argv[1].includes('ts-node');
+// Detect if running in dev mode with ts-node. Library imports may not have argv[1].
+const argv0 = process.argv[0] ?? '';
+const argv1 = process.argv[1] ?? '';
+const isDevMode = argv0.includes('ts-node') || argv1.includes('ts-node');
 
 type StreamingOptions = {
     isStreaming: boolean;

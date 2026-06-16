@@ -9,7 +9,6 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
-      "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
     "./generated": {
@@ -22,6 +21,11 @@
       "import": "./dist/unstable.js",
       "default": "./dist/unstable.js"
     },
+    "./runner": {
+      "types": "./dist/runner/index.d.ts",
+      "import": "./dist/runner/index.js",
+      "default": "./dist/runner/index.js"
+    },
     "./testing/contracts": {
       "types": "./dist/testing/contracts.d.ts",
       "import": "./dist/testing/contracts.js",
@@ -30,7 +34,7 @@
   },
   "scripts": {
     "prisma:generate": "prisma generate",
-    "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma-client && cp -R src/generated/prisma-client/* dist/generated/prisma-client/",
+    "build": "rm -rf dist && yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma-client && cp -R src/generated/prisma-client/* dist/generated/prisma-client/ && find dist/generated/prisma-client -name '*.ts' ! -name '*.d.ts' -delete",
     "test:types": "tsd . --files tests/*.test-d.ts",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run",
@@ -43,6 +47,19 @@
   },
   "description": "Core framework for the CallAgent AI agent system.",
   "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/core#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "keywords": [
     "core",
     "framework",
@@ -52,13 +69,13 @@
     "callagent-scaffold": "./dist/scaffold/scaffoldCli.js"
   },
   "dependencies": {
-    "@a2arium/callagent-memory-engine": "workspace:*",
-    "@a2arium/callagent-memory-sql": "workspace:*",
-    "@a2arium/callagent-types": "workspace:*",
-    "@a2arium/callagent-utils": "workspace:*",
+    "@a2arium/callagent-memory-engine": "^0.1.0",
+    "@a2arium/callagent-memory-sql": "^0.2.0",
+    "@a2arium/callagent-types": "^0.2.0",
+    "@a2arium/callagent-utils": "^0.2.0",
     "@prisma/adapter-pg": "7.4.0",
     "@prisma/client": "7.4.0",
-    "callllm": "portal:../../../callLLM",
+    "callllm": "^0.3.0",
     "pg": "8.13.3",
     "uuid": "^11.1.0",
     "zod": "^4.3.6"

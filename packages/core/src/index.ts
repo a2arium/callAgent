@@ -5,7 +5,6 @@ import './pgStartupDiagnostic.js';
 export * from './config/index.js';
 export * from './plugin/types.js';
 export * from './plugin/createAgent.js';
-export * from './runner/streamingRunner.js';
 export { createApiRouter } from './api/router.js';
 export {
     buildAgentIndex,

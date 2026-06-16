@@ -9,7 +9,6 @@
     "exports": {
         ".": {
             "import": "./dist/index.js",
-            "require": "./dist/index.js",
             "types": "./dist/index.d.ts"
         }
     },
@@ -22,13 +21,26 @@
     },
     "description": "Memory Engine for CallAgent",
     "license": "MIT",
+    "author": "A2arium <a2arium@gmail.com>",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/a2arium/callAgent.git",
+        "directory": "packages/memory-engine"
+    },
+    "bugs": {
+        "url": "https://github.com/a2arium/callAgent/issues"
+    },
+    "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/memory-engine#readme",
+    "engines": {
+        "node": ">=20"
+    },
     "dependencies": {
-        "@a2arium/callagent-memory-sql": "workspace:*",
-        "@a2arium/callagent-types": "workspace:*",
-        "@a2arium/callagent-utils": "workspace:*",
+        "@a2arium/callagent-memory-sql": "^0.2.0",
+        "@a2arium/callagent-types": "^0.2.0",
+        "@a2arium/callagent-utils": "^0.2.0",
         "@prisma/adapter-pg": "^7.4.0",
         "@prisma/client": "^7.4.0",
-        "callllm": "portal:../../../callLLM",
+        "callllm": "^0.3.0",
         "dotenv": "^16.4.5",
         "pg": "^8.13.3",
         "uuid": "^11.1.0"

@@ -9,7 +9,6 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
-      "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
@@ -27,6 +26,19 @@
   },
   "description": "Shared types and error classes for the CallAgent framework.",
   "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/types"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/types#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "keywords": [
     "types",
     "errors",

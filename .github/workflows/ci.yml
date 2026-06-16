@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, feature/*, release/*]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  package-readiness:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x, 24.x]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Enable Corepack before dependency cache
+        run: corepack enable
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: yarn
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build packages
+        run: yarn build
+
+      - name: Verify publish manifests
+        run: yarn verify:publish-manifests
+
+      - name: Verify package packlists
+        run: yarn verify:packlists
+
+      - name: Verify core import safety
+        run: yarn verify:core-imports
+
+      - name: Verify core public types
+        run: yarn workspace @a2arium/callagent-core test:types
+
+      - name: Run tests
+        run: yarn test
+        env:
+          CI: true
+

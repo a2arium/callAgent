@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(NODE_OPTIONS=--experimental-vm-modules jest:*)",
+      "Bash(yarn test:*)",
+      "Bash(NODE_OPTIONS=--experimental-vm-modules yarn test:*)",
+      "Bash(npm test)",
+      "Bash(npx jest:*)",
+      "Bash(NODE_OPTIONS=\"--experimental-vm-modules\" npx jest:*)",
+      "Bash(npm test:*)",
+      "Bash(yarn workspaces run test:*)",
+      "Bash(yarn workspace @a2arium/callagent-core test:*)",
+      "Bash(git restore:*)",
+      "Bash(yarn build:*)",
+      "Bash(cd packages/core/tests && grep -l \"protocolBinding.*a2a\" *.test.ts)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -6,12 +6,14 @@
   "bin": "./scripts/setup-database.cjs",
   "files": [
     "dist",
-    "prisma",
-    "scripts"
+    "prisma/schema.prisma",
+    "prisma/migrations",
+    "scripts/setup-database.cjs",
+    "scripts/optimize-tenant-queries.sql"
   ],
   "scripts": {
     "prisma:generate": "prisma generate",
-    "build": "yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma && cp -R src/generated/prisma/* dist/generated/prisma/",
+    "build": "rm -rf dist && yarn prisma:generate && tsc -p tsconfig.json && mkdir -p dist/generated/prisma && cp -R src/generated/prisma/* dist/generated/prisma/ && find dist/generated/prisma -name '*.ts' ! -name '*.d.ts' -delete",
     "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js",
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
@@ -31,6 +33,19 @@
   },
   "description": "SQL-backed memory adapter for the CallAgent framework.",
   "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/memory-sql"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/memory-sql#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "keywords": [
     "memory",
     "sql",
@@ -38,8 +53,8 @@
     "callagent"
   ],
   "dependencies": {
-    "@a2arium/callagent-types": "workspace:*",
-    "@a2arium/callagent-utils": "workspace:*",
+    "@a2arium/callagent-types": "^0.2.0",
+    "@a2arium/callagent-utils": "^0.2.0",
     "@prisma/adapter-pg": "^7.4.0",
     "@prisma/client": "^7.4.0",
     "pg": "^8.13.3"
@@ -57,7 +72,6 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
-      "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
     "./generated": {

@@ -21,6 +21,9 @@ const config = {
         '/dist/',
         '<rootDir>/packages/.*/dist/'
     ],
+    modulePathIgnorePatterns: [
+        '<rootDir>/packages/.*/dist/'
+    ],
 
     // Force TypeScript transformation with ts-jest only
     transform: {

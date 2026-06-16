@@ -1,22 +1,8 @@
 {
   "name": "callagent",
   "version": "0.3.0",
-  "description": "AI Agents Framework with A2A Support",
+  "description": "Private monorepo for the callAgent TypeScript agent framework.",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "postinstall": "node scripts/sync-dotenv.cjs",
     "build": "yarn turbo run build",
@@ -26,6 +12,9 @@
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
     "test": "NODE_OPTIONS='--max-old-space-size=8192 --no-warnings' node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "test:coverage": "NODE_OPTIONS='--max-old-space-size=8192 --no-warnings' COVERAGE=true node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "verify:core-imports": "node scripts/verify-core-imports.mjs",
+    "verify:publish-manifests": "node scripts/check-publish-manifests.mjs",
+    "verify:packlists": "node scripts/check-packlists.mjs",
     "create-agent": "node packages/core/dist/scaffold/scaffoldCli.js",
     "run:hello": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}'",
     "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}' --no-resolve-deps",
@@ -49,8 +38,19 @@
     "agent",
     "framework"
   ],
-  "author": "Your Name <your.email@example.com>",
-  "license": "ISC",
+  "author": "A2arium <a2arium@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
     "@jest/test-sequencer": "29.7.0",
     "@testcontainers/nats": "^11.14.0",

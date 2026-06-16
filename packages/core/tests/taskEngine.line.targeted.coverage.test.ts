@@ -132,9 +132,20 @@ beforeAll(() => {
     process.env.DISABLE_OUTBOX_PUBLISHER = '1';
 });
 
+const originalMemoryDatabaseUrl = process.env.MEMORY_DATABASE_URL;
+
+beforeEach(() => {
+    delete process.env.MEMORY_DATABASE_URL;
+});
+
 afterEach(() => {
     jest.clearAllMocks();
     TaskEngine.testOverrides = undefined;
+    if (originalMemoryDatabaseUrl === undefined) {
+        delete process.env.MEMORY_DATABASE_URL;
+    } else {
+        process.env.MEMORY_DATABASE_URL = originalMemoryDatabaseUrl;
+    }
 });
 
 describe('TaskEngine Line Targeted Coverage Tests', () => {
