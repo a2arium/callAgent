@@ -11,8 +11,6 @@
   },
   "dependencies": {
     "@a2arium/callagent-driver-hatchet": "workspace:*",
-    "@a2arium/callagent-eventbus-nats": "workspace:*",
-    "@a2arium/callagent-memory-sql": "workspace:*",
     "dotenv": "^17.3.1"
   },
   "devDependencies": {

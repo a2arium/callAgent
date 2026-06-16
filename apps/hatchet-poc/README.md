@@ -1,36 +1,73 @@
 # Hatchet POC — Scenario 1 (outbox dispatch)
 
-Self-hosted Hatchet + NATS + callAgent Postgres for manual gates **B5–B7**.
+Self-hosted Hatchet + NATS for manual gates **B5–B7**. **Postgres stays on your host**
+(two databases: `callagent` + `hatchet`). Docker only runs Hatchet, RabbitMQ (Hatchet
+internal queue), and NATS (callAgent event bus).
 
 ## Prerequisites
 
+- **Host Postgres** already running (e.g. `localhost:5432`) — not in Docker
 - Docker Desktop (or Docker Engine + Compose)
 - Node 20+, yarn
 - Built workspace: `yarn build`
 
-## 1. Start infrastructure
+## 1. Create databases on host Postgres
+
+One Postgres **server**, two **databases**:
+
+| Database | Used by | Typical URL |
+|---|---|---|
+| `callagent` | runtime-host, hatchet-worker (`MEMORY_DATABASE_URL`) | `postgres://callagent:callagent@localhost:5432/callagent` |
+| `hatchet` | Hatchet engine/dashboard (Docker → host) | `postgres://hatchet:hatchet@localhost:5432/hatchet` |
+
+Example (adjust passwords to match your setup):
+
+```bash
+psql -U postgres -f apps/hatchet-poc/scripts/init-host-databases.sql
+```
+
+If you already have a `callagent` database from normal development, skip that part and
+only create `hatchet`.
+
+Optional: copy Hatchet Docker env (only needed if credentials/host differ from default):
+
+```bash
+cp apps/hatchet-poc/.env.example apps/hatchet-poc/.env
+# edit HATCHET_DATABASE_URL if needed
+```
+
+## 2. Migrate callAgent schema
+
+Use your **existing** host connection (same as day-to-day dev):
+
+```bash
+export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5432/callagent
+cd packages/memory-sql && yarn db:migrate && yarn db:generate
+```
+
+## 3. Start Docker services (Hatchet + NATS)
 
 ```bash
 yarn hatchet:poc:up
 ```
 
-Services:
+This does **not** start Postgres. Docker runs:
 
-| Service | URL / port |
-|---|---|
-| Hatchet dashboard | http://localhost:8080 (default `admin@example.com` / `Admin123!!`) |
-| Hatchet gRPC engine | `localhost:7077` |
-| callAgent Postgres | `postgres://callagent:callagent@localhost:5433/callagent` |
-| NATS JetStream | `nats://localhost:4222` |
+| Service | Purpose | URL / port |
+|---|---|---|
+| Hatchet dashboard | Operator UI (B5–B7) | http://localhost:8080 (`admin@example.com` / `Admin123!!`) |
+| Hatchet gRPC engine | Task scheduling | `localhost:7077` |
+| NATS JetStream | **callAgent** cross-process event bus (ADR 0007) | `nats://localhost:4222` |
+| RabbitMQ | **Hatchet internal** worker queue (not callAgent) | `localhost:5673` (mgmt `15673`) |
 
-## 2. Migrate callAgent DB
+**NATS vs RabbitMQ:** NATS is what you configure on runtime-host / hatchet-worker
+(`NATS_URL`). RabbitMQ is Hatchet plumbing between engine and worker containers;
+callAgent never connects to it.
 
-```bash
-export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5433/callagent
-cd packages/memory-sql && yarn db:migrate && yarn db:generate
-```
+Hatchet containers reach host Postgres via `host.docker.internal` (Linux: `host-gateway`
+is set in compose).
 
-## 3. Create Hatchet API token
+## 4. Create Hatchet API token
 
 In the dashboard: **Settings → API Tokens → Create API Token**.
 
@@ -40,12 +77,12 @@ export HATCHET_CLIENT_HOST_PORT=localhost:7077
 export HATCHET_CLIENT_TLS_STRATEGY=none
 ```
 
-## 4. Run worker + API host (separate terminals)
+## 5. Run worker + API host (host processes)
 
 **Worker** (dispatches `aplret.outbox.dispatch`):
 
 ```bash
-export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5433/callagent
+export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5432/callagent
 export NATS_URL=nats://localhost:4222
 export HATCHET_CLIENT_TOKEN=...
 export HATCHET_CLIENT_HOST_PORT=localhost:7077
@@ -56,7 +93,7 @@ yarn workspace @a2arium/hatchet-worker dev
 **Runtime host** (enqueues outbox rows + triggers Hatchet):
 
 ```bash
-export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5433/callagent
+export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5432/callagent
 export NATS_URL=nats://localhost:4222
 export CALLAGENT_OUTBOX_DISPATCHER=hatchet
 export HATCHET_CLIENT_TOKEN=...
@@ -65,7 +102,9 @@ export HATCHET_CLIENT_TLS_STRATEGY=none
 yarn workspace @a2arium/runtime-host dev
 ```
 
-## 5. Scenario 1 validation
+Replace `MEMORY_DATABASE_URL` with whatever you already use for local development.
+
+## 6. Scenario 1 validation
 
 1. Start a demo task via runtime-host RPC.
 2. Confirm an outbox row is created in `outbox` and a Hatchet run for `aplret.outbox.dispatch` appears.
@@ -100,3 +139,13 @@ Set `CALLAGENT_OUTBOX_DISPATCHER=poll` (or unset) to use the in-process `OutboxP
 - **Duplicate delivery:** Publish-then-delete is not fully idempotent across
   Hatchet redelivery until ADR 0009 per-effect keys land in Phase 2. CloudEvent
   `id` is the outbox row id for downstream dedupe where supported.
+
+## Troubleshooting
+
+- **Hatchet migration fails:** ensure host Postgres is up and `hatchet` DB exists;
+  check `HATCHET_DATABASE_URL` in `apps/hatchet-poc/.env`.
+- **Linux:** if `host.docker.internal` fails, set
+  `HATCHET_DATABASE_URL=postgres://hatchet:hatchet@172.17.0.1:5432/hatchet` (or your
+  host LAN IP) in `apps/hatchet-poc/.env`.
+- **Reuse existing callagent DB:** no separate Docker DB; `MEMORY_DATABASE_URL` is
+  always your host Postgres.

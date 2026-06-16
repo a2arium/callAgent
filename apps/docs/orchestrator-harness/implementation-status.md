@@ -129,7 +129,7 @@ first POC candidate.
     `aplret.outbox.dispatch` task, `driver_runs` repository, bootstrap helper.
   - `driver_runs` Prisma model + migration (`packages/memory-sql`).
   - `apps/hatchet-worker` — minimal outbox worker entry point.
-  - `apps/hatchet-poc/` — Docker Compose (Hatchet + NATS + callAgent Postgres)
+  - `apps/hatchet-poc/` — Docker Compose (Hatchet + NATS; host Postgres for both DBs)
     + manual runbook.
   - `apps/examples/runtime-host` — opt-in hatchet outbox mode via env flags.
   - Tests: `outboxDispatch.test.ts`, `packages/driver-hatchet/tests/*`.

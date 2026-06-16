@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
+import type { IEventBus } from '@a2arium/callagent-core';
+import type { HatchetOutboxBootstrap } from '@a2arium/callagent-driver-hatchet';
 
 loadNearestEnv();
 
@@ -32,17 +34,15 @@ async function main(): Promise<void> {
         ? new WorkingMemorySessionStore()
         : undefined;
 
-    let hatchetBootstrap: ReturnType<typeof resolveHatchetOutboxBootstrap> | undefined;
+    let hatchetBootstrap: HatchetOutboxBootstrap | undefined;
     let transportClose: (() => Promise<void>) | undefined;
-    let eventBus: Awaited<
-        ReturnType<typeof import('@a2arium/callagent-eventbus-nats').createNatsJetStreamEventBusStandalone>
-    >['eventBus'] | undefined;
+    let eventBus: IEventBus | undefined;
 
     if (process.env.CALLAGENT_OUTBOX_DISPATCHER?.toLowerCase() === 'hatchet') {
-        const { createNatsJetStreamEventBusStandalone } = await import(
-            '@a2arium/callagent-eventbus-nats'
-        );
-        const { resolveHatchetOutboxBootstrap } = await import('@a2arium/callagent-driver-hatchet');
+        const natsSpec = '@a2arium/callagent-eventbus-nats';
+        const hatchetSpec = '@a2arium/callagent-driver-hatchet';
+        const [{ createNatsJetStreamEventBusStandalone }, { resolveHatchetOutboxBootstrap }] =
+            await Promise.all([import(natsSpec), import(hatchetSpec)]);
         const natsUrl = process.env.NATS_URL ?? 'nats://localhost:4222';
         const nats = await createNatsJetStreamEventBusStandalone({ servers: [natsUrl] });
         eventBus = nats.eventBus;

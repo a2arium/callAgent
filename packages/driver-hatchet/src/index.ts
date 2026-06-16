@@ -13,6 +13,11 @@ export {
     type HatchetOutboxBootstrap,
 } from './resolveHatchetOutboxBootstrap.js';
 export {
+    startHatchetOutboxWorkerApp,
+    type HatchetOutboxWorkerApp,
+    type StartHatchetOutboxWorkerAppOptions,
+} from './startHatchetOutboxWorkerApp.js';
+export {
     OUTBOX_DISPATCH_TASK_NAME,
     createOutboxDispatchTask,
     executeOutboxDispatch,

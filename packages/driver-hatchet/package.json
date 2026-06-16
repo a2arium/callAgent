@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-eventbus-nats": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
     "@hatchet-dev/typescript-sdk": "^1.24.2",
     "@prisma/client": "^7.4.0",

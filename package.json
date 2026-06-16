@@ -12,7 +12,7 @@
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
     "test": "NODE_OPTIONS='--max-old-space-size=8192 --no-warnings' node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "test:coverage": "NODE_OPTIONS='--max-old-space-size=8192 --no-warnings' COVERAGE=true node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
-    "hatchet:poc:up": "docker compose -f apps/hatchet-poc/docker-compose.yml up -d",
+    "hatchet:poc:up": "docker compose --project-directory apps/hatchet-poc -f apps/hatchet-poc/docker-compose.yml up -d",
     "verify:core-imports": "node scripts/verify-core-imports.mjs",
     "verify:publish-manifests": "node scripts/check-publish-manifests.mjs",
     "verify:packlists": "node scripts/check-packlists.mjs",
