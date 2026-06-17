@@ -334,15 +334,64 @@ Advanced: `recognize`, `enrich`, entity alignment — optional SQL adapter featu
 | **Handlers / tools outside the loop** | Library consumer pattern; must not bypass Learning for cognitive facts |
 | **Policy** | **Never** |
 
-### Bootstrap (normative target)
+### Bootstrap
 
-Every task context that needs durable memory should be initialized **once**, with the same stack:
+Every task context that needs durable memory should be initialized with:
 
-1. Resolve Prisma / SQL adapter (`@a2arium/callagent-memory-sql`).
-2. Attach `ctx.memory` with SQL semantic backend.
-3. Expose `recall` / `remember` only if explicitly needed (see [legacy](#deprecated-and-non-canonical-surfaces)).
+1. A SQL semantic adapter (`@a2arium/callagent-memory-sql` or equivalent).
+2. `ctx.memory` with `backends.sql` registered (alongside any optional MLO backend).
+3. `recall` / `remember` only if you explicitly need legacy MLO helpers (see [deprecated surfaces](#deprecated-and-non-canonical-surfaces)).
 
-Today, different entry points (`streamingRunner`, `restoreCtx`, `TaskExecutor`) may initialize memory differently. **Consolidation work must make bootstrap identical** — see [implementation alignment](#implementation-alignment-backlog).
+Top-level agents started via the streaming runner and child agents started via `ctx.sendTaskToAgent` should both end up with the same durable write capability.
+
+### Agent-to-agent (child) durable writes
+
+A child invoked through `ctx.sendTaskToAgent` gets its own `TaskContext`. Writes from that child reach `agent_memory_store` only when `ctx.memory.semantic.backends.sql` is present.
+
+**Writing from child Execution** (action-only loads and durable side effects — not for Policy):
+
+```ts
+// Explicit SQL backend (registry default is often `mlo`)
+await ctx.memory.semantic.set(key, record, { tags, backend: 'sql' });
+
+// High-level API — routes to SQL when `backends.sql` exists
+await ctx.memory.semantic.add({ id: key, value: record, tags });
+```
+
+Do not assume the default semantic backend is SQL. Use `backend: 'sql'` on low-level `set`/`get`, or use `add`.
+
+**Saving after an MCP or async tool**
+
+Execution may call `ctx.requestTool` in two ways. Choose explicitly:
+
+| Pattern | When to persist | Usage |
+| --- | --- | --- |
+| **Same turn (inline)** | Right after the tool returns, in the same `execution` call | `const result = await ctx.requestTool('mcp:server.tool', args, { awaitCompletion: true });` then `ctx.memory.semantic.set(...)` |
+| **Next loop turn** | After the inbox contains `tool.completed` | Turn 1: dispatch with `requestTool` (no `awaitCompletion`). Turn 2: read the tool result from the perception/inbox observation, then persist in `execution` or Learning |
+
+With the **next-loop** pattern, do not call persist logic immediately after turn-1 `requestTool` — that call returns before the tool finishes. The child task resumes after `await_tool`; use the same `ctx` (including memory) on the follow-up turn.
+
+Example — inline save:
+
+```ts
+const result = await ctx.requestTool(
+  'mcp:browser-use.navigate_and_extract',
+  args,
+  { awaitCompletion: true }
+);
+await ctx.memory.semantic.set(tipKey, toTipRecord(result), { tags, backend: 'sql' });
+```
+
+Example — next-turn save (sketch):
+
+```ts
+// Turn 1 — execution: dispatch only
+await ctx.requestTool('mcp:browser-use.navigate_and_extract', args);
+
+// Turn 2 — execution: observation carries tool.completed; read payload, then set
+const mcpResult = /* from observation / inbox in this turn */;
+await ctx.memory.semantic.set(tipKey, toTipRecord(mcpResult), { tags, backend: 'sql' });
+```
 
 ---
 
@@ -415,7 +464,7 @@ Full guide: [How-to: Use artifacts correctly](./7-how_to_use_artifacts_correctly
 
 ## Deprecated and non-canonical surfaces
 
-The following exist in code or old docs but are **not** part of the canonical model. New agents must not use them. Consolidation will remove or gate them.
+Do not use these in new agents:
 
 | Surface | Status | Use instead |
 | --- | --- | --- |
@@ -426,8 +475,7 @@ The following exist in code or old docs but are **not** part of the canonical mo
 | `ctx.goals` / `ctx.decisions` writing WM SQL directly | **Non-canonical** | Internal observations → Learning → `M` |
 | `ctx.recall` / `ctx.remember` (MLO) | **Legacy convenience** | `MemoryReader` / `MemoryWriter` + `ctx.memory.semantic` in loop agents |
 | `ctx.cognitive.*` | **Placeholder** | Loop modules + `M` |
-| MLO as default semantic backend | **Under review** | SQL adapter via `createMemoryRegistry` unless MLO is explicitly chosen |
-| `drafts/memory/*.md` consumer guides | **Stale** | This document + migrations |
+| MLO as default semantic backend | **Legacy** | Prefer SQL via `ctx.memory.semantic` with `backend: 'sql'` when persisting to `agent_memory_store` |
 
 ---
 
@@ -440,23 +488,6 @@ The following exist in code or old docs but are **not** part of the canonical mo
 5. **Selectors** — Policy reads views derived from `M`, not raw nested paths scattered in Policy.
 
 See [How-to: Test APLRET agents](./11-how_to_test_aplret_agents.md).
-
----
-
-## Implementation alignment backlog
-
-This document is **normative**. The codebase is not fully aligned yet. The next consolidation phase should:
-
-1. **Unify context bootstrap** — `streamingRunner`, `restoreCtx`, and `TaskExecutor` must use one memory initialization path (SQL `createMemoryRegistry` baseline; optional MLO behind explicit config).
-2. **Remove runtime `ctx.semantic`** — stop creating the legacy facade in `extendContextWithMemory`.
-3. **Remove direct `M` mutation from `ctx.episodic.add`** in `restoreCtx`.
-4. **Align `ctx.goals` / `ctx.decisions` / `ctx.thoughts`** — emit internal observations instead of writing parallel stores.
-5. **Sync `packages/memory-engine` duplicate types** — remove deprecated `vars`, `ctx.semantic`, mutable `ctx.world` from shadow `TaskContext`.
-6. **Update `0-aplret_contracts.md` pseudotype** — point to `loop/types.ts` and this document.
-7. **Archive or rewrite `drafts/memory/*`** — especially `semantic-memory.md` (`ctx.semantic` examples).
-8. **Reference agent examples** — demonstrate `MemoryWriter` for durable facts, not only direct `M` spread.
-
-Until these land, treat any behavior that contradicts this document as **legacy debt**, not guidance.
 
 ---
 

@@ -451,6 +451,8 @@ Anti-patterns (explicitly discouraged):
 
 The framework may provide `ctx.*` namespaces. They MUST NOT create a second cognitive truth.
 
+See [How-to: Use memory in APLRET](./18-how_to_use_memory_in_aplret.md) for durable store rules, `MemoryReader` / `MemoryWriter`, and deprecated `ctx.*` surfaces.
+
 ### Authoritative cognition
 
 - `MentalState` is authoritative
@@ -596,6 +598,8 @@ type EnvObservation<T> = {
 
 `MentalState` stores cognition, not transport details.
 
+Full normative guide: [How-to: Use memory in APLRET](./18-how_to_use_memory_in_aplret.md) (canonical shapes, `MemoryReader` / `MemoryWriter`, durable store, and deprecated surfaces). Runtime types: `packages/core/src/loop/types.ts`.
+
 ### Memory placement table
 
 | Concern                              | Recommended location                          | Why                                      |
@@ -682,15 +686,23 @@ Purpose: update cognition from normalized observations.
 Contract:
 
 ```ts
-learning(prevM, prevAction, observation, reward?) => M | Promise<M>
+learning(
+  prevM,
+  prevAction,
+  observation,
+  mem: MemoryReader,
+  writer: MemoryWriter,
+  reward?
+) => M | Promise<M>
 ```
 
 Rules:
 
 - only writer of `MentalState`
 - must return a new state
+- may use `mem` for async durable reads and `writer` for patches that merge into `M` and flush to the durable store (see [memory how-to](./18-how_to_use_memory_in_aplret.md))
 - may be async only to load artifacts or perform minimal cognition-related reads needed for the update
-- no external side effects
+- no external side effects (no direct `ctx.memory` calls from Learning module code)
 - should prefer compact, validated writes
 - SHOULD apply updates through **reducer-style** functions (e.g. `reducers.ts`) — one clear path per normalized observation kind — instead of long imperative mutation chains inline
 
