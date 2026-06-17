@@ -29,6 +29,16 @@ import { SessionManager } from './SessionManager.js';
 
 const log = logger.createLogger({ prefix: 'TaskExecutor' });
 
+type A2AParentLink = {
+    parentTenantId: string;
+    parentTaskId: string;
+    parentChildToken: string;
+};
+
+type A2AParentContext = TaskContext & {
+    __a2aParent?: A2AParentLink;
+};
+
 export type LoopOutcome = TurnOutcome;
 
 export type LoopOpts = {
@@ -376,10 +386,12 @@ export class TaskExecutor {
             ...consumedKeysFromSnapshot,
             ...consumedKeysFromRun,
         ]);
+        const a2aParent = (ctx as A2AParentContext).__a2aParent;
         const nextMeta = {
             ...prevMeta,
             turn: env.turn,
             budgets: loopOpts,
+            ...(a2aParent ? { a2aParent } : {}),
             ...(ctx.telemetry ? { telemetry: ctx.telemetry } : {})
         };
         if (consumedKeysFromRun.size > 0) {

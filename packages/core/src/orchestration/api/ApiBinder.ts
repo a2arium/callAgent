@@ -51,8 +51,15 @@ import type { IEventBus } from '../../public-types/eventbus/types.js';
 import { createBusEvent } from '../../eventbus/busEventHelpers.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
+import type { TaskState } from '../../shared/types/StreamingEvents.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
+
+const TERMINAL_CHILD_STATES: ReadonlySet<TaskState> = new Set(['completed', 'failed', 'canceled']);
+
+function isTerminalChildState(state: string | undefined): boolean {
+    return state === undefined || TERMINAL_CHILD_STATES.has(state as TaskState);
+}
 
 export interface ApiBinderDependencies {
     sessionManager: SessionManager;
@@ -401,26 +408,6 @@ export class ApiBinder {
             }
         ).__activeLoopInbox;
         if (inbox) {
-            const obs: EngineObservation = {
-                source: 'child',
-                kind: 'child.completed',
-                payload: {
-                    token,
-                    childTaskId: cleanChildResult.childTaskId,
-                    result: cleanChildResult.result,
-                    executionMetadata: cleanChildResult.executionMetadata,
-                },
-                provenance: {
-                    ts: Date.now(),
-                    turn: minimalCtx.__activeLoopEnv?.turn ?? 0,
-                    id: token,
-                    correlationId: token,
-                },
-            };
-
-            inbox.current.push(obs);
-            inbox.all.push(obs);
-
             const loopEnv = minimalCtx.__activeLoopEnv;
             if (loopEnv?.pending?.children) {
                 loopEnv.pending.children[token] = {
@@ -429,7 +416,35 @@ export class ApiBinder {
                 };
             }
 
-            log.debug('✅ SYNC CHILD: Injected completion into active loop inbox', { token, awaitCompletion });
+            if (isTerminalChildState(cleanChildResult.executionMetadata?.state)) {
+                const obs: EngineObservation = {
+                    source: 'child',
+                    kind: 'child.completed',
+                    payload: {
+                        token,
+                        childTaskId: cleanChildResult.childTaskId,
+                        result: cleanChildResult.result,
+                        executionMetadata: cleanChildResult.executionMetadata,
+                    },
+                    provenance: {
+                        ts: Date.now(),
+                        turn: minimalCtx.__activeLoopEnv?.turn ?? 0,
+                        id: token,
+                        correlationId: token,
+                    },
+                };
+
+                inbox.current.push(obs);
+                inbox.all.push(obs);
+
+                log.debug('✅ SYNC CHILD: Injected completion into active loop inbox', { token, awaitCompletion });
+            } else {
+                log.debug('SYNC CHILD: Child is still active; pending without completion injection', {
+                    token,
+                    awaitCompletion,
+                    state: cleanChildResult.executionMetadata?.state,
+                });
+            }
         } else if (awaitCompletion) {
             await deps.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
         }

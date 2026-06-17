@@ -1,6 +1,6 @@
 import type { TaskContext, TaskInput } from '../shared/types/index.js';
 import { LoopRegistry } from './LoopRegistry.js';
-import type { TaskStatus } from '../shared/types/StreamingEvents.js';
+import type { TaskState, TaskStatus } from '../shared/types/StreamingEvents.js';
 import { Artifact } from '../shared/types/index.js'; // Explicitly import Memory Artifact for usage
 import { createInMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
 import type { IEventBus } from '../public-types/eventbus/types.js';
@@ -110,6 +110,41 @@ const log = logger.createLogger({ prefix: 'TaskEngine' });
 
 const delay = (ms: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+type A2AParentLink = {
+    parentTenantId: string;
+    parentTaskId: string;
+    parentChildToken: string;
+};
+
+type A2AChildContext = TaskContext & {
+    __a2aParent?: A2AParentLink;
+    __a2aParentNotified?: boolean;
+};
+
+const A2A_TERMINAL_STATES: ReadonlySet<TaskState> = new Set(['completed', 'failed', 'canceled']);
+
+function isA2ATerminalTaskState(state: TaskState | undefined): boolean {
+    return state !== undefined && A2A_TERMINAL_STATES.has(state);
+}
+
+function readA2AParentLink(value: unknown): A2AParentLink | undefined {
+    if (value === null || typeof value !== 'object') {
+        return undefined;
+    }
+    const candidate = value as Record<string, unknown>;
+    const parentTenantId = candidate.parentTenantId;
+    const parentTaskId = candidate.parentTaskId;
+    const parentChildToken = candidate.parentChildToken;
+    if (
+        typeof parentTenantId === 'string' &&
+        typeof parentTaskId === 'string' &&
+        typeof parentChildToken === 'string'
+    ) {
+        return { parentTenantId, parentTaskId, parentChildToken };
+    }
+    return undefined;
+}
 
 type PendingConversationActivation = {
     params: ConversationActivateParams;
@@ -544,6 +579,32 @@ export class TaskEngine {
         return this.turnRunner.runTurn(params.ctx, params.turnParams, {
             initialM: params.initialM,
             snapshot: params.snapshot,
+        });
+    }
+
+    private async notifyA2AParentIfTerminal(
+        ctx: TaskContext,
+        task: TaskEntity,
+        childAgentId?: string
+    ): Promise<void> {
+        if (!isA2ATerminalTaskState(task.status?.state)) {
+            return;
+        }
+
+        const childCtx = ctx as A2AChildContext;
+        const parent = childCtx.__a2aParent;
+        if (!parent || childCtx.__a2aParentNotified) {
+            return;
+        }
+
+        childCtx.__a2aParentNotified = true;
+        await this.handleChildCompleted({
+            tenantId: parent.parentTenantId,
+            parentTaskId: parent.parentTaskId,
+            childToken: parent.parentChildToken,
+            childTaskId: task.id,
+            result: task,
+            childAgentId,
         });
     }
 
@@ -1138,6 +1199,12 @@ export class TaskEngine {
                 // Persist provenance into snapshot meta so it is saved and available on resume
                 const metaObj = (baseSnap.meta as Record<string, unknown>) || {};
                 metaObj.manifestProvenance = manifestProvenance;
+                baseSnap.meta = metaObj;
+            }
+            const a2aParent = (ctx as A2AChildContext).__a2aParent;
+            if (a2aParent) {
+                const metaObj = (baseSnap.meta as Record<string, unknown>) || {};
+                metaObj.a2aParent = a2aParent;
                 baseSnap.meta = metaObj;
             }
             let M: MentalState = (baseSnap as Record<string, unknown>).M as MentalState || initialM(ctx);
@@ -1854,6 +1921,7 @@ export class TaskEngine {
      */
     async handleToolCompleted(params: { tenantId: string; taskId: string; token: string; result: unknown }): Promise<void> {
         const { tenantId, taskId, token, result } = params;
+        await this.runTaskSessionExclusive(tenantId, taskId, async () => {
         const snap = await this.sessionManager?.load(tenantId, taskId);
         if (!snap) return;
         const base = (snap.snapshot as Record<string, unknown>) || {};
@@ -1905,26 +1973,13 @@ export class TaskEngine {
             }
         }
 
-        // Check if there's an active loop
-        const activeCtx = LoopRegistry.__activeLoopContexts?.get(taskId);
-
-        // ✅ FIX: If the original runLoop is still active, inject the tool result
-        // into its inbox and let the loop's await_tool→continue logic handle it.
-        // Do NOT start a redundant runTurn which creates a fresh context lacking
-        // the original streaming transport, leading to process hangs.
-        if (activeCtx) {
-            log.debug('handleToolCompleted: Active loop exists, injecting into inbox only', { taskId, token });
-            try {
-                const activeInbox = (activeCtx as any).__activeLoopInbox;
-                if (activeInbox) {
-                    activeInbox.current.push(toolObservation);
-                    activeInbox.all.push(toolObservation);
-                }
-            } catch { /* best-effort */ }
-            return;
+        // Auto-resume one loop turn to consume the tool result. The per-task mutex
+        // serializes this with any still-active turn; relying only on LoopRegistry
+        // can leave completed async tools staged but never consumed after await_tool.
+        if (LoopRegistry.__activeLoopContexts?.has(taskId)) {
+            log.debug('handleToolCompleted: Active loop exists; durable resume will wait for task lock', { taskId, token });
         }
 
-        // No active loop — auto-resume one loop turn to consume the tool result
         try {
             const agentName = (snap as any)?.agentId;
             const ctx = this.createContext({ id: taskId, input: {} });
@@ -1932,12 +1987,17 @@ export class TaskEngine {
 
             // Use 'next' directly - it's the snapshot we just saved with the observation
             const baseNow = next as Record<string, unknown>;
+            const a2aParent = readA2AParentLink(
+                (baseNow as { meta?: { a2aParent?: unknown } }).meta?.a2aParent
+            );
+            if (a2aParent) {
+                (ctx as A2AChildContext).__a2aParent = a2aParent;
+            }
             const M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
 
-            const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
-                this.runPreparedTurnThroughDriver({
+            const taskResult = await this.runPreparedTurnThroughDriver({
                     operation: 'resume',
                     tenantId,
                     taskId,
@@ -1955,11 +2015,12 @@ export class TaskEngine {
                     },
                     initialM: M,
                     snapshot: baseNow,
-                })
-            );
+                });
+            await this.notifyA2AParentIfTerminal(ctx, taskResult, agentName);
             // Note: TurnRunner.runTurn already publishes the completion event via eventBus,
             // so we don't need to publish again here.
         } catch { /* ignore resume errors */ }
+        });
     }
 
     /**
