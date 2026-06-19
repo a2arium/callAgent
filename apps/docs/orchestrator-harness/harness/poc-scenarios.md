@@ -215,6 +215,20 @@ Expected:
 
 Gates: B5, B6, B7, D3.
 
+Phase 2 signoff:
+
+```text
+start phase2-parent-agent in Hatchet mode
+parent delegates to phase2-loop-agent
+open GET /tasks/:taskId/run-graph
+confirm one root AgentRun, one child AgentRun, and one completed delegates_to edge
+```
+
+Result: signed off on 2026-06-19 with `phase2-parent-agent` ->
+`phase2-loop-agent`. The graph showed the root and child completed, a single
+completed edge, `task.child_started` / `task.child_completed` operator events,
+and turn/effect debug rows.
+
 ## Scenario 7 — upgrade and retention (production gate)
 
 Purpose: validate operational readiness.

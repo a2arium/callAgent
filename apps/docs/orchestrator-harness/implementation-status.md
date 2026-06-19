@@ -1,10 +1,10 @@
 # Implementation Status
 
-Last updated: 2026-06-18.
+Last updated: 2026-06-19.
 
 ## Stage
 
-**Phase 2 durable loop + first operator graph slice implemented** — Hatchet-backed
+**Phase 2 durable loop + operator graph slice signed off** — Hatchet-backed
 `aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
 parent workflows exist behind driver-surface flags. The runtime now exposes a
 projection-backed operator `AgentRunGraph` API so users can inspect agents, child
@@ -12,9 +12,13 @@ calls, turns, effects, events/log groups, TurnTrace refs, and raw Hatchet ids
 without reading `aplret.*` workflow names.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
-The remaining UX hardening is durable normalized graph persistence
-(`agent_runs`, `agent_run_edges`, `turn_runs`, `effect_runs`) and a real operator
-viewer. Hatchet UI grouping is useful debug scaffolding, not the product surface.
+The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
+delegates to `phase2-loop-agent` in Hatchet mode and the graph renders one root
+agent node, one child agent node, one completed `delegates_to` edge, grouped
+child events, turn details, and hidden debug effect rows. The remaining UX
+hardening is durable normalized graph persistence (`agent_runs`,
+`agent_run_edges`, `turn_runs`, `effect_runs`) and a real operator viewer.
+Hatchet UI grouping is useful debug scaffolding, not the product surface.
 
 This workspace was created after the research outcomes in
 `apps/docs/drafts/orchestrator-substrate-requirements.md` (§13). Hatchet is the
@@ -181,13 +185,17 @@ first POC candidate.
     `AgentRunEdge`, `TurnRun`, `EffectRun`, and grouped `AgentRunEvent`
     projection from existing runtime data.
   - `GET /tasks/:taskId/run-graph` — JSON/API signoff surface.
+  - `apps/examples/phase2-parent-agent` — canonical parent DAG signoff agent
+    that calls `phase2-loop-agent`.
   - Hatchet metadata normalized around `agent.run`, `turn.segment`, and
     `effect.outbox.dispatch`, with `rootTaskId` where available.
   - Known registered agents can register `agent.<agentId>` parent workflows;
     `aplret.task` remains the fallback.
-  - Remaining hardening: persist normalized graph records and durable
-    `boundary.kind` / `turnTraceId` references rather than reconstructing them
-    from mixed JSON sources.
+  - Phase 2 hardening persists graph-critical fields on `driver_runs`:
+    `rootTaskId`, parent/child ids, edge token/kind, turn sequence, boundary
+    kind, and TurnTrace id where available.
+  - Remaining hardening: persist normalized graph records rather than using
+    `driver_runs` as the bridge table.
 
 ## Production code changed
 
@@ -211,6 +219,12 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 - `packages/core/tests/runtime/*` — 29 tests (mapper, driver, wake applicator,
   segment executor, bootstrap, Scenario 0 parity, driver routing).
+- `apps/examples/phase2-parent-agent/tests/parentAgent.test.ts` — parent DAG
+  regression coverage for loop-mode input normalization and completion after
+  awaited child delegation.
+- `packages/core/tests/operator.runGraph.test.ts` — operator graph projection,
+  durable turn fields, completed child edge projection, and stale parent-row
+  status derivation.
 - `TaskEngine.sync`, `TaskEngine.inbox`, `TaskEngine.async_race` — pass with
   driver-routed call sites.
 - All `packages/core/tests/TaskEngine*` suites — pass (151 tests).
@@ -218,11 +232,10 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Phase 1 code + D5 + manual B5–B7 signoff are done. Next: Phase 2 durable
-`aplret.task` loop (requires durable dedupe ADR 0005, per-effect idempotency ADR 0009,
-full worker bootstrap, and the operator-UI run-grouping criterion). Carry forward two
-Phase 1 findings: group per-task work under the `aplret.task` parent run, and thread
-`agentId` into outbox-dispatch metadata / `driver_runs.agent_id`.
+Phase 2 is closed for the durable-loop/operator-graph slice. Next phase: turn the
+semantic graph into an operator viewer and graduate the bridge fields from
+`driver_runs` into normalized graph tables, while continuing the remaining POC
+scenarios for timers, cancellation, broader child fan-out/fan-in, and parity.
 
 ## Open questions (carried from requirements §11)
 

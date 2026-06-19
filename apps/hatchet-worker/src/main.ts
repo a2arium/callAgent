@@ -4,12 +4,16 @@ import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import { startHatchetRuntimeWorkerApp } from '@a2arium/callagent-driver-hatchet';
 import { registerPhase2LoopAgent } from '@a2arium/phase2-loop-agent';
+import { registerPhase2ParentAgent } from '@a2arium/phase2-parent-agent';
 
 loadNearestEnv();
 
 async function main(): Promise<void> {
     const app = await startHatchetRuntimeWorkerApp({
-        registerAgents: registerPhase2LoopAgent,
+        registerAgents: async () => {
+            await registerPhase2LoopAgent();
+            await registerPhase2ParentAgent();
+        },
     });
 
     const shutdown = async () => {

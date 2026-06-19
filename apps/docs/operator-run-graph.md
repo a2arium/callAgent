@@ -14,9 +14,10 @@ The product-level unit is an **Agent Run**, not a Hatchet workflow. Hatchet rema
 - where to find TurnTrace and raw backend IDs for debugging
 
 The current implementation exposes this as a projection over `driver_runs`,
-`wm_events`, snapshots, and available trace/span references. The durable target is
-normalized graph persistence so the operator view does not depend on JSON
-archaeology.
+`wm_events`, snapshots, and available trace/span references. Phase 2 persists the
+key graph fields directly on `driver_runs` as a lean durable index; the later
+normalized target is dedicated graph tables so the operator view does not depend
+on JSON archaeology.
 
 ## Model
 
@@ -138,8 +139,12 @@ Do not ask operators to interpret `aplret.*` names as the product model. They sh
 
 ## Persistence Direction
 
-The projection API is the first contract. The durable end state should persist
-enough normalized data to answer operator questions without parsing arbitrary JSON:
+The projection API is the first contract. Phase 2 already persists graph-critical
+fields on `driver_runs`: `rootTaskId`, parent/child task and agent ids, edge
+tokens/kinds, turn sequence, boundary kind, and TurnTrace ids where available.
+
+The durable end state should persist enough normalized data to answer operator
+questions without parsing arbitrary JSON:
 
 - `agent_runs`
 - `agent_run_edges`
@@ -147,8 +152,21 @@ enough normalized data to answer operator questions without parsing arbitrary JS
 - `effect_runs`
 - optionally `agent_run_events`
 
-`driver_runs` should remain the provider index and deep-link table. It should not
-be stretched into the product model.
+`driver_runs` remains the provider index and deep-link table. The Phase 2 columns
+are a hardening bridge, not the long-term product graph schema.
+
+## Phase 2 Signoff
+
+The parent-child DAG path is manually signed off with `phase2-parent-agent`
+delegating to `phase2-loop-agent` in Hatchet mode.
+
+Expected graph shape:
+
+- `root.agentId`: `phase2-parent-agent`
+- one child node with `agentId: "phase2-loop-agent"`
+- one `delegates_to` edge with `status: "completed"`
+- operator events `task.child_started` and `task.child_completed`
+- debug turn/effect rows available without exposing `aplret.*` as the product UI
 
 ## Acceptance
 

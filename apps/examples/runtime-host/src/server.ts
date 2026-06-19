@@ -26,12 +26,17 @@ async function main(): Promise<void> {
             registerPhase2LoopAgent,
         },
         {
+            PHASE2_PARENT_AGENT_ID,
+            registerPhase2ParentAgent,
+        },
+        {
             WorkingMemorySessionStore,
         },
     ] = await Promise.all([
         import('@a2arium/callagent-core'),
         import('./demoAgent.js'),
         import('@a2arium/phase2-loop-agent'),
+        import('@a2arium/phase2-parent-agent'),
         import('@a2arium/callagent-memory-sql'),
     ]);
 
@@ -66,6 +71,7 @@ async function main(): Promise<void> {
         registerAgents: async () => {
             await registerDemoAgent();
             await registerPhase2LoopAgent();
+            await registerPhase2ParentAgent();
         },
         taskEngine: {
             sessionStore,
@@ -90,6 +96,7 @@ async function main(): Promise<void> {
             ok: true,
             agentId: DEMO_AGENT_ID,
             phase2AgentId: PHASE2_LOOP_AGENT_ID,
+            phase2ParentAgentId: PHASE2_PARENT_AGENT_ID,
             rpc: '/rpc',
         });
     });
@@ -100,6 +107,7 @@ async function main(): Promise<void> {
         console.log(`RPC URL: http://${host}:${port}/rpc`);
         console.log(`Demo agent: ${DEMO_AGENT_ID}`);
         console.log(`Phase 2 loop agent: ${PHASE2_LOOP_AGENT_ID}`);
+        console.log(`Phase 2 parent agent: ${PHASE2_PARENT_AGENT_ID}`);
         console.log('Viewer: node apps/docs/streaming-harness/viewer/server.mjs');
     });
 

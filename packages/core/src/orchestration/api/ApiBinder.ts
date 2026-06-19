@@ -375,6 +375,22 @@ export class ApiBinder {
         childCallNode.endTime = Date.now();
         childCallNode.end(cleanChildResult.result, 'success');
         telemetry.endNode(childCallNode);
+        const childCompletedPayload = {
+            token,
+            agentId: agent,
+            childAgentId: agent,
+            childTaskId: cleanChildResult.childTaskId,
+            resultPreview:
+                cleanChildResult.result != null
+                    ? compactModuleOutput({ result: cleanChildResult.result })
+                    : undefined,
+        };
+        await deps.sessionManager.appendEvent(
+            tenantId,
+            sessionId,
+            'task.child_completed',
+            childCompletedPayload
+        );
         const a2aTel = readA2aResultTelemetry(result);
         if (iCtx.__turnChildCalls) {
             iCtx.__turnChildCalls.push({
