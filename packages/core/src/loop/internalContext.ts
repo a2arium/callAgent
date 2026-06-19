@@ -6,6 +6,20 @@ import type { TopicPostBackpressureSample } from '../internal/conversation/Backp
 import type { TurnUsage, ManifestProvenance, JsonValue } from '../types/turnTrace.js';
 import type { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 
+export type OperatorTurnTraceCapture = {
+    enabled?: boolean;
+    level?: 'summary' | 'full';
+};
+
+export type OperatorMemoryEvent = {
+    op: 'read' | 'write' | 'delete';
+    keys: string[];
+    backend?: string;
+    turnSeq?: number;
+    agentId?: string;
+    source: 'loop.memory' | 'context.memory';
+};
+
 /**
  * Internal extension of TaskContext used by the loop and stage facade.
  * Not exported publicly. Framework code that needs typed access to __activeLoopEnv,
@@ -136,6 +150,10 @@ export type InternalTaskContext = TaskContext & {
     __turnTraceCollector?: TurnTraceCollector;
     /** Session-level manifest provenance restored from snapshot/session metadata on every turn-entry path */
     __manifestProvenance?: ManifestProvenance;
+    /** Runtime-manifest observability settings used by operator event capture. */
+    __operatorTurnTraceCapture?: OperatorTurnTraceCapture;
+    /** Best-effort memory operation sink installed while a turn is active. */
+    __operatorMemoryEvent?: (event: OperatorMemoryEvent) => Promise<void> | void;
     /** True when the context has a real configured LLM and not only a fallback stub. */
     __llmConfigured?: boolean;
     /** Conversation delivery keys consumed by this run, persisted as an internal drain cursor. */

@@ -1,0 +1,249 @@
+import type { AgentRunGraph, AgentRunListItem, AgentRunNode, LlmCallRun, MemoryOperationRun, TurnRun } from '../types';
+import type { RuntimeStatus } from '../design/tokens';
+
+export type Thresholds = {
+  awaitInputMs: number;
+  awaitToolMs: number;
+  awaitChildMs: number;
+};
+
+export const defaultThresholds: Thresholds = {
+  awaitInputMs: 24 * 60 * 60 * 1000,
+  awaitToolMs: 10 * 60 * 1000,
+  awaitChildMs: 15 * 60 * 1000,
+};
+
+export type EnrichedStatus = {
+  status: RuntimeStatus;
+  runtimeStatus: string;
+  derived: boolean;
+  reason?: string;
+  waitDurationMs?: number;
+  thresholdMs?: number;
+  awaitType?: 'await_input' | 'await_tool' | 'await_child' | 'unknown';
+};
+
+export type GraphInsights = {
+  selectedNodeId?: string;
+  deepestFailedNodeId?: string;
+  failurePathNodeIds: string[];
+  failurePathEdgeIds: string[];
+  failedLeafCount: number;
+  hasPartialData: boolean;
+  summary: string;
+};
+
+export type NodeRollup = {
+  taskId: string;
+  turns: TurnRun[];
+  llmCalls: LlmCallRun[];
+  memoryOps: MemoryOperationRun[];
+  costUsd?: number;
+};
+
+export type FleetSummary = {
+  total: number;
+  failed: number;
+  waiting: number;
+  stuck: number;
+  completed: number;
+  costCaptured: number;
+  costUnavailable: number;
+};
+
+export function normalizeRuntimeStatus(status: string | undefined): RuntimeStatus {
+  switch ((status ?? '').toLowerCase()) {
+    case 'queued':
+      return 'queued';
+    case 'running':
+      return 'running';
+    case 'completed':
+    case 'success':
+    case 'succeeded':
+      return 'completed';
+    case 'failed':
+    case 'error':
+      return 'failed';
+    case 'canceled':
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return 'unknown';
+  }
+}
+
+export function deriveStatus(input: {
+  status?: string;
+  updatedAt?: string;
+  finishedAt?: string;
+  turns?: TurnRun[];
+  now?: Date;
+  thresholds?: Thresholds;
+}): EnrichedStatus {
+  const runtimeStatus = input.status ?? 'unknown';
+  const normalized = normalizeRuntimeStatus(runtimeStatus);
+  if (normalized !== 'running' && normalized !== 'queued') {
+    return { status: normalized, runtimeStatus, derived: false };
+  }
+  const waitingTurn = [...(input.turns ?? [])]
+    .reverse()
+    .find((turn) => turn.boundaryKind === 'await_input' || turn.boundaryKind === 'await_tool' || turn.boundaryKind === 'await_child');
+  if (!waitingTurn) {
+    return { status: normalized, runtimeStatus, derived: false };
+  }
+  const awaitType = waitingTurn.boundaryKind as EnrichedStatus['awaitType'];
+  const thresholds = input.thresholds ?? defaultThresholds;
+  const thresholdMs =
+    awaitType === 'await_input'
+      ? thresholds.awaitInputMs
+      : awaitType === 'await_tool'
+        ? thresholds.awaitToolMs
+        : thresholds.awaitChildMs;
+  const anchor = waitingTurn.cognition?.timings?.finishedAt;
+  const anchorText = typeof anchor === 'string' ? anchor : input.finishedAt ?? input.updatedAt;
+  const waitDurationMs = durationSince(anchorText, input.now ?? new Date());
+  if (typeof waitDurationMs === 'number' && waitDurationMs > thresholdMs) {
+    return {
+      status: 'stuck',
+      runtimeStatus,
+      derived: true,
+      reason: 'Waiting longer than configured threshold',
+      waitDurationMs,
+      thresholdMs,
+      awaitType,
+    };
+  }
+  return {
+    status: 'waiting',
+    runtimeStatus,
+    derived: true,
+    reason: 'Latest known boundary is an await state',
+    waitDurationMs,
+    thresholdMs,
+    awaitType,
+  };
+}
+
+export function deriveFleetSummary(rows: AgentRunListItem[]): FleetSummary {
+  return rows.reduce<FleetSummary>(
+    (summary, row) => {
+      const status = normalizeRuntimeStatus(row.status);
+      summary.total += 1;
+      if (status === 'failed') summary.failed += 1;
+      if (status === 'completed') summary.completed += 1;
+      if (status === 'running') summary.waiting += 1;
+      if (typeof row.costUsd === 'number') summary.costCaptured += 1;
+      else summary.costUnavailable += 1;
+      return summary;
+    },
+    { total: 0, failed: 0, waiting: 0, stuck: 0, completed: 0, costCaptured: 0, costUnavailable: 0 }
+  );
+}
+
+export function deriveGraphInsights(graph: AgentRunGraph | undefined): GraphInsights {
+  if (!graph) {
+    return {
+      failurePathNodeIds: [],
+      failurePathEdgeIds: [],
+      failedLeafCount: 0,
+      hasPartialData: false,
+      summary: 'Select a run to inspect its execution graph.',
+    };
+  }
+  const childrenByParent = new Map<string, AgentRunNode[]>();
+  for (const node of graph.nodes) {
+    if (!node.parentTaskId) continue;
+    const children = childrenByParent.get(node.parentTaskId) ?? [];
+    children.push(node);
+    childrenByParent.set(node.parentTaskId, children);
+  }
+  const failedNodes = graph.nodes.filter((node) => normalizeRuntimeStatus(node.status) === 'failed');
+  const failedLeaves = failedNodes.filter((node) => !hasFailedDescendant(node.taskId, childrenByParent));
+  const deepest = [...failedLeaves].sort((a, b) => depthOf(b, graph.nodes) - depthOf(a, graph.nodes))[0] ?? failedNodes[0];
+  const pathNodeIds = deepest ? pathToRoot(deepest.taskId, graph.nodes) : [];
+  const pathEdgeIds = graph.edges
+    .filter((edge) => edge.childTaskId !== undefined && pathNodeIds.includes(edge.parentTaskId) && pathNodeIds.includes(edge.childTaskId))
+    .map((edge) => edge.id);
+  const hasPartialData = graph.nodes.length === 0 || graph.nodes.some((node) => normalizeRuntimeStatus(node.status) === 'unknown');
+  const selectedNodeId = deepest?.id ?? graph.root.id;
+  const summary = buildGraphSummary(graph, deepest, pathNodeIds, hasPartialData);
+  return {
+    selectedNodeId,
+    deepestFailedNodeId: deepest?.id,
+    failurePathNodeIds: pathNodeIds,
+    failurePathEdgeIds: pathEdgeIds,
+    failedLeafCount: failedLeaves.length,
+    hasPartialData,
+    summary,
+  };
+}
+
+export function buildNodeRollup(graph: AgentRunGraph, taskId: string): NodeRollup {
+  const turns = graph.turns.filter((turn) => turn.taskId === taskId);
+  const llmCalls = turns.flatMap((turn) => turn.llmCalls ?? []);
+  const memoryOps = graph.memoryOps.filter((op) => op.taskId === taskId || op.agentId === graph.nodes.find((node) => node.taskId === taskId)?.agentId);
+  const costUsd = llmCalls.reduce<number | undefined>((sum, call) => {
+    const value = typeof call.costUsd === 'number' ? call.costUsd : typeof call.cost === 'number' ? call.cost : undefined;
+    if (typeof value !== 'number') return sum;
+    return (sum ?? 0) + value;
+  }, undefined);
+  return { taskId, turns, llmCalls, memoryOps, costUsd };
+}
+
+export function getNodeById(graph: AgentRunGraph | undefined, nodeId: string | undefined): AgentRunNode | undefined {
+  if (!graph) return undefined;
+  if (!nodeId) return graph.root;
+  return graph.nodes.find((node) => node.id === nodeId || node.taskId === nodeId);
+}
+
+function durationSince(value: string | undefined, now: Date): number | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return now.getTime() - date.getTime();
+}
+
+function hasFailedDescendant(taskId: string, childrenByParent: Map<string, AgentRunNode[]>): boolean {
+  const children = childrenByParent.get(taskId) ?? [];
+  return children.some((child) => normalizeRuntimeStatus(child.status) === 'failed' || hasFailedDescendant(child.taskId, childrenByParent));
+}
+
+function depthOf(node: AgentRunNode, nodes: AgentRunNode[]): number {
+  const byTask = new Map(nodes.map((candidate) => [candidate.taskId, candidate]));
+  let depth = 0;
+  let current = node;
+  while (current.parentTaskId) {
+    const parent = byTask.get(current.parentTaskId);
+    if (!parent) break;
+    current = parent;
+    depth += 1;
+  }
+  return depth;
+}
+
+function pathToRoot(taskId: string, nodes: AgentRunNode[]): string[] {
+  const byTask = new Map(nodes.map((node) => [node.taskId, node]));
+  const path: string[] = [];
+  let current = byTask.get(taskId);
+  while (current) {
+    path.unshift(current.taskId);
+    current = current.parentTaskId ? byTask.get(current.parentTaskId) : undefined;
+  }
+  return path;
+}
+
+function buildGraphSummary(graph: AgentRunGraph, deepest: AgentRunNode | undefined, pathNodeIds: string[], hasPartialData: boolean): string {
+  if (deepest) {
+    const leaf = deepest.agentId ?? deepest.taskId;
+    const root = graph.root.agentId ?? graph.root.taskId;
+    if (pathNodeIds.length > 1) {
+      return `Failed in ${leaf}. The failure propagated to ${root}.`;
+    }
+    return `Failed in ${leaf}.`;
+  }
+  if (hasPartialData) return 'This run has partial data. The graph shows known agent nodes only.';
+  if (normalizeRuntimeStatus(graph.root.status) === 'completed') {
+    return 'Run completed. Healthy branches are collapsed by default.';
+  }
+  return 'Run data loaded. Select an agent node to inspect turns, LLM calls, memory operations, and links.';
+}

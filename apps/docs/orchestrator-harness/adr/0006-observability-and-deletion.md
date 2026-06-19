@@ -26,10 +26,23 @@ Link the layers with:
 - a local `driver_runs` table for exact joins and deep links.
 - semantic graph records or projections: `AgentRun`, `AgentRunEdge`, `TurnRun`,
   `EffectRun`, and grouped events/logs.
+- compact operator events in existing `wm_events`:
+  - `turn.completed` for turn stage, decision, shield, transition, timings,
+    usage, LLM metadata, child summaries, and trace/span references;
+  - `memory.read`, `memory.write`, `memory.delete` for memory operation keys,
+    backend, agent, turn, trace, and span.
 
 `driver_runs` is the provider/backend index. It must not become the product model.
 The operator graph answers user questions in agent vocabulary and hides
 `aplret.segment` / `aplret.outbox.dispatch` behind debug details.
+
+The operator event taxonomy is deliberately compact. `wm_events` may store
+summaries and identifiers, but not raw LLM prompts/responses or raw memory
+values. `observability.turnTrace.enabled` gates capture. `summary` is the
+default level; `full` may include larger previews, but still applies truncation
+and remains unsuitable for long-term prompt/value audit. Full cognition and
+prompt/response debugging should deep-link to external trace systems such as
+Opik.
 
 Outbox migration uses one authoritative delivery path per event type:
 
@@ -48,8 +61,9 @@ Deletion policy:
 ## Consequences
 
 - Operators use the callAgent run graph first: agent status, input/output,
-  child calls, failures, TurnTrace, and logs/events. Hatchet is the linked
-  infrastructure/debug pane.
+  child calls, failures, compact turn cognition, LLM metadata, memory keys,
+  TurnTrace refs, and logs/events. Hatchet is the linked infrastructure/debug
+  pane.
 - Hatchet retention is operational history, not long-term audit.
 - Long-term audit and product UX require normalized graph persistence or an
   equivalent durable projection; reconstructing from arbitrary JSON payloads is
@@ -64,3 +78,6 @@ Deletion policy:
 - Operator graph validation verifies that a user can answer which agent ran,
   what it received/output, what child agents it called, what failed, and where
   the relevant TurnTrace/raw Hatchet run ids are.
+- Operator Experience validation verifies fleet filtering, DAG drill-down,
+  compact LLM cost/latency metadata, memory key timelines, and Hatchet/Opik
+  deep links without adding graph tables.

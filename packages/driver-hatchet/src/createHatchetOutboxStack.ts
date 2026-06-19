@@ -76,11 +76,15 @@ export async function startOutboxWorker(params: {
         });
         const agentTasks = globalAgentRegistry
             .listAgents()
-            .map((agent) => createTaskTask(hatchet, { prisma: params.prisma }, agentTaskName(agent.name)));
+            .map((agent) => createTaskTask(
+                hatchet,
+                { prisma: params.prisma, driverRuns },
+                agentTaskName(agent.name)
+            ));
         await worker.registerWorkflows([
             outboxDispatchTask,
             createSegmentTask(hatchet, { turnExecutor: params.turnExecutor, driverRuns }),
-            createTaskTask(hatchet, { prisma: params.prisma }),
+            createTaskTask(hatchet, { prisma: params.prisma, driverRuns }),
             ...agentTasks,
         ]);
         return { worker };

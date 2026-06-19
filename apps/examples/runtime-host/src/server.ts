@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
+import { loadWorkspaces } from '@a2arium/callagent-core';
 import type { IEventBus } from '@a2arium/callagent-core';
 import type { HatchetOutboxBootstrap } from '@a2arium/callagent-driver-hatchet';
 
@@ -72,6 +73,7 @@ async function main(): Promise<void> {
             await registerDemoAgent();
             await registerPhase2LoopAgent();
             await registerPhase2ParentAgent();
+            await loadWorkspaces();
         },
         taskEngine: {
             sessionStore,
@@ -98,8 +100,35 @@ async function main(): Promise<void> {
             phase2AgentId: PHASE2_LOOP_AGENT_ID,
             phase2ParentAgentId: PHASE2_PARENT_AGENT_ID,
             rpc: '/rpc',
+            operatorViewer: '/operator',
         });
     });
+    const serverDir = dirname(fileURLToPath(import.meta.url));
+    const operatorViewerDist = [
+        process.env.OPERATOR_VIEWER_DIST,
+        join(process.cwd(), 'apps/operator-viewer/dist'),
+        join(serverDir, '../../../operator-viewer/dist'),
+    ].find((candidate): candidate is string =>
+        typeof candidate === 'string' && existsSync(join(candidate, 'index.html'))
+    );
+    app.get('/operator-config', (_req, res) => {
+        res.json({
+            hatchetDashboardUrl: process.env.HATCHET_DASHBOARD_URL ?? 'http://127.0.0.1:8080',
+            hatchetDashboardTenantId: process.env.HATCHET_DASHBOARD_TENANT_ID ??
+                '707d0855-80ab-4e1f-a156-f1c4546cbf52',
+            opikDashboardUrl: process.env.OPIK_DASHBOARD_URL,
+            environment: process.env.OPERATOR_ENVIRONMENT ?? 'local-dev',
+        });
+    });
+    if (operatorViewerDist !== undefined) {
+        app.use('/operator', express.static(operatorViewerDist));
+        app.get('/operator', (_req, res) => {
+            res.redirect('/operator/');
+        });
+        app.get(/^\/operator\/.*/, (_req, res) => {
+            res.sendFile(join(operatorViewerDist, 'index.html'));
+        });
+    }
     app.use('/', createApiRouter());
 
     const server = app.listen(port, host, () => {
@@ -108,7 +137,11 @@ async function main(): Promise<void> {
         console.log(`Demo agent: ${DEMO_AGENT_ID}`);
         console.log(`Phase 2 loop agent: ${PHASE2_LOOP_AGENT_ID}`);
         console.log(`Phase 2 parent agent: ${PHASE2_PARENT_AGENT_ID}`);
-        console.log('Viewer: node apps/docs/streaming-harness/viewer/server.mjs');
+        console.log(
+            operatorViewerDist
+                ? `Operator viewer: http://${host}:${port}/operator`
+                : 'Operator viewer: not built (run yarn workspace @a2arium/operator-viewer build)'
+        );
     });
 
     const shutdown = async () => {

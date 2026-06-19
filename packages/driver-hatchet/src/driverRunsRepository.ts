@@ -26,6 +26,16 @@ export type DriverRunRecord = {
     turnTraceId?: string | null;
 };
 
+export type FinalizeRootRunRecord = {
+    tenantId: string;
+    taskId: string;
+    status: string;
+    agentId?: string | null;
+    traceId?: string | null;
+    boundaryKind?: string | null;
+    turnTraceId?: string | null;
+};
+
 export class DriverRunsRepository {
     constructor(private readonly prisma: PrismaClient) {}
 
@@ -75,6 +85,27 @@ export class DriverRunsRepository {
                 edgeToken: record.edgeToken ?? undefined,
                 edgeKind: record.edgeKind ?? undefined,
                 turnSeq: record.turnSeq ?? undefined,
+                boundaryKind: record.boundaryKind ?? undefined,
+                turnTraceId: record.turnTraceId ?? undefined,
+                updatedAt: new Date(),
+            },
+        });
+    }
+
+    async finalizeRootRun(record: FinalizeRootRunRecord): Promise<void> {
+        await this.prisma.driverRun.updateMany({
+            where: {
+                tenantId: record.tenantId,
+                operation: { in: ['agent.run', 'task.start'] },
+                OR: [
+                    { taskId: record.taskId },
+                    { rootTaskId: record.taskId },
+                ],
+            },
+            data: {
+                status: record.status,
+                agentId: record.agentId ?? undefined,
+                traceId: record.traceId ?? undefined,
                 boundaryKind: record.boundaryKind ?? undefined,
                 turnTraceId: record.turnTraceId ?? undefined,
                 updatedAt: new Date(),

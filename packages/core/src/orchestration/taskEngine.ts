@@ -57,7 +57,7 @@ import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentPlugin } from '../plugin/types.js';
 import { resolveManifestProvenance } from '../telemetry/manifestProvenance.js';
 import type { ManifestProvenance, ManifestSource } from '../types/turnTrace.js';
-import type { InternalTaskContext } from '../loop/internalContext.js';
+import type { InternalTaskContext, OperatorTurnTraceCapture } from '../loop/internalContext.js';
 import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
 import { createMemoryRegistry } from '@a2arium/callagent-memory-engine';
 import { ArtifactImpl, isArtifactMarker, type ArtifactMarker } from '@a2arium/callagent-memory-engine';
@@ -152,6 +152,119 @@ function readA2AParentLink(value: unknown): A2AParentLink | undefined {
     return undefined;
 }
 
+function encodeAgentRunCursor(cursor: AgentRunCursor): string {
+    return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeAgentRunCursor(value: string | undefined): AgentRunCursor | undefined {
+    if (value === undefined || value.length === 0) {
+        return undefined;
+    }
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown;
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return undefined;
+        }
+        const record = parsed as Record<string, unknown>;
+        return typeof record.createdAt === 'string' && typeof record.id === 'string'
+            ? { createdAt: record.createdAt, id: record.id }
+            : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function clampAgentRunLimit(limit: number | undefined): number {
+    if (limit === undefined || !Number.isFinite(limit)) {
+        return 50;
+    }
+    return Math.max(1, Math.min(100, Math.trunc(limit)));
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function numberFromPayload(payload: Record<string, unknown>, key: string): number | undefined {
+    const value = payload[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function taskIdForRun(row: DriverRunView): string | undefined {
+    return row.rootTaskId ?? row.taskId ?? undefined;
+}
+
+function deriveListRunStatus(
+    rootRun: DriverRunListRow,
+    relatedRuns: DriverRunListRow[],
+    turnEvents: WMEventRow[]
+): string {
+    if (turnEvents.some((event) => event.type === 'task.failed')) {
+        return 'failed';
+    }
+    if (turnEvents.some((event) => event.type === 'task.completed')) {
+        return 'completed';
+    }
+
+    const latestTurnCompleted = [...turnEvents].reverse().find((event) => event.type === 'turn.completed');
+    if (latestTurnCompleted !== undefined && eventHasOkFalse(latestTurnCompleted.payload)) {
+        return 'failed';
+    }
+
+    const terminalSegment = [...relatedRuns]
+        .reverse()
+        .find((run) => run.operation === 'turn.segment' && run.boundaryKind !== null && run.boundaryKind !== undefined);
+    if (terminalSegment?.boundaryKind === 'fail' || normalizeListRunStatus(terminalSegment?.status) === 'failed') {
+        return 'failed';
+    }
+    if (terminalSegment?.boundaryKind === 'complete') {
+        return 'completed';
+    }
+
+    const rootStatus = normalizeListRunStatus(rootRun.status);
+    if (rootStatus !== 'unknown' && rootStatus !== 'queued') {
+        return rootStatus;
+    }
+    if (turnEvents.some((event) => event.type === 'task.started')) {
+        return 'running';
+    }
+    return rootStatus;
+}
+
+function normalizeListRunStatus(status: string | null | undefined): string {
+    switch ((status ?? '').toLowerCase()) {
+        case 'success':
+        case 'succeeded':
+        case 'complete':
+        case 'completed':
+            return 'completed';
+        case 'error':
+        case 'failed':
+        case 'failure':
+            return 'failed';
+        case 'running':
+        case 'active':
+            return 'running';
+        case 'queued':
+        case 'pending':
+            return 'queued';
+        default:
+            return 'unknown';
+    }
+}
+
+function eventHasOkFalse(payload: unknown): boolean {
+    if (!isRecordValue(payload)) {
+        return false;
+    }
+    const transition = payload.transition;
+    if (!isRecordValue(transition)) {
+        return false;
+    }
+    const result = transition.result;
+    return isRecordValue(result) && result.ok === false;
+}
+
 type PendingConversationActivation = {
     params: ConversationActivateParams;
     waiters: Array<{
@@ -162,6 +275,66 @@ type PendingConversationActivation = {
 
 type WaitForBackgroundTasksOptions = {
     throwOnTimeout?: boolean;
+};
+
+export type AgentRunListItem = {
+    agentId?: string;
+    taskId: string;
+    rootTaskId: string;
+    status: string;
+    startedAt?: string;
+    finishedAt?: string;
+    durationMs?: number;
+    turns: number;
+    children: number;
+    llmCalls: number;
+    costUsd: number;
+    error?: unknown;
+    traceId?: string;
+    providerRunId?: string | null;
+};
+
+export type AgentRunListPage = {
+    items: AgentRunListItem[];
+    nextCursor?: string;
+};
+
+type AgentRunListParams = {
+    tenantId: string;
+    agentId?: string;
+    status?: string;
+    since?: string;
+    cursor?: string;
+    limit?: number;
+};
+
+type DriverRunListRow = DriverRunView & {
+    id: string;
+    createdAt: Date | string;
+    updatedAt: Date | string;
+};
+
+type WMEventRow = {
+    eventId: string;
+    sessionId: string;
+    seq: number;
+    type: string;
+    payload: Record<string, unknown>;
+    createdAt: Date | string;
+};
+
+type OperatorPrismaClient = {
+    driverRun?: {
+        findMany: (args: Record<string, unknown>) => Promise<DriverRunListRow[]>;
+    };
+    wMEvent?: {
+        findMany: (args: Record<string, unknown>) => Promise<WMEventRow[]>;
+    };
+};
+
+type AgentRunCursor = {
+    createdAt: string;
+    id: string;
 };
 
 /**
@@ -890,6 +1063,23 @@ export class TaskEngine {
         return (this.sessionManager as any)?.store?.prisma;
     }
 
+    async appendOperatorEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        type: string;
+        payload: Record<string, unknown>;
+    }): Promise<{ eventId: string; seq: number } | undefined> {
+        if (!this.sessionManager) {
+            return undefined;
+        }
+        return this.sessionManager.appendEvent(
+            params.tenantId,
+            params.sessionId,
+            params.type,
+            params.payload
+        );
+    }
+
     async buildAgentRunGraph(params: {
         tenantId: string;
         taskId: string;
@@ -939,6 +1129,190 @@ export class TaskEngine {
             driverRuns,
             events: sessionEvents,
         });
+    }
+
+    async listAgentRuns(params: AgentRunListParams): Promise<AgentRunListPage> {
+        const prisma = this.getSessionStorePrisma() as OperatorPrismaClient | undefined;
+        if (!prisma?.driverRun) {
+            return { items: [] };
+        }
+        const limit = clampAgentRunLimit(params.limit);
+        const cursor = decodeAgentRunCursor(params.cursor);
+        const where: Record<string, unknown> = {
+            tenantId: params.tenantId,
+            operation: { in: ['agent.run', 'task.start'] },
+        };
+        if (params.agentId !== undefined && params.agentId.length > 0) {
+            where.agentId = params.agentId;
+        }
+        if (params.since !== undefined && params.since.length > 0) {
+            const sinceDate = new Date(params.since);
+            if (!Number.isNaN(sinceDate.getTime())) {
+                where.createdAt = { gte: sinceDate };
+            }
+        }
+        if (cursor !== undefined) {
+            const cursorDate = new Date(cursor.createdAt);
+            if (!Number.isNaN(cursorDate.getTime())) {
+                where.OR = [
+                    { createdAt: { lt: cursorDate } },
+                    { createdAt: cursorDate, id: { lt: cursor.id } },
+                ];
+            }
+        }
+
+        const rows = await prisma.driverRun.findMany({
+            where,
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            take: limit + 1,
+        });
+        const pageRows = rows.slice(0, limit);
+        const rootTaskIds = [
+            ...new Set(
+                pageRows
+                    .map((row) => taskIdForRun(row))
+                    .filter((taskId): taskId is string => taskId !== undefined)
+            ),
+        ];
+        const relatedRuns = rootTaskIds.length > 0
+            ? await prisma.driverRun.findMany({
+                  where: {
+                      tenantId: params.tenantId,
+                      OR: [
+                          { rootTaskId: { in: rootTaskIds } },
+                          { taskId: { in: rootTaskIds } },
+                      ],
+                  },
+                  orderBy: [{ createdAt: 'asc' }],
+              })
+            : [];
+        const turnEvents = prisma.wMEvent && rootTaskIds.length > 0
+            ? await prisma.wMEvent.findMany({
+                  where: {
+                      tenantId: params.tenantId,
+                      sessionId: { in: rootTaskIds },
+                      type: { in: ['task.failed', 'task.completed', 'task.started', 'turn.completed'] },
+                  },
+                  orderBy: [{ createdAt: 'asc' }],
+              })
+            : [];
+
+        const runsByRoot = new Map<string, DriverRunListRow[]>();
+        for (const run of relatedRuns) {
+            const rootTaskId = taskIdForRun(run);
+            if (rootTaskId === undefined) {
+                continue;
+            }
+            const current = runsByRoot.get(rootTaskId) ?? [];
+            current.push(run);
+            runsByRoot.set(rootTaskId, current);
+        }
+        const turnEventsByRoot = new Map<string, WMEventRow[]>();
+        for (const event of turnEvents) {
+            const current = turnEventsByRoot.get(event.sessionId) ?? [];
+            current.push(event);
+            turnEventsByRoot.set(event.sessionId, current);
+        }
+
+        const items = pageRows
+            .map((row): AgentRunListItem | undefined => {
+                const rootTaskId = taskIdForRun(row);
+                if (rootTaskId === undefined) {
+                    return undefined;
+                }
+                const runs = runsByRoot.get(rootTaskId) ?? [];
+                const taskTurnEvents = turnEventsByRoot.get(rootTaskId) ?? [];
+                const completed = taskTurnEvents
+                    .map((event) => event.payload)
+                    .filter(isRecordValue);
+                const llmCalls = completed.reduce((count, payload) => {
+                    const calls = payload.llmCalls;
+                    return count + (Array.isArray(calls) ? calls.length : 0);
+                }, 0);
+                const costUsd = completed.reduce((sum, payload) => {
+                    const usage = payload.usage;
+                    if (!isRecordValue(usage)) {
+                        return sum;
+                    }
+                    return sum + (numberFromPayload(usage, 'totalCost') ?? 0);
+                }, 0);
+                const turns = runs.filter((run) => run.operation === 'turn.segment' || run.operation === 'segment').length ||
+                    taskTurnEvents.length;
+                const children = runs.filter((run) => run.edgeKind === 'delegates_to' || run.operation === 'child.dispatch').length;
+                const startedAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt;
+                const updatedAt = row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt;
+                const startedMs = new Date(startedAt).getTime();
+                const updatedMs = new Date(updatedAt).getTime();
+                const status = deriveListRunStatus(row, runs, taskTurnEvents);
+                const isTerminal = status === 'completed' || status === 'failed' || status === 'succeeded';
+                return {
+                    ...(row.agentId ? { agentId: row.agentId } : {}),
+                    taskId: row.taskId ?? rootTaskId,
+                    rootTaskId,
+                    status,
+                    startedAt,
+                    ...(isTerminal ? { finishedAt: updatedAt } : {}),
+                    ...(isTerminal && Number.isFinite(startedMs) && Number.isFinite(updatedMs)
+                        ? { durationMs: Math.max(0, updatedMs - startedMs) }
+                        : {}),
+                    turns,
+                    children,
+                    llmCalls,
+                    costUsd,
+                    ...(row.traceId ? { traceId: row.traceId } : {}),
+                    ...(row.providerRunId ? { providerRunId: row.providerRunId } : {}),
+                };
+            })
+            .filter((item): item is AgentRunListItem => item !== undefined)
+            .filter((item) => params.status === undefined || params.status.length === 0 || item.status === params.status);
+
+        const overflow = rows.length > limit ? rows[limit] : undefined;
+        return {
+            items,
+            ...(overflow
+                ? {
+                      nextCursor: encodeAgentRunCursor({
+                          createdAt: overflow.createdAt instanceof Date ? overflow.createdAt.toISOString() : overflow.createdAt,
+                          id: overflow.id,
+                      }),
+                  }
+                : {}),
+        };
+    }
+
+    async getAgentRunTurn(params: {
+        tenantId: string;
+        taskId: string;
+        turnSeq: number;
+    }) {
+        const graph = await this.buildAgentRunGraph({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+        });
+        return graph.turns.find((turn) => turn.turnSeq === params.turnSeq) ?? null;
+    }
+
+    async getAgentRunMemory(params: {
+        tenantId: string;
+        taskId: string;
+    }) {
+        const [graph, snapshot] = await Promise.all([
+            this.buildAgentRunGraph({ tenantId: params.tenantId, taskId: params.taskId }),
+            this.sessionManager?.load(params.tenantId, params.taskId) ?? Promise.resolve(null),
+        ]);
+        const state = snapshot?.snapshot;
+        const memory = isRecordValue(state)
+            ? isRecordValue(state.M)
+                ? state.M.memory
+                : state.memory
+            : undefined;
+        return {
+            taskId: params.taskId,
+            tenantId: params.tenantId,
+            agentId: snapshot?.agentId,
+            memory,
+            operations: graph.memoryOps,
+        };
     }
 
     // Persist a child's minimal context so durable handlers can restore it later
@@ -1245,6 +1619,11 @@ export class TaskEngine {
         const activeAgentId = (ctx as Record<string, unknown>).agentId as string | undefined || agentId;
         const plugin = activeAgentId ? PluginManager.findAgent(activeAgentId) : null;
         const manifestRunMode = plugin?.resolved.runtimeManifest.runMode;
+        const turnTrace = plugin?.resolved.runtimeManifest.observability?.turnTrace;
+        (ctx as InternalTaskContext).__operatorTurnTraceCapture = {
+            enabled: turnTrace?.enabled ?? true,
+            level: turnTrace?.level ?? 'summary',
+        } satisfies OperatorTurnTraceCapture;
         const runModeRaw = (ctx as Record<string, unknown>).runMode ?? manifestRunMode ?? 'loop';
         const runMode: 'loop' | 'legacy' = runModeRaw === 'legacy' ? 'legacy' : 'loop';
         try { log.debug('Task execution start', { runMode, agentId: activeAgentId }); } catch { }
@@ -1478,7 +1857,11 @@ export class TaskEngine {
             });
 
             // Append start event and publish status via outbox; reducer entrypoint
-            await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.started', { taskId: sessionId, traceparent });
+            await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.started', {
+                taskId: sessionId,
+                traceparent,
+                inputPreview: task.input,
+            });
             await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, { taskId: sessionId, status: { state: 'working', timestamp: new Date().toISOString() }, traceparent });
             // Emit initial working status locally too so CLI can see the taskId
             try {

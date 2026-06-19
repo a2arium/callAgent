@@ -11,6 +11,19 @@ projects task streams for web/chat/CLI clients.
 From the repo root:
 
 ```bash
+yarn runtime
+```
+
+This starts the runtime host, Hatchet worker, and operator dashboard together.
+Infra is still started separately:
+
+```bash
+yarn hatchet:poc:up
+```
+
+For host-only debugging, run:
+
+```bash
 yarn workspace @a2arium/runtime-host dev
 ```
 
@@ -20,6 +33,9 @@ The host prints:
 RPC URL: http://127.0.0.1:8790/rpc
 Demo agent: streaming-demo-agent
 ```
+
+External agent folders are configured through the workspace registry described
+in `apps/docs/workspaces-and-runtime.md`.
 
 Use that RPC URL in the temporary streaming viewer:
 

@@ -8,6 +8,7 @@ dist/
 .env
 .env.*
 !.env.example
+.callagent/workspaces.json
 
 # Logs
 logs/

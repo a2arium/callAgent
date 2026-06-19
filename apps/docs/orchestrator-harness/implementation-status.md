@@ -4,12 +4,14 @@ Last updated: 2026-06-19.
 
 ## Stage
 
-**Phase 2 durable loop + operator graph slice signed off** — Hatchet-backed
+**Phase 2 durable loop + Operator Experience track implemented** — Hatchet-backed
 `aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
 parent workflows exist behind driver-surface flags. The runtime now exposes a
 projection-backed operator `AgentRunGraph` API so users can inspect agents, child
 calls, turns, effects, events/log groups, TurnTrace refs, and raw Hatchet ids
-without reading `aplret.*` workflow names.
+without reading `aplret.*` workflow names. The product track now adds compact
+`wm_events` cognition capture, a fleet list API, memory/turn detail APIs, and a
+Vite/React operator viewer served at `/operator` by `runtime-host` when built.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
 The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
@@ -17,8 +19,8 @@ delegates to `phase2-loop-agent` in Hatchet mode and the graph renders one root
 agent node, one child agent node, one completed `delegates_to` edge, grouped
 child events, turn details, and hidden debug effect rows. The remaining UX
 hardening is durable normalized graph persistence (`agent_runs`,
-`agent_run_edges`, `turn_runs`, `effect_runs`) and a real operator viewer.
-Hatchet UI grouping is useful debug scaffolding, not the product surface.
+`agent_run_edges`, `turn_runs`, `effect_runs`) and operator actions once ADR 0010
+lands. Hatchet UI grouping is useful debug scaffolding, not the product surface.
 
 This workspace was created after the research outcomes in
 `apps/docs/drafts/orchestrator-substrate-requirements.md` (§13). Hatchet is the
@@ -66,6 +68,8 @@ first POC candidate.
 - `specs/composition-roots-scope.md` — which entry points use shared bootstrap.
 - `specs/child-completion-routing.md` — why `handleChildCompleted` stays on
   `executeTurn` until Phase 2.
+- `specs/operator-viewer.md` — operator viewer data sources, event taxonomy,
+  endpoints, SPA contract, and acceptance.
 - `../operator-run-graph.md` — permanent semantic operator graph contract.
 
 ## Production code added
@@ -197,6 +201,25 @@ first POC candidate.
   - Remaining hardening: persist normalized graph records rather than using
     `driver_runs` as the bridge table.
 
+- Operator Experience track:
+  - `observability.turnTrace.enabled/level` now gates compact operator capture.
+  - `turn.completed` events capture stage, decision, transition, timings, usage,
+    LLM metadata, child summaries, and trace/span refs into existing `wm_events`.
+  - `memory.read`, `memory.write`, and `memory.delete` events capture key-level
+    memory activity without storing memory values.
+  - `AgentRunGraph` now includes `memoryOps`, per-turn cognition, per-turn LLM
+    metadata, and memory operation timelines.
+  - `GET /agent-runs` lists root runs with tenant scoping, filters, and keyset
+    pagination over `driver_runs`.
+  - `GET /tasks/:taskId/turns/:turnSeq` and `GET /tasks/:taskId/memory` expose
+    read-only drill-down details.
+  - `driver_runs` has list-oriented indexes for tenant/time, tenant/agent/time,
+    and tenant/status/time.
+  - `apps/operator-viewer` is a Vite/React SPA with a virtualized fleet table,
+    React Flow DAG, turn/LLM/memory/effects drawers, and Hatchet/Opik deep links.
+  - `apps/examples/runtime-host` serves the built viewer at `/operator` when
+    `apps/operator-viewer/dist/index.html` (or `OPERATOR_VIEWER_DIST`) exists.
+
 ## Production code changed
 
 - `packages/core/src/orchestration/taskEngine.ts` — holds default
@@ -225,6 +248,7 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 - `packages/core/tests/operator.runGraph.test.ts` — operator graph projection,
   durable turn fields, completed child edge projection, and stale parent-row
   status derivation.
+- `yarn workspace @a2arium/operator-viewer build` — Vite/React viewer build.
 - `TaskEngine.sync`, `TaskEngine.inbox`, `TaskEngine.async_race` — pass with
   driver-routed call sites.
 - All `packages/core/tests/TaskEngine*` suites — pass (151 tests).
@@ -232,10 +256,9 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Phase 2 is closed for the durable-loop/operator-graph slice. Next phase: turn the
-semantic graph into an operator viewer and graduate the bridge fields from
-`driver_runs` into normalized graph tables, while continuing the remaining POC
-scenarios for timers, cancellation, broader child fan-out/fan-in, and parity.
+Next phase: verify the Operator Experience track with real Hatchet/in-process
+runs, then continue the remaining POC scenarios for timers, cancellation,
+broader child fan-out/fan-in, and parity. Normalized graph tables remain deferred.
 
 ## Open questions (carried from requirements §11)
 

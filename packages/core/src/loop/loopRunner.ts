@@ -24,8 +24,8 @@ import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
-import type { InternalTaskContext } from './internalContext.js';
-import type { TurnTrace, ManifestProvenance, TurnTimings } from '../types/turnTrace.js';
+import type { InternalTaskContext, OperatorMemoryEvent } from './internalContext.js';
+import type { TurnTrace, ManifestProvenance, TurnTimings, TurnUsage } from '../types/turnTrace.js';
 import { TurnTraceSchema } from '../types/turnTrace.js';
 import { summarizePending, aggregateUsage, compactModuleOutput } from '../telemetry/turnTraceHelpers.js';
 import { generateCorrelationId } from '../tracing/Tracing.js';
@@ -99,6 +99,205 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const asString = (value: unknown): string | undefined =>
     typeof value === 'string' ? value : undefined;
 
+type OperatorEventSink = {
+    appendOperatorEvent: (params: {
+        tenantId: string;
+        sessionId: string;
+        type: string;
+        payload: Record<string, unknown>;
+    }) => Promise<{ eventId: string; seq: number } | undefined>;
+};
+
+const OPERATOR_SUMMARY_STRING_CHARS = 240;
+const OPERATOR_FULL_STRING_CHARS = 2_000;
+const OPERATOR_SUMMARY_ARRAY_ITEMS = 20;
+const OPERATOR_FULL_ARRAY_ITEMS = 100;
+
+function resolveOperatorEventSink(): OperatorEventSink | undefined {
+    const engine = EngineLocator.getEngine<Partial<OperatorEventSink>>();
+    return typeof engine?.appendOperatorEvent === 'function'
+        ? { appendOperatorEvent: engine.appendOperatorEvent.bind(engine) }
+        : undefined;
+}
+
+function isOperatorCaptureEnabled(ctx: InternalTaskContext): boolean {
+    return ctx.__operatorTurnTraceCapture?.enabled !== false;
+}
+
+function operatorCaptureLevel(ctx: InternalTaskContext): 'summary' | 'full' {
+    return ctx.__operatorTurnTraceCapture?.level === 'full' ? 'full' : 'summary';
+}
+
+function compactOperatorValue(value: unknown, level: 'summary' | 'full', depth = 0): unknown {
+    const maxDepth = level === 'full' ? 6 : 3;
+    const maxStringChars = level === 'full' ? OPERATOR_FULL_STRING_CHARS : OPERATOR_SUMMARY_STRING_CHARS;
+    const maxArrayItems = level === 'full' ? OPERATOR_FULL_ARRAY_ITEMS : OPERATOR_SUMMARY_ARRAY_ITEMS;
+
+    if (depth > maxDepth) {
+        return '[truncated]';
+    }
+    if (value === null || value === undefined) {
+        return value;
+    }
+    if (typeof value === 'string') {
+        return value.length <= maxStringChars
+            ? value
+            : `${value.slice(0, maxStringChars)}... [truncated ${value.length} chars]`;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return value;
+    }
+    if (typeof value === 'bigint') {
+        return value.toString();
+    }
+    if (Array.isArray(value)) {
+        const items = value
+            .slice(0, maxArrayItems)
+            .map((item) => compactOperatorValue(item, level, depth + 1));
+        return value.length > maxArrayItems
+            ? [...items, `... [truncated ${value.length - maxArrayItems} array items]`]
+            : items;
+    }
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const output: Record<string, unknown> = {};
+        for (const [key, entry] of Object.entries(record)) {
+            const compact = compactOperatorValue(entry, level, depth + 1);
+            if (compact !== undefined) {
+                output[key] = compact;
+            }
+        }
+        return output;
+    }
+    return String(value);
+}
+
+async function appendOperatorEvent(
+    ctx: TaskContext,
+    type: string,
+    payload: Record<string, unknown>
+): Promise<void> {
+    const sink = resolveOperatorEventSink();
+    if (sink === undefined) {
+        return;
+    }
+    await sink.appendOperatorEvent({
+        tenantId: ctx.tenantId,
+        sessionId: ctx.task.id,
+        type,
+        payload,
+    });
+}
+
+async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    if (!isOperatorCaptureEnabled(internal)) {
+        return;
+    }
+    const level = operatorCaptureLevel(internal);
+    await appendOperatorEvent(ctx, 'turn.completed', {
+        taskId: ctx.task.id,
+        agentId: ctx.agentId,
+        turnSeq: trace.turn,
+        turnId: trace.turnId,
+        stageBefore: trace.stageBefore,
+        stageAfter: trace.stageAfter,
+        stageTransition: trace.stageTransition,
+        transition: compactOperatorValue(trace.transition, level),
+        intent: compactOperatorValue(trace.intent, level),
+        shield: compactOperatorValue(trace.shield, level),
+        perception: compactOperatorValue(trace.perception, level),
+        execAction: compactOperatorValue(trace.execAction, level),
+        execResult: compactOperatorValue(trace.execResult, level),
+        timings: trace.timings,
+        usage: trace.usage,
+        llmCalls: compactOperatorValue(trace.llmCalls ?? [], level),
+        toolCalls: compactOperatorValue(trace.toolCalls ?? [], level),
+        childCalls: compactOperatorValue(trace.childCalls ?? [], level),
+        mentalStateBeforeHash: trace.mentalStateBeforeHash,
+        mentalStateAfterHash: trace.mentalStateAfterHash,
+        traceId: trace.traceId,
+        spanId: trace.spanId,
+        parentSpanId: trace.parentSpanId,
+        level,
+    });
+}
+
+async function appendOperatorMemoryEvent(
+    ctx: TaskContext,
+    event: OperatorMemoryEvent
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    if (!isOperatorCaptureEnabled(internal) || event.keys.length === 0) {
+        return;
+    }
+    await appendOperatorEvent(ctx, `memory.${event.op}`, {
+        taskId: ctx.task.id,
+        agentId: event.agentId ?? ctx.agentId,
+        turnSeq: event.turnSeq,
+        op: event.op,
+        keys: event.keys.slice(0, 100),
+        keyCount: event.keys.length,
+        backend: event.backend,
+        source: event.source,
+        traceId: ctx.telemetry?.traceId,
+        spanId: ctx.telemetry?.nodeId,
+    });
+}
+
+function semanticReadKeys(query: {
+    id?: string | string[];
+    tag?: string;
+    tags?: string[];
+    limit?: number;
+}): string[] {
+    if (typeof query.id === 'string') {
+        return [query.id];
+    }
+    if (Array.isArray(query.id)) {
+        return query.id;
+    }
+    return [];
+}
+
+function usageFromTurnCalls(iCtx: InternalTaskContext): TurnUsage | undefined {
+    const llmCalls = iCtx.__turnLlmCalls ?? [];
+    const toolCallCount = iCtx.__turnToolCalls?.length ?? 0;
+    const childCallCount = iCtx.__turnChildCalls?.length ?? 0;
+    const hasUsageData =
+        llmCalls.length > 0 ||
+        toolCallCount > 0 ||
+        childCallCount > 0 ||
+        iCtx.__turnUsage !== undefined;
+    if (!hasUsageData) {
+        return undefined;
+    }
+    const aggregate = llmCalls.length > 0
+        ? aggregateUsage(llmCalls.map((call) => ({
+              usage: {
+                  inputTokens: call.inputTokens,
+                  outputTokens: call.outputTokens,
+                  totalTokens:
+                      call.inputTokens !== undefined || call.outputTokens !== undefined
+                          ? (call.inputTokens ?? 0) + (call.outputTokens ?? 0)
+                          : undefined,
+              },
+              pricing: {
+                  cost: call.cost ?? 0,
+                  currency: 'USD',
+              },
+          })))
+        : undefined;
+
+    return {
+        ...(aggregate ?? {}),
+        ...(iCtx.__turnUsage ?? {}),
+        ...(llmCalls.length > 0 ? { llmCalls: llmCalls.length } : {}),
+        ...(toolCallCount > 0 ? { toolCalls: toolCallCount } : {}),
+        ...(childCallCount > 0 ? { childCalls: childCallCount } : {}),
+    };
+}
+
 export async function runLoop<
     Sensory = unknown,
     Obs = Observation,
@@ -168,6 +367,20 @@ export async function runLoop<
                 read: async (q) => {
                     if (semanticRegistry?.read) {
                         const res = await semanticRegistry.read(q);
+                        try {
+                            await appendOperatorMemoryEvent(ctx, {
+                                op: 'read',
+                                keys: semanticReadKeys(q),
+                                backend: 'semantic',
+                                turnSeq: env.turn,
+                                agentId: ctx.agentId,
+                                source: 'loop.memory',
+                            });
+                        } catch (eventErr) {
+                            log.debug('Failed to append operator memory.read event', {
+                                error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                            });
+                        }
                         return Array.isArray(res) ? res.map(normalizeSemantic) : [];
                     }
                     const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
@@ -177,6 +390,20 @@ export async function runLoop<
                 },
                 get: async (id) => {
                     const res = await (semanticRegistry?.read ? semanticRegistry.read(id) : undefined);
+                    try {
+                        await appendOperatorMemoryEvent(ctx, {
+                            op: 'read',
+                            keys: [id],
+                            backend: 'semantic',
+                            turnSeq: env.turn,
+                            agentId: ctx.agentId,
+                            source: 'loop.memory',
+                        });
+                    } catch (eventErr) {
+                        log.debug('Failed to append operator memory.read event', {
+                            error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                        });
+                    }
                     if (Array.isArray(res) && res.length > 0) return normalizeSemantic(res[0]);
                     const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
                     return concepts.find((c: any) => c.id === id) || null;
@@ -344,7 +571,38 @@ export async function runLoop<
         const semantic = (ctx as any).memory?.semantic;
         const upsertCount = patches.semanticUpserts.size;
         const deleteCount = patches.semanticDeletes.size;
+        const appendWriteEvents = async () => {
+            try {
+                const writeKeys = [...patches.semanticUpserts.keys()];
+                if (writeKeys.length > 0) {
+                    await appendOperatorMemoryEvent(ctx, {
+                        op: 'write',
+                        keys: writeKeys,
+                        backend: 'semantic',
+                        turnSeq: env.turn,
+                        agentId: ctx.agentId,
+                        source: 'loop.memory',
+                    });
+                }
+                const deleteKeys = [...patches.semanticDeletes.values()];
+                if (deleteKeys.length > 0) {
+                    await appendOperatorMemoryEvent(ctx, {
+                        op: 'delete',
+                        keys: deleteKeys,
+                        backend: 'semantic',
+                        turnSeq: env.turn,
+                        agentId: ctx.agentId,
+                        source: 'loop.memory',
+                    });
+                }
+            } catch (eventErr) {
+                log.debug('Failed to append operator memory write/delete event', {
+                    error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                });
+            }
+        };
         if (!semantic || (upsertCount === 0 && deleteCount === 0)) {
+            await appendWriteEvents();
             return;
         }
 
@@ -369,6 +627,7 @@ export async function runLoop<
                 memNode.end({ ok: true, upsertCount, deleteCount }, 'success');
                 telemetry.endNode(memNode);
             }
+            await appendWriteEvents();
         } catch (err) {
             if (memNode) {
                 const er = err instanceof Error ? err : new Error(String(err));
@@ -982,6 +1241,12 @@ export async function runLoop<
                 iCtxTurn.__turnStopPolicy = undefined;
                 iCtxTurn.__turnBackpressure = undefined;
                 iCtxTurn.__turnInviteAutoJoin = {};
+                iCtxTurn.__operatorMemoryEvent = (event) =>
+                    appendOperatorMemoryEvent(ctx, {
+                        ...event,
+                        turnSeq: event.turnSeq ?? env.turn,
+                        agentId: event.agentId ?? ctx.agentId,
+                    });
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }
@@ -1087,18 +1352,7 @@ export async function runLoop<
                 resolveTraceIdForTurnParent(iterationTurnNode?.parentId, ctx);
             const spanId = iterationTurnNode?.id ?? undefined;
 
-            const usage = iCtx.__turnUsage
-                ? { ...iCtx.__turnUsage }
-                : undefined;
-            if (iCtx.__turnLlmCalls?.length && usage) {
-                usage.llmCalls = iCtx.__turnLlmCalls.length;
-            }
-            if (iCtx.__turnToolCalls?.length && usage) {
-                usage.toolCalls = iCtx.__turnToolCalls.length;
-            }
-            if (iCtx.__turnChildCalls?.length && usage) {
-                usage.childCalls = iCtx.__turnChildCalls.length;
-            }
+            const usage = usageFromTurnCalls(iCtx);
 
             const inviteIssued: Array<{
                 token: string;
@@ -1322,6 +1576,13 @@ export async function runLoop<
                     error: emitErr instanceof Error ? emitErr.message : String(emitErr),
                 });
             }
+            try {
+                await appendOperatorTurnEvent(ctx, trace);
+            } catch (eventErr) {
+                log.debug('Failed to append operator turn.completed event', {
+                    error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                });
+            }
             if (collector) {
                 collector.push(trace);
             }
@@ -1342,6 +1603,7 @@ export async function runLoop<
             iCtx.__turnStopPolicy = undefined;
             iCtx.__turnBackpressure = undefined;
             iCtx.__turnInviteAutoJoin = undefined;
+            iCtx.__operatorMemoryEvent = undefined;
 
             log.debug('Transition outcome', {
                 taskId,

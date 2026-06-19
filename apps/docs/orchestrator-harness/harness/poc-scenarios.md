@@ -229,6 +229,41 @@ Result: signed off on 2026-06-19 with `phase2-parent-agent` ->
 completed edge, `task.child_started` / `task.child_completed` operator events,
 and turn/effect debug rows.
 
+Operator Experience variants:
+
+```text
+seed at least 1,000 driver_runs root rows across multiple agents/statuses
+open apps/operator-viewer against runtime-host
+filter by tenant, agentId, status, and since timestamp
+open one failed run and one completed multi-child run
+inspect DAG, turn rail, LLM drawer, memory drawer, effects drawer
+follow Hatchet and Opik links when provider/trace ids exist
+```
+
+Expected:
+
+- fleet list stays responsive with virtualized rows and server-side filtering;
+- each run opens without loading every task graph in the tenant;
+- `turn.completed` data answers what decision/stage/transition occurred;
+- LLM drawer shows model/tokens/cost/latency metadata without storing prompts;
+- memory drawer shows `memory.read` / `memory.write` / `memory.delete` keys,
+  not raw memory values;
+- Hatchet and Opik remain deep-link destinations, not the primary product UI.
+
+Additional scale/cost checks:
+
+```text
+run a task with many internal turns and multiple LLM calls
+confirm GET /tasks/:taskId/run-graph includes per-turn usage
+confirm GET /agent-runs rolls up llmCalls and costUsd from compact events
+```
+
+Expected:
+
+- cost rollups are non-negative and match the sum of compact turn usage events;
+- large prompts/responses are absent from `wm_events`;
+- event payloads stay bounded by summary/full truncation rules.
+
 ## Scenario 7 — upgrade and retention (production gate)
 
 Purpose: validate operational readiness.

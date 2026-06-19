@@ -29,6 +29,31 @@ describe('buildAgentRunGraph', () => {
             childAgentId: 'researcher-agent',
             resultPreview: { ok: true },
         });
+        await sessionManager.appendEvent('tenant-1', 'task-1', 'turn.completed', {
+            taskId: 'task-1',
+            agentId: 'root-agent',
+            turnSeq: 7,
+            turnId: 'turn-trace-turn-id',
+            stageBefore: 'thinking',
+            stageAfter: 'done',
+            intent: { kind: 'answer', summary: 'respond' },
+            usage: { llmCalls: 1, totalCost: 0.01 },
+            llmCalls: [{ model: 'gpt-test', inputTokens: 10, outputTokens: 20, cost: 0.01 }],
+            traceId: 'trace-1',
+            spanId: 'span-1',
+            level: 'summary',
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-1', 'memory.write', {
+            taskId: 'task-1',
+            agentId: 'root-agent',
+            turnSeq: 7,
+            op: 'write',
+            keys: ['customer:123'],
+            keyCount: 1,
+            backend: 'semantic',
+            traceId: 'trace-1',
+            spanId: 'span-1',
+        });
         await sessionManager.appendEvent('tenant-1', 'task-1', 'task.completed', {
             result: { text: 'done' },
         });
@@ -104,6 +129,22 @@ describe('buildAgentRunGraph', () => {
                 turnSeq: 7,
                 boundaryKind: 'complete',
                 turnTraceRef: { traceId: 'trace-1', spanId: 'span-1', turnTraceId: 'turn-trace-1' },
+                cognition: expect.objectContaining({
+                    turnId: 'turn-trace-turn-id',
+                    stageBefore: 'thinking',
+                    stageAfter: 'done',
+                    usage: { llmCalls: 1, totalCost: 0.01 },
+                }),
+                llmCalls: [expect.objectContaining({ model: 'gpt-test' })],
+                memoryOps: [expect.objectContaining({ op: 'write', keys: ['customer:123'] })],
+            }),
+        ]);
+        expect(graph.memoryOps).toEqual([
+            expect.objectContaining({
+                op: 'write',
+                keys: ['customer:123'],
+                turnSeq: 7,
+                backend: 'semantic',
             }),
         ]);
         expect(graph.effects).toEqual([
@@ -172,5 +213,66 @@ describe('buildAgentRunGraph', () => {
 
         expect(graph.root.status).toBe('completed');
         expect(graph.root.finishedAt).toBe('2026-06-19T07:05:07.319Z');
+    });
+
+    it('treats complete transitions with ok false as failed semantic outcomes', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-semantic-fail',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-semantic-fail', 'task.started', {
+            taskId: 'task-semantic-fail',
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-semantic-fail', 'turn.completed', {
+            taskId: 'task-semantic-fail',
+            agentId: 'root-agent',
+            turnSeq: 1,
+            transition: {
+                kind: 'complete',
+                result: {
+                    ok: false,
+                    error: {
+                        code: 'NO_URL',
+                        message: 'No URL provided',
+                    },
+                },
+            },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-semantic-fail',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'parent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-semantic-fail',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-semantic-fail',
+                    operation: 'agent.run',
+                    status: 'queued',
+                },
+                {
+                    providerRunId: 'turn-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-semantic-fail',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-semantic-fail',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    turnSeq: 1,
+                    boundaryKind: 'complete',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('failed');
+        expect(graph.turns[0]?.status).toBe('failed');
     });
 });

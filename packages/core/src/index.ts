@@ -21,6 +21,16 @@ export {
     DEFAULT_AGENT_INDEX_PATH
 } from './plugin/AgentIndexBuilder.js';
 export { loadAgentIndex, loadAgentIndexIfPresent, type LoadAgentIndexOptions } from './plugin/AgentIndexLoader.js';
+export {
+    getAgentWorkspaceInfo,
+    loadWorkspaces,
+    type AgentWorkspaceInfo,
+    type LoadWorkspacesOptions,
+    type WorkspaceDefinition,
+    type WorkspaceEnvConflict,
+    type WorkspaceLoadResult,
+    type WorkspaceLoadSummary,
+} from './plugin/WorkspaceLoader.js';
 export { AgentRegistry, globalAgentRegistry } from './plugin/AgentRegistry.js';
 export { PluginManager } from './plugin/pluginManager.js';
 export { ContextSerializer } from './orchestration/ContextSerializer.js';

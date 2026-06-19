@@ -2,6 +2,7 @@
 import type { Request, Response } from 'express';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
+import { normalizeRpcTaskParams } from './taskParams.js';
 
 /**
  * Handler for the tasks/send method
@@ -9,10 +10,11 @@ import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 export async function handleTasksSend(req: Request, res: Response): Promise<void> {
     try {
         // Extract request data
-        const { params } = req.body;
+        const body = req.body as { id?: unknown; params?: unknown };
+        const params = normalizeRpcTaskParams(body.params);
 
-        if (!params?.id) {
-            return sendError(res, -32602, 'Invalid params: task ID is required');
+        if (!params) {
+            return sendError(res, -32602, 'Invalid params: params object is required');
         }
 
         // Create a task entity
@@ -35,7 +37,7 @@ export async function handleTasksSend(req: Request, res: Response): Promise<void
         // Send the JSON-RPC response with the complete task results
         res.json({
             jsonrpc: '2.0',
-            id: req.body.id || null,
+            id: body.id ?? null,
             result: resultTask
         });
     } catch (error: unknown) {

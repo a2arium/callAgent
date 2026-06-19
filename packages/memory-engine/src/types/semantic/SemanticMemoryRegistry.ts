@@ -11,6 +11,37 @@ import {
     EnrichmentResult
 } from '@a2arium/callagent-types';
 
+export type SemanticMemoryEvent = {
+    op: 'read' | 'write' | 'delete';
+    keys: string[];
+    backend?: string;
+    source: 'context.memory';
+};
+
+type FacadeSemanticMemoryBackend = SemanticMemoryBackend & {
+    read?: <T>(input: GetManyInput, options?: GetManyOptions) => Promise<Array<MemoryQueryResult<T>>>;
+    remove?: (input: GetManyInput, options?: GetManyOptions) => Promise<number>;
+    enrich?: <T>(key: string, additionalData: T[], options?: EnrichmentOptions) => Promise<EnrichmentResult<T>>;
+};
+
+function keysFromInput(input: GetManyInput): string[] {
+    if (typeof input === 'string') {
+        return [input];
+    }
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+        return [];
+    }
+    const record = input as Record<string, unknown>;
+    const id = record.id;
+    if (typeof id === 'string') {
+        return [id];
+    }
+    if (Array.isArray(id)) {
+        return id.filter((item): item is string => typeof item === 'string');
+    }
+    return [];
+}
+
 /**
  * Registry/facade for semantic memory backends.
  * Routes calls to the default or named backend as specified.
@@ -26,9 +57,21 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param backends Map of backend names to implementations
      * @param defaultBackend Name of the default backend
      */
-    constructor(backends: Record<string, SemanticMemoryBackend>, defaultBackend: string) {
+    constructor(
+        backends: Record<string, SemanticMemoryBackend>,
+        defaultBackend: string,
+        private eventSink?: (event: SemanticMemoryEvent) => Promise<void> | void
+    ) {
         this.backends = backends;
         this.defaultBackend = defaultBackend;
+    }
+
+    private async emit(event: SemanticMemoryEvent): Promise<void> {
+        try {
+            await this.eventSink?.(event);
+        } catch {
+            // Operator capture is best-effort and must not affect memory semantics.
+        }
     }
 
     /**
@@ -54,8 +97,11 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param opts Optional backend override
      */
     async get<T>(key: string, opts?: { backend?: string }): Promise<T | null> {
-        const backend = this.backends[opts?.backend ?? this.defaultBackend];
-        return backend.get<T>(key, opts);
+        const backendName = opts?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        const result = await backend.get<T>(key, opts);
+        await this.emit({ op: 'read', keys: [key], backend: backendName, source: 'context.memory' });
+        return result;
     }
 
     /**
@@ -65,8 +111,10 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param opts Optional backend override and tags
      */
     async set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void> {
-        const backend = this.backends[opts?.backend ?? this.defaultBackend];
-        return backend.set<T>(key, value, opts);
+        const backendName = opts?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        await backend.set<T>(key, value, opts);
+        await this.emit({ op: 'write', keys: [key], backend: backendName, source: 'context.memory' });
     }
 
     /**
@@ -83,8 +131,10 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      */
     async read<T>(input: GetManyInput, options?: GetManyOptions): Promise<Array<MemoryQueryResult<T>>> {
         const backendName = options?.backend ?? this.defaultBackend;
-        const backend = this.backends[backendName];
-        return (backend as any).read?.(input, options) ?? [] as Array<MemoryQueryResult<T>>;
+        const backend = this.backends[backendName] as FacadeSemanticMemoryBackend;
+        const result = await (backend.read?.<T>(input, options) ?? Promise.resolve([] as Array<MemoryQueryResult<T>>));
+        await this.emit({ op: 'read', keys: keysFromInput(input), backend: backendName, source: 'context.memory' });
+        return result;
     }
 
 
@@ -94,8 +144,10 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param opts Optional backend override
      */
     async delete(key: string, opts?: { backend?: string }): Promise<void> {
-        const backend = this.backends[opts?.backend ?? this.defaultBackend];
-        return backend.delete(key, opts);
+        const backendName = opts?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        await backend.delete(key, opts);
+        await this.emit({ op: 'delete', keys: [key], backend: backendName, source: 'context.memory' });
     }
 
     /**
@@ -114,8 +166,10 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      */
     async remove(input: GetManyInput, options?: GetManyOptions): Promise<number> {
         const backendName = options?.backend ?? this.defaultBackend;
-        const backend = this.backends[backendName];
-        return (backend as any).remove?.(input, options) ?? 0;
+        const backend = this.backends[backendName] as FacadeSemanticMemoryBackend;
+        const removed = await (backend.remove?.(input, options) ?? Promise.resolve(0));
+        await this.emit({ op: 'delete', keys: keysFromInput(input), backend: backendName, source: 'context.memory' });
+        return removed;
     }
 
 
@@ -145,8 +199,12 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param options Enrichment options
      */
     async enrich<T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>> {
-        const backendName = (options as any)?.backend ?? this.defaultBackend;
-        const backend = this.backends[backendName];
+        const optionsWithBackend = options as EnrichmentOptions & { backend?: string };
+        const backendName = optionsWithBackend.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName] as FacadeSemanticMemoryBackend;
+        if (!backend.enrich) {
+            throw new Error('Enrichment not available on selected semantic memory backend');
+        }
         return backend.enrich<T>(key, additionalData, options);
     }
 } 

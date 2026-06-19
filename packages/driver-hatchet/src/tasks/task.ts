@@ -16,6 +16,7 @@ import type {
     OutboxDispatchOutput,
 } from './outboxDispatch.js';
 import { OUTBOX_DISPATCH_TASK_NAME } from './outboxDispatch.js';
+import type { DriverRunsRepository } from '../driverRunsRepository.js';
 
 export const TASK_TASK_NAME = 'aplret.task';
 
@@ -34,6 +35,7 @@ export type TaskTaskInput = JsonObject & {
 export type TaskTaskOutput = SegmentTaskOutput;
 
 export type TaskTaskDeps = {
+    driverRuns?: DriverRunsRepository;
     prisma?: {
         outbox: {
             findMany: (args: {
@@ -93,6 +95,7 @@ export async function executeTaskTask(
         await dispatchPendingOutboxChildren(ctx, input, segment, deps);
 
         if (segment.boundary.kind === 'complete' || segment.boundary.kind === 'fail') {
+            await finalizeRootRun(input, segment, deps);
             return segment;
         }
 
@@ -105,6 +108,43 @@ export async function executeTaskTask(
 
         return segment;
     }
+}
+
+async function finalizeRootRun(
+    input: TaskTaskInput,
+    segment: SegmentTaskOutput,
+    deps?: TaskTaskDeps
+): Promise<void> {
+    if (deps?.driverRuns === undefined) {
+        return;
+    }
+
+    await deps.driverRuns.finalizeRootRun({
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        status: statusFromTerminalBoundary(segment.boundary),
+        agentId: segment.agentId ?? input.agentId ?? null,
+        traceId: segment.traceId ?? null,
+        boundaryKind: segment.boundary.kind,
+        turnTraceId: segment.turnTraceId ?? null,
+    });
+}
+
+function statusFromTerminalBoundary(boundary: SegmentTaskBoundary): 'completed' | 'failed' {
+    if (boundary.kind === 'fail') {
+        return 'failed';
+    }
+    if (boundary.kind === 'complete') {
+        return hasOkFalse(boundary.result) ? 'failed' : 'completed';
+    }
+    return 'failed';
+}
+
+function hasOkFalse(value: unknown): boolean {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return false;
+    }
+    return (value as Record<string, unknown>).ok === false;
 }
 
 async function dispatchPendingOutboxChildren(

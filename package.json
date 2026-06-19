@@ -7,6 +7,7 @@
     "postinstall": "node scripts/sync-dotenv.cjs",
     "build": "yarn turbo run build",
     "generate:prisma": "npx prisma generate --schema=packages/memory-sql/prisma/schema.prisma && npx prisma generate --schema=packages/chat-bridge/prisma/schema.prisma && npx prisma generate --schema=packages/core/prisma/schema.prisma",
+    "runtime": "node scripts/runtime.mjs",
     "start": "node packages/core/dist/runner/runnerCli.js",
     "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",

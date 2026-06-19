@@ -147,6 +147,39 @@ Goal: remove resume coordination entirely in Hatchet mode.
 Deletes (guarded): `A2AService` `queueMicrotask` deferral; TurnRunner event-log
 backfill (`243–309`) where Hatchet guarantees ordering.
 
+## Operator Experience Track — Product-facing run explorer
+
+Goal: make orchestration understandable to operators at fleet scale without
+adding graph tables yet. This track is product-facing and runs alongside the
+Hatchet infrastructure phases above.
+
+1. Capture compact operator cognition into existing `wm_events`:
+   `turn.completed` for decision/stage/timings/usage/LLM metadata and
+   `memory.read`, `memory.write`, `memory.delete` for key-level memory activity.
+   The capture is gated by `observability.turnTrace.enabled` and sized by
+   `observability.turnTrace.level` (`summary` default, `full` still truncated).
+   Full prompts/responses and raw memory values remain outside callAgent storage;
+   operators deep-link to Opik when that detail is needed.
+2. Extend the projection API rather than adding DB tables:
+   `GET /tasks/:taskId/run-graph` includes per-turn cognition, LLM metadata, and
+   memory operation timelines; `GET /agent-runs` lists root runs with filters and
+   keyset pagination over `driver_runs`; detail APIs expose a single turn and
+   current memory snapshot.
+3. Add only list-oriented indexes to `driver_runs`:
+   `(tenantId, createdAt)`, `(tenantId, agentId, createdAt)`, and
+   `(tenantId, status, createdAt)`.
+4. Build `apps/operator-viewer`, a Vite/React SPA with a virtualized fleet table,
+   React Flow DAG, turn rail, and drawers for cognition, LLM calls, memory, and
+   effects. The built SPA is served by `runtime-host` at `/operator` when present.
+5. Acceptance: an operator can start from thousands of runs, filter by tenant /
+   agent / status / time, open a run DAG, inspect child agents, decisions, LLM
+   cost/latency metadata, and memory read/write keys, and deep-link to Hatchet or
+   Opik for backend/full-trace debugging.
+
+Deferred: normalized `agent_runs`, `agent_run_edges`, `turn_runs`,
+`effect_runs`, and full prompt/response/value persistence. Operator actions
+(cancel/retry) wait for ADR 0010 implementation.
+
 ## Phase 4 — Timers via durable sleep + reconciler
 
 Goal: native, restart-safe timers.

@@ -120,7 +120,7 @@ export async function executeSegmentTask(
                 boundaryKind: output.boundary.kind,
                 turnTraceId: output.turnTraceId ?? null,
                 operation: 'turn.segment',
-                status: output.boundary.kind === 'fail' ? 'failed' : 'completed',
+                status: isFailedBoundary(output.boundary) ? 'failed' : 'completed',
             });
         }
         return output;
@@ -167,6 +167,23 @@ function toSegmentTaskBoundary(boundary: SegmentResult['boundary']): SegmentTask
         return { kind: 'fail', error: boundary.error as JsonValue };
     }
     return boundary;
+}
+
+function isFailedBoundary(boundary: SegmentTaskBoundary): boolean {
+    if (boundary.kind === 'fail') {
+        return true;
+    }
+    if (boundary.kind !== 'complete') {
+        return false;
+    }
+    return hasOkFalse(boundary.result);
+}
+
+function hasOkFalse(value: unknown): boolean {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return false;
+    }
+    return (value as Record<string, unknown>).ok === false;
 }
 
 export function createSegmentTask(hatchet: HatchetClient, deps: SegmentTaskDeps) {

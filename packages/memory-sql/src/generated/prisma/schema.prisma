@@ -216,6 +216,9 @@ model DriverRun {
 
   @@index([tenantId, taskId])
   @@index([tenantId, rootTaskId])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, agentId, createdAt])
+  @@index([tenantId, status, createdAt])
   @@map("driver_runs")
 }
 

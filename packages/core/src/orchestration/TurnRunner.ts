@@ -7,7 +7,7 @@ import { SessionManager } from './SessionManager.js';
 import { ApiBinder } from './api/ApiBinder.js';
 
 import { TaskExecutor, type LoopOpts } from './TaskExecutor.js';
-import type { InternalTaskContext } from '../loop/internalContext.js';
+import type { InternalTaskContext, OperatorTurnTraceCapture } from '../loop/internalContext.js';
 import type { ManifestProvenance } from '../types/turnTrace.js';
 import { InboxManager, EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
@@ -329,6 +329,11 @@ export class TurnRunner {
             // Budgeting
             const agentId = (ctx as Record<string, unknown>).agentId as string | undefined;
             const plugin = agentId ? PluginManager.findAgent(agentId) : null;
+            const turnTrace = plugin?.resolved.runtimeManifest.observability?.turnTrace;
+            (ctx as InternalTaskContext).__operatorTurnTraceCapture = {
+                enabled: turnTrace?.enabled ?? true,
+                level: turnTrace?.level ?? 'summary',
+            } satisfies OperatorTurnTraceCapture;
             const moduleOverrides = (plugin as { loop?: { modules?: Record<string, unknown> } })?.loop?.modules || {};
 
             // Restore budgets

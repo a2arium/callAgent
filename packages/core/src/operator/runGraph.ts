@@ -10,6 +10,7 @@ export type AgentRunGraph = {
     nodes: AgentRunNode[];
     edges: AgentRunEdge[];
     turns: TurnRun[];
+    memoryOps: MemoryOperationRun[];
     effects: EffectRun[];
     events: AgentRunEvent[];
     debug: {
@@ -70,7 +71,44 @@ export type TurnRun = {
         spanId?: string;
         turnTraceId?: string;
     };
+    cognition?: TurnCognition;
+    llmCalls?: unknown[];
+    memoryOps?: MemoryOperationRun[];
     providerRunId?: string;
+};
+
+export type TurnCognition = {
+    turnId?: string;
+    stageBefore?: string;
+    stageAfter?: string;
+    stageTransition?: unknown;
+    transition?: unknown;
+    intent?: unknown;
+    shield?: unknown;
+    perception?: unknown;
+    execAction?: unknown;
+    execResult?: unknown;
+    timings?: unknown;
+    usage?: unknown;
+    mentalStateBeforeHash?: string;
+    mentalStateAfterHash?: string;
+    level?: 'summary' | 'full';
+};
+
+export type MemoryOperationRun = {
+    id: string;
+    taskId: string;
+    seq: number;
+    timestamp: string;
+    op: 'read' | 'write' | 'delete';
+    keys: string[];
+    keyCount: number;
+    backend?: string;
+    source?: string;
+    turnSeq?: number;
+    agentId?: string;
+    traceId?: string;
+    spanId?: string;
 };
 
 export type EffectRun = {
@@ -107,6 +145,7 @@ export type AgentRunEvent = {
 };
 
 export type DriverRunView = {
+    id?: string;
     provider?: string;
     providerRunId?: string | null;
     providerTaskRunId?: string | null;
@@ -191,7 +230,8 @@ export async function buildAgentRunGraph(
 
     const edges = buildChildEdges(params.taskId, agentId ?? undefined, events);
     const childNodes = edges.map((edge) => edgeToNode(params.tenantId, edge));
-    const turns = buildTurnRuns(params.taskId, driverRuns);
+    const memoryOps = buildMemoryOps(params.taskId, events);
+    const turns = buildTurnRuns(params.taskId, driverRuns, events, memoryOps);
     const effects = buildEffectRuns(params.taskId, driverRuns);
     const graphEvents = buildGraphEvents(params.taskId, agentId ?? undefined, events, driverRuns);
 
@@ -203,6 +243,7 @@ export async function buildAgentRunGraph(
         nodes: [root, ...childNodes],
         edges,
         turns,
+        memoryOps,
         effects,
         events: graphEvents,
         debug: {
@@ -224,10 +265,15 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
         return 'completed';
     }
 
+    const latestTurnCompleted = [...events].reverse().find((event) => event.type === 'turn.completed');
+    if (latestTurnCompleted !== undefined && eventHasSemanticFailure(latestTurnCompleted)) {
+        return 'failed';
+    }
+
     const terminalSegment = [...driverRuns]
         .reverse()
         .find((run) => run.operation === 'turn.segment' && run.boundaryKind !== null && run.boundaryKind !== undefined);
-    if (terminalSegment?.boundaryKind === 'fail') {
+    if (terminalSegment?.boundaryKind === 'fail' || normalizeStatus(terminalSegment?.status) === 'failed') {
         return 'failed';
     }
     if (terminalSegment?.boundaryKind === 'complete') {
@@ -250,11 +296,17 @@ function deriveInputPreview(
     snapshot: Record<string, unknown> | undefined
 ): unknown {
     const started = events.find((event) => event.type === 'task.started');
+    if (started !== undefined && Object.prototype.hasOwnProperty.call(started.payload, 'inputPreview')) {
+        return started.payload.inputPreview;
+    }
+    const task = snapshot?.task;
+    if (task !== undefined) {
+        return task;
+    }
     if (started !== undefined) {
         return started.payload;
     }
-    const task = snapshot?.task;
-    return task;
+    return undefined;
 }
 
 function deriveOutputPreview(events: AgentRunSourceEvent[]): unknown {
@@ -322,29 +374,135 @@ function edgeToNode(tenantId: string, edge: AgentRunEdge): AgentRunNode {
     };
 }
 
-function buildTurnRuns(rootTaskId: string, driverRuns: DriverRunView[]): TurnRun[] {
-    return driverRuns
+function buildTurnRuns(
+    rootTaskId: string,
+    driverRuns: DriverRunView[],
+    events: AgentRunSourceEvent[],
+    memoryOps: MemoryOperationRun[]
+): TurnRun[] {
+    const turnEvents = events.filter((event) => event.type === 'turn.completed');
+    const cognitionByTurnSeq = new Map<number, AgentRunSourceEvent>();
+    for (const event of turnEvents) {
+        const turnSeq = numberField(event.payload, 'turnSeq');
+        if (turnSeq !== undefined) {
+            cognitionByTurnSeq.set(turnSeq, event);
+        }
+    }
+
+    const driverTurns = driverRuns
         .filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
-        .map((run, index) => ({
-            id: run.providerTaskRunId ?? run.providerRunId ?? `turn-${index}`,
-            rootTaskId: run.rootTaskId ?? rootTaskId,
-            taskId: run.taskId ?? 'unknown',
-            ...(run.agentId ? { agentId: run.agentId } : {}),
-            status: normalizeStatus(run.status),
-            operation: 'turn.segment',
-            turnSeq: run.turnSeq ?? index + 1,
-            ...(run.boundaryKind ? { boundaryKind: run.boundaryKind } : {}),
-            ...(run.token ? { token: run.token } : {}),
-            ...(run.traceId ? { traceId: run.traceId } : {}),
-            ...(run.spanId ? { spanId: run.spanId } : {}),
-            ...(run.idempotencyKey ? { idempotencyKey: run.idempotencyKey } : {}),
-            turnTraceRef: {
+        .map((run, index): TurnRun => {
+            const turnEvent = cognitionByTurnSeq.get(run.turnSeq ?? index + 1);
+            return {
+                id: run.providerTaskRunId ?? run.providerRunId ?? `turn-${index}`,
+                rootTaskId: run.rootTaskId ?? rootTaskId,
+                taskId: run.taskId ?? 'unknown',
+                ...(run.agentId ? { agentId: run.agentId } : {}),
+                status: deriveTurnStatus(run.status, turnEvent),
+                operation: 'turn.segment',
+                turnSeq: run.turnSeq ?? index + 1,
+                ...(run.boundaryKind ? { boundaryKind: run.boundaryKind } : {}),
+                ...(run.token ? { token: run.token } : {}),
                 ...(run.traceId ? { traceId: run.traceId } : {}),
                 ...(run.spanId ? { spanId: run.spanId } : {}),
-                ...(run.turnTraceId ? { turnTraceId: run.turnTraceId } : {}),
-            },
-            ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
-        }));
+                ...(run.idempotencyKey ? { idempotencyKey: run.idempotencyKey } : {}),
+                turnTraceRef: {
+                    ...(run.traceId ? { traceId: run.traceId } : {}),
+                    ...(run.spanId ? { spanId: run.spanId } : {}),
+                    ...(run.turnTraceId ? { turnTraceId: run.turnTraceId } : {}),
+                },
+                ...turnEventProjection(turnEvent, memoryOps),
+                ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
+            };
+        });
+    const existingTurnSeqs = new Set(driverTurns.map((turn) => turn.turnSeq).filter((turnSeq): turnSeq is number => turnSeq !== undefined));
+    const eventOnlyTurns = turnEvents
+        .filter((event) => {
+            const turnSeq = numberField(event.payload, 'turnSeq');
+            return turnSeq !== undefined && !existingTurnSeqs.has(turnSeq);
+        })
+        .map((event, index): TurnRun => {
+            const turnSeq = numberField(event.payload, 'turnSeq');
+            const traceId = stringField(event.payload, 'traceId');
+            const spanId = stringField(event.payload, 'spanId');
+            return {
+                id: stringField(event.payload, 'turnId') ?? `turn-event-${event.seq}-${index}`,
+                rootTaskId,
+                taskId: stringField(event.payload, 'taskId') ?? rootTaskId,
+                ...(stringField(event.payload, 'agentId') ? { agentId: stringField(event.payload, 'agentId') } : {}),
+                status: deriveTurnStatus('completed', event),
+                operation: 'turn.segment',
+                ...(turnSeq !== undefined ? { turnSeq } : {}),
+                ...(traceId ? { traceId } : {}),
+                ...(spanId ? { spanId } : {}),
+                turnTraceRef: {
+                    ...(traceId ? { traceId } : {}),
+                    ...(spanId ? { spanId } : {}),
+                },
+                ...turnEventProjection(event, memoryOps),
+            };
+        });
+    return [...driverTurns, ...eventOnlyTurns].sort((a, b) => (a.turnSeq ?? 0) - (b.turnSeq ?? 0));
+}
+
+function turnEventProjection(
+    event: AgentRunSourceEvent | undefined,
+    memoryOps: MemoryOperationRun[]
+): Pick<TurnRun, 'cognition' | 'llmCalls' | 'memoryOps'> {
+    if (event === undefined) {
+        return {};
+    }
+    const turnSeq = numberField(event.payload, 'turnSeq');
+    const level = event.payload.level === 'full' ? 'full' : event.payload.level === 'summary' ? 'summary' : undefined;
+    return {
+        cognition: {
+            ...(stringField(event.payload, 'turnId') ? { turnId: stringField(event.payload, 'turnId') } : {}),
+            ...(stringField(event.payload, 'stageBefore') ? { stageBefore: stringField(event.payload, 'stageBefore') } : {}),
+            ...(stringField(event.payload, 'stageAfter') ? { stageAfter: stringField(event.payload, 'stageAfter') } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'stageTransition') ? { stageTransition: event.payload.stageTransition } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'transition') ? { transition: event.payload.transition } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'intent') ? { intent: event.payload.intent } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'shield') ? { shield: event.payload.shield } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'perception') ? { perception: event.payload.perception } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'execAction') ? { execAction: event.payload.execAction } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'execResult') ? { execResult: event.payload.execResult } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'timings') ? { timings: event.payload.timings } : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'usage') ? { usage: event.payload.usage } : {}),
+            ...(stringField(event.payload, 'mentalStateBeforeHash') ? { mentalStateBeforeHash: stringField(event.payload, 'mentalStateBeforeHash') } : {}),
+            ...(stringField(event.payload, 'mentalStateAfterHash') ? { mentalStateAfterHash: stringField(event.payload, 'mentalStateAfterHash') } : {}),
+            ...(level ? { level } : {}),
+        },
+        llmCalls: arrayField(event.payload, 'llmCalls'),
+        memoryOps: turnSeq !== undefined
+            ? memoryOps.filter((op) => op.turnSeq === turnSeq)
+            : [],
+    };
+}
+
+function buildMemoryOps(rootTaskId: string, events: AgentRunSourceEvent[]): MemoryOperationRun[] {
+    return events
+        .filter((event) => event.type === 'memory.read' || event.type === 'memory.write' || event.type === 'memory.delete')
+        .map((event): MemoryOperationRun | undefined => {
+            const op = event.type === 'memory.write' ? 'write' : event.type === 'memory.delete' ? 'delete' : 'read';
+            const keys = stringArrayField(event.payload, 'keys');
+            const keyCount = numberField(event.payload, 'keyCount') ?? keys.length;
+            return {
+                id: event.eventId,
+                taskId: stringField(event.payload, 'taskId') ?? rootTaskId,
+                seq: event.seq,
+                timestamp: event.createdAt,
+                op,
+                keys,
+                keyCount,
+                ...(stringField(event.payload, 'backend') ? { backend: stringField(event.payload, 'backend') } : {}),
+                ...(stringField(event.payload, 'source') ? { source: stringField(event.payload, 'source') } : {}),
+                ...(numberField(event.payload, 'turnSeq') !== undefined ? { turnSeq: numberField(event.payload, 'turnSeq') } : {}),
+                ...(stringField(event.payload, 'agentId') ? { agentId: stringField(event.payload, 'agentId') } : {}),
+                ...(stringField(event.payload, 'traceId') ? { traceId: stringField(event.payload, 'traceId') } : {}),
+                ...(stringField(event.payload, 'spanId') ? { spanId: stringField(event.payload, 'spanId') } : {}),
+            };
+        })
+        .filter((event): event is MemoryOperationRun => event !== undefined);
 }
 
 function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[]): EffectRun[] {
@@ -415,6 +573,24 @@ function childStatus(type: string, payload: Record<string, unknown>): AgentRunSt
     return normalizeStatus(status);
 }
 
+function deriveTurnStatus(status: string | undefined | null, event: AgentRunSourceEvent | undefined): AgentRunStatus {
+    if (event !== undefined && eventHasSemanticFailure(event)) {
+        return 'failed';
+    }
+    return normalizeStatus(status);
+}
+
+function eventHasSemanticFailure(event: AgentRunSourceEvent): boolean {
+    return transitionResultOk(event.payload) === false;
+}
+
+function transitionResultOk(payload: Record<string, unknown>): boolean | undefined {
+    const transition = objectField(payload, 'transition');
+    const result = transition ? objectField(transition, 'result') : undefined;
+    const ok = result?.ok;
+    return typeof ok === 'boolean' ? ok : undefined;
+}
+
 function normalizeStatus(status: string | undefined | null): AgentRunStatus {
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
         return 'completed';
@@ -431,6 +607,28 @@ function normalizeStatus(status: string | undefined | null): AgentRunStatus {
 function stringField(payload: Record<string, unknown>, key: string): string | undefined {
     const value = payload[key];
     return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function numberField(payload: Record<string, unknown>, key: string): number | undefined {
+    const value = payload[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function arrayField(payload: Record<string, unknown>, key: string): unknown[] {
+    const value = payload[key];
+    return Array.isArray(value) ? value : [];
+}
+
+function stringArrayField(payload: Record<string, unknown>, key: string): string[] {
+    const value = payload[key];
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function objectField(payload: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+    const value = payload[key];
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
 }
 
 function readSnapshotAgentId(snapshot: Record<string, unknown> | undefined): string | undefined {

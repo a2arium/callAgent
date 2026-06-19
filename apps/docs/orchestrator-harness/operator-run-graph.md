@@ -11,13 +11,15 @@ The product-level unit is an **Agent Run**, not a Hatchet workflow. Hatchet rema
 - what it output
 - which child agents it called
 - which turn/effect failed
-- where to find TurnTrace and raw backend IDs for debugging
+- which decision/stage/transition occurred inside each turn
+- which LLM calls and memory keys were touched
+- where to find TurnTrace, Opik, and raw backend IDs for debugging
 
 The current implementation exposes this as a projection over `driver_runs`,
 `wm_events`, snapshots, and available trace/span references. Phase 2 persists the
-key graph fields directly on `driver_runs` as a lean durable index; the later
-normalized target is dedicated graph tables so the operator view does not depend
-on JSON archaeology.
+key graph fields directly on `driver_runs` as a lean durable index. The Operator
+Experience track adds compact cognition and memory events to `wm_events`, still
+without adding normalized graph tables.
 
 ## Model
 
@@ -27,6 +29,8 @@ flowchart TD
   root --> turn["TurnRun: turn.segment"]
   root --> child["AgentRun: child agent"]
   root --> effect["EffectRun: outbox/tool/stream"]
+  turn --> llm["LLM metadata"]
+  turn --> memory["Memory ops"]
   turn --> trace["TurnTrace ref"]
 ```
 
@@ -75,7 +79,26 @@ Important fields:
 - `spanId`
 - `idempotencyKey`
 - `turnTraceRef`
+- `cognition` with compact stage/decision/transition/timing/usage data
+- `llmCalls` with model/provider/token/cost/latency metadata only
+- `memoryOps` with memory operation keys touched during the turn
 - `providerRunId`
+
+### `MemoryOperationRun`
+
+One compact memory operation captured from existing task execution paths.
+
+Important fields:
+
+- `op: "read" | "write" | "delete"`
+- `keys` and `keyCount`
+- `backend`
+- `turnSeq`
+- `agentId`
+- `traceId`
+- `spanId`
+
+Memory operation events do not store raw memory values.
 
 ### `EffectRun`
 
@@ -112,6 +135,14 @@ Important fields:
 The runtime host exposes:
 
 ```bash
+curl "http://127.0.0.1:8790/agent-runs?status=failed&limit=50" \
+  -H 'x-tenant-id: <tenantId>'
+```
+
+`GET /agent-runs` returns a paginated fleet list over existing `driver_runs`
+root rows. Supported filters: `agentId`, `status`, `since`, `cursor`, `limit`.
+
+```bash
 curl http://127.0.0.1:8790/tasks/<taskId>/run-graph \
   -H 'x-tenant-id: <tenantId>'
 ```
@@ -122,9 +153,25 @@ The response is an `AgentRunGraph`:
 - `nodes`: root and child agent nodes
 - `edges`: child-agent calls
 - `turns`: turn details with TurnTrace references
+- `memoryOps`: memory read/write/delete key timeline
 - `effects`: debug effect runs
 - `events`: normalized event/log entries grouped by task, agent, trace, span, and token
 - `debug.driverRuns`: normalized raw driver rows
+
+Additional read-only detail endpoints:
+
+```bash
+curl http://127.0.0.1:8790/tasks/<taskId>/turns/<turnSeq> \
+  -H 'x-tenant-id: <tenantId>'
+
+curl http://127.0.0.1:8790/tasks/<taskId>/memory \
+  -H 'x-tenant-id: <tenantId>'
+```
+
+The operator SPA lives in `apps/operator-viewer`. In development it runs on Vite
+with a proxy to `runtime-host`. In production/local host mode, `runtime-host`
+serves the built app at `/operator` when `apps/operator-viewer/dist/index.html`
+or `OPERATOR_VIEWER_DIST` exists.
 
 ## Hatchet Naming
 
@@ -142,6 +189,9 @@ Do not ask operators to interpret `aplret.*` names as the product model. They sh
 The projection API is the first contract. Phase 2 already persists graph-critical
 fields on `driver_runs`: `rootTaskId`, parent/child task and agent ids, edge
 tokens/kinds, turn sequence, boundary kind, and TurnTrace ids where available.
+The Operator Experience track reuses `wm_events` for compact `turn.completed`
+and `memory.*` events; full prompts/responses and raw memory values are deferred
+to external trace systems such as Opik.
 
 The durable end state should persist enough normalized data to answer operator
 questions without parsing arbitrary JSON:

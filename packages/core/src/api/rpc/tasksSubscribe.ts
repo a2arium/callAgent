@@ -3,6 +3,9 @@ import type { Request, Response } from 'express';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
+import { normalizeRpcTaskParams } from './taskParams.js';
+
+type RequestWithTenant = Request & { tenantId?: string };
 
 /**
  * Handler for the tasks/sendSubscribe method
@@ -11,10 +14,11 @@ import { handleSSE } from '../sse/streamHandler.js';
 export async function handleTasksSubscribe(req: Request, res: Response): Promise<void> {
     try {
         // Extract request data
-        const { params } = req.body;
+        const body = req.body as { params?: unknown };
+        const params = normalizeRpcTaskParams(body.params);
 
-        if (!params?.id) {
-            return sendError(res, -32602, 'Invalid params: task ID is required');
+        if (!params) {
+            return sendError(res, -32602, 'Invalid params: params object is required');
         }
 
         // Create a task entity
@@ -40,7 +44,7 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
         // Hand off to SSE handler (never returns - response is managed by SSE)
         const tenantId = typeof params.tenantId === 'string'
             ? params.tenantId
-            : (req as any).tenantId || 'default';
+            : (req as RequestWithTenant).tenantId || 'default';
         await handleSSE(req, res, task.id, undefined, tenantId);
     } catch (error: unknown) {
         console.error('Error handling tasks/sendSubscribe:', error);

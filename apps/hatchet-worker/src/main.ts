@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
+import { loadWorkspaces } from '@a2arium/callagent-core';
 import { startHatchetRuntimeWorkerApp } from '@a2arium/callagent-driver-hatchet';
 import { registerPhase2LoopAgent } from '@a2arium/phase2-loop-agent';
 import { registerPhase2ParentAgent } from '@a2arium/phase2-parent-agent';
@@ -13,6 +14,7 @@ async function main(): Promise<void> {
         registerAgents: async () => {
             await registerPhase2LoopAgent();
             await registerPhase2ParentAgent();
+            await loadWorkspaces();
         },
     });
 
