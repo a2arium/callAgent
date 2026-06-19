@@ -14,6 +14,16 @@ export type DriverRunRecord = {
     operation: string;
     status: string;
     outboxRowId?: string | null;
+    rootTaskId?: string | null;
+    parentTaskId?: string | null;
+    parentAgentId?: string | null;
+    childTaskId?: string | null;
+    childAgentId?: string | null;
+    edgeToken?: string | null;
+    edgeKind?: string | null;
+    turnSeq?: number | null;
+    boundaryKind?: string | null;
+    turnTraceId?: string | null;
 };
 
 export class DriverRunsRepository {
@@ -36,6 +46,16 @@ export class DriverRunsRepository {
                 operation: record.operation,
                 status: record.status,
                 outboxRowId: record.outboxRowId ?? null,
+                rootTaskId: record.rootTaskId ?? null,
+                parentTaskId: record.parentTaskId ?? null,
+                parentAgentId: record.parentAgentId ?? null,
+                childTaskId: record.childTaskId ?? null,
+                childAgentId: record.childAgentId ?? null,
+                edgeToken: record.edgeToken ?? null,
+                edgeKind: record.edgeKind ?? null,
+                turnSeq: record.turnSeq ?? null,
+                boundaryKind: record.boundaryKind ?? null,
+                turnTraceId: record.turnTraceId ?? null,
             },
             update: {
                 providerTaskRunId: record.providerTaskRunId ?? undefined,
@@ -47,6 +67,16 @@ export class DriverRunsRepository {
                 idempotencyKey: record.idempotencyKey ?? undefined,
                 status: record.status,
                 outboxRowId: record.outboxRowId ?? undefined,
+                rootTaskId: record.rootTaskId ?? undefined,
+                parentTaskId: record.parentTaskId ?? undefined,
+                parentAgentId: record.parentAgentId ?? undefined,
+                childTaskId: record.childTaskId ?? undefined,
+                childAgentId: record.childAgentId ?? undefined,
+                edgeToken: record.edgeToken ?? undefined,
+                edgeKind: record.edgeKind ?? undefined,
+                turnSeq: record.turnSeq ?? undefined,
+                boundaryKind: record.boundaryKind ?? undefined,
+                turnTraceId: record.turnTraceId ?? undefined,
                 updatedAt: new Date(),
             },
         });

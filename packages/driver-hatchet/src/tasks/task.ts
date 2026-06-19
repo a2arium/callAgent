@@ -69,14 +69,17 @@ export async function executeTaskTask(
 ): Promise<TaskTaskOutput> {
     let wake: SegmentTaskWake = { trigger: 'start', input: input.input };
     let idempotencyKey = input.idempotencyKey;
+    let turnSeq = 0;
 
     for (;;) {
+        turnSeq += 1;
         const segmentInput: SegmentTaskInput = {
             tenantId: input.tenantId,
             taskId: input.taskId,
             agentId: input.agentId,
             wake,
             idempotencyKey,
+            turnSeq,
         };
         const segmentRaw = await ctx.runChild<SegmentTaskInput, SegmentTaskOutput>(
             SEGMENT_TASK_NAME,
@@ -210,6 +213,7 @@ function buildTaskRunMetadata(
         rootTaskId: input.taskId,
         tenantTaskKey: `${input.tenantId}:${input.taskId}`,
         idempotencyKey: segmentInput.idempotencyKey,
+        turnSeq: String(segmentInput.turnSeq ?? ''),
     };
     if (input.agentId !== undefined) {
         metadata.agentId = input.agentId;

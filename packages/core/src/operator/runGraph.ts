@@ -120,6 +120,16 @@ export type DriverRunView = {
     operation: string;
     status: string;
     outboxRowId?: string | null;
+    rootTaskId?: string | null;
+    parentTaskId?: string | null;
+    parentAgentId?: string | null;
+    childTaskId?: string | null;
+    childAgentId?: string | null;
+    edgeToken?: string | null;
+    edgeKind?: string | null;
+    turnSeq?: number | null;
+    boundaryKind?: string | null;
+    turnTraceId?: string | null;
     createdAt?: Date | string;
     updatedAt?: Date | string;
 };
@@ -302,12 +312,13 @@ function buildTurnRuns(rootTaskId: string, driverRuns: DriverRunView[]): TurnRun
         .filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
         .map((run, index) => ({
             id: run.providerTaskRunId ?? run.providerRunId ?? `turn-${index}`,
-            rootTaskId,
+            rootTaskId: run.rootTaskId ?? rootTaskId,
             taskId: run.taskId ?? 'unknown',
             ...(run.agentId ? { agentId: run.agentId } : {}),
             status: normalizeStatus(run.status),
             operation: 'turn.segment',
-            turnSeq: index + 1,
+            turnSeq: run.turnSeq ?? index + 1,
+            ...(run.boundaryKind ? { boundaryKind: run.boundaryKind } : {}),
             ...(run.token ? { token: run.token } : {}),
             ...(run.traceId ? { traceId: run.traceId } : {}),
             ...(run.spanId ? { spanId: run.spanId } : {}),
@@ -315,6 +326,7 @@ function buildTurnRuns(rootTaskId: string, driverRuns: DriverRunView[]): TurnRun
             turnTraceRef: {
                 ...(run.traceId ? { traceId: run.traceId } : {}),
                 ...(run.spanId ? { spanId: run.spanId } : {}),
+                ...(run.turnTraceId ? { turnTraceId: run.turnTraceId } : {}),
             },
             ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
         }));
@@ -325,7 +337,7 @@ function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[]): Effec
         .filter((run) => run.operation.startsWith('effect.') || run.operation === 'outbox.dispatch')
         .map((run, index) => ({
             id: run.providerTaskRunId ?? run.providerRunId ?? run.outboxRowId ?? `effect-${index}`,
-            rootTaskId,
+            rootTaskId: run.rootTaskId ?? rootTaskId,
             ...(run.taskId ? { taskId: run.taskId } : {}),
             ...(run.agentId ? { agentId: run.agentId } : {}),
             operation: run.operation === 'outbox.dispatch' ? 'effect.outbox.dispatch' : run.operation,

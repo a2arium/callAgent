@@ -33,6 +33,7 @@ export type SegmentTaskInput = JsonObject & {
     agentId?: string;
     wake: SegmentTaskWake;
     idempotencyKey: string;
+    turnSeq?: number;
 };
 
 export type SegmentTaskBoundary =
@@ -65,6 +66,8 @@ function segmentDriverRunFields(input: SegmentTaskInput) {
         taskId: input.taskId,
         agentId: input.agentId ?? null,
         idempotencyKey: input.idempotencyKey,
+        rootTaskId: input.taskId,
+        turnSeq: input.turnSeq ?? null,
         token:
             input.wake.trigger === 'start'
                 ? null
@@ -89,6 +92,8 @@ export async function executeSegmentTask(
             agentId: fields.agentId,
             token: fields.token,
             idempotencyKey: fields.idempotencyKey,
+            rootTaskId: fields.rootTaskId,
+            turnSeq: fields.turnSeq,
             operation: 'turn.segment',
             status: 'running',
         });
@@ -110,6 +115,10 @@ export async function executeSegmentTask(
                 traceId: output.traceId ?? null,
                 token: fields.token,
                 idempotencyKey: fields.idempotencyKey,
+                rootTaskId: fields.rootTaskId,
+                turnSeq: fields.turnSeq,
+                boundaryKind: output.boundary.kind,
+                turnTraceId: output.turnTraceId ?? null,
                 operation: 'turn.segment',
                 status: output.boundary.kind === 'fail' ? 'failed' : 'completed',
             });
@@ -125,6 +134,9 @@ export async function executeSegmentTask(
                 agentId: fields.agentId,
                 token: fields.token,
                 idempotencyKey: fields.idempotencyKey,
+                rootTaskId: fields.rootTaskId,
+                turnSeq: fields.turnSeq,
+                boundaryKind: 'fail',
                 operation: 'turn.segment',
                 status: 'failed',
             });

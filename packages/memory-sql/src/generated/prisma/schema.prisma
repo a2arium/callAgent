@@ -201,10 +201,21 @@ model DriverRun {
   operation         String
   status            String
   outboxRowId       String?  @map("outbox_row_id")
+  rootTaskId        String?  @map("root_task_id")
+  parentTaskId      String?  @map("parent_task_id")
+  parentAgentId     String?  @map("parent_agent_id")
+  childTaskId       String?  @map("child_task_id")
+  childAgentId      String?  @map("child_agent_id")
+  edgeToken         String?  @map("edge_token")
+  edgeKind          String?  @map("edge_kind")
+  turnSeq           Int?     @map("turn_seq")
+  boundaryKind      String?  @map("boundary_kind")
+  turnTraceId       String?  @map("turn_trace_id")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
   @@index([tenantId, taskId])
+  @@index([tenantId, rootTaskId])
   @@map("driver_runs")
 }
 

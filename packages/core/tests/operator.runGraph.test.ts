@@ -52,6 +52,10 @@ describe('buildAgentRunGraph', () => {
                 agentId: 'root-agent',
                 traceId: 'trace-1',
                 spanId: 'span-1',
+                rootTaskId: 'task-1',
+                turnSeq: 7,
+                boundaryKind: 'complete',
+                turnTraceId: 'turn-trace-1',
                 operation: 'turn.segment',
                 status: 'completed',
             },
@@ -97,8 +101,9 @@ describe('buildAgentRunGraph', () => {
                 id: 'turn-1',
                 rootTaskId: 'task-1',
                 operation: 'turn.segment',
-                turnSeq: 1,
-                turnTraceRef: { traceId: 'trace-1', spanId: 'span-1' },
+                turnSeq: 7,
+                boundaryKind: 'complete',
+                turnTraceRef: { traceId: 'trace-1', spanId: 'span-1', turnTraceId: 'turn-trace-1' },
             }),
         ]);
         expect(graph.effects).toEqual([

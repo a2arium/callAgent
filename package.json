@@ -32,7 +32,8 @@
     "publish:dry-run": "yarn workspaces run npm:publish:dry-run",
     "version:patch": "yarn workspaces run version:patch",
     "version:minor": "yarn workspaces run version:minor",
-    "version:major": "yarn workspaces run version:major"
+    "version:major": "yarn workspaces run version:major",
+    "operator:run-graph": "node scripts/operator-run-graph.mjs"
   },
   "keywords": [
     "ai",

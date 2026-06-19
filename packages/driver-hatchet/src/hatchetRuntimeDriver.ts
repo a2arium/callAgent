@@ -70,6 +70,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                 traceId: params.traceId ?? null,
                 token: params.token ?? null,
                 idempotencyKey: params.idempotencyKey,
+                rootTaskId: params.taskId,
                 operation: 'agent.run',
                 status: 'queued',
             });
@@ -134,6 +135,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                     agentId: params.agentId ?? null,
                     traceId: params.traceId ?? null,
                     token: params.token ?? null,
+                    rootTaskId: params.taskId ?? null,
                     operation: 'effect.outbox.dispatch',
                     status: 'queued',
                     outboxRowId: params.outboxRowId,
