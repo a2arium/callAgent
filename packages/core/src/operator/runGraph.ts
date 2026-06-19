@@ -171,7 +171,7 @@ export async function buildAgentRunGraph(
     const rootStartedAt = firstEventTime(events) ?? rootRun?.createdAt;
     const rootFinishedAt =
         rootStatus === 'completed' || rootStatus === 'failed'
-            ? latestEventTime(events)
+            ? latestTerminalEventTime(events) ?? latestTerminalDriverRunTime(driverRuns)
             : undefined;
     const root: AgentRunNode = {
         id: params.taskId,
@@ -223,11 +223,26 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
     if (events.some((event) => event.type === 'task.completed')) {
         return 'completed';
     }
+
+    const terminalSegment = [...driverRuns]
+        .reverse()
+        .find((run) => run.operation === 'turn.segment' && run.boundaryKind !== null && run.boundaryKind !== undefined);
+    if (terminalSegment?.boundaryKind === 'fail') {
+        return 'failed';
+    }
+    if (terminalSegment?.boundaryKind === 'complete') {
+        return 'completed';
+    }
+
+    const root = chooseRootRun(driverRuns);
+    const rootStatus = normalizeStatus(root?.status);
+    if (rootStatus !== 'unknown' && rootStatus !== 'queued') {
+        return rootStatus;
+    }
     if (events.some((event) => event.type === 'task.started')) {
         return 'running';
     }
-    const root = chooseRootRun(driverRuns);
-    return normalizeStatus(root?.status);
+    return rootStatus;
 }
 
 function deriveInputPreview(
@@ -431,8 +446,20 @@ function firstEventTime(events: AgentRunSourceEvent[]): string | undefined {
     return events.length > 0 ? events[0]?.createdAt : undefined;
 }
 
-function latestEventTime(events: AgentRunSourceEvent[]): string | undefined {
-    return events.length > 0 ? events[events.length - 1]?.createdAt : undefined;
+
+function latestTerminalEventTime(events: AgentRunSourceEvent[]): string | undefined {
+    const terminal = [...events]
+        .reverse()
+        .find((event) => event.type === 'task.completed' || event.type === 'task.failed');
+    return terminal?.createdAt;
+}
+
+function latestTerminalDriverRunTime(driverRuns: DriverRunView[]): string | undefined {
+    const terminal = [...driverRuns]
+        .reverse()
+        .find((run) => normalizeStatus(run.status) === 'completed' || normalizeStatus(run.status) === 'failed');
+    const timestamp = terminal?.updatedAt ?? terminal?.createdAt;
+    return timestamp !== undefined ? toIso(timestamp) : undefined;
 }
 
 function toIso(value: Date | string): string {

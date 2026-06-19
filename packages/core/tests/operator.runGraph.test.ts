@@ -126,4 +126,51 @@ describe('buildAgentRunGraph', () => {
             }),
         ]));
     });
+
+    it('marks the root completed from a terminal segment when the parent driver row is stale', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-stale-parent',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-stale-parent', 'task.started', {
+            taskId: 'task-stale-parent',
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-stale-parent',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'parent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-stale-parent',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-stale-parent',
+                    operation: 'agent.run',
+                    status: 'queued',
+                },
+                {
+                    providerRunId: 'turn-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-stale-parent',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-stale-parent',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    updatedAt: '2026-06-19T07:05:07.319Z',
+                    turnSeq: 1,
+                    boundaryKind: 'complete',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('completed');
+        expect(graph.root.finishedAt).toBe('2026-06-19T07:05:07.319Z');
+    });
 });
