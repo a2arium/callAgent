@@ -7,6 +7,14 @@ export * from './plugin/types.js';
 export * from './plugin/createAgent.js';
 export { createApiRouter } from './api/router.js';
 export {
+    buildAgentRunGraph,
+    type AgentRunGraph,
+    type AgentRunNode,
+    type AgentRunEdge,
+    type TurnRun,
+    type EffectRun,
+} from './operator/runGraph.js';
+export {
     buildAgentIndex,
     type AgentIndexBuildResult,
     type AgentIndexEntry,

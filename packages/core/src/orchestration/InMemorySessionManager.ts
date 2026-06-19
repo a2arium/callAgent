@@ -32,7 +32,14 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         payload: Record<string, unknown>;
         createdAt: string;
     }>>();
-    private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
+    private outbox: Array<{
+        id: string;
+        tenantId: string;
+        topic: string;
+        key: string;
+        payload: Record<string, unknown>;
+        idempotencyKey?: string;
+    }> = [];
     private outboxSeq = 0;
     private conversationThreads = new Map<string, ConversationThreadRecord>();
     private conversationMessages = new Map<string, ConversationMessageRecord[]>();
@@ -124,10 +131,18 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         topic: string;
         key: string;
         payload: Record<string, unknown>;
+        idempotencyKey?: string;
     }): Promise<{ id: string }> {
-        this.outbox.push(params);
+        if (params.idempotencyKey !== undefined) {
+            const existing = this.outbox.find((row) => row.idempotencyKey === params.idempotencyKey);
+            if (existing !== undefined) {
+                return { id: existing.id };
+            }
+        }
         this.outboxSeq += 1;
-        return { id: `mem-outbox-${this.outboxSeq}` };
+        const id = `mem-outbox-${this.outboxSeq}`;
+        this.outbox.push({ ...params, id });
+        return { id };
     }
 
     async createConversationThread(params: {

@@ -60,6 +60,12 @@ Hatchet regular child task (non-deterministic):
   TurnExecutor.runSegment(...)   # = runLoop to next durable boundary
 ```
 
+This is the **execution DAG**, not the user-facing operator DAG. The operator
+surface projects this into callAgent vocabulary: parent durable runs become
+`AgentRun`, child agent calls become `AgentRunEdge`, segment children become
+expandable `TurnRun` details, and effect children become hidden-by-default
+`EffectRun` debug details.
+
 The durable task may read only the child task result (a checkpoint output),
 durable wait results, and small stable identifiers. It must not read snapshots,
 call LLMs/tools, generate tokens/ids, read wall-clock time for control flow, or
@@ -82,6 +88,9 @@ control program deterministic on replay while letting cognition mint the tokens.
 - Worker crashes around orchestration waits can resume from Hatchet checkpoints.
 - A failed or retried turn child may be delivered more than once; callAgent
   idempotency and CAS remain mandatory.
+- Hatchet task names (`aplret.task`, `aplret.segment`, `aplret.outbox.dispatch`)
+  must not leak as the product vocabulary. They are raw execution primitives
+  linked from the semantic `AgentRunGraph`.
 
 ## Open Validation
 

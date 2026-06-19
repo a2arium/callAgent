@@ -18,6 +18,11 @@ export {
     type StartHatchetOutboxWorkerAppOptions,
 } from './startHatchetOutboxWorkerApp.js';
 export {
+    startHatchetRuntimeWorkerApp,
+    type HatchetRuntimeWorkerApp,
+    type StartHatchetRuntimeWorkerAppOptions,
+} from './startHatchetRuntimeWorkerApp.js';
+export {
     OUTBOX_DISPATCH_TASK_NAME,
     createOutboxDispatchTask,
     executeOutboxDispatch,
@@ -25,3 +30,18 @@ export {
     type OutboxDispatchOutput,
     type OutboxDispatchDeps,
 } from './tasks/outboxDispatch.js';
+export {
+    SEGMENT_TASK_NAME,
+    createSegmentTask,
+    executeSegmentTask,
+    type SegmentTaskDeps,
+    type SegmentTaskInput,
+    type SegmentTaskOutput,
+} from './tasks/segment.js';
+export {
+    TASK_TASK_NAME,
+    createTaskTask,
+    executeTaskTask,
+    type TaskTaskInput,
+    type TaskTaskOutput,
+} from './tasks/task.js';

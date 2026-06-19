@@ -16,13 +16,20 @@ surface is proven.
 
 ## Decision
 
-Use Hatchet UI for infrastructure history and callAgent artifacts for cognition.
-Link them with:
+Use Hatchet UI for infrastructure history and callAgent artifacts for cognition,
+but expose a callAgent `AgentRunGraph` as the operator-facing product surface.
+Link the layers with:
 
 - run metadata (`tenantId`, `agentId`, `taskId`, `traceId`, `token`,
-  `idempotencyKey`, `operation`);
+  `idempotencyKey`, `operation`, `rootTaskId`);
 - composite search keys (`tenantTaskKey`, `tenantTraceKey`, `taskTokenKey`);
 - a local `driver_runs` table for exact joins and deep links.
+- semantic graph records or projections: `AgentRun`, `AgentRunEdge`, `TurnRun`,
+  `EffectRun`, and grouped events/logs.
+
+`driver_runs` is the provider/backend index. It must not become the product model.
+The operator graph answers user questions in agent vocabulary and hides
+`aplret.segment` / `aplret.outbox.dispatch` behind debug details.
 
 Outbox migration uses one authoritative delivery path per event type:
 
@@ -40,9 +47,13 @@ Deletion policy:
 
 ## Consequences
 
-- Operators use a two-pane story: Hatchet for infrastructure, callAgent for
-  cognition.
+- Operators use the callAgent run graph first: agent status, input/output,
+  child calls, failures, TurnTrace, and logs/events. Hatchet is the linked
+  infrastructure/debug pane.
 - Hatchet retention is operational history, not long-term audit.
+- Long-term audit and product UX require normalized graph persistence or an
+  equivalent durable projection; reconstructing from arbitrary JSON payloads is
+  acceptable only as an interim implementation.
 - We avoid accumulating both old and new coordination paths indefinitely.
 
 ## Open Validation
@@ -50,3 +61,6 @@ Deletion policy:
 - B5/B6/B7 verify the self-hosted UI and manual operations.
 - B11 verifies retention/storage behavior.
 - D3 verifies `driver_runs` mapping and deep links.
+- Operator graph validation verifies that a user can answer which agent ran,
+  what it received/output, what child agents it called, what failed, and where
+  the relevant TurnTrace/raw Hatchet run ids are.

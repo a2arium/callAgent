@@ -15,6 +15,10 @@ import {
     readConsumedConversationDeliveryKeysFromMeta,
     writeConsumedConversationDeliveryKeysToMeta,
 } from '../loop/conversationInboxIdentity.js';
+import {
+    addProcessedSegmentKey,
+    currentSegmentIdempotencyKey,
+} from '../runtime/segmentProcessedKeys.js';
 
 import type {
     EnvironmentState,
@@ -448,13 +452,18 @@ export class TaskExecutor {
             log.warn('Failed to fetch LLM state during saveSnapshot', { error: (err as Error).message });
         }
 
-        const next = {
+        let next = {
             ...baseNow,
             M: mNextEffective,
             meta: nextMeta,
             inbox: nextInbox,
             ...(attachedLlmState ? { llmState: attachedLlmState } : {})
         } as Record<string, unknown>;
+
+        const activeIdempotencyKey = currentSegmentIdempotencyKey();
+        if (activeIdempotencyKey !== undefined) {
+            next = addProcessedSegmentKey(next, activeIdempotencyKey);
+        }
 
         // Offload Artifacts
         try {

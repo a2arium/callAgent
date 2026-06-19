@@ -6,7 +6,7 @@ import {
     HATCHET_OUTBOX_DISPATCH_RETRIES,
     type OutboxRow,
 } from '@a2arium/callagent-core/unstable';
-import type { Context } from '@hatchet-dev/typescript-sdk';
+import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { HatchetClient } from '../hatchetClient.js';
 import { DriverRunsRepository } from '../driverRunsRepository.js';
 
@@ -90,7 +90,7 @@ export async function executeOutboxDispatch(
             agentId: fields.agentId,
             traceId: fields.traceId,
             token: fields.token,
-            operation: 'outbox.dispatch',
+            operation: 'effect.outbox.dispatch',
             status: 'running',
             outboxRowId: input.outboxRowId,
         });
@@ -109,7 +109,7 @@ export async function executeOutboxDispatch(
                 agentId: fields.agentId,
                 traceId: fields.traceId,
                 token: fields.token,
-                operation: 'outbox.dispatch',
+                operation: 'effect.outbox.dispatch',
                 status: 'completed',
                 outboxRowId: input.outboxRowId,
             });
@@ -126,7 +126,7 @@ export async function executeOutboxDispatch(
                 agentId: fields.agentId,
                 traceId: fields.traceId,
                 token: fields.token,
-                operation: 'outbox.dispatch',
+                operation: 'effect.outbox.dispatch',
                 status: 'failed',
                 outboxRowId: input.outboxRowId,
             });

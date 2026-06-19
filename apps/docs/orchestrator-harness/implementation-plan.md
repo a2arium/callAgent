@@ -57,6 +57,17 @@ metadata search, and `driver_runs` mapping.
    `tenantTraceKey`, `taskTokenKey`).
 4. Acceptance: POC gates B5, B6, B7 (search, replay/cancel, self-hosted UI).
 
+Known limitation (resolved in Phase 2): each `aplret.outbox.dispatch` is an
+independent top-level Hatchet run triggered externally from the runtime host
+(`runNoWait`). Hatchet only groups runs in the dashboard when they are spawned as
+children from within a parent task (`ctx.runChild` / `ctx.runNoWaitChild` /
+`ctx.bulkRunChildren`); shared metadata enables search/filter but does **not**
+nest runs. As a result a busy task emits many sibling dispatch runs (one per
+outbox row, e.g. several `task.status` plus `task.input_required`). This is
+acceptable for the Phase 1 POC (search by `tenantTaskKey` works) but is not an
+acceptable steady-state operator UI. Phase 2 makes the per-task Hatchet run the
+parent so these become grouped children.
+
 Deletes (guarded by flag): `OutboxPublisher` poll loop for migrated event types.
 
 ## Phase 2 — Hatchet durable task for the APLRET loop
@@ -84,10 +95,34 @@ Prerequisites (must land before/with this phase):
    `boundary` → `waitForEvent` / `sleepFor` / spawn child → repeat; return on
    terminal. No `continue` case crosses the boundary.
 3. Per-task serialization via concurrency key `tenantId:taskId`, limit 1.
-4. Acceptance: POC gates B1 (crash mid-segment), B3 (duplicate resume no-op via
+4. **Operator run graph (required):** `aplret.task` or `agent.<agentId>` is the
+   single parent Hatchet run per callAgent task. All per-task work —
+   `aplret.segment`, `aplret.outbox.dispatch`, child dispatch — must be spawned as
+   children of that parent (`ctx.runChild` / `ctx.runNoWaitChild` /
+   `ctx.bulkRunChildren` / durable `spawnChild`) so the dashboard nests them under
+   one run rather than flooding the top-level run list with sibling dispatch runs
+   (the Phase 1 limitation). This Hatchet grouping is only the infrastructure
+   view. The product/operator view is the callAgent `AgentRunGraph`, where the
+   root agent, child agent calls, turns, effects, logs/events, input/output
+   previews, TurnTrace refs, and raw provider ids are returned by
+   `GET /tasks/:taskId/run-graph`.
+   Outbox dispatch triggered for a task while its durable parent run is active
+   must route through the parent, not an external top-level `runNoWait`.
+   External-only fallback dispatch — e.g. before the durable loop exists or when
+   no active parent run is found — may stay top-level and must still be projected
+   as debug `EffectRun` data.
+5. Acceptance: POC gates B1 (crash mid-segment), B3 (duplicate resume no-op via
    durable dedupe), B4 (serialization), B8 (latency: hot resume stays in-process
    and internal `continue` turns do not round-trip), plus ADR 0007 streaming
-   parity (identical SSE under both drivers).
+   parity (identical SSE under both drivers), plus **operator graph acceptance:**
+   one callAgent task renders as one root `AgentRun`; child calls render as
+   `AgentRunEdge` + child `AgentRun` nodes; turns link to TurnTrace; effects are
+   hidden by default; logs/events are grouped by task/agent/trace/span/token; raw
+   Hatchet workflow names and run ids are available only as debug details; and
+   filtering by `tenantTaskKey` / `agentId` / `traceId` / token still works.
+   The durable end state should persist normalized graph facts (`agent_runs`,
+   `agent_run_edges`, `turn_runs`, `effect_runs`) rather than relying on JSON
+   archaeology from `wm_events` and snapshots.
 
 Deletes (guarded): `resumeInput` auto-turn scheduling, `handleToolCompleted` /
 `handleExternalEventOccurred` auto-resume, child-completion CAS/resume retry

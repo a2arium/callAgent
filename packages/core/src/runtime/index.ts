@@ -50,6 +50,16 @@ export type { PreparedSegmentWake } from './segmentWakeApplicator.js';
 export { createInMemorySegmentDedupe } from './inMemorySegmentDedupe.js';
 export type { SegmentDedupe } from './inMemorySegmentDedupe.js';
 
+export {
+    addProcessedSegmentKey,
+    currentSegmentIdempotencyKey,
+    nextSegmentOutboxIdempotencyKey,
+    readProcessedSegmentKeys,
+    runWithSegmentIdempotencyKey,
+    segmentEffectIdempotencyKey,
+    snapshotHasProcessedSegmentKey,
+} from './segmentProcessedKeys.js';
+
 export { TurnRunnerSegmentExecutor } from './turnRunnerSegmentExecutor.js';
 export type { TurnRunnerSegmentExecutorDeps } from './turnRunnerSegmentExecutor.js';
 

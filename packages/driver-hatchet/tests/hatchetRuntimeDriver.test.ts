@@ -1,8 +1,12 @@
-import { describe, it, expect, jest } from '@jest/globals';
+import { afterEach, describe, it, expect, jest } from '@jest/globals';
 import { HatchetRuntimeDriver } from '../src/hatchetRuntimeDriver.js';
 import type { RuntimeDriver } from '@a2arium/callagent-core/unstable';
 
 describe('HatchetRuntimeDriver', () => {
+    afterEach(() => {
+        delete process.env.CALLAGENT_DRIVER_SURFACES;
+    });
+
     it('delegates scheduling methods to the in-process driver', async () => {
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
@@ -63,6 +67,96 @@ describe('HatchetRuntimeDriver', () => {
         expect(driver.getDelegate()).toBe(delegate);
     });
 
+    it('enqueues aplret.task for start when the start surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const taskTask = {
+            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('task-run-1') })),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            taskTask as never
+        );
+
+        await driver.enqueueStart({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            idempotencyKey: 'task-1:start',
+            input: { text: 'hello' },
+        });
+
+        expect(delegate.enqueueStart).not.toHaveBeenCalled();
+        expect(taskTask.runNoWait).toHaveBeenCalledWith(
+            expect.objectContaining({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                idempotencyKey: 'task-1:start',
+            }),
+            expect.objectContaining({
+                additionalMetadata: expect.objectContaining({
+                    tenantTaskKey: 'tenant-1:task-1',
+                }),
+            })
+        );
+    });
+
+    it('pushes resume events when the resume surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const events = {
+            push: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            events
+        );
+
+        await driver.enqueueResume({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            idempotencyKey: 'task-1:input:tok-1',
+            event: { kind: 'input', token: 'tok-1', value: 'answer' },
+        });
+
+        expect(delegate.enqueueResume).not.toHaveBeenCalled();
+        expect(events.push).toHaveBeenCalledWith(
+            'aplret.input.tok-1',
+            expect.objectContaining({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                kind: 'input',
+                token: 'tok-1',
+                value: 'answer',
+            }),
+            { key: 'tenant-1:task-1:tok-1' }
+        );
+    });
+
+
     it('falls back to inline dispatch when Hatchet trigger fails', async () => {
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
@@ -104,5 +198,42 @@ describe('HatchetRuntimeDriver', () => {
 
         expect(bus.publish).toHaveBeenCalled();
         expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
+    });
+
+    it('uses an agent-named parent workflow when registered', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const fallbackTask = {
+            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('fallback-run') })),
+        };
+        const agentTask = {
+            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('agent-run') })),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            fallbackTask as never,
+            new Map([['agent-1', agentTask as never]])
+        );
+
+        await driver.enqueueStart({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            idempotencyKey: 'task-1:start',
+            input: { text: 'hello' },
+        });
+
+        expect(agentTask.runNoWait).toHaveBeenCalled();
+        expect(fallbackTask.runNoWait).not.toHaveBeenCalled();
     });
 });

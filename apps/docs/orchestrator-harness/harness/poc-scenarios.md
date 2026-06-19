@@ -192,21 +192,25 @@ Gate: R-F9 / ADR 0010.
 
 ## Scenario 6 — operator flow
 
-Purpose: validate the two-pane ops story.
+Purpose: validate the semantic operator graph plus Hatchet debug story.
 
 ```text
-failed Hatchet run
-search by tenantTaskKey / traceId
-open Hatchet timeline/logs
-follow deep link to callAgent task / TurnTrace
+failed task / Hatchet run
+open GET /tasks/:taskId/run-graph
+confirm root AgentRun, child edges, turns, effects, grouped events/logs
+open raw Hatchet run ids only from debug details
+search Hatchet by tenantTaskKey / traceId when infrastructure debugging is needed
+follow TurnTrace reference from TurnRun
 retry or cancel
 ```
 
 Expected:
 
-- operator can find the failed run in under 30 seconds;
+- operator can answer which agent ran, what it received/output, which child
+  agents it called, and what failed without reading `aplret.*` names;
+- operator can find the failed semantic run in under 30 seconds;
 - Hatchet shows infra attempt history;
-- callAgent shows cognition trace;
+- callAgent shows cognition trace and grouped logs/events;
 - retry/cancel is available without Hatchet Cloud.
 
 Gates: B5, B6, B7, D3.

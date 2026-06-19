@@ -10,6 +10,7 @@ import { createInMemoryEventBus } from '../../src/eventbus/inMemoryEventBus.js';
 import { initialM } from '../../src/loop/init.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
 import { setPendingInputs } from '../../src/orchestration/DurableHandlerRegistry.js';
+import { readProcessedSegmentKeys } from '../../src/runtime/segmentProcessedKeys.js';
 
 describe('TurnRunnerSegmentExecutor integration', () => {
     const tenantId = 'tenant-seg';
@@ -151,6 +152,55 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             wake: { trigger: 'start', input: {} },
         });
         await executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: key,
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('persists processed keys in the snapshot for durable duplicate detection', async () => {
+        executeTurnSpy.mockResolvedValue({
+            M: initialM({
+                task: { id: taskId, input: {} },
+                logger: console,
+                progress: jest.fn(),
+                fail: jest.fn(),
+            } as TaskContext),
+            outcome: { kind: 'complete' },
+            metrics: {},
+            taskStatus: { state: 'completed', timestamp: new Date().toISOString() },
+        });
+
+        const key = `${taskId}:start`;
+        await executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: key,
+            wake: { trigger: 'start', input: {} },
+        });
+
+        const persisted = await sessionManager.load(tenantId, taskId);
+        expect(readProcessedSegmentKeys(persisted?.snapshot ?? {})).toContain(key);
+
+        const freshExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) =>
+                ({
+                    task,
+                    logger: console,
+                    progress: jest.fn(),
+                    fail: jest.fn(),
+                }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+        });
+
+        await freshExecutor.runSegment({
             tenantId,
             taskId,
             agentId,

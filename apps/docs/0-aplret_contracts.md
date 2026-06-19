@@ -23,6 +23,8 @@ Its goals are:
 - make resume flows replayable and testable
 - make agent implementations predictable for humans and LLMs
 
+For operator-facing orchestration views, see [Operator Run Graph](./operator-run-graph.md). Hatchet workflow names are execution/debug vocabulary; users should see the semantic agent run DAG.
+
 ## Getting started
 
 **New agents** should start from the scaffold generator so manifests, `tsconfig`, module layout, and harness tests match the recommended structure. For downstream usage, run the scaffold CLI from your project root (see [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md)); the same flow is available via the `callagent-scaffold` **bin** on `@a2arium/callagent-core` or the `scaffoldAgent` API for tooling. `yarn create-agent` is the convenience script used in this monorepo.

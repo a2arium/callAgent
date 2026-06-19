@@ -42,6 +42,8 @@ Each **TurnTrace** can include compact summaries of sub-calls made during that t
 
 Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or export traces to your observability backend.
 
+For cross-agent topology, start from the operator run graph (`GET /tasks/:taskId/run-graph`; see [Operator Run Graph](./operator-run-graph.md)). It shows root/child `AgentRun` nodes and `AgentRunEdge` links first, then points each turn back to TurnTrace via `traceId` / `spanId` / `turnTraceRef`. TurnTrace remains the turn-level source of truth; the run graph is the higher-level navigation surface.
+
 ### Opik export and payload size
 
 When **`CALLAGENT_OPIK_ENABLED=true`** (or **`OPIK_API_KEY`** is set), spans sent to Opik are **sanitized** so a single trace does not exceed typical HTTP/API limits: long strings are truncated (default **8192** characters per string), arrays are capped, depth is limited, and objects with **`kind: "artifact"`** are reduced to metadata (**`id`**, **`mimeType`**, **`estimatedSize`**, **`name`**, **`uri`**) so HTML and other large bodies are not inlined. Override the string cap with **`CALLAGENT_OPIK_MAX_STRING_CHARS`** (positive integer). Full payloads remain in your local **`TurnTrace`** when you use **`collectTraces: true`**; Opik is a trimmed view.

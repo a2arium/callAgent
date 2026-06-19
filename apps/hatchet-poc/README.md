@@ -29,11 +29,11 @@ psql -U postgres -f apps/hatchet-poc/scripts/init-host-databases.sql
 If you already have a `callagent` database from normal development, skip that part and
 only create `hatchet`.
 
-Optional: copy Hatchet Docker env (only needed if credentials/host differ from default):
+Add the Hatchet Docker database URL to the repo-root `.env` (only needed if
+credentials/host differ from default):
 
 ```bash
-cp apps/hatchet-poc/.env.example apps/hatchet-poc/.env
-# edit HATCHET_DATABASE_URL if needed
+HATCHET_DATABASE_URL=postgres://hatchet:hatchet@host.docker.internal:5432/hatchet?sslmode=disable
 ```
 
 ## 2. Migrate callAgent schema
@@ -96,6 +96,7 @@ yarn workspace @a2arium/hatchet-worker dev
 export MEMORY_DATABASE_URL=postgres://callagent:callagent@localhost:5432/callagent
 export NATS_URL=nats://localhost:4222
 export CALLAGENT_OUTBOX_DISPATCHER=hatchet
+export DISABLE_OUTBOX_PUBLISHER=1
 export HATCHET_CLIENT_TOKEN=...
 export HATCHET_CLIENT_HOST_PORT=localhost:7077
 export HATCHET_CLIENT_TLS_STRATEGY=none
@@ -139,13 +140,18 @@ Set `CALLAGENT_OUTBOX_DISPATCHER=poll` (or unset) to use the in-process `OutboxP
 - **Duplicate delivery:** Publish-then-delete is not fully idempotent across
   Hatchet redelivery until ADR 0009 per-effect keys land in Phase 2. CloudEvent
   `id` is the outbox row id for downstream dedupe where supported.
+- **V1 SDK imports:** `@a2arium/callagent-driver-hatchet` imports Hatchet from
+  `@hatchet-dev/typescript-sdk/v1`; the old V0 deprecation warning should not
+  appear.
+- **Hatchet diagnostics:** Set `DISABLE_OUTBOX_PUBLISHER=1` on runtime-host while
+  validating this POC so the in-process poller does not mask Hatchet dispatch.
 
 ## Troubleshooting
 
 - **Hatchet migration fails:** ensure host Postgres is up and `hatchet` DB exists;
-  check `HATCHET_DATABASE_URL` in `apps/hatchet-poc/.env`.
+  check `HATCHET_DATABASE_URL` in the repo-root `.env`.
 - **Linux:** if `host.docker.internal` fails, set
   `HATCHET_DATABASE_URL=postgres://hatchet:hatchet@172.17.0.1:5432/hatchet` (or your
-  host LAN IP) in `apps/hatchet-poc/.env`.
+  host LAN IP) in the repo-root `.env`.
 - **Reuse existing callagent DB:** no separate Docker DB; `MEMORY_DATABASE_URL` is
   always your host Postgres.

@@ -329,7 +329,7 @@ written answer (even "deferred") before committing to a vendor.
 | A1 | **Hybrid latency model**: which `RuntimeDriver` operations stay in-process vs go through the substrate in production? | R-N1 — a queue hop on every chat resume may break SSE/chat UX. | Decide default config: e.g. in-process `enqueueResume` for interactive paths; substrate for `scheduleTimer`, outbox dispatch, child dispatch. Document per-surface overrides. |
 | A2 | **Outbox reconciliation**: does the substrate replace `OutboxPublisher`, consume the outbox table, or coexist during migration? | R-D3 — two delivery paths for the same event type is forbidden. | Write a one-page migration sequence: Phase 1 substrate dispatches outbox rows → retire poll loop when proven. Define the cutover flag. |
 | A3 | **Conversation vs task scope**: does the substrate own conversation/message-log delivery, or only task turn scheduling (`startTask` / `resumeInput` / timers / children)? | Avoid scope creep; NATS/eventbus already exists for conversation. | Explicit boundary doc: substrate = task driver; `IEventBus` / `MessageLog` / NATS = conversation transport unless a later phase says otherwise. |
-| A4 | **Ops UI expectations**: is the orchestrator dashboard alone sufficient for R-O1, or do we need a callAgent ops layer (deep links run → task → `TurnTrace`)? | R-O1, R-O3 — no vendor shows APLRET cognition natively. | Mock the operator workflow on paper: "task failed at 3am — what screens do I use?" If gaps exist, define minimum callAgent ops additions. |
+| A4 | **Ops UI expectations**: is the orchestrator dashboard alone sufficient for R-O1, or do we need a callAgent ops layer (deep links run → task → `TurnTrace`)? | R-O1, R-O3 — no vendor shows APLRET cognition natively. | Decided: Hatchet is the infrastructure/debug view; callAgent owns the semantic `AgentRunGraph` product view. Mock the operator workflow against `GET /tasks/:taskId/run-graph`. |
 | A5 | **Worker topology**: one global worker pool vs per-tenant workers vs co-located with the API host? | R-F6, R-N4, R-OP4 — affects fairness, blast radius, and streaming host layout. | Match to deployment model (`runtime-host`, future multi-tenant SaaS). Start with one pool + concurrency keys; note when to split. |
 | A6 | **Cancellation semantics**: cancel only at await boundaries, or attempt mid-turn cooperative cancel? | R-F9 — mid-turn cancel needs checkpoints in Execution/loop. | Prefer await-boundary cancel for v1 unless a concrete product need exists. Document interaction with snapshot + pending tokens. |
 
@@ -462,13 +462,15 @@ Out of scope: MessageLog, conversation transport, NATS/IEventBus, SSE/chat bridg
 
 #### A4 — Ops UI expectations
 
-Hatchet dashboard alone is **not sufficient** for full R-O1/R-O3. Use Hatchet UI
-plus a small callAgent ops layer.
+Hatchet dashboard alone is **not sufficient** for full R-O1/R-O3. Use the
+callAgent `AgentRunGraph` as the primary operator view and Hatchet UI as the
+linked infrastructure/debug layer.
 
 Hatchet does not understand `MentalState`, pending tokens, `TurnTrace`, APLRET
-turn boundaries, or `wmVersion`. Minimum addition: `driver_runs` table (see
-[D3 mapping](#d3--run-id-mapping)) and deep links from failed Hatchet run →
-callAgent task snapshot / `TurnTrace`.
+turn boundaries, child-agent semantics, or `wmVersion`. Minimum addition:
+semantic graph projection/persistence (`AgentRun`, `AgentRunEdge`, `TurnRun`,
+`EffectRun`, grouped events/logs), plus `driver_runs` as the provider id/deep
+link table (see [D3 mapping](#d3--run-id-mapping)).
 
 **Metadata caveat:** Hatchet run filtering with multiple `additional_metadata`
 pairs uses logical **OR**; event filtering uses **AND**. Use composite keys for
@@ -609,9 +611,9 @@ const taskEngine = new TaskEngine({ /* ... */, runtimeDriver });
 
 No agent code imports Hatchet types.
 
-#### D3 — Run ID mapping
+#### D3 — Run ID mapping and semantic graph
 
-`driver_runs` table (authoritative for exact joins; Hatchet metadata for search):
+`driver_runs` table (authoritative for exact provider joins; Hatchet metadata for search):
 
 ```sql
 driver_runs(
@@ -622,8 +624,17 @@ driver_runs(
 ```
 
 Hatchet run history is **ops convenience** (default retention ~30 days). Long-term
-audit relies on `TurnTrace`, snapshots, and callAgent telemetry — not Hatchet
-alone.
+audit and product UX rely on the callAgent `AgentRunGraph`, `TurnTrace`,
+snapshots, and callAgent telemetry — not Hatchet alone.
+
+Durable graph persistence target:
+
+```text
+agent_runs       root task/agent status, input/output previews, trace ids, provider ids
+agent_run_edges  parent/child task+agent ids, edgeToken, edgeKind, status/result/error
+turn_runs        segment/turn details, boundary.kind, turnSeq, TurnTrace refs
+effect_runs      outbox/tool/stream effects, hidden/debug classification
+```
 
 #### D4 — Idempotency keys
 
@@ -699,9 +710,9 @@ Lite — so B1/B7/B12 results are representative.
 |---|---|
 | **B1** | Kill worker during `aplret.resume`; one effective state transition; duplicate redelivery no-op |
 | **B3** | Two resume jobs, same `idempotencyKey`; one observation applied |
-| **B5** | 100+ runs; operator finds failed run by `tenantTaskKey` / `traceId` in <30s |
+| **B5** | 100+ runs; operator finds failed agent run by `tenantTaskKey` / `traceId` or run graph in <30s |
 | **B6** | Failed run shows payload, error, attempts, logs; replay/cancel from UI |
-| **B7** | Self-hosted dashboard fully usable without Cloud; B7a–c security acceptable |
+| **B7** | Self-hosted dashboard usable as debug infra without Cloud; semantic callAgent run graph answers product/operator questions |
 | **D1** | No Hatchet types above adapter; injection at composition root |
 | **D5** | Full test suite passes with `InProcessRuntimeDriver` default |
 

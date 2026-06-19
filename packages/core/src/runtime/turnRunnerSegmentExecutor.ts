@@ -18,6 +18,11 @@ import {
     type TurnExecutor,
 } from './turnExecutor.js';
 import { createInMemorySegmentDedupe, type SegmentDedupe } from './inMemorySegmentDedupe.js';
+import {
+    addProcessedSegmentKey,
+    runWithSegmentIdempotencyKey,
+    snapshotHasProcessedSegmentKey,
+} from './segmentProcessedKeys.js';
 
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
@@ -45,19 +50,23 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     async runSegment(params: RunSegmentParams): Promise<SegmentResult> {
         const { tenantId, taskId, agentId, wake, idempotencyKey, prepared } = params;
 
-        if (this.dedupe.has(idempotencyKey)) {
+        if (await this.hasProcessedKey(tenantId, taskId, idempotencyKey)) {
             return this.buildDuplicateResult(tenantId, taskId, agentId);
         }
 
         if (prepared !== undefined) {
-            const taskEntity = await this.turnRunner.runTurn(
-                prepared.ctx,
-                prepared.turnParams,
-                {
-                    initialM: prepared.initialM,
-                    snapshot: prepared.snapshot,
-                }
+            const taskEntity = await runWithSegmentIdempotencyKey(
+                idempotencyKey,
+                () => this.turnRunner.runTurn(
+                    prepared.ctx,
+                    prepared.turnParams,
+                    {
+                        initialM: prepared.initialM,
+                        snapshot: prepared.snapshot,
+                    }
+                )
             );
+            await this.ensureProcessedKeyRecorded(tenantId, taskId, agentId, idempotencyKey);
             this.dedupe.record(idempotencyKey);
 
             const boundary = await this.resolveBoundary(
@@ -101,21 +110,25 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
 
         const M = (preparedWake.snapshot.M as MentalState | undefined) ?? initialM(ctx);
 
-        const taskEntity = await this.turnRunner.runTurn(
-            ctx,
-            {
-                tenantId,
-                sessionId: taskId,
-                trigger: preparedWake.trigger,
-                isStreaming: this.isStreaming,
-                ...preparedWake.turnParams,
-            },
-            {
-                initialM: M,
-                snapshot: preparedWake.snapshot,
-            }
+        const taskEntity = await runWithSegmentIdempotencyKey(
+            idempotencyKey,
+            () => this.turnRunner.runTurn(
+                ctx,
+                {
+                    tenantId,
+                    sessionId: taskId,
+                    trigger: preparedWake.trigger,
+                    isStreaming: this.isStreaming,
+                    ...preparedWake.turnParams,
+                },
+                {
+                    initialM: M,
+                    snapshot: preparedWake.snapshot,
+                }
+            )
         );
 
+        await this.ensureProcessedKeyRecorded(tenantId, taskId, preparedWake.agentId, idempotencyKey);
         this.dedupe.record(idempotencyKey);
 
         const boundary = await this.resolveBoundary(
@@ -183,6 +196,41 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         }
 
         return { kind: 'complete' };
+    }
+
+    private async hasProcessedKey(
+        tenantId: string,
+        taskId: string,
+        idempotencyKey: string
+    ): Promise<boolean> {
+        if (this.dedupe.has(idempotencyKey)) {
+            return true;
+        }
+        const snap = await this.sessionManager.load(tenantId, taskId);
+        return snapshotHasProcessedSegmentKey(snap?.snapshot, idempotencyKey);
+    }
+
+    private async ensureProcessedKeyRecorded(
+        tenantId: string,
+        taskId: string,
+        agentId: string | undefined,
+        idempotencyKey: string
+    ): Promise<void> {
+        const snap = await this.sessionManager.load(tenantId, taskId);
+        if (
+            snap === null ||
+            snap === undefined ||
+            snapshotHasProcessedSegmentKey(snap.snapshot, idempotencyKey)
+        ) {
+            return;
+        }
+        await this.sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: taskId,
+            agentId: agentId ?? snap.agentId,
+            expectedWmVersion: snap.wmVersion ?? BigInt(0),
+            snapshot: addProcessedSegmentKey(snap.snapshot, idempotencyKey),
+        });
     }
 
     private async buildDuplicateResult(

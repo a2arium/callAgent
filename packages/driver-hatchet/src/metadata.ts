@@ -23,7 +23,7 @@ export function buildDriverRunMetadata(
     const traceId = params.traceId ?? '';
     const token = params.token ?? '';
     const metadata: Record<string, string> = {
-        operation: params.operation ?? 'outbox.dispatch',
+        operation: params.operation ?? 'effect.outbox.dispatch',
         eventType: params.eventType,
         outboxRowId: params.outboxRowId,
     };
@@ -36,6 +36,7 @@ export function buildDriverRunMetadata(
     }
     if (taskId) {
         metadata.taskId = taskId;
+        metadata.rootTaskId = taskId;
     }
     if (params.agentId) {
         metadata.agentId = params.agentId;

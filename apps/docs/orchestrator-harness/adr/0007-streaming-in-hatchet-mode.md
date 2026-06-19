@@ -34,6 +34,11 @@ the canonical runtime stream contract unchanged:
 The only thing that changes is **where** the publisher runs (a worker), not the
 contract or the projection.
 
+The same canonical events also feed the operator `AgentRunGraph`: user-visible
+status/output stays in the stream contract, while graph consumers group events
+and logs by `taskId`, `agentId`, `traceId`, `spanId`, and token. Hatchet native
+stream ids are therefore not part of the product graph contract.
+
 ### Required consequence: cross-process event bus
 
 When Hatchet mode is enabled, the in-memory event bus is insufficient because the
@@ -53,6 +58,8 @@ driver = hatchet      -> cross-process bus (NATS) is required for live streaming
 
 - One streaming contract across both drivers; no Hatchet-run-id streaming path.
 - Replay, visibility (public/debug/private), and finality rules are unchanged.
+- Operator graph event visibility follows the canonical stream visibility model;
+  runtime internals remain debug-only unless explicitly promoted.
 - Enabling Hatchet implies provisioning a durable cross-process bus; this is
   added to the ops checklist and the worker-runtime spec.
 - Workers must be able to publish to the bus (network + credentials), which is

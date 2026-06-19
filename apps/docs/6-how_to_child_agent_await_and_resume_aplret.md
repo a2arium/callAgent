@@ -77,6 +77,8 @@ Each turn’s **TurnTrace** can include **`childCalls`**: an array of **ChildCal
 
 Parent and child traces are linked in telemetry via **ChildCallNode** (node type `'child'`): the parent turn’s span has a child span for each dispatched child, and optional `childTraceId` / `childAgentNodeId` connect to the child run’s trace. Use **`trace.childCalls`** when debugging or testing to verify which child was dispatched, with which token, and when it completed.
 
+For operator-facing parent/child topology, use the semantic run graph (`GET /tasks/:taskId/run-graph`; see [Operator Run Graph](./operator-run-graph.md)). Child dispatches become `AgentRunEdge` entries with `parentTaskId`, `childTaskId`, `parentAgentId`, `childAgentId`, `edgeToken`, and status/result/error previews. Raw child task IDs and TurnTrace child-call fields are still the debugging evidence, but the graph is the user-facing navigation layer.
+
 ## Step-by-step implementation
 
 ### Step 1: Make Policy request delegation using only `MentalState`

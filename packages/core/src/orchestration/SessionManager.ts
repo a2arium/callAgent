@@ -17,6 +17,7 @@ import {
     resolveOutboxDispatchContext,
     type OutboxDispatchContext,
 } from '../eventbus/outboxDispatch.js';
+import { nextSegmentOutboxIdempotencyKey } from '../runtime/segmentProcessedKeys.js';
 
 export type OutboxEnqueuedRef = {
     outboxRowId: string;
@@ -29,6 +30,15 @@ export type OutboxEnqueuedRef = {
 };
 
 export type { OutboxDispatchContext };
+
+function readSnapshotAgentId(snapshot: Record<string, unknown> | undefined): string | undefined {
+    const meta = snapshot?.meta;
+    if (meta === undefined || meta === null || typeof meta !== 'object' || Array.isArray(meta)) {
+        return undefined;
+    }
+    const agentId = (meta as Record<string, unknown>).agentId;
+    return typeof agentId === 'string' ? agentId : undefined;
+}
 
 export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
@@ -96,9 +106,16 @@ export class SessionManager {
         dispatchContext?: OutboxDispatchContext
     ): Promise<{ id: string } | void> {
         if (!this.store) return;
-        const result = await this.store.enqueueOutbox({ tenantId, topic, key, payload });
+        const enrichedPayload = await this.enrichOutboxPayload(tenantId, key, payload, dispatchContext);
+        const result = await this.store.enqueueOutbox({
+            tenantId,
+            topic,
+            key,
+            payload: enrichedPayload,
+            idempotencyKey: nextSegmentOutboxIdempotencyKey(topic),
+        });
         if (result?.id && this.onOutboxEnqueued) {
-            const ctx = resolveOutboxDispatchContext(payload, dispatchContext);
+            const ctx = resolveOutboxDispatchContext(enrichedPayload, dispatchContext);
             await this.onOutboxEnqueued({
                 outboxRowId: result.id,
                 eventType: topic,
@@ -110,6 +127,27 @@ export class SessionManager {
             });
         }
         return result;
+    }
+
+    private async enrichOutboxPayload(
+        tenantId: string,
+        key: string,
+        payload: Record<string, unknown>,
+        dispatchContext?: OutboxDispatchContext
+    ): Promise<Record<string, unknown>> {
+        if (typeof payload.agentId === 'string' || dispatchContext?.agentId !== undefined) {
+            return dispatchContext?.agentId !== undefined && typeof payload.agentId !== 'string'
+                ? { ...payload, agentId: dispatchContext.agentId }
+                : payload;
+        }
+
+        const taskId = typeof payload.taskId === 'string' ? payload.taskId : key;
+        const snapshot = await this.load(tenantId, taskId).catch(() => null);
+        const agentId =
+            snapshot?.agentId ??
+            readSnapshotAgentId(snapshot?.snapshot as Record<string, unknown> | undefined);
+
+        return agentId !== undefined ? { ...payload, agentId } : payload;
     }
 
     async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }) {

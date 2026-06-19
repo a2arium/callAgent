@@ -1,6 +1,6 @@
 # Hatchet POC — Docker runs Hatchet + NATS + RabbitMQ only.
 # Both Postgres databases (callagent + hatchet) live on the host; see README.md.
-# Override Hatchet DB URL in apps/hatchet-poc/.env (see .env.example).
+# Override Hatchet DB URL in the repo-root .env.
 
 x-host-access: &host-access
   extra_hosts:

@@ -1,7 +1,7 @@
-import { Hatchet } from '@hatchet-dev/typescript-sdk';
+import { HatchetClient as HatchetV1 } from '@hatchet-dev/typescript-sdk/v1/client/client.js';
 
-export type HatchetClient = ReturnType<typeof Hatchet.init>;
+export type HatchetClient = ReturnType<typeof HatchetV1.init>;
 
 export function createHatchetClient(): HatchetClient {
-    return Hatchet.init();
+    return HatchetV1.init();
 }

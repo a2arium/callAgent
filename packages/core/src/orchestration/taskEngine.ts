@@ -88,6 +88,12 @@ import {
     StartTaskParams,
     CleanChildResult
 } from './types.js';
+import {
+    buildAgentRunGraph,
+    type AgentRunGraph,
+    type AgentRunSourceEvent,
+    type DriverRunView,
+} from '../operator/runGraph.js';
 
 export type {
     TaskEntity,
@@ -576,10 +582,48 @@ export class TaskEngine {
             }
         }
 
+        if (this.shouldScheduleAsyncThroughRuntimeDriver(params.operation)) {
+            if (params.operation === 'start') {
+                await this.runtimeDriver.enqueueStart({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    idempotencyKey: params.idempotencyKey,
+                    input: params.input ?? {},
+                });
+            } else {
+                await this.runtimeDriver.enqueueResume({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    idempotencyKey: params.idempotencyKey,
+                    event: params.resumeEvent!,
+                });
+            }
+
+            return {
+                id: params.taskId,
+                input: params.input ?? {},
+                status: {
+                    state: 'working',
+                    timestamp: new Date().toISOString(),
+                },
+            } as TaskEntity;
+        }
+
         return this.turnRunner.runTurn(params.ctx, params.turnParams, {
             initialM: params.initialM,
             snapshot: params.snapshot,
         });
+    }
+
+    private shouldScheduleAsyncThroughRuntimeDriver(operation: 'start' | 'resume'): boolean {
+        const raw = process.env.CALLAGENT_DRIVER_SURFACES;
+        if (raw === undefined || raw.trim().length === 0) {
+            return false;
+        }
+        const surfaces = raw.split(',').map((value) => value.trim()).filter(Boolean);
+        return surfaces.includes('all') || surfaces.includes(operation);
     }
 
     private async notifyA2AParentIfTerminal(
@@ -844,6 +888,57 @@ export class TaskEngine {
 
     private getSessionStorePrisma() {
         return (this.sessionManager as any)?.store?.prisma;
+    }
+
+    async buildAgentRunGraph(params: {
+        tenantId: string;
+        taskId: string;
+    }): Promise<AgentRunGraph> {
+        if (!this.sessionManager) {
+            throw new Error('Session manager is not configured');
+        }
+        const prisma = this.getSessionStorePrisma() as
+            | {
+                  driverRun?: {
+                      findMany: (args: {
+                          where: {
+                              tenantId: string;
+                              taskId: { in: string[] };
+                          };
+                          orderBy: { createdAt: 'asc' };
+                      }) => Promise<DriverRunView[]>;
+                  };
+              }
+            | undefined;
+        const sessionEvents: AgentRunSourceEvent[] = await this.sessionManager.listEventsSince({
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            sinceSeq: -1,
+        });
+        const childTaskIds = sessionEvents
+            .map((event) => {
+                const childTaskId = event.payload.childTaskId;
+                return typeof childTaskId === 'string' ? childTaskId : undefined;
+            })
+            .filter((taskId): taskId is string => taskId !== undefined);
+        const taskIds = [...new Set([params.taskId, ...childTaskIds])];
+        const driverRuns = prisma?.driverRun
+            ? await prisma.driverRun.findMany({
+                  where: {
+                      tenantId: params.tenantId,
+                      taskId: { in: taskIds },
+                  },
+                  orderBy: { createdAt: 'asc' },
+              })
+            : [];
+
+        return buildAgentRunGraph({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            sessionManager: this.sessionManager,
+            driverRuns,
+            events: sessionEvents,
+        });
     }
 
     // Persist a child's minimal context so durable handlers can restore it later

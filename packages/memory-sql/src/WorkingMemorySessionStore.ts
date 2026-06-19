@@ -344,9 +344,27 @@ export class WorkingMemorySessionStore {
         topic: string;
         key: string;
         payload: Record<string, unknown>;
+        idempotencyKey?: string;
     }): Promise<{ id: string }> {
-        const { tenantId, topic, key, payload } = params;
+        const { tenantId, topic, key, payload, idempotencyKey } = params;
         await this.ensureConnected();
+        if (idempotencyKey !== undefined) {
+            const row = await this.runWithReconnect(() =>
+                this.prisma.outbox.upsert({
+                    where: { idempotencyKey },
+                    update: {},
+                    create: {
+                        tenantId,
+                        topic,
+                        key,
+                        payload: payload as unknown as Prisma.InputJsonValue,
+                        idempotencyKey,
+                    },
+                })
+            );
+            return { id: row.id };
+        }
+
         const row = await this.runWithReconnect(() =>
             this.prisma.outbox.create({
                 data: {

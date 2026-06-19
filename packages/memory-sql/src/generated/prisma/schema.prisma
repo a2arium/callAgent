@@ -173,13 +173,14 @@ model WMEvent {
 }
 
 model Outbox {
-  id         String   @id @default(cuid())
-  tenantId   String   @map("tenant_id")
-  topic      String
-  key        String
-  payload    Json
-  retryCount Int      @default(0) @map("retry_count")
-  createdAt  DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  topic          String
+  key            String
+  payload        Json
+  idempotencyKey String?  @unique @map("idempotency_key")
+  retryCount     Int      @default(0) @map("retry_count")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([tenantId, topic])
   @@map("outbox")

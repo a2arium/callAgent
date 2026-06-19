@@ -22,11 +22,16 @@ async function main(): Promise<void> {
             registerDemoAgent,
         },
         {
+            PHASE2_LOOP_AGENT_ID,
+            registerPhase2LoopAgent,
+        },
+        {
             WorkingMemorySessionStore,
         },
     ] = await Promise.all([
         import('@a2arium/callagent-core'),
         import('./demoAgent.js'),
+        import('@a2arium/phase2-loop-agent'),
         import('@a2arium/callagent-memory-sql'),
     ]);
 
@@ -39,6 +44,10 @@ async function main(): Promise<void> {
     let eventBus: IEventBus | undefined;
 
     if (process.env.CALLAGENT_OUTBOX_DISPATCHER?.toLowerCase() === 'hatchet') {
+        console.log('CALLAGENT_OUTBOX_DISPATCHER=hatchet; initializing Hatchet outbox mode');
+        console.log(`NATS_URL: ${process.env.NATS_URL ?? 'nats://localhost:4222'}`);
+        console.log(`HATCHET_CLIENT_HOST_PORT: ${process.env.HATCHET_CLIENT_HOST_PORT ?? '(default)'}`);
+        console.log(`HATCHET_CLIENT_TLS_STRATEGY: ${process.env.HATCHET_CLIENT_TLS_STRATEGY ?? '(default)'}`);
         const natsSpec = '@a2arium/callagent-eventbus-nats';
         const hatchetSpec = '@a2arium/callagent-driver-hatchet';
         const [{ createNatsJetStreamEventBusStandalone }, { resolveHatchetOutboxBootstrap }] =
@@ -48,10 +57,16 @@ async function main(): Promise<void> {
         eventBus = nats.eventBus;
         transportClose = nats.close;
         hatchetBootstrap = resolveHatchetOutboxBootstrap({ sessionStore, eventBus });
+        console.log('Hatchet outbox mode bootstrapped');
+    } else {
+        console.log('CALLAGENT_OUTBOX_DISPATCHER is not hatchet; using polling outbox mode');
     }
 
     const { engine, shutdown: shutdownComposition } = await bootstrapCompositionRoot({
-        registerAgents: registerDemoAgent,
+        registerAgents: async () => {
+            await registerDemoAgent();
+            await registerPhase2LoopAgent();
+        },
         taskEngine: {
             sessionStore,
             eventBus,
@@ -74,6 +89,7 @@ async function main(): Promise<void> {
         res.json({
             ok: true,
             agentId: DEMO_AGENT_ID,
+            phase2AgentId: PHASE2_LOOP_AGENT_ID,
             rpc: '/rpc',
         });
     });
@@ -83,6 +99,7 @@ async function main(): Promise<void> {
         console.log(`Runtime host listening on http://${host}:${port}`);
         console.log(`RPC URL: http://${host}:${port}/rpc`);
         console.log(`Demo agent: ${DEMO_AGENT_ID}`);
+        console.log(`Phase 2 loop agent: ${PHASE2_LOOP_AGENT_ID}`);
         console.log('Viewer: node apps/docs/streaming-harness/viewer/server.mjs');
     });
 

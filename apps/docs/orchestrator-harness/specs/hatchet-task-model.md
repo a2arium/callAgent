@@ -7,7 +7,7 @@ callAgent.
 
 ## Tasks
 
-### `aplret.task` — durable control loop
+### `aplret.task` / `agent.<agentId>` — durable control loop
 
 Type: Hatchet durable task.
 
@@ -19,6 +19,11 @@ Responsibility:
    matching Hatchet event, then spawn the next `aplret.segment`.
 4. For `sleep`, use durable sleep, then spawn the next `aplret.segment`.
 5. Return on `complete` / `fail` / `canceled`.
+
+Known registered agents may use an `agent.<agentId>` parent workflow name for
+Hatchet dashboard readability. `aplret.task` remains the fallback for unknown or
+dynamic agents. Both names represent the same execution primitive and must map to
+the same callAgent `AgentRun` product model.
 
 There is no `continue` case: internal `continue` turns are consumed inside the
 segment by `runLoop` and never reach the durable task (ADR 0002).
@@ -117,6 +122,45 @@ Attach to every Hatchet run:
 Composite keys are required because Hatchet task-run metadata filtering can use
 OR semantics across multiple key/value pairs.
 
+## Run grouping (operator UI)
+
+Hatchet groups runs in the dashboard via parent-child spawning, not via shared
+metadata. A run is nested under a parent only when it is spawned from inside a
+parent task with `ctx.runChild` / `ctx.runNoWaitChild` / `ctx.bulkRunChildren`
+(or durable `ctx.spawnChild` / `ctx.spawnChildren`). Metadata (the composite
+keys above) only powers search/filter; it does not nest runs.
+
+Requirement: `aplret.task` or `agent.<agentId>` is the single parent Hatchet run
+per callAgent task, and all per-task work is spawned as its children:
+
+```text
+agent.<agentId> / aplret.task (parent run; metadata: tenantId, taskId, rootTaskId, agentId, traceId)
+├─ aplret.segment            (runLoop to next boundary)
+├─ aplret.outbox.dispatch    (task.status)
+├─ aplret.outbox.dispatch    (task.status)
+├─ aplret.outbox.dispatch    (task.input_required)
+└─ aplret.child.dispatch     (when applicable)
+```
+
+This is what keeps the top-level run list readable. The Phase 1 model — where the
+runtime host triggers each `aplret.outbox.dispatch` via an external top-level
+`runNoWait` — produces ungrouped sibling runs (one per outbox row) and is only
+acceptable for the outbox-only POC. Once `aplret.task` exists (Phase 2),
+outbox dispatch for a task with an active parent run must route through that
+parent. External top-level dispatch remains only as a fallback (no active parent
+run / pre-Phase-2 / trigger failure).
+
+This Hatchet grouping is **not** the product operator model. The product model is
+the callAgent `AgentRunGraph` (`apps/docs/operator-run-graph.md`), where:
+
+- parent workflow runs project to `AgentRun`;
+- child agent calls project to `AgentRunEdge`;
+- `aplret.segment` projects to `TurnRun`;
+- `aplret.outbox.dispatch` projects to hidden-by-default `EffectRun`.
+
+Operators should not need to understand `aplret.*` names. Hatchet workflow names
+and run ids are debug links attached to the semantic graph.
+
 ## Concurrency and fairness
 
 | Concern | Hatchet setting |
@@ -166,8 +210,15 @@ driver_runs(
 )
 ```
 
-Hatchet is an operator UI; `driver_runs` is the callAgent index and deep-link
-source.
+Hatchet is an infrastructure UI; `driver_runs` is the provider index and
+deep-link source. The operator-facing API must project or persist a semantic
+`AgentRunGraph` and should not ask users to interpret raw `driver_runs` rows.
+
+Graph-only fields such as `rootTaskId`, `parentTaskId`, `parentAgentId`,
+`childTaskId`, `childAgentId`, `edgeToken`, `edgeKind`, `turnSeq`,
+`boundary.kind`, and `turnTraceId` belong in normalized graph persistence
+(`agent_runs`, `agent_run_edges`, `turn_runs`, `effect_runs`) or in the
+projection contract, not necessarily in `driver_runs`.
 
 ## POC environment
 

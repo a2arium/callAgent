@@ -2,12 +2,15 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
-import { startHatchetOutboxWorkerApp } from '@a2arium/callagent-driver-hatchet';
+import { startHatchetRuntimeWorkerApp } from '@a2arium/callagent-driver-hatchet';
+import { registerPhase2LoopAgent } from '@a2arium/phase2-loop-agent';
 
 loadNearestEnv();
 
 async function main(): Promise<void> {
-    const app = await startHatchetOutboxWorkerApp();
+    const app = await startHatchetRuntimeWorkerApp({
+        registerAgents: registerPhase2LoopAgent,
+    });
 
     const shutdown = async () => {
         await app.shutdown();

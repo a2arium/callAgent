@@ -72,7 +72,14 @@ harness checklist style.
 
 ## Observability
 
-- [ ] Run metadata carries `tenantId/agentId/taskId/traceId/token/operation`.
+- [ ] Run metadata carries `tenantId/agentId/taskId/rootTaskId/traceId/token/operation`.
+- [ ] `GET /tasks/:taskId/run-graph` returns the semantic operator graph:
+      root `AgentRun`, child `AgentRunEdge` entries, `TurnRun`, hidden-by-default
+      `EffectRun`, grouped events/logs, TurnTrace refs, and raw provider ids.
+- [ ] `driver_runs` is treated as backend/provider debug data, not the product
+      operator model.
+- [ ] Normalized durable graph persistence is implemented or explicitly deferred:
+      `agent_runs`, `agent_run_edges`, `turn_runs`, `effect_runs`.
 - [ ] Deep link Hatchet run → callAgent task → `TurnTrace`.
 - [ ] Prometheus/OTel wired; alerts for DLQ/stuck/failure/timer-lag.
 - [ ] Retention policy decided (Hatchet ~30d; audit stays in TurnTrace/snapshots).
@@ -96,9 +103,10 @@ See `specs/deletion-inventory.md` for exact line references.
 - [ ] B2 timer survives restart (durable sleep + reconciler).
 - [ ] B3 duplicate resume no-op.
 - [ ] B4 per-task serialization.
-- [ ] B5 operator search by IDs.
+- [ ] B5 operator search by IDs and/or semantic run graph.
 - [ ] B6 failed-run replay/cancel/inspection.
-- [ ] B7 self-hosted dashboard parity (incl. security sub-gates).
+- [ ] B7 self-hosted dashboard works as debug infra, while semantic run graph
+      answers product/operator questions (incl. security sub-gates).
 - [ ] B8 hot-resume latency protected.
 - [ ] B9 child fan-out/fan-in.
 - [ ] B10 upgrade with active timers/runs (production gate).
@@ -110,5 +118,7 @@ See `specs/deletion-inventory.md` for exact line references.
       contract docs.
 - [ ] Promote the ADR 0007 streaming-parity decision into the canonical streaming
       contract doc.
+- [ ] Promote `apps/docs/operator-run-graph.md` as the permanent operator-facing
+      orchestration contract.
 - [ ] Convert POC scenarios into permanent tests.
 - [ ] Delete `apps/docs/orchestrator-harness/` after promotion or discard.

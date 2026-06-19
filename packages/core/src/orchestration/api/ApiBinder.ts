@@ -50,6 +50,7 @@ import { readA2aResultTelemetry } from './a2aResultTelemetry.js';
 import type { IEventBus } from '../../public-types/eventbus/types.js';
 import { createBusEvent } from '../../eventbus/busEventHelpers.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
+import { segmentEffectIdempotencyKey } from '../../runtime/segmentProcessedKeys.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
 import type { TaskState } from '../../shared/types/StreamingEvents.js';
 
@@ -771,6 +772,7 @@ export class ApiBinder {
             // Async tool request path: enqueue and let background handler execute
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
             let toolToken = opts?.setToken && typeof opts.setToken === 'string' ? opts.setToken : `tool-${uuidv7()}`;
+            const effectIdempotencyKey = segmentEffectIdempotencyKey('tool', toolToken);
             try { await flushMentalState(); } catch { /* best-effort */ }
 
             // Use saveWithRetry to avoid CAS_MISMATCH after flushMentalState bumps version
@@ -779,14 +781,24 @@ export class ApiBinder {
                 agentId: (ctx as any).agentId || 'default',
                 mutate: (baseSnap) => {
                     const toolsNow = { ...getPendingTools(baseSnap) } as any;
-                    toolsNow[toolToken] = { name: toolName, args, handlers: { completed: opts?.onCompleted } };
+                    toolsNow[toolToken] = {
+                        name: toolName,
+                        args,
+                        handlers: { completed: opts?.onCompleted },
+                        ...(effectIdempotencyKey !== undefined ? { idempotencyKey: effectIdempotencyKey } : {}),
+                    };
                     if (opts?.setToken || opts?.setStage) {
                         toolsNow[toolToken].options = { setToken: opts.setToken, setStage: opts.setStage };
                     }
                     return setPendingTools(baseSnap, toolsNow);
                 }
             });
-            const toolRequestedPayload = { token: toolToken, toolName, argsPreview: args };
+            const toolRequestedPayload = {
+                token: toolToken,
+                toolName,
+                argsPreview: args,
+                ...(effectIdempotencyKey !== undefined ? { idempotencyKey: effectIdempotencyKey } : {}),
+            };
             const toolRequestedEvent = await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', toolRequestedPayload);
             if (this.deps.eventBus) {
                 const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({

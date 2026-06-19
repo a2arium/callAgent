@@ -1,14 +1,20 @@
 # Implementation Status
 
-Last updated: 2026-06-16.
+Last updated: 2026-06-18.
 
 ## Stage
 
-**Phase 1 outbox dispatch implemented** — Hatchet-backed `aplret.outbox.dispatch`,
-`driver_runs` mapping, NATS cross-process bus wiring, worker app, and Docker
-Compose POC env. Task scheduling remains in-process; outbox delivery is opt-in
-via `CALLAGENT_OUTBOX_DISPATCHER=hatchet`. Manual POC gates B5–B7 are **runnable** via
-`apps/hatchet-poc/README.md` (not yet validated in CI).
+**Phase 2 durable loop + first operator graph slice implemented** — Hatchet-backed
+`aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
+parent workflows exist behind driver-surface flags. The runtime now exposes a
+projection-backed operator `AgentRunGraph` API so users can inspect agents, child
+calls, turns, effects, events/log groups, TurnTrace refs, and raw Hatchet ids
+without reading `aplret.*` workflow names.
+
+Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
+The remaining UX hardening is durable normalized graph persistence
+(`agent_runs`, `agent_run_edges`, `turn_runs`, `effect_runs`) and a real operator
+viewer. Hatchet UI grouping is useful debug scaffolding, not the product surface.
 
 This workspace was created after the research outcomes in
 `apps/docs/drafts/orchestrator-substrate-requirements.md` (§13). Hatchet is the
@@ -56,6 +62,7 @@ first POC candidate.
 - `specs/composition-roots-scope.md` — which entry points use shared bootstrap.
 - `specs/child-completion-routing.md` — why `handleChildCompleted` stays on
   `executeTurn` until Phase 2.
+- `../operator-run-graph.md` — permanent semantic operator graph contract.
 
 ## Production code added
 
@@ -140,6 +147,47 @@ first POC candidate.
     - `driver_runs.provider_run_id` unique + Prisma upsert.
     - Known limitation: publish-then-delete may duplicate events on Hatchet redelivery
       until ADR 0009 per-effect idempotency (Phase 2).
+    - SDK V1 import cleanup: `packages/driver-hatchet` imports from
+      `@hatchet-dev/typescript-sdk/v1/*` (explicit file subpaths) to drop the
+      `HATCHET_V0_REMOVED` deprecation warning; POC Hatchet env consolidated to the
+      repo-root `.env` (`hatchet:poc:up` uses `--env-file .env`).
+
+- Phase 1 manual POC gate signoff (host Postgres + Docker Hatchet/NATS):
+  - **B5 baseline dispatch — PASS.** One demo task produced N `aplret.outbox.dispatch`
+    runs (one per outbox row), all succeeded; `outbox` drained to 0 for the task;
+    `conversation_dead_letter` empty; `driver_runs` has matching `completed` rows
+    linked by `task_id` + `trace_id`.
+  - **B5 metadata search — PASS.** Runs carry `tenantTaskKey`, `tenantTraceKey`,
+    `traceId`, `taskId`, `tenantId`, and `token` (on `task.input_required`) and are
+    filterable in the dashboard.
+  - **B6 replay — PASS.** Induced replay/failure scenario recovered correctly from
+    the Hatchet UI.
+  - **B7 self-hosted UI — PASS with Phase 2 caveat.** Dashboard is useful for
+    Phase 1 replay/errors/runs/metadata, with the agreed limitation that raw
+    outbox-dispatch runs are not automatically grouped until the Phase 2
+    `aplret.task` parent-run model.
+  - **Run grouping — resolved as infrastructure, superseded by operator graph UX.**
+    Dispatch runs are nested under the durable parent when routed through
+    `aplret.task` / `agent.<agentId>`. The accepted product direction is the
+    callAgent `AgentRunGraph`, not the raw Hatchet run list (see
+    `../operator-run-graph.md` and `specs/hatchet-task-model.md` § Run grouping).
+  - **Metadata follow-up — resolved in Phase 2 slice:** `agentId` is threaded into
+    outbox payload / dispatch context where available, and semantic graph
+    projection treats missing raw provider metadata as debug incompleteness rather
+    than a product-model failure.
+
+- Operator graph slice:
+  - `packages/core/src/operator/runGraph.ts` — `AgentRunGraph`, `AgentRun`,
+    `AgentRunEdge`, `TurnRun`, `EffectRun`, and grouped `AgentRunEvent`
+    projection from existing runtime data.
+  - `GET /tasks/:taskId/run-graph` — JSON/API signoff surface.
+  - Hatchet metadata normalized around `agent.run`, `turn.segment`, and
+    `effect.outbox.dispatch`, with `rootTaskId` where available.
+  - Known registered agents can register `agent.<agentId>` parent workflows;
+    `aplret.task` remains the fallback.
+  - Remaining hardening: persist normalized graph records and durable
+    `boundary.kind` / `turnTraceId` references rather than reconstructing them
+    from mixed JSON sources.
 
 ## Production code changed
 
@@ -170,10 +218,11 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Phase 1 code + D5 are done. Next: run manual POC gates B5–B7, then Phase 2 durable
+Phase 1 code + D5 + manual B5–B7 signoff are done. Next: Phase 2 durable
 `aplret.task` loop (requires durable dedupe ADR 0005, per-effect idempotency ADR 0009,
-full worker bootstrap). Run `yarn hatchet:poc:up` and follow
-`apps/hatchet-poc/README.md` for B5–B7.
+full worker bootstrap, and the operator-UI run-grouping criterion). Carry forward two
+Phase 1 findings: group per-task work under the `aplret.task` parent run, and thread
+`agentId` into outbox-dispatch metadata / `driver_runs.agent_id`.
 
 ## Open questions (carried from requirements §11)
 

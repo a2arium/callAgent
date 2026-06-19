@@ -58,7 +58,8 @@ This workspace covers:
 - External wakes (`tasks/input`, tool/webhook callbacks, A2A child completion)
   as Hatchet events.
 - Snapshot ownership and idempotency under at-least-once delivery.
-- Observability mapping (`driver_runs`, deep links to `TurnTrace`).
+- Observability mapping (`AgentRunGraph`, `driver_runs`, deep links to
+  `TurnTrace`, and Hatchet debug run ids).
 - The line-referenced deletion inventory and reversibility rules.
 - POC scenarios and pass/fail gates.
 
@@ -85,6 +86,8 @@ In particular:
   stay in-process.
 - The canonical streaming contract is unchanged; Hatchet mode requires a
   cross-process bus and does not use Hatchet's native stream (ADR 0007).
+- Hatchet task names are execution/debug vocabulary. The operator-facing product
+  vocabulary is the semantic run graph in `apps/docs/operator-run-graph.md`.
 - `MentalState` lives only in callAgent snapshots; orchestrator payloads carry
   IDs and small event data.
 - The in-process driver remains the default; the orchestrator is opt-in and

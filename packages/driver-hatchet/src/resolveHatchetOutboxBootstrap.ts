@@ -26,6 +26,7 @@ export function resolveHatchetOutboxBootstrap(params: {
                 delegate: stack.runtimeDriver,
                 eventBus,
                 prisma,
+                turnExecutor: stack.turnExecutor,
             }).runtimeDriver,
     };
 }
