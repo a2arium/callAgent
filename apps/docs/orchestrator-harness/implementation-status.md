@@ -1,11 +1,12 @@
 # Implementation Status
 
-Last updated: 2026-06-21.
+Last updated: 2026-06-22.
 
 ## Stage
 
-**Phase 2 durable loop + Operator Experience MVP implemented; Phase 3/operator
-hardening in progress; production-readiness track added.** Hatchet-backed
+**Phase 2 durable loop + Operator Experience MVP implemented; Phase 3 child
+wake/fan-in slice closed; remaining Phase 3/operator hardening in progress;
+production-readiness track added.** Hatchet-backed
 `aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
 parent workflows exist behind driver-surface flags. The runtime now exposes a
 projection-backed operator `AgentRunGraph` API so users can inspect agents, child
@@ -19,6 +20,13 @@ hardening, but it is not yet the production-scale read path. Production readines
 now has a dedicated plan in `production-readiness.md`, covering indexed summary
 storage, root/child correctness, graph caps, payload budgets, observability,
 retention, load tests, and failure drills.
+
+Current Phase 3 status: durable child wakes have the required unit coverage for
+post-wait child completion, pre-wait persisted child completion/failure,
+out-of-order child completion selection, missing child wake timeout, and graph
+projection. The remaining Phase 3 work is non-child external/conversation wakes,
+boundary cancellation, durable dedupe for all wake families, and restart/failure
+validation against real workers.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
 The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
@@ -270,6 +278,11 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Tested
 
+- 2026-06-22 broad Phase 3 regression sweep:
+  `yarn test packages/core/tests/runtime packages/core/tests/operator.runGraph.test.ts packages/core/tests/taskEngine.coverage.test.ts packages/core/tests/taskEngine.enhanced.coverage.test.ts packages/core/tests/taskEngine.additional.coverage.test.ts packages/core/tests/taskEngine.coverage.improvement.test.ts packages/core/tests/a2a.asyncChildPrematureCompletion.repro.test.ts packages/driver-hatchet/tests --runInBand`
+  — 25 suites / 226 tests passed. Expected console noise remains from tests that
+  intentionally drive failed stores, Hatchet trigger failures, and dispatch
+  fallback paths.
 - `packages/core/tests/runtime/*` — 29 tests (mapper, driver, wake applicator,
   segment executor, bootstrap, Scenario 0 parity, driver routing).
 - `apps/examples/phase2-parent-agent/tests/parentAgent.test.ts` — parent DAG
@@ -284,7 +297,8 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
   durable turn fields, completed/failed child edge projection, recursive child
   turns, stale parent-row status derivation, stale running turn finalization, and
   semantic failure derivation.
-- `yarn workspace @a2arium/operator-viewer build` — Vite/React viewer build.
+- `yarn workspace @a2arium/operator-viewer build` — Vite/React viewer build
+  passes. Vite still reports the known large bundle/chunk-size warning.
 - `TaskEngine.sync`, `TaskEngine.inbox`, `TaskEngine.async_race` — pass with
   driver-routed call sites.
 - All `packages/core/tests/TaskEngine*` suites — pass (151 tests).
@@ -292,15 +306,13 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Next phase: continue Phase 3 beyond child wakes. Child `await_child` fan-in now
-has durable-parent unit coverage for post-wait completion, pre-wait persisted
-completion/failure, child semantic failure propagation, out-of-order completion
-selection, wait timeout failure, and operator graph projection. Remaining Phase 3
-work is durable handling for non-child external/conversation wakes, cancellation
-semantics, durable dedupe policy, and real-run validation under worker restarts.
-In parallel, start the production-readiness read model: semantic run summaries,
-edge facts, root-only fleet correctness, child counts, query/index review, and
-payload-budget error surfacing.
+Next phase: finish the rest of Phase 3 beyond child wakes. Child `await_child`
+fan-in is covered and should be treated as closed for the harness. Remaining
+Phase 3 work is durable handling for non-child external/conversation wakes,
+cancellation semantics, durable dedupe policy, and real-run validation under
+worker restarts. In parallel, start the production-readiness read model:
+semantic run summaries, edge facts, root-only fleet correctness, child counts,
+query/index review, and payload-budget error surfacing.
 
 ## Open questions (carried from requirements §11)
 

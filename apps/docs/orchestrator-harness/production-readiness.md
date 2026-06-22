@@ -1,6 +1,6 @@
 # Production Readiness Plan
 
-Last updated: 2026-06-21.
+Last updated: 2026-06-22.
 
 This is the promotion gate for running the Hatchet orchestration harness as a
 production substrate, not a dashboard polish list. The runtime can plausibly run
@@ -23,6 +23,13 @@ wait/spawn/sleep infrastructure while callAgent keeps the APLRET kernel,
 snapshots, idempotency, and semantic operator graph. The remaining production
 risk is mostly in read-side scale, payload discipline, operational controls, and
 failure drills.
+
+As of the 2026-06-22 harness sweep, the Phase 3 child wake/fan-in slice is
+covered by durable-parent unit tests and operator graph projection tests. That
+does not change the production gate: the system still needs the read model,
+query validation, payload budgets, observability, retention, and failure drills
+below before Hatchet mode or the operator viewer can be treated as production
+defaults.
 
 Known gaps from the current implementation:
 

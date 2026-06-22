@@ -158,6 +158,7 @@ See `specs/deletion-inventory.md` for exact line references.
 - [x] B9 child fan-out/fan-in durable-parent unit coverage: child completes after
       wait, child completed before wait, child failure, out-of-order child
       completion selection, missing child wake timeout, and graph projection.
+      Verified again in the 2026-06-22 broad Phase 3 regression sweep.
 - [ ] B10 upgrade with active timers/runs (production gate).
 - [ ] B11 100k-run volume test with dashboard/query/retention acceptance.
 
