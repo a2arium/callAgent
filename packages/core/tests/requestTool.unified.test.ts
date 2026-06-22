@@ -1,5 +1,6 @@
 import { TaskEngine } from '../src/orchestration/taskEngine';
 import { ApiBinder } from '../src/orchestration/api/ApiBinder';
+import { globalA2AService } from '../src/orchestration/A2AService';
 import { SessionManager } from '../src/orchestration/SessionManager';
 import { v4 as uuidv4 } from 'uuid';
 import { jest } from '@jest/globals';
@@ -49,6 +50,89 @@ describe('ApiBinder.requestTool unified API', () => {
             backgroundTaskPromises: new Set(),
             handleChildCompleted: jest.fn().mockResolvedValue(undefined)
         });
+    });
+
+    it('schedules non-blocking child starts through the runtime driver when start surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start,resume';
+        const enqueueChildStart = jest.fn().mockResolvedValue(undefined);
+        const localA2ASpy = jest
+            .spyOn(globalA2AService, 'sendTaskToAgent')
+            .mockRejectedValue(new Error('local A2A should not run'));
+
+        apiBinder = new ApiBinder({
+            sessionManager: mockSessionManager,
+            snapshotRepo: {
+                saveWithRetry: jest.fn(async (opts: any) => {
+                    const session = await mockSessionManager.load('t1', 's1');
+                    const baseSnap = session?.snapshot || {};
+                    const nextSnap = await opts.mutate(baseSnap);
+                    await mockSessionManager.saveSnapshot({
+                        tenantId: opts.tenantId,
+                        sessionId: opts.sessionId,
+                        agentId: opts.agentId || 'default',
+                        expectedWmVersion: BigInt(1),
+                        snapshot: nextSnap
+                    });
+                })
+            } as any,
+            getTraceContext: () => ({}),
+            getSessionStorePrisma: () => null,
+            taskCreationMutex: { runExclusive: jest.fn((key, fn) => fn()) } as any,
+            backgroundTaskPromises: new Set(),
+            handleChildCompleted: jest.fn().mockResolvedValue(undefined),
+            enqueueChildStart
+        });
+
+        const ctx: any = {
+            task: { id: 's1', input: {} },
+            tenantId: 't1',
+            agentId: 'parent-agent',
+            telemetry: { traceId: 'trace-1', nodeId: 'node-1' }
+        };
+
+        try {
+            await apiBinder.attachOrchestrationAPIs(ctx, {
+                tenantId: 't1',
+                sessionId: 's1',
+                agentId: 'parent-agent',
+                flushMentalState: jest.fn()
+            });
+
+            const result = await ctx.sendTaskToAgent('child-agent', { url: 'https://example.test' }, {
+                awaitCompletion: false
+            });
+
+            expect(result).toHaveProperty('token');
+            expect(localA2ASpy).not.toHaveBeenCalled();
+            expect(enqueueChildStart).toHaveBeenCalledWith(expect.objectContaining({
+                tenantId: 't1',
+                agentId: 'child-agent',
+                input: { url: 'https://example.test' },
+                token: result.token,
+                traceId: 'trace-1'
+            }));
+            const scheduledTaskId = (enqueueChildStart.mock.calls[0]?.[0] as any)?.taskId;
+            expect(typeof scheduledTaskId).toBe('string');
+            expect(scheduledTaskId).toContain('a2a_s1_child-agent_');
+            expect(mockSessionManager.saveSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+                tenantId: 't1',
+                sessionId: scheduledTaskId,
+                agentId: 'child-agent',
+                snapshot: expect.objectContaining({
+                    meta: expect.objectContaining({
+                        agentId: 'child-agent',
+                        a2aParent: {
+                            parentTenantId: 't1',
+                            parentTaskId: 's1',
+                            parentChildToken: result.token
+                        }
+                    })
+                })
+            }));
+        } finally {
+            delete process.env.CALLAGENT_DRIVER_SURFACES;
+            localA2ASpy.mockRestore();
+        }
     });
 
     it('should execute regular tool inline when awaitCompletion is true', async () => {

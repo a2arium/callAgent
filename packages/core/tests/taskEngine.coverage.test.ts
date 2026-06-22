@@ -1258,6 +1258,47 @@ describe('TaskEngine orchestration coverage', () => {
         expect(ctx.__activeLoopEnv.pending.children[token]).toBeDefined();
     });
 
+    test('restoreCtx durable sendTaskToAgent does not complete a still-working child', async () => {
+        const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
+            id: 'child-task-id',
+            input: { input: 1 },
+            status: {
+                state: 'working',
+                timestamp: new Date().toISOString(),
+            },
+        });
+
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
+        const base = { meta: { agentId: 'agent-a' }, inbox: { current: [], all: [] }, pending: {}, M: { memory: { vars: {} } } };
+        store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
+        const ctx: any = await (engine as any).restoreCtx('t', 'session');
+        ctx.__activeLoopInbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
+        ctx.__activeLoopEnv = { turn: 1, pending: { children: {}, inputs: {}, tools: {}, groups: {} } };
+        const handleChildSpy = jest.spyOn(engine as any, 'handleChildCompleted');
+
+        const result = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { setToken: true, setStage: 'child-await', autoClearToken: false });
+
+        expect(result.handle).toBeDefined();
+        expect(result.handle.status?.state).toBe('working');
+        expect(sendMock).toHaveBeenCalledWith(
+            expect.any(Object),
+            'child-agent',
+            expect.objectContaining({ input: 1 }),
+            expect.objectContaining({ parentTenantId: 't', parentTaskId: 'session', skipParentNotification: true })
+        );
+        expect(handleChildSpy).not.toHaveBeenCalled();
+        expect(ctx.__activeLoopInbox.current).toHaveLength(0);
+        expect(ctx.__activeLoopInbox.all).toHaveLength(0);
+
+        const events = store.getEvents('t', 'session');
+        expect(events.some((event) => event.type === 'task.child_started')).toBe(true);
+        expect(events.some((event) => event.type === 'task.child_completed')).toBe(false);
+    });
+
     test('restoreCtx durable sendTaskToAgent falls back to handleChildCompleted when no active inbox', async () => {
         // Use spyOn instead of module mocking to avoid Jest ESM issues
         const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });

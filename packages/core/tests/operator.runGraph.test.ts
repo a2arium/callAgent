@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
-import { buildAgentRunGraph, type DriverRunView } from '../src/operator/runGraph.js';
+import { buildAgentRunGraph, type AgentRunSourceEvent, type DriverRunView } from '../src/operator/runGraph.js';
 
 describe('buildAgentRunGraph', () => {
     it('projects a user-facing agent graph from driver runs and working-memory events', async () => {
@@ -168,6 +168,67 @@ describe('buildAgentRunGraph', () => {
         ]));
     });
 
+    it('projects driver run errors onto failed turns and root nodes', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-error',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        const error = {
+            name: 'Error',
+            message: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+            stack: 'Error: LIMIT_WM_SNAPSHOT_TOO_LARGE',
+        };
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-error',
+            sessionManager,
+            driverRuns: [
+                {
+                    provider: 'hatchet',
+                    providerRunId: 'run-root',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-error',
+                    rootTaskId: 'task-error',
+                    agentId: 'root-agent',
+                    operation: 'agent.run',
+                    status: 'failed',
+                    boundaryKind: 'fail',
+                    error,
+                },
+                {
+                    provider: 'hatchet',
+                    providerRunId: 'run-turn',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-error',
+                    rootTaskId: 'task-error',
+                    agentId: 'root-agent',
+                    operation: 'turn.segment',
+                    status: 'failed',
+                    boundaryKind: 'fail',
+                    turnSeq: 2,
+                    error,
+                },
+            ],
+        });
+
+        expect(graph.root).toEqual(expect.objectContaining({
+            status: 'failed',
+            error,
+        }));
+        expect(graph.turns[0]).toEqual(expect.objectContaining({
+            status: 'failed',
+            boundaryKind: 'fail',
+            error,
+        }));
+        expect(graph.debug.driverRuns[1]?.error).toEqual(error);
+    });
+
     it('marks the root completed from a terminal segment when the parent driver row is stale', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
@@ -213,6 +274,50 @@ describe('buildAgentRunGraph', () => {
 
         expect(graph.root.status).toBe('completed');
         expect(graph.root.finishedAt).toBe('2026-06-19T07:05:07.319Z');
+    });
+
+    it('finalizes stale running turns when a later turn exists for the same task', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-stale-turn',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-stale-turn', 'task.started', {
+            taskId: 'task-stale-turn',
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-stale-turn', 'turn.completed', {
+            taskId: 'task-stale-turn',
+            agentId: 'root-agent',
+            turnSeq: 4,
+            transition: { kind: 'complete', result: { ok: true } },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-stale-turn',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'turn-run-stale',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-stale-turn',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-stale-turn',
+                    operation: 'turn.segment',
+                    status: 'running',
+                    turnSeq: 3,
+                },
+            ],
+        });
+
+        expect(graph.turns).toEqual([
+            expect.objectContaining({ turnSeq: 3, status: 'completed' }),
+            expect.objectContaining({ turnSeq: 4, status: 'completed' }),
+        ]);
     });
 
     it('treats complete transitions with ok false as failed semantic outcomes', async () => {
@@ -274,5 +379,346 @@ describe('buildAgentRunGraph', () => {
 
         expect(graph.root.status).toBe('failed');
         expect(graph.turns[0]?.status).toBe('failed');
+    });
+
+    it('does not let an old await_child turn mask a failed root driver run', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-timeout',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-timeout', 'task.started', {
+            taskId: 'task-timeout',
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-timeout', 'turn.completed', {
+            taskId: 'task-timeout',
+            agentId: 'root-agent',
+            turnSeq: 1,
+            transition: {
+                kind: 'await_child',
+                token: 'child-token',
+            },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-timeout',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'parent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-timeout',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-timeout',
+                    operation: 'agent.run',
+                    status: 'failed',
+                    boundaryKind: 'fail',
+                },
+                {
+                    providerRunId: 'turn-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-timeout',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-timeout',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    turnSeq: 1,
+                    boundaryKind: 'await_child',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('failed');
+        expect(graph.turns[0]?.status).toBe('completed');
+    });
+
+    it('projects await_child as waiting and includes recursively loaded child session turns', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'cian',
+            agentId: 'discover-listing-selectors',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'discover-listing-selectors' } },
+        });
+        const events: AgentRunSourceEvent[] = [
+            {
+                eventId: 'root-started',
+                sessionId: 'cian',
+                seq: 1,
+                type: 'task.started',
+                payload: { taskId: 'cian' },
+                createdAt: '2026-06-19T20:51:02.000Z',
+            },
+            {
+                eventId: 'child-started',
+                sessionId: 'cian',
+                seq: 2,
+                type: 'task.child_started',
+                payload: {
+                    taskId: 'cian',
+                    token: 'child-token',
+                    childTaskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                    childAgentId: 'fetch-page-router',
+                },
+                createdAt: '2026-06-19T20:51:03.000Z',
+            },
+            {
+                eventId: 'root-turn-1',
+                sessionId: 'cian',
+                seq: 3,
+                type: 'turn.completed',
+                payload: {
+                    taskId: 'cian',
+                    agentId: 'discover-listing-selectors',
+                    turnSeq: 1,
+                    stageBefore: 'idle',
+                    stageAfter: 'idle',
+                    transition: { kind: 'await_child', token: 'child-token' },
+                },
+                createdAt: '2026-06-19T20:51:04.000Z',
+            },
+            {
+                eventId: 'child-task-started',
+                sessionId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                seq: 1,
+                type: 'task.started',
+                payload: {
+                    taskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                    inputPreview: { url: 'https://example.test/listing.html' },
+                },
+                createdAt: '2026-06-19T20:51:05.000Z',
+            },
+            {
+                eventId: 'child-turn-1',
+                sessionId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                seq: 2,
+                type: 'turn.completed',
+                payload: {
+                    taskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                    agentId: 'fetch-page-router',
+                    turnSeq: 1,
+                    stageBefore: 'idle',
+                    stageAfter: 'idle',
+                    transition: { kind: 'complete', result: { ok: true } },
+                },
+                createdAt: '2026-06-19T20:51:06.000Z',
+            },
+            {
+                eventId: 'child-task-completed',
+                sessionId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                seq: 3,
+                type: 'task.completed',
+                payload: {
+                    taskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                    resultPreview: { ok: true },
+                },
+                createdAt: '2026-06-19T20:51:07.000Z',
+            },
+            {
+                eventId: 'child-completed',
+                sessionId: 'cian',
+                seq: 4,
+                type: 'task.child_completed',
+                payload: {
+                    taskId: 'cian',
+                    token: 'child-token',
+                    childTaskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                    childAgentId: 'fetch-page-router',
+                    resultPreview: { ok: true },
+                },
+                createdAt: '2026-06-19T20:51:08.000Z',
+            },
+        ];
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'cian',
+            sessionManager,
+            events,
+            driverRuns: [
+                {
+                    providerRunId: 'root-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'cian',
+                    agentId: 'discover-listing-selectors',
+                    rootTaskId: 'cian',
+                    operation: 'agent.run',
+                    status: 'failed',
+                },
+                {
+                    providerRunId: 'root-turn-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'cian',
+                    agentId: 'discover-listing-selectors',
+                    rootTaskId: 'cian',
+                    operation: 'turn.segment',
+                    status: 'failed',
+                    boundaryKind: 'fail',
+                    turnSeq: 1,
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('failed');
+        expect(graph.nodes).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                agentId: 'fetch-page-router',
+                status: 'completed',
+                inputPreview: { url: 'https://example.test/listing.html' },
+            }),
+        ]));
+        expect(graph.turns).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: 'cian',
+                turnSeq: 1,
+                status: 'failed',
+                cognition: expect.objectContaining({
+                    transition: { kind: 'await_child', token: 'child-token' },
+                }),
+            }),
+            expect.objectContaining({
+                taskId: 'a2a_cian_fetch-page-route_1781902264052_5ullho51i',
+                turnSeq: 1,
+                status: 'completed',
+                cognition: expect.objectContaining({
+                    transition: { kind: 'complete', result: { ok: true } },
+                }),
+            }),
+        ]));
+    });
+
+    it('uses descendant driver runs to resolve child node and edge status when child completion events are missing', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'root-task',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        const events: AgentRunSourceEvent[] = [
+            {
+                eventId: 'root-started',
+                sessionId: 'root-task',
+                seq: 1,
+                type: 'task.started',
+                payload: { taskId: 'root-task' },
+                createdAt: '2026-06-20T17:41:54.000Z',
+            },
+            {
+                eventId: 'child-started',
+                sessionId: 'root-task',
+                seq: 2,
+                type: 'task.child_started',
+                payload: {
+                    taskId: 'root-task',
+                    token: 'child-token',
+                    childTaskId: 'child-task',
+                    childAgentId: 'child-agent',
+                },
+                createdAt: '2026-06-20T17:41:55.000Z',
+            },
+            {
+                eventId: 'root-turn-1',
+                sessionId: 'root-task',
+                seq: 3,
+                type: 'turn.completed',
+                payload: {
+                    taskId: 'root-task',
+                    agentId: 'root-agent',
+                    turnSeq: 1,
+                    transition: { kind: 'await_child', token: 'child-token' },
+                },
+                createdAt: '2026-06-20T17:41:56.000Z',
+            },
+        ];
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'root-task',
+            sessionManager,
+            events,
+            driverRuns: [
+                {
+                    providerRunId: 'root-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'root-task',
+                    agentId: 'root-agent',
+                    rootTaskId: 'root-task',
+                    operation: 'agent.run',
+                    status: 'completed',
+                    boundaryKind: 'complete',
+                },
+                {
+                    providerRunId: 'root-turn-1',
+                    tenantId: 'tenant-1',
+                    taskId: 'root-task',
+                    agentId: 'root-agent',
+                    rootTaskId: 'root-task',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    boundaryKind: 'await_child',
+                    turnSeq: 1,
+                    updatedAt: '2026-06-20T17:41:56.000Z',
+                },
+                {
+                    providerRunId: 'child-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'child-task',
+                    agentId: 'child-agent',
+                    rootTaskId: 'child-task',
+                    token: 'child-token',
+                    operation: 'agent.run',
+                    status: 'completed',
+                    boundaryKind: 'complete',
+                    updatedAt: '2026-06-20T17:42:10.000Z',
+                },
+                {
+                    providerRunId: 'child-turn-1',
+                    tenantId: 'tenant-1',
+                    taskId: 'child-task',
+                    agentId: 'child-agent',
+                    rootTaskId: 'child-task',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    boundaryKind: 'complete',
+                    turnSeq: 1,
+                    updatedAt: '2026-06-20T17:42:09.000Z',
+                },
+            ],
+        });
+
+        expect(graph.nodes).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: 'child-task',
+                agentId: 'child-agent',
+                status: 'completed',
+                finishedAt: '2026-06-20T17:42:10.000Z',
+            }),
+        ]));
+        expect(graph.edges).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                childTaskId: 'child-task',
+                status: 'completed',
+                finishedAt: '2026-06-20T17:42:10.000Z',
+            }),
+        ]));
+        expect(graph.turns).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: 'root-task',
+                turnSeq: 1,
+                boundaryKind: 'await_child',
+                status: 'completed',
+            }),
+        ]));
     });
 });

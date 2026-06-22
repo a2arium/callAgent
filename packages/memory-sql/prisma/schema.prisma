@@ -211,6 +211,7 @@ model DriverRun {
     turnSeq           Int?     @map("turn_seq")
     boundaryKind      String?  @map("boundary_kind")
     turnTraceId       String?  @map("turn_trace_id")
+    error             Json?
     createdAt         DateTime @default(now()) @map("created_at")
     updatedAt         DateTime @updatedAt @map("updated_at")
 

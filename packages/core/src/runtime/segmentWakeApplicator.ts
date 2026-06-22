@@ -17,6 +17,7 @@ import { InboxManager, type EngineObservation } from '../orchestration/InboxMana
 import type { SessionManager } from '../orchestration/SessionManager.js';
 import { getPendingTools, setPendingTools } from '../orchestration/ToolsRegistry.js';
 import { TaskStateUtils } from '../orchestration/utils/TaskStateUtils.js';
+import { getPendingTasks, setPendingTasks } from '../orchestration/Handles.js';
 import type { TurnExecutionParams, TurnTrigger as TurnRunnerTrigger } from '../orchestration/TurnRunner.js';
 import type { ConversationPayload } from '../types/observation.js';
 import type { TurnWake } from './turnExecutor.js';
@@ -120,6 +121,12 @@ export function applyWakeToSnapshot(
             if (event.kind !== 'child') {
                 throw new Error(`child wake expects child event, got ${event.kind}`);
             }
+            const tasks = getPendingTasks(base);
+            const pendingTask = tasks[event.token];
+            const options = pendingTask?.options ?? {};
+            const shouldSetToken = options.setToken !== false;
+            const shouldAutoClear = options.autoClearToken !== false;
+            const childTokenPath = options.tokenPath ?? 'child.token';
             const clean = TaskStateUtils.extractCleanChildResult(event.output);
             const observation: EngineObservation = {
                 source: 'child',
@@ -132,10 +139,17 @@ export function applyWakeToSnapshot(
                 },
                 provenance: observationProvenance(event.token, turnFromSnapshot(base)),
             };
-            const next = {
+            let next: Record<string, unknown> = {
                 ...base,
                 inbox: InboxManager.addObservationToInbox((base as { inbox?: unknown }).inbox, observation),
             };
+            if (pendingTask !== undefined && shouldAutoClear) {
+                delete tasks[event.token];
+                next = setPendingTasks(next, tasks);
+            }
+            if (shouldSetToken && shouldAutoClear) {
+                next = TaskStateUtils.removeControlVarFromSnapshot(next, childTokenPath);
+            }
             return {
                 snapshot: next,
                 wmVersion: BigInt(0),

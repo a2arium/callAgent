@@ -8,7 +8,8 @@ import {
 } from '@a2arium/callagent-core/unstable';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { HatchetClient } from '../hatchetClient.js';
-import { DriverRunsRepository } from '../driverRunsRepository.js';
+import { DriverRunsRepository, serializeDriverRunError } from '../driverRunsRepository.js';
+import { withHatchetTaskLogging } from '../hatchetLogging.js';
 
 export const OUTBOX_DISPATCH_TASK_NAME = 'aplret.outbox.dispatch';
 
@@ -71,6 +72,16 @@ export async function executeOutboxDispatch(
     ctx: Context<OutboxDispatchInput>,
     deps: OutboxDispatchDeps
 ): Promise<OutboxDispatchOutput> {
+    return withHatchetTaskLogging(input, ctx, 'effect.outbox.dispatch', () =>
+        executeOutboxDispatchInner(input, ctx, deps)
+    );
+}
+
+async function executeOutboxDispatchInner(
+    input: OutboxDispatchInput,
+    ctx: Context<OutboxDispatchInput>,
+    deps: OutboxDispatchDeps
+): Promise<OutboxDispatchOutput> {
     const row = (await deps.prisma.outbox.findUnique({
         where: { id: input.outboxRowId },
     })) as OutboxRow | null;
@@ -129,6 +140,7 @@ export async function executeOutboxDispatch(
                 operation: 'effect.outbox.dispatch',
                 status: 'failed',
                 outboxRowId: input.outboxRowId,
+                error: serializeDriverRunError(error),
             });
         }
 

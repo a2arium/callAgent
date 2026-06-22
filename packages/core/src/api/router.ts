@@ -79,6 +79,7 @@ export function createApiRouter(): Router {
             }
             const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
             const limitRaw = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
+            const scope = req.query.scope === 'all' ? 'all' : 'roots';
             const page = await engine.listAgentRuns({
                 tenantId,
                 ...(typeof req.query.agentId === 'string' && req.query.agentId.length > 0 ? { agentId: req.query.agentId } : {}),
@@ -86,6 +87,7 @@ export function createApiRouter(): Router {
                 ...(typeof req.query.since === 'string' && req.query.since.length > 0 ? { since: req.query.since } : {}),
                 ...(typeof req.query.cursor === 'string' && req.query.cursor.length > 0 ? { cursor: req.query.cursor } : {}),
                 ...(limitRaw !== undefined && Number.isFinite(limitRaw) ? { limit: limitRaw } : {}),
+                scope,
             });
             res.json(page);
         } catch (error) {

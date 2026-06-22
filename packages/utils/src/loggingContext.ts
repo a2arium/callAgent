@@ -4,6 +4,17 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
+import { inspect } from 'util';
+
+export type LoggingSinkLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export type LoggingSinkEntry = {
+    level: LoggingSinkLevel;
+    message: string;
+    context?: Omit<LoggingContext, 'logSink'>;
+};
+
+export type LoggingSink = (entry: LoggingSinkEntry) => void | Promise<void>;
 
 export type LoggingContext = {
     /** Unique task/request ID for correlation */
@@ -20,6 +31,8 @@ export type LoggingContext = {
     turn?: number;
     /** Current stage in agent workflow */
     stage?: string;
+    /** Optional sink for forwarding scoped console/logger output to an external runtime. */
+    logSink?: LoggingSink;
     /** Any additional contextual data */
     [key: string]: unknown;
 };
@@ -108,3 +121,90 @@ export function hasLoggingContext(): boolean {
     return loggingContext.getStore() !== undefined;
 }
 
+let consoleBridgeInstalled = false;
+let forwardingToSink = false;
+let originalConsole: Pick<Console, 'debug' | 'info' | 'warn' | 'error'> | undefined;
+
+/**
+ * Install a process-wide console bridge that mirrors console output to the current
+ * async logging context sink, when one is present.
+ *
+ * The patch is intentionally inert unless `withLoggingContext({ logSink })` is
+ * active, so normal CLI behavior remains stdout/stderr only.
+ */
+export function installLoggingContextConsoleBridge(): void {
+    if (consoleBridgeInstalled) {
+        return;
+    }
+    consoleBridgeInstalled = true;
+    originalConsole = {
+        debug: console.debug.bind(console),
+        info: console.info.bind(console),
+        warn: console.warn.bind(console),
+        error: console.error.bind(console),
+    };
+
+    console.debug = (...args: unknown[]) => {
+        originalConsole!.debug(...args);
+        emitConsoleArgsToLoggingSink('debug', args);
+    };
+    console.info = (...args: unknown[]) => {
+        originalConsole!.info(...args);
+        emitConsoleArgsToLoggingSink('info', args);
+    };
+    console.warn = (...args: unknown[]) => {
+        originalConsole!.warn(...args);
+        emitConsoleArgsToLoggingSink('warn', args);
+    };
+    console.error = (...args: unknown[]) => {
+        originalConsole!.error(...args);
+        emitConsoleArgsToLoggingSink('error', args);
+    };
+}
+
+function emitConsoleArgsToLoggingSink(level: LoggingSinkLevel, args: unknown[]): void {
+    if (forwardingToSink) {
+        return;
+    }
+    const context = getLoggingContext();
+    const sink = context?.logSink;
+    if (!sink) {
+        return;
+    }
+
+    const { logSink: _logSink, ...contextForSink } = context;
+    const message = formatConsoleArgs(args);
+    forwardingToSink = true;
+    try {
+        const result = sink({ level, message, context: contextForSink });
+        if (result && typeof (result as Promise<void>).catch === 'function') {
+            (result as Promise<void>).catch((error) => {
+                originalConsole?.warn(
+                    '[LoggingContext] Failed to forward console log to sink',
+                    error instanceof Error ? error.message : String(error)
+                );
+            });
+        }
+    } catch (error) {
+        originalConsole?.warn(
+            '[LoggingContext] Failed to forward console log to sink',
+            error instanceof Error ? error.message : String(error)
+        );
+    } finally {
+        forwardingToSink = false;
+    }
+}
+
+function formatConsoleArgs(args: unknown[]): string {
+    return args
+        .map((arg) => {
+            if (typeof arg === 'string') {
+                return arg;
+            }
+            if (arg instanceof Error) {
+                return arg.stack ?? arg.message;
+            }
+            return inspect(arg, { depth: 4, breakLength: 120, compact: true });
+        })
+        .join(' ');
+}

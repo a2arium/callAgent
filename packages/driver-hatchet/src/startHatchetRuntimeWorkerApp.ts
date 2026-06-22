@@ -6,7 +6,7 @@ import type {
 import { bootstrapCompositionRootInternal } from '@a2arium/callagent-core/unstable';
 import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engine';
 import type { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
-import { startOutboxWorker } from './createHatchetOutboxStack.js';
+import { createHatchetOutboxStack, startOutboxWorker } from './createHatchetOutboxStack.js';
 
 export type HatchetRuntimeWorkerApp = {
     composition: RuntimeCompositionRootInternal;
@@ -67,6 +67,13 @@ export async function startHatchetRuntimeWorkerApp(
             sessionStore,
             eventBus,
             transportClose: closeNats,
+            runtimeDriverFactory: (stack) =>
+                createHatchetOutboxStack({
+                    delegate: stack.runtimeDriver,
+                    eventBus,
+                    prisma: sessionStore.getPrismaClient(),
+                    turnExecutor: stack.turnExecutor,
+                }).runtimeDriver,
         },
     });
 

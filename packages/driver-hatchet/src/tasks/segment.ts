@@ -4,11 +4,14 @@ import type {
     TurnWake,
 } from '@a2arium/callagent-core/unstable';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
+import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
 import type { JsonObject, JsonValue } from '@hatchet-dev/typescript-sdk/v1/types.js';
 import type { HatchetClient } from '../hatchetClient.js';
-import { DriverRunsRepository } from '../driverRunsRepository.js';
+import { DriverRunsRepository, serializeDriverRunError } from '../driverRunsRepository.js';
+import { withHatchetTaskLogging } from '../hatchetLogging.js';
 
 export const SEGMENT_TASK_NAME = 'aplret.segment';
+const SEGMENT_EXECUTION_TIMEOUT = '30m';
 
 export type SegmentTaskWake =
     | { trigger: 'start'; input: JsonValue }
@@ -82,6 +85,16 @@ export async function executeSegmentTask(
     ctx: Context<SegmentTaskInput>,
     deps: SegmentTaskDeps
 ): Promise<SegmentTaskOutput> {
+    return withHatchetTaskLogging(input, ctx, 'turn.segment', () =>
+        executeSegmentTaskInner(input, ctx, deps)
+    );
+}
+
+async function executeSegmentTaskInner(
+    input: SegmentTaskInput,
+    ctx: Context<SegmentTaskInput>,
+    deps: SegmentTaskDeps
+): Promise<SegmentTaskOutput> {
     const fields = segmentDriverRunFields(input);
     if (deps.driverRuns) {
         await deps.driverRuns.upsertByProviderRunId({
@@ -119,6 +132,9 @@ export async function executeSegmentTask(
                 turnSeq: fields.turnSeq,
                 boundaryKind: output.boundary.kind,
                 turnTraceId: output.turnTraceId ?? null,
+                error: isFailedBoundary(output.boundary)
+                    ? errorFromBoundary(output.boundary)
+                    : null,
                 operation: 'turn.segment',
                 status: isFailedBoundary(output.boundary) ? 'failed' : 'completed',
             });
@@ -137,6 +153,7 @@ export async function executeSegmentTask(
                 rootTaskId: fields.rootTaskId,
                 turnSeq: fields.turnSeq,
                 boundaryKind: 'fail',
+                error: serializeDriverRunError(error),
                 operation: 'turn.segment',
                 status: 'failed',
             });
@@ -186,10 +203,25 @@ function hasOkFalse(value: unknown): boolean {
     return (value as Record<string, unknown>).ok === false;
 }
 
-export function createSegmentTask(hatchet: HatchetClient, deps: SegmentTaskDeps) {
+function errorFromBoundary(boundary: SegmentTaskBoundary) {
+    if (boundary.kind === 'fail') {
+        return serializeDriverRunError(boundary.error);
+    }
+    if (boundary.kind === 'complete' && hasOkFalse(boundary.result)) {
+        return boundary.result as unknown as ReturnType<typeof serializeDriverRunError>;
+    }
+    return null;
+}
+
+export function createSegmentTask(
+    hatchet: HatchetClient,
+    deps: SegmentTaskDeps,
+    options?: { executionTimeout?: Duration }
+) {
     return hatchet.task<SegmentTaskInput, SegmentTaskOutput>({
         name: SEGMENT_TASK_NAME,
         retries: 3,
+        executionTimeout: options?.executionTimeout ?? SEGMENT_EXECUTION_TIMEOUT,
         fn: async (input: SegmentTaskInput, ctx: Context<SegmentTaskInput>) =>
             executeSegmentTask(input, ctx, deps),
     });

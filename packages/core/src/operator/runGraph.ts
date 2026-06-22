@@ -29,6 +29,7 @@ export type AgentRunNode = {
     status: AgentRunStatus;
     inputPreview?: unknown;
     outputPreview?: unknown;
+    error?: unknown;
     traceId?: string;
     providerRunId?: string;
     startedAt?: string;
@@ -75,6 +76,7 @@ export type TurnRun = {
     llmCalls?: unknown[];
     memoryOps?: MemoryOperationRun[];
     providerRunId?: string;
+    error?: unknown;
 };
 
 export type TurnCognition = {
@@ -123,6 +125,7 @@ export type EffectRun = {
     providerRunId?: string;
     outboxRowId?: string;
     hiddenByDefault: boolean;
+    error?: unknown;
 };
 
 export type AgentRunEvent = {
@@ -169,6 +172,7 @@ export type DriverRunView = {
     turnSeq?: number | null;
     boundaryKind?: string | null;
     turnTraceId?: string | null;
+    error?: unknown;
     createdAt?: Date | string;
     updatedAt?: Date | string;
 };
@@ -183,6 +187,7 @@ export type BuildAgentRunGraphParams = {
 
 export type AgentRunSourceEvent = {
     eventId: string;
+    sessionId?: string;
     seq: number;
     type: string;
     payload: Record<string, unknown>;
@@ -202,15 +207,17 @@ export async function buildAgentRunGraph(
                   sinceSeq: -1,
               }),
     ]);
-    const events = [...loadedEvents].sort((a, b) => a.seq - b.seq);
+    const events = [...loadedEvents].sort((a, b) => (a.createdAt === b.createdAt ? a.seq - b.seq : a.createdAt.localeCompare(b.createdAt)));
+    const rootEvents = eventsForTask(events, params.taskId);
     const driverRuns = params.driverRuns ?? [];
-    const rootRun = chooseRootRun(driverRuns);
+    const rootDriverRuns = driverRuns.filter((run) => run.taskId === params.taskId);
+    const rootRun = chooseRootRun(rootDriverRuns);
     const agentId = rootRun?.agentId ?? snapshot?.agentId ?? readSnapshotAgentId(snapshot?.snapshot);
-    const rootStatus = deriveRootStatus(events, driverRuns);
-    const rootStartedAt = firstEventTime(events) ?? rootRun?.createdAt;
+    const rootStatus = deriveRootStatus(rootEvents, rootDriverRuns);
+    const rootStartedAt = firstEventTime(rootEvents) ?? rootRun?.createdAt;
     const rootFinishedAt =
         rootStatus === 'completed' || rootStatus === 'failed'
-            ? latestTerminalEventTime(events) ?? latestTerminalDriverRunTime(driverRuns)
+            ? latestTerminalEventTime(rootEvents) ?? latestTerminalDriverRunTime(rootDriverRuns)
             : undefined;
     const root: AgentRunNode = {
         id: params.taskId,
@@ -220,16 +227,30 @@ export async function buildAgentRunGraph(
         taskId: params.taskId,
         ...(agentId ? { agentId } : {}),
         status: rootStatus,
-        inputPreview: deriveInputPreview(events, snapshot?.snapshot),
-        outputPreview: deriveOutputPreview(events),
+        inputPreview: deriveInputPreview(rootEvents, snapshot?.snapshot),
+        outputPreview: deriveOutputPreview(rootEvents),
+        ...(rootRun?.error ? { error: rootRun.error } : {}),
         ...(rootRun?.traceId ? { traceId: rootRun.traceId } : {}),
         ...(rootRun?.providerRunId ? { providerRunId: rootRun.providerRunId } : {}),
         ...(rootStartedAt ? { startedAt: toIso(rootStartedAt) } : {}),
         ...(rootFinishedAt ? { finishedAt: rootFinishedAt } : {}),
     };
 
-    const edges = buildChildEdges(params.taskId, agentId ?? undefined, events);
-    const childNodes = edges.map((edge) => edgeToNode(params.tenantId, edge));
+    const rawEdges = buildChildEdges(params.taskId, agentId ?? undefined, events);
+    const childNodes = rawEdges.map((edge) => edgeToNode(params.tenantId, edge, events, driverRuns));
+    const childNodeByTaskId = new Map(childNodes.map((node) => [node.taskId, node]));
+    const edges = rawEdges.map((edge) => {
+        const childNode = edge.childTaskId ? childNodeByTaskId.get(edge.childTaskId) : undefined;
+        if (edge.status !== 'unknown' || childNode === undefined || childNode.status === 'unknown') {
+            return edge;
+        }
+        return {
+            ...edge,
+            status: childNode.status,
+            ...(childNode.finishedAt ? { finishedAt: childNode.finishedAt } : {}),
+            ...(childNode.error ? { error: childNode.error } : {}),
+        };
+    });
     const memoryOps = buildMemoryOps(params.taskId, events);
     const turns = buildTurnRuns(params.taskId, driverRuns, events, memoryOps);
     const effects = buildEffectRuns(params.taskId, driverRuns);
@@ -282,6 +303,18 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
 
     const root = chooseRootRun(driverRuns);
     const rootStatus = normalizeStatus(root?.status);
+    if (rootStatus === 'failed') {
+        return 'failed';
+    }
+    if (rootStatus === 'completed') {
+        return 'completed';
+    }
+
+    const latestTurnBoundary = latestTurnCompleted ? turnTransitionKind(latestTurnCompleted.payload) : undefined;
+    if (isAwaitBoundary(latestTurnBoundary)) {
+        return 'running';
+    }
+
     if (rootStatus !== 'unknown' && rootStatus !== 'queued') {
         return rootStatus;
     }
@@ -315,8 +348,8 @@ function deriveOutputPreview(events: AgentRunSourceEvent[]): unknown {
 }
 
 function buildChildEdges(
-    parentTaskId: string,
-    parentAgentId: string | undefined,
+    rootTaskId: string,
+    rootAgentId: string | undefined,
     events: AgentRunSourceEvent[]
 ): AgentRunEdge[] {
     const byToken = new Map<string, AgentRunEdge>();
@@ -324,14 +357,16 @@ function buildChildEdges(
         if (!event.type.startsWith('task.child_')) {
             continue;
         }
+        const parentTaskId = event.sessionId ?? rootTaskId;
         const token = stringField(event.payload, 'token') ?? `seq-${event.seq}`;
-        const previous = byToken.get(token);
+        const key = `${parentTaskId}:${token}`;
+        const previous = byToken.get(key);
         const base: AgentRunEdge = previous ?? {
-            id: `${parentTaskId}:${token}`,
+            id: key,
             kind: 'agent-child',
-            rootTaskId: parentTaskId,
+            rootTaskId,
             parentTaskId,
-            ...(parentAgentId ? { parentAgentId } : {}),
+            ...(parentTaskId === rootTaskId && rootAgentId ? { parentAgentId: rootAgentId } : {}),
             token,
             edgeToken: token,
             edgeKind: 'delegates_to',
@@ -341,7 +376,7 @@ function buildChildEdges(
         const childAgentId =
             stringField(event.payload, 'agentId') ?? stringField(event.payload, 'childAgentId');
         const childTaskId = stringField(event.payload, 'childTaskId');
-        byToken.set(token, {
+        byToken.set(key, {
             ...base,
             ...(childAgentId ? { childAgentId } : {}),
             ...(childTaskId ? { childTaskId } : {}),
@@ -360,18 +395,58 @@ function buildChildEdges(
     return [...byToken.values()];
 }
 
-function edgeToNode(tenantId: string, edge: AgentRunEdge): AgentRunNode {
+function edgeToNode(
+    tenantId: string,
+    edge: AgentRunEdge,
+    events: AgentRunSourceEvent[],
+    driverRuns: DriverRunView[]
+): AgentRunNode {
+    const taskId = edge.childTaskId ?? edge.id;
+    const childEvents = eventsForTask(events, taskId);
+    const childDriverRuns = driverRuns.filter((run) => run.taskId === taskId);
+    const childRun = chooseRootRun(childDriverRuns);
+    const status = deriveChildNodeStatus(edge.status, childEvents, childDriverRuns);
+    const startedAt = firstEventTime(childEvents) ?? childRun?.createdAt;
+    const finishedAt =
+        status === 'completed' || status === 'failed'
+            ? latestTerminalEventTime(childEvents) ?? latestTerminalDriverRunTime(childDriverRuns)
+            : undefined;
     return {
-        id: edge.childTaskId ?? edge.id,
+        id: taskId,
         kind: 'agent',
         tenantId,
         rootTaskId: edge.rootTaskId,
-        taskId: edge.childTaskId ?? edge.id,
+        taskId,
         parentTaskId: edge.parentTaskId,
         ...(edge.childAgentId ? { agentId: edge.childAgentId } : {}),
-        status: edge.status,
-        outputPreview: edge.resultPreview,
+        status,
+        inputPreview: deriveInputPreview(childEvents, undefined),
+        outputPreview: deriveOutputPreview(childEvents) ?? edge.resultPreview,
+        ...(childRun?.error ? { error: childRun.error } : {}),
+        ...(childRun?.traceId ? { traceId: childRun.traceId } : {}),
+        ...(childRun?.providerRunId ? { providerRunId: childRun.providerRunId } : {}),
+        ...(startedAt ? { startedAt: toIso(startedAt) } : {}),
+        ...(finishedAt ? { finishedAt } : {}),
     };
+}
+
+function eventsForTask(events: AgentRunSourceEvent[], taskId: string): AgentRunSourceEvent[] {
+    return events.filter((event) => (event.sessionId ?? stringField(event.payload, 'taskId')) === taskId);
+}
+
+function deriveChildNodeStatus(
+    edgeStatus: AgentRunStatus,
+    events: AgentRunSourceEvent[],
+    driverRuns: DriverRunView[]
+): AgentRunStatus {
+    if (events.some((event) => event.type === 'task.failed')) return 'failed';
+    if (events.some((event) => event.type === 'task.completed')) return 'completed';
+    const driverStatus = deriveRootStatus(events, driverRuns);
+    if (driverStatus !== 'unknown' && driverStatus !== 'queued') return driverStatus;
+    const latestTurnCompleted = [...events].reverse().find((event) => event.type === 'turn.completed');
+    const latestTurnBoundary = latestTurnCompleted ? turnTransitionKind(latestTurnCompleted.payload) : undefined;
+    if (isAwaitBoundary(latestTurnBoundary)) return 'running';
+    return edgeStatus;
 }
 
 function buildTurnRuns(
@@ -381,18 +456,19 @@ function buildTurnRuns(
     memoryOps: MemoryOperationRun[]
 ): TurnRun[] {
     const turnEvents = events.filter((event) => event.type === 'turn.completed');
-    const cognitionByTurnSeq = new Map<number, AgentRunSourceEvent>();
+    const cognitionByTurn = new Map<string, AgentRunSourceEvent>();
     for (const event of turnEvents) {
         const turnSeq = numberField(event.payload, 'turnSeq');
         if (turnSeq !== undefined) {
-            cognitionByTurnSeq.set(turnSeq, event);
+            cognitionByTurn.set(turnKey(stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId, turnSeq), event);
         }
     }
 
     const driverTurns = driverRuns
         .filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
         .map((run, index): TurnRun => {
-            const turnEvent = cognitionByTurnSeq.get(run.turnSeq ?? index + 1);
+            const turnSeq = run.turnSeq ?? index + 1;
+            const turnEvent = cognitionByTurn.get(turnKey(run.taskId ?? rootTaskId, turnSeq));
             return {
                 id: run.providerTaskRunId ?? run.providerRunId ?? `turn-${index}`,
                 rootTaskId: run.rootTaskId ?? rootTaskId,
@@ -400,7 +476,7 @@ function buildTurnRuns(
                 ...(run.agentId ? { agentId: run.agentId } : {}),
                 status: deriveTurnStatus(run.status, turnEvent),
                 operation: 'turn.segment',
-                turnSeq: run.turnSeq ?? index + 1,
+                turnSeq,
                 ...(run.boundaryKind ? { boundaryKind: run.boundaryKind } : {}),
                 ...(run.token ? { token: run.token } : {}),
                 ...(run.traceId ? { traceId: run.traceId } : {}),
@@ -413,13 +489,15 @@ function buildTurnRuns(
                 },
                 ...turnEventProjection(turnEvent, memoryOps),
                 ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
+                ...(run.error ? { error: run.error } : {}),
             };
         });
-    const existingTurnSeqs = new Set(driverTurns.map((turn) => turn.turnSeq).filter((turnSeq): turnSeq is number => turnSeq !== undefined));
+    const existingTurns = new Set(driverTurns.flatMap((turn) => turn.turnSeq === undefined ? [] : [turnKey(turn.taskId, turn.turnSeq)]));
     const eventOnlyTurns = turnEvents
         .filter((event) => {
             const turnSeq = numberField(event.payload, 'turnSeq');
-            return turnSeq !== undefined && !existingTurnSeqs.has(turnSeq);
+            const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
+            return turnSeq !== undefined && !existingTurns.has(turnKey(taskId, turnSeq));
         })
         .map((event, index): TurnRun => {
             const turnSeq = numberField(event.payload, 'turnSeq');
@@ -442,7 +520,32 @@ function buildTurnRuns(
                 ...turnEventProjection(event, memoryOps),
             };
         });
-    return [...driverTurns, ...eventOnlyTurns].sort((a, b) => (a.turnSeq ?? 0) - (b.turnSeq ?? 0));
+    return finalizeSupersededRunningTurns(
+        [...driverTurns, ...eventOnlyTurns].sort((a, b) => (a.turnSeq ?? 0) - (b.turnSeq ?? 0))
+    );
+}
+
+function finalizeSupersededRunningTurns(turns: TurnRun[]): TurnRun[] {
+    const maxTurnSeqByTask = new Map<string, number>();
+    for (const turn of turns) {
+        if (turn.turnSeq === undefined) continue;
+        const current = maxTurnSeqByTask.get(turn.taskId) ?? Number.NEGATIVE_INFINITY;
+        if (turn.turnSeq > current) {
+            maxTurnSeqByTask.set(turn.taskId, turn.turnSeq);
+        }
+    }
+
+    return turns.map((turn) => {
+        if (turn.turnSeq === undefined || turn.error !== undefined) return turn;
+        const maxTurnSeq = maxTurnSeqByTask.get(turn.taskId);
+        if (maxTurnSeq === undefined || turn.turnSeq >= maxTurnSeq) return turn;
+        if (turn.status !== 'running' && turn.status !== 'queued') return turn;
+        return { ...turn, status: 'completed' };
+    });
+}
+
+function turnKey(taskId: string, turnSeq: number): string {
+    return `${taskId}:${turnSeq}`;
 }
 
 function turnEventProjection(
@@ -520,6 +623,7 @@ function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[]): Effec
             ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
             ...(run.outboxRowId ? { outboxRowId: run.outboxRowId } : {}),
             hiddenByDefault: true,
+            ...(run.error ? { error: run.error } : {}),
         }));
 }
 
@@ -574,14 +678,42 @@ function childStatus(type: string, payload: Record<string, unknown>): AgentRunSt
 }
 
 function deriveTurnStatus(status: string | undefined | null, event: AgentRunSourceEvent | undefined): AgentRunStatus {
+    const driverStatus = normalizeStatus(status);
+    if (driverStatus === 'failed') {
+        return 'failed';
+    }
     if (event !== undefined && eventHasSemanticFailure(event)) {
         return 'failed';
     }
-    return normalizeStatus(status);
+    if (driverStatus === 'completed') {
+        return 'completed';
+    }
+    if (event !== undefined) {
+        const boundaryKind = turnTransitionKind(event.payload);
+        if (isAwaitBoundary(boundaryKind)) {
+            return 'running';
+        }
+        if (boundaryKind === 'complete') {
+            return 'completed';
+        }
+        if (boundaryKind === 'fail') {
+            return 'failed';
+        }
+    }
+    return driverStatus;
 }
 
 function eventHasSemanticFailure(event: AgentRunSourceEvent): boolean {
     return transitionResultOk(event.payload) === false;
+}
+
+function turnTransitionKind(payload: Record<string, unknown>): string | undefined {
+    const transition = objectField(payload, 'transition');
+    return transition ? stringField(transition, 'kind') : undefined;
+}
+
+function isAwaitBoundary(value: string | undefined): boolean {
+    return value === 'await_input' || value === 'await_tool' || value === 'await_child';
 }
 
 function transitionResultOk(payload: Record<string, unknown>): boolean | undefined {
@@ -653,11 +785,14 @@ function latestTerminalEventTime(events: AgentRunSourceEvent[]): string | undefi
 }
 
 function latestTerminalDriverRunTime(driverRuns: DriverRunView[]): string | undefined {
-    const terminal = [...driverRuns]
-        .reverse()
-        .find((run) => normalizeStatus(run.status) === 'completed' || normalizeStatus(run.status) === 'failed');
-    const timestamp = terminal?.updatedAt ?? terminal?.createdAt;
-    return timestamp !== undefined ? toIso(timestamp) : undefined;
+    const terminalTimes = driverRuns
+        .filter((run) => normalizeStatus(run.status) === 'completed' || normalizeStatus(run.status) === 'failed')
+        .flatMap((run) => {
+            const timestamp = run.updatedAt ?? run.createdAt;
+            return timestamp !== undefined ? [toIso(timestamp)] : [];
+        })
+        .sort();
+    return terminalTimes.at(-1);
 }
 
 function toIso(value: Date | string): string {

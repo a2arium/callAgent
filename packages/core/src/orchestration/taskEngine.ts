@@ -190,6 +190,11 @@ function numberFromPayload(payload: Record<string, unknown>, key: string): numbe
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function childTaskIdFromEvent(event: WMEventRow): string | undefined {
+    const childTaskId = event.payload.childTaskId;
+    return typeof childTaskId === 'string' && childTaskId.length > 0 ? childTaskId : undefined;
+}
+
 function taskIdForRun(row: DriverRunView): string | undefined {
     return row.rootTaskId ?? row.taskId ?? undefined;
 }
@@ -222,6 +227,15 @@ function deriveListRunStatus(
     }
 
     const rootStatus = normalizeListRunStatus(rootRun.status);
+    if (rootStatus === 'failed') {
+        return 'failed';
+    }
+
+    const latestTurnBoundary = latestTurnCompleted ? eventTransitionKind(latestTurnCompleted.payload) : undefined;
+    if (isAwaitBoundaryKind(latestTurnBoundary)) {
+        return 'running';
+    }
+
     if (rootStatus !== 'unknown' && rootStatus !== 'queued') {
         return rootStatus;
     }
@@ -265,6 +279,22 @@ function eventHasOkFalse(payload: unknown): boolean {
     return isRecordValue(result) && result.ok === false;
 }
 
+function eventTransitionKind(payload: unknown): string | undefined {
+    if (!isRecordValue(payload)) {
+        return undefined;
+    }
+    const transition = payload.transition;
+    if (!isRecordValue(transition)) {
+        return undefined;
+    }
+    const kind = transition.kind;
+    return typeof kind === 'string' && kind.length > 0 ? kind : undefined;
+}
+
+function isAwaitBoundaryKind(value: string | undefined): boolean {
+    return value === 'await_input' || value === 'await_tool' || value === 'await_child';
+}
+
 type PendingConversationActivation = {
     params: ConversationActivateParams;
     waiters: Array<{
@@ -306,6 +336,7 @@ type AgentRunListParams = {
     since?: string;
     cursor?: string;
     limit?: number;
+    scope?: 'roots' | 'all';
 };
 
 type DriverRunListRow = DriverRunView & {
@@ -582,6 +613,7 @@ export class TaskEngine {
             handleToolCompleted: (p) => this.handleToolCompleted(p),
             conversationService: this.conversationService,
             eventBus: this.eventBus,
+            enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),
         });
 
         this.turnRunner = new TurnRunner(
@@ -1100,18 +1132,10 @@ export class TaskEngine {
                   };
               }
             | undefined;
-        const sessionEvents: AgentRunSourceEvent[] = await this.sessionManager.listEventsSince({
+        const { events: sessionEvents, taskIds } = await this.collectRunGraphEvents({
             tenantId: params.tenantId,
-            sessionId: params.taskId,
-            sinceSeq: -1,
+            rootTaskId: params.taskId,
         });
-        const childTaskIds = sessionEvents
-            .map((event) => {
-                const childTaskId = event.payload.childTaskId;
-                return typeof childTaskId === 'string' ? childTaskId : undefined;
-            })
-            .filter((taskId): taskId is string => taskId !== undefined);
-        const taskIds = [...new Set([params.taskId, ...childTaskIds])];
         const driverRuns = prisma?.driverRun
             ? await prisma.driverRun.findMany({
                   where: {
@@ -1129,6 +1153,41 @@ export class TaskEngine {
             driverRuns,
             events: sessionEvents,
         });
+    }
+
+    private async collectRunGraphEvents(params: {
+        tenantId: string;
+        rootTaskId: string;
+    }): Promise<{ events: AgentRunSourceEvent[]; taskIds: string[] }> {
+        const sessionManager = this.sessionManager;
+        if (!sessionManager) {
+            throw new Error('Session manager is not configured');
+        }
+        const queue = [params.rootTaskId];
+        const seen = new Set<string>();
+        const events: AgentRunSourceEvent[] = [];
+
+        while (queue.length > 0) {
+            const taskId = queue.shift()!;
+            if (seen.has(taskId)) continue;
+            seen.add(taskId);
+
+            const taskEvents = await sessionManager.listEventsSince({
+                tenantId: params.tenantId,
+                sessionId: taskId,
+                sinceSeq: -1,
+            });
+            for (const event of taskEvents) {
+                const eventWithSession = { ...event, sessionId: taskId };
+                events.push(eventWithSession);
+                const childTaskId = event.payload.childTaskId;
+                if (typeof childTaskId === 'string' && childTaskId.length > 0 && !seen.has(childTaskId)) {
+                    queue.push(childTaskId);
+                }
+            }
+        }
+
+        return { events, taskIds: [...seen] };
     }
 
     async listAgentRuns(params: AgentRunListParams): Promise<AgentRunListPage> {
@@ -1161,12 +1220,29 @@ export class TaskEngine {
             }
         }
 
+        const scope = params.scope ?? 'roots';
         const rows = await prisma.driverRun.findMany({
             where,
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-            take: limit + 1,
+            take: scope === 'roots' ? Math.min((limit + 1) * 5, 500) : limit + 1,
         });
-        const pageRows = rows.slice(0, limit);
+        const childLinkEvents = prisma.wMEvent
+            ? await prisma.wMEvent.findMany({
+                  where: {
+                      tenantId: params.tenantId,
+                      type: { in: ['task.child_started', 'task.child_completed', 'task.child_failed'] },
+                  },
+                  orderBy: [{ createdAt: 'desc' }],
+                  take: 5000,
+              })
+            : [];
+        const childTaskIds = new Set(
+            childLinkEvents
+                .map((event) => childTaskIdFromEvent(event))
+                .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+        );
+        const filteredRows = rows.filter((row) => scope === 'all' || row.taskId === null || row.taskId === undefined || !childTaskIds.has(row.taskId));
+        const pageRows = filteredRows.slice(0, limit);
         const rootTaskIds = [
             ...new Set(
                 pageRows
@@ -1191,7 +1267,7 @@ export class TaskEngine {
                   where: {
                       tenantId: params.tenantId,
                       sessionId: { in: rootTaskIds },
-                      type: { in: ['task.failed', 'task.completed', 'task.started', 'turn.completed'] },
+                      type: { in: ['task.failed', 'task.completed', 'task.started', 'task.child_started', 'task.child_completed', 'task.child_failed', 'turn.completed'] },
                   },
                   orderBy: [{ createdAt: 'asc' }],
               })
@@ -1237,8 +1313,13 @@ export class TaskEngine {
                     return sum + (numberFromPayload(usage, 'totalCost') ?? 0);
                 }, 0);
                 const turns = runs.filter((run) => run.operation === 'turn.segment' || run.operation === 'segment').length ||
-                    taskTurnEvents.length;
-                const children = runs.filter((run) => run.edgeKind === 'delegates_to' || run.operation === 'child.dispatch').length;
+                    taskTurnEvents.filter((event) => event.type === 'turn.completed').length;
+                const children = new Set(
+                    taskTurnEvents
+                        .filter((event) => event.type.startsWith('task.child_'))
+                        .map((event) => isRecordValue(event.payload) ? event.payload.childTaskId : undefined)
+                        .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+                ).size;
                 const startedAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt;
                 const updatedAt = row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt;
                 const startedMs = new Date(startedAt).getTime();
@@ -1266,7 +1347,7 @@ export class TaskEngine {
             .filter((item): item is AgentRunListItem => item !== undefined)
             .filter((item) => params.status === undefined || params.status.length === 0 || item.status === params.status);
 
-        const overflow = rows.length > limit ? rows[limit] : undefined;
+        const overflow = filteredRows.length > limit ? filteredRows[limit] : undefined;
         return {
             items,
             ...(overflow
@@ -1675,6 +1756,12 @@ export class TaskEngine {
                 metaObj.manifestProvenance = manifestProvenance;
                 baseSnap.meta = metaObj;
             }
+            const persistedA2AParent = readA2AParentLink(
+                (baseSnap as { meta?: { a2aParent?: unknown } }).meta?.a2aParent
+            );
+            if (persistedA2AParent && !(ctx as A2AChildContext).__a2aParent) {
+                (ctx as A2AChildContext).__a2aParent = persistedA2AParent;
+            }
             const a2aParent = (ctx as A2AChildContext).__a2aParent;
             if (a2aParent) {
                 const metaObj = (baseSnap.meta as Record<string, unknown>) || {};
@@ -1986,6 +2073,11 @@ export class TaskEngine {
                 }
 
                 this.finalizeAgentNodeTelemetry(agentNode, task);
+                await this.notifyA2AParentIfTerminal(
+                    ctx,
+                    task,
+                    typeof agentId === 'string' ? agentId : undefined
+                );
 
                 if (isStreaming) {
                     // Even in streaming mode, we return the task entity so the caller has the ID and handle.
@@ -2016,6 +2108,13 @@ export class TaskEngine {
             // If this turn requested input, do NOT mark completed; just return current status
             if (task.status?.state === 'input-required' || (ctx as any).__wmSavedThisTurn) {
                 this.finalizeAgentNodeTelemetry(agentNode, task);
+                await this.notifyA2AParentIfTerminal(
+                    ctx,
+                    task,
+                    typeof (ctx as Record<string, unknown>).agentId === 'string'
+                        ? (ctx as Record<string, unknown>).agentId as string
+                        : undefined
+                );
                 return task;
             }
 
@@ -2033,6 +2132,13 @@ export class TaskEngine {
             });
 
             this.finalizeAgentNodeTelemetry(agentNode, task);
+            await this.notifyA2AParentIfTerminal(
+                ctx,
+                task,
+                typeof (ctx as Record<string, unknown>).agentId === 'string'
+                    ? (ctx as Record<string, unknown>).agentId as string
+                    : undefined
+            );
             return task;
         } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
@@ -2932,13 +3038,13 @@ export class TaskEngine {
                 });
             }
 
+            const childCompletedPayload = {
+                token,
+                childTaskId: cleanChildResult.childTaskId || childTaskId || token,
+                agentId: childAgentId,
+                resultPreview: cleanChildResult.result,
+            };
             try {
-                const childCompletedPayload = {
-                    token,
-                    childTaskId: cleanChildResult.childTaskId || childTaskId || token,
-                    agentId: childAgentId,
-                    resultPreview: cleanChildResult.result,
-                };
                 const childCompletedEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', childCompletedPayload);
                 if (childCompletedEvent) {
                     const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
@@ -2972,6 +3078,23 @@ export class TaskEngine {
                     parentTaskId,
                     childToken: token
                 });
+            }
+
+            if (this.shouldScheduleAsyncThroughRuntimeDriver('resume')) {
+                await this.runtimeDriver.enqueueResume({
+                    tenantId,
+                    taskId: parentTaskId,
+                    agentId: parentAgentId,
+                    token,
+                    idempotencyKey: `${parentTaskId}:child:${token}`,
+                    event: {
+                        kind: 'child',
+                        token,
+                        childTaskId: childCompletedPayload.childTaskId,
+                        output: cleanChildResult.result,
+                    },
+                });
+                return;
             }
 
             try {
@@ -4284,6 +4407,7 @@ export class TaskEngine {
                 handleChildCompleted: (p) => this.handleChildCompleted(p),
                 handleToolCompleted: (p) => this.handleToolCompleted(p),
                 conversationService: this.conversationService,
+                enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),
             },
             ctx,
             {

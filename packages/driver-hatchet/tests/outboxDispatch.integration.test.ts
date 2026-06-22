@@ -67,6 +67,46 @@ describe('executeOutboxDispatch', () => {
         expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
     });
 
+    it('mirrors task console errors to Hatchet logs', async () => {
+        const prisma = {
+            outbox: {
+                findUnique: jest.fn(async () => row),
+                delete: jest.fn(async () => undefined),
+            },
+        };
+        const ctx = {
+            workflowRunId: () => 'wf-run-1',
+            taskRunExternalId: () => 'task-run-1',
+            retryCount: () => 0,
+            logger: {
+                info: jest.fn(async () => undefined),
+                debug: jest.fn(async () => undefined),
+                warn: jest.fn(async () => undefined),
+                error: jest.fn(async () => undefined),
+            },
+        };
+        const bus = {
+            publish: jest.fn(async () => {
+                console.error('provider failed', new Error('server_error'));
+                throw new Error('provider failed');
+            }),
+            subscribe: jest.fn(),
+        };
+
+        await expect(
+            executeOutboxDispatch(
+                { outboxRowId: 'row-1', eventType: 'task.status', tenantId: 'tenant-a', taskId: 'task-1' },
+                ctx as never,
+                { eventBus: bus as never, prisma }
+            )
+        ).rejects.toThrow('provider failed');
+
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+            expect.stringContaining('provider failed'),
+            expect.objectContaining({ operation: 'effect.outbox.dispatch' })
+        );
+    });
+
     it('returns skipped when the row is already gone', async () => {
         const prisma = {
             outbox: {

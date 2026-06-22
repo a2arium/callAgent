@@ -37,6 +37,37 @@ import {
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isTaskEntityLike(value: unknown): value is {
+    id: string;
+    status?: { state?: string; metadata?: { result?: unknown } };
+} {
+    return isRecord(value) && typeof value.id === 'string' && isRecord(value.status);
+}
+
+function terminalResultFromTaskEntity(value: unknown): unknown {
+    if (!isTaskEntityLike(value)) {
+        return value;
+    }
+    if (value.status?.state !== 'completed') {
+        return undefined;
+    }
+    return value.status.metadata?.result;
+}
+
+function normalizeCacheableA2AResult(value: unknown): { cacheable: boolean; result?: unknown } {
+    if (!isTaskEntityLike(value)) {
+        return { cacheable: true, result: value };
+    }
+    const terminalResult = terminalResultFromTaskEntity(value);
+    return terminalResult === undefined
+        ? { cacheable: false }
+        : { cacheable: true, result: terminalResult };
+}
+
 function getRequiredEngine(): TaskEngine {
     const engine = EngineLocator.getEngine<TaskEngine>();
     if (!engine) {
@@ -1012,8 +1043,10 @@ export class A2AService implements IA2AService {
                             effectiveCache.excludePaths,
                             targetCtx.tenantId
                         );
+                        const normalizedCached = normalizeCacheableA2AResult(cachedResult);
 
-                        if (cachedResult) {
+                        if (cachedResult && normalizedCached.cacheable) {
+                            const servedCachedResult = normalizedCached.result;
                             a2aLogger.debug('A2A cache hit', {
                                 operationId,
                                 targetAgent: targetPlugin.resolved.agentCard.name,
@@ -1025,7 +1058,7 @@ export class A2AService implements IA2AService {
                             // Hydrate artifacts in cached result before returning
                             try {
                                 ArtifactHydrationService.attachHydratedArtifactHandles(
-                                    cachedResult,
+                                    servedCachedResult,
                                     this.agentResultCache,
                                     targetCtx.tenantId
                                 );
@@ -1041,16 +1074,23 @@ export class A2AService implements IA2AService {
                                 agentNode.end({
                                     status: 'completed',
                                     _origin: 'cache',
-                                    result: cachedResult
+                                    result: servedCachedResult
                                 });
                                 telemetry.endNode(agentNode);
                             }
 
-                            attachA2aResultTelemetry(cachedResult, {
+                            attachA2aResultTelemetry(servedCachedResult, {
                                 childTraceId: targetCtx.telemetry?.traceId,
                                 childAgentNodeId: agentNode?.id,
                             });
-                            return cachedResult;
+                            return servedCachedResult;
+                        } else if (cachedResult) {
+                            a2aLogger.warn('Ignoring non-terminal A2A cache entry', {
+                                operationId,
+                                targetAgent: targetPlugin.resolved.agentCard.name,
+                                taskId: targetCtx.task.id,
+                                cachedState: isTaskEntityLike(cachedResult) ? cachedResult.status?.state : undefined,
+                            });
                         }
                     }
 
@@ -1089,14 +1129,24 @@ export class A2AService implements IA2AService {
                     // Cache the result if caching is enabled
                     if (this.agentResultCache && effectiveCache.enabled) {
                         try {
-                            await this.agentResultCache.setCachedResult(
-                                targetPlugin.resolved.agentCard.name,
-                                targetCtx.task.input,
-                                result,
-                                effectiveCache.ttlSeconds,
-                                effectiveCache.excludePaths,
-                                targetCtx.tenantId
-                            );
+                            const normalizedResult = normalizeCacheableA2AResult(result);
+                            if (!normalizedResult.cacheable) {
+                                a2aLogger.debug('Skipping non-terminal A2A result cache write', {
+                                    operationId,
+                                    targetAgent: targetPlugin.resolved.agentCard.name,
+                                    taskId: targetCtx.task.id,
+                                    state: isTaskEntityLike(result) ? result.status?.state : undefined,
+                                });
+                            } else {
+                                await this.agentResultCache.setCachedResult(
+                                    targetPlugin.resolved.agentCard.name,
+                                    targetCtx.task.input,
+                                    normalizedResult.result,
+                                    effectiveCache.ttlSeconds,
+                                    effectiveCache.excludePaths,
+                                    targetCtx.tenantId
+                                );
+                            }
                         } catch (cacheError) {
                             a2aLogger.error('Failed to cache A2A result', cacheError, {
                                 operationId,

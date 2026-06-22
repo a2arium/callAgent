@@ -53,6 +53,7 @@ import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 import { segmentEffectIdempotencyKey } from '../../runtime/segmentProcessedKeys.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
 import type { TaskState } from '../../shared/types/StreamingEvents.js';
+import type { EnqueueStartParams } from '../../runtime/runtimeDriver.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -60,6 +61,20 @@ const TERMINAL_CHILD_STATES: ReadonlySet<TaskState> = new Set(['completed', 'fai
 
 function isTerminalChildState(state: string | undefined): boolean {
     return state === undefined || TERMINAL_CHILD_STATES.has(state as TaskState);
+}
+
+function shouldScheduleChildStartThroughRuntimeDriver(): boolean {
+    const raw = process.env.CALLAGENT_DRIVER_SURFACES;
+    if (raw === undefined || raw.trim().length === 0) {
+        return false;
+    }
+    const surfaces = raw.split(',').map((value) => value.trim()).filter(Boolean);
+    return surfaces.includes('all') || surfaces.includes('start');
+}
+
+function buildA2AChildTaskId(sourceTaskId: string, targetAgentId: string): string {
+    const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+    return `a2a_${sourceTaskId.slice(0, 16)}_${targetAgentId.slice(0, 16)}_${uniqueSuffix}`;
 }
 
 export interface ApiBinderDependencies {
@@ -73,6 +88,7 @@ export interface ApiBinderDependencies {
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
     conversationService: InternalConversationApi;
     eventBus?: IEventBus;
+    enqueueChildStart?: (params: EnqueueStartParams) => Promise<void>;
 }
 
 export class ApiBinder {
@@ -126,7 +142,7 @@ export class ApiBinder {
 
         const parentId = ctx.telemetry?.nodeId ?? 'root';
         const parentNode = telemetry.getNode(parentId);
-        const traceId = parentNode?.traceId;
+        const traceId = parentNode?.traceId ?? ctx.telemetry?.traceId;
         const childCallNode = new ChildCallNode(token, parentId, agent, undefined, traceId);
         childCallNode.start({ token, agentId: agent });
         telemetry.registerNode(childCallNode);
@@ -268,10 +284,11 @@ export class ApiBinder {
         };
 
         const a2aOpts = options;
+        const childTaskId = a2aOpts?.childTaskId ?? buildA2AChildTaskId(sessionId, agent);
         const idempotencyKey =
-            a2aOpts?.childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
+            childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
 
-        const childStartedPayload = { token, agentId: agent };
+        const childStartedPayload = { token, agentId: agent, childTaskId };
         const childStartedEvent = await deps.sessionManager.appendEvent(tenantId, sessionId, 'task.child_started', childStartedPayload);
         if (deps.eventBus) {
             const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
@@ -298,6 +315,62 @@ export class ApiBinder {
                     },
                 }));
             }
+        }
+
+        if (
+            awaitCompletion === false &&
+            deps.enqueueChildStart &&
+            shouldScheduleChildStartThroughRuntimeDriver()
+        ) {
+            try {
+                Object.defineProperty(handle as object, 'id', {
+                    value: childTaskId,
+                    configurable: true,
+                    enumerable: true,
+                });
+            } catch {
+                (handle as unknown as Record<string, unknown>).id = childTaskId;
+            }
+            const childSnap = await deps.sessionManager.load(tenantId, childTaskId);
+            const childBase = (childSnap?.snapshot as Record<string, unknown>) || {};
+            const childMeta = (childBase.meta as Record<string, unknown>) || {};
+            const childNext = {
+                ...childBase,
+                meta: {
+                    ...childMeta,
+                    agentId: agent,
+                    a2aParent: {
+                        parentTenantId: tenantId,
+                        parentTaskId: sessionId,
+                        parentChildToken: token,
+                    },
+                    ...(ctx.telemetry?.traceId || ctx.telemetry?.nodeId
+                        ? {
+                              telemetry: {
+                                  ...(ctx.telemetry?.traceId ? { traceId: ctx.telemetry.traceId } : {}),
+                                  ...(ctx.telemetry?.nodeId ? { parentNodeId: ctx.telemetry.nodeId } : {}),
+                              },
+                          }
+                        : {}),
+                },
+            };
+            await deps.sessionManager.saveSnapshot({
+                tenantId,
+                sessionId: childTaskId,
+                agentId: agent,
+                expectedWmVersion: childSnap?.wmVersion ?? BigInt(0),
+                snapshot: childNext,
+            });
+            await deps.enqueueChildStart({
+                tenantId,
+                taskId: childTaskId,
+                agentId: agent,
+                input: childInput,
+                idempotencyKey,
+                token,
+                traceId,
+            });
+            return { handle, token };
         }
 
         let convoStamp: import('./bootstrapConversationForSendTaskToAgent.js').ConversationBootstrapStamp | undefined;
@@ -332,6 +405,7 @@ export class ApiBinder {
         const runA2a = () =>
             globalA2AService.sendTaskToAgent(minimalCtx, agent, childInput as TaskInput, {
                 ...(options || {}),
+                childTaskId,
                 ...a2aOptions,
             });
 
@@ -371,28 +445,35 @@ export class ApiBinder {
         }
 
         const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
+        const childState = cleanChildResult.executionMetadata?.state;
+        const childIsTerminal = isTerminalChildState(childState);
         childCallNode.childTaskId = cleanChildResult.childTaskId;
-        childCallNode.endTime = Date.now();
-        childCallNode.end(cleanChildResult.result, 'success');
-        telemetry.endNode(childCallNode);
-        const childCompletedPayload = {
-            token,
-            agentId: agent,
-            childAgentId: agent,
-            childTaskId: cleanChildResult.childTaskId,
-            resultPreview:
-                cleanChildResult.result != null
-                    ? compactModuleOutput({ result: cleanChildResult.result })
-                    : undefined,
-        };
-        await deps.sessionManager.appendEvent(
-            tenantId,
-            sessionId,
-            'task.child_completed',
-            childCompletedPayload
-        );
         const a2aTel = readA2aResultTelemetry(result);
-        if (iCtx.__turnChildCalls) {
+
+        if (childIsTerminal) {
+            childCallNode.endTime = Date.now();
+            childCallNode.end(cleanChildResult.result, 'success');
+            telemetry.endNode(childCallNode);
+
+            const childCompletedPayload = {
+                token,
+                agentId: agent,
+                childAgentId: agent,
+                childTaskId: cleanChildResult.childTaskId,
+                resultPreview:
+                    cleanChildResult.result != null
+                        ? compactModuleOutput({ result: cleanChildResult.result })
+                        : undefined,
+            };
+            await deps.sessionManager.appendEvent(
+                tenantId,
+                sessionId,
+                'task.child_completed',
+                childCompletedPayload
+            );
+        }
+
+        if (iCtx.__turnChildCalls && childIsTerminal) {
             iCtx.__turnChildCalls.push({
                 token,
                 agentId: agent,
@@ -405,6 +486,16 @@ export class ApiBinder {
                     cleanChildResult.result != null
                         ? compactModuleOutput({ result: cleanChildResult.result })
                         : undefined,
+            });
+        } else if (iCtx.__turnChildCalls) {
+            iCtx.__turnChildCalls.push({
+                token,
+                agentId: agent,
+                childTaskId: cleanChildResult.childTaskId,
+                status: 'dispatched',
+                module: iCtx.__currentModule,
+                childAgentNodeId: childCallNode.id,
+                childTraceId: a2aTel?.childTraceId,
             });
         }
 
@@ -433,7 +524,7 @@ export class ApiBinder {
                 };
             }
 
-            if (isTerminalChildState(cleanChildResult.executionMetadata?.state)) {
+            if (childIsTerminal) {
                 const obs: EngineObservation = {
                     source: 'child',
                     kind: 'child.completed',
@@ -459,10 +550,10 @@ export class ApiBinder {
                 log.debug('SYNC CHILD: Child is still active; pending without completion injection', {
                     token,
                     awaitCompletion,
-                    state: cleanChildResult.executionMetadata?.state,
+                    state: childState,
                 });
             }
-        } else if (awaitCompletion) {
+        } else if (awaitCompletion && childIsTerminal) {
             await deps.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
         }
 

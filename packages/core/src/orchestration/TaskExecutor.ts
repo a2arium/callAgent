@@ -104,6 +104,15 @@ export class TaskExecutor {
             });
         }
 
+        TaskExecutor.ensureUsageRecorderAttached(ctx);
+        await TaskExecutor.ensureAgentLlmAttached({
+            ctx,
+            agentId,
+            sessionManager,
+            tenantId,
+            sessionId,
+        });
+
         // Exposed flush for logic that needs DB sync (like starting subagents)
         // This MUST be defined before runLoop so the loop can use it!
         (ctx as any).flushSnapshot = async (current?: { M?: MentalState; env?: EnvironmentState }) => {
@@ -327,6 +336,7 @@ export class TaskExecutor {
 
         // Determine Status
         taskStatus = TaskExecutor.determineTaskStatus(outcome, metrics, isStreaming);
+        taskStatus = TaskExecutor.attachUsageToTaskStatus(taskStatus, ctx);
 
         // Emit Status
         if (!isStreaming) {
@@ -516,5 +526,106 @@ export class TaskExecutor {
             } as any;
         }
         return { state: 'working', timestamp: new Date().toISOString() } as any;
+    }
+
+    private static ensureUsageRecorderAttached(ctx: TaskContext): void {
+        const candidate = ctx as TaskContext & {
+            __usageRecorderInstalled?: boolean;
+            __usageRecords?: Array<Record<string, unknown>>;
+        };
+        if (candidate.__usageRecorderInstalled === true) {
+            return;
+        }
+
+        let totalCost = 0;
+        const byKind: Record<string, number> = {};
+        const records: Array<Record<string, unknown>> = [];
+        candidate.__usageRecords = records;
+        candidate.recordUsage = (usage: number | Record<string, unknown>) => {
+            const record =
+                typeof usage === 'number'
+                    ? { cost: usage, kind: 'other' }
+                    : { ...usage };
+            records.push(record);
+            const cost = Number(record.cost) || 0;
+            totalCost += cost;
+            const kind = typeof record.kind === 'string' && record.kind.length > 0
+                ? record.kind
+                : 'other';
+            byKind[kind] = (byKind[kind] || 0) + cost;
+        };
+        candidate.getUsage = () => ({
+            totalCost,
+            byKind: { ...byKind },
+        });
+        candidate.__usageRecorderInstalled = true;
+    }
+
+    private static attachUsageToTaskStatus(taskStatus: TaskStatus, ctx: TaskContext): TaskStatus {
+        const usage = ctx.getUsage?.();
+        if (!usage || usage.totalCost <= 0) {
+            return taskStatus;
+        }
+        return {
+            ...taskStatus,
+            metadata: {
+                ...(taskStatus.metadata ?? {}),
+                usage,
+            },
+        } as TaskStatus;
+    }
+
+    private static async ensureAgentLlmAttached(params: {
+        ctx: TaskContext;
+        agentId: string;
+        sessionManager: SessionManager | undefined;
+        tenantId: string;
+        sessionId: string;
+    }): Promise<void> {
+        const { ctx, agentId, sessionManager, tenantId, sessionId } = params;
+        if (!agentId) return;
+
+        try {
+            const { PluginManager } = await import('../plugin/pluginManager.js');
+            const plugin = PluginManager.findAgent(agentId);
+            if (!plugin?.llmAdapter && !plugin?.llmConfig) {
+                (ctx as InternalTaskContext).__llmConfigured = false;
+                return;
+            }
+
+            if (plugin.llmAdapter) {
+                (ctx as any).llm = plugin.llmAdapter;
+            } else if (plugin.llmConfig) {
+                const { createLLMForTask } = await import('../llm/LLMFactory.js');
+                (ctx as any).llm = createLLMForTask(plugin.llmConfig, ctx);
+            }
+            (ctx as InternalTaskContext).__llmConfigured = true;
+
+            const llmAny = (ctx as any).llm as {
+                getHistoryMode?: () => 'stateless' | 'dynamic' | 'full';
+                clearHistory?: () => void;
+                importState?: (state: unknown) => void;
+            };
+            const historyMode =
+                typeof llmAny?.getHistoryMode === 'function'
+                    ? llmAny.getHistoryMode()
+                    : 'full';
+
+            if (historyMode === 'stateless') {
+                llmAny?.clearHistory?.();
+                return;
+            }
+
+            const snap = await sessionManager?.load(tenantId, sessionId);
+            const llmState = (snap?.snapshot as { llmState?: unknown } | undefined)?.llmState;
+            if (llmState !== undefined && typeof llmAny?.importState === 'function') {
+                llmAny.importState(llmState);
+            }
+        } catch (error) {
+            log.warn('Failed to attach agent LLM before turn execution', {
+                agentId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
     }
 }

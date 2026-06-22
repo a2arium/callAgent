@@ -186,7 +186,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
 }
 
 function isHatchetResumeEvent(kind: EnqueueResumeParams['event']['kind']): boolean {
-    return kind === 'input' || kind === 'tool' || kind === 'external';
+    return kind === 'input' || kind === 'tool' || kind === 'child' || kind === 'external';
 }
 
 function buildTaskMetadata(

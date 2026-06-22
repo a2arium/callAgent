@@ -344,9 +344,11 @@ const createAwaitingParentPlugin = (name: string, childAgentId: string, tenantId
 describe('A2A async child lifecycle', () => {
     afterEach(() => {
         EngineLocator.setEngine(undefined as never);
+        delete process.env.CALLAGENT_DRIVER_SURFACES;
     });
 
     it('does not inject child.completed when the child only suspended on an async tool', async () => {
+        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const tenantId = 't-a2a-async-child-repro';
         const parentAgentId = `parent-repro-${Date.now()}`;
         const childAgentId = `child-repro-${Date.now()}`;

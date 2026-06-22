@@ -101,4 +101,74 @@ describe('A2AService Artifact Hydration (Reproduction)', () => {
         expect(typeof result.output.file.load).toBe('function');
         expect(result.output.file.id).toBe('artifact-123');
     });
+
+    it('should ignore cached task wrappers that are not terminal', async () => {
+        const mockCache = {
+            getCachedResult: jest.fn().mockResolvedValue({
+                id: 'child-task-1',
+                input: { url: 'https://example.test' },
+                status: { state: 'working', timestamp: '2026-06-20T05:00:01.809Z' }
+            }),
+            setCachedResult: jest.fn()
+        };
+        (service as any).agentResultCache = mockCache;
+
+        const liveResult = { ok: true, data: { html: '<html>fresh</html>' } };
+        (mockAgent.handleTask as jest.Mock).mockResolvedValueOnce(liveResult);
+
+        const result: any = await service.sendTaskToAgent(
+            {
+                tenantId: 'test-tenant',
+                agentId: 'source-agent',
+                task: { id: 'task-1', input: {} } as any
+            } as any,
+            'test-agent',
+            { url: 'https://example.test' },
+            { cache: { enabled: true } }
+        );
+
+        expect(mockCache.getCachedResult).toHaveBeenCalled();
+        expect(mockAgent.handleTask).toHaveBeenCalledTimes(1);
+        expect(result).toEqual(liveResult);
+        expect(mockCache.setCachedResult).toHaveBeenCalledWith(
+            'test-agent',
+            { url: 'https://example.test' },
+            liveResult,
+            60,
+            [],
+            'test-tenant'
+        );
+    });
+
+    it('should unwrap completed cached task wrappers to their terminal result', async () => {
+        const terminalResult = { ok: true, data: { html: '<html>cached</html>' } };
+        const mockCache = {
+            getCachedResult: jest.fn().mockResolvedValue({
+                id: 'child-task-1',
+                input: { url: 'https://example.test' },
+                status: {
+                    state: 'completed',
+                    timestamp: '2026-06-20T05:00:01.809Z',
+                    metadata: { result: terminalResult }
+                }
+            }),
+            setCachedResult: jest.fn()
+        };
+        (service as any).agentResultCache = mockCache;
+
+        const result: any = await service.sendTaskToAgent(
+            {
+                tenantId: 'test-tenant',
+                agentId: 'source-agent',
+                task: { id: 'task-1', input: {} } as any
+            } as any,
+            'test-agent',
+            { url: 'https://example.test' },
+            { cache: { enabled: true } }
+        );
+
+        expect(mockCache.getCachedResult).toHaveBeenCalled();
+        expect(mockAgent.handleTask).not.toHaveBeenCalled();
+        expect(result).toEqual(terminalResult);
+    });
 });
