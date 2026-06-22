@@ -156,6 +156,94 @@ describe('HatchetRuntimeDriver', () => {
         );
     });
 
+    it('pushes external resume events when the resume surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const events = {
+            push: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            events
+        );
+
+        await driver.enqueueResume({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            idempotencyKey: 'task-1:external:tok-1',
+            event: { kind: 'external', token: 'tok-1', type: 'webhook.received', data: { ok: true } },
+        });
+
+        expect(delegate.enqueueResume).not.toHaveBeenCalled();
+        expect(events.push).toHaveBeenCalledWith(
+            'aplret.external.tok-1',
+            expect.objectContaining({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                kind: 'external',
+                token: 'tok-1',
+                type: 'webhook.received',
+                data: { ok: true },
+            }),
+            { key: 'tenant-1:task-1:tok-1' }
+        );
+    });
+
+    it('delegates conversation resume events until conversation has a durable wait boundary', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const events = {
+            push: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            events
+        );
+
+        await driver.enqueueResume({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            idempotencyKey: 'task-1:conversation:msg-1',
+            event: {
+                kind: 'conversation',
+                token: 'task-1',
+                messageId: 'msg-1',
+                data: { kind: 'message.received' },
+            },
+        });
+
+        expect(events.push).not.toHaveBeenCalled();
+        expect(delegate.enqueueResume).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            event: expect.objectContaining({ kind: 'conversation' }),
+        }));
+    });
+
 
     it('falls back to inline dispatch when Hatchet trigger fails', async () => {
         const delegate: RuntimeDriver = {

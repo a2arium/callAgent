@@ -190,6 +190,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         if (awaiting?.kind === 'await_child') {
             return { kind: 'await_child', token: awaiting.token };
         }
+        if (awaiting?.kind === 'await_event') {
+            return { kind: 'await_event', token: awaiting.token };
+        }
 
         if (state === 'working') {
             return { kind: 'paused', reason: 'budget_or_latency' };
@@ -250,7 +253,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                   ? { kind: 'await_tool' as const, token: awaiting.token }
                   : awaiting?.kind === 'await_child'
                     ? { kind: 'await_child' as const, token: awaiting.token }
-                    : ({ kind: 'complete' as const });
+                    : awaiting?.kind === 'await_event'
+                      ? { kind: 'await_event' as const, token: awaiting.token }
+                      : ({ kind: 'complete' as const });
         return {
             tenantId,
             taskId,

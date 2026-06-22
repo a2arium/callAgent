@@ -48,6 +48,7 @@ export type TransitionOut =
     | { kind: 'await_input'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
+    | { kind: 'await_event'; token: string }
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; reason: string; error?: unknown };
 

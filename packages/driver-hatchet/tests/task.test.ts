@@ -309,6 +309,85 @@ describe('executeTaskTask', () => {
         }));
     });
 
+    it('waits for await_event and resumes the durable parent from the external event', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'await_event', token: 'event-token' },
+                taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:00.000Z' },
+            },
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { ok: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitForEvent: jest.fn(async () => ({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                kind: 'external',
+                token: 'event-token',
+                type: 'webhook.received',
+                data: { ok: true },
+                idempotencyKey: 'task-1:external:event-token',
+            })),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { driverRuns: { finalizeRootRun } as never }
+        );
+
+        expect(ctx.waitForEvent).toHaveBeenCalledWith(
+            'aplret.external.event-token',
+            'input.tenantId == "tenant-1" && input.taskId == "task-1"',
+            undefined,
+            undefined,
+            '5m',
+            'wait:external:event-token'
+        );
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            expect.any(String),
+            expect.objectContaining({
+                wake: {
+                    trigger: 'event',
+                    event: {
+                        kind: 'external',
+                        token: 'event-token',
+                        type: 'webhook.received',
+                        data: { ok: true },
+                        idempotencyKey: 'task-1:external:event-token',
+                    },
+                },
+                idempotencyKey: 'task-1:external:event-token',
+                turnSeq: 2,
+            }),
+            expect.any(Object)
+        );
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'completed',
+            boundaryKind: 'complete',
+        }));
+    });
+
     it('resumes await_child from an already persisted child completion before waiting for Hatchet events', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const segmentOutputs = [

@@ -292,7 +292,7 @@ function eventTransitionKind(payload: unknown): string | undefined {
 }
 
 function isAwaitBoundaryKind(value: string | undefined): boolean {
-    return value === 'await_input' || value === 'await_tool' || value === 'await_child';
+    return value === 'await_input' || value === 'await_tool' || value === 'await_child' || value === 'await_event';
 }
 
 type PendingConversationActivation = {
@@ -2618,6 +2618,24 @@ export class TaskEngine {
         const events = getPendingExternalEvents(base) as any;
         const entry = events[token];
         if (!entry) return;
+
+        const agentName = (snap as any)?.agentId ?? (base as any)?.meta?.agentId;
+        if (this.shouldScheduleAsyncThroughRuntimeDriver('resume') && !isSyncRuntimeDriver(this.runtimeDriver)) {
+            await this.runtimeDriver.enqueueResume({
+                tenantId,
+                taskId,
+                agentId: agentName,
+                idempotencyKey: `${taskId}:external:${token}`,
+                event: {
+                    kind: 'external',
+                    token,
+                    type: entry?.type ?? 'external',
+                    data: payload,
+                },
+            });
+            return;
+        }
+
         delete events[token];
         const next = setPendingExternalEvents(base, events) as Record<string, unknown>;
         const externalObservation: EngineObservation = {
@@ -2636,7 +2654,6 @@ export class TaskEngine {
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.external_event_registered', { token, type: entry?.type });
         // Always auto-resume one loop turn to consume the external event
         try {
-            const agentName = (snap as any)?.agentId;
             const ctx = this.createContext({ id: taskId, input: {} });
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
 

@@ -134,15 +134,19 @@ loops, `childCompletionInFlight`, `LoopRegistry` active-loop injection,
 Goal: remove resume coordination entirely in Hatchet mode.
 
 Status note (2026-06-22): the child `await_child` fan-out/fan-in slice of this
-phase is covered and treated as complete for the harness. Input, tool, external,
-timer, and conversation wake application/routing now have runtime-seam coverage.
-Remaining Phase 3 work is durable Hatchet event-wait handling for non-child
-wakes, boundary cancellation, durable dedupe for all wake families, and
-worker-restart validation.
+phase is covered and treated as complete for the harness. Input/tool durable
+waits are implemented, and external events now have a first-class `await_event`
+boundary backed by `aplret.external.<token>` Hatchet events. Timer and
+conversation wake application/routing have runtime-seam coverage only.
+Remaining Phase 3 work is boundary cancellation, durable dedupe for all wake
+families, and worker-restart validation; conversation durable waits need a
+first-class conversation boundary before Hatchet event waits can own them.
 
-1. `tasks/input` (non-hot), tool/webhook callbacks, A2A child completion, and
-   conversation-delivered wakes (ADR 0008) →
+1. `tasks/input` (non-hot), tool/webhook callbacks, external event callbacks,
+   and A2A child completion →
    `hatchet.events.push('aplret.<kind>.<token>', …)` via `enqueueResume`.
+   Conversation delivery remains delegated until the kernel exposes a durable
+   conversation wait boundary (ADR 0008).
 2. Durable event waits in `aplret.task` resume on the matching event. Event keys
    come only from tokens minted by a prior segment (ADR 0002 token provenance).
 3. Hot chat/SSE resumes stay in-process (ADR 0004).

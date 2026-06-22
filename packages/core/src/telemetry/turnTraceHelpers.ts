@@ -116,6 +116,7 @@ export function summarizePending(
     const inputs = pending.inputs as Record<string, unknown> | undefined;
     const tools = pending.tools as Record<string, unknown> | undefined;
     const children = pending.children as Record<string, unknown> | undefined;
+    const events = pending.events as Record<string, unknown> | undefined;
     const controlVars = pending.controlVars as Record<string, unknown> | undefined;
 
     const inputTokens = inputs ? Object.keys(inputs) : [];
@@ -137,6 +138,15 @@ export function summarizePending(
                       : undefined,
           }))
         : [];
+    const eventTokens = events
+        ? Object.entries(events).map(([token, v]) => ({
+              token,
+              type:
+                  typeof v === 'object' && v !== null && 'type' in v
+                      ? String((v as { type?: string }).type ?? '')
+                      : undefined,
+          }))
+        : [];
     const stage =
         controlVars && typeof controlVars.stage === 'string'
             ? controlVars.stage
@@ -146,6 +156,7 @@ export function summarizePending(
         inputTokens,
         toolTokens,
         childTokens,
+        ...(eventTokens.length > 0 ? { eventTokens } : {}),
         ...(stage !== undefined ? { stage } : {}),
     };
 }

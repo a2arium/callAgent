@@ -65,6 +65,7 @@ export type SegmentBoundary =
     | { kind: 'await_input'; token: string; expiresAt?: string }
     | { kind: 'await_tool'; token: string }
     | { kind: 'await_child'; token: string }
+    | { kind: 'await_event'; token: string }
     | { kind: 'sleep'; token: string; fireAt: string }
     | { kind: 'paused'; reason: string }
     | { kind: 'complete'; result?: unknown }
@@ -130,6 +131,8 @@ export function outcomeToBoundary(
             return { kind: 'await_tool', token: outcome.token };
         case 'await_child':
             return { kind: 'await_child', token: outcome.token };
+        case 'await_event':
+            return { kind: 'await_event', token: outcome.token };
         case 'complete':
             return { kind: 'complete', result: outcome.result };
         case 'fail':
@@ -148,6 +151,7 @@ export function boundaryToTaskStatus(boundary: SegmentBoundary): SegmentTaskStat
             return 'input-required';
         case 'await_tool':
         case 'await_child':
+        case 'await_event':
         case 'sleep':
         case 'paused':
             return 'working';

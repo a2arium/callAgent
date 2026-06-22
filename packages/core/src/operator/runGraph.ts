@@ -713,7 +713,7 @@ function turnTransitionKind(payload: Record<string, unknown>): string | undefine
 }
 
 function isAwaitBoundary(value: string | undefined): boolean {
-    return value === 'await_input' || value === 'await_tool' || value === 'await_child';
+    return value === 'await_input' || value === 'await_tool' || value === 'await_child' || value === 'await_event';
 }
 
 function transitionResultOk(payload: Record<string, unknown>): boolean | undefined {

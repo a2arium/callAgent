@@ -221,6 +221,7 @@ export type ControlPendingState = {
     inputs?: Record<string, unknown>;
     children?: Record<string, { token?: string } & Record<string, unknown>>;
     tools?: Record<string, unknown>;
+    events?: Record<string, unknown>;
     groups?: Record<string, unknown>;
     controlVars?: Record<string, unknown>;
 };
@@ -241,6 +242,7 @@ export type EnvironmentState = {
         inputs: Record<string, unknown>;
         children: Record<string, unknown>;
         tools: Record<string, unknown>;
+        events?: Record<string, unknown>;
         groups: Record<string, unknown>;
         controlVars?: Record<string, unknown>;
     };
@@ -313,4 +315,3 @@ export const normalizeObservationInbox = (
     }
     return attachInboxAccessors({ current: [], all: [] });
 };
-

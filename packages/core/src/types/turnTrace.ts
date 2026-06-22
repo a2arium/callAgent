@@ -75,7 +75,7 @@ export const ExecResultTraceSchema = z.object({
 export type ExecResultTrace = z.infer<typeof ExecResultTraceSchema>;
 
 export const TransitionTraceSchema = z.object({
-    kind: z.enum(['continue', 'await_input', 'await_tool', 'await_child', 'complete', 'fail']),
+    kind: z.enum(['continue', 'await_input', 'await_tool', 'await_child', 'await_event', 'complete', 'fail']),
     token: z.string().optional(),
     summary: z.string().optional(),
     result: JsonValueSchema.optional(),
@@ -86,6 +86,7 @@ export const PendingSummarySchema = z.object({
     inputTokens: z.array(z.string()),
     toolTokens: z.array(z.object({ token: z.string(), tool: z.string().optional() })),
     childTokens: z.array(z.object({ token: z.string(), agentId: z.string().optional() })),
+    eventTokens: z.array(z.object({ token: z.string(), type: z.string().optional() })).optional(),
     stage: z.string().optional(),
 });
 export type PendingSummary = z.infer<typeof PendingSummarySchema>;

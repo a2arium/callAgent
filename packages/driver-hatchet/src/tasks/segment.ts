@@ -43,6 +43,7 @@ export type SegmentTaskBoundary =
     | { kind: 'await_input'; token: string; expiresAt?: string }
     | { kind: 'await_tool'; token: string }
     | { kind: 'await_child'; token: string }
+    | { kind: 'await_event'; token: string }
     | { kind: 'sleep'; token: string; fireAt: string }
     | { kind: 'paused'; reason: string }
     | { kind: 'complete'; result?: JsonValue }

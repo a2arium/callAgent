@@ -101,7 +101,7 @@ export type TaskTaskDeps = {
 
 type AwaitableBoundary = Extract<
     SegmentTaskBoundary,
-    { kind: 'await_input' | 'await_tool' | 'await_child' }
+    { kind: 'await_input' | 'await_tool' | 'await_child' | 'await_event' }
 >;
 type SegmentEventWake = Exclude<SegmentTaskWake, { trigger: 'start' }>;
 
@@ -155,7 +155,8 @@ async function executeTaskTaskInner(
             if (
                 segment.boundary.kind === 'await_input' ||
                 segment.boundary.kind === 'await_tool' ||
-                segment.boundary.kind === 'await_child'
+                segment.boundary.kind === 'await_child' ||
+                segment.boundary.kind === 'await_event'
             ) {
                 const event =
                     await findPersistedBoundaryEvent(input, segment.boundary, deps)
@@ -418,7 +419,9 @@ async function waitForBoundaryEvent(
             ? 'input'
             : boundary.kind === 'await_tool'
               ? 'tool'
-              : 'child';
+              : boundary.kind === 'await_child'
+                ? 'child'
+                : 'external';
     const payload = await ctx.waitForEvent(
         `aplret.${eventKind}.${boundary.token}`,
         `input.tenantId == "${input.tenantId}" && input.taskId == "${input.taskId}"`,
@@ -481,7 +484,7 @@ async function findPersistedBoundaryEvent(
 }
 
 function normalizeWakeEvent(
-    eventKind: 'input' | 'tool' | 'child',
+    eventKind: 'input' | 'tool' | 'child' | 'external',
     token: string,
     payload: Record<string, unknown>
 ): RuntimeWakeEvent & { idempotencyKey?: string } {
@@ -507,6 +510,16 @@ function normalizeWakeEvent(
         };
     }
 
+    if (eventKind === 'external') {
+        return {
+            kind: 'external',
+            token,
+            type: typeof payload.type === 'string' ? payload.type : 'external',
+            data: 'data' in payload ? payload.data : payload.payload,
+            ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        };
+    }
+
     return {
         kind: 'tool',
         token,
@@ -524,6 +537,9 @@ function boundaryEventToWake(
     }
     if (boundary.kind === 'await_child') {
         return { trigger: 'child', event: event as SegmentEventWake['event'] };
+    }
+    if (boundary.kind === 'await_event') {
+        return { trigger: 'event', event: event as SegmentEventWake['event'] };
     }
     return { trigger: 'tool', event: event as SegmentEventWake['event'] };
 }

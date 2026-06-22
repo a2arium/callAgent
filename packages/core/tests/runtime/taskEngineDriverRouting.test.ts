@@ -374,6 +374,10 @@ describe('TaskEngine runtime driver routing', () => {
             },
         }));
         expect(executeTurnSpy).not.toHaveBeenCalled();
+        const snap = await store.getSessionSnapshot('t', 'external-task');
+        expect((snap?.snapshot as any)?.pending?.events?.['event-token']).toEqual({
+            type: 'webhook.received',
+        });
 
         executeTurnSpy.mockRestore();
     });

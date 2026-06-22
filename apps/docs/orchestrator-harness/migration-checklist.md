@@ -33,8 +33,10 @@ harness checklist style.
 - [ ] Per-task concurrency key `tenantId:taskId`, limit 1.
 - [x] Child wakes pushed as Hatchet events; `await_child` durable event waits
       resume and recover from already-persisted child completion/failure events.
-- [ ] Non-child external + conversation wakes pushed as Hatchet events (ADR 0008);
-      durable event waits resume.
+- [x] External event wakes pushed as Hatchet events; `await_event` durable event
+      waits resume.
+- [ ] Conversation wakes have runtime-seam coverage, but remain delegated until
+      a first-class durable conversation wait boundary exists (ADR 0008).
 - [ ] Timers via durable sleep; `TimerReconciler` implemented.
 - [x] `driver_runs` table + composite metadata keys.
 

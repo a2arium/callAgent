@@ -19,7 +19,7 @@ describe('outcomeToBoundary', () => {
         });
     });
 
-    it('maps await_tool and await_child', () => {
+    it('maps await_tool, await_child, and await_event', () => {
         expect(outcomeToBoundary({ kind: 'await_tool', token: 't' })).toEqual({
             kind: 'await_tool',
             token: 't',
@@ -27,6 +27,10 @@ describe('outcomeToBoundary', () => {
         expect(outcomeToBoundary({ kind: 'await_child', token: 'c' })).toEqual({
             kind: 'await_child',
             token: 'c',
+        });
+        expect(outcomeToBoundary({ kind: 'await_event', token: 'e' })).toEqual({
+            kind: 'await_event',
+            token: 'e',
         });
     });
 
@@ -62,6 +66,7 @@ describe('boundaryToTaskStatus', () => {
         expect(boundaryToTaskStatus({ kind: 'await_input', token: 't' })).toBe('input-required');
         expect(boundaryToTaskStatus({ kind: 'await_tool', token: 't' })).toBe('working');
         expect(boundaryToTaskStatus({ kind: 'await_child', token: 't' })).toBe('working');
+        expect(boundaryToTaskStatus({ kind: 'await_event', token: 't' })).toBe('working');
         expect(boundaryToTaskStatus({ kind: 'sleep', token: 't', fireAt: 'x' })).toBe('working');
         expect(boundaryToTaskStatus({ kind: 'paused', reason: 'r' })).toBe('working');
         expect(boundaryToTaskStatus({ kind: 'complete' })).toBe('completed');

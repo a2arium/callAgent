@@ -970,6 +970,16 @@ export async function runLoop<
                     }
                 }
 
+                const pendingEvents = env.pending?.events;
+                if (pendingEvents && typeof pendingEvents === 'object') {
+                    const tokens = Object.keys(pendingEvents);
+                    if (tokens.length > 0) {
+                        const firstToken = tokens[0];
+                        try { log.info('Default transition: detected pending external event, returning await_event', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
+                        return { kind: 'await_event', token: firstToken } as TransitionOut;
+                    }
+                }
+
                 if (action.kind === 'internal' && action.done === true) {
                     return { kind: 'complete' } as TransitionOut;
                 }
@@ -1871,7 +1881,7 @@ export async function runLoop<
 
             // Transition invariant enforcement: await_* must have token; terminal must have no pending
             if (outcome.kind !== 'continue') {
-                if (outcome.kind === 'await_input' || outcome.kind === 'await_tool' || outcome.kind === 'await_child') {
+                if (outcome.kind === 'await_input' || outcome.kind === 'await_tool' || outcome.kind === 'await_child' || outcome.kind === 'await_event') {
                     const token = (outcome as { token?: string }).token;
                     if (typeof token !== 'string' || token.trim() === '') {
                         throwInvariantError(
@@ -1887,6 +1897,7 @@ export async function runLoop<
                         (p?.inputs && Object.keys(p.inputs).length > 0) ||
                         (p?.children && Object.keys(p.children).length > 0) ||
                         (p?.tools && Object.keys(p.tools).length > 0) ||
+                        (p?.events && Object.keys(p.events).length > 0) ||
                         (p?.groups && Object.keys(p.groups).length > 0);
                     if (hasPending) {
                         throwInvariantError(

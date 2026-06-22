@@ -416,7 +416,7 @@ export class TaskExecutor {
         }
 
         // FIX: Add/Clear awaiting
-        if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+        if (outcome.kind === 'await_child' || outcome.kind === 'await_tool' || outcome.kind === 'await_event') {
             (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
         } else {
             delete (nextMeta as any).awaiting;
@@ -507,7 +507,7 @@ export class TaskExecutor {
         if (outcome.kind === 'await_input') {
             return { state: 'input-required', timestamp: new Date().toISOString(), metadata: { token: (outcome as any).token, awaitExtra: { kind: outcome.kind }, timings: metrics?.timings, rewards: metrics?.rewards } } as any;
         }
-        if (outcome.kind === 'await_child' || outcome.kind === 'await_tool') {
+        if (outcome.kind === 'await_child' || outcome.kind === 'await_tool' || outcome.kind === 'await_event') {
             return { state: 'working', timestamp: new Date().toISOString(), metadata: { awaiting: outcome.kind, token: (outcome as any).token, awaitExtra: { kind: outcome.kind } } } as any;
         }
         if (outcome.kind === 'fail') {
