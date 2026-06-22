@@ -36,14 +36,14 @@ try {
     startChild('worker', ['workspace', '@a2arium/hatchet-worker', 'dev'], env);
     startChild('host', ['workspace', '@a2arium/runtime-host', 'dev'], env);
     if (!noDashboard && !prodMode) {
-        startChild('dash', ['workspace', '@a2arium/operator-viewer', 'dev'], env);
+        startChild('dash', ['workspace', '@a2arium/operator-viewer', 'dev', '--host', '127.0.0.1'], env);
     }
 
     console.log('');
     console.log('Runtime started');
     console.log('RPC:       http://127.0.0.1:8790/rpc');
     if (!noDashboard) {
-        console.log(`Dashboard: ${prodMode ? 'http://127.0.0.1:8790/operator' : 'http://127.0.0.1:8791'}`);
+        console.log(`Dashboard: ${prodMode ? 'http://127.0.0.1:8790/operator' : 'http://127.0.0.1:8791/operator'}`);
     }
     console.log('Press Ctrl-C to stop all runtime processes.');
 } catch (error) {

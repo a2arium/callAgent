@@ -1,6 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
-import { ChevronDown, Pencil, Plus, Play, RefreshCw, Rocket, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  Copy,
+  Maximize2,
+  Minimize2,
+  Pencil,
+  Plus,
+  Play,
+  RefreshCw,
+  Rocket,
+  X,
+} from 'lucide-react';
 import { useAgents } from '../../api/hooks';
 import { runAgent, type ListedAgent } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
@@ -19,6 +32,10 @@ type RunState =
   | { state: 'running' }
   | { state: 'error'; message: string }
   | { state: 'accepted'; taskId: string; status?: string };
+
+type PayloadParseResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; message: string; line?: number; column?: number };
 
 const AGENT_USAGE_STORAGE_KEY = 'operator-viewer.agent-usage.v1';
 const AGENT_VIEW_STORAGE_KEY = 'operator-viewer.agent-view.v1';
@@ -92,6 +109,13 @@ export function AgentsPage(): React.ReactElement {
       return;
     }
 
+    if (selectedPreset) {
+      const formattedPayload = JSON.stringify(parsed.value, null, 2);
+      if (formattedPayload !== selectedPreset.payloadText) {
+        setPresetState(updatePresetState(presetState, selectedPreset.id, { payloadText: formattedPayload }));
+      }
+    }
+
     setRunState({ state: 'running' });
     markAgentUsed(selectedAgent);
     try {
@@ -115,6 +139,7 @@ export function AgentsPage(): React.ReactElement {
         params: { taskId },
         search: {
           tenantId,
+          scope: 'roots',
           agentId: '',
           status: '',
           since: '',
@@ -193,7 +218,7 @@ export function AgentsPage(): React.ReactElement {
           ))}
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-4">
+        <div className="rounded-lg border border-border bg-card p-4 shadow-[0_12px_35px_hsl(220_20%_10%/0.04)]">
           {selectedAgent ? (
             <AgentRunner
               agent={selectedAgent}
@@ -227,7 +252,7 @@ function AgentGroup(props: {
   const hiddenCount = props.agents.length - visibleAgents.length;
 
   return (
-    <section className="rounded-xl border border-border bg-card p-3">
+    <section className="rounded-lg border border-border bg-card p-3">
       <button
         type="button"
         className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left hover:bg-accent"
@@ -247,8 +272,10 @@ function AgentGroup(props: {
             key={agent.id}
             type="button"
             className={cn(
-              'rounded-lg border p-3 text-left transition-colors hover:bg-accent',
-              props.selectedAgentId === agent.id ? 'border-primary bg-accent text-accent-foreground' : 'border-border'
+              'relative rounded-lg border p-3 pl-4 text-left transition-colors hover:border-primary/35 hover:bg-accent',
+              props.selectedAgentId === agent.id
+                ? 'border-primary/45 bg-accent text-accent-foreground shadow-sm before:absolute before:left-1 before:top-3 before:bottom-3 before:w-0.5 before:rounded-full before:bg-primary'
+                : 'border-border'
             )}
             onClick={() => props.onSelect(agent)}
           >
@@ -287,7 +314,15 @@ function AgentRunner(props: {
     props.presetState.presets.find((preset) => preset.id === props.presetState.selectedPresetId) ??
     props.presetState.presets[0];
   const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
+  const [copiedPayload, setCopiedPayload] = useState(false);
+  const initialPayloadsRef = useRef<Record<string, string>>({});
   const parsedPayload = useMemo(() => parsePayload(selectedPreset?.payloadText ?? '{}'), [selectedPreset?.payloadText]);
+
+  useEffect(() => {
+    initialPayloadsRef.current = Object.fromEntries(
+      props.presetState.presets.map((preset) => [preset.id, preset.payloadText])
+    );
+  }, [props.agent.id]);
 
   const updateSelectedPreset = (patch: { name?: string; payloadText?: string }) => {
     if (!selectedPreset) return;
@@ -322,121 +357,122 @@ function AgentRunner(props: {
     }
   };
 
+  const duplicatePreset = (presetId: string) => {
+    const preset = props.presetState.presets.find((candidate) => candidate.id === presetId);
+    if (!preset) return;
+    const copy = {
+      ...createPayloadPreset(`${preset.name || 'Payload'} copy`),
+      payloadText: preset.payloadText,
+    };
+    props.onPresetState({
+      selectedPresetId: copy.id,
+      presets: [...props.presetState.presets, copy],
+    });
+  };
+
   const formatPayload = () => {
     if (!selectedPreset || !parsedPayload.ok) return;
     updateSelectedPreset({ payloadText: JSON.stringify(parsedPayload.value, null, 2) });
   };
 
+  const copyPayload = () => {
+    if (!selectedPreset) return;
+    void navigator.clipboard.writeText(selectedPreset.payloadText).then(() => {
+      setCopiedPayload(true);
+      window.setTimeout(() => setCopiedPayload(false), 1500);
+    });
+  };
+
+  const selectedPayloadName = selectedPreset?.name || 'Untitled';
+
   return (
-    <div className="grid gap-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Rocket className="h-5 w-5 text-primary" />
-            <h3 className="text-xl font-semibold">{props.agent.name}</h3>
-            <span className="rounded-md border border-border px-2 py-1 font-mono text-xs text-muted-foreground">
-              {props.agent.workspace?.name ?? 'built-in'}
-            </span>
-          </div>
-          <p className="mt-2 text-sm text-muted-foreground">{props.agent.description}</p>
-        </div>
-        <CopyableId value={props.agent.id} label="agent id" />
-      </div>
-
-      <div className="grid gap-3 lg:grid-cols-2">
-        <Field label="Tenant">
-          <input
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-            value={props.tenantId}
-            onChange={(event) => props.onTenantId(event.target.value)}
-          />
-        </Field>
-        <Field label="Input modes">
-          <div className="flex min-h-9 flex-wrap items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground">
-            {props.agent.defaultInputModes.join(', ') || 'not specified'}
-          </div>
-        </Field>
-      </div>
-
-      <section className="grid gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <label className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Payload JSON</label>
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={formatPayload} disabled={!parsedPayload.ok}>
-              Format JSON
-            </Button>
-            <Button type="button" variant="outline" size="icon" onClick={addPreset} aria-label="Add payload preset">
-              <Plus className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {props.presetState.presets.map((preset) => (
-            <div
-              key={preset.id}
-              className={cn(
-                'group inline-flex h-9 items-center gap-1 rounded-md border px-2 text-xs transition-colors hover:bg-accent',
-                preset.id === selectedPreset?.id
-                  ? 'border-primary bg-accent text-accent-foreground'
-                  : 'border-border text-muted-foreground'
-              )}
-            >
-              {renamingPresetId === preset.id ? (
-                <input
-                  className="h-6 w-32 rounded border border-input bg-background px-2 text-xs text-foreground"
-                  value={preset.name}
-                  autoFocus
-                  onChange={(event) => updatePreset(preset.id, { name: event.target.value })}
-                  onBlur={() => setRenamingPresetId(null)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === 'Escape') {
-                      setRenamingPresetId(null);
-                    }
-                  }}
-                />
-              ) : (
-                <button
-                  type="button"
-                  className="max-w-40 truncate"
-                  onClick={() => props.onPresetState({ ...props.presetState, selectedPresetId: preset.id })}
-                  onDoubleClick={() => setRenamingPresetId(preset.id)}
-                  title="Double-click to rename"
-                >
-                  {preset.name || 'Untitled'}
-                </button>
-              )}
-              <button
-                type="button"
-                className="rounded p-1 opacity-60 hover:bg-background/70 hover:opacity-100"
-                aria-label={`Rename ${preset.name}`}
-                onClick={() => setRenamingPresetId(preset.id)}
-              >
-                <Pencil className="h-3 w-3" />
-              </button>
-              <button
-                type="button"
-                className="rounded p-1 opacity-60 hover:bg-background/70 hover:opacity-100 disabled:pointer-events-none disabled:opacity-25"
-                aria-label={`Delete ${preset.name}`}
-                disabled={props.presetState.presets.length <= 1}
-                onClick={() => deletePreset(preset.id)}
-              >
-                <X className="h-3 w-3" />
-              </button>
+    <div className="grid gap-4 pb-2">
+      <div className="grid gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Rocket className="h-5 w-5 text-primary" />
+              <h3 className="min-w-0 truncate text-xl font-semibold">{props.agent.name}</h3>
+              <span className="rounded-md border border-border px-2 py-1 font-mono text-xs text-muted-foreground">
+                {props.agent.workspace?.name ?? 'built-in'}
+              </span>
             </div>
-          ))}
+            <p className="mt-2 max-w-3xl text-sm text-muted-foreground">{props.agent.description}</p>
+          </div>
+          <CopyableId value={props.agent.id} label="agent id" />
         </div>
-        <textarea
-          className="min-h-[420px] rounded-lg border border-input bg-background p-3 font-mono text-xs leading-5 text-foreground"
-          spellCheck={false}
+
+        <div className="grid gap-3 rounded-lg border border-border bg-surface-muted p-3 md:grid-cols-[minmax(180px,260px)_1fr]">
+          <Field label="Tenant">
+            <input
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              value={props.tenantId}
+              onChange={(event) => props.onTenantId(event.target.value)}
+              aria-label="Tenant id"
+            />
+          </Field>
+          <MetadataField label="Input modes">
+            {props.agent.defaultInputModes.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {props.agent.defaultInputModes.map((mode) => (
+                  <span key={mode} className="rounded-md border border-border bg-background px-2 py-1 font-mono text-xs">
+                    {mode}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <span className="text-sm text-muted-foreground">not specified</span>
+            )}
+          </MetadataField>
+        </div>
+      </div>
+
+      <section className="grid gap-3">
+        <div className="grid gap-2">
+          <div className="flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <label className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Payload JSON</label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Developer mode: payloads are sent as raw JSON. Do not paste secrets.
+              </p>
+            </div>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-1 rounded-lg border border-border bg-surface-muted p-1">
+          {props.presetState.presets.map((preset) => (
+            <PayloadTab
+              key={preset.id}
+              name={preset.name}
+              active={preset.id === selectedPreset?.id}
+              invalid={!parsePayload(preset.payloadText).ok}
+              dirty={
+                initialPayloadsRef.current[preset.id] !== undefined &&
+                initialPayloadsRef.current[preset.id] !== preset.payloadText
+              }
+              renaming={renamingPresetId === preset.id}
+              canDelete={props.presetState.presets.length > 1}
+              onSelect={() => props.onPresetState({ ...props.presetState, selectedPresetId: preset.id })}
+              onNameChange={(name) => updatePreset(preset.id, { name })}
+              onRename={() => setRenamingPresetId(preset.id)}
+              onRenameDone={() => setRenamingPresetId(null)}
+              onDuplicate={() => duplicatePreset(preset.id)}
+              onDelete={() => deletePreset(preset.id)}
+            />
+          ))}
+            <Button type="button" variant="outline" size="sm" onClick={addPreset} className="h-8 gap-1" aria-label="Add payload preset">
+              <Plus className="h-3.5 w-3.5" />
+              New payload
+            </Button>
+          </div>
+        </div>
+
+        <JsonEditor
           value={selectedPreset?.payloadText ?? '{}'}
-          onChange={(event) => updateSelectedPreset({ payloadText: event.target.value })}
-          aria-invalid={!parsedPayload.ok}
+          validation={parsedPayload}
+          onChange={(payloadText) => updateSelectedPreset({ payloadText })}
+          onFormat={formatPayload}
+          onCopy={copyPayload}
+          copied={copiedPayload}
         />
-        {parsedPayload.ok ? (
-          <p className="text-xs text-emerald-700 dark:text-emerald-300">Valid JSON object</p>
-        ) : (
-          <p className="text-xs text-rose-700 dark:text-rose-300">{parsedPayload.message}</p>
-        )}
       </section>
 
       {props.runState.state === 'error' ? (
@@ -449,14 +485,29 @@ function AgentRunner(props: {
         </Notice>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Notice kind="unsafe" title="Developer launcher">
-          Payloads are sent as raw JSON. Do not paste secrets into the payload.
-        </Notice>
-        <Button type="button" onClick={props.onSubmit} disabled={props.runState.state === 'running' || !parsedPayload.ok}>
+      <div className="sticky bottom-3 z-20 -mx-1 rounded-lg border border-primary/25 bg-card/95 p-3 shadow-[0_14px_40px_hsl(220_20%_10%/0.12)] backdrop-blur supports-[backdrop-filter]:bg-card/85">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              {parsedPayload.ok ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-700" aria-hidden="true" />
+              ) : (
+                <AlertTriangle className="h-4 w-4 text-rose-700" aria-hidden="true" />
+              )}
+              <span className={cn(parsedPayload.ok ? 'text-emerald-800' : 'text-rose-800')}>
+                {parsedPayload.ok ? 'Valid JSON object' : 'Invalid JSON'}
+              </span>
+              <span className="text-muted-foreground">· Payload: {selectedPayloadName}</span>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Developer mode sends raw JSON. The payload will be formatted before the run starts.
+            </p>
+          </div>
+          <Button type="button" onClick={props.onSubmit} disabled={props.runState.state === 'running' || !parsedPayload.ok}>
           <Play className="h-4 w-4" />
           {props.runState.state === 'running' ? 'Starting...' : 'Run agent'}
         </Button>
+        </div>
       </div>
     </div>
   );
@@ -481,12 +532,298 @@ function updatePresetState(
   };
 }
 
+function PayloadTab(props: {
+  name: string;
+  active: boolean;
+  invalid: boolean;
+  dirty: boolean;
+  renaming: boolean;
+  canDelete: boolean;
+  onSelect: () => void;
+  onNameChange: (name: string) => void;
+  onRename: () => void;
+  onRenameDone: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        'group inline-flex h-8 max-w-full items-center gap-1 rounded-md border px-2 text-xs transition-colors',
+        props.active
+          ? 'border-primary bg-background text-foreground shadow-sm'
+          : 'border-transparent text-muted-foreground hover:border-border hover:bg-background/70'
+      )}
+    >
+      {props.renaming ? (
+        <input
+          className="h-6 w-32 rounded border border-input bg-background px-2 text-xs text-foreground"
+          value={props.name}
+          autoFocus
+          onChange={(event) => props.onNameChange(event.target.value)}
+          onBlur={props.onRenameDone}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === 'Escape') {
+              props.onRenameDone();
+            }
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="flex min-w-0 max-w-40 items-center gap-1 truncate"
+          onClick={props.onSelect}
+          onDoubleClick={props.onRename}
+          title="Double-click to rename"
+        >
+          <span className="truncate">{props.name || 'Untitled'}</span>
+          {props.dirty ? <span className="text-primary" aria-label="edited">*</span> : null}
+          {props.invalid ? <AlertTriangle className="h-3 w-3 shrink-0 text-rose-700" aria-label="invalid JSON" /> : null}
+        </button>
+      )}
+      <button
+        type="button"
+        className="rounded p-1 opacity-60 hover:bg-muted hover:opacity-100"
+        aria-label={`Rename ${props.name}`}
+        onClick={props.onRename}
+      >
+        <Pencil className="h-3 w-3" />
+      </button>
+      <button
+        type="button"
+        className="rounded p-1 opacity-60 hover:bg-muted hover:opacity-100"
+        aria-label={`Duplicate ${props.name}`}
+        onClick={props.onDuplicate}
+      >
+        <Copy className="h-3 w-3" />
+      </button>
+      <button
+        type="button"
+        className="rounded p-1 opacity-60 hover:bg-muted hover:opacity-100 disabled:pointer-events-none disabled:opacity-25"
+        aria-label={`Delete ${props.name}`}
+        disabled={!props.canDelete}
+        onClick={props.onDelete}
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
+function JsonEditor(props: {
+  value: string;
+  validation: PayloadParseResult;
+  copied: boolean;
+  onChange: (value: string) => void;
+  onFormat: () => void;
+  onCopy: () => void;
+}): React.ReactElement {
+  const [fullscreen, setFullscreen] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const highlighterRef = useRef<HTMLPreElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+  const lineCount = Math.max(1, props.value.split('\n').length);
+  const editorHeight = Math.max(360, lineCount * 20 + 24);
+
+  const syncScroll = () => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    if (highlighterRef.current) {
+      highlighterRef.current.style.transform = fullscreen
+        ? `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`
+        : `translateX(${-textarea.scrollLeft}px)`;
+    }
+    if (gutterRef.current) {
+      gutterRef.current.style.transform = fullscreen ? `translateY(${-textarea.scrollTop}px)` : '';
+    }
+  };
+
+  const insertText = (text: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      props.onChange(text);
+      return;
+    }
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const next = `${props.value.slice(0, start)}${text}${props.value.slice(end)}`;
+    props.onChange(next);
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.selectionStart = start + text.length;
+      textarea.selectionEnd = start + text.length;
+    });
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = event.clipboardData.getData('text');
+    const formatted = formatJsonIfObject(pasted);
+    if (!formatted) return;
+    event.preventDefault();
+    insertText(formatted);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') {
+      event.preventDefault();
+      props.onFormat();
+    }
+  };
+
+  return (
+    <div
+      className={cn(
+        'grid gap-0',
+        fullscreen ? 'fixed inset-4 z-50 rounded-xl border border-border bg-card p-4 shadow-2xl' : ''
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-t-lg border border-b-0 border-border bg-muted/30 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {props.validation.ok ? null : (
+            <span className="inline-flex items-center gap-1 text-rose-800">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {props.validation.message}
+              {props.validation.line ? ` at line ${props.validation.line}, column ${props.validation.column}` : ''}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <Button type="button" variant="ghost" size="sm" onClick={props.onFormat} disabled={!props.validation.ok}>
+            Format
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={props.onCopy}>
+            <Copy className="h-3.5 w-3.5" />
+            {props.copied ? 'Copied' : 'Copy'}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setFullscreen(!fullscreen)}
+            aria-label={fullscreen ? 'Exit fullscreen editor' : 'Open fullscreen editor'}
+          >
+            {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            {fullscreen ? 'Exit' : 'Full screen'}
+          </Button>
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          'grid min-h-[360px] grid-cols-[3.25rem_minmax(0,1fr)] overflow-hidden rounded-b-lg border border-input bg-background',
+          fullscreen ? 'h-[calc(100vh-9rem)]' : ''
+        )}
+        style={fullscreen ? undefined : { height: editorHeight }}
+      >
+        <div className="relative overflow-hidden border-r border-border bg-muted/30 px-2 py-3 font-mono text-xs leading-5 text-muted-foreground">
+          <div ref={gutterRef} className="text-right">
+            {Array.from({ length: lineCount }, (_, index) => (
+              <div key={index + 1}>{index + 1}</div>
+            ))}
+          </div>
+        </div>
+        <div className="relative min-w-0 overflow-hidden">
+          <pre
+            ref={highlighterRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute left-0 top-0 min-h-full min-w-full whitespace-pre p-3 font-mono text-xs leading-5"
+          >
+            <JsonHighlightedCode text={props.value} />
+          </pre>
+          <textarea
+            ref={textareaRef}
+            className={cn(
+              'absolute inset-0 resize-none bg-transparent p-3 font-mono text-xs leading-5 text-transparent caret-foreground outline-none selection:bg-primary/20',
+              fullscreen ? 'overflow-auto' : 'overflow-x-auto overflow-y-hidden'
+            )}
+            spellCheck={false}
+            wrap="off"
+            value={props.value}
+            onBlur={() => {
+              if (props.validation.ok) props.onFormat();
+            }}
+            onChange={(event) => props.onChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            onScroll={syncScroll}
+            aria-label="Payload JSON editor"
+            aria-invalid={!props.validation.ok}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function JsonHighlightedCode(props: { text: string }): React.ReactElement {
+  const lines = props.text.split('\n');
+  return (
+    <>
+      {lines.map((line, index) => (
+        <div key={index}>{highlightJsonLine(line)}</div>
+      ))}
+    </>
+  );
+}
+
+function highlightJsonLine(line: string): React.ReactNode[] | string {
+  if (line.length === 0) return '\u00a0';
+  const tokenPattern =
+    /("(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|[-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\btrue\b|\bfalse\b|\bnull\b|[{}\[\],:])/g;
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const match of line.matchAll(tokenPattern)) {
+    const token = match[0];
+    const index = match.index ?? 0;
+    if (index > cursor) {
+      nodes.push(line.slice(cursor, index));
+    }
+    nodes.push(
+      <span key={`${index}-${token}`} className={jsonTokenClass(token, line.slice(index + token.length))}>
+        {token}
+      </span>
+    );
+    cursor = index + token.length;
+  }
+  if (cursor < line.length) nodes.push(line.slice(cursor));
+  return nodes;
+}
+
+function jsonTokenClass(token: string, afterToken: string): string {
+  if (token.startsWith('"')) {
+    return afterToken.match(/^\s*:/) ? 'text-sky-800' : 'text-emerald-800';
+  }
+  if (token === 'true' || token === 'false') return 'text-violet-800';
+  if (token === 'null') return 'text-muted-foreground';
+  if (/^-?\d/.test(token)) return 'text-amber-800';
+  return 'text-muted-foreground';
+}
+
+function formatJsonIfObject(text: string): string | null {
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return null;
+  }
+}
+
 function Field(props: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
     <label className="grid gap-1 text-sm">
       <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">{props.label}</span>
       {props.children}
     </label>
+  );
+}
+
+function MetadataField(props: { label: string; children: React.ReactNode }): React.ReactElement {
+  return (
+    <div className="grid gap-1 text-sm">
+      <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">{props.label}</span>
+      <div className="min-h-9 py-1">{props.children}</div>
+    </div>
   );
 }
 
@@ -575,7 +912,7 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
-function parsePayload(payloadText: string): { ok: true; value: Record<string, unknown> } | { ok: false; message: string } {
+function parsePayload(payloadText: string): PayloadParseResult {
   try {
     const value = JSON.parse(payloadText) as unknown;
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -583,6 +920,24 @@ function parsePayload(payloadText: string): { ok: true; value: Record<string, un
     }
     return { ok: true, value: value as Record<string, unknown> };
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : 'Payload is not valid JSON.' };
+    const message = error instanceof Error ? error.message : 'Payload is not valid JSON.';
+    return {
+      ok: false,
+      message,
+      ...jsonErrorPosition(payloadText, message),
+    };
   }
+}
+
+function jsonErrorPosition(text: string, message: string): { line?: number; column?: number } {
+  const positionMatch = message.match(/position\s+(\d+)/i);
+  if (!positionMatch) return {};
+  const position = Number(positionMatch[1]);
+  if (!Number.isFinite(position)) return {};
+  const before = text.slice(0, position);
+  const lines = before.split('\n');
+  return {
+    line: lines.length,
+    column: (lines.at(-1)?.length ?? 0) + 1,
+  };
 }

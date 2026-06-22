@@ -8,6 +8,9 @@
   --color-foreground: hsl(var(--foreground));
   --color-card: hsl(var(--card));
   --color-card-foreground: hsl(var(--card-foreground));
+  --color-sidebar: hsl(var(--sidebar));
+  --color-surface-muted: hsl(var(--surface-muted));
+  --color-surface-raised: hsl(var(--surface-raised));
   --color-popover: hsl(var(--popover));
   --color-popover-foreground: hsl(var(--popover-foreground));
   --color-primary: hsl(var(--primary));
@@ -23,6 +26,18 @@
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
+  --color-success: hsl(var(--success));
+  --color-success-bg: hsl(var(--success-bg));
+  --color-success-border: hsl(var(--success-border));
+  --color-danger: hsl(var(--danger));
+  --color-danger-bg: hsl(var(--danger-bg));
+  --color-danger-border: hsl(var(--danger-border));
+  --color-warning: hsl(var(--warning));
+  --color-warning-bg: hsl(var(--warning-bg));
+  --color-warning-border: hsl(var(--warning-border));
+  --color-info: hsl(var(--info));
+  --color-info-bg: hsl(var(--info-bg));
+  --color-info-border: hsl(var(--info-border));
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -30,50 +45,80 @@
 
 :root {
   color-scheme: light;
-  --background: 220 14% 96%;
-  --foreground: 220 10% 12%;
+  --background: 220 20% 97%;
+  --foreground: 220 23% 11%;
   --card: 0 0% 100%;
-  --card-foreground: 220 10% 12%;
+  --card-foreground: 220 23% 11%;
+  --sidebar: 0 0% 100%;
+  --surface-muted: 216 24% 96%;
+  --surface-raised: 0 0% 100%;
   --popover: 0 0% 100%;
-  --popover-foreground: 220 10% 12%;
-  --primary: 220 7% 28%;
+  --popover-foreground: 220 23% 11%;
+  --primary: 243 75% 59%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 220 10% 91%;
-  --secondary-foreground: 220 10% 12%;
-  --muted: 220 11% 92%;
-  --muted-foreground: 220 7% 42%;
-  --accent: 220 10% 89%;
-  --accent-foreground: 220 10% 12%;
-  --destructive: 0 72% 51%;
+  --secondary: 216 24% 96%;
+  --secondary-foreground: 220 23% 11%;
+  --muted: 216 24% 96%;
+  --muted-foreground: 219 13% 40%;
+  --accent: 233 100% 97%;
+  --accent-foreground: 243 52% 35%;
+  --destructive: 347 57% 50%;
   --destructive-foreground: 0 0% 100%;
-  --border: 220 10% 82%;
-  --input: 220 10% 82%;
-  --ring: 220 7% 28%;
-  --radius: 0.75rem;
+  --border: 213 20% 87%;
+  --input: 213 18% 80%;
+  --ring: 243 75% 59%;
+  --success: 158 80% 30%;
+  --success-bg: 151 53% 94%;
+  --success-border: 153 55% 70%;
+  --danger: 347 57% 50%;
+  --danger-bg: 349 100% 97%;
+  --danger-border: 349 100% 80%;
+  --warning: 36 100% 33%;
+  --warning-bg: 45 100% 94%;
+  --warning-border: 40 82% 69%;
+  --info: 214 70% 45%;
+  --info-bg: 211 100% 96%;
+  --info-border: 211 87% 83%;
+  --radius: 0.625rem;
 }
 
 :root.dark {
   color-scheme: dark;
-  --background: 220 10% 7%;
-  --foreground: 220 14% 92%;
-  --card: 220 9% 10%;
-  --card-foreground: 220 14% 92%;
-  --popover: 220 9% 10%;
-  --popover-foreground: 220 14% 92%;
-  --primary: 220 8% 72%;
-  --primary-foreground: 0 0% 100%;
-  --secondary: 220 8% 16%;
-  --secondary-foreground: 220 14% 92%;
-  --muted: 220 8% 14%;
-  --muted-foreground: 220 8% 64%;
-  --accent: 220 8% 17%;
-  --accent-foreground: 220 14% 92%;
-  --destructive: 0 72% 51%;
+  --background: 218 21% 7%;
+  --foreground: 213 36% 95%;
+  --card: 218 19% 11%;
+  --card-foreground: 213 36% 95%;
+  --sidebar: 216 22% 9%;
+  --surface-muted: 218 19% 14%;
+  --surface-raised: 218 20% 17%;
+  --popover: 218 20% 17%;
+  --popover-foreground: 213 36% 95%;
+  --primary: 240 100% 77%;
+  --primary-foreground: 236 39% 13%;
+  --secondary: 218 19% 14%;
+  --secondary-foreground: 213 36% 95%;
+  --muted: 218 19% 14%;
+  --muted-foreground: 218 13% 56%;
+  --accent: 237 35% 20%;
+  --accent-foreground: 238 100% 88%;
+  --destructive: 346 100% 71%;
   --destructive-foreground: 0 0% 100%;
-  --border: 220 7% 22%;
-  --input: 220 7% 22%;
-  --ring: 220 8% 72%;
-  --radius: 0.75rem;
+  --border: 217 18% 21%;
+  --input: 217 16% 28%;
+  --ring: 240 100% 77%;
+  --success: 154 62% 55%;
+  --success-bg: 154 44% 11%;
+  --success-border: 156 52% 31%;
+  --danger: 346 100% 71%;
+  --danger-bg: 346 46% 14%;
+  --danger-border: 347 45% 37%;
+  --warning: 36 83% 65%;
+  --warning-bg: 36 42% 13%;
+  --warning-border: 36 56% 35%;
+  --info: 208 100% 73%;
+  --info-bg: 211 52% 15%;
+  --info-border: 209 47% 37%;
+  --radius: 0.625rem;
 }
 
 * {
@@ -88,6 +133,7 @@ html {
 
 body {
   margin: 0;
+  background: hsl(var(--background));
 }
 
 button,
@@ -102,7 +148,7 @@ a {
 }
 
 .react-flow {
-  background: hsl(var(--background));
+  background: hsl(var(--card));
 }
 
 .react-flow__node {
@@ -116,15 +162,15 @@ a {
 }
 
 .react-flow__edge-path {
-  stroke: hsl(var(--muted-foreground));
+  stroke: hsl(var(--border));
 }
 
 .react-flow__controls {
   overflow: hidden;
   border: 1px solid hsl(var(--border));
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
   background: hsl(var(--card));
-  box-shadow: none;
+  box-shadow: 0 12px 30px hsl(220 20% 10% / 0.08);
 }
 
 .react-flow__controls-button {

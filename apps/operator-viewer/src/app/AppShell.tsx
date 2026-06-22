@@ -14,10 +14,10 @@ export function AppShell(): React.ReactElement {
   const isProd = environment.toLowerCase().includes('prod');
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-64 border-r border-border bg-card/95 p-4 lg:block">
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-64 border-r border-border bg-sidebar p-4 shadow-[8px_0_30px_hsl(220_20%_10%/0.04)] lg:block">
         <div className="mb-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">callAgent</p>
-          <h1 className="mt-1 text-xl font-semibold">Operator Dashboard</h1>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-primary">callAgent</p>
+          <h1 className="mt-1 text-lg font-semibold">Operator Dashboard</h1>
         </div>
         <nav className="grid gap-2">
           <NavLink to="/" active={location.pathname === '/'}>Fleet</NavLink>
@@ -31,8 +31,8 @@ export function AppShell(): React.ReactElement {
             className={cn(
               'rounded-lg border p-3',
               isProd
-                ? 'border-rose-500/55 bg-rose-100 text-rose-900 dark:border-rose-400/50 dark:bg-rose-500/10 dark:text-rose-100'
-                : 'border-zinc-400/50 bg-zinc-100 text-zinc-800 dark:border-zinc-400/30 dark:bg-zinc-500/10 dark:text-zinc-100'
+                ? 'border-danger-border bg-danger-bg text-danger'
+                : 'border-border bg-surface-muted text-muted-foreground'
             )}
           >
             <div className="flex items-center gap-2 font-medium">
@@ -41,7 +41,7 @@ export function AppShell(): React.ReactElement {
             </div>
             <p className="mt-1 opacity-80">Environment is visible on every page.</p>
           </div>
-          <div className="rounded-lg border border-border bg-background/50 p-3">
+          <div className="rounded-lg border border-border bg-surface-muted p-3">
             <div className="flex items-center gap-2">
               <UserCircle className="h-4 w-4" />
               Auth reserved
@@ -50,7 +50,7 @@ export function AppShell(): React.ReactElement {
         </div>
       </aside>
       <div className="lg:pl-64">
-        <header className="sticky top-0 z-10 border-b border-border bg-background/85 px-4 py-3 backdrop-blur lg:px-6">
+        <header className="sticky top-0 z-10 border-b border-border bg-background/88 px-4 py-3 backdrop-blur lg:px-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <Activity className="h-5 w-5 text-primary" />
@@ -60,13 +60,13 @@ export function AppShell(): React.ReactElement {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <div className="hidden items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-sm text-muted-foreground md:flex">
+              <div className="hidden items-center gap-2 rounded-md border border-border bg-card/80 px-3 py-1.5 text-sm text-muted-foreground md:flex">
                 <Search className="h-4 w-4" />
                 Global search reserved
               </div>
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
                 onClick={theme.toggleTheme}
                 aria-label={`Switch to ${theme.theme === 'dark' ? 'light' : 'dark'} theme`}
@@ -74,7 +74,7 @@ export function AppShell(): React.ReactElement {
                 {theme.theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
                 {theme.theme === 'dark' ? 'Light' : 'Dark'}
               </Button>
-              <Button variant="outline" size="sm">
+              <Button variant="ghost" size="sm">
                 <HelpCircle className="h-4 w-4" />
                 Help
               </Button>
@@ -99,17 +99,18 @@ function NavLink(props: {
   children: React.ReactNode;
 }): React.ReactElement {
   if (props.disabled) {
-    return <span className="rounded-md px-3 py-2 text-sm text-muted-foreground/60">{props.children}</span>;
+    return <span className="rounded-md px-3 py-2 text-sm text-muted-foreground/55">{props.children}</span>;
   }
   return (
     <Link
       to={props.to}
       params={props.params}
       className={cn(
-        'rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent hover:text-accent-foreground',
-        props.active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'
+        'relative rounded-md px-3 py-2 pl-4 text-sm transition-colors hover:bg-accent hover:text-accent-foreground',
+        props.active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground'
       )}
     >
+      {props.active ? <span className="absolute left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-primary" /> : null}
       {props.children}
     </Link>
   );
