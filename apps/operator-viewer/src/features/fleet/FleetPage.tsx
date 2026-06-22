@@ -39,6 +39,7 @@ export function FleetPage(): React.ReactElement {
   const [sorting, setSorting] = useState<SortingState>([]);
   const query = useAgentRuns({
     tenantId: search.tenantId,
+    scope: search.scope,
     agentId: search.agentId || undefined,
     status: search.status || undefined,
     since: search.since || undefined,
@@ -63,10 +64,12 @@ export function FleetPage(): React.ReactElement {
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Fleet</p>
           <h2 className="text-2xl font-semibold">Agent runs</h2>
-          <p className="text-sm text-muted-foreground">Page-scoped counts until fleet aggregate endpoints exist.</p>
+          <p className="text-sm text-muted-foreground">
+            {search.scope === 'all' ? 'Showing root and child agent runs.' : 'Showing root agent runs by default.'}
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-md border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
+          <span className="rounded-md border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground">
             Tenant: <span className="font-mono text-foreground">{search.tenantId}</span>
           </span>
           <Button variant="outline" size="sm" onClick={() => void query.refetch()}>
@@ -126,11 +129,15 @@ function FleetSummaryCards(props: {
         <button
           key={label}
           type="button"
-          className="rounded-xl border border-border bg-card p-3 text-left transition-colors hover:bg-accent"
+          className={cn(
+            'rounded-lg border border-border bg-card p-3 text-left transition-colors hover:border-primary/35 hover:bg-accent',
+            label === 'Failed' && value > 0 ? 'border-danger-border' : '',
+            label === 'Completed' && value > 0 ? 'border-success-border' : ''
+          )}
           onClick={() => props.onStatus(status)}
         >
           <p className="text-xs text-muted-foreground">{label}</p>
-          <p className="mt-1 text-2xl font-semibold">{formatNumber(value)}</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums">{formatNumber(value)}</p>
         </button>
       ))}
     </section>
@@ -143,7 +150,7 @@ function FleetFilters(props: {
 }): React.ReactElement {
   const update = (patch: Partial<FleetSearch>) => props.onChange({ ...props.search, ...patch });
   return (
-    <section className="rounded-xl border border-border bg-card p-3">
+    <section className="rounded-lg border border-border bg-card p-3">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
         <Field label="Tenant">
           <input className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={props.search.tenantId} onChange={(event) => update({ tenantId: event.target.value })} />
@@ -180,6 +187,7 @@ function FleetFilters(props: {
         </Field>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
+        <Toggle checked={props.search.scope === 'all'} onClick={() => update({ scope: props.search.scope === 'all' ? 'roots' : 'all' })}>Include child agents</Toggle>
         <Toggle checked={props.search.hasLlm} onClick={() => update({ hasLlm: !props.search.hasLlm })}>Has LLM calls</Toggle>
         <Toggle checked={props.search.hasMemory} onClick={() => update({ hasMemory: !props.search.hasMemory })}>Has memory ops</Toggle>
       </div>
@@ -243,7 +251,7 @@ function FleetTable(props: {
     overscan: 10,
   });
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card">
+    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-[0_12px_35px_hsl(220_20%_10%/0.04)]">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div>
           <h3 className="font-semibold">Runs</h3>
@@ -255,7 +263,7 @@ function FleetTable(props: {
           {table.getHeaderGroups().map((headerGroup) => (
             <div
               key={headerGroup.id}
-              className={`sticky top-0 z-10 grid ${fleetGridColumns} bg-muted px-3 text-xs uppercase tracking-wide text-muted-foreground`}
+              className={`sticky top-0 z-10 grid ${fleetGridColumns} border-b border-border bg-surface-muted px-3 text-xs uppercase tracking-wide text-muted-foreground`}
             >
               {headerGroup.headers.map((header) => (
                 <HeaderCell key={header.id} header={header} />
@@ -272,7 +280,10 @@ function FleetTable(props: {
                 <button
                   key={row.id}
                   type="button"
-                  className={`absolute left-0 grid w-full ${fleetGridColumns} items-center border-b border-border px-3 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+                  className={cn(
+                    `absolute left-0 grid w-full ${fleetGridColumns} items-center border-b border-border px-3 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`,
+                    normalizeRuntimeStatus(row.original.displayStatus) === 'failed' ? 'border-l-2 border-l-danger-border' : ''
+                  )}
                   style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}
                   onClick={() => props.onOpen(row.original)}
                 >

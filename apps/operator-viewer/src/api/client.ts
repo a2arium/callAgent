@@ -2,6 +2,7 @@ import type { AgentRunGraph, AgentRunListPage, AgentRunMemoryView, TurnRun } fro
 
 export type ListAgentRunsInput = {
   tenantId: string;
+  scope?: 'roots' | 'all';
   agentId?: string;
   status?: string;
   since?: string;
@@ -95,6 +96,7 @@ async function fetchJson<T>(path: string, tenantId?: string): Promise<T> {
 
 export async function listAgentRuns(input: ListAgentRunsInput): Promise<AgentRunListPage> {
   const params = new URLSearchParams();
+  if (input.scope) params.set('scope', input.scope);
   if (input.agentId) params.set('agentId', input.agentId);
   if (input.status) params.set('status', input.status);
   if (input.since) params.set('since', input.since);

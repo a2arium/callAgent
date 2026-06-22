@@ -1,5 +1,6 @@
 export type FleetSearch = {
   tenantId: string;
+  scope: 'roots' | 'all';
   agentId: string;
   status: string;
   since: string;
@@ -20,6 +21,7 @@ export const defaultTenantId = 'default';
 export function parseFleetSearch(value: Record<string, unknown>): FleetSearch {
   return {
     tenantId: stringParam(value.tenantId, defaultTenantId),
+    scope: value.scope === 'all' ? 'all' : 'roots',
     agentId: stringParam(value.agentId, ''),
     status: stringParam(value.status, ''),
     since: stringParam(value.since, ''),

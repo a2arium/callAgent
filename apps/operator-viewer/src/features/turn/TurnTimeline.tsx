@@ -1,9 +1,9 @@
 import { AlertTriangle, ArrowLeft, Brain, DollarSign, FileOutput, ShieldAlert, Timer } from 'lucide-react';
-import { Button } from '../../design/components/ui/button';
 import { Notice } from '../../design/components/ui/notice';
 import { StatusBadge } from '../../design/components/ui/status-badge';
 import { formatCost, formatDuration, stringFromUnknown } from '../../design/format';
 import { normalizeRuntimeStatus } from '../../domain/derive';
+import { semanticFailureFromTurn, type SemanticFailure } from '../../domain/semanticFailure';
 import { JsonPreview } from '../inspector/JsonPreview';
 import type { AgentRunEvent, TurnRun } from '../../types';
 import { cn } from '../../lib/utils';
@@ -15,7 +15,7 @@ export function TurnTimeline(props: {
   const duplicateSeqs = duplicateTurnSeqs(props.turns);
 
   return (
-    <section className="grid gap-3">
+    <section className="grid gap-3 p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h4 className="text-sm font-semibold">Turn timeline</h4>
@@ -42,7 +42,7 @@ export function TurnTimeline(props: {
                 <div className="min-w-0">
                   <p className="break-words font-semibold [overflow-wrap:anywhere]">Turn {turnSeq}</p>
                   <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                    {turn.cognition?.stageBefore ?? '?'} → {turn.cognition?.stageAfter ?? turn.boundaryKind ?? '?'}
+                    {turnFlowLabel(turn)}
                   </p>
                 </div>
                 <StatusBadge status={normalizeRuntimeStatus(turn.status)} />
@@ -79,6 +79,7 @@ export function TurnDetail(props: {
   const turn = props.turn;
   const turnLabel = `Turn ${turn.turnSeq ?? '?'}`;
   const events = props.events ?? [];
+  const semanticFailure = semanticFailureFromTurn(turn);
   const stages = [
     { name: 'Attention', value: undefined },
     { name: 'Perception', value: turn.cognition?.perception },
@@ -90,78 +91,88 @@ export function TurnDetail(props: {
   ];
   return (
     <section className="grid gap-3">
-      <div className="sticky top-0 z-10 rounded-lg border border-primary/40 bg-card/95 p-3 backdrop-blur">
-        <Button type="button" variant="ghost" size="sm" className="mb-2 px-0" onClick={props.onBack}>
-          <ArrowLeft className="h-4 w-4" />
-          Back to turns
-        </Button>
-        <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{props.agentId ?? 'selected agent'} → {turnLabel}</p>
-        <div className="mt-1 flex flex-wrap items-center gap-2">
-          <h4 className="text-base font-semibold">Selected Turn: {turnLabel}</h4>
+      <button
+        type="button"
+        className="sticky top-0 z-20 grid min-w-0 gap-1 border-b border-border bg-card px-4 py-2 text-left shadow-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={props.onBack}
+      >
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <span className="inline-flex min-w-0 items-center gap-2 text-sm font-medium">
+            <ArrowLeft className="h-4 w-4 shrink-0" />
+            <span>Back to turns</span>
+          </span>
           <StatusBadge status={normalizeRuntimeStatus(turn.status)} />
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {turn.cognition?.stageBefore ?? '?'} → {turn.cognition?.stageAfter ?? turn.boundaryKind ?? '?'}
+        <p className="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+          {props.agentId ?? 'selected agent'} → {turnLabel} · {turnFlowLabel(turn)}
         </p>
-      </div>
+      </button>
 
-      <section className="grid gap-2">
-        <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Summary</h4>
-        <p className="rounded-lg border border-border bg-background/50 p-3 text-sm text-muted-foreground">
-          {turnSummary(turn)}
-        </p>
-      </section>
-
-      <section className="grid gap-2">
-        <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Key signals</h4>
-        <div className="grid gap-1">
-          <FactRow label="Turn inbox">{turn.cognition?.perception ? 'Derived from perception context' : 'No inbox event captured'}</FactRow>
-          <FactRow label="Shield">{shieldSummary(turn)}</FactRow>
-          <FactRow label="Execution">{executionSummary(turn)}</FactRow>
-          <FactRow label="Output">{hasOutputProduced(turn) ? 'Produced' : 'Not captured'}</FactRow>
-          <FactRow label="LLM calls">{turn.llmCalls?.length ?? 0}</FactRow>
-          <FactRow label="Memory ops">{turn.memoryOps?.length ?? 0}</FactRow>
-          <FactRow label="Cost">{turnCost(turn) > 0 ? formatCost(turnCost(turn)) : 'Not captured'}</FactRow>
-        </div>
-      </section>
-
-      {hasOutputProduced(turn) ? (
+      <div className="grid gap-3 px-4 pb-4">
         <section className="grid gap-2">
-          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Output</h4>
-          <p className="rounded-lg border border-border bg-background/50 p-3 text-sm text-muted-foreground">
-            Output was produced in Transition. Final output preview may still be unavailable at the agent summary level.
-          </p>
+          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Summary</h4>
+          {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}
+          {!semanticFailure ? (
+            <p className="rounded-lg border border-border bg-background/50 p-3 text-sm text-muted-foreground">
+              {turnSummary(turn)}
+            </p>
+          ) : null}
         </section>
-      ) : null}
 
-      <section className="grid gap-2">
-        <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Execution events</h4>
-        {events.length > 0 ? (
-          <div className="grid gap-2">
-            {events.map((event) => (
-              <details key={event.id} className="min-w-0 rounded-lg border border-border bg-background/50">
-                <summary className="flex cursor-pointer items-start justify-between gap-3 p-3">
-                  <div className="min-w-0">
-                    <p className="break-words text-sm font-medium [overflow-wrap:anywhere]">{event.type}</p>
-                    <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{eventSummary(event)}</p>
-                  </div>
-                  <span className="shrink-0 text-xs text-muted-foreground">Show details</span>
-                </summary>
-                <div className="border-t border-border p-3">
-                  <JsonPreview value={event.payload} summaryFields={['turnSeq', 'kind', 'status', 'boundaryKind', 'error']} maxPreviewRows={5} maxRawHeight={220} />
-                </div>
-              </details>
-            ))}
+        <section className="grid gap-2">
+          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Key signals</h4>
+          <div className="grid gap-1">
+            <FactRow label="Turn inbox">{turn.cognition?.perception ? 'Derived from perception context' : 'No inbox event captured'}</FactRow>
+            <FactRow label="Shield">{shieldSummary(turn)}</FactRow>
+            <FactRow label="Execution">{executionSummary(turn)}</FactRow>
+            <FactRow label="Output">{hasOutputProduced(turn) ? 'Produced' : 'Not captured'}</FactRow>
+            <FactRow label="LLM calls">{turn.llmCalls?.length ?? 0}</FactRow>
+            <FactRow label="Memory ops">{turn.memoryOps?.length ?? 0}</FactRow>
+            <FactRow label="Cost">{turnCost(turn) > 0 ? formatCost(turnCost(turn)) : 'Not captured'}</FactRow>
           </div>
-        ) : (
-          <Notice title="No turn-scoped execution events captured" className="bg-background/50" />
-        )}
-      </section>
+        </section>
 
-      <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Stages</h4>
-      {stages.map((stage, index) => (
-        <StageDetailCard key={stage.name} index={index + 1} name={stage.name} value={stage.value} turn={turn} />
-      ))}
+        {hasOutputProduced(turn) ? (
+          <section className="grid gap-2">
+            <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Output</h4>
+            <p className="rounded-lg border border-border bg-background/50 p-3 text-sm text-muted-foreground">
+              Output was produced in Transition. Final output preview may still be unavailable at the agent summary level.
+            </p>
+          </section>
+        ) : null}
+
+        <section className="grid gap-2">
+          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Execution events</h4>
+          {events.length > 0 ? (
+            <div className="grid gap-2">
+              {events.map((event) => (
+                <details key={event.id} className="min-w-0 rounded-lg border border-border bg-background/50">
+                  <summary className="flex cursor-pointer items-start justify-between gap-3 p-3">
+                    <div className="min-w-0">
+                      <p className="break-words text-sm font-medium [overflow-wrap:anywhere]">{event.type}</p>
+                      <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{eventSummary(event)}</p>
+                    </div>
+                    <span className="shrink-0 text-xs text-muted-foreground">Show details</span>
+                  </summary>
+                  <div className="border-t border-border p-3">
+                    <JsonPreview value={event.payload} summaryFields={['turnSeq', 'kind', 'status', 'boundaryKind', 'error']} maxPreviewRows={5} maxRawHeight={220} />
+                  </div>
+                </details>
+              ))}
+            </div>
+          ) : (
+            <Notice title="No turn-scoped execution events captured" className="bg-background/50" />
+          )}
+        </section>
+
+        <div className="grid gap-2">
+          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Stages</h4>
+          <StageTimingRail turn={turn} />
+        </div>
+        {stages.map((stage, index) => (
+          <StageDetailCard key={stage.name} index={index + 1} name={stage.name} value={stage.value} turn={turn} />
+        ))}
+      </div>
     </section>
   );
 }
@@ -170,12 +181,16 @@ function StageDetailCard(props: { index: number; name: string; value: unknown; t
   const facts = stageFacts(props.name, props.value, props.turn);
   const hasValue = props.value !== undefined && props.value !== null;
   const shouldOpen = defaultStageOpen(props.name, props.turn);
+  const duration = stageDuration(props.turn, props.name);
   return (
     <details className="min-w-0 rounded-lg border border-border bg-background/50" open={shouldOpen}>
       <summary className="flex cursor-pointer items-center gap-2 p-3">
         <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{props.index}</span>
         <div className="min-w-0 flex-1">
-          <h4 className="font-semibold">{props.name}</h4>
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <h4 className="font-semibold">{props.name}</h4>
+            {duration !== undefined ? <span className="shrink-0 text-xs text-muted-foreground">{formatDuration(duration)}</span> : null}
+          </div>
           <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{stageSummary(props.name, props.value, props.turn)}</p>
         </div>
       </summary>
@@ -203,6 +218,44 @@ function StageDetailCard(props: { index: number; name: string; value: unknown; t
         ) : null}
       </div>
     </details>
+  );
+}
+
+function SemanticFailureNotice(props: { failure: SemanticFailure }): React.ReactElement {
+  return (
+    <Notice kind="error" title="Semantic failure">
+      <div className="grid gap-1">
+        {props.failure.code ? (
+          <div>
+            <span className="font-medium">Code:</span> <span className="font-mono">{props.failure.code}</span>
+          </div>
+        ) : null}
+        <div>
+          <span className="font-medium">Message:</span> {props.failure.message}
+        </div>
+      </div>
+    </Notice>
+  );
+}
+
+function StageTimingRail(props: { turn: TurnRun }): React.ReactElement | null {
+  const segments = stageTimingSegments(props.turn);
+  if (segments.length === 0) return null;
+  const totalMs = timingTotal(props.turn) ?? segments.reduce((sum, segment) => sum + segment.durationMs, 0);
+  if (totalMs <= 0) return null;
+  return (
+    <div className="overflow-hidden rounded-full border border-border bg-muted/60" title={`Total: ${formatDuration(totalMs)}`}>
+      <div className="flex h-2 w-full">
+        {segments.map((segment) => (
+          <div
+            key={segment.stage}
+            className={cn('min-w-[2px]', segmentClass(segment.stage))}
+            style={{ width: `${Math.max(1, (segment.durationMs / totalMs) * 100)}%` }}
+            title={`${segment.stage}: ${formatDuration(segment.durationMs)}`}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -252,7 +305,84 @@ function hasOutputProduced(turn: TurnRun): boolean {
   return valueContainsKey(execResult, 'data') || transitionResultOk(transition) || turn.boundaryKind === 'complete';
 }
 
+function turnFlowLabel(turn: TurnRun): string {
+  const before = turn.cognition?.stageBefore ?? '?';
+  const terminal = transitionKind(turn) ?? turn.boundaryKind;
+  if (terminal && terminal !== 'continue') {
+    return `${before} → ${terminal}`;
+  }
+  return `${before} → ${turn.cognition?.stageAfter ?? terminal ?? '?'}`;
+}
+
+function transitionKind(turn: TurnRun): string | undefined {
+  const transition = turn.cognition?.transition;
+  if (!isRecord(transition)) return undefined;
+  return stringField(transition, 'kind');
+}
+
+type TimingSegment = {
+  stage: string;
+  durationMs: number;
+};
+
+const STAGE_TIMING_KEYS: Array<[string, string]> = [
+  ['Attention', 'attentionMs'],
+  ['Perception', 'perceptionMs'],
+  ['Learning', 'learningMs'],
+  ['Policy', 'policyMs'],
+  ['Shield', 'shieldMs'],
+  ['Execution', 'executionMs'],
+  ['Transition', 'transitionMs'],
+];
+
+function stageTimingSegments(turn: TurnRun): TimingSegment[] {
+  const timings = turn.cognition?.timings;
+  if (!isRecord(timings)) return [];
+  return STAGE_TIMING_KEYS.flatMap(([stage, key]) => {
+    const durationMs = numberField(timings, key);
+    return durationMs !== undefined ? [{ stage, durationMs: Math.max(0, durationMs) }] : [];
+  });
+}
+
+function stageDuration(turn: TurnRun, stageName: string): number | undefined {
+  const timings = turn.cognition?.timings;
+  if (!isRecord(timings)) return undefined;
+  const key = STAGE_TIMING_KEYS.find(([stage]) => stage === stageName)?.[1];
+  return key ? numberField(timings, key) : undefined;
+}
+
+function timingTotal(turn: TurnRun): number | undefined {
+  const timings = turn.cognition?.timings;
+  if (!isRecord(timings)) return undefined;
+  return numberField(timings, 'totalMs');
+}
+
+function segmentClass(stage: string): string {
+  switch (stage) {
+    case 'Attention':
+      return 'bg-sky-500';
+    case 'Perception':
+      return 'bg-cyan-500';
+    case 'Learning':
+      return 'bg-teal-500';
+    case 'Policy':
+      return 'bg-amber-500';
+    case 'Shield':
+      return 'bg-emerald-500';
+    case 'Execution':
+      return 'bg-rose-500';
+    case 'Transition':
+      return 'bg-indigo-500';
+    default:
+      return 'bg-muted-foreground';
+  }
+}
+
 function turnSummary(turn: TurnRun): string {
+  const semanticFailure = semanticFailureFromTurn(turn);
+  if (semanticFailure) {
+    return `This turn completed with semantic failure${semanticFailure.code ? ` (${semanticFailure.code})` : ''}. ${semanticFailure.message}`;
+  }
   const parts: string[] = [];
   const status = normalizeRuntimeStatus(turn.status);
   if (status === 'completed') parts.push('This turn completed successfully.');
@@ -341,8 +471,11 @@ function stageFacts(stageName: string, value: unknown, turn: TurnRun): Array<[st
     ];
   }
   if (stageName === 'Transition') {
+    const semanticFailure = semanticFailureFromTurn(turn);
     return [
-      ['Status', hasOutputProduced(turn) ? 'Completed' : 'Captured'],
+      ['Status', semanticFailure ? 'Semantic failure' : hasOutputProduced(turn) ? 'Completed' : 'Captured'],
+      ...(semanticFailure?.code ? [['Code', semanticFailure.code] satisfies [string, React.ReactNode]] : []),
+      ...(semanticFailure ? [['Message', semanticFailure.message] satisfies [string, React.ReactNode]] : []),
       ['Output produced', hasOutputProduced(turn) ? 'Yes' : 'No'],
     ];
   }
@@ -418,4 +551,9 @@ function recordField(value: Record<string, unknown>, key: string): Record<string
 function stringField(value: Record<string, unknown>, key: string): string | undefined {
   const field = value[key];
   return typeof field === 'string' && field.length > 0 ? field : undefined;
+}
+
+function numberField(value: Record<string, unknown>, key: string): number | undefined {
+  const field = value[key];
+  return typeof field === 'number' && Number.isFinite(field) ? field : undefined;
 }

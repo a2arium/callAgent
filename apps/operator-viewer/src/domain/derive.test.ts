@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { deriveGraphInsights, deriveStatus } from './derive';
+import { semanticFailureFromTurns } from './semanticFailure';
 import type { AgentRunGraph } from '../types';
 
 describe('deriveGraphInsights', () => {
@@ -51,6 +52,90 @@ describe('deriveStatus', () => {
     expect(waiting.derived).toBe(true);
     expect(stuck.status).toBe('stuck');
     expect(stuck.derived).toBe(true);
+  });
+
+  it('derives waiting from transition kind when boundaryKind is missing', () => {
+    const waiting = deriveStatus({
+      status: 'running',
+      updatedAt: '2026-06-19T10:00:00.000Z',
+      turns: [
+        {
+          id: 't1',
+          rootTaskId: 'root-task',
+          taskId: 'root-task',
+          status: 'running',
+          operation: 'turn.segment',
+          cognition: {
+            transition: { kind: 'await_child' },
+          },
+        },
+      ],
+      now: new Date('2026-06-19T10:05:00.000Z'),
+    });
+
+    expect(waiting.status).toBe('waiting');
+    expect(waiting.awaitType).toBe('await_child');
+  });
+
+  it('does not let an older await boundary mask a newer running turn', () => {
+    const status = deriveStatus({
+      status: 'running',
+      updatedAt: '2026-06-19T10:10:00.000Z',
+      turns: [
+        {
+          id: 't1',
+          rootTaskId: 'root-task',
+          taskId: 'root-task',
+          status: 'completed',
+          operation: 'turn.segment',
+          turnSeq: 1,
+          boundaryKind: 'await_child',
+        },
+        {
+          id: 't2',
+          rootTaskId: 'root-task',
+          taskId: 'root-task',
+          status: 'running',
+          operation: 'turn.segment',
+          turnSeq: 2,
+        },
+      ],
+      now: new Date('2026-06-19T10:11:00.000Z'),
+    });
+
+    expect(status.status).toBe('running');
+    expect(status.derived).toBe(false);
+  });
+});
+
+describe('semanticFailureFromTurns', () => {
+  it('extracts readable transition failure details', () => {
+    const failure = semanticFailureFromTurns([
+      {
+        id: 't1',
+        rootTaskId: 'root-task',
+        taskId: 'root-task',
+        status: 'failed',
+        operation: 'turn.segment',
+        cognition: {
+          transition: {
+            kind: 'complete',
+            result: {
+              ok: false,
+              error: {
+                code: 'NO_HTML',
+                message: 'Agent reached a state where it has no HTML and no URL to fetch.',
+              },
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(failure).toEqual({
+      code: 'NO_HTML',
+      message: 'Agent reached a state where it has no HTML and no URL to fetch.',
+    });
   });
 });
 
@@ -123,5 +208,6 @@ function graphFixture(): AgentRunGraph {
     memoryOps: [],
     effects: [],
     events: [],
+    debug: { driverRuns: [] },
   };
 }

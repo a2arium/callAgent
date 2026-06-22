@@ -85,13 +85,13 @@ export function deriveStatus(input: {
   if (normalized !== 'running' && normalized !== 'queued') {
     return { status: normalized, runtimeStatus, derived: false };
   }
-  const waitingTurn = [...(input.turns ?? [])]
-    .reverse()
-    .find((turn) => turn.boundaryKind === 'await_input' || turn.boundaryKind === 'await_tool' || turn.boundaryKind === 'await_child');
-  if (!waitingTurn) {
+  const latestTurn = latestTurnRun(input.turns ?? []);
+  const latestBoundaryKind = latestTurn ? turnBoundaryKind(latestTurn) : undefined;
+  if (!latestTurn || !isAwaitBoundary(latestBoundaryKind)) {
     return { status: normalized, runtimeStatus, derived: false };
   }
-  const awaitType = waitingTurn.boundaryKind as EnrichedStatus['awaitType'];
+  const waitingTurn = latestTurn;
+  const awaitType = latestBoundaryKind as EnrichedStatus['awaitType'];
   const thresholds = input.thresholds ?? defaultThresholds;
   const thresholdMs =
     awaitType === 'await_input'
@@ -122,6 +122,29 @@ export function deriveStatus(input: {
     thresholdMs,
     awaitType,
   };
+}
+
+function latestTurnRun(turns: TurnRun[]): TurnRun | undefined {
+  return turns.reduce<TurnRun | undefined>((latest, turn) => {
+    if (!latest) return turn;
+    const latestSeq = latest.turnSeq ?? Number.NEGATIVE_INFINITY;
+    const turnSeq = turn.turnSeq ?? Number.NEGATIVE_INFINITY;
+    return turnSeq >= latestSeq ? turn : latest;
+  }, undefined);
+}
+
+function turnBoundaryKind(turn: TurnRun): string | undefined {
+  if (turn.boundaryKind) return turn.boundaryKind;
+  const transition = turn.cognition?.transition;
+  if (transition !== null && typeof transition === 'object' && !Array.isArray(transition) && 'kind' in transition) {
+    const kind = transition.kind;
+    return typeof kind === 'string' ? kind : undefined;
+  }
+  return undefined;
+}
+
+function isAwaitBoundary(value: string | undefined): value is 'await_input' | 'await_tool' | 'await_child' {
+  return value === 'await_input' || value === 'await_tool' || value === 'await_child';
 }
 
 export function deriveFleetSummary(rows: AgentRunListItem[]): FleetSummary {

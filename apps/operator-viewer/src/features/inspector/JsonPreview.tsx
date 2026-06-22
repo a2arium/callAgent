@@ -166,11 +166,10 @@ function summaryText(value: unknown, kind: ReturnType<typeof jsonState>['kind'])
   if (isRecord(value)) {
     if (isTurnTraceProjection(value)) {
       const turn = numberField(value, 'turnSeq');
-      const before = stringField(value, 'stageBefore') ?? '?';
-      const after = stringField(value, 'stageAfter') ?? '?';
+      const flow = turnTraceFlowLabel(value);
       const result = transitionResult(value);
       const llmCalls = arrayField(value, 'llmCalls')?.length ?? numberField(recordField(value, 'usage') ?? {}, 'llmCalls') ?? 0;
-      return `Turn ${turn ?? '?'} completed: ${before} -> ${after}${result ? ` · ${result}` : ''}${llmCalls ? ` · ${llmCalls} LLM call${llmCalls === 1 ? '' : 's'}` : ''}.`;
+      return `Turn ${turn ?? '?'} completed: ${flow}${result ? ` · ${result}` : ''}${llmCalls ? ` · ${llmCalls} LLM call${llmCalls === 1 ? '' : 's'}` : ''}.`;
     }
     const keys = Object.keys(value);
     if (keys.length === 0) return 'Empty object.';
@@ -256,7 +255,7 @@ function prettyJson(value: unknown): string {
 }
 
 function shortenRawString(value: string): string {
-  return value.length > 500 ? `${value.slice(0, 500)}... [truncated]"` : value;
+  return value.length > 1000 ? `${value.slice(0, 1000)}... [truncated]"` : value;
 }
 
 function truncate(value: string, max: number): string {
@@ -326,4 +325,15 @@ function transitionResult(value: Record<string, unknown>): string | undefined {
   if (ok === true) return 'result ok';
   if (ok === false) return 'semantic failure';
   return transition ? stringField(transition, 'kind') : undefined;
+}
+
+function turnTraceFlowLabel(value: Record<string, unknown>): string {
+  const before = stringField(value, 'stageBefore') ?? '?';
+  const after = stringField(value, 'stageAfter');
+  const transition = recordField(value, 'transition');
+  const terminal = transition ? stringField(transition, 'kind') : undefined;
+  if (terminal && terminal !== 'continue') {
+    return `${before} -> ${terminal}`;
+  }
+  return `${before} -> ${after ?? terminal ?? '?'}`;
 }

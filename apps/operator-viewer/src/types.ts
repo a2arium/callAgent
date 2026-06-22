@@ -34,6 +34,7 @@ export type AgentRunNode = {
   status: AgentRunStatus;
   inputPreview?: unknown;
   outputPreview?: unknown;
+  error?: unknown;
   traceId?: string;
   providerRunId?: string;
   startedAt?: string;
@@ -114,6 +115,7 @@ export type TurnRun = {
   llmCalls?: LlmCallRun[];
   memoryOps?: MemoryOperationRun[];
   providerRunId?: string;
+  error?: unknown;
 };
 
 export type EffectRun = {
@@ -128,6 +130,7 @@ export type EffectRun = {
   providerRunId?: string;
   outboxRowId?: string;
   hiddenByDefault: boolean;
+  error?: unknown;
 };
 
 export type LlmCallRun = {
@@ -179,6 +182,23 @@ export type AgentRunGraph = {
   memoryOps: MemoryOperationRun[];
   effects: EffectRun[];
   events: AgentRunEvent[];
+  debug: {
+    driverRuns: DriverRunView[];
+  };
+};
+
+export type DriverRunView = {
+  id?: string;
+  provider?: string;
+  providerRunId?: string | null;
+  providerTaskRunId?: string | null;
+  tenantId: string;
+  agentId?: string | null;
+  taskId?: string | null;
+  operation: string;
+  status: string;
+  rootTaskId?: string | null;
+  error?: unknown;
 };
 
 export type AgentRunMemoryView = {

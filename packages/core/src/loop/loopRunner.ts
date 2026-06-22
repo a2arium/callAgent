@@ -108,7 +108,7 @@ type OperatorEventSink = {
     }) => Promise<{ eventId: string; seq: number } | undefined>;
 };
 
-const OPERATOR_SUMMARY_STRING_CHARS = 240;
+const OPERATOR_SUMMARY_STRING_CHARS = 1_000;
 const OPERATOR_FULL_STRING_CHARS = 2_000;
 const OPERATOR_SUMMARY_ARRAY_ITEMS = 20;
 const OPERATOR_FULL_ARRAY_ITEMS = 100;
@@ -129,7 +129,7 @@ function operatorCaptureLevel(ctx: InternalTaskContext): 'summary' | 'full' {
 }
 
 function compactOperatorValue(value: unknown, level: 'summary' | 'full', depth = 0): unknown {
-    const maxDepth = level === 'full' ? 6 : 3;
+    const maxDepth = level === 'full' ? 6 : 6;
     const maxStringChars = level === 'full' ? OPERATOR_FULL_STRING_CHARS : OPERATOR_SUMMARY_STRING_CHARS;
     const maxArrayItems = level === 'full' ? OPERATOR_FULL_ARRAY_ITEMS : OPERATOR_SUMMARY_ARRAY_ITEMS;
 

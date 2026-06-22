@@ -1,4 +1,4 @@
-import { ExternalLink } from 'lucide-react';
+import { ExternalLink, PanelRightClose } from 'lucide-react';
 import { hatchetRunUrl, opikTraceUrl, type OperatorConfig } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
@@ -7,6 +7,7 @@ import { StatusBadge } from '../../design/components/ui/status-badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../design/components/ui/tabs';
 import { formatCost, formatDuration, formatNumber, formatRelative } from '../../design/format';
 import { buildNodeRollup, deriveStatus, normalizeRuntimeStatus } from '../../domain/derive';
+import { semanticFailureFromTurns, type SemanticFailure } from '../../domain/semanticFailure';
 import { JsonPreview } from './JsonPreview';
 import { LlmCallsTable } from '../llm/LlmCallsTable';
 import { MemoryOpsTable } from '../memory/MemoryOpsTable';
@@ -19,13 +20,15 @@ export function NodeInspector(props: {
   activeTab: string;
   selectedTurnSeq?: number;
   config: OperatorConfig;
+  collapseButtonRef?: React.Ref<HTMLButtonElement>;
   onTabChange: (tab: string) => void;
   onTurnSelect: (turn: TurnRun) => void;
   onTurnBack: () => void;
+  onCollapse?: () => void;
 }): React.ReactElement {
   if (!props.node) {
     return (
-      <aside className="min-w-0 self-start overflow-hidden rounded-lg border border-border bg-card p-4 xl:max-h-[640px]">
+      <aside className="min-w-0 overflow-hidden rounded-lg border border-border bg-card p-4 xl:h-full xl:max-h-[calc(100vh-250px)]">
         <Notice title="No node selected">Select an agent node in the graph to inspect details.</Notice>
       </aside>
     );
@@ -38,7 +41,7 @@ export function NodeInspector(props: {
     : undefined;
 
   return (
-    <aside className="flex min-w-0 self-start overflow-hidden overflow-x-hidden rounded-lg border border-border bg-card xl:max-h-[640px] xl:flex-col">
+    <aside className="flex min-w-0 overflow-hidden overflow-x-hidden rounded-lg border border-border bg-card xl:h-full xl:max-h-[calc(100vh-250px)] xl:flex-col">
       <div className="border-b border-border px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -50,7 +53,22 @@ export function NodeInspector(props: {
               <CopyableId value={props.node.taskId} label="task ID" max={18} />
             </div>
           </div>
-          <StatusBadge status={status.status} derived={status.derived} />
+          <div className="flex shrink-0 items-center gap-2">
+            <StatusBadge status={status.status} derived={status.derived} />
+            {props.onCollapse ? (
+              <Button
+                ref={props.collapseButtonRef}
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={props.onCollapse}
+                aria-label="Collapse inspector"
+                title="Collapse inspector"
+              >
+                <PanelRightClose className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -68,7 +86,7 @@ export function NodeInspector(props: {
         <TabsContent value="summary" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
           <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} />
         </TabsContent>
-        <TabsContent value="turns" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
+        <TabsContent value="turns" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-0">
           {selectedTurn ? (
             <TurnDetail
               turn={selectedTurn}
@@ -102,9 +120,13 @@ function SummaryTab(props: {
 }): React.ReactElement {
   const children = props.graph.nodes.filter((node) => node.parentTaskId === props.node.taskId).length;
   const outboxRows = outboxRowsForNode(props.graph, props.node);
+  const semanticFailure = semanticFailureFromTurns(props.rollup.turns);
+  const runtimeError = runtimeErrorForNode(props.graph, props.node, props.rollup.turns);
   return (
     <div className="grid gap-4">
       <InspectorSection title="At a glance">
+        {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}
+        {runtimeError ? <RuntimeErrorNotice error={runtimeError} /> : null}
         <div className="grid grid-cols-2 gap-2 text-sm">
           <Metric label="Duration" value={formatDuration(durationBetween(props.node.startedAt, props.node.finishedAt))} />
           <Metric label="Turns" value={formatNumber(props.rollup.turns.length)} />
@@ -231,12 +253,95 @@ function FactRow(props: { label: string; children: React.ReactNode }): React.Rea
   );
 }
 
+type RuntimeErrorSummary = {
+  name?: string;
+  message: string;
+  source?: string;
+  raw?: unknown;
+};
+
+function runtimeErrorForNode(graph: AgentRunGraph, node: AgentRunNode, turns: TurnRun[]): RuntimeErrorSummary | undefined {
+  const direct = summarizeRuntimeError(node.error, 'agent.run');
+  if (direct) return direct;
+
+  const failedTurn = turns.find((turn) => turn.status === 'failed' && turn.error !== undefined);
+  const turnError = summarizeRuntimeError(failedTurn?.error, failedTurn?.turnSeq ? `turn ${failedTurn.turnSeq}` : 'turn.segment');
+  if (turnError) return turnError;
+
+  const failedEffect = graph.effects.find((effect) => effect.taskId === node.taskId && effect.status === 'failed' && effect.error !== undefined);
+  const effectError = summarizeRuntimeError(failedEffect?.error, failedEffect?.operation);
+  if (effectError) return effectError;
+
+  const driverRun = graph.debug.driverRuns
+    .filter((run) => run.taskId === node.taskId || run.rootTaskId === node.taskId)
+    .find((run) => run.status === 'failed' && run.error !== undefined);
+  return summarizeRuntimeError(driverRun?.error, driverRun?.operation);
+}
+
+function summarizeRuntimeError(error: unknown, source?: string): RuntimeErrorSummary | undefined {
+  if (error === undefined || error === null) return undefined;
+  if (typeof error === 'string') return { message: error, source, raw: error };
+  if (typeof error !== 'object' || Array.isArray(error)) return { message: String(error), source, raw: error };
+
+  const record = error as Record<string, unknown>;
+  const name = typeof record.name === 'string' ? record.name : undefined;
+  const message =
+    typeof record.message === 'string'
+      ? record.message
+      : typeof record.code === 'string'
+        ? record.code
+        : 'Runtime task failed.';
+  return { ...(name ? { name } : {}), message, source, raw: error };
+}
+
 function Metric(props: { label: string; value: string }): React.ReactElement {
   return (
     <div className="min-w-0 rounded-md border border-border bg-background/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">{props.label}</p>
       <p className="mt-0.5 truncate font-medium">{props.value}</p>
     </div>
+  );
+}
+
+function SemanticFailureNotice(props: { failure: SemanticFailure }): React.ReactElement {
+  return (
+    <Notice kind="error" title="Semantic failure">
+      <div className="grid gap-1">
+        {props.failure.code ? (
+          <div>
+            <span className="font-medium">Code:</span> <span className="font-mono">{props.failure.code}</span>
+          </div>
+        ) : null}
+        <div>
+          <span className="font-medium">Message:</span> {props.failure.message}
+        </div>
+      </div>
+    </Notice>
+  );
+}
+
+function RuntimeErrorNotice(props: { error: RuntimeErrorSummary }): React.ReactElement {
+  return (
+    <Notice kind="error" title="Runtime error">
+      <div className="grid gap-2">
+        <div className="grid gap-1">
+          {props.error.name ? (
+            <div>
+              <span className="font-medium">Type:</span> <span className="font-mono">{props.error.name}</span>
+            </div>
+          ) : null}
+          <div>
+            <span className="font-medium">Message:</span> {props.error.message}
+          </div>
+          {props.error.source ? (
+            <div className="text-xs text-muted-foreground">Source: {props.error.source}</div>
+          ) : null}
+        </div>
+        {props.error.raw ? (
+          <JsonPreview value={props.error.raw} title="Runtime error details" summaryFields={['name', 'message', 'code']} maxPreviewRows={3} maxRawHeight={180} />
+        ) : null}
+      </div>
+    </Notice>
   );
 }
 

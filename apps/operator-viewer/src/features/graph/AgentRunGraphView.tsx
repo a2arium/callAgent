@@ -1,41 +1,65 @@
-import dagre from 'dagre';
 import { Maximize2, Route, Shrink } from 'lucide-react';
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import ReactFlow, {
   Background,
   Controls,
+  Handle,
   MarkerType,
+  Position,
   type Edge,
   type Node,
   type NodeProps,
+  useNodesInitialized,
   useReactFlow,
 } from 'reactflow';
 import { StatusBadge } from '../../design/components/ui/status-badge';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { formatCost, formatDuration } from '../../design/format';
-import { buildNodeRollup, deriveStatus, type GraphInsights } from '../../domain/derive';
-import type { AgentRunGraph, AgentRunNode } from '../../types';
+import { buildNodeRollup, deriveStatus, normalizeRuntimeStatus, type GraphInsights } from '../../domain/derive';
+import { semanticFailureFromTurns } from '../../domain/semanticFailure';
+import type { AgentRunGraph, AgentRunNode, TurnRun } from '../../types';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design/components/ui/button';
 
 export type AgentNodeData = {
+  kind: 'agent';
   node: AgentRunNode;
   graph: AgentRunGraph;
   insights: GraphInsights;
   selected: boolean;
 };
 
+export type TurnNodeData = {
+  kind: 'turn';
+  turn: TurnRun;
+  selected: boolean;
+};
+
 export function AgentRunGraphView(props: {
   graph: AgentRunGraph;
   insights: GraphInsights;
+  layoutKey?: string;
   selectedNodeId?: string;
+  selectedTurnSeq?: number;
   onSelectNode: (nodeId: string) => void;
+  onSelectTurn: (turn: TurnRun) => void;
 }): React.ReactElement {
-  const flow = useMemo(() => buildFlow(props.graph, props.insights, props.selectedNodeId), [props.graph, props.insights, props.selectedNodeId]);
+  const flow = useMemo(
+    () => buildFlow(props.graph, props.insights, props.selectedNodeId, props.selectedTurnSeq),
+    [props.graph, props.insights, props.selectedNodeId, props.selectedTurnSeq]
+  );
   const isSingleNode = props.graph.nodes.length === 1;
   const hasFailurePath = props.insights.failurePathNodeIds.length > 0;
+  const nodeSignature = useMemo(
+    () => [
+      ...props.graph.nodes.map((node) => node.id),
+      ...props.graph.turns.map((turn) => turnNodeId(turn)),
+      props.layoutKey ?? '',
+    ].sort().join('|'),
+    [props.graph.nodes, props.graph.turns, props.layoutKey]
+  );
   return (
-    <section className={cn('relative overflow-hidden rounded-xl border border-border bg-card', isSingleNode ? 'h-[420px]' : 'h-[560px]')}>
+    <section className="relative h-full min-h-[520px] overflow-hidden rounded-xl border border-border bg-card xl:min-h-[calc(100vh-250px)]">
       <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-2">
         <GraphControlButton kind="fit" />
         {hasFailurePath ? <GraphControlButton kind="failure" /> : null}
@@ -46,18 +70,45 @@ export function AgentRunGraphView(props: {
       <ReactFlow
         nodes={flow.nodes}
         edges={flow.edges}
-        nodeTypes={{ agent: AgentRunNodeCard }}
+        nodeTypes={{ agent: AgentRunNodeCard, turn: TurnRunNodeCard }}
         fitView
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
-        onNodeClick={(_event, node) => props.onSelectNode(node.id)}
+        onNodeClick={(_event, node) => {
+          const data = node.data as AgentNodeData | TurnNodeData;
+          if (data.kind === 'turn') {
+            props.onSelectTurn(data.turn);
+            return;
+          }
+          props.onSelectNode(data.node.id);
+        }}
       >
+        <AutoFitGraph nodeSignature={nodeSignature} />
         <Background gap={18} />
         <Controls showInteractive={false} />
       </ReactFlow>
     </section>
   );
+}
+
+function AutoFitGraph(props: { nodeSignature: string }): null {
+  const instance = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+  useEffect(() => {
+    if (!nodesInitialized || props.nodeSignature.length === 0) return undefined;
+    let frame = 0;
+    const timer = window.setTimeout(() => {
+      frame = window.requestAnimationFrame(() => {
+        void instance.fitView({ padding: 0.2, duration: 220 });
+      });
+    }, 50);
+    return () => {
+      window.clearTimeout(timer);
+      if (frame !== 0) window.cancelAnimationFrame(frame);
+    };
+  }, [instance, nodesInitialized, props.nodeSignature]);
+  return null;
 }
 
 function GraphControlButton(props: { kind: 'fit' | 'failure' }): React.ReactElement {
@@ -86,37 +137,88 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
   const { node, graph, insights, selected } = props.data;
   const rollup = buildNodeRollup(graph, node.taskId);
   const status = deriveStatus({ status: node.status, updatedAt: node.finishedAt ?? node.startedAt, turns: rollup.turns });
+  const semanticFailure = semanticFailureFromTurns(rollup.turns);
   const isFailurePath = insights.failurePathNodeIds.includes(node.taskId);
   const isDeepestFailure = insights.deepestFailedNodeId === node.id;
   const isSingleNode = graph.nodes.length === 1;
   return (
-    <article
-      className={cn(
-        'rounded-lg border bg-card p-3 text-left shadow-sm transition-colors',
-        isSingleNode ? 'w-[220px]' : 'w-[250px]',
-        selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
-        isFailurePath ? 'bg-rose-500/10' : '',
-        isDeepestFailure ? 'border-rose-300 ring-2 ring-rose-400/30' : ''
-      )}
-      aria-label={`${node.agentId ?? 'unknown agent'} ${status.status}`}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold">{node.agentId ?? 'unknown agent'}</p>
-          <CopyableId value={node.taskId} label="task ID" max={18} />
+    <div className="relative">
+      <Handle id="left" type="target" position={Position.Left} />
+      <Handle id="right" type="source" position={Position.Right} />
+      <article
+        className={cn(
+          'rounded-lg border bg-card p-3 text-left shadow-sm transition-colors',
+          isSingleNode ? 'w-[220px]' : 'w-[250px]',
+          selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
+          isFailurePath ? 'bg-rose-500/10' : '',
+          isDeepestFailure ? 'border-rose-300 ring-2 ring-rose-400/30' : ''
+        )}
+        aria-label={`${node.agentId ?? 'unknown agent'} ${status.status}`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold">{node.agentId ?? 'unknown agent'}</p>
+            <CopyableId value={node.taskId} label="task ID" max={18} />
+          </div>
+          <StatusBadge status={status.status} derived={status.derived} />
         </div>
-        <StatusBadge status={status.status} derived={status.derived} />
-      </div>
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <Metric label="Turns" value={String(rollup.turns.length)} />
-        <Metric label="LLM" value={String(rollup.llmCalls.length)} />
-        <Metric label="Cost" value={formatCost(rollup.costUsd)} />
-      </div>
-      <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-        <Shrink className="h-3.5 w-3.5" />
-        {node.parentTaskId ? 'Child agent' : 'Root agent'} · {node.startedAt ? formatDuration(durationBetween(node.startedAt, node.finishedAt)) : 'duration not captured'}
-      </div>
-    </article>
+        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+          <Metric label="Turns" value={String(rollup.turns.length)} />
+          <Metric label="LLM" value={String(rollup.llmCalls.length)} />
+          <Metric label="Cost" value={formatCost(rollup.costUsd)} />
+        </div>
+        {semanticFailure ? (
+          <div className="mt-2 min-w-0 rounded-md border border-rose-500/45 bg-rose-100 px-2 py-1 text-xs text-rose-900 dark:border-rose-400/35 dark:bg-rose-500/10 dark:text-rose-100">
+            <p className="truncate font-medium">{semanticFailure.code ?? 'Semantic failure'}</p>
+            <p className="truncate opacity-85" title={semanticFailure.message}>{semanticFailure.message}</p>
+          </div>
+        ) : null}
+        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+          <Shrink className="h-3.5 w-3.5" />
+          {node.parentTaskId ? 'Child agent' : 'Root agent'} · {node.startedAt ? formatDuration(durationBetween(node.startedAt, node.finishedAt)) : 'duration not captured'}
+        </div>
+      </article>
+    </div>
+  );
+}
+
+function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
+  const { turn, selected } = props.data;
+  const status = normalizeRuntimeStatus(turn.status);
+  const flowLabel = turnFlowLabel(turn);
+  const boundary = effectiveBoundaryKind(turn);
+  return (
+    <div className="relative">
+      <Handle id="left" type="target" position={Position.Left} />
+      <Handle id="right" type="source" position={Position.Right} />
+      <article
+        className={cn(
+          'w-[118px] rounded-md border bg-background px-2 py-1.5 text-left shadow-sm transition-colors',
+          selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
+          status === 'failed' ? 'bg-rose-500/10' : '',
+          status === 'running' || status === 'waiting' ? 'border-sky-300 bg-sky-500/10' : ''
+        )}
+        aria-label={`Turn ${turn.turnSeq ?? '?'} ${status}`}
+      >
+        <div className="flex min-w-0 items-start justify-between gap-1.5">
+          <div className="min-w-0">
+            <p className="truncate text-[11px] font-semibold">Turn {turn.turnSeq ?? '?'}</p>
+            <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={flowLabel}>{boundary ?? status}</p>
+          </div>
+          <span
+            className={cn(
+              'mt-0.5 h-2 w-2 shrink-0 rounded-full border',
+              status === 'completed' ? 'border-emerald-600 bg-emerald-500' : '',
+              status === 'failed' ? 'border-rose-600 bg-rose-500' : '',
+              status === 'running' || status === 'waiting' ? 'border-sky-600 bg-sky-500' : '',
+              status === 'queued' ? 'border-slate-500 bg-slate-300' : '',
+              status === 'unknown' ? 'border-muted-foreground bg-muted' : ''
+            )}
+            title={status}
+          />
+        </div>
+      </article>
+    </div>
   );
 }
 
@@ -129,32 +231,37 @@ function Metric(props: { label: string; value: string }): React.ReactElement {
   );
 }
 
-function buildFlow(graph: AgentRunGraph, insights: GraphInsights, selectedNodeId: string | undefined): {
-  nodes: Node<AgentNodeData>[];
+function buildFlow(
+  graph: AgentRunGraph,
+  insights: GraphInsights,
+  selectedNodeId: string | undefined,
+  selectedTurnSeq: number | undefined
+): {
+  nodes: Array<Node<AgentNodeData> | Node<TurnNodeData>>;
   edges: Edge[];
 } {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: 'LR', nodesep: 70, ranksep: 110 });
-  for (const node of graph.nodes) {
-    g.setNode(node.id, { width: graph.nodes.length === 1 ? 220 : 260, height: 148 });
-  }
-  for (const edge of graph.edges) {
-    if (edge.childTaskId) g.setEdge(edge.parentTaskId, edge.childTaskId);
-  }
-  dagre.layout(g);
+  const layout = layoutExecutionGraph(graph);
   const byTask = new Map(graph.nodes.map((node) => [node.taskId, node]));
-  const nodes: Node<AgentNodeData>[] = graph.nodes.map((node) => {
-    const layout = g.node(node.id) ?? g.node(node.taskId);
-    const isSingleNode = graph.nodes.length === 1;
+  const turnByParentAndToken = new Map<string, TurnRun>();
+  for (const turn of graph.turns) {
+    const token = awaitChildToken(turn);
+    if (!token) continue;
+    turnByParentAndToken.set(`${turn.taskId}:${token}`, turn);
+  }
+  const isSingleAgent = graph.nodes.length === 1;
+  const agentNodes: Node<AgentNodeData>[] = graph.nodes.map((node) => {
+    const position = layout.positions.get(node.id) ?? { x: 0, y: 0 };
     return {
       id: node.id,
       type: 'agent',
       position: {
-        x: isSingleNode ? 0 : typeof layout?.x === 'number' ? layout.x : 0,
-        y: isSingleNode ? 0 : typeof layout?.y === 'number' ? layout.y : 0,
+        x: isSingleAgent && graph.turns.length === 0 ? 0 : position.x,
+        y: isSingleAgent && graph.turns.length === 0 ? 0 : position.y,
       },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
       data: {
+        kind: 'agent',
         node,
         graph,
         insights,
@@ -162,22 +269,247 @@ function buildFlow(graph: AgentRunGraph, insights: GraphInsights, selectedNodeId
       },
     };
   });
-  const edges: Edge[] = graph.edges
+  const turnNodes: Node<TurnNodeData>[] = graph.turns
+    .filter((turn) => byTask.has(turn.taskId))
+    .map((turn) => {
+      const id = turnNodeId(turn);
+      const position = layout.positions.get(id) ?? { x: 0, y: 0 };
+      return {
+        id,
+        type: 'turn',
+        position,
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
+        data: {
+          kind: 'turn',
+          turn,
+          selected: selectedNodeId === turn.taskId && selectedTurnSeq !== undefined && selectedTurnSeq === turn.turnSeq,
+        },
+      };
+    });
+  const turnEdges: Edge[] = graph.turns
+    .filter((turn) => byTask.has(turn.taskId))
+    .map((turn) => {
+      const status = normalizeRuntimeStatus(turn.status);
+      return {
+        id: `agent-turn:${turnNodeId(turn)}`,
+        source: byTask.get(turn.taskId)?.id ?? turn.taskId,
+        target: turnNodeId(turn),
+        sourceHandle: 'right',
+        targetHandle: 'left',
+        animated: status === 'running' || status === 'waiting',
+        markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+        style: {
+          strokeWidth: 2,
+          stroke: status === 'failed' ? '#fb7185' : status === 'running' || status === 'waiting' ? '#38bdf8' : '#94a3b8',
+        },
+      };
+    });
+  const childEdges: Edge[] = graph.edges
     .filter((edge) => edge.childTaskId !== undefined && byTask.has(edge.parentTaskId) && byTask.has(edge.childTaskId))
     .map((edge) => {
       const highlighted = insights.failurePathEdgeIds.includes(edge.id);
+      const sourceTurn = edge.token ? turnByParentAndToken.get(`${edge.parentTaskId}:${edge.token}`) : undefined;
       return {
         id: edge.id,
-        source: byTask.get(edge.parentTaskId)?.id ?? edge.parentTaskId,
+        source: sourceTurn ? turnNodeId(sourceTurn) : byTask.get(edge.parentTaskId)?.id ?? edge.parentTaskId,
         target: byTask.get(edge.childTaskId ?? '')?.id ?? edge.childTaskId ?? edge.id,
-        label: edge.edgeKind,
+        sourceHandle: 'right',
+        targetHandle: 'left',
         animated: highlighted || edge.status === 'running',
-        markerEnd: { type: MarkerType.ArrowClosed },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
         className: highlighted ? 'stroke-rose-300' : '',
-        style: highlighted ? { strokeWidth: 3, stroke: '#fda4af' } : undefined,
+        style: highlighted
+          ? { strokeWidth: 3, stroke: '#fda4af' }
+          : { strokeWidth: 2.25, stroke: '#64748b' },
       };
     });
-  return { nodes, edges };
+  return { nodes: [...agentNodes, ...turnNodes], edges: [...turnEdges, ...childEdges] };
+}
+
+type LayoutPoint = { x: number; y: number };
+
+const AGENT_WIDTH = 250;
+const AGENT_HEIGHT = 148;
+const ROOT_AGENT_WIDTH = 220;
+const TURN_HEIGHT = 48;
+const AGENT_COLUMN_GAP = 560;
+const TURN_COLUMN_OFFSET = 300;
+const TURN_GAP = 24;
+const SUBTREE_GAP = 54;
+
+function layoutExecutionGraph(graph: AgentRunGraph): { positions: Map<string, LayoutPoint> } {
+  const positions = new Map<string, LayoutPoint>();
+  const nodesByTask = new Map(graph.nodes.map((node) => [node.taskId, node]));
+  const turnsByTask = new Map<string, TurnRun[]>();
+  for (const turn of graph.turns) {
+    if (!nodesByTask.has(turn.taskId)) continue;
+    const turns = turnsByTask.get(turn.taskId) ?? [];
+    turns.push(turn);
+    turnsByTask.set(turn.taskId, turns);
+  }
+  for (const turns of turnsByTask.values()) {
+    turns.sort((a, b) => (a.turnSeq ?? 0) - (b.turnSeq ?? 0));
+  }
+
+  const childEdgesByParentToken = new Map<string, typeof graph.edges>();
+  const edgeIdsAssignedToTurns = new Set<string>();
+  for (const edge of graph.edges) {
+    if (!edge.childTaskId || !nodesByTask.has(edge.childTaskId)) continue;
+    const key = `${edge.parentTaskId}:${edge.token ?? ''}`;
+    const edges = childEdgesByParentToken.get(key) ?? [];
+    edges.push(edge);
+    childEdgesByParentToken.set(key, edges);
+  }
+
+  const visited = new Set<string>();
+
+  function layoutAgent(taskId: string, depth: number, top: number): { height: number; centerY: number } {
+    const node = nodesByTask.get(taskId);
+    if (!node || visited.has(taskId)) {
+      return { height: AGENT_HEIGHT, centerY: top + AGENT_HEIGHT / 2 };
+    }
+    visited.add(taskId);
+
+    const agentX = depth * AGENT_COLUMN_GAP;
+    const turnX = agentX + TURN_COLUMN_OFFSET;
+    const turns = turnsByTask.get(taskId) ?? [];
+
+    if (turns.length === 0) {
+      positions.set(node.id, { x: agentX, y: top });
+      return { height: AGENT_HEIGHT, centerY: top + AGENT_HEIGHT / 2 };
+    }
+
+    let cursor = top;
+    const turnCenters: number[] = [];
+
+    for (const turn of turns) {
+      const turnId = turnNodeId(turn);
+      const token = awaitChildToken(turn);
+      const childEdges = token ? childEdgesByParentToken.get(`${taskId}:${token}`) ?? [] : [];
+
+      if (childEdges.length > 0) {
+        const childCenters: number[] = [];
+        const childStart = cursor;
+        for (const edge of childEdges) {
+          if (!edge.childTaskId) continue;
+          edgeIdsAssignedToTurns.add(edge.id);
+          const childLayout = layoutAgent(edge.childTaskId, depth + 1, cursor);
+          childCenters.push(childLayout.centerY);
+          cursor += childLayout.height + SUBTREE_GAP;
+        }
+        if (childCenters.length > 0) {
+          cursor -= SUBTREE_GAP;
+          const turnCenter = (childCenters[0] + childCenters[childCenters.length - 1]) / 2;
+          positions.set(turnId, { x: turnX, y: turnCenter - TURN_HEIGHT / 2 });
+          turnCenters.push(turnCenter);
+          cursor = Math.max(cursor, childStart + TURN_HEIGHT) + TURN_GAP;
+          continue;
+        }
+      }
+
+      const turnCenter = cursor + TURN_HEIGHT / 2;
+      positions.set(turnId, { x: turnX, y: cursor });
+      turnCenters.push(turnCenter);
+      cursor += TURN_HEIGHT + TURN_GAP;
+    }
+
+    const unmatchedChildEdges = graph.edges.filter((edge) =>
+      edge.parentTaskId === taskId &&
+      edge.childTaskId !== undefined &&
+      nodesByTask.has(edge.childTaskId) &&
+      !edgeIdsAssignedToTurns.has(edge.id)
+    );
+    for (const edge of unmatchedChildEdges) {
+      if (!edge.childTaskId) continue;
+      const childLayout = layoutAgent(edge.childTaskId, depth + 1, cursor);
+      cursor += childLayout.height + SUBTREE_GAP;
+    }
+    if (unmatchedChildEdges.length > 0) {
+      cursor -= SUBTREE_GAP;
+    }
+
+    cursor -= TURN_GAP;
+    const turnStackHeight = Math.max(TURN_HEIGHT, cursor - top);
+    const agentCenter = (turnCenters[0] + turnCenters[turnCenters.length - 1]) / 2;
+    positions.set(node.id, { x: agentX, y: agentCenter - AGENT_HEIGHT / 2 });
+    const minY = Math.min(top, agentCenter - AGENT_HEIGHT / 2);
+    const maxY = Math.max(top + turnStackHeight, agentCenter + AGENT_HEIGHT / 2);
+    return { height: Math.max(AGENT_HEIGHT, maxY - minY), centerY: agentCenter };
+  }
+
+  let cursor = 0;
+  const roots = [
+    graph.root,
+    ...graph.nodes.filter((node) => node.id !== graph.root.id && !node.parentTaskId),
+  ];
+  for (const root of roots) {
+    const result = layoutAgent(root.taskId, 0, cursor);
+    cursor += result.height + SUBTREE_GAP;
+  }
+  for (const node of graph.nodes) {
+    if (positions.has(node.id)) continue;
+    const result = layoutAgent(node.taskId, 0, cursor);
+    cursor += result.height + SUBTREE_GAP;
+  }
+
+  return { positions };
+}
+
+function turnNodeId(turn: TurnRun): string {
+  return `turn:${turn.taskId}:${turn.turnSeq ?? turn.id}`;
+}
+
+function turnFlowLabel(turn: TurnRun): string {
+  const before = turn.cognition?.stageBefore ?? '?';
+  const terminal = effectiveBoundaryKind(turn);
+  if (terminal && terminal !== 'continue') {
+    return `${before} -> ${terminal}`;
+  }
+  return `${before} -> ${turn.cognition?.stageAfter ?? terminal ?? '?'}`;
+}
+
+function effectiveBoundaryKind(turn: TurnRun): string | undefined {
+  return transitionKind(turn) ?? turn.boundaryKind;
+}
+
+function transitionKind(turn: TurnRun): string | undefined {
+  const transition = turn.cognition?.transition;
+  if (!isRecord(transition)) return undefined;
+  const kind = transition.kind;
+  return typeof kind === 'string' ? kind : undefined;
+}
+
+function awaitChildToken(turn: TurnRun): string | undefined {
+  const transition = turn.cognition?.transition;
+  if (isRecord(transition) && transition.kind === 'await_child' && typeof transition.token === 'string') {
+    return transition.token;
+  }
+  if (isRecord(transition) && typeof transition.kind === 'string') {
+    return undefined;
+  }
+  if (turn.boundaryKind === 'await_child' && typeof turn.token === 'string') {
+    return turn.token;
+  }
+  return undefined;
+}
+
+function hasOutputProduced(turn: TurnRun): boolean {
+  const execResult = turn.cognition?.execResult;
+  const transition = turn.cognition?.transition;
+  return isRecord(execResult) && Object.prototype.hasOwnProperty.call(execResult, 'data')
+    || transitionResultOk(transition)
+    || turn.boundaryKind === 'complete';
+}
+
+function transitionResultOk(transition: unknown): boolean {
+  if (!isRecord(transition)) return false;
+  const result = transition.result;
+  return isRecord(result) && result.ok === true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function durationBetween(start: string, finish: string | undefined): number | undefined {
