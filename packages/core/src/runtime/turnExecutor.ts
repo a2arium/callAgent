@@ -68,6 +68,7 @@ export type SegmentBoundary =
     | { kind: 'await_event'; token: string }
     | { kind: 'sleep'; token: string; fireAt: string }
     | { kind: 'paused'; reason: string }
+    | { kind: 'canceled'; reason?: string }
     | { kind: 'complete'; result?: unknown }
     | { kind: 'fail'; error: unknown };
 
@@ -155,6 +156,8 @@ export function boundaryToTaskStatus(boundary: SegmentBoundary): SegmentTaskStat
         case 'sleep':
         case 'paused':
             return 'working';
+        case 'canceled':
+            return 'canceled';
         case 'complete':
             return 'completed';
         case 'fail':

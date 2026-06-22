@@ -27,9 +27,11 @@ post-wait child completion, pre-wait persisted child completion/failure,
 out-of-order child completion selection, missing child wake timeout, and graph
 projection. Input/tool durable waits are implemented, and external events now
 have a first-class `await_event` boundary backed by `aplret.external.<token>`
-Hatchet events. Conversation activation and timer wakes still have runtime-seam
-coverage only. Remaining Phase 3 work is boundary cancellation, durable dedupe
-for all wake families, and restart/failure validation against real workers.
+Hatchet events. Boundary cancellation now has a durable snapshot intent and
+pending-token late wakes no-op as `canceled` boundaries. Conversation activation
+and timer wakes still have runtime-seam coverage only. Remaining Phase 3 work is
+queued Hatchet run cancellation, cancel-after-complete validation, durable
+dedupe policy closure, and restart/failure validation against real workers.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
 The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
@@ -312,13 +314,15 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 ## Next action
 
 Next phase: finish the runtime/provider side of Phase 3. Child `await_child`
-fan-in is covered and should be treated as closed for the harness, and external
-`await_event` waits now resume through Hatchet events. Remaining Phase 3 work is
-cancellation semantics, durable dedupe policy, and real-run validation under
-worker restarts. Conversation durable waits remain a follow-up until the kernel
-has a first-class conversation boundary. In parallel, start the production-readiness read model:
-semantic run summaries, edge facts, root-only fleet correctness, child counts,
-query/index review, and payload-budget error surfacing.
+fan-in is covered and should be treated as closed for the harness, external
+`await_event` waits now resume through Hatchet events, and canceled snapshots
+stop at the next boundary/wake without applying late pending-token events.
+Remaining Phase 3 work is queued Hatchet cancellation, cancel-after-complete
+proof, durable dedupe policy closure, and real-run validation under worker
+restarts. Conversation durable waits remain a follow-up until the kernel has a
+first-class conversation boundary. In parallel, start the production-readiness
+read model: semantic run summaries, edge facts, root-only fleet correctness,
+child counts, query/index review, and payload-budget error surfacing.
 
 ## Open questions (carried from requirements §11)
 

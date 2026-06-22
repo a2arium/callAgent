@@ -18,6 +18,7 @@ import { normalizeObservationInbox } from '../src/loop/types.js';
 import type { SynthesizeObservation } from '../src/loop/oneTurn.js';
 import type { ObservationConfig } from '../src/loop/oneTurn.js';
 import { InboxManager } from '../src/orchestration/InboxManager.js';
+import { readSegmentCancellation } from '../src/runtime/segmentCancellation.js';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { LocalArtifactImpl } from '../src/orchestration/LocalArtifactImpl.js';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
@@ -327,6 +328,48 @@ afterEach(() => {
 });
 
 describe('TaskEngine orchestration coverage', () => {
+    test('cancelTask marks cancellation durably before delegating to the runtime driver', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-cancel', {
+            meta: { agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-token' } },
+        }, BigInt(0), 'agent-a');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-cancel',
+            agentId: 'agent-a',
+            reason: 'operator stop',
+        });
+
+        const persisted = store.getSnapshot('t', 'task-cancel');
+        expect(readSegmentCancellation(persisted?.snapshot)).toEqual({
+            requested: true,
+            reason: 'operator stop',
+            requestedAt: expect.any(String),
+        });
+        expect(cancel).toHaveBeenCalledWith({
+            tenantId: 't',
+            taskId: 'task-cancel',
+            agentId: 'agent-a',
+            idempotencyKey: 'task-cancel:cancel',
+            reason: 'operator stop',
+        });
+    });
+
     test('stages child completion with CAS retry and deduplication', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });

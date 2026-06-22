@@ -160,6 +160,42 @@ describe('executeTaskTask', () => {
         }));
     });
 
+    it('finalizes canceled segment boundaries as canceled root runs', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const ctx = {
+            runChild: jest.fn(async () => ({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'canceled', reason: 'operator stop' },
+                taskStatus: 'canceled',
+                traceId: 'trace-1',
+            })),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { driverRuns: { finalizeRootRun } as never }
+        );
+
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'canceled',
+            boundaryKind: 'canceled',
+            traceId: 'trace-1',
+        }));
+        expect(ctx.runChild).toHaveBeenCalledTimes(1);
+    });
+
     it('pushes a parent child wake event when an async durable child reaches a terminal boundary', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const events = { push: jest.fn(async () => undefined) };

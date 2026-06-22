@@ -60,6 +60,13 @@ export {
     snapshotHasProcessedSegmentKey,
 } from './segmentProcessedKeys.js';
 
+export {
+    isSegmentCancellationRequested,
+    markSegmentCancellationRequested,
+    readSegmentCancellation,
+} from './segmentCancellation.js';
+export type { SegmentCancellation } from './segmentCancellation.js';
+
 export { TurnRunnerSegmentExecutor } from './turnRunnerSegmentExecutor.js';
 export type { TurnRunnerSegmentExecutorDeps } from './turnRunnerSegmentExecutor.js';
 

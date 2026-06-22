@@ -46,6 +46,7 @@ export type SegmentTaskBoundary =
     | { kind: 'await_event'; token: string }
     | { kind: 'sleep'; token: string; fireAt: string }
     | { kind: 'paused'; reason: string }
+    | { kind: 'canceled'; reason?: string }
     | { kind: 'complete'; result?: JsonValue }
     | { kind: 'fail'; error: JsonValue };
 
@@ -137,7 +138,7 @@ async function executeSegmentTaskInner(
                     ? errorFromBoundary(output.boundary)
                     : null,
                 operation: 'turn.segment',
-                status: isFailedBoundary(output.boundary) ? 'failed' : 'completed',
+                status: statusFromBoundary(output.boundary),
             });
         }
         return output;
@@ -195,6 +196,13 @@ function isFailedBoundary(boundary: SegmentTaskBoundary): boolean {
         return false;
     }
     return hasOkFalse(boundary.result);
+}
+
+function statusFromBoundary(boundary: SegmentTaskBoundary): string {
+    if (boundary.kind === 'canceled') {
+        return 'canceled';
+    }
+    return isFailedBoundary(boundary) ? 'failed' : 'completed';
 }
 
 function hasOkFalse(value: unknown): boolean {

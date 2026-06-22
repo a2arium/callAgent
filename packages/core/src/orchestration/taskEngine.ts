@@ -78,6 +78,7 @@ import {
     type RuntimeWakeEvent,
     type TurnExecutor,
 } from '../runtime/index.js';
+import { markSegmentCancellationRequested } from '../runtime/segmentCancellation.js';
 
 
 
@@ -99,6 +100,13 @@ export type {
     TaskEntity,
     StartTaskParams,
     CleanChildResult
+};
+
+export type CancelTaskParams = {
+    tenantId: string;
+    taskId: string;
+    agentId?: string;
+    reason?: string;
 };
 
 
@@ -1622,6 +1630,31 @@ export class TaskEngine {
         } catch {
             /* ignore telemetry errors */
         }
+    }
+
+    async cancelTask(params: CancelTaskParams): Promise<{ acknowledged: true }> {
+        const reason = params.reason ?? 'canceled';
+        const loaded = await this.sessionManager!.load(params.tenantId, params.taskId);
+        if (loaded !== null) {
+            const snapshot = (loaded.snapshot as Record<string, unknown> | undefined) ?? {};
+            await this.sessionManager!.saveSnapshot({
+                tenantId: params.tenantId,
+                sessionId: params.taskId,
+                agentId: params.agentId ?? loaded.agentId,
+                expectedWmVersion: loaded.wmVersion ?? BigInt(0),
+                snapshot: markSegmentCancellationRequested(snapshot, reason),
+            });
+        }
+
+        await this.runtimeDriver.cancel({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+            idempotencyKey: `${params.taskId}:cancel`,
+            reason,
+        });
+
+        return { acknowledged: true };
     }
 
     /**

@@ -69,6 +69,7 @@ describe('boundaryToTaskStatus', () => {
         expect(boundaryToTaskStatus({ kind: 'await_event', token: 't' })).toBe('working');
         expect(boundaryToTaskStatus({ kind: 'sleep', token: 't', fireAt: 'x' })).toBe('working');
         expect(boundaryToTaskStatus({ kind: 'paused', reason: 'r' })).toBe('working');
+        expect(boundaryToTaskStatus({ kind: 'canceled', reason: 'user' })).toBe('canceled');
         expect(boundaryToTaskStatus({ kind: 'complete' })).toBe('completed');
         expect(boundaryToTaskStatus({ kind: 'fail', error: 'e' })).toBe('failed');
     });

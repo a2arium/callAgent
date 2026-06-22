@@ -146,7 +146,7 @@ async function executeTaskTaskInner(
             const segment = normalizeSegmentOutput(segmentRaw);
             await dispatchPendingOutboxChildren(ctx, input, segment, deps);
 
-            if (segment.boundary.kind === 'complete' || segment.boundary.kind === 'fail') {
+            if (isTerminalBoundary(segment.boundary)) {
                 await finalizeRootRun(input, segment, deps);
                 await notifyPersistedA2AParentIfTerminal(input, segment, deps);
                 return segment;
@@ -213,7 +213,14 @@ async function finalizeRootRunAsFailed(
     });
 }
 
-function statusFromTerminalBoundary(boundary: SegmentTaskBoundary): 'completed' | 'failed' {
+function isTerminalBoundary(boundary: SegmentTaskBoundary): boolean {
+    return boundary.kind === 'complete' || boundary.kind === 'fail' || boundary.kind === 'canceled';
+}
+
+function statusFromTerminalBoundary(boundary: SegmentTaskBoundary): 'completed' | 'failed' | 'canceled' {
+    if (boundary.kind === 'canceled') {
+        return 'canceled';
+    }
     if (boundary.kind === 'fail') {
         return 'failed';
     }
@@ -287,6 +294,13 @@ function outputFromTerminalBoundary(boundary: SegmentTaskBoundary): unknown {
         return {
             ok: false,
             error: boundary.error,
+        };
+    }
+    if (boundary.kind === 'canceled') {
+        return {
+            ok: false,
+            canceled: true,
+            reason: boundary.reason,
         };
     }
     return {

@@ -23,6 +23,7 @@ import {
     runWithSegmentIdempotencyKey,
     snapshotHasProcessedSegmentKey,
 } from './segmentProcessedKeys.js';
+import { readSegmentCancellation } from './segmentCancellation.js';
 
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
@@ -55,6 +56,18 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         }
 
         if (prepared !== undefined) {
+            const preparedCancellation = readSegmentCancellation(prepared.snapshot);
+            if (preparedCancellation !== undefined) {
+                return this.buildCanceledResult(
+                    tenantId,
+                    taskId,
+                    agentId,
+                    idempotencyKey,
+                    preparedCancellation.reason,
+                    prepared.ctx as { telemetry?: { traceId?: string } }
+                );
+            }
+
             const taskEntity = await runWithSegmentIdempotencyKey(
                 idempotencyKey,
                 () => this.turnRunner.runTurn(
@@ -92,6 +105,18 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     (prepared.ctx as { telemetry?: { traceId?: string } }).telemetry?.traceId,
                 taskEntity,
             };
+        }
+
+        const snapBeforeWake = await this.sessionManager.load(tenantId, taskId);
+        const cancellationBeforeWake = readSegmentCancellation(snapBeforeWake?.snapshot);
+        if (cancellationBeforeWake !== undefined) {
+            return this.buildCanceledResult(
+                tenantId,
+                taskId,
+                agentId ?? snapBeforeWake?.agentId,
+                idempotencyKey,
+                cancellationBeforeWake.reason
+            );
         }
 
         const preparedWake = await prepareSegmentWake(this.sessionManager, {
@@ -173,6 +198,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         }
 
         const snapAfter = await this.sessionManager.load(tenantId, taskId);
+        const cancellation = readSegmentCancellation(snapAfter?.snapshot);
+        if (cancellation !== undefined) {
+            return cancellation.reason !== undefined
+                ? { kind: 'canceled', reason: cancellation.reason }
+                : { kind: 'canceled' };
+        }
+
         const meta = (snapAfter?.snapshot as { meta?: { awaiting?: { kind: string; token: string } } } | undefined)
             ?.meta;
         const awaiting = meta?.awaiting;
@@ -245,9 +277,14 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         const base = (snap?.snapshot ?? {}) as {
             meta?: { awaiting?: { kind: string; token: string }; agentId?: string };
         };
+        const cancellation = readSegmentCancellation(snap?.snapshot);
         const awaiting = base.meta?.awaiting;
         const boundary =
-            awaiting?.kind === 'await_input'
+            cancellation !== undefined
+                ? cancellation.reason !== undefined
+                    ? { kind: 'canceled' as const, reason: cancellation.reason }
+                    : { kind: 'canceled' as const }
+                : awaiting?.kind === 'await_input'
                 ? { kind: 'await_input' as const, token: awaiting.token }
                 : awaiting?.kind === 'await_tool'
                   ? { kind: 'await_tool' as const, token: awaiting.token }
@@ -264,6 +301,34 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             taskStatus: boundaryToTaskStatus(boundary),
         };
     }
+
+    private async buildCanceledResult(
+        tenantId: string,
+        taskId: string,
+        agentId: string | undefined,
+        idempotencyKey: string,
+        reason?: string,
+        ctx?: { telemetry?: { traceId?: string } }
+    ): Promise<SegmentResult> {
+        await this.ensureProcessedKeyRecorded(tenantId, taskId, agentId, idempotencyKey);
+        this.dedupe.record(idempotencyKey);
+
+        const snap = await this.sessionManager.load(tenantId, taskId);
+        const telemetry = (snap?.snapshot as { meta?: { telemetry?: { traceId?: string } } } | undefined)
+            ?.meta?.telemetry;
+        const boundary = reason !== undefined
+            ? { kind: 'canceled' as const, reason }
+            : { kind: 'canceled' as const };
+
+        return {
+            tenantId,
+            taskId,
+            agentId: agentId ?? snap?.agentId,
+            boundary,
+            taskStatus: 'canceled',
+            traceId: telemetry?.traceId ?? ctx?.telemetry?.traceId,
+        };
+    }
 }
 
 function mapTaskEntityStatus(
@@ -275,6 +340,9 @@ function mapTaskEntityStatus(
     }
     if (state === 'completed') {
         return 'completed';
+    }
+    if (boundary.kind === 'canceled') {
+        return 'canceled';
     }
     if (state === 'input-required') {
         return 'input-required';

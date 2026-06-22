@@ -11,6 +11,7 @@ import { initialM } from '../../src/loop/init.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
 import { setPendingInputs } from '../../src/orchestration/DurableHandlerRegistry.js';
 import { readProcessedSegmentKeys } from '../../src/runtime/segmentProcessedKeys.js';
+import { markSegmentCancellationRequested } from '../../src/runtime/segmentCancellation.js';
 
 describe('TurnRunnerSegmentExecutor integration', () => {
     const tenantId = 'tenant-seg';
@@ -209,5 +210,97 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         });
 
         expect(executeTurnSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('turns a late wake into a durable canceled boundary without applying the wake', async () => {
+        const token = 'input-tok-canceled';
+        const snapshot = markSegmentCancellationRequested(
+            setPendingInputs(
+                {
+                    meta: { agentId, turn: 1 },
+                    inbox: { current: [] },
+                },
+                { [token]: {} }
+            ),
+            'user requested stop',
+            '2026-06-19T00:00:00.000Z'
+        );
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: taskId,
+            agentId,
+            expectedWmVersion: BigInt(0),
+            snapshot,
+        });
+
+        const result = await executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: `${taskId}:input:${token}`,
+            wake: {
+                trigger: 'resume',
+                event: { kind: 'input', token, value: 'too late' },
+            },
+        });
+
+        expect(result.boundary).toEqual({ kind: 'canceled', reason: 'user requested stop' });
+        expect(result.taskStatus).toBe('canceled');
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+
+        const persisted = await sessionManager.load(tenantId, taskId);
+        expect(readProcessedSegmentKeys(persisted?.snapshot ?? {})).toContain(`${taskId}:input:${token}`);
+        expect((persisted?.snapshot as { inbox?: { current?: unknown[] } }).inbox?.current).toEqual([]);
+    });
+
+    it('returns canceled for duplicate wake delivery after a restart', async () => {
+        const token = 'input-tok-duplicate-canceled';
+        const idempotencyKey = `${taskId}:input:${token}`;
+        const snapshot = markSegmentCancellationRequested(
+            {
+                meta: {
+                    agentId,
+                    awaiting: { kind: 'await_input', token },
+                    processedKeys: [idempotencyKey],
+                },
+            },
+            'stop',
+            '2026-06-19T00:00:00.000Z'
+        );
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: taskId,
+            agentId,
+            expectedWmVersion: BigInt(0),
+            snapshot,
+        });
+
+        const freshExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) =>
+                ({
+                    task,
+                    logger: console,
+                    progress: jest.fn(),
+                    fail: jest.fn(),
+                }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+        });
+
+        const result = await freshExecutor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey,
+            wake: {
+                trigger: 'resume',
+                event: { kind: 'input', token, value: 'duplicate' },
+            },
+        });
+
+        expect(result.boundary).toEqual({ kind: 'canceled', reason: 'stop' });
+        expect(result.taskStatus).toBe('canceled');
+        expect(executeTurnSpy).not.toHaveBeenCalled();
     });
 });

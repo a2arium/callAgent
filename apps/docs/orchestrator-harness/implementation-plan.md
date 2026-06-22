@@ -138,8 +138,10 @@ phase is covered and treated as complete for the harness. Input/tool durable
 waits are implemented, and external events now have a first-class `await_event`
 boundary backed by `aplret.external.<token>` Hatchet events. Timer and
 conversation wake application/routing have runtime-seam coverage only.
-Remaining Phase 3 work is boundary cancellation, durable dedupe for all wake
-families, and worker-restart validation; conversation durable waits need a
+Boundary cancellation now writes intent to the snapshot and turns pending-token
+late wakes into durable `canceled` no-ops. Remaining Phase 3 work is queued
+Hatchet cancellation, cancel-after-complete validation, durable dedupe policy
+closure, and worker-restart validation; conversation durable waits need a
 first-class conversation boundary before Hatchet event waits can own them.
 
 1. `tasks/input` (non-hot), tool/webhook callbacks, external event callbacks,
@@ -150,8 +152,9 @@ first-class conversation boundary before Hatchet event waits can own them.
 2. Durable event waits in `aplret.task` resume on the matching event. Event keys
    come only from tokens minted by a prior segment (ADR 0002 token provenance).
 3. Hot chat/SSE resumes stay in-process (ADR 0004).
-4. Cancellation: implement boundary cancellation (ADR 0010) — intent in snapshot,
-   pending-token wakes become no-ops, queued Hatchet runs cancelled best-effort.
+4. Cancellation: boundary cancellation (ADR 0010) — intent in snapshot and
+   pending-token wake no-op are implemented; queued Hatchet run cancellation and
+   cancel-after-complete proof remain.
 5. Acceptance: POC gate B9 (fan-out/fan-in), parity of projected stream events,
    plus cancel-while-waiting / cancel-with-children scenarios (ADR 0010).
 
