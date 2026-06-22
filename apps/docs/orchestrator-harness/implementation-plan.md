@@ -134,9 +134,11 @@ loops, `childCompletionInFlight`, `LoopRegistry` active-loop injection,
 Goal: remove resume coordination entirely in Hatchet mode.
 
 Status note (2026-06-22): the child `await_child` fan-out/fan-in slice of this
-phase is covered and treated as complete for the harness. Remaining Phase 3 work
-is non-child external/conversation wakes, boundary cancellation, durable dedupe
-for all wake families, and worker-restart validation.
+phase is covered and treated as complete for the harness. Input, tool, external,
+timer, and conversation wake application/routing now have runtime-seam coverage.
+Remaining Phase 3 work is durable Hatchet event-wait handling for non-child
+wakes, boundary cancellation, durable dedupe for all wake families, and
+worker-restart validation.
 
 1. `tasks/input` (non-hot), tool/webhook callbacks, A2A child completion, and
    conversation-delivered wakes (ADR 0008) →

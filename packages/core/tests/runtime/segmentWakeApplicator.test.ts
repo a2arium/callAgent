@@ -100,4 +100,77 @@ describe('applyWakeToSnapshot', () => {
         const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string }> };
         expect(inbox.current[0]?.kind).toBe('child.completed');
     });
+
+    it('external wake adds external.event observation and clears pending event', () => {
+        const prepared = applyWakeToSnapshot({
+            ...base,
+            pending: {
+                ...base.pending,
+                events: {
+                    'event-tok': { type: 'webhook.received', data: { expected: true } },
+                },
+            },
+        }, {
+            trigger: 'event',
+            event: {
+                kind: 'external',
+                token: 'event-tok',
+                type: 'webhook.received',
+                data: { ok: true },
+            },
+        });
+
+        expect(prepared.trigger).toBe('event');
+        expect(prepared.turnParams).toMatchObject({
+            eventToken: 'event-tok',
+            eventType: 'webhook.received',
+            eventPayload: { ok: true },
+        });
+        expect(
+            (prepared.snapshot.pending as { events?: Record<string, unknown> }).events?.['event-tok']
+        ).toBeUndefined();
+        const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string; payload: { type?: string } }> };
+        expect(inbox.current[0]?.kind).toBe('external.event');
+        expect(inbox.current[0]?.payload.type).toBe('webhook.received');
+    });
+
+    it('timer wake becomes a timer.fired external event', () => {
+        const prepared = applyWakeToSnapshot(base, {
+            trigger: 'timer',
+            event: {
+                kind: 'timer',
+                token: 'timer-tok',
+                timerId: 'timer-1',
+                payload: { reason: 'ttl' },
+            },
+        });
+
+        expect(prepared.trigger).toBe('event');
+        expect(prepared.turnParams).toMatchObject({
+            eventToken: 'timer-tok',
+            eventType: 'timer.fired',
+            eventPayload: { reason: 'ttl' },
+        });
+        const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string; payload: { type?: string } }> };
+        expect(inbox.current[0]?.kind).toBe('external.event');
+        expect(inbox.current[0]?.payload.type).toBe('timer.fired');
+    });
+
+    it('conversation wake adds conversation observation', () => {
+        const prepared = applyWakeToSnapshot(base, {
+            trigger: 'conversation',
+            event: {
+                kind: 'conversation',
+                token: 'conversation-session',
+                messageId: 'message-1',
+                data: { kind: 'message.received', text: 'hello' },
+            },
+        });
+
+        expect(prepared.trigger).toBe('conversation');
+        const inbox = prepared.snapshot.inbox as { current: Array<{ source: string; kind: string; payload: { kind?: string } }> };
+        expect(inbox.current[0]?.source).toBe('conversation');
+        expect(inbox.current[0]?.kind).toBe('message.received');
+        expect(inbox.current[0]?.payload.kind).toBe('message.received');
+    });
 });

@@ -3,6 +3,7 @@ import { TaskEngine } from '../../src/orchestration/taskEngine.js';
 import { InMemorySessionManager } from '../../src/orchestration/InMemorySessionManager.js';
 import { TaskExecutor } from '../../src/orchestration/TaskExecutor.js';
 import { PluginManager } from '../../src/plugin/pluginManager.js';
+import { globalA2AService } from '../../src/orchestration/A2AService.js';
 import { isSyncRuntimeDriver } from '../../src/runtime/inProcessRuntimeDriver.js';
 import type { RuntimeDriver } from '../../src/runtime/runtimeDriver.js';
 import { initialM } from '../../src/loop/init.js';
@@ -19,6 +20,15 @@ const loopAgentPlugin = {
         agentCard: { name: 'driver-test-agent', version: '1.0.0' },
     },
 };
+
+const createAsyncOnlyDriver = (): RuntimeDriver => ({
+    enqueueStart: jest.fn(async () => undefined),
+    enqueueResume: jest.fn(async () => undefined),
+    enqueueChildDispatch: jest.fn(async () => undefined),
+    scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+    cancel: jest.fn(async () => undefined),
+    dispatchOutbox: jest.fn(async () => undefined),
+});
 
 describe('TaskEngine runtime driver routing', () => {
     beforeEach(() => {
@@ -41,14 +51,7 @@ describe('TaskEngine runtime driver routing', () => {
             taskStatus: { state: 'completed', timestamp: new Date().toISOString() },
         });
 
-        const asyncOnlyDriver: RuntimeDriver = {
-            enqueueStart: jest.fn(async () => undefined),
-            enqueueResume: jest.fn(async () => undefined),
-            enqueueChildDispatch: jest.fn(async () => undefined),
-            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
-            cancel: jest.fn(async () => undefined),
-            dispatchOutbox: jest.fn(async () => undefined),
-        };
+        const asyncOnlyDriver = createAsyncOnlyDriver();
 
         const store = new InMemorySessionManager();
         const engine = new TaskEngine({
@@ -175,14 +178,7 @@ describe('TaskEngine runtime driver routing', () => {
     it('routes child completion through the runtime driver when resume surface is enabled', async () => {
         process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
-        const runtimeDriver: RuntimeDriver = {
-            enqueueStart: jest.fn(async () => undefined),
-            enqueueResume: jest.fn(async () => undefined),
-            enqueueChildDispatch: jest.fn(async () => undefined),
-            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
-            cancel: jest.fn(async () => undefined),
-            dispatchOutbox: jest.fn(async () => undefined),
-        };
+        const runtimeDriver = createAsyncOnlyDriver();
         const store = new InMemorySessionManager();
         await store.writeSnapshotCAS({
             tenantId: 't',
@@ -237,6 +233,202 @@ describe('TaskEngine runtime driver routing', () => {
                 token: 'child-token',
                 childTaskId: 'child-task',
             }),
+        }));
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+
+        executeTurnSpy.mockRestore();
+    });
+
+    it('routes input resume through the runtime driver when resume surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
+        const runtimeDriver = createAsyncOnlyDriver();
+        const store = new InMemorySessionManager();
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 'input-task',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: { agentId: 'driver-test-agent', turn: 1 },
+                pending: {
+                    inputs: {
+                        'input-token': { schema: { type: 'object' } },
+                    },
+                },
+                inbox: { current: [], all: [] },
+                M: initialM({ task: { id: 'input-task', input: {} } } as TaskContext),
+            },
+        });
+        const engine = new TaskEngine({ sessionStore: store, runtimeDriver });
+
+        await expect(engine.resumeInput({
+            tenantId: 't',
+            taskId: 'input-task',
+            token: 'input-token',
+            input: { answer: 42 },
+        })).resolves.toEqual({ acknowledged: true });
+
+        expect(runtimeDriver.enqueueResume).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 't',
+            taskId: 'input-task',
+            agentId: 'driver-test-agent',
+            idempotencyKey: 'input-task:input:input-token',
+            event: {
+                kind: 'input',
+                token: 'input-token',
+                value: { answer: 42 },
+            },
+        }));
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+
+        executeTurnSpy.mockRestore();
+    });
+
+    it('routes tool completion through the runtime driver when resume surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
+        const runtimeDriver = createAsyncOnlyDriver();
+        const store = new InMemorySessionManager();
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 'tool-task',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: { agentId: 'driver-test-agent', turn: 1 },
+                pending: {
+                    tools: {
+                        'tool-token': { name: 'search', args: { q: 'hi' } },
+                    },
+                },
+                inbox: { current: [], all: [] },
+                M: initialM({ task: { id: 'tool-task', input: {} } } as TaskContext),
+            },
+        });
+        const engine = new TaskEngine({ sessionStore: store, runtimeDriver });
+
+        await engine.handleToolCompleted({
+            tenantId: 't',
+            taskId: 'tool-task',
+            token: 'tool-token',
+            result: { hits: 2 },
+        });
+
+        expect(runtimeDriver.enqueueResume).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 't',
+            taskId: 'tool-task',
+            agentId: 'driver-test-agent',
+            idempotencyKey: 'tool-task:tool:tool-token',
+            event: {
+                kind: 'tool',
+                token: 'tool-token',
+                result: { hits: 2 },
+            },
+        }));
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+
+        executeTurnSpy.mockRestore();
+    });
+
+    it('routes external event wake through the runtime driver when resume surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
+        const runtimeDriver = createAsyncOnlyDriver();
+        const store = new InMemorySessionManager();
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 'external-task',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: { agentId: 'driver-test-agent', turn: 1 },
+                pending: {
+                    events: {
+                        'event-token': { type: 'webhook.received' },
+                    },
+                },
+                inbox: { current: [], all: [] },
+                M: initialM({ task: { id: 'external-task', input: {} } } as TaskContext),
+            },
+        });
+        const engine = new TaskEngine({ sessionStore: store, runtimeDriver });
+
+        await engine.handleExternalEventOccurred({
+            tenantId: 't',
+            taskId: 'external-task',
+            token: 'event-token',
+            payload: { ok: true },
+        });
+
+        expect(runtimeDriver.enqueueResume).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 't',
+            taskId: 'external-task',
+            agentId: 'driver-test-agent',
+            idempotencyKey: 'external-task:external:event-token',
+            event: {
+                kind: 'external',
+                token: 'event-token',
+                type: 'webhook.received',
+                data: { ok: true },
+            },
+        }));
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+
+        executeTurnSpy.mockRestore();
+    });
+
+    it('routes conversation activation through the runtime driver when resume surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
+        const runtimeDriver = createAsyncOnlyDriver();
+        const store = new InMemorySessionManager();
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 'thread-1:driver-test-agent',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: { agentId: 'driver-test-agent', turn: 1 },
+                inbox: { current: [], all: [] },
+                M: initialM({ task: { id: 'thread-1:driver-test-agent', input: {} } } as TaskContext),
+            },
+        });
+        jest.spyOn(globalA2AService, 'findLocalAgent').mockResolvedValue(loopAgentPlugin as never);
+        jest.spyOn(globalA2AService, 'buildPassiveConversationContext').mockResolvedValue({
+            task: { id: 'thread-1:driver-test-agent', input: { __conversationSession: true } },
+            tenantId: 't',
+            agentId: 'driver-test-agent',
+            memory: {},
+            vars: {},
+            reply: jest.fn(),
+            progress: jest.fn(),
+            logger: { info: jest.fn(), warn: jest.fn(), debug: jest.fn(), error: jest.fn() },
+        } as never);
+        const engine = new TaskEngine({ sessionStore: store, runtimeDriver });
+
+        await expect(engine.ensureConversationActivation({
+            kind: 'thread',
+            tenantId: 't',
+            threadId: 'thread-1',
+            routingSessionId: 'thread-1:driver-test-agent',
+            recipientAgentId: 'driver-test-agent',
+            messageId: 'message-1',
+            senderSessionId: 'sender-task',
+            senderAgentId: 'sender-agent',
+        })).resolves.toEqual({ ok: true });
+
+        expect(runtimeDriver.enqueueResume).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 't',
+            taskId: 'thread-1:driver-test-agent',
+            agentId: 'driver-test-agent',
+            idempotencyKey: 'thread-1:driver-test-agent:conversation:thread',
+            event: {
+                kind: 'conversation',
+                token: 'thread-1:driver-test-agent',
+                messageId: 'thread-1:driver-test-agent',
+                data: { kind: 'message.received' },
+            },
         }));
         expect(executeTurnSpy).not.toHaveBeenCalled();
 
