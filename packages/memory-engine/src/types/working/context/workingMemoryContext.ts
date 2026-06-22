@@ -146,10 +146,9 @@ export async function extendContextWithMemory(
     });
 
     const context = baseContext as TaskContext;
-    const operatorMemoryEventSink = (context as TaskContext & OperatorMemoryEventSink).__operatorMemoryEvent;
     const emitOperatorSemanticEvent = async (event: SemanticMemoryEvent): Promise<void> => {
         try {
-            await operatorMemoryEventSink?.(event);
+            await (context as TaskContext & OperatorMemoryEventSink).__operatorMemoryEvent?.(event);
         } catch {
             // Operator capture is best-effort and must not affect memory semantics.
         }

@@ -18,6 +18,14 @@ export type SemanticMemoryEvent = {
     source: 'context.memory';
 };
 
+export type SemanticAddInput = {
+    id: string;
+    value?: unknown;
+    data?: unknown;
+    tags?: string[];
+    entities?: MemorySetOptions['entities'];
+};
+
 type FacadeSemanticMemoryBackend = SemanticMemoryBackend & {
     read?: <T>(input: GetManyInput, options?: GetManyOptions) => Promise<Array<MemoryQueryResult<T>>>;
     remove?: (input: GetManyInput, options?: GetManyOptions) => Promise<number>;
@@ -115,6 +123,20 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
         const backend = this.backends[backendName];
         await backend.set<T>(key, value, opts);
         await this.emit({ op: 'write', keys: [key], backend: backendName, source: 'context.memory' });
+    }
+
+    /**
+     * High-level agent API for semantic writes.
+     * Kept in parity with createMemoryRegistry so ctx.memory.semantic.add()
+     * persists and is visible to operator memory telemetry.
+     */
+    async add(item: SemanticAddInput, opts?: MemorySetOptions): Promise<void> {
+        const value = item.value !== undefined ? item.value : item.data;
+        await this.set(item.id, value, {
+            ...opts,
+            tags: opts?.tags ?? item.tags,
+            entities: opts?.entities ?? item.entities,
+        });
     }
 
     /**
