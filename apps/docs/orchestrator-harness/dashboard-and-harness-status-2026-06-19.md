@@ -1,6 +1,6 @@
 # Orchestrator Harness and Operator Dashboard Status
 
-Last updated: 2026-06-19.
+Last updated: 2026-06-21.
 
 ## Executive Summary
 
@@ -20,9 +20,12 @@ The Operator Dashboard is no longer only a passive viewer. It now has:
 - A local `yarn runtime` command that starts the runtime host, Hatchet worker,
   and optionally the dashboard dev server.
 
-The main remaining gap is durability/product hardening: normalized graph tables,
-operator actions, better task status finalization, auth, and production-grade
-workspace/process isolation.
+The main remaining gap is production readiness: normalized summary/graph
+persistence, root-vs-child correctness at scale, query/index validation,
+payload/artifact budgets, retention, observability, failure drills, operator
+actions, auth, and production-grade workspace/process isolation. The current
+dashboard is a strong MVP investigation surface, but it should not be treated as
+the 100k-run production incident UI until `production-readiness.md` gates pass.
 
 ## Current Architecture
 

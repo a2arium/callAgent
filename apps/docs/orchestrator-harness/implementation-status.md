@@ -1,10 +1,11 @@
 # Implementation Status
 
-Last updated: 2026-06-19.
+Last updated: 2026-06-21.
 
 ## Stage
 
-**Phase 2 durable loop + Operator Experience track implemented** — Hatchet-backed
+**Phase 2 durable loop + Operator Experience MVP implemented; Phase 3/operator
+hardening in progress; production-readiness track added.** Hatchet-backed
 `aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
 parent workflows exist behind driver-surface flags. The runtime now exposes a
 projection-backed operator `AgentRunGraph` API so users can inspect agents, child
@@ -12,6 +13,12 @@ calls, turns, effects, events/log groups, TurnTrace refs, and raw Hatchet ids
 without reading `aplret.*` workflow names. The product track now adds compact
 `wm_events` cognition capture, a fleet list API, memory/turn detail APIs, and a
 Vite/React operator viewer served at `/operator` by `runtime-host` when built.
+
+The current operator viewer is good enough for MVP investigation and real-run
+hardening, but it is not yet the production-scale read path. Production readiness
+now has a dedicated plan in `production-readiness.md`, covering indexed summary
+storage, root/child correctness, graph caps, payload budgets, observability,
+retention, load tests, and failure drills.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
 The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
@@ -71,6 +78,8 @@ first POC candidate.
 - `specs/operator-viewer.md` — operator viewer data sources, event taxonomy,
   endpoints, SPA contract, and acceptance.
 - `../operator-run-graph.md` — permanent semantic operator graph contract.
+- `production-readiness.md` — production promotion workstreams, gates, and
+  scale/observability/payload/readiness criteria.
 
 ## Production code added
 
@@ -220,6 +229,27 @@ first POC candidate.
   - `apps/examples/runtime-host` serves the built viewer at `/operator` when
     `apps/operator-viewer/dist/index.html` (or `OPERATOR_VIEWER_DIST`) exists.
 
+- Production-readiness findings (added 2026-06-21):
+  - 10-20 active parallel agent tasks is a realistic target once Hatchet worker
+    concurrency, external tool/browser pools, LLM provider limits, and DB pool
+    sizes are configured.
+  - 100k historical runs is not a guaranteed property of the current read path.
+    It requires summary/graph persistence, query/index validation, retention, and
+    a recorded load test.
+  - Fleet root/child filtering must stop depending on bounded recent event
+    samples; persisted run/edge facts need to answer root vs child and child
+    counts.
+  - Run graph detail currently reads recursive task/session/event data. It needs
+    graph caps and progressive loading before large fan-out trees are supported.
+  - Polling every few seconds is acceptable for the MVP, but production needs
+    adaptive intervals, hidden-tab pause, terminal-status slowdown, and
+    server-side query budgets.
+  - Payload size failures such as snapshot-too-large must be first-class
+    semantic errors in summaries, turns, logs, and graph nodes. Artifacts should
+    remain refs until the consumer boundary that needs content resolves them.
+  - Hatchet/log connectivity failures must not replace the original runtime
+    failure or create retry storms.
+
 ## Production code changed
 
 - `packages/core/src/orchestration/taskEngine.ts` — holds default
@@ -256,9 +286,12 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Next phase: verify the Operator Experience track with real Hatchet/in-process
-runs, then continue the remaining POC scenarios for timers, cancellation,
-broader child fan-out/fan-in, and parity. Normalized graph tables remain deferred.
+Next phase: continue Phase 3 external wake hardening and real-run operator
+validation, while starting the production-readiness track in parallel. The first
+production-readiness work should be the semantic run summary/edge read model,
+root-only fleet correctness, child counts, query/index review, and payload-budget
+error surfacing. Normalized graph tables are no longer just polish; they are the
+likely production read path.
 
 ## Open questions (carried from requirements §11)
 
@@ -278,4 +311,3 @@ broader child fan-out/fan-in, and parity. Normalized graph tables remain deferre
   timer reconciler).
 - Parity harness: golden canonical-event traces proving in-process and Hatchet
   drivers are equivalent (ADR 0007 parity test needs a home/format).
-

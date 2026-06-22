@@ -60,6 +60,8 @@ This workspace covers:
 - Snapshot ownership and idempotency under at-least-once delivery.
 - Observability mapping (`AgentRunGraph`, `driver_runs`, deep links to
   `TurnTrace`, and Hatchet debug run ids).
+- Production readiness for scale, payload budgets, retention, observability,
+  failure drills, and operator UI safety.
 - The line-referenced deletion inventory and reversibility rules.
 - POC scenarios and pass/fail gates.
 
@@ -114,6 +116,8 @@ Key pages:
 - `principles.md` — design principles and non-negotiables.
 - `implementation-status.md` — where we are right now.
 - `implementation-plan.md` — staged implementation plan.
+- `production-readiness.md` — production promotion gates for scale, reliability,
+  payload safety, observability, retention, and incident workflow.
 - `migration-checklist.md` — promotion/deletion checklist.
 - `adr/` — decision records to review before implementation (0001–0010).
 - `specs/` — driver seam, kernel, Hatchet task model, worker runtime, deletion

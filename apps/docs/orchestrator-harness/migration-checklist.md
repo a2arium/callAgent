@@ -70,6 +70,49 @@ harness checklist style.
 - [ ] Live cutover drill: deployment with in-flight waits flips to Hatchet with
       no lost wakes/timers and no duplicate effects.
 
+## Production readiness
+
+See `production-readiness.md`. These items must pass before Hatchet mode becomes
+the default production driver or before the operator viewer becomes the primary
+production incident UI.
+
+- [ ] Semantic run summary/read model exists and is backfilled for existing
+      `driver_runs`/`wm_events` where needed.
+- [ ] Root-vs-child classification and child counts come from persisted run/edge
+      facts, not bounded recent-event samples.
+- [ ] Fleet and graph query plans reviewed with `EXPLAIN ANALYZE` against
+      realistic data; required indexes are present.
+- [ ] 100k-run operator load test passes with 20 active roots and realistic child
+      fan-out/event volume.
+- [ ] Run graph APIs enforce caps/progressive loading for large trees.
+- [ ] Retention and archival policy implemented for Hatchet provider rows,
+      semantic summaries, `driver_runs`, `wm_events`, logs, TurnTrace refs, and
+      artifacts.
+- [ ] Worker/tenant/agent/tool/browser/LLM concurrency limits configured and
+      documented.
+- [ ] Agent budget timeouts are passed to Hatchet with fallback and grace.
+- [ ] Queue-age, wait-age, missing-child, timeout, and cancellation behaviors are
+      visible and tested.
+- [ ] Snapshot/event/metadata/log/API payload budgets are enforced; large content
+      remains artifact refs until the consumer boundary.
+- [ ] Payload-budget failures appear in agent summary, turn summary, logs, and
+      graph nodes with readable code/message.
+- [ ] Logs, metrics, alerts, and deep links are wired for semantic run graph,
+      Hatchet provider runs, TurnTrace, artifacts, and LLM traces.
+- [ ] Hatchet/log sink outage does not hide the original runtime error or create
+      unbounded retry noise.
+- [ ] Operator UI defaults to root runs only, with an explicit include-children
+      switch.
+- [ ] Live operator polling backs off, pauses in hidden tabs, and slows/stops
+      after terminal status.
+- [ ] Production mode is explicit from runtime configuration; development mode
+      is the default.
+- [ ] Auth and tenant isolation are implemented and tested before production data
+      is exposed.
+- [ ] Failure drills pass: worker kill mid-segment, worker kill while awaiting
+      child, Hatchet unavailable, Postgres restart, NATS unavailable, missing
+      child wake, timeout, and cancellation.
+
 ## Observability
 
 - [ ] Run metadata carries `tenantId/agentId/taskId/rootTaskId/traceId/token/operation`.
@@ -110,6 +153,7 @@ See `specs/deletion-inventory.md` for exact line references.
 - [ ] B8 hot-resume latency protected.
 - [ ] B9 child fan-out/fan-in.
 - [ ] B10 upgrade with active timers/runs (production gate).
+- [ ] B11 100k-run volume test with dashboard/query/retention acceptance.
 
 ## Docs promotion
 
@@ -120,5 +164,7 @@ See `specs/deletion-inventory.md` for exact line references.
       contract doc.
 - [ ] Promote `apps/docs/operator-run-graph.md` as the permanent operator-facing
       orchestration contract.
+- [ ] Promote `apps/docs/orchestrator-harness/production-readiness.md` into the
+      permanent production operations/runbook docs.
 - [ ] Convert POC scenarios into permanent tests.
 - [ ] Delete `apps/docs/orchestrator-harness/` after promotion or discard.

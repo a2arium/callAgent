@@ -40,7 +40,7 @@ Phase-to-page mapping (read the pages that match the work):
 | 2 — durable loop | `durable-execution`, `durable-tasks`, `child-spawning`, `concurrency` |
 | 3 — event wakes | `durable-event-waits`, events API |
 | 4 — timers | `durable-sleep`, `scheduled-runs` (missed-schedule caveat, ADR 0003) |
-| 5 — production | self-hosting HA/upgrade/retention, Prometheus metrics |
+| 5 — production readiness | self-hosting HA/upgrade/retention, Prometheus metrics |
 
 See also the key-page list in `README.md` § Hatchet docs reference.
 
@@ -149,9 +149,9 @@ backfill (`243–309`) where Hatchet guarantees ordering.
 
 ## Operator Experience Track — Product-facing run explorer
 
-Goal: make orchestration understandable to operators at fleet scale without
-adding graph tables yet. This track is product-facing and runs alongside the
-Hatchet infrastructure phases above.
+Goal: make orchestration understandable to operators without blocking the
+Hatchet infrastructure phases above. This is an MVP product surface, not the
+final production-scale read model.
 
 1. Capture compact operator cognition into existing `wm_events`:
    `turn.completed` for decision/stage/timings/usage/LLM metadata and
@@ -180,6 +180,11 @@ Deferred: normalized `agent_runs`, `agent_run_edges`, `turn_runs`,
 `effect_runs`, and full prompt/response/value persistence. Operator actions
 (cancel/retry) wait for ADR 0010 implementation.
 
+Production caveat: the current projection API and viewer are acceptable for MVP
+debugging and real-run hardening, but they are not the 100k-run production read
+path. Phase 5 must promote this into indexed summary/graph persistence with load
+tests before the dashboard becomes the primary production incident UI.
+
 ## Phase 4 — Timers via durable sleep + reconciler
 
 Goal: native, restart-safe timers.
@@ -192,16 +197,53 @@ Goal: native, restart-safe timers.
 
 Deletes (guarded): in-process `setTimeout` semantic waits for token expiry.
 
-## Phase 5 — Production gates
+## Phase 5 — Production readiness gates
 
-1. B10 upgrade drill with active timers/runs; rollback runbook.
-2. B11 100k-run volume test (Postgres size, dashboard speed, retention).
-3. C2 cost model; C3 HA / RPO-RTO per state type; C4 alerts.
-4. **Live cutover drill:** flip a deployment with tasks already waiting
-   in-process (pending tokens / `setTimeout`) to Hatchet mode; verify no lost
-   wakes/timers and no duplicate effects (reconciler + dedupe).
-5. Decide which deletion targets are permanent and remove the dead in-process
-   code for fully-migrated surfaces.
+Goal: prove the Hatchet-backed runtime and operator surface can run production
+traffic, retain large history, and support incidents before deleting in-process
+fallbacks. See `production-readiness.md` for the detailed workstreams and gates.
+
+1. **Scale-oriented read model:** persist indexed run summaries, graph edges,
+   turn summaries, child counts, output/error availability, and last semantic
+   error. Fleet root/child filtering must not depend on bounded recent
+   `wm_events` samples, and run graph loading must be capped/progressive for
+   large fan-out.
+2. **Query/index review:** validate fleet and graph queries with
+   `EXPLAIN ANALYZE` against realistic data. Required query paths include
+   root-only fleet, include-children fleet, agent/status/time filters, and run
+   graph detail.
+3. **Runtime safety:** pass agent budget timeouts to Hatchet with a fallback and
+   grace window; configure worker/tenant/agent/tool/LLM concurrency; verify
+   retry classification, dead-letter behavior, duplicate-safe effects, and
+   cancellation semantics.
+4. **Payload and artifact budgets:** large HTML/text/model outputs stay as
+   artifact refs until the consumer boundary that needs them. Snapshot, event,
+   driver metadata, Hatchet payload, log, and operator API size limits must fail
+   with readable semantic errors.
+5. **Observability:** logs, metrics, alerts, and deep links must support incident
+   investigation across the semantic run graph, Hatchet provider runs,
+   TurnTrace, artifacts, and LLM traces. Log-sink failures must not hide the
+   original runtime error or create retry storms.
+6. **Operator production behavior:** default fleet scope is root runs only, with
+   an explicit switch to include children. Live polling has backoff/hidden-tab
+   behavior and stops or slows after terminal status. Production mode is explicit
+   and never inferred from browser dark mode.
+7. **Retention and archival:** define retention for Hatchet provider rows,
+   semantic run summaries, `driver_runs`, `wm_events`, logs, TurnTrace refs, and
+   artifacts. Old runs must keep useful summaries after raw/debug data expires.
+8. **B10 rolling upgrade drill:** upgrade workers with active waits, timers,
+   child calls, and running segments; document rollback.
+9. **B11 100k-run volume test:** seed at least 100k completed root runs plus
+   realistic children/events and 20 concurrently active roots. Record fleet and
+   graph p95/p99, Postgres size, dashboard behavior, and retention results.
+10. **Failure drills:** worker killed mid-segment, worker killed while awaiting a
+    child, Hatchet unavailable, Postgres restart, NATS unavailable, missing child
+    wake, timeout, and cancel scenarios all have visible and correct outcomes.
+11. **Live cutover drill:** flip a deployment with tasks already waiting
+    in-process (pending tokens / `setTimeout`) to Hatchet mode; verify no lost
+    wakes/timers and no duplicate effects (reconciler + dedupe).
+12. Decide which deletion targets are permanent and remove the dead in-process
+    code for fully migrated surfaces only after the gates above pass.
 
 ## Cross-cutting: parity harness
 
