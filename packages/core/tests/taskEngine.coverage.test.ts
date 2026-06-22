@@ -21,11 +21,13 @@ import { InboxManager } from '../src/orchestration/InboxManager.js';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { LocalArtifactImpl } from '../src/orchestration/LocalArtifactImpl.js';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
+import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
 import { globalA2AService } from '../src/orchestration/A2AService.js';
 import { InvariantError } from '../src/utils/errors.js';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
+const originalDriverSurfaces = process.env.CALLAGENT_DRIVER_SURFACES;
 
 // Create properly typed mocks
 const mockFindLocalAgent = jest.fn() as jest.MockedFunction<(agentName: string) => Promise<any>>;
@@ -223,6 +225,41 @@ const createCtx = (overrides: Record<string, unknown> = {}) => ({
     ...overrides
 });
 
+const mockInlineParentResume = () =>
+    jest.spyOn(TaskExecutor, 'executeTurn').mockImplementation(async (params: any) => {
+        const latest = await params.sessionManager.load(params.tenantId, params.sessionId);
+        const snapshot = JSON.parse(JSON.stringify(latest?.snapshot ?? {})) as Record<string, unknown>;
+        const meta = { ...((snapshot as any).meta ?? {}) };
+        const currentTurn = Number(meta.turn ?? params.env?.turn ?? 0);
+        meta.turn = currentTurn + 1;
+        delete (meta as any).awaiting;
+        (snapshot as any).meta = meta;
+
+        await params.sessionManager.saveSnapshot({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            agentId: params.agentId,
+            expectedWmVersion: latest?.wmVersion ?? BigInt(0),
+            snapshot,
+        });
+
+        return {
+            M: params.M,
+            outcome: { kind: 'complete', result: {} },
+            metrics: {},
+            taskStatus: {
+                state: 'completed',
+                timestamp: new Date().toISOString(),
+                metadata: { result: {} },
+            },
+        } as any;
+    });
+
+const mockLegacyInlineParentResume = () => {
+    delete process.env.CALLAGENT_DRIVER_SURFACES;
+    return mockInlineParentResume();
+};
+
 const loadEngineWithA2AMock = async (sendResult: unknown) => {
     jest.resetModules();
     const sendMock = jest.fn() as jest.MockedFunction<(params: any) => Promise<any>>;
@@ -278,6 +315,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    if (originalDriverSurfaces === undefined) {
+        delete process.env.CALLAGENT_DRIVER_SURFACES;
+    } else {
+        process.env.CALLAGENT_DRIVER_SURFACES = originalDriverSurfaces;
+    }
     runLoopMock.mockReset();
     jest.clearAllMocks();
     jest.restoreAllMocks();
@@ -737,14 +779,7 @@ describe('TaskEngine orchestration coverage', () => {
         const initialSnap = store.getSnapshot('t', 'parent');
         const initialTurn = Number(((initialSnap?.snapshot as any)?.meta?.turn) ?? 0);
 
-        runLoopMock.mockImplementation(async () => {
-            console.log('runLoopMock invoked');
-            return {
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
-            };
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         await engine.handleChildCompleted({
             tenantId: 't',
@@ -758,6 +793,7 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
         expect(afterTurn).toBeGreaterThan(initialTurn);
         expect((savedPending as any)?.tasks?.['child-1']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
@@ -770,11 +806,7 @@ describe('TaskEngine orchestration coverage', () => {
         jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
         jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
 
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: {} },
-            metrics: {}
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         const pending = setPendingTasks({
             meta: { turn: 2, agentId: 'agent-a' },
@@ -807,6 +839,7 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
         expect(afterTurn).toBeGreaterThan(initialTurn);
         expect((savedPending as any)?.tasks?.['child-early']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
@@ -836,11 +869,7 @@ describe('TaskEngine orchestration coverage', () => {
         jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
         jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
 
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: {} },
-            metrics: {}
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         const pending = setPendingTasks({
             meta: { turn: 2, agentId: 'agent-a' },
@@ -872,6 +901,7 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
         expect(afterTurn).toBeGreaterThan(initialTurn);
         expect((afterSnap?.snapshot as any)?.pending?.tasks?.['child-early']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
@@ -884,7 +914,6 @@ describe('TaskEngine orchestration coverage', () => {
                 const snap = await super.getSessionSnapshot(tenantId, sessionId);
                 if (!snap) return snap;
                 this.loadCount++;
-                console.log('AwaitingDroppingStore snapshot load', this.loadCount);
                 if (this.loadCount === 2) {
                     const mutated = JSON.parse(JSON.stringify(snap.snapshot));
                     if (mutated.meta) {
@@ -907,11 +936,7 @@ describe('TaskEngine orchestration coverage', () => {
         jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
         jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
 
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: {} },
-            metrics: {}
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         const base = {
             meta: { turn: 2, agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-1' } },
@@ -935,6 +960,7 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
         expect(afterTurn).toBeGreaterThan(initialTurn);
     });
 
