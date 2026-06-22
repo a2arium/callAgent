@@ -22,23 +22,27 @@ harness checklist style.
       task/SDK change (see `implementation-plan.md` § Hatchet docs); ADR summaries
       are not sufficient for API details.
 - [x] New `packages/driver-hatchet` workspace; no upward imports.
-- [ ] Worker process builds full composition root + initializes `EngineLocator`
+- [x] Worker process builds full composition root + initializes `EngineLocator`
       for itself (`specs/worker-runtime.md`). *(Phase 1 worker is outbox-only.)*
 - [x] Cross-process bus (NATS) provisioned; worker can publish stream events to
       the API host (ADR 0007).
 - [x] `aplret.outbox.dispatch` consumes outbox; in-process poll is fallback.
-- [ ] `aplret.segment` child task = `runSegment` (run to next durable boundary).
-- [ ] `aplret.task` durable loop: spawn → branch → wait/sleep/spawn → repeat;
+- [x] `aplret.segment` child task = `runSegment` (run to next durable boundary).
+- [x] `aplret.task` durable loop: spawn → branch → wait/sleep/spawn → repeat;
       no `continue` crosses the boundary.
 - [ ] Per-task concurrency key `tenantId:taskId`, limit 1.
-- [ ] External + conversation wakes pushed as Hatchet events (ADR 0008); durable
-      event waits resume.
+- [x] Child wakes pushed as Hatchet events; `await_child` durable event waits
+      resume and recover from already-persisted child completion/failure events.
+- [ ] Non-child external + conversation wakes pushed as Hatchet events (ADR 0008);
+      durable event waits resume.
 - [ ] Timers via durable sleep; `TimerReconciler` implemented.
 - [x] `driver_runs` table + composite metadata keys.
 
 ## Idempotency & ordering
 
 - [ ] Wake idempotency keys defined for start/input/tool/child/timer/outbox.
+      Child wake keys are covered as `parentTaskId:child:token`; remaining wake
+      families still need the durable dedupe policy below.
 - [ ] **Durable** dedupe implemented (snapshot `processedKeys` or
       `processed_wakes` table), committed atomically with the snapshot (ADR 0005).
 - [ ] **Per-effect** idempotency keys defined (ADR 0009): tool
@@ -151,7 +155,9 @@ See `specs/deletion-inventory.md` for exact line references.
 - [ ] B7 self-hosted dashboard works as debug infra, while semantic run graph
       answers product/operator questions (incl. security sub-gates).
 - [ ] B8 hot-resume latency protected.
-- [ ] B9 child fan-out/fan-in.
+- [x] B9 child fan-out/fan-in durable-parent unit coverage: child completes after
+      wait, child completed before wait, child failure, out-of-order child
+      completion selection, missing child wake timeout, and graph projection.
 - [ ] B10 upgrade with active timers/runs (production gate).
 - [ ] B11 100k-run volume test with dashboard/query/retention acceptance.
 

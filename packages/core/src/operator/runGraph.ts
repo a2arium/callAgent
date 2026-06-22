@@ -406,10 +406,10 @@ function edgeToNode(
     const childDriverRuns = driverRuns.filter((run) => run.taskId === taskId);
     const childRun = chooseRootRun(childDriverRuns);
     const status = deriveChildNodeStatus(edge.status, childEvents, childDriverRuns);
-    const startedAt = firstEventTime(childEvents) ?? childRun?.createdAt;
+    const startedAt = firstEventTime(childEvents) ?? childRun?.createdAt ?? edge.startedAt;
     const finishedAt =
         status === 'completed' || status === 'failed'
-            ? latestTerminalEventTime(childEvents) ?? latestTerminalDriverRunTime(childDriverRuns)
+            ? latestTerminalEventTime(childEvents) ?? latestTerminalDriverRunTime(childDriverRuns) ?? edge.finishedAt
             : undefined;
     return {
         id: taskId,
@@ -422,7 +422,7 @@ function edgeToNode(
         status,
         inputPreview: deriveInputPreview(childEvents, undefined),
         outputPreview: deriveOutputPreview(childEvents) ?? edge.resultPreview,
-        ...(childRun?.error ? { error: childRun.error } : {}),
+        ...(childRun?.error ?? edge.error ? { error: childRun?.error ?? edge.error } : {}),
         ...(childRun?.traceId ? { traceId: childRun.traceId } : {}),
         ...(childRun?.providerRunId ? { providerRunId: childRun.providerRunId } : {}),
         ...(startedAt ? { startedAt: toIso(startedAt) } : {}),

@@ -402,6 +402,215 @@ describe('executeTaskTask', () => {
         }));
     });
 
+    it('resumes await_child from an already persisted child failure as an ok:false child wake', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'await_child', token: 'child-token' },
+                taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:00.000Z' },
+            },
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: {
+                    kind: 'complete',
+                    result: {
+                        ok: false,
+                        error: { code: 'CHILD_FAILED', message: 'Child failed' },
+                    },
+                },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitForEvent: jest.fn(async () => {
+                throw new Error('should not wait');
+            }),
+        };
+        const wMEvent = {
+            findMany: jest.fn(async () => [{
+                eventId: 'event-1',
+                tenantId: 'tenant-1',
+                sessionId: 'task-1',
+                seq: 2,
+                type: 'task.child_failed',
+                payload: {
+                    token: 'child-token',
+                    childTaskId: 'child-task-1',
+                    error: { code: 'ALL_MODES_FAILED', message: 'No HTML returned' },
+                },
+                createdAt: new Date('2026-06-19T00:00:00.500Z'),
+            }]),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            {
+                driverRuns: { finalizeRootRun } as never,
+                prisma: {
+                    outbox: { findMany: jest.fn(async () => []) },
+                    wMEvent,
+                } as never,
+            }
+        );
+
+        expect(ctx.waitForEvent).not.toHaveBeenCalled();
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            expect.any(String),
+            expect.objectContaining({
+                wake: {
+                    trigger: 'child',
+                    event: {
+                        kind: 'child',
+                        token: 'child-token',
+                        childTaskId: 'child-task-1',
+                        output: {
+                            ok: false,
+                            error: { code: 'ALL_MODES_FAILED', message: 'No HTML returned' },
+                        },
+                        idempotencyKey: 'task-1:child:child-token',
+                    },
+                },
+                idempotencyKey: 'task-1:child:child-token',
+            }),
+            expect.any(Object)
+        );
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'failed',
+            boundaryKind: 'complete',
+        }));
+    });
+
+    it('ignores persisted completions for other child tokens until the parent awaits that token', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'await_child', token: 'child-a' },
+                taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:00.000Z' },
+            },
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'await_child', token: 'child-b' },
+                taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:01.000Z' },
+            },
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { ok: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:02.000Z' },
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitForEvent: jest.fn(async () => ({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                kind: 'child',
+                token: 'child-a',
+                childTaskId: 'child-task-a',
+                output: { ok: true, child: 'a' },
+            })),
+        };
+        const wMEvent = {
+            findMany: jest.fn(async () => [{
+                eventId: 'event-b',
+                tenantId: 'tenant-1',
+                sessionId: 'task-1',
+                seq: 2,
+                type: 'task.child_completed',
+                payload: {
+                    token: 'child-b',
+                    childTaskId: 'child-task-b',
+                    resultPreview: { ok: true, child: 'b' },
+                },
+                createdAt: new Date('2026-06-19T00:00:00.500Z'),
+            }]),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            {
+                driverRuns: { finalizeRootRun } as never,
+                prisma: {
+                    outbox: { findMany: jest.fn(async () => []) },
+                    wMEvent,
+                } as never,
+            }
+        );
+
+        expect(ctx.waitForEvent).toHaveBeenCalledTimes(1);
+        expect(ctx.waitForEvent).toHaveBeenCalledWith(
+            'aplret.child.child-a',
+            'input.tenantId == "tenant-1" && input.taskId == "task-1"',
+            undefined,
+            undefined,
+            '5m',
+            'wait:child:child-a'
+        );
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            expect.any(String),
+            expect.objectContaining({
+                wake: expect.objectContaining({
+                    event: expect.objectContaining({
+                        token: 'child-a',
+                        childTaskId: 'child-task-a',
+                    }),
+                }),
+            }),
+            expect.any(Object)
+        );
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            3,
+            expect.any(String),
+            expect.objectContaining({
+                wake: expect.objectContaining({
+                    event: expect.objectContaining({
+                        token: 'child-b',
+                        childTaskId: 'child-task-b',
+                        output: { ok: true, child: 'b' },
+                    }),
+                }),
+            }),
+            expect.any(Object)
+        );
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'completed',
+        }));
+    });
+
     it('marks the root driver run failed when waiting for a boundary throws', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const ctx = {

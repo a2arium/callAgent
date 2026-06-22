@@ -721,4 +721,91 @@ describe('buildAgentRunGraph', () => {
             }),
         ]));
     });
+
+    it('projects child failure event errors onto child edges and synthetic child nodes', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'root-task',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        const error = { code: 'ALL_MODES_FAILED', message: 'No HTML returned' };
+        const events: AgentRunSourceEvent[] = [
+            {
+                eventId: 'root-started',
+                sessionId: 'root-task',
+                seq: 1,
+                type: 'task.started',
+                payload: { taskId: 'root-task' },
+                createdAt: '2026-06-20T17:41:54.000Z',
+            },
+            {
+                eventId: 'child-started',
+                sessionId: 'root-task',
+                seq: 2,
+                type: 'task.child_started',
+                payload: {
+                    taskId: 'root-task',
+                    token: 'child-token',
+                    childTaskId: 'child-task',
+                    childAgentId: 'child-agent',
+                },
+                createdAt: '2026-06-20T17:41:55.000Z',
+            },
+            {
+                eventId: 'child-failed',
+                sessionId: 'root-task',
+                seq: 3,
+                type: 'task.child_failed',
+                payload: {
+                    taskId: 'root-task',
+                    token: 'child-token',
+                    childTaskId: 'child-task',
+                    childAgentId: 'child-agent',
+                    error,
+                },
+                createdAt: '2026-06-20T17:42:10.000Z',
+            },
+        ];
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'root-task',
+            sessionManager,
+            events,
+            driverRuns: [
+                {
+                    providerRunId: 'root-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'root-task',
+                    agentId: 'root-agent',
+                    rootTaskId: 'root-task',
+                    operation: 'agent.run',
+                    status: 'failed',
+                    boundaryKind: 'fail',
+                },
+            ],
+        });
+
+        expect(graph.edges).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                childTaskId: 'child-task',
+                status: 'failed',
+                error,
+                finishedAt: '2026-06-20T17:42:10.000Z',
+            }),
+        ]));
+        expect(graph.nodes).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: 'child-task',
+                agentId: 'child-agent',
+                status: 'failed',
+                error,
+                finishedAt: '2026-06-20T17:42:10.000Z',
+            }),
+        ]));
+    });
 });

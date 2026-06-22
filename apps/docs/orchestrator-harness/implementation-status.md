@@ -275,9 +275,15 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 - `apps/examples/phase2-parent-agent/tests/parentAgent.test.ts` — parent DAG
   regression coverage for loop-mode input normalization and completion after
   awaited child delegation.
+- `packages/driver-hatchet/tests/task.test.ts` — durable parent task behavior,
+  including `await_child` event waits, already-persisted child completion/failure
+  recovery, out-of-order child completion selection, root finalization, semantic
+  failure finalization, wait timeout failure, task logging, and Hatchet execution
+  timeout defaults.
 - `packages/core/tests/operator.runGraph.test.ts` — operator graph projection,
-  durable turn fields, completed child edge projection, and stale parent-row
-  status derivation.
+  durable turn fields, completed/failed child edge projection, recursive child
+  turns, stale parent-row status derivation, stale running turn finalization, and
+  semantic failure derivation.
 - `yarn workspace @a2arium/operator-viewer build` — Vite/React viewer build.
 - `TaskEngine.sync`, `TaskEngine.inbox`, `TaskEngine.async_race` — pass with
   driver-routed call sites.
@@ -286,12 +292,15 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Next phase: continue Phase 3 external wake hardening and real-run operator
-validation, while starting the production-readiness track in parallel. The first
-production-readiness work should be the semantic run summary/edge read model,
-root-only fleet correctness, child counts, query/index review, and payload-budget
-error surfacing. Normalized graph tables are no longer just polish; they are the
-likely production read path.
+Next phase: continue Phase 3 beyond child wakes. Child `await_child` fan-in now
+has durable-parent unit coverage for post-wait completion, pre-wait persisted
+completion/failure, child semantic failure propagation, out-of-order completion
+selection, wait timeout failure, and operator graph projection. Remaining Phase 3
+work is durable handling for non-child external/conversation wakes, cancellation
+semantics, durable dedupe policy, and real-run validation under worker restarts.
+In parallel, start the production-readiness read model: semantic run summaries,
+edge facts, root-only fleet correctness, child counts, query/index review, and
+payload-budget error surfacing.
 
 ## Open questions (carried from requirements §11)
 
