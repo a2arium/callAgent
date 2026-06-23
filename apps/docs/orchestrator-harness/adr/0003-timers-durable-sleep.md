@@ -31,6 +31,8 @@ on startup and every N minutes:
 Source of truth for timer semantics remains callAgent persisted state. Hatchet
 provides waiting and dispatch.
 
+Implementation contract: `../specs/timer-wakes.md`.
+
 ## Consequences
 
 - We use the Hatchet-native primitive that matches runtime sleeps.

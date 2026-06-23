@@ -97,7 +97,9 @@ Type: event or regular task used by `TimerReconciler`.
 Responsibility:
 
 Push a timer wake into the durable loop or call `TurnExecutor.runSegment` if the
-timer is recovered outside the active durable task.
+timer is recovered outside the active durable task. Detailed timer state,
+idempotency, races, reconciler behavior, and B2 acceptance live in
+`timer-wakes.md`.
 
 ## Metadata
 

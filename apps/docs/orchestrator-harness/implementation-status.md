@@ -94,6 +94,8 @@ first POC candidate.
 - `specs/turn-executor-kernel.md` — the shared **segment** kernel contract
   (`runSegment`).
 - `specs/hatchet-task-model.md` — Hatchet task definitions, metadata, keys.
+- `specs/timer-wakes.md` — Phase 4 durable timer/sleep/reconciler contract and
+  B2 acceptance.
 - `specs/worker-runtime.md` — what a Hatchet worker process must construct
   (composition root, process-global hazards, cross-process bus).
 - `specs/deletion-inventory.md` — line-referenced marked-for-deletion list.
@@ -346,9 +348,10 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Start Phase 4: timers via durable sleep + reconciler. The implementation should
-make timer/token expiry restart-safe before deleting in-process `setTimeout`
-semantic waits:
+Start Phase 4: timers via durable sleep + reconciler. Use
+`specs/timer-wakes.md` as the implementation contract. The implementation
+should make timer/token expiry restart-safe before deleting in-process
+`setTimeout` semantic waits:
 
 1. Define the timer wake contract and boundary shape (`sleep` / `sleep_until` /
    token expiry) in the runtime seam.

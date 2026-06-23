@@ -206,11 +206,23 @@ tests before the dashboard becomes the primary production incident UI.
 
 Goal: native, restart-safe timers.
 
-1. Token expiry / "sleep until" via `ctx.sleepFor` inside `aplret.task`.
-2. `TimerReconciler`: scan pending tokens with `expiresAt <= now`, enqueue
+Normative implementation spec: `specs/timer-wakes.md`.
+
+1. Persist timer facts for token expiry and explicit sleep boundaries. callAgent
+   state remains the source of truth; Hatchet durable sleep is the efficient wait
+   primitive, not the only record of timer existence.
+2. Token expiry / "sleep until" via durable sleep inside `aplret.task`.
+   `await_input` with `expiresAt` waits for either the input event or the timer
+   deadline. Explicit `sleep` boundaries wait until `fireAt`.
+3. Add idempotent `aplret.timer.fire` repair/manual-fire path. Duplicate fires,
+   canceled timers, and already-satisfied tokens must return success no-op.
+4. Add `TimerReconciler`: scan pending timers with `dueAt <= now`, enqueue
    `aplret.timer.fire` idempotently on startup + periodically (defense in depth).
-3. Acceptance: POC gate B2 (timer survives engine/worker restart; downtime
-   covered by reconciler).
+5. Project timer schedule/fire into the operator graph as hidden-by-default
+   effects and expose waiting reason (`Waiting until ...`, `Sleeping until ...`)
+   without requiring Hatchet UI.
+6. Acceptance: POC gate B2 (timer survives worker restart, Hatchet/runtime
+   downtime during `dueAt` is recovered by reconciler, duplicate fire is no-op).
 
 Deletes (guarded): in-process `setTimeout` semantic waits for token expiry.
 

@@ -37,7 +37,11 @@ harness checklist style.
       waits resume.
 - [ ] Conversation wakes have runtime-seam coverage, but remain delegated until
       a first-class durable conversation wait boundary exists (ADR 0008).
-- [ ] Timers via durable sleep; `TimerReconciler` implemented.
+- [ ] Timer wake contract implemented per `specs/timer-wakes.md`.
+- [ ] Timers via durable sleep in `aplret.task`; `await_input.expiresAt` races
+      input event vs timer deadline correctly.
+- [ ] `aplret.timer.fire` idempotent repair/manual-fire path implemented.
+- [ ] `TimerReconciler` startup/periodic overdue-token scan implemented.
 - [x] `driver_runs` table + composite metadata keys.
 
 ## Idempotency & ordering
