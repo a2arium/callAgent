@@ -276,6 +276,67 @@ describe('buildAgentRunGraph', () => {
         expect(graph.root.finishedAt).toBe('2026-06-19T07:05:07.319Z');
     });
 
+    it('marks the root running when a resumed turn is active after a stale root AbortError', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-resumed',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-resumed', 'task.started', {
+            taskId: 'task-resumed',
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-resumed',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'parent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-resumed',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-resumed',
+                    operation: 'agent.run',
+                    status: 'failed',
+                    boundaryKind: 'fail',
+                    error: { name: 'AbortError', message: 'Operation cancelled by AbortSignal' },
+                    updatedAt: '2026-06-23T12:00:10.000Z',
+                },
+                {
+                    providerRunId: 'turn-await',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-resumed',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-resumed',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    turnSeq: 1,
+                    boundaryKind: 'await_child',
+                    updatedAt: '2026-06-23T12:00:20.000Z',
+                },
+                {
+                    providerRunId: 'turn-running',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-resumed',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-resumed',
+                    operation: 'turn.segment',
+                    status: 'running',
+                    turnSeq: 2,
+                    updatedAt: '2026-06-23T12:00:30.000Z',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('running');
+        expect(graph.root.finishedAt).toBeUndefined();
+    });
+
     it('finalizes stale running turns when a later turn exists for the same task', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);

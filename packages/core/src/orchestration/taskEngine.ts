@@ -238,6 +238,13 @@ function deriveListRunStatus(
         return 'failed';
     }
 
+    const latestSegment = [...relatedRuns]
+        .reverse()
+        .find((run) => run.operation === 'turn.segment' || run.operation === 'segment');
+    if (normalizeListRunStatus(latestSegment?.status) === 'running') {
+        return 'running';
+    }
+
     const terminalSegment = [...relatedRuns]
         .reverse()
         .find((run) => run.operation === 'turn.segment' && run.boundaryKind !== null && run.boundaryKind !== undefined);

@@ -291,6 +291,13 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
         return 'failed';
     }
 
+    const latestSegment = [...driverRuns]
+        .reverse()
+        .find((run) => run.operation === 'turn.segment' || run.operation === 'segment');
+    if (normalizeStatus(latestSegment?.status) === 'running') {
+        return 'running';
+    }
+
     const terminalSegment = [...driverRuns]
         .reverse()
         .find((run) => run.operation === 'turn.segment' && run.boundaryKind !== null && run.boundaryKind !== undefined);
@@ -306,13 +313,14 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
     if (rootStatus === 'failed') {
         return 'failed';
     }
-    if (rootStatus === 'completed') {
-        return 'completed';
-    }
 
     const latestTurnBoundary = latestTurnCompleted ? turnTransitionKind(latestTurnCompleted.payload) : undefined;
     if (isAwaitBoundary(latestTurnBoundary)) {
         return 'running';
+    }
+
+    if (rootStatus === 'completed') {
+        return 'completed';
     }
 
     if (rootStatus !== 'unknown' && rootStatus !== 'queued') {

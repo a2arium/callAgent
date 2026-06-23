@@ -135,4 +135,88 @@ describe('TaskEngine operator agent run list', () => {
         const allRuns = await engine.listAgentRuns({ tenantId: 'default', scope: 'all', limit: 20 });
         expect(allRuns.items.map((item) => item.taskId)).toEqual(['root-task', 'a2a_root-task_child-agent_123']);
     });
+
+    it('shows a resumed task as running when a newer turn segment is active after root AbortError', async () => {
+        const failedRootRun = {
+            id: 'run-root',
+            provider: 'hatchet',
+            providerRunId: 'provider-root',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'agent.run',
+            status: 'failed',
+            boundaryKind: 'fail',
+            error: { name: 'AbortError', message: 'Operation cancelled by AbortSignal' },
+            createdAt: now,
+            updatedAt: new Date('2026-06-23T12:00:10.000Z'),
+        };
+        const awaitingSegment = {
+            id: 'turn-1',
+            provider: 'hatchet',
+            providerRunId: 'provider-turn-1',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'turn.segment',
+            status: 'completed',
+            boundaryKind: 'await_child',
+            turnSeq: 1,
+            createdAt: new Date('2026-06-23T12:00:20.000Z'),
+            updatedAt: new Date('2026-06-23T12:00:21.000Z'),
+        };
+        const runningSegment = {
+            id: 'turn-2',
+            provider: 'hatchet',
+            providerRunId: 'provider-turn-2',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'turn.segment',
+            status: 'running',
+            boundaryKind: null,
+            turnSeq: 2,
+            createdAt: new Date('2026-06-23T12:00:30.000Z'),
+            updatedAt: new Date('2026-06-23T12:00:30.000Z'),
+        };
+        const runs = [failedRootRun, awaitingSegment, runningSegment];
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async (args: { where?: Record<string, unknown> }) => {
+                    if (Array.isArray(args.where?.OR)) {
+                        return runs;
+                    }
+                    return [failedRootRun];
+                }),
+            },
+            wMEvent: {
+                findMany: jest.fn(async () => [
+                    {
+                        eventId: 'event-1',
+                        sessionId: 'root-task',
+                        seq: 1,
+                        type: 'task.started',
+                        payload: { taskId: 'root-task' },
+                        createdAt: now,
+                    },
+                ]),
+            },
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 20 });
+        expect(page.items[0]).toEqual(expect.objectContaining({
+            taskId: 'root-task',
+            status: 'running',
+        }));
+        expect(page.items[0]?.finishedAt).toBeUndefined();
+    });
 });
