@@ -78,7 +78,10 @@ import {
     type RuntimeWakeEvent,
     type TurnExecutor,
 } from '../runtime/index.js';
-import { markSegmentCancellationRequested } from '../runtime/segmentCancellation.js';
+import {
+    markSegmentCancellationRequested,
+    readSegmentCancellation,
+} from '../runtime/segmentCancellation.js';
 
 
 
@@ -1637,6 +1640,12 @@ export class TaskEngine {
         const loaded = await this.sessionManager!.load(params.tenantId, params.taskId);
         if (loaded !== null) {
             const snapshot = (loaded.snapshot as Record<string, unknown> | undefined) ?? {};
+            if (
+                readSegmentCancellation(snapshot) !== undefined ||
+                await this.hasTerminalTaskEvent(params.tenantId, params.taskId)
+            ) {
+                return { acknowledged: true };
+            }
             await this.sessionManager!.saveSnapshot({
                 tenantId: params.tenantId,
                 sessionId: params.taskId,
@@ -1655,6 +1664,19 @@ export class TaskEngine {
         });
 
         return { acknowledged: true };
+    }
+
+    private async hasTerminalTaskEvent(tenantId: string, taskId: string): Promise<boolean> {
+        const events = await this.sessionManager!.listEventsSince({
+            tenantId,
+            sessionId: taskId,
+            sinceSeq: -1,
+        });
+        return events.some((event) =>
+            event.type === 'task.completed' ||
+            event.type === 'task.failed' ||
+            event.type === 'task.canceled'
+        );
     }
 
     /**

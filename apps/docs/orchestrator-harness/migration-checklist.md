@@ -67,7 +67,7 @@ harness checklist style.
 - [x] Pending-token wakes become durable no-ops after cancel.
 - [ ] Queued Hatchet runs cancelled best-effort; running segment finishes its
       current effect boundary (no mid-segment kill).
-- [ ] `cancel` idempotent (`taskId:cancel`); cancel-after-complete is a no-op.
+- [x] `cancel` idempotent (`taskId:cancel`); cancel-after-complete is a no-op.
 
 ## Parity & cutover
 

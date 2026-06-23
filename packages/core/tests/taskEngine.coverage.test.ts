@@ -370,6 +370,89 @@ describe('TaskEngine orchestration coverage', () => {
         });
     });
 
+    test('cancelTask is a no-op when cancellation was already requested', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-cancel-twice', {
+            meta: {
+                agentId: 'agent-a',
+                cancellation: {
+                    requested: true,
+                    reason: 'first stop',
+                    requestedAt: '2026-06-19T00:00:00.000Z',
+                },
+            },
+        }, BigInt(0), 'agent-a');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-cancel-twice',
+            agentId: 'agent-a',
+            reason: 'second stop',
+        });
+
+        const persisted = store.getSnapshot('t', 'task-cancel-twice');
+        expect(readSegmentCancellation(persisted?.snapshot)).toEqual({
+            requested: true,
+            reason: 'first stop',
+            requestedAt: '2026-06-19T00:00:00.000Z',
+        });
+        expect(cancel).not.toHaveBeenCalled();
+        expect(store.writeCount).toBe(0);
+    });
+
+    test('cancelTask is a no-op after a terminal task event', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-complete', {
+            meta: { agentId: 'agent-a' },
+        }, BigInt(0), 'agent-a');
+        await store.appendEvent({
+            tenantId: 't',
+            sessionId: 'task-complete',
+            type: 'task.completed',
+            payload: { resultPreview: { ok: true } },
+        });
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-complete',
+            agentId: 'agent-a',
+            reason: 'too late',
+        });
+
+        const persisted = store.getSnapshot('t', 'task-complete');
+        expect(readSegmentCancellation(persisted?.snapshot)).toBeUndefined();
+        expect(cancel).not.toHaveBeenCalled();
+        expect(store.writeCount).toBe(0);
+    });
+
     test('stages child completion with CAS retry and deduplication', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
