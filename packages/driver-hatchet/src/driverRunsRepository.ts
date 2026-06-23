@@ -39,6 +39,11 @@ export type FinalizeRootRunRecord = {
     error?: Prisma.InputJsonValue | typeof Prisma.JsonNull | null;
 };
 
+export type DriverRunTaskSelector = {
+    tenantId: string;
+    taskId: string;
+};
+
 export class DriverRunsRepository {
     constructor(private readonly prisma: PrismaClient) {}
 
@@ -114,6 +119,44 @@ export class DriverRunsRepository {
                 boundaryKind: record.boundaryKind ?? undefined,
                 turnTraceId: record.turnTraceId ?? undefined,
                 error: record.error === undefined ? undefined : record.error ?? Prisma.JsonNull,
+                updatedAt: new Date(),
+            },
+        });
+    }
+
+    async findCancelableProviderRunIds(selector: DriverRunTaskSelector): Promise<string[]> {
+        const rows = await this.prisma.driverRun.findMany({
+            where: {
+                tenantId: selector.tenantId,
+                providerRunId: { not: null },
+                status: { in: ['queued', 'running'] },
+                OR: [
+                    { taskId: selector.taskId },
+                    { rootTaskId: selector.taskId },
+                ],
+            },
+            select: { providerRunId: true },
+        });
+        return [
+            ...new Set(
+                rows
+                    .map((row) => row.providerRunId)
+                    .filter((providerRunId): providerRunId is string => typeof providerRunId === 'string')
+            ),
+        ];
+    }
+
+    async markProviderRunsCanceled(providerRunIds: string[]): Promise<void> {
+        if (providerRunIds.length === 0) {
+            return;
+        }
+        await this.prisma.driverRun.updateMany({
+            where: {
+                providerRunId: { in: providerRunIds },
+                status: { in: ['queued', 'running'] },
+            },
+            data: {
+                status: 'canceled',
                 updatedAt: new Date(),
             },
         });

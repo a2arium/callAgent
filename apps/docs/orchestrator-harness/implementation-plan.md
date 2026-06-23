@@ -140,8 +140,9 @@ boundary backed by `aplret.external.<token>` Hatchet events. Timer and
 conversation wake application/routing have runtime-seam coverage only.
 Boundary cancellation now writes intent to the snapshot, turns pending-token
 late wakes into durable `canceled` no-ops, and treats double cancel /
-cancel-after-terminal as no-ops. Remaining Phase 3 work is queued Hatchet
-cancellation, durable dedupe policy closure, and worker-restart validation;
+cancel-after-terminal as no-ops. Queued/running Hatchet provider runs are
+cancelled best-effort from recorded `driver_runs` provider ids. Remaining Phase
+3 work is durable dedupe policy closure and worker-restart validation;
 conversation durable waits need a
 first-class conversation boundary before Hatchet event waits can own them.
 
@@ -155,7 +156,8 @@ first-class conversation boundary before Hatchet event waits can own them.
 3. Hot chat/SSE resumes stay in-process (ADR 0004).
 4. Cancellation: boundary cancellation (ADR 0010) — intent in snapshot and
    pending-token wake no-op are implemented; double cancel and
-   cancel-after-terminal are no-ops; queued Hatchet run cancellation remains.
+   cancel-after-terminal are no-ops; queued/running Hatchet provider runs are
+   cancelled best-effort.
 5. Acceptance: POC gate B9 (fan-out/fan-in), parity of projected stream events,
    plus cancel-while-waiting / cancel-with-children scenarios (ADR 0010).
 

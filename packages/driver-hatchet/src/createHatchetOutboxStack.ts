@@ -65,7 +65,8 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
         { eventBus: params.eventBus, prisma: params.prisma },
         taskTask,
         agentTaskTasks,
-        resolveEventPusher(hatchet)
+        resolveEventPusher(hatchet),
+        resolveRunsCanceller(hatchet)
     );
     return { runtimeDriver, hatchet, outboxDispatchTask, driverRuns };
 }
@@ -123,4 +124,13 @@ export async function startOutboxWorker(params: {
 function resolveEventPusher(hatchet: HatchetClient): HatchetEventPusher | undefined {
     const candidate = hatchet as unknown as { events?: HatchetEventPusher };
     return candidate.events;
+}
+
+function resolveRunsCanceller(hatchet: HatchetClient) {
+    const candidate = hatchet as unknown as {
+        runs?: { cancel?: (opts: { ids: string[] }) => Promise<unknown> };
+    };
+    return typeof candidate.runs?.cancel === 'function'
+        ? { cancel: (opts: { ids: string[] }) => candidate.runs!.cancel!(opts) }
+        : undefined;
 }

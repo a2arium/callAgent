@@ -27,6 +27,10 @@ export type HatchetEventPusher = {
     push: (eventKey: string, payload: Record<string, unknown>, opts?: { key?: string }) => Promise<unknown>;
 };
 
+export type HatchetRunsCanceller = {
+    cancel: (opts: { ids: string[] }) => Promise<unknown>;
+};
+
 export class HatchetRuntimeDriver implements RuntimeDriver {
     constructor(
         private readonly delegate: RuntimeDriver,
@@ -41,7 +45,8 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             string,
             TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput>
         >,
-        private readonly events?: HatchetEventPusher
+        private readonly events?: HatchetEventPusher,
+        private readonly runs?: HatchetRunsCanceller
     ) {}
 
     async enqueueStart(params: EnqueueStartParams): Promise<void> {
@@ -108,7 +113,30 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
     }
 
     async cancel(params: CancelParams): Promise<void> {
-        return this.delegate.cancel(params);
+        await this.delegate.cancel(params);
+        if (this.driverRuns === undefined || this.runs === undefined) {
+            return;
+        }
+
+        const providerRunIds = await this.driverRuns.findCancelableProviderRunIds({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+        });
+        if (providerRunIds.length === 0) {
+            return;
+        }
+
+        try {
+            await this.runs.cancel({ ids: providerRunIds });
+            await this.driverRuns.markProviderRunsCanceled(providerRunIds);
+        } catch (error) {
+            log.warn('Hatchet run cancellation failed; snapshot cancellation remains authoritative', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                providerRunIds,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
     }
 
     async dispatchOutbox(params: DispatchOutboxParams): Promise<void> {

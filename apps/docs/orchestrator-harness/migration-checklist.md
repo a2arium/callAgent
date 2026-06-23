@@ -65,7 +65,7 @@ harness checklist style.
 
 - [x] Cancellation intent written authoritatively to the snapshot.
 - [x] Pending-token wakes become durable no-ops after cancel.
-- [ ] Queued Hatchet runs cancelled best-effort; running segment finishes its
+- [x] Queued Hatchet runs cancelled best-effort; running segment finishes its
       current effect boundary (no mid-segment kill).
 - [x] `cancel` idempotent (`taskId:cancel`); cancel-after-complete is a no-op.
 

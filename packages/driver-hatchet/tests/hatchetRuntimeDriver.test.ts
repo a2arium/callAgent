@@ -67,6 +67,94 @@ describe('HatchetRuntimeDriver', () => {
         expect(driver.getDelegate()).toBe(delegate);
     });
 
+    it('cancels active Hatchet provider runs best-effort after delegate cancellation', async () => {
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const driverRuns = {
+            findCancelableProviderRunIds: jest.fn(async () => ['run-1', 'run-2']),
+            markProviderRunsCanceled: jest.fn(async () => undefined),
+        };
+        const runs = {
+            cancel: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            driverRuns as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            runs
+        );
+
+        await driver.cancel({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            idempotencyKey: 'task-1:cancel',
+            reason: 'operator stop',
+        });
+
+        expect(delegate.cancel).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+        }));
+        expect(driverRuns.findCancelableProviderRunIds).toHaveBeenCalledWith({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+        });
+        expect(runs.cancel).toHaveBeenCalledWith({ ids: ['run-1', 'run-2'] });
+        expect(driverRuns.markProviderRunsCanceled).toHaveBeenCalledWith(['run-1', 'run-2']);
+    });
+
+    it('does not fail cancellation when Hatchet provider cancellation fails', async () => {
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const driverRuns = {
+            findCancelableProviderRunIds: jest.fn(async () => ['run-1']),
+            markProviderRunsCanceled: jest.fn(async () => undefined),
+        };
+        const runs = {
+            cancel: jest.fn(async () => {
+                throw new Error('hatchet unavailable');
+            }),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            driverRuns as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            runs
+        );
+
+        await expect(driver.cancel({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            idempotencyKey: 'task-1:cancel',
+            reason: 'operator stop',
+        })).resolves.toBeUndefined();
+
+        expect(delegate.cancel).toHaveBeenCalled();
+        expect(runs.cancel).toHaveBeenCalledWith({ ids: ['run-1'] });
+        expect(driverRuns.markProviderRunsCanceled).not.toHaveBeenCalled();
+    });
+
     it('enqueues aplret.task for start when the start surface is enabled', async () => {
         process.env.CALLAGENT_DRIVER_SURFACES = 'start';
         const delegate: RuntimeDriver = {
