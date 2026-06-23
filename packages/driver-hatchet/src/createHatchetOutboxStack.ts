@@ -1,3 +1,4 @@
+import { RuntimeTimerRepository } from '@a2arium/callagent-core/unstable';
 import type { IEventBus } from '@a2arium/callagent-core/unstable';
 import type { RuntimeDriver } from '@a2arium/callagent-core/unstable';
 import type { TurnExecutor } from '@a2arium/callagent-core/unstable';
@@ -10,6 +11,8 @@ import type { HatchetEventPusher } from './hatchetRuntimeDriver.js';
 import { createOutboxDispatchTask } from './tasks/outboxDispatch.js';
 import { createSegmentTask } from './tasks/segment.js';
 import { agentTaskName, createTaskTask } from './tasks/task.js';
+import { createTimerFireTask } from './tasks/timerFire.js';
+import { isTimerSurfaceEnabled, TimerReconciler } from './timerReconciler.js';
 import {
     resolveAgentHatchetExecutionTimeout,
     resolveSharedSegmentHatchetExecutionTimeout,
@@ -20,6 +23,7 @@ export type HatchetOutboxStack = {
     hatchet: HatchetClient;
     outboxDispatchTask: ReturnType<typeof createOutboxDispatchTask>;
     driverRuns: DriverRunsRepository;
+    timerReconciler?: TimerReconciler;
 };
 
 export type CreateHatchetOutboxStackParams = {
@@ -33,12 +37,18 @@ export type CreateHatchetOutboxStackParams = {
 export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams): HatchetOutboxStack {
     const hatchet = params.hatchet ?? createHatchetClient();
     const driverRuns = new DriverRunsRepository(params.prisma);
+    const runtimeTimers = new RuntimeTimerRepository(params.prisma);
     const outboxDispatchTask = createOutboxDispatchTask(hatchet, {
         eventBus: params.eventBus,
         prisma: params.prisma,
         driverRuns,
     });
     const taskTask = params.turnExecutor !== undefined ? createTaskTask(hatchet) : undefined;
+    const timerFireTask = createTimerFireTask(hatchet, {
+        runtimeTimers,
+        driverRuns,
+        events: resolveEventPusher(hatchet),
+    });
     const registeredAgents = globalAgentRegistry.listAgents();
     const agentTaskTasks =
         params.turnExecutor !== undefined
@@ -66,9 +76,14 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
         taskTask,
         agentTaskTasks,
         resolveEventPusher(hatchet),
-        resolveRunsCanceller(hatchet)
+        resolveRunsCanceller(hatchet),
+        runtimeTimers,
+        timerFireTask
     );
-    return { runtimeDriver, hatchet, outboxDispatchTask, driverRuns };
+    const timerReconciler = isTimerSurfaceEnabled()
+        ? new TimerReconciler(runtimeTimers, timerFireTask)
+        : undefined;
+    return { runtimeDriver, hatchet, outboxDispatchTask, driverRuns, timerReconciler };
 }
 
 export async function startOutboxWorker(params: {
@@ -80,10 +95,16 @@ export async function startOutboxWorker(params: {
 }): Promise<{ worker: { start: () => Promise<void>; stop: () => Promise<void> } }> {
     const hatchet = params.hatchet ?? createHatchetClient();
     const driverRuns = new DriverRunsRepository(params.prisma);
+    const runtimeTimers = new RuntimeTimerRepository(params.prisma);
     const outboxDispatchTask = createOutboxDispatchTask(hatchet, {
         eventBus: params.eventBus,
         prisma: params.prisma,
         driverRuns,
+    });
+    const timerFireTask = createTimerFireTask(hatchet, {
+        runtimeTimers,
+        driverRuns,
+        events: resolveEventPusher(hatchet),
     });
     if (params.turnExecutor !== undefined) {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker', {
@@ -94,7 +115,12 @@ export async function startOutboxWorker(params: {
         const agentTasks = registeredAgents
             .map((agent) => createTaskTask(
                 hatchet,
-                { prisma: params.prisma, driverRuns, events: resolveEventPusher(hatchet) },
+                {
+                    prisma: params.prisma,
+                    driverRuns,
+                    runtimeTimers,
+                    events: resolveEventPusher(hatchet),
+                },
                 agentTaskName(agent.name),
                 {
                     executionTimeout: resolveAgentHatchetExecutionTimeout(
@@ -110,13 +136,22 @@ export async function startOutboxWorker(params: {
                 { turnExecutor: params.turnExecutor, driverRuns },
                 { executionTimeout: resolveSharedSegmentHatchetExecutionTimeout(agentPlugins) }
             ),
-            createTaskTask(hatchet, { prisma: params.prisma, driverRuns, events: resolveEventPusher(hatchet) }),
+            createTaskTask(hatchet, {
+                prisma: params.prisma,
+                driverRuns,
+                runtimeTimers,
+                events: resolveEventPusher(hatchet),
+            }),
+            timerFireTask,
             ...agentTasks,
         ]);
+        if (isTimerSurfaceEnabled()) {
+            new TimerReconciler(runtimeTimers, timerFireTask).start();
+        }
         return { worker };
     } else {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker');
-        await worker.registerWorkflows([outboxDispatchTask]);
+        await worker.registerWorkflows([outboxDispatchTask, timerFireTask]);
         return { worker };
     }
 }

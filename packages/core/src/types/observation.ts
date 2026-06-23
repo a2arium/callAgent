@@ -293,7 +293,7 @@ export const ObservationSchema = z.discriminatedUnion('source', [
     }),
     z.object({ 
         source: z.literal('env'), 
-        kind: z.enum(['config.updated', 'clock.tick', 'snapshot.available', 'external.event']), 
+        kind: z.enum(['config.updated', 'clock.tick', 'snapshot.available', 'external.event', 'timer.expired']), 
         payload: z.unknown(),
         ...BaseObservationProps
     }),

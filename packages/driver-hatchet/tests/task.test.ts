@@ -424,6 +424,103 @@ describe('executeTaskTask', () => {
         }));
     });
 
+    it('expires await_input with a runtime timer when the sleep branch wins', async () => {
+        const dueAt = new Date(Date.now() + 60_000).toISOString();
+        const timer = {
+            id: 'timer-row-1',
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            rootTaskId: 'task-1',
+            token: 'input-token',
+            timerId: 'timer-1',
+            dueAt: new Date(dueAt),
+            kind: 'token_expiry',
+            status: 'scheduled',
+            idempotencyKey: 'timer:tenant-1:task-1:input-token:timer-1',
+            fireLeaseId: null,
+            fireLeaseUntil: null,
+            payload: null,
+            providerRunId: null,
+            providerTaskRunId: null,
+            error: null,
+            firedAt: null,
+            canceledAt: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        };
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'await_input', token: 'input-token', expiresAt: dueAt },
+                taskStatus: { state: 'input-required', timestamp: '2026-06-19T00:00:00.000Z' },
+            },
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { ok: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitFor: jest.fn(async () => ({ timer: {} })),
+        };
+        const runtimeTimers = {
+            schedule: jest.fn(async () => timer),
+            markFiredByTimerId: jest.fn(async () => true),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { runtimeTimers: runtimeTimers as never }
+        );
+
+        expect(runtimeTimers.schedule).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            token: 'input-token',
+            fireAt: dueAt,
+            kind: 'token_expiry',
+        }));
+        expect(ctx.waitFor).toHaveBeenCalledTimes(1);
+        expect(runtimeTimers.markFiredByTimerId).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            token: 'input-token',
+            timerId: 'timer-1',
+        }));
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            expect.any(String),
+            expect.objectContaining({
+                wake: {
+                    trigger: 'timer',
+                    event: expect.objectContaining({
+                        kind: 'timer',
+                        token: 'input-token',
+                        timerId: 'timer-1',
+                        reason: 'input_timeout',
+                    }),
+                },
+                idempotencyKey: 'timer:tenant-1:task-1:input-token:timer-1',
+                turnSeq: 2,
+            }),
+            expect.any(Object)
+        );
+    });
+
     it('resumes await_child from an already persisted child completion before waiting for Hatchet events', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const segmentOutputs = [
@@ -762,5 +859,87 @@ describe('executeTaskTask', () => {
             boundaryKind: 'fail',
             error: expect.objectContaining({ message: 'execution timeout' }),
         }));
+    });
+
+    it('does not mark the root failed for Hatchet durable eviction aborts', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const abort = new Error('Operation cancelled by AbortSignal');
+        abort.name = 'AbortError';
+        abort.stack = [
+            'AbortError: Operation cancelled by AbortSignal',
+            '    at DurableEvictionManager.cancelLocal (/worker-internal.js:363:45)',
+            '    at DurableEvictionManager._evictRun (/eviction-manager.js:57:14)',
+        ].join('\n');
+        const ctx = {
+            runChild: jest.fn(async () => {
+                throw abort;
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await expect(executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { driverRuns: { finalizeRootRun } as never }
+        )).rejects.toThrow('Operation cancelled by AbortSignal');
+
+        expect(finalizeRootRun).not.toHaveBeenCalled();
+    });
+
+    it('marks the root canceled when a provider abort follows operator cancellation metadata', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const abort = new Error('Operation cancelled by AbortSignal');
+        abort.name = 'AbortError';
+        abort.stack = [
+            'AbortError: Operation cancelled by AbortSignal',
+            '    at InternalWorker.<anonymous> (/worker-internal.js:606:45)',
+        ].join('\n');
+        const ctx = {
+            runChild: jest.fn(async () => {
+                throw abort;
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+        const prisma = {
+            wMSession: {
+                findUnique: jest.fn(async () => ({
+                    snapshot: {
+                        meta: {
+                            cancellation: {
+                                requested: true,
+                                reason: 'operator stop',
+                                requestedAt: '2026-06-23T00:00:00.000Z',
+                            },
+                        },
+                    },
+                })),
+            },
+        };
+
+        await expect(executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { driverRuns: { finalizeRootRun } as never, prisma: prisma as never }
+        )).rejects.toThrow('Operation cancelled by AbortSignal');
+
+        expect(finalizeRootRun).toHaveBeenCalledWith({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'canceled',
+            agentId: 'agent-1',
+            boundaryKind: 'canceled',
+        });
     });
 });

@@ -201,11 +201,14 @@ export function applyWakeToSnapshot(
             }
             const observation: EngineObservation = {
                 source: 'env',
-                kind: 'external.event',
+                kind: 'timer.expired',
                 payload: {
                     token: event.token,
-                    type: 'timer.fired',
-                    payload: { timerId: event.timerId, data: event.payload },
+                    timerId: event.timerId,
+                    dueAt: event.dueAt,
+                    firedAt: event.firedAt,
+                    reason: event.reason,
+                    ...(event.payload !== undefined ? { payload: event.payload } : {}),
                 },
                 provenance: observationProvenance(event.token, turnFromSnapshot(base)),
             };
@@ -220,7 +223,7 @@ export function applyWakeToSnapshot(
                 trigger: 'event',
                 turnParams: {
                     eventToken: event.token,
-                    eventType: 'timer.fired',
+                    eventType: 'timer.expired',
                     eventPayload: event.payload,
                 },
             };

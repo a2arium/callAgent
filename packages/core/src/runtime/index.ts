@@ -20,6 +20,23 @@ export type {
     DispatchOutboxParams,
 } from './runtimeDriver.js';
 
+export {
+    RuntimeTimerRepository,
+    deriveRuntimeTimerId,
+    deriveRuntimeTimerIdempotencyKey,
+    timerKindToReason,
+    timerRecordToWake,
+} from './runtimeTimer.js';
+export type {
+    RuntimeTimerKind,
+    RuntimeTimerStatus,
+    RuntimeTimerRecord,
+    RuntimeTimerScheduleParams,
+    RuntimeTimerFireLease,
+    RuntimeTimerPrisma,
+    TimerExpiredReason,
+} from './runtimeTimer.js';
+
 export type {
     TurnExecutor,
     TurnTrigger,

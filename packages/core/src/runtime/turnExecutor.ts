@@ -66,7 +66,7 @@ export type SegmentBoundary =
     | { kind: 'await_tool'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_event'; token: string }
-    | { kind: 'sleep'; token: string; fireAt: string }
+    | { kind: 'sleep'; token: string; fireAt: string; timerId?: string; payload?: unknown }
     | { kind: 'paused'; reason: string }
     | { kind: 'canceled'; reason?: string }
     | { kind: 'complete'; result?: unknown }

@@ -1,4 +1,4 @@
-import { ExternalLink, PanelRightClose } from 'lucide-react';
+import { Ban, ExternalLink, PanelRightClose } from 'lucide-react';
 import { hatchetRunUrl, opikTraceUrl, type OperatorConfig } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
@@ -21,10 +21,13 @@ export function NodeInspector(props: {
   selectedTurnSeq?: number;
   config: OperatorConfig;
   collapseButtonRef?: React.Ref<HTMLButtonElement>;
+  canCancel?: boolean;
+  cancelPending?: boolean;
   onTabChange: (tab: string) => void;
   onTurnSelect: (turn: TurnRun) => void;
   onTurnBack: () => void;
   onCollapse?: () => void;
+  onCancel?: () => void;
 }): React.ReactElement {
   if (!props.node) {
     return (
@@ -55,6 +58,19 @@ export function NodeInspector(props: {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <StatusBadge status={status.status} derived={status.derived} />
+            {props.onCancel ? (
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={props.onCancel}
+                disabled={!props.canCancel || props.cancelPending}
+                title={props.canCancel ? 'Cancel selected agent task' : 'Selected agent is already terminal'}
+              >
+                <Ban className="h-4 w-4" />
+                {props.cancelPending ? 'Canceling...' : 'Cancel'}
+              </Button>
+            ) : null}
             {props.onCollapse ? (
               <Button
                 ref={props.collapseButtonRef}
@@ -127,6 +143,7 @@ function SummaryTab(props: {
       <InspectorSection title="At a glance">
         {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}
         {runtimeError ? <RuntimeErrorNotice error={runtimeError} /> : null}
+        {props.node.cancellation ? <CancellationNotice cancellation={props.node.cancellation} /> : null}
         <div className="grid grid-cols-2 gap-2 text-sm">
           <Metric label="Duration" value={formatDuration(durationBetween(props.node.startedAt, props.node.finishedAt))} />
           <Metric label="Turns" value={formatNumber(props.rollup.turns.length)} />
@@ -314,6 +331,21 @@ function SemanticFailureNotice(props: { failure: SemanticFailure }): React.React
         ) : null}
         <div>
           <span className="font-medium">Message:</span> {props.failure.message}
+        </div>
+      </div>
+    </Notice>
+  );
+}
+
+function CancellationNotice(props: { cancellation: NonNullable<AgentRunNode['cancellation']> }): React.ReactElement {
+  return (
+    <Notice kind="warning" title="Cancellation requested">
+      <div className="grid gap-1">
+        <div>
+          <span className="font-medium">Reason:</span> {props.cancellation.reason ?? 'Not captured'}
+        </div>
+        <div>
+          <span className="font-medium">Requested:</span> {props.cancellation.requestedAt ? formatRelative(props.cancellation.requestedAt) : 'Time not captured'}
         </div>
       </div>
     </Notice>

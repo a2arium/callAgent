@@ -1,9 +1,13 @@
 import type {
     RuntimeWakeEvent,
+    RuntimeTimerRecord,
+    RuntimeTimerRepository,
 } from '@a2arium/callagent-core/unstable';
+import { readSegmentCancellation, timerKindToReason } from '@a2arium/callagent-core/unstable';
 import type { DurableContext } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
 import type { JsonObject, JsonValue } from '@hatchet-dev/typescript-sdk/v1/types.js';
+import { Or, SleepCondition, UserEventCondition } from '@hatchet-dev/typescript-sdk/v1/conditions/index.js';
 import type { HatchetClient } from '../hatchetClient.js';
 import {
     SEGMENT_TASK_NAME,
@@ -40,6 +44,7 @@ export type TaskTaskOutput = SegmentTaskOutput;
 
 export type TaskTaskDeps = {
     driverRuns?: DriverRunsRepository;
+    runtimeTimers?: RuntimeTimerRepository;
     events?: {
         push: (
             eventKey: string,
@@ -104,6 +109,7 @@ type AwaitableBoundary = Extract<
     { kind: 'await_input' | 'await_tool' | 'await_child' | 'await_event' }
 >;
 type SegmentEventWake = Exclude<SegmentTaskWake, { trigger: 'start' }>;
+type TimerBoundary = Extract<SegmentTaskBoundary, { kind: 'await_input' | 'sleep' }>;
 
 export async function executeTaskTask(
     input: TaskTaskInput,
@@ -160,16 +166,27 @@ async function executeTaskTaskInner(
             ) {
                 const event =
                     await findPersistedBoundaryEvent(input, segment.boundary, deps)
-                    ?? await waitForBoundaryEvent(ctx, input, segment.boundary);
+                    ?? await waitForBoundaryEvent(ctx, input, segment.boundary, deps);
                 wake = boundaryEventToWake(segment.boundary, event);
                 idempotencyKey = event.idempotencyKey ?? `${input.taskId}:${event.kind}:${event.token}`;
+                continue;
+            }
+
+            if (segment.boundary.kind === 'sleep') {
+                const event = await waitForSleepBoundary(ctx, input, segment.boundary, deps);
+                wake = { trigger: 'timer', event: event as SegmentEventWake['event'] };
+                idempotencyKey = event.idempotencyKey ?? `${input.taskId}:timer:${event.token}`;
                 continue;
             }
 
             return segment;
         }
     } catch (error) {
-        await finalizeRootRunAsFailed(input, deps, error);
+        if (await isOperatorCancellationAbort(input, deps, error)) {
+            await finalizeRootRunAsCanceled(input, deps);
+        } else if (!isHatchetDurableEvictionAbort(error)) {
+            await finalizeRootRunAsFailed(input, deps, error);
+        }
         throw error;
     }
 }
@@ -213,6 +230,23 @@ async function finalizeRootRunAsFailed(
     });
 }
 
+async function finalizeRootRunAsCanceled(
+    input: TaskTaskInput,
+    deps?: TaskTaskDeps
+): Promise<void> {
+    if (deps?.driverRuns === undefined) {
+        return;
+    }
+
+    await deps.driverRuns.finalizeRootRun({
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        status: 'canceled',
+        agentId: input.agentId ?? null,
+        boundaryKind: 'canceled',
+    });
+}
+
 function isTerminalBoundary(boundary: SegmentTaskBoundary): boolean {
     return boundary.kind === 'complete' || boundary.kind === 'fail' || boundary.kind === 'canceled';
 }
@@ -235,6 +269,51 @@ function hasOkFalse(value: unknown): boolean {
         return false;
     }
     return (value as Record<string, unknown>).ok === false;
+}
+
+function isHatchetDurableEvictionAbort(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+        return false;
+    }
+    const record = error as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name : '';
+    const message = typeof record.message === 'string' ? record.message : '';
+    const stack = typeof record.stack === 'string' ? record.stack : '';
+    return (
+        name === 'AbortError' &&
+        message.includes('Operation cancelled by AbortSignal') &&
+        stack.includes('DurableEvictionManager')
+    );
+}
+
+async function isOperatorCancellationAbort(
+    input: TaskTaskInput,
+    deps: TaskTaskDeps | undefined,
+    error: unknown
+): Promise<boolean> {
+    if (!isHatchetAbortSignalError(error) || deps?.prisma?.wMSession === undefined) {
+        return false;
+    }
+    const row = await deps.prisma.wMSession.findUnique({
+        where: {
+            tenantId_sessionId: {
+                tenantId: input.tenantId,
+                sessionId: input.taskId,
+            },
+        },
+        select: { snapshot: true },
+    });
+    return readSegmentCancellation(row?.snapshot) !== undefined;
+}
+
+function isHatchetAbortSignalError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+        return false;
+    }
+    const record = error as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name : '';
+    const message = typeof record.message === 'string' ? record.message : '';
+    return name === 'AbortError' && message.includes('Operation cancelled by AbortSignal');
 }
 
 async function notifyPersistedA2AParentIfTerminal(
@@ -426,8 +505,13 @@ function buildTaskRunMetadata(
 async function waitForBoundaryEvent(
     ctx: DurableContext<TaskTaskInput>,
     input: TaskTaskInput,
-    boundary: AwaitableBoundary
+    boundary: AwaitableBoundary,
+    deps?: TaskTaskDeps
 ): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    if (boundary.kind === 'await_input' && boundary.expiresAt !== undefined && deps?.runtimeTimers !== undefined) {
+        return waitForInputOrTimer(ctx, input, boundary, deps.runtimeTimers);
+    }
+
     const eventKind =
         boundary.kind === 'await_input'
             ? 'input'
@@ -445,6 +529,187 @@ async function waitForBoundaryEvent(
         `wait:${eventKind}:${boundary.token}`
     );
     return normalizeWakeEvent(eventKind, boundary.token, payload);
+}
+
+async function waitForInputOrTimer(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: Extract<SegmentTaskBoundary, { kind: 'await_input' }>,
+    runtimeTimers: RuntimeTimerRepository
+): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    if (boundary.expiresAt === undefined) {
+        throw new Error('TIMER_EXPIRES_AT_MISSING');
+    }
+    const timer = await scheduleBoundaryTimer(input, boundary, runtimeTimers, 'token_expiry');
+    const inputKey = `aplret.input.${boundary.token}`;
+    const timerKey = `aplret.timer.${boundary.token}`;
+    const expression = `input.tenantId == "${input.tenantId}" && input.taskId == "${input.taskId}"`;
+    const winner = await waitForBoundaryRace(ctx, {
+        eventKey: inputKey,
+        timerKey,
+        expression,
+        fireAt: boundary.expiresAt,
+        inputReadableKey: 'input',
+        timerReadableKey: 'timer',
+        label: `wait:input-or-timer:${boundary.token}`,
+    });
+
+    if (winner.kind === 'timer') {
+        const firedAt = new Date().toISOString();
+        await runtimeTimers.markFiredByTimerId({
+            tenantId: input.tenantId,
+            taskId: input.taskId,
+            token: boundary.token,
+            timerId: timer.timerId,
+            firedAt: new Date(firedAt),
+        });
+        return {
+            kind: 'timer',
+            token: boundary.token,
+            timerId: timer.timerId,
+            dueAt: timer.dueAt.toISOString(),
+            firedAt,
+            reason: timerKindToReason(timer.kind),
+            ...(timer.payload !== null && timer.payload !== undefined ? { payload: timer.payload } : {}),
+            idempotencyKey: timer.idempotencyKey,
+        };
+    }
+
+    await runtimeTimers.cancelTaskTimers({
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        token: boundary.token,
+    });
+    return normalizeWakeEvent('input', boundary.token, winner.payload);
+}
+
+async function waitForSleepBoundary(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: Extract<SegmentTaskBoundary, { kind: 'sleep' }>,
+    deps?: TaskTaskDeps
+): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    if (deps?.runtimeTimers === undefined) {
+        await ctx.sleepUntil(new Date(boundary.fireAt));
+        const firedAt = new Date().toISOString();
+        return {
+            kind: 'timer',
+            token: boundary.token,
+            timerId: boundary.timerId ?? `${input.taskId}:sleep:${boundary.token}`,
+            dueAt: boundary.fireAt,
+            firedAt,
+            reason: 'sleep_due',
+            ...(boundary.payload !== undefined ? { payload: boundary.payload } : {}),
+            idempotencyKey: `${input.taskId}:sleep:${boundary.token}`,
+        };
+    }
+    const timer = await scheduleBoundaryTimer(input, boundary, deps.runtimeTimers, 'sleep');
+    const winner = await waitForBoundaryRace(ctx, {
+        timerKey: `aplret.timer.${boundary.token}`,
+        fireAt: boundary.fireAt,
+        timerReadableKey: 'timer',
+        label: `wait:sleep:${boundary.token}`,
+    });
+    const firedAt = new Date().toISOString();
+    await deps.runtimeTimers.markFiredByTimerId({
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        token: boundary.token,
+        timerId: timer.timerId,
+        firedAt: new Date(firedAt),
+    });
+    if (winner.kind === 'timer' && winner.payload.kind === 'timer') {
+        return normalizeTimerWake(boundary.token, winner.payload, timer);
+    }
+    return {
+        kind: 'timer',
+        token: boundary.token,
+        timerId: timer.timerId,
+        dueAt: timer.dueAt.toISOString(),
+        firedAt,
+        reason: timerKindToReason(timer.kind),
+        ...(timer.payload !== null && timer.payload !== undefined ? { payload: timer.payload } : {}),
+        idempotencyKey: timer.idempotencyKey,
+    };
+}
+
+async function scheduleBoundaryTimer(
+    input: TaskTaskInput,
+    boundary: TimerBoundary,
+    runtimeTimers: RuntimeTimerRepository,
+    kind: 'token_expiry' | 'sleep'
+): Promise<RuntimeTimerRecord> {
+    const fireAt = boundary.kind === 'sleep' ? boundary.fireAt : boundary.expiresAt;
+    if (fireAt === undefined) {
+        throw new Error('TIMER_FIRE_AT_MISSING');
+    }
+    return runtimeTimers.schedule({
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        agentId: input.agentId,
+        token: boundary.token,
+        idempotencyKey: input.idempotencyKey,
+        fireAt,
+        kind,
+        ...(boundary.kind === 'sleep' && boundary.payload !== undefined ? { payload: boundary.payload } : {}),
+    });
+}
+
+type BoundaryRaceResult =
+    | { kind: 'input'; payload: Record<string, unknown> }
+    | { kind: 'timer'; payload: Record<string, unknown> };
+
+async function waitForBoundaryRace(
+    ctx: DurableContext<TaskTaskInput>,
+    params: {
+        eventKey?: string;
+        timerKey: string;
+        expression?: string;
+        fireAt: string;
+        inputReadableKey?: string;
+        timerReadableKey: string;
+        label: string;
+    }
+): Promise<BoundaryRaceResult> {
+    const timerEvent = new UserEventCondition(params.timerKey, params.expression ?? '', params.timerReadableKey);
+    const sleep = new SleepCondition(durationUntil(params.fireAt), params.timerReadableKey);
+    const waitable = params.eventKey === undefined
+        ? Or(sleep, timerEvent)
+        : Or(
+            new UserEventCondition(params.eventKey, params.expression ?? '', params.inputReadableKey ?? 'input'),
+            sleep,
+            timerEvent
+        );
+    const result = await ctx.waitFor(waitable, params.label);
+    const extracted = extractWaitResult(result);
+    if (extracted.key === (params.inputReadableKey ?? 'input')) {
+        return { kind: 'input', payload: extracted.payload };
+    }
+    return { kind: 'timer', payload: extracted.payload };
+}
+
+function extractWaitResult(value: Record<string, unknown>): { key: string; payload: Record<string, unknown> } {
+    const [key] = Object.keys(value);
+    if (key === undefined) {
+        return { key: 'timer', payload: {} };
+    }
+    const raw = value[key];
+    if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+        const record = raw as Record<string, unknown>;
+        const [eventId] = Object.keys(record);
+        if (eventId !== undefined) {
+            const payload = record[eventId];
+            return { key, payload: jsonObjectOrEmpty(payload as JsonValue) };
+        }
+        return { key, payload: record };
+    }
+    return { key, payload: {} };
+}
+
+function durationUntil(fireAt: string): Duration {
+    const remainingMs = Date.parse(fireAt) - Date.now();
+    const seconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    return `${seconds}s` as Duration;
 }
 
 async function findPersistedBoundaryEvent(
@@ -542,10 +807,32 @@ function normalizeWakeEvent(
     };
 }
 
+function normalizeTimerWake(
+    token: string,
+    payload: Record<string, unknown>,
+    fallback: RuntimeTimerRecord
+): RuntimeWakeEvent & { idempotencyKey?: string } {
+    const idempotencyKey =
+        typeof payload.idempotencyKey === 'string' ? payload.idempotencyKey : fallback.idempotencyKey;
+    return {
+        kind: 'timer',
+        token,
+        timerId: typeof payload.timerId === 'string' ? payload.timerId : fallback.timerId,
+        dueAt: typeof payload.dueAt === 'string' ? payload.dueAt : fallback.dueAt.toISOString(),
+        firedAt: typeof payload.firedAt === 'string' ? payload.firedAt : new Date().toISOString(),
+        reason: payload.reason === 'sleep_due' ? 'sleep_due' : 'input_timeout',
+        ...('payload' in payload ? { payload: payload.payload } : {}),
+        idempotencyKey,
+    };
+}
+
 function boundaryEventToWake(
     boundary: AwaitableBoundary,
     event: RuntimeWakeEvent
 ): SegmentTaskWake {
+    if (event.kind === 'timer') {
+        return { trigger: 'timer', event: event as SegmentEventWake['event'] };
+    }
     if (boundary.kind === 'await_input') {
         return { trigger: 'resume', event: event as SegmentEventWake['event'] };
     }

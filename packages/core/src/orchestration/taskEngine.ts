@@ -1362,7 +1362,12 @@ export class TaskEngine {
                 const startedMs = new Date(startedAt).getTime();
                 const updatedMs = new Date(updatedAt).getTime();
                 const status = deriveListRunStatus(row, runs, taskTurnEvents);
-                const isTerminal = status === 'completed' || status === 'failed' || status === 'succeeded';
+                const isTerminal =
+                    status === 'completed' ||
+                    status === 'failed' ||
+                    status === 'succeeded' ||
+                    status === 'canceled' ||
+                    status === 'cancelled';
                 return {
                     ...(row.agentId ? { agentId: row.agentId } : {}),
                     taskId: row.taskId ?? rootTaskId,

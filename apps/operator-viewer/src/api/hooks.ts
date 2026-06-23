@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { getMemory, getOperatorConfig, getRunGraph, getTurn, listAgentRuns, listAgents, type ListAgentRunsInput } from './client';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { cancelRun, getMemory, getOperatorConfig, getRunGraph, getTurn, listAgentRuns, listAgents, type CancelRunInput, type ListAgentRunsInput } from './client';
 import type { AgentRunGraph } from '../types';
 
 export function useOperatorConfig() {
@@ -51,6 +51,20 @@ export function useMemory(tenantId: string, taskId: string | undefined, enabled:
     queryKey: ['memory', tenantId, taskId],
     queryFn: () => getMemory(tenantId, taskId ?? ''),
     enabled: enabled && taskId !== undefined && taskId.length > 0,
+  });
+}
+
+export function useCancelRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CancelRunInput) => cancelRun(input),
+    onSuccess: (_result, input) => {
+      void queryClient.invalidateQueries({ queryKey: ['agent-runs'] });
+      void queryClient.invalidateQueries({ queryKey: ['run-graph', input.tenantId, input.taskId] });
+      if (input.rootTaskId && input.rootTaskId !== input.taskId) {
+        void queryClient.invalidateQueries({ queryKey: ['run-graph', input.tenantId, input.rootTaskId] });
+      }
+    },
   });
 }
 

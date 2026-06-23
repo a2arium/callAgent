@@ -76,6 +76,18 @@ export type RunAgentResponse = {
   };
 };
 
+export type CancelRunInput = {
+  tenantId: string;
+  taskId: string;
+  rootTaskId?: string;
+  agentId?: string;
+  reason?: string;
+};
+
+export type CancelRunResponse = {
+  acknowledged: true;
+};
+
 async function fetchJson<T>(path: string, tenantId?: string): Promise<T> {
   const response = await fetch(path, {
     headers: tenantId
@@ -108,6 +120,24 @@ export async function listAgentRuns(input: ListAgentRunsInput): Promise<AgentRun
 
 export async function getRunGraph(tenantId: string, taskId: string): Promise<AgentRunGraph> {
   return fetchJson<AgentRunGraph>(`/tasks/${encodeURIComponent(taskId)}/run-graph`, tenantId);
+}
+
+export async function cancelRun(input: CancelRunInput): Promise<CancelRunResponse> {
+  const response = await fetch(`/tasks/${encodeURIComponent(input.taskId)}/cancel`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-tenant-id': input.tenantId,
+    },
+    body: JSON.stringify({
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+      ...(input.reason ? { reason: input.reason } : {}),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<CancelRunResponse>;
 }
 
 export async function getTurn(tenantId: string, taskId: string, turnSeq: number): Promise<TurnRun> {

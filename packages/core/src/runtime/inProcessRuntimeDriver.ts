@@ -27,6 +27,11 @@ import type {
     TurnExecutor,
     TurnWake,
 } from './turnExecutor.js';
+import {
+    deriveRuntimeTimerId,
+    deriveRuntimeTimerIdempotencyKey,
+    timerKindToReason,
+} from './runtimeTimer.js';
 
 const log = logger.createLogger({ prefix: 'InProcessRuntimeDriver' });
 
@@ -96,7 +101,6 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     /** Scheduled timers keyed by timerId, plus a reverse index per task. */
     private readonly timers = new Map<string, unknown>();
     private readonly timersByTask = new Map<string, Set<string>>();
-    private timerSeq = 0;
 
     constructor(deps: InProcessRuntimeDriverDeps) {
         this.turnExecutor = deps.turnExecutor;
@@ -199,15 +203,25 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     }
 
     async scheduleTimer(params: ScheduleTimerParams): Promise<{ timerId: string }> {
-        const timerId = `tmr-${++this.timerSeq}-${params.token}`;
+        const timerId = deriveRuntimeTimerId({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            token: params.token,
+            fireAt: params.fireAt,
+            kind: params.kind,
+        });
         const delayMs = Math.max(0, Date.parse(params.fireAt) - this.now());
 
         const handle = this.scheduler.set(() => {
+            const firedAt = new Date(this.now()).toISOString();
             this.forgetTimer(params.taskId, timerId);
             const event: RuntimeWakeEvent = {
                 kind: 'timer',
                 token: params.token,
                 timerId,
+                dueAt: params.fireAt,
+                firedAt,
+                reason: timerKindToReason(params.kind),
                 payload: params.payload,
             };
             void this.enqueueResume({
@@ -217,7 +231,12 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 traceId: params.traceId,
                 spanId: params.spanId,
                 token: params.token,
-                idempotencyKey: `${params.taskId}:timer:${timerId}`,
+                idempotencyKey: deriveRuntimeTimerIdempotencyKey({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    token: params.token,
+                    timerId,
+                }),
                 event,
             });
         }, delayMs);

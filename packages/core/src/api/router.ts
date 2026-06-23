@@ -174,6 +174,39 @@ export function createApiRouter(): Router {
         }
     });
 
+    router.post('/tasks/:taskId/cancel', async (req, res) => {
+        try {
+            const engine = EngineLocator.getEngine<TaskEngine>();
+            if (!engine) {
+                res.status(503).json({ error: 'Task engine is not available' });
+                return;
+            }
+            const taskId = req.params.taskId;
+            if (taskId === undefined || taskId.length === 0) {
+                res.status(400).json({ error: 'taskId is required' });
+                return;
+            }
+            const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
+            const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+            const reason = typeof body.reason === 'string' && body.reason.trim().length > 0
+                ? body.reason.trim()
+                : 'operator cancel';
+            const agentId = typeof body.agentId === 'string' && body.agentId.length > 0
+                ? body.agentId
+                : undefined;
+            const result = await engine.cancelTask({
+                tenantId,
+                taskId,
+                ...(agentId !== undefined ? { agentId } : {}),
+                reason,
+            });
+            res.json(result);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to cancel task', message });
+        }
+    });
+
     router.get('/tasks/:taskId/turns/:turnSeq', async (req, res) => {
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();

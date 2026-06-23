@@ -96,7 +96,7 @@ export class DriverRunsRepository {
                 turnSeq: record.turnSeq ?? undefined,
                 boundaryKind: record.boundaryKind ?? undefined,
                 turnTraceId: record.turnTraceId ?? undefined,
-                error: record.error === undefined ? undefined : record.error ?? Prisma.JsonNull,
+                error: driverRunErrorUpdate(record.status, record.error),
                 updatedAt: new Date(),
             },
         });
@@ -118,7 +118,7 @@ export class DriverRunsRepository {
                 traceId: record.traceId ?? undefined,
                 boundaryKind: record.boundaryKind ?? undefined,
                 turnTraceId: record.turnTraceId ?? undefined,
-                error: record.error === undefined ? undefined : record.error ?? Prisma.JsonNull,
+                error: driverRunErrorUpdate(record.status, record.error),
                 updatedAt: new Date(),
             },
         });
@@ -161,6 +161,20 @@ export class DriverRunsRepository {
             },
         });
     }
+}
+
+function driverRunErrorUpdate(
+    status: string,
+    error: DriverRunRecord['error'] | FinalizeRootRunRecord['error'] | undefined
+): Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined {
+    if (error !== undefined) {
+        return error ?? Prisma.JsonNull;
+    }
+    return normalizeDriverRunStatus(status) === 'failed' ? undefined : Prisma.JsonNull;
+}
+
+function normalizeDriverRunStatus(status: string): string {
+    return status.trim().toLowerCase();
 }
 
 export function serializeDriverRunError(error: unknown): Prisma.InputJsonValue {

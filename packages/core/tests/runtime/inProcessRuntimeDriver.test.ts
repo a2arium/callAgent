@@ -75,7 +75,14 @@ describe('wakeEventToTurnWake', () => {
             [{ kind: 'input', token: 't', value: 1 }, 'resume'],
             [{ kind: 'tool', token: 't', result: 1 }, 'tool'],
             [{ kind: 'child', token: 't', childTaskId: 'c', output: 1 }, 'child'],
-            [{ kind: 'timer', token: 't', timerId: 'tm' }, 'timer'],
+            [{
+                kind: 'timer',
+                token: 't',
+                timerId: 'tm',
+                dueAt: '2026-06-23T00:00:00.000Z',
+                firedAt: '2026-06-23T00:00:01.000Z',
+                reason: 'input_timeout',
+            }, 'timer'],
             [{ kind: 'external', token: 't', type: 'x', data: 1 }, 'event'],
             [{ kind: 'conversation', token: 't', messageId: 'm', data: 1 }, 'conversation'],
         ];
@@ -153,6 +160,7 @@ describe('InProcessRuntimeDriver', () => {
             ...ids,
             token: 'tok-timer',
             fireAt: new Date(1000).toISOString(),
+            kind: 'token_expiry',
             payload: { n: 1 },
         });
         expect(scheduler.pending()).toBe(1);
@@ -164,9 +172,17 @@ describe('InProcessRuntimeDriver', () => {
         expect(calls).toHaveLength(1);
         expect(calls[0].wake).toEqual({
             trigger: 'timer',
-            event: { kind: 'timer', token: 'tok-timer', timerId, payload: { n: 1 } },
+            event: {
+                kind: 'timer',
+                token: 'tok-timer',
+                timerId,
+                dueAt: new Date(1000).toISOString(),
+                firedAt: new Date(0).toISOString(),
+                reason: 'input_timeout',
+                payload: { n: 1 },
+            },
         });
-        expect(calls[0].idempotencyKey).toBe(`task-1:timer:${timerId}`);
+        expect(calls[0].idempotencyKey).toBe(`timer:t1:task-1:tok-timer:${timerId}`);
     });
 
     it('cancel clears scheduled timers so they never fire', async () => {
@@ -177,6 +193,7 @@ describe('InProcessRuntimeDriver', () => {
             ...ids,
             token: 'tok-timer',
             fireAt: new Date(Date.now() + 60_000).toISOString(),
+            kind: 'token_expiry',
         });
         expect(scheduler.pending()).toBe(1);
 

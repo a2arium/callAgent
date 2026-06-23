@@ -1,6 +1,6 @@
 import type { SessionManager } from '../orchestration/SessionManager.js';
 
-export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'unknown';
+export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | 'unknown';
 
 export type AgentRunGraph = {
     schemaVersion: 1;
@@ -32,8 +32,15 @@ export type AgentRunNode = {
     error?: unknown;
     traceId?: string;
     providerRunId?: string;
+    cancellation?: AgentRunCancellation;
     startedAt?: string;
     finishedAt?: string;
+};
+
+export type AgentRunCancellation = {
+    requested: boolean;
+    reason?: string;
+    requestedAt?: string;
 };
 
 export type AgentRunEdge = {
@@ -216,9 +223,11 @@ export async function buildAgentRunGraph(
     const rootRun = chooseRootRun(rootDriverRuns);
     const agentId = rootRun?.agentId ?? snapshot?.agentId ?? readSnapshotAgentId(snapshot?.snapshot);
     const rootStatus = deriveRootStatus(rootEvents, rootDriverRuns);
+    const rootError = rootStatus === 'failed' ? rootRun?.error : undefined;
+    const rootCancellation = readCancellation(snapshot?.snapshot);
     const rootStartedAt = firstEventTime(rootEvents) ?? rootRun?.createdAt;
     const rootFinishedAt =
-        rootStatus === 'completed' || rootStatus === 'failed'
+        isTerminalRunStatus(rootStatus)
             ? latestTerminalEventTime(rootEvents) ?? latestTerminalDriverRunTime(rootDriverRuns)
             : undefined;
     const root: AgentRunNode = {
@@ -231,9 +240,10 @@ export async function buildAgentRunGraph(
         status: rootStatus,
         inputPreview: deriveInputPreview(rootEvents, snapshot?.snapshot),
         outputPreview: deriveOutputPreview(rootEvents),
-        ...(rootRun?.error ? { error: rootRun.error } : {}),
+        ...(rootError ? { error: rootError } : {}),
         ...(rootRun?.traceId ? { traceId: rootRun.traceId } : {}),
         ...(rootRun?.providerRunId ? { providerRunId: rootRun.providerRunId } : {}),
+        ...(rootCancellation ? { cancellation: rootCancellation } : {}),
         ...(rootStartedAt ? { startedAt: toIso(rootStartedAt) } : {}),
         ...(rootFinishedAt ? { finishedAt: rootFinishedAt } : {}),
     };
@@ -315,6 +325,9 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
     if (rootStatus === 'failed') {
         return 'failed';
     }
+    if (rootStatus === 'canceled') {
+        return 'canceled';
+    }
 
     const latestTurnBoundary = latestTurnCompleted ? turnTransitionKind(latestTurnCompleted.payload) : undefined;
     if (isAwaitBoundary(latestTurnBoundary)) {
@@ -350,6 +363,28 @@ function deriveInputPreview(
         return started.payload;
     }
     return undefined;
+}
+
+function readCancellation(snapshot: Record<string, unknown> | undefined): AgentRunCancellation | undefined {
+    if (snapshot === undefined) {
+        return undefined;
+    }
+    const meta = objectField(snapshot, 'meta');
+    if (meta === undefined) {
+        return undefined;
+    }
+    const cancellation = objectField(meta, 'cancellation');
+    if (cancellation === undefined) {
+        return undefined;
+    }
+    const requested = cancellation.requested === true;
+    const reason = stringField(cancellation, 'reason');
+    const requestedAt = stringField(cancellation, 'requestedAt');
+    return {
+        requested,
+        ...(reason ? { reason } : {}),
+        ...(requestedAt ? { requestedAt } : {}),
+    };
 }
 
 function deriveOutputPreview(events: AgentRunSourceEvent[]): unknown {
@@ -416,9 +451,10 @@ function edgeToNode(
     const childDriverRuns = driverRuns.filter((run) => run.taskId === taskId);
     const childRun = chooseRootRun(childDriverRuns);
     const status = deriveChildNodeStatus(edge.status, childEvents, childDriverRuns);
+    const error = status === 'failed' ? childRun?.error ?? edge.error : undefined;
     const startedAt = firstEventTime(childEvents) ?? childRun?.createdAt ?? edge.startedAt;
     const finishedAt =
-        status === 'completed' || status === 'failed'
+        isTerminalRunStatus(status)
             ? latestTerminalEventTime(childEvents) ?? latestTerminalDriverRunTime(childDriverRuns) ?? edge.finishedAt
             : undefined;
     return {
@@ -432,7 +468,7 @@ function edgeToNode(
         status,
         inputPreview: deriveInputPreview(childEvents, undefined),
         outputPreview: deriveOutputPreview(childEvents) ?? edge.resultPreview,
-        ...(childRun?.error ?? edge.error ? { error: childRun?.error ?? edge.error } : {}),
+        ...(error ? { error } : {}),
         ...(childRun?.traceId ? { traceId: childRun.traceId } : {}),
         ...(childRun?.providerRunId ? { providerRunId: childRun.providerRunId } : {}),
         ...(startedAt ? { startedAt: toIso(startedAt) } : {}),
@@ -492,7 +528,7 @@ function buildTurnRuns(
             const status = deriveTurnStatus(run.status, turnEvent);
             const startedAt = run.createdAt ?? startedEvent?.createdAt;
             const terminalTimestamp = run.updatedAt ?? run.createdAt ?? turnEvent?.createdAt ?? startedEvent?.createdAt;
-            const finishedAt = status === 'completed' || status === 'failed'
+            const finishedAt = isTerminalRunStatus(status)
                 ? terminalTimestamp
                 : undefined;
             return {
@@ -517,7 +553,7 @@ function buildTurnRuns(
                 ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
                 ...(startedAt ? { startedAt: toIso(startedAt) } : {}),
                 ...(finishedAt ? { finishedAt: toIso(finishedAt) } : {}),
-                ...(run.error ? { error: run.error } : {}),
+                ...(status === 'failed' && run.error ? { error: run.error } : {}),
             };
         });
     const existingTurns = new Set(driverTurns.flatMap((turn) => turn.turnSeq === undefined ? [] : [turnKey(turn.taskId, turn.turnSeq)]));
@@ -681,7 +717,12 @@ function buildMemoryOps(rootTaskId: string, events: AgentRunSourceEvent[]): Memo
 
 function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[]): EffectRun[] {
     return driverRuns
-        .filter((run) => run.operation.startsWith('effect.') || run.operation === 'outbox.dispatch')
+        .filter((run) =>
+            run.operation.startsWith('effect.') ||
+            run.operation === 'outbox.dispatch' ||
+            run.operation === 'timer.schedule' ||
+            run.operation === 'timer.fire'
+        )
         .map((run, index) => ({
             id: run.providerTaskRunId ?? run.providerRunId ?? run.outboxRowId ?? `effect-${index}`,
             rootTaskId: run.rootTaskId ?? rootTaskId,
@@ -801,10 +842,17 @@ function normalizeStatus(status: string | undefined | null): AgentRunStatus {
     if (status === 'failed' || status === 'error') {
         return 'failed';
     }
+    if (status === 'canceled' || status === 'cancelled') {
+        return 'canceled';
+    }
     if (status === 'running' || status === 'queued') {
         return status;
     }
     return 'unknown';
+}
+
+function isTerminalRunStatus(status: AgentRunStatus): boolean {
+    return status === 'completed' || status === 'failed' || status === 'canceled';
 }
 
 function stringField(payload: Record<string, unknown>, key: string): string | undefined {
@@ -851,13 +899,13 @@ function firstEventTime(events: AgentRunSourceEvent[]): string | undefined {
 function latestTerminalEventTime(events: AgentRunSourceEvent[]): string | undefined {
     const terminal = [...events]
         .reverse()
-        .find((event) => event.type === 'task.completed' || event.type === 'task.failed');
+        .find((event) => event.type === 'task.completed' || event.type === 'task.failed' || event.type === 'task.canceled');
     return terminal?.createdAt;
 }
 
 function latestTerminalDriverRunTime(driverRuns: DriverRunView[]): string | undefined {
     const terminalTimes = driverRuns
-        .filter((run) => normalizeStatus(run.status) === 'completed' || normalizeStatus(run.status) === 'failed')
+        .filter((run) => isTerminalRunStatus(normalizeStatus(run.status)))
         .flatMap((run) => {
             const timestamp = run.updatedAt ?? run.createdAt;
             return timestamp !== undefined ? [toIso(timestamp)] : [];

@@ -332,6 +332,83 @@ describe('HatchetRuntimeDriver', () => {
         }));
     });
 
+    it('persists timers when the timers surface is enabled', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'timers';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'delegate-timer' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const timer = {
+            id: 'runtime-timer-row-1',
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            rootTaskId: 'task-1',
+            token: 'tok-1',
+            timerId: 'timer-stable',
+            dueAt: new Date(Date.now() + 60_000),
+            kind: 'token_expiry',
+            status: 'scheduled',
+            idempotencyKey: 'timer:tenant-1:task-1:tok-1:timer-stable',
+            fireLeaseId: null,
+            fireLeaseUntil: null,
+            payload: null,
+            providerRunId: null,
+            providerTaskRunId: null,
+            error: null,
+            firedAt: null,
+            canceledAt: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        };
+        const runtimeTimers = {
+            schedule: jest.fn(async () => timer),
+        };
+        const driverRuns = {
+            upsertByProviderRunId: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            driverRuns as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            runtimeTimers as never
+        );
+
+        const result = await driver.scheduleTimer({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            token: 'tok-1',
+            fireAt: timer.dueAt.toISOString(),
+            kind: 'token_expiry',
+            idempotencyKey: 'ignored-by-timer-repository',
+        });
+
+        expect(result.timerId).toBe('timer-stable');
+        expect(delegate.scheduleTimer).not.toHaveBeenCalled();
+        expect(runtimeTimers.schedule).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            token: 'tok-1',
+            kind: 'token_expiry',
+        }));
+        expect(driverRuns.upsertByProviderRunId).toHaveBeenCalledWith(expect.objectContaining({
+            providerRunId: 'runtime-timer-row-1',
+            operation: 'timer.schedule',
+            status: 'completed',
+            idempotencyKey: 'timer:tenant-1:task-1:tok-1:timer-stable',
+        }));
+    });
+
 
     it('falls back to inline dispatch when Hatchet trigger fails', async () => {
         const delegate: RuntimeDriver = {

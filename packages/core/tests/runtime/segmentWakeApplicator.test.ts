@@ -134,13 +134,16 @@ describe('applyWakeToSnapshot', () => {
         expect(inbox.current[0]?.payload.type).toBe('webhook.received');
     });
 
-    it('timer wake becomes a timer.fired external event', () => {
+    it('timer wake becomes a timer.expired observation', () => {
         const prepared = applyWakeToSnapshot(base, {
             trigger: 'timer',
             event: {
                 kind: 'timer',
                 token: 'timer-tok',
                 timerId: 'timer-1',
+                dueAt: '2026-06-23T00:00:00.000Z',
+                firedAt: '2026-06-23T00:00:01.000Z',
+                reason: 'input_timeout',
                 payload: { reason: 'ttl' },
             },
         });
@@ -148,12 +151,13 @@ describe('applyWakeToSnapshot', () => {
         expect(prepared.trigger).toBe('event');
         expect(prepared.turnParams).toMatchObject({
             eventToken: 'timer-tok',
-            eventType: 'timer.fired',
+            eventType: 'timer.expired',
             eventPayload: { reason: 'ttl' },
         });
-        const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string; payload: { type?: string } }> };
-        expect(inbox.current[0]?.kind).toBe('external.event');
-        expect(inbox.current[0]?.payload.type).toBe('timer.fired');
+        const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string; payload: { timerId?: string; reason?: string } }> };
+        expect(inbox.current[0]?.kind).toBe('timer.expired');
+        expect(inbox.current[0]?.payload.timerId).toBe('timer-1');
+        expect(inbox.current[0]?.payload.reason).toBe('input_timeout');
     });
 
     it('conversation wake adds conversation observation', () => {

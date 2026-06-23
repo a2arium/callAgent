@@ -6,6 +6,7 @@ import type {
     EnqueueStartParams,
     IEventBus,
     RuntimeDriver,
+    RuntimeTimerRepository,
     ScheduleTimerParams,
 } from '@a2arium/callagent-core/unstable';
 import type { TaskWorkflowDeclaration } from '@hatchet-dev/typescript-sdk/v1/declaration.js';
@@ -15,6 +16,7 @@ import { dispatchOutboxRowInline, type InlineOutboxPrisma } from './inlineOutbox
 import { buildDriverRunMetadata } from './metadata.js';
 import type { OutboxDispatchInput, OutboxDispatchOutput } from './tasks/outboxDispatch.js';
 import type { TaskTaskInput, TaskTaskOutput } from './tasks/task.js';
+import type { TimerFireTaskInput, TimerFireTaskOutput } from './tasks/timerFire.js';
 
 const log = logger.createLogger({ prefix: 'HatchetRuntimeDriver' });
 
@@ -46,7 +48,9 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput>
         >,
         private readonly events?: HatchetEventPusher,
-        private readonly runs?: HatchetRunsCanceller
+        private readonly runs?: HatchetRunsCanceller,
+        private readonly runtimeTimers?: RuntimeTimerRepository,
+        private readonly timerFireTask?: TaskWorkflowDeclaration<TimerFireTaskInput, TimerFireTaskOutput>
     ) {}
 
     async enqueueStart(params: EnqueueStartParams): Promise<void> {
@@ -109,11 +113,67 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
     }
 
     async scheduleTimer(params: ScheduleTimerParams): Promise<{ timerId: string }> {
-        return this.delegate.scheduleTimer(params);
+        if (!this.isSurfaceEnabled('timers') || this.runtimeTimers === undefined) {
+            return this.delegate.scheduleTimer(params);
+        }
+        const timer = await this.runtimeTimers.schedule({
+            ...params,
+            rootTaskId: params.taskId,
+        });
+        if (this.driverRuns) {
+            await this.driverRuns.upsertByProviderRunId({
+                providerRunId: timer.id,
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId ?? null,
+                traceId: params.traceId ?? null,
+                token: params.token,
+                idempotencyKey: timer.idempotencyKey,
+                rootTaskId: params.taskId,
+                operation: 'timer.schedule',
+                status: 'completed',
+                boundaryKind: params.kind === 'sleep' ? 'sleep' : 'timer',
+            });
+        }
+        if (Date.parse(params.fireAt) <= Date.now() && this.timerFireTask !== undefined) {
+            const ref = await this.timerFireTask.runNoWait(
+                {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                    token: params.token,
+                    timerId: timer.timerId,
+                    idempotencyKey: timer.idempotencyKey,
+                },
+                {
+                    additionalMetadata: {
+                        operation: 'timer.fire',
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        rootTaskId: params.taskId,
+                        tenantTaskKey: `${params.tenantId}:${params.taskId}`,
+                        token: params.token,
+                        timerId: timer.timerId,
+                        idempotencyKey: timer.idempotencyKey,
+                    },
+                }
+            );
+            await this.runtimeTimers.attachProviderRun({
+                id: timer.id,
+                providerRunId: await ref.runId,
+            });
+        }
+        return { timerId: timer.timerId };
     }
 
     async cancel(params: CancelParams): Promise<void> {
         await this.delegate.cancel(params);
+        if (this.runtimeTimers !== undefined) {
+            await this.runtimeTimers.cancelTaskTimers({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+            });
+        }
         if (this.driverRuns === undefined || this.runs === undefined) {
             return;
         }
@@ -191,7 +251,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         return this.delegate;
     }
 
-    private isSurfaceEnabled(surface: 'start' | 'resume'): boolean {
+    private isSurfaceEnabled(surface: 'start' | 'resume' | 'timers'): boolean {
         const raw = process.env.CALLAGENT_DRIVER_SURFACES;
         if (raw === undefined || raw.trim().length === 0) {
             return false;
@@ -214,7 +274,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
 }
 
 function isHatchetResumeEvent(kind: EnqueueResumeParams['event']['kind']): boolean {
-    return kind === 'input' || kind === 'tool' || kind === 'child' || kind === 'external';
+    return kind === 'input' || kind === 'tool' || kind === 'child' || kind === 'external' || kind === 'timer';
 }
 
 function buildTaskMetadata(

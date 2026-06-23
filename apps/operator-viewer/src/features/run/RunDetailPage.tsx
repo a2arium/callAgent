@@ -1,8 +1,8 @@
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { ReactFlowProvider } from 'reactflow';
-import { ArrowLeft, PanelRightOpen, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Ban, PanelRightOpen, RefreshCw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useOperatorConfig, useRunGraph } from '../../api/hooks';
+import { useCancelRun, useOperatorConfig, useRunGraph } from '../../api/hooks';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -30,6 +30,7 @@ export function RunDetailPage(): React.ReactElement {
   const taskId = params.taskId;
   const graphQuery = useRunGraph(search.tenantId, taskId);
   const configQuery = useOperatorConfig();
+  const cancelRun = useCancelRun();
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false;
     return window.localStorage.getItem(INSPECTOR_COLLAPSED_KEY) === 'true';
@@ -52,6 +53,8 @@ export function RunDetailPage(): React.ReactElement {
     turns: rootRollup?.turns,
   });
   const liveRefresh = graph === undefined || graph.nodes.some((node) => ['queued', 'running', 'unknown'].includes(node.status));
+  const cancelDisabled = taskId === undefined || graph === undefined || isTerminalStatus(graph.root.status) || cancelRun.isPending;
+  const selectedNodeCancelable = selectedNode !== undefined && !isTerminalStatus(selectedNode.status) && !cancelRun.isPending;
 
   const updateSearch = (patch: Partial<typeof search>) => {
     void navigate({
@@ -100,6 +103,42 @@ export function RunDetailPage(): React.ReactElement {
     });
   };
 
+  const cancelRootRun = () => {
+    if (!taskId || !graph || isTerminalStatus(graph.root.status)) return;
+    const defaultReason = 'operator cancel';
+    const reason = window.prompt(
+      `Cancel root run ${taskId}?\n\nActive provider runs will be canceled best-effort and the runtime will stop at the next cancellation check.`,
+      defaultReason
+    );
+    if (reason === null) return;
+    const trimmedReason = reason.trim() || defaultReason;
+    cancelRun.mutate({
+      tenantId: search.tenantId,
+      taskId,
+      ...(graph.root.agentId ? { agentId: graph.root.agentId } : {}),
+      reason: trimmedReason,
+    });
+  };
+
+  const cancelSelectedNode = () => {
+    if (!graph || !selectedNode || isTerminalStatus(selectedNode.status)) return;
+    const defaultReason = 'operator cancel';
+    const label = selectedNode.parentTaskId ? 'child agent' : 'root agent';
+    const reason = window.prompt(
+      `Cancel ${label} ${selectedNode.taskId}?\n\nActive provider runs for this agent task will be canceled best-effort and the runtime will stop at the next cancellation check.`,
+      defaultReason
+    );
+    if (reason === null) return;
+    const trimmedReason = reason.trim() || defaultReason;
+    cancelRun.mutate({
+      tenantId: search.tenantId,
+      taskId: selectedNode.taskId,
+      rootTaskId: graph.root.taskId,
+      ...(selectedNode.agentId ? { agentId: selectedNode.agentId } : {}),
+      reason: trimmedReason,
+    });
+  };
+
   return (
     <div className="grid min-h-0 gap-4">
       <header className="sticky top-[73px] z-10 rounded-xl border border-border bg-card/95 p-4 backdrop-blur">
@@ -130,12 +169,30 @@ export function RunDetailPage(): React.ReactElement {
               <span className="inline-flex items-center gap-1.5">Known cost {formatCost(rootRollup?.costUsd)}</span>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={() => void graphQuery.refetch()}>
-            <RefreshCw className={cn('h-4 w-4', graphQuery.isFetching ? 'animate-spin' : '')} />
-            Refresh
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => void graphQuery.refetch()}>
+              <RefreshCw className={cn('h-4 w-4', graphQuery.isFetching ? 'animate-spin' : '')} />
+              Refresh
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={cancelRootRun}
+              disabled={cancelDisabled}
+              title={isTerminalStatus(graph?.root.status) ? 'Run is already terminal' : 'Cancel root run'}
+            >
+              <Ban className="h-4 w-4" />
+              {cancelRun.isPending ? 'Canceling...' : 'Cancel run'}
+            </Button>
+          </div>
         </div>
       </header>
+
+      {cancelRun.error instanceof Error ? (
+        <Notice kind="error" title="Cancel failed">
+          {cancelRun.error.message}
+        </Notice>
+      ) : null}
 
       {graphQuery.error instanceof Error ? (
         <Notice kind="error" title="Run graph unavailable">
@@ -179,10 +236,13 @@ export function RunDetailPage(): React.ReactElement {
                 selectedTurnSeq={selectedTurnSeq}
                 config={configQuery.data ?? {}}
                 collapseButtonRef={collapseButtonRef}
+                canCancel={selectedNodeCancelable}
+                cancelPending={cancelRun.isPending}
                 onTabChange={(tab) => updateSearch({ tab })}
                 onTurnSelect={selectTurn}
                 onTurnBack={() => updateSearch({ turn: '', tab: 'turns' })}
                 onCollapse={() => setInspectorOpen(false)}
+                onCancel={cancelSelectedNode}
               />
             </div>
           )}
@@ -194,6 +254,11 @@ export function RunDetailPage(): React.ReactElement {
       )}
     </div>
   );
+}
+
+function isTerminalStatus(status: string | undefined): boolean {
+  const normalized = status?.toLowerCase();
+  return normalized === 'completed' || normalized === 'failed' || normalized === 'canceled' || normalized === 'cancelled';
 }
 
 function InspectorSplitter(props: {

@@ -5,10 +5,8 @@
 
 import { jest } from '@jest/globals';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcDir = path.resolve(__dirname, '../src');
+const srcDir = path.resolve(process.cwd(), 'packages/core/src');
 import type { WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
@@ -276,16 +274,16 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         llmAdapter: {},
         tenantId: 'test-tenant'
     });
-    await jest.unstable_mockModule(path.resolve(srcDir, 'orchestration/A2AService.ts'), () => ({
+    await jest.unstable_mockModule('../src/orchestration/A2AService.js', () => ({
         globalA2AService: { sendTaskToAgent: sendMock, findLocalAgent: findMock }
     } as any));
-    await jest.unstable_mockModule(path.resolve(srcDir, 'eventbus/outboxPublisher.ts'), () => ({
+    await jest.unstable_mockModule('../src/eventbus/outboxPublisher.js', () => ({
         OutboxPublisher: jest.fn().mockImplementation(() => ({
             start: jest.fn(),
             stop: jest.fn(),
         })),
     }));
-    await jest.unstable_mockModule(path.resolve(srcDir, 'loop/loopRunner.ts'), () => ({
+    await jest.unstable_mockModule('../src/loop/loopRunner.js', () => ({
         runLoop: (...args: any[]) => runLoopMock(...args)
     }));
     await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
@@ -1513,16 +1511,20 @@ describe('TaskEngine orchestration coverage', () => {
         expect(capturedParams.trigger).toBe('start');
     });
 
-    test('startTask passes manifestProvenance to runLoop', async () => {
+    test('startTask passes manifestProvenance to TurnRunner context', async () => {
+        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
         const store = new FakeSessionStore();
         const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: { ok: true } },
-            metrics: { timings: {} },
-        });
+        const baseCtx = createCtx();
+        jest.spyOn(engine as any, 'createContext').mockReturnValue(baseCtx);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+        const runTurn = jest.spyOn((engine as any).turnRunner, 'runTurn').mockResolvedValue({
+            id: 'provenance-task',
+            input: { test: true },
+            status: { state: 'completed', timestamp: new Date().toISOString() },
+        } as any);
 
         const task = {
             id: 'provenance-task',
@@ -1537,10 +1539,10 @@ describe('TaskEngine orchestration coverage', () => {
             tenantId: 't',
         });
 
-        expect(runLoopMock).toHaveBeenCalled();
-        const loopOpts = runLoopMock.mock.calls[0]?.[4] as { manifestProvenance?: { agentCardSource: string; runtimeManifestSource: string; agentCardHash: string; runtimeManifestHash: string } } | undefined;
-        expect(loopOpts?.manifestProvenance).toBeDefined();
-        expect(loopOpts!.manifestProvenance).toMatchObject({
+        expect(runTurn).toHaveBeenCalled();
+        const runTurnCtx = runTurn.mock.calls[0]?.[0] as { __manifestProvenance?: { agentCardSource: string; runtimeManifestSource: string; agentCardHash: string; runtimeManifestHash: string } } | undefined;
+        expect(runTurnCtx?.__manifestProvenance).toBeDefined();
+        expect(runTurnCtx!.__manifestProvenance).toMatchObject({
             agentCardSource: expect.any(String),
             runtimeManifestSource: expect.any(String),
             agentCardHash: expect.any(String),
@@ -1548,15 +1550,20 @@ describe('TaskEngine orchestration coverage', () => {
         });
     });
 
-    test('startTask binds ctx.conversation thread APIs before loop execution', async () => {
+    test('startTask delegates prepared context to TurnRunner for loop execution', async () => {
+        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
         const store = new FakeSessionStore();
         const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: { ok: true } },
-            metrics: { timings: {} },
-        });
+        const baseCtx = createCtx();
+        jest.spyOn(engine as any, 'createContext').mockReturnValue(baseCtx);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+        const runTurn = jest.spyOn((engine as any).turnRunner, 'runTurn').mockResolvedValue({
+            id: 'conversation-api-task',
+            input: { test: true },
+            status: { state: 'completed', timestamp: new Date().toISOString() },
+        } as any);
 
         await engine.startTask({
             task: {
@@ -1569,11 +1576,14 @@ describe('TaskEngine orchestration coverage', () => {
             tenantId: 't',
         });
 
-        const runLoopCtx = runLoopMock.mock.calls[0]?.[0] as { conversation?: Record<string, unknown> } | undefined;
-        expect(runLoopCtx?.conversation).toBeDefined();
-        expect(typeof runLoopCtx?.conversation?.startThread).toBe('function');
-        expect(typeof runLoopCtx?.conversation?.send).toBe('function');
-        expect(typeof runLoopCtx?.conversation?.close).toBe('function');
+        expect(runTurn).toHaveBeenCalled();
+        const [runTurnCtx, turnParams] = runTurn.mock.calls[0] as [{ task?: { id?: string }; tenantId?: string; agentId?: string }, { sessionId?: string; tenantId?: string; trigger?: string }];
+        expect(runTurnCtx).toBe(baseCtx);
+        expect(turnParams).toMatchObject({
+            sessionId: 'conversation-api-task',
+            tenantId: 't',
+            trigger: 'start',
+        });
     });
 
     // Note: executeTaskHandler tests removed as they test internal implementation details

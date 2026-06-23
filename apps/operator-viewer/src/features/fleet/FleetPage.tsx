@@ -10,10 +10,10 @@ import {
 } from '@tanstack/react-table';
 import { useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { RefreshCw } from 'lucide-react';
+import { Ban, RefreshCw } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import { useAgentRuns } from '../../api/hooks';
+import { useAgentRuns, useCancelRun } from '../../api/hooks';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -30,12 +30,13 @@ type FleetRow = AgentRunListItem & {
 
 const columnHelper = createColumnHelper<FleetRow>();
 const fleetGridColumns =
-  'grid-cols-[130px_minmax(170px,1.4fr)_minmax(210px,1.7fr)_80px_95px_80px_100px_120px_120px]';
+  'grid-cols-[130px_minmax(170px,1.4fr)_minmax(210px,1.7fr)_80px_95px_80px_100px_120px_120px_104px]';
 
 export function FleetPage(): React.ReactElement {
   const search = parseFleetSearch(useSearch({ strict: false }) as Record<string, unknown>);
   const navigate = useNavigate({ from: '/' });
   const queryClient = useQueryClient();
+  const cancelRun = useCancelRun();
   const [sorting, setSorting] = useState<SortingState>([]);
   const query = useAgentRuns({
     tenantId: search.tenantId,
@@ -57,6 +58,21 @@ export function FleetPage(): React.ReactElement {
     [query.data?.items, queryClient, search]
   );
   const summary = useMemo(() => deriveFleetSummary(rows), [rows]);
+  const cancelFleetRun = (row: FleetRow) => {
+    if (isTerminalStatus(row.displayStatus)) return;
+    const defaultReason = 'operator cancel';
+    const reason = window.prompt(
+      `Cancel root run ${row.rootTaskId}?\n\nActive provider runs will be canceled best-effort and the runtime will stop at the next cancellation check.`,
+      defaultReason
+    );
+    if (reason === null) return;
+    cancelRun.mutate({
+      tenantId: search.tenantId,
+      taskId: row.rootTaskId,
+      ...(row.agentId ? { agentId: row.agentId } : {}),
+      reason: reason.trim() || defaultReason,
+    });
+  };
 
   return (
     <div className="grid gap-4">
@@ -92,6 +108,11 @@ export function FleetPage(): React.ReactElement {
           Start a task with a database-backed runtime, broaden filters, or open a task directly from its ID.
         </Notice>
       ) : null}
+      {cancelRun.error instanceof Error ? (
+        <Notice kind="error" title="Cancel failed">
+          {cancelRun.error.message}
+        </Notice>
+      ) : null}
 
       <FleetTable
         rows={rows}
@@ -105,6 +126,8 @@ export function FleetPage(): React.ReactElement {
             search: { ...search, nodeId: '', turn: '', tab: 'summary' },
           });
         }}
+        onCancel={cancelFleetRun}
+        cancelingTaskId={cancelRun.isPending ? cancelRun.variables?.taskId : undefined}
       />
     </div>
   );
@@ -160,7 +183,7 @@ function FleetFilters(props: {
         </Field>
         <Field label="Status">
           <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={props.search.status} onChange={(event) => update({ status: event.target.value })}>
-            {['', 'queued', 'running', 'completed', 'failed', 'unknown'].map((status) => (
+            {['', 'queued', 'running', 'completed', 'failed', 'canceled', 'unknown'].map((status) => (
               <option key={status || 'all'} value={status}>
                 {status || 'all'}
               </option>
@@ -201,6 +224,8 @@ function FleetTable(props: {
   sorting: SortingState;
   onSortingChange: Dispatch<SetStateAction<SortingState>>;
   onOpen: (row: AgentRunListItem) => void;
+  onCancel: (row: FleetRow) => void;
+  cancelingTaskId?: string;
 }): React.ReactElement {
   const columns = useMemo(
     () => [
@@ -231,8 +256,33 @@ function FleetTable(props: {
         header: 'Started',
         cell: (info) => <span title={info.getValue()}>{formatRelative(info.getValue())}</span>,
       }),
+      columnHelper.display({
+        id: 'actions',
+        header: 'Actions',
+        cell: (info) => {
+          const row = info.row.original;
+          const isCanceling = props.cancelingTaskId === row.rootTaskId;
+          const disabled = isTerminalStatus(row.displayStatus) || isCanceling;
+          return (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled}
+              title={isTerminalStatus(row.displayStatus) ? 'Run is already terminal' : 'Cancel run'}
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onCancel(row);
+              }}
+            >
+              <Ban className="h-3.5 w-3.5" />
+              {isCanceling ? 'Canceling' : 'Cancel'}
+            </Button>
+          );
+        },
+      }),
     ],
-    []
+    [props.cancelingTaskId, props.onCancel]
   );
   const table = useReactTable({
     data: props.rows,
@@ -259,7 +309,7 @@ function FleetTable(props: {
         </div>
       </div>
       <div className="overflow-x-auto">
-        <div className="min-w-[1180px]">
+        <div className="min-w-[1280px]">
           {table.getHeaderGroups().map((headerGroup) => (
             <div
               key={headerGroup.id}
@@ -272,27 +322,34 @@ function FleetTable(props: {
           ))}
         </div>
         <div ref={parentRef} className="h-[56vh] min-h-[360px] overflow-auto">
-          <div className="relative min-w-[1180px]" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+          <div className="relative min-w-[1280px]" style={{ height: `${virtualizer.getTotalSize()}px` }}>
             {virtualizer.getVirtualItems().map((virtualRow) => {
               const row = rows[virtualRow.index];
               if (!row) return null;
               return (
-                <button
+                <div
                   key={row.id}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   className={cn(
                     `absolute left-0 grid w-full ${fleetGridColumns} items-center border-b border-border px-3 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`,
                     normalizeRuntimeStatus(row.original.displayStatus) === 'failed' ? 'border-l-2 border-l-danger-border' : ''
                   )}
                   style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}
                   onClick={() => props.onOpen(row.original)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      props.onOpen(row.original);
+                    }
+                  }}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <span key={cell.id} className="min-w-0 truncate py-2 pr-3">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </span>
                   ))}
-                </button>
+                </div>
               );
             })}
           </div>
@@ -330,6 +387,11 @@ function Toggle(props: { checked: boolean; onClick: () => void; children: React.
       {props.children}
     </Button>
   );
+}
+
+function isTerminalStatus(status: string | undefined): boolean {
+  const normalized = status?.toLowerCase();
+  return normalized === 'completed' || normalized === 'failed' || normalized === 'canceled' || normalized === 'cancelled';
 }
 
 function filterRows(rows: AgentRunListItem[], search: FleetSearch): AgentRunListItem[] {

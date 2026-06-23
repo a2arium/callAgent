@@ -93,6 +93,18 @@ describe('buildAgentRunGraph', () => {
                 operation: 'effect.outbox.dispatch',
                 status: 'completed',
             },
+            {
+                provider: 'hatchet',
+                providerRunId: 'run-child',
+                tenantId: 'tenant-1',
+                taskId: 'task-2',
+                rootTaskId: 'task-1',
+                parentTaskId: 'task-1',
+                agentId: 'researcher-agent',
+                operation: 'agent.run',
+                status: 'completed',
+                error: { name: 'AbortError', message: 'Operation cancelled by AbortSignal' },
+            },
         ];
 
         const graph = await buildAgentRunGraph({
@@ -121,6 +133,9 @@ describe('buildAgentRunGraph', () => {
                 status: 'completed',
             }),
         ]);
+        expect(graph.nodes.find((node) => node.taskId === 'task-2')).toEqual(expect.not.objectContaining({
+            error: expect.anything(),
+        }));
         expect(graph.turns).toEqual([
             expect.objectContaining({
                 id: 'turn-1',
@@ -334,7 +349,117 @@ describe('buildAgentRunGraph', () => {
         });
 
         expect(graph.root.status).toBe('running');
+        expect(graph.root.error).toBeUndefined();
         expect(graph.root.finishedAt).toBeUndefined();
+    });
+
+    it('projects canceled driver runs as terminal canceled graph state', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-canceled',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: {
+                    agentId: 'root-agent',
+                    cancellation: {
+                        requested: true,
+                        reason: 'operator stop',
+                        requestedAt: '2026-06-23T11:59:00.000Z',
+                    },
+                },
+            },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-canceled',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'parent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-canceled',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-canceled',
+                    operation: 'agent.run',
+                    status: 'canceled',
+                    updatedAt: '2026-06-23T12:00:10.000Z',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('canceled');
+        expect(graph.root.finishedAt).toBe('2026-06-23T12:00:10.000Z');
+        expect(graph.root.cancellation).toEqual({
+            requested: true,
+            reason: 'operator stop',
+            requestedAt: '2026-06-23T11:59:00.000Z',
+        });
+    });
+
+    it('keeps an operator-canceled root terminal even when the latest completed turn was waiting', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-canceled-awaiting',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: {
+                    agentId: 'root-agent',
+                    cancellation: {
+                        requested: true,
+                        reason: 'operator stop',
+                        requestedAt: '2026-06-23T11:59:00.000Z',
+                    },
+                },
+            },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-canceled-awaiting', 'turn.completed', {
+            taskId: 'task-canceled-awaiting',
+            agentId: 'root-agent',
+            turnSeq: 1,
+            transition: { kind: 'await_input', token: 'input-token' },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-canceled-awaiting',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'parent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-canceled-awaiting',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-canceled-awaiting',
+                    operation: 'agent.run',
+                    status: 'canceled',
+                    boundaryKind: 'canceled',
+                    updatedAt: '2026-06-23T12:00:10.000Z',
+                },
+                {
+                    providerRunId: 'turn-await',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-canceled-awaiting',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-canceled-awaiting',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    boundaryKind: 'await_input',
+                    turnSeq: 1,
+                    updatedAt: '2026-06-23T12:00:00.000Z',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('canceled');
+        expect(graph.root.finishedAt).toBe('2026-06-23T12:00:10.000Z');
+        expect(graph.root.cancellation?.reason).toBe('operator stop');
     });
 
     it('finalizes stale running turns when a later turn exists for the same task', async () => {

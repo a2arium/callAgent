@@ -223,6 +223,35 @@ model DriverRun {
     @@map("driver_runs")
 }
 
+model RuntimeTimer {
+    id                String    @id @default(cuid())
+    tenantId          String    @map("tenant_id")
+    taskId            String    @map("task_id")
+    agentId           String?   @map("agent_id")
+    rootTaskId        String?   @map("root_task_id")
+    token             String
+    timerId           String    @map("timer_id")
+    dueAt             DateTime  @map("due_at")
+    kind              String
+    status            String
+    idempotencyKey    String    @unique @map("idempotency_key")
+    fireLeaseId       String?   @map("fire_lease_id")
+    fireLeaseUntil    DateTime? @map("fire_lease_until")
+    payload           Json?
+    providerRunId     String?   @map("provider_run_id")
+    providerTaskRunId String?   @map("provider_task_run_id")
+    error             Json?
+    firedAt           DateTime? @map("fired_at")
+    canceledAt        DateTime? @map("canceled_at")
+    createdAt         DateTime  @default(now()) @map("created_at")
+    updatedAt         DateTime  @updatedAt @map("updated_at")
+
+    @@unique([tenantId, taskId, token, timerId])
+    @@index([tenantId, status, dueAt, timerId])
+    @@index([tenantId, taskId, token])
+    @@map("runtime_timers")
+}
+
 model DurableSubscriptionCursor {
     tenantId       String   @map("tenant_id")
     streamId       String   @map("stream_id")

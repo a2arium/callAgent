@@ -26,7 +26,15 @@ export type SegmentWakeEvent =
     | { kind: 'input'; token: string; value: JsonValue }
     | { kind: 'tool'; token: string; result: JsonValue }
     | { kind: 'child'; token: string; childTaskId: string; output: JsonValue }
-    | { kind: 'timer'; token: string; timerId: string; payload?: JsonValue }
+    | {
+          kind: 'timer';
+          token: string;
+          timerId: string;
+          dueAt: string;
+          firedAt: string;
+          reason: 'input_timeout' | 'sleep_due';
+          payload?: JsonValue;
+      }
     | { kind: 'external'; token: string; type: string; data: JsonValue }
     | { kind: 'conversation'; token: string; messageId: string; data: JsonValue };
 
@@ -44,7 +52,7 @@ export type SegmentTaskBoundary =
     | { kind: 'await_tool'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_event'; token: string }
-    | { kind: 'sleep'; token: string; fireAt: string }
+    | { kind: 'sleep'; token: string; fireAt: string; timerId?: string; payload?: JsonValue }
     | { kind: 'paused'; reason: string }
     | { kind: 'canceled'; reason?: string }
     | { kind: 'complete'; result?: JsonValue }
@@ -184,6 +192,12 @@ function toSegmentTaskBoundary(boundary: SegmentResult['boundary']): SegmentTask
     }
     if (boundary.kind === 'fail') {
         return { kind: 'fail', error: boundary.error as JsonValue };
+    }
+    if (boundary.kind === 'sleep') {
+        return {
+            ...boundary,
+            ...(boundary.payload !== undefined ? { payload: boundary.payload as JsonValue } : {}),
+        } as SegmentTaskBoundary;
     }
     return boundary;
 }

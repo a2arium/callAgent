@@ -31,7 +31,7 @@ __metadata:
     "@a2arium/callagent-utils": "npm:^0.2.0"
     "@prisma/adapter-pg": "npm:7.4.0"
     "@prisma/client": "npm:7.4.0"
-    callllm: "npm:^0.3.0"
+    callllm: "npm:^0.3.1"
     dotenv: "npm:^17.3.1"
     jest: "npm:^29.7.0"
     pg: "npm:8.13.3"
@@ -5177,6 +5177,35 @@ __metadata:
     "@opentelemetry/api": ">=1.6.0"
     "@opentelemetry/semantic-conventions": ">=1.22.0"
   checksum: 10c0/96eda7f163df27d4edb7b2a797d3ebf4b0a93318fa7c0456eb0fb8efa451a09276c0de41159eba9eb7a8d407ea5b31d29e7ac83244612bcd1acf21a4386c4e39
+  languageName: node
+  linkType: hard
+
+"callllm@npm:^0.3.1":
+  version: 0.3.1
+  resolution: "callllm@npm:0.3.1"
+  dependencies:
+    "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
+    "@dqbd/tiktoken": "npm:^1.0.18"
+    "@google/genai": "npm:^1.52.0"
+    "@modelcontextprotocol/sdk": "npm:^1.10.2"
+    "@openrouter/sdk": "npm:^0.8.0"
+    "@types/jest": "npm:^29.5.14"
+    "@types/sharp": "npm:^0.32.0"
+    dotenv: "npm:^16.4.7"
+    jest: "npm:^29.7.0"
+    jsonrepair: "npm:^3.12.0"
+    openai: "npm:^6.3.0"
+    opik: "npm:^1.8.70"
+    sharp: "npm:^0.34.1"
+    tree-kill: "npm:^1.2.2"
+    ts-jest: "npm:^29.2.5"
+    ts-morph: "npm:^25.0.1"
+    uuid: "npm:^10.0.0"
+    zod: "npm:4.3.6"
+  peerDependencies:
+    "@opentelemetry/api": ">=1.6.0"
+    "@opentelemetry/semantic-conventions": ">=1.22.0"
+  checksum: 10c0/0f699d64bcec213f7234713523649746d31809cc6b85cacc6012fa0cc9117f35d87bc37344196262fb2b119778b5c206143705ba4423455f7eb14adfd72698fa
   languageName: node
   linkType: hard
 

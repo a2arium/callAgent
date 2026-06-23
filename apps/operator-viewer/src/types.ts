@@ -37,8 +37,15 @@ export type AgentRunNode = {
   error?: unknown;
   traceId?: string;
   providerRunId?: string;
+  cancellation?: AgentRunCancellation;
   startedAt?: string;
   finishedAt?: string;
+};
+
+export type AgentRunCancellation = {
+  requested: boolean;
+  reason?: string;
+  requestedAt?: string;
 };
 
 export type AgentRunEdge = {
