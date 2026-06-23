@@ -17,7 +17,11 @@ import {
     resolveOutboxDispatchContext,
     type OutboxDispatchContext,
 } from '../eventbus/outboxDispatch.js';
-import { nextSegmentOutboxIdempotencyKey } from '../runtime/segmentProcessedKeys.js';
+import {
+    addProcessedSegmentKey,
+    currentSegmentIdempotencyKey,
+    nextSegmentOutboxIdempotencyKey,
+} from '../runtime/segmentProcessedKeys.js';
 
 export type OutboxEnqueuedRef = {
     outboxRowId: string;
@@ -74,10 +78,14 @@ export class SessionManager {
         }
 
         const loaded = await this.store.getSessionSnapshot(params.tenantId, params.sessionId);
-        const snapshotToWrite = preserveConversationInboxForSnapshot(
+        const preservedSnapshot = preserveConversationInboxForSnapshot(
             params.snapshot,
             loaded?.snapshot as Record<string, unknown> | undefined
         );
+        const activeSegmentKey = currentSegmentIdempotencyKey();
+        const snapshotToWrite = activeSegmentKey !== undefined
+            ? addProcessedSegmentKey(preservedSnapshot, activeSegmentKey)
+            : preservedSnapshot;
         const paramsToWrite = { ...params, snapshot: snapshotToWrite };
 
         // Enforce WM snapshot size cap (bytes)

@@ -39,11 +39,14 @@ callAgent remains the owner of all cognition and snapshot state:
 ### Durable dedupe mechanism
 
 `runSegment` checks and records the `idempotencyKey` durably **in the same
-transaction** as the snapshot write:
+transaction** as snapshot writes:
 
-- Preferred: a `processedKeys` set persisted inside the snapshot (bounded /
-  pruned), so the dedupe commit and the state transition are one atomic write
-  guarded by CAS.
+- Implemented mechanism: a `processedKeys` set persisted inside the snapshot
+  (bounded / pruned to the most recent 512 keys). `SessionManager.saveSnapshot`
+  stamps the active segment idempotency key into every snapshot write made while
+  `runSegment` is active, so the dedupe commit and the state transition are one
+  atomic write guarded by CAS. A post-run recorder remains as a fallback for
+  segments that return without writing a snapshot.
 - Alternative: a dedicated `processed_wakes(tenant_id, task_id, idempotency_key,
   applied_at)` table with a unique constraint, written transactionally with the
   snapshot.
@@ -53,16 +56,18 @@ current boundary as a no-op. The in-memory RPC `IdempotencyStore` (10-min TTL,
 lost on restart) is explicitly **not** the mechanism for orchestrator-driven
 wakes.
 
-Required idempotency keys:
+Current required wake idempotency keys:
 
 | Operation | Key |
 |---|---|
 | task start | `taskId:start` |
-| input resume | `token:input` or token if globally unique |
-| tool resume | `token:tool` |
-| child completion | `parentTaskId:token:childTaskId` |
-| timer fire | `taskId:token:timerId` |
-| outbox publish | `outboxRowId:eventType` |
+| input resume | `taskId:input:token` |
+| tool resume | `taskId:tool:token` |
+| child completion | `parentTaskId:child:token` |
+| external event | `taskId:external:token` |
+| timer fire | `taskId:timer:timerId` |
+| cancel | `taskId:cancel` |
+| segment outbox publish | `segmentIdempotencyKey:outbox:topic:seq` |
 
 ## Consequences
 
@@ -76,7 +81,9 @@ Required idempotency keys:
 
 ## Open Validation
 
-- D4: implement and test the durable dedupe (snapshot `processedKeys` or
-  `processed_wakes` table); confirm it commits atomically with the snapshot.
-- B1/B3: prove duplicate/redelivered wakes produce exactly one effective snapshot
-  transition, including across a worker crash between apply and ack.
+- B1/B3 real-worker validation: run the duplicate/redelivery scenarios against
+  actual Hatchet worker restarts, not only the segment executor integration
+  tests.
+- ADR 0009 per-effect idempotency remains separate: wake dedupe protects
+  snapshot transitions; effect idempotency protects non-transactional external
+  side effects.

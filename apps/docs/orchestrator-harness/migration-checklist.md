@@ -42,10 +42,9 @@ harness checklist style.
 
 ## Idempotency & ordering
 
-- [ ] Wake idempotency keys defined for start/input/tool/child/timer/outbox.
-      Child wake keys are covered as `parentTaskId:child:token`; remaining wake
-      families still need the durable dedupe policy below.
-- [ ] **Durable** dedupe implemented (snapshot `processedKeys` or
+- [x] Wake idempotency keys defined for start/input/tool/child/external/timer/outbox.
+      Current keys are documented in ADR 0005.
+- [x] **Durable** dedupe implemented (snapshot `processedKeys` or
       `processed_wakes` table), committed atomically with the snapshot (ADR 0005).
 - [ ] **Per-effect** idempotency keys defined (ADR 0009): tool
       `taskId:turnSeq:toolCallId`, outbox `taskId:turnSeq:eventKind`, child
@@ -58,7 +57,7 @@ harness checklist style.
 - [ ] Duplicate/redelivered delivery proven no-op at the effect boundary —
       including across a crash between apply and ack, and after a partial
       mid-segment crash (not CAS alone).
-- [ ] `processedKeys` pruning policy defined.
+- [x] `processedKeys` pruning policy defined.
 - [ ] FIFO per `taskId` verified.
 
 ## Cancellation (ADR 0010)

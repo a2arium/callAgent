@@ -32,8 +32,8 @@ pending-token late wakes no-op as `canceled` boundaries, and idempotent
 cancel-after-terminal behavior. Conversation activation and timer wakes still
 have runtime-seam coverage only. Queued/running Hatchet provider runs are
 cancelled best-effort from recorded `driver_runs` provider ids. Remaining Phase
-3 work is durable dedupe policy closure and restart/failure validation against
-real workers.
+3 work is per-effect idempotency/retry policy closure and restart/failure
+validation against real workers.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
 The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
@@ -61,8 +61,8 @@ first POC candidate.
   completion become Hatchet events feeding durable event waits; hot chat stays
   in-process.
 - `adr/0005-snapshot-ownership-and-idempotency.md` — `MentalState` stays in
-  callAgent; **durable dedupe** required (CAS alone is insufficient against
-  re-delivery); idempotency keys.
+  callAgent; **durable wake dedupe** uses bounded snapshot `processedKeys`
+  stamped into active segment snapshot writes; idempotency keys.
 - `adr/0006-observability-and-deletion.md` — `driver_runs`, deep links to
   `TurnTrace`, outbox reconciliation, and the deletion/reversibility policy.
 - `adr/0007-streaming-in-hatchet-mode.md` — keep the canonical stream contract;
@@ -319,8 +319,8 @@ Next phase: finish the runtime/provider side of Phase 3. Child `await_child`
 fan-in is covered and should be treated as closed for the harness, external
 `await_event` waits now resume through Hatchet events, and canceled snapshots
 stop at the next boundary/wake without applying late pending-token events.
-Remaining Phase 3 work is durable dedupe policy closure and real-run validation
-under worker restarts. Conversation durable waits remain a follow-up until the kernel has a
+Remaining Phase 3 work is per-effect idempotency/retry policy closure and
+real-run validation under worker restarts. Conversation durable waits remain a follow-up until the kernel has a
 first-class conversation boundary. In parallel, start the production-readiness
 read model: semantic run summaries, edge facts, root-only fleet correctness,
 child counts, query/index review, and payload-budget error surfacing.
@@ -333,8 +333,6 @@ child counts, query/index review, and payload-budget error surfacing.
 - Reconciling Hatchet run UI with `TurnTrace` (ADR 0006: link, don't duplicate).
 - Cross-process bus choice/provisioning for Hatchet mode (ADR 0007: NATS
   required; in-memory bus only for in-process driver).
-- Durable dedupe shape: snapshot `processedKeys` vs `processed_wakes` table, and
-  its pruning policy (ADR 0005).
 - Transactional outbox: today `enqueueOutbox` and `writeSnapshotCAS` are separate
   non-transactional calls (confirmed in code). Decide whether to couple them for
   migrated event types or rely on per-effect idempotency (ADR 0009).

@@ -10,6 +10,9 @@ import { createInMemoryEventBus } from '../../src/eventbus/inMemoryEventBus.js';
 import { initialM } from '../../src/loop/init.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
 import { setPendingInputs } from '../../src/orchestration/DurableHandlerRegistry.js';
+import { setPendingTools } from '../../src/orchestration/ToolsRegistry.js';
+import { setPendingExternalEvents } from '../../src/orchestration/ExternalEventsRegistry.js';
+import { setPendingTasks } from '../../src/orchestration/Handles.js';
 import { readProcessedSegmentKeys } from '../../src/runtime/segmentProcessedKeys.js';
 import { markSegmentCancellationRequested } from '../../src/runtime/segmentCancellation.js';
 
@@ -212,6 +215,67 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         expect(executeTurnSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('records the processed key atomically with snapshot writes inside a segment', async () => {
+        const key = `${taskId}:start`;
+        const token = 'tool-crash-token';
+        executeTurnSpy.mockImplementation(async (params) => {
+            const loaded = await params.sessionManager.load(params.tenantId, params.sessionId);
+            await params.sessionManager.saveSnapshot({
+                tenantId: params.tenantId,
+                sessionId: params.sessionId,
+                agentId: params.agentId,
+                expectedWmVersion: loaded?.wmVersion ?? BigInt(0),
+                snapshot: setPendingTools(
+                    {
+                        meta: {
+                            agentId: params.agentId,
+                            awaiting: { kind: 'await_tool', token },
+                        },
+                        inbox: { current: [], all: [] },
+                    },
+                    { [token]: { name: 'fetch', args: {} } }
+                ),
+            });
+            throw new Error('worker died after snapshot write');
+        });
+
+        await expect(executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: key,
+            wake: { trigger: 'start', input: {} },
+        })).rejects.toThrow('worker died after snapshot write');
+
+        const persisted = await sessionManager.load(tenantId, taskId);
+        expect(readProcessedSegmentKeys(persisted?.snapshot ?? {})).toContain(key);
+
+        const freshExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) =>
+                ({
+                    task,
+                    logger: console,
+                    progress: jest.fn(),
+                    fail: jest.fn(),
+                }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+        });
+
+        const duplicate = await freshExecutor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: key,
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(duplicate.boundary).toEqual({ kind: 'await_tool', token });
+        expect(duplicate.taskStatus).toBe('working');
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('turns a late wake into a durable canceled boundary without applying the wake', async () => {
         const token = 'input-tok-canceled';
         const snapshot = markSegmentCancellationRequested(
@@ -302,5 +366,137 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         expect(result.boundary).toEqual({ kind: 'canceled', reason: 'stop' });
         expect(result.taskStatus).toBe('canceled');
         expect(executeTurnSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        {
+            name: 'input',
+            idempotencyKey: `${taskId}:input:input-restart-token`,
+            snapshot: setPendingInputs(
+                {
+                    meta: {
+                        agentId,
+                        awaiting: { kind: 'await_input', token: 'input-restart-token' },
+                        processedKeys: [`${taskId}:input:input-restart-token`],
+                    },
+                    inbox: { current: [], all: [] },
+                },
+                { 'input-restart-token': {} }
+            ),
+            wake: {
+                trigger: 'resume' as const,
+                event: { kind: 'input' as const, token: 'input-restart-token', value: 'duplicate answer' },
+            },
+            expectedBoundary: { kind: 'await_input' as const, token: 'input-restart-token' },
+        },
+        {
+            name: 'tool',
+            idempotencyKey: `${taskId}:tool:tool-restart-token`,
+            snapshot: setPendingTools(
+                {
+                    meta: {
+                        agentId,
+                        awaiting: { kind: 'await_tool', token: 'tool-restart-token' },
+                        processedKeys: [`${taskId}:tool:tool-restart-token`],
+                    },
+                    inbox: { current: [], all: [] },
+                },
+                { 'tool-restart-token': { name: 'fetch', args: { url: 'https://example.com' } } }
+            ),
+            wake: {
+                trigger: 'tool' as const,
+                event: { kind: 'tool' as const, token: 'tool-restart-token', result: { ok: true } },
+            },
+            expectedBoundary: { kind: 'await_tool' as const, token: 'tool-restart-token' },
+        },
+        {
+            name: 'child',
+            idempotencyKey: `${taskId}:child:child-restart-token`,
+            snapshot: setPendingTasks(
+                {
+                    meta: {
+                        agentId,
+                        awaiting: { kind: 'await_child', token: 'child-restart-token' },
+                        processedKeys: [`${taskId}:child:child-restart-token`],
+                    },
+                    inbox: { current: [], all: [] },
+                },
+                { 'child-restart-token': { target: 'child-agent', handlers: {} } }
+            ),
+            wake: {
+                trigger: 'child' as const,
+                event: {
+                    kind: 'child' as const,
+                    token: 'child-restart-token',
+                    childTaskId: 'child-task-1',
+                    output: { ok: true },
+                },
+            },
+            expectedBoundary: { kind: 'await_child' as const, token: 'child-restart-token' },
+        },
+        {
+            name: 'external',
+            idempotencyKey: `${taskId}:external:event-restart-token`,
+            snapshot: setPendingExternalEvents(
+                {
+                    meta: {
+                        agentId,
+                        awaiting: { kind: 'await_event', token: 'event-restart-token' },
+                        processedKeys: [`${taskId}:external:event-restart-token`],
+                    },
+                    inbox: { current: [], all: [] },
+                },
+                { 'event-restart-token': { type: 'webhook.received' } }
+            ),
+            wake: {
+                trigger: 'event' as const,
+                event: {
+                    kind: 'external' as const,
+                    token: 'event-restart-token',
+                    type: 'webhook.received',
+                    data: { ok: true },
+                },
+            },
+            expectedBoundary: { kind: 'await_event' as const, token: 'event-restart-token' },
+        },
+    ])('dedupes duplicate $name wake after executor restart', async (scenario) => {
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: taskId,
+            agentId,
+            expectedWmVersion: BigInt(0),
+            snapshot: scenario.snapshot,
+        });
+
+        const freshExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) =>
+                ({
+                    task,
+                    logger: console,
+                    progress: jest.fn(),
+                    fail: jest.fn(),
+                }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+        });
+
+        const result = await freshExecutor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: scenario.idempotencyKey,
+            wake: scenario.wake,
+        });
+
+        expect(result.boundary).toEqual(scenario.expectedBoundary);
+        expect(result.taskStatus).toBe(
+            scenario.expectedBoundary.kind === 'await_input' ? 'input-required' : 'working'
+        );
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+
+        const persisted = await sessionManager.load(tenantId, taskId);
+        expect(readProcessedSegmentKeys(persisted?.snapshot ?? {})).toContain(scenario.idempotencyKey);
+        expect((persisted?.snapshot as { inbox?: { current?: unknown[] } }).inbox?.current).toEqual([]);
     });
 });

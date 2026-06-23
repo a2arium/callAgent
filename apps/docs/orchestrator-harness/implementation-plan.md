@@ -77,9 +77,9 @@ lifecycle.
 
 Prerequisites (must land before/with this phase):
 
-- **Durable dedupe** (ADR 0005): `processedKeys` in snapshot or `processed_wakes`
-  table, committed atomically with the snapshot. The in-memory RPC store is not
-  sufficient.
+- **Durable wake dedupe** (ADR 0005): implemented with bounded snapshot
+  `processedKeys` stamped into active segment snapshot writes. The in-memory RPC
+  store is not sufficient and is not used for orchestrator wake dedupe.
 - **Per-effect idempotency + retry policy** (ADR 0009): deterministic keys for
   tool/outbox/child/timer effects; `throw` = transient retry (bounded), `fail`
   boundary = terminal (never retried). This is the correctness prerequisite —
@@ -142,8 +142,8 @@ Boundary cancellation now writes intent to the snapshot, turns pending-token
 late wakes into durable `canceled` no-ops, and treats double cancel /
 cancel-after-terminal as no-ops. Queued/running Hatchet provider runs are
 cancelled best-effort from recorded `driver_runs` provider ids. Remaining Phase
-3 work is durable dedupe policy closure and worker-restart validation;
-conversation durable waits need a
+3 work is per-effect idempotency/retry policy closure and worker-restart
+validation; conversation durable waits need a
 first-class conversation boundary before Hatchet event waits can own them.
 
 1. `tasks/input` (non-hot), tool/webhook callbacks, external event callbacks,
