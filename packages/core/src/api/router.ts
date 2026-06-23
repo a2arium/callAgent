@@ -1,5 +1,6 @@
 // src/api/router.ts
 import { Router } from 'express';
+import fs from 'node:fs/promises';
 import {
     handleTasksSend,
     handleTasksSubscribe,
@@ -8,7 +9,7 @@ import {
 } from './rpc/index.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
 import type { TaskEngine } from '../orchestration/taskEngine.js';
-import { getAgentWorkspaceInfo } from '../plugin/WorkspaceLoader.js';
+import { getAgentWorkspaceInfo, listAgentWorkspaceInfos } from '../plugin/WorkspaceLoader.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentCard } from '@a2arium/callagent-types';
 
@@ -96,31 +97,55 @@ export function createApiRouter(): Router {
         }
     });
 
-    router.get('/agents', (_req, res) => {
-        const agents: ListedAgent[] = PluginManager.listAgents()
-            .map((card) => {
-                const workspace = getAgentWorkspaceInfo(card.name);
-                return {
-                    id: card.name,
-                    name: card.name,
-                    version: card.version,
-                    description: card.description,
-                    tags: card.skills.flatMap((skill) => skill.tags ?? []),
-                    defaultInputModes: card.defaultInputModes,
-                    defaultOutputModes: card.defaultOutputModes,
-                    capabilities: card.capabilities,
-                    skills: card.skills,
-                    ...(workspace
-                        ? {
-                            workspace: {
-                                name: workspace.workspaceName,
-                                root: workspace.workspaceRoot,
-                            },
-                        }
-                        : {}),
-                };
-            })
-            .sort((left, right) => left.name.localeCompare(right.name));
+    router.get('/agents', async (_req, res) => {
+        const agentsById = new Map<string, ListedAgent>();
+
+        for (const card of PluginManager.listAgents()) {
+            const workspace = getAgentWorkspaceInfo(card.name);
+            agentsById.set(card.name, {
+                id: card.name,
+                name: card.name,
+                version: card.version,
+                description: card.description,
+                tags: card.skills.flatMap((skill) => skill.tags ?? []),
+                defaultInputModes: card.defaultInputModes,
+                defaultOutputModes: card.defaultOutputModes,
+                capabilities: card.capabilities,
+                skills: card.skills,
+                ...(workspace
+                    ? {
+                        workspace: {
+                            name: workspace.workspaceName,
+                            root: workspace.workspaceRoot,
+                        },
+                    }
+                    : {}),
+            });
+        }
+
+        for (const { agentName, info } of listAgentWorkspaceInfos()) {
+            if (agentsById.has(agentName)) {
+                continue;
+            }
+            const card = await readIndexedAgentCard(agentName, info.agentCardPath);
+            agentsById.set(agentName, {
+                id: card.name,
+                name: card.name,
+                version: card.version,
+                description: card.description,
+                tags: card.skills.flatMap((skill) => skill.tags ?? []),
+                defaultInputModes: card.defaultInputModes,
+                defaultOutputModes: card.defaultOutputModes,
+                capabilities: card.capabilities,
+                skills: card.skills,
+                workspace: {
+                    name: info.workspaceName,
+                    root: info.workspaceRoot,
+                },
+            });
+        }
+
+        const agents = Array.from(agentsById.values()).sort((left, right) => left.name.localeCompare(right.name));
 
         res.json({ items: agents });
     });
@@ -202,4 +227,46 @@ export function createApiRouter(): Router {
     });
 
     return router;
-} 
+}
+
+async function readIndexedAgentCard(agentName: string, agentCardPath: string | undefined): Promise<AgentCard> {
+    if (agentCardPath !== undefined) {
+        try {
+            const parsed = JSON.parse(await fs.readFile(agentCardPath, 'utf8')) as Partial<AgentCard>;
+            if (typeof parsed.name === 'string' && parsed.name.length > 0) {
+                return normalizeListedAgentCard(agentName, parsed);
+            }
+        } catch {
+            // Fall back to a minimal launcher card. The runtime can still load the agent by id.
+        }
+    }
+    return normalizeListedAgentCard(agentName, { name: agentName });
+}
+
+function normalizeListedAgentCard(agentName: string, card: Partial<AgentCard>): AgentCard {
+    const skill = Array.isArray(card.skills) && card.skills.length > 0
+        ? card.skills
+        : [
+              {
+                  id: agentName,
+                  name: agentName,
+                  description: card.description ?? 'Indexed workspace agent.',
+              },
+          ];
+    return {
+        name: typeof card.name === 'string' && card.name.length > 0 ? card.name : agentName,
+        version: typeof card.version === 'string' && card.version.length > 0 ? card.version : '0.0.0',
+        description: typeof card.description === 'string' && card.description.length > 0
+            ? card.description
+            : 'Indexed workspace agent.',
+        supportedInterfaces: Array.isArray(card.supportedInterfaces) ? card.supportedInterfaces : [],
+        capabilities: card.capabilities ?? {},
+        defaultInputModes: Array.isArray(card.defaultInputModes) ? card.defaultInputModes : ['application/json'],
+        defaultOutputModes: Array.isArray(card.defaultOutputModes) ? card.defaultOutputModes : ['application/json'],
+        skills: skill,
+        ...(card.url ? { url: card.url } : {}),
+        ...(card.provider ? { provider: card.provider } : {}),
+        ...(card.documentationUrl ? { documentationUrl: card.documentationUrl } : {}),
+        ...(card.iconUrl ? { iconUrl: card.iconUrl } : {}),
+    };
+}

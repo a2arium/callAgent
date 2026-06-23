@@ -56,6 +56,10 @@ export type AgentWorkspaceInfo = {
     workspaceName: string;
     workspaceRoot: string;
     agentIndexPath: string;
+    agentCardPath?: string;
+    runtimeManifestPath?: string;
+    modulePath?: string;
+    loaded: boolean;
 };
 
 const envSources = new Map<string, EnvValueSource>();
@@ -63,6 +67,10 @@ const agentWorkspaceInfo = new Map<string, AgentWorkspaceInfo>();
 
 export function getAgentWorkspaceInfo(agentName: string): AgentWorkspaceInfo | undefined {
     return agentWorkspaceInfo.get(agentName);
+}
+
+export function listAgentWorkspaceInfos(): Array<{ agentName: string; info: AgentWorkspaceInfo }> {
+    return Array.from(agentWorkspaceInfo.entries()).map(([agentName, info]) => ({ agentName, info }));
 }
 
 export async function loadWorkspaces(options: LoadWorkspacesOptions = {}): Promise<WorkspaceLoadSummary> {
@@ -206,16 +214,35 @@ async function loadWorkspace(workspace: WorkspaceDefinition, baseDir: string): P
         indexPath: agentIndexPath,
         cwd: root,
     });
+    const indexedAgents = await readWorkspaceAgentIndex(agentIndexPath, root);
 
     if (result.loaded.length === 0) {
         throw new Error(`Workspace "${workspace.name}" did not load any agents from ${agentIndexPath}`);
     }
 
-    for (const agentName of result.loaded) {
+    const loadedAgentNames = new Set(result.loaded);
+    for (const [agentName, entry] of indexedAgents) {
         agentWorkspaceInfo.set(agentName, {
             workspaceName: workspace.name,
             workspaceRoot: root,
             agentIndexPath,
+            ...(entry.agentCardPath ? { agentCardPath: entry.agentCardPath } : {}),
+            ...(entry.runtimeManifestPath ? { runtimeManifestPath: entry.runtimeManifestPath } : {}),
+            ...(entry.modulePath ? { modulePath: entry.modulePath } : {}),
+            loaded: loadedAgentNames.has(agentName),
+        });
+    }
+
+    for (const agentName of result.loaded) {
+        const existing = agentWorkspaceInfo.get(agentName);
+        agentWorkspaceInfo.set(agentName, {
+            workspaceName: workspace.name,
+            workspaceRoot: root,
+            agentIndexPath,
+            ...(existing?.agentCardPath ? { agentCardPath: existing.agentCardPath } : {}),
+            ...(existing?.runtimeManifestPath ? { runtimeManifestPath: existing.runtimeManifestPath } : {}),
+            ...(existing?.modulePath ? { modulePath: existing.modulePath } : {}),
+            loaded: true,
         });
     }
 
@@ -292,4 +319,60 @@ async function pathExists(candidate: string): Promise<boolean> {
     } catch {
         return false;
     }
+}
+
+async function readWorkspaceAgentIndex(
+    agentIndexPath: string,
+    workspaceRoot: string
+): Promise<Map<string, { modulePath?: string; agentCardPath?: string; runtimeManifestPath?: string }>> {
+    const entries = new Map<string, { modulePath?: string; agentCardPath?: string; runtimeManifestPath?: string }>();
+    let raw: string;
+    try {
+        raw = await fs.readFile(agentIndexPath, 'utf8');
+    } catch {
+        return entries;
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return entries;
+    }
+
+    const indexDir = path.dirname(agentIndexPath);
+    for (const [agentName, value] of Object.entries(parsed)) {
+        const entry = normalizeAgentIndexEntry(value);
+        if (!entry) continue;
+        entries.set(agentName, {
+            modulePath: path.resolve(indexDir, entry.module),
+            ...(entry.agentCard ? { agentCardPath: path.resolve(indexDir, entry.agentCard) } : {}),
+            ...(entry.runtimeManifest ? { runtimeManifestPath: path.resolve(indexDir, entry.runtimeManifest) } : {}),
+        });
+    }
+
+    if (entries.size === 0 && workspaceRoot !== indexDir) {
+        workspaceLogger.warn('Workspace agent index had no readable entries', { agentIndexPath, workspaceRoot });
+    }
+    return entries;
+}
+
+function normalizeAgentIndexEntry(value: unknown): { module: string; agentCard?: string; runtimeManifest?: string } | null {
+    if (typeof value === 'string' && value.length > 0) {
+        return { module: value };
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.module !== 'string' || candidate.module.length === 0) {
+        return null;
+    }
+    return {
+        module: candidate.module,
+        ...(typeof candidate.agentCard === 'string' && candidate.agentCard.length > 0
+            ? { agentCard: candidate.agentCard }
+            : {}),
+        ...(typeof candidate.runtimeManifest === 'string' && candidate.runtimeManifest.length > 0
+            ? { runtimeManifest: candidate.runtimeManifest }
+            : {}),
+    };
 }

@@ -210,6 +210,17 @@ function taskIdForRun(row: DriverRunView): string | undefined {
     return row.rootTaskId ?? row.taskId ?? undefined;
 }
 
+function isRootDriverRun(row: DriverRunView, childTaskIds: Set<string>): boolean {
+    if (row.parentTaskId !== null && row.parentTaskId !== undefined && row.parentTaskId.length > 0) {
+        return false;
+    }
+    const taskId = row.taskId ?? undefined;
+    if (taskId !== undefined && childTaskIds.has(taskId)) {
+        return false;
+    }
+    return row.rootTaskId === null || row.rootTaskId === undefined || row.rootTaskId === taskId;
+}
+
 function deriveListRunStatus(
     rootRun: DriverRunListRow,
     relatedRuns: DriverRunListRow[],
@@ -1252,7 +1263,7 @@ export class TaskEngine {
                 .map((event) => childTaskIdFromEvent(event))
                 .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
         );
-        const filteredRows = rows.filter((row) => scope === 'all' || row.taskId === null || row.taskId === undefined || !childTaskIds.has(row.taskId));
+        const filteredRows = rows.filter((row) => scope === 'all' || isRootDriverRun(row, childTaskIds));
         const pageRows = filteredRows.slice(0, limit);
         const rootTaskIds = [
             ...new Set(
@@ -1325,12 +1336,16 @@ export class TaskEngine {
                 }, 0);
                 const turns = runs.filter((run) => run.operation === 'turn.segment' || run.operation === 'segment').length ||
                     taskTurnEvents.filter((event) => event.type === 'turn.completed').length;
-                const children = new Set(
-                    taskTurnEvents
+                const children = new Set([
+                    ...runs
+                        .filter((run) => run.parentTaskId !== null && run.parentTaskId !== undefined && run.parentTaskId.length > 0)
+                        .map((run) => run.taskId)
+                        .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0 && taskId !== rootTaskId),
+                    ...taskTurnEvents
                         .filter((event) => event.type.startsWith('task.child_'))
                         .map((event) => isRecordValue(event.payload) ? event.payload.childTaskId : undefined)
-                        .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
-                ).size;
+                        .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0),
+                ]).size;
                 const startedAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt;
                 const updatedAt = row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt;
                 const startedMs = new Date(startedAt).getTime();
