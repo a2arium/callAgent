@@ -1,12 +1,13 @@
 # Implementation Status
 
-Last updated: 2026-06-22.
+Last updated: 2026-06-23.
 
 ## Stage
 
-**Phase 2 durable loop + Operator Experience MVP implemented; Phase 3 child
-wake/fan-in slice closed; non-child wake routing coverage added; remaining
-Phase 3/operator hardening in progress; production-readiness track added.**
+**Phase 2 durable loop + Operator Experience MVP implemented; Phase 3
+external-wake, child fan-in, cancellation, and operator-hardening slice closed
+for harness purposes; Phase 4 timer work is next; production-readiness track
+added for promotion gates.**
 Hatchet-backed
 `aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
 parent workflows exist behind driver-surface flags. The runtime now exposes a
@@ -28,12 +29,22 @@ out-of-order child completion selection, missing child wake timeout, and graph
 projection. Input/tool durable waits are implemented, and external events now
 have a first-class `await_event` boundary backed by `aplret.external.<token>`
 Hatchet events. Boundary cancellation now has a durable snapshot intent,
-pending-token late wakes no-op as `canceled` boundaries, and idempotent
-cancel-after-terminal behavior. Conversation activation and timer wakes still
-have runtime-seam coverage only. Queued/running Hatchet provider runs are
-cancelled best-effort from recorded `driver_runs` provider ids. Remaining Phase
-3 work is per-effect idempotency/retry policy closure and restart/failure
-validation against real workers.
+pending-token late wakes no-op as `canceled` boundaries, idempotent
+cancel-after-terminal behavior, and best-effort provider-run cancellation from
+recorded `driver_runs` provider ids. Recent real-run hardening closed the main
+operator correctness gaps found while running `discover-listing-selectors`:
+root-only fleet filtering uses child-link facts rather than stale provider
+parent columns, workspace agent discovery no longer depends on stale
+`agent-paths.json`, resumed runs are treated as active when newer running
+segments supersede worker-abort root rows, and live run graphs show started
+event-only turns before their final `turn.completed` trace is captured.
+
+Phase 3 is therefore closed enough to start Phase 4. Remaining work around
+normalized read-model persistence, query/index validation, retention,
+production-grade observability, payload budgets, and volume/failure drills is
+tracked as Phase 5 production readiness, not as a blocker for timer work.
+Conversation activation still has runtime-seam coverage only and remains a
+follow-up until the kernel has a first-class conversation boundary.
 
 Manual POC gates B5–B7 are **signed off** via `apps/hatchet-poc/README.md`.
 The Phase 2 parent-child DAG signoff is also complete: `phase2-parent-agent`
@@ -291,6 +302,26 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
   added. Expected console noise remains from tests that
   intentionally drive failed stores, Hatchet trigger failures, and dispatch
   fallback paths.
+- 2026-06-23 Phase 3 hardening commits:
+  - `846bfa2` / `f35035f` — operator agent registry and root/child fleet scope
+    against real `itupdated` workspace data.
+  - `740aaf4` — durable wake dedupe policy closure.
+  - `ec3fd50`, `2993c70`, `6e5f0d7` — cancellation semantics, idempotent
+    cancel-after-terminal behavior, and provider-run best-effort cancellation.
+  - `33c94b8` — resumed runs with stale worker-abort root rows remain active
+    when newer running turn segments exist.
+  - `4361cd1` — live operator graph turn nodes via `turn.started` projection and
+    temporal child-edge matching.
+- 2026-06-23 focused verification:
+  - `yarn test packages/core/tests/operator.agentRunsList.test.ts packages/core/tests/operator.runGraph.test.ts --runInBand`
+    — root/child fleet scope, stale parent-row status, live turn projection, and
+    graph edge projection coverage.
+  - `yarn test packages/core/tests/operator.runGraph.test.ts --runInBand`
+    — 12 graph projection tests passed after live-turn projection was added.
+  - `yarn workspace @a2arium/operator-viewer build` — viewer build passes after
+    graph polling/edge changes. Vite still reports the known large
+    bundle/chunk-size warning.
+  - `yarn workspace @a2arium/callagent-core build` — core build passes.
 - `packages/core/tests/runtime/*` — runtime seam coverage for mapper, driver,
   wake applicator, segment executor, bootstrap, Scenario 0 parity, and driver
   routing.
@@ -315,15 +346,24 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Next phase: finish the runtime/provider side of Phase 3. Child `await_child`
-fan-in is covered and should be treated as closed for the harness, external
-`await_event` waits now resume through Hatchet events, and canceled snapshots
-stop at the next boundary/wake without applying late pending-token events.
-Remaining Phase 3 work is per-effect idempotency/retry policy closure and
-real-run validation under worker restarts. Conversation durable waits remain a follow-up until the kernel has a
-first-class conversation boundary. In parallel, start the production-readiness
-read model: semantic run summaries, edge facts, root-only fleet correctness,
-child counts, query/index review, and payload-budget error surfacing.
+Start Phase 4: timers via durable sleep + reconciler. The implementation should
+make timer/token expiry restart-safe before deleting in-process `setTimeout`
+semantic waits:
+
+1. Define the timer wake contract and boundary shape (`sleep` / `sleep_until` /
+   token expiry) in the runtime seam.
+2. Add the Hatchet durable sleep path and idempotent `aplret.timer.fire` wake.
+3. Add `TimerReconciler` startup/periodic scans for expired pending tokens so
+   downtime is recovered.
+4. Add tests for restart survival, late/duplicate timer fire, and downtime
+   recovery.
+5. Run the manual B2 POC: start a timer, stop runtime/worker during the wait,
+   restart, and verify the timer fires once and resumes the correct task.
+
+In parallel, keep Phase 5 production-readiness work visible: normalized semantic
+run summaries, edge facts, child counts, query/index review, graph caps,
+payload-budget error surfacing, retention, observability, and 100k-run volume
+testing.
 
 ## Open questions (carried from requirements §11)
 

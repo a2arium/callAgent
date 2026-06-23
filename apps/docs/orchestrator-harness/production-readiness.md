@@ -1,6 +1,6 @@
 # Production Readiness Plan
 
-Last updated: 2026-06-22.
+Last updated: 2026-06-23.
 
 This is the promotion gate for running the Hatchet orchestration harness as a
 production substrate, not a dashboard polish list. The runtime can plausibly run
@@ -24,18 +24,19 @@ snapshots, idempotency, and semantic operator graph. The remaining production
 risk is mostly in read-side scale, payload discipline, operational controls, and
 failure drills.
 
-As of the 2026-06-22 harness sweep, the Phase 3 child wake/fan-in slice is
-covered by durable-parent unit tests and operator graph projection tests. That
-does not change the production gate: the system still needs the read model,
-query validation, payload budgets, observability, retention, and failure drills
-below before Hatchet mode or the operator viewer can be treated as production
-defaults.
+As of the 2026-06-23 harness sweep, the Phase 3 child wake/fan-in,
+external-wake, cancellation, and operator-hardening slice is closed enough to
+start Phase 4 timer work. That does not change the production gate: the system
+still needs the read model, query validation, payload budgets, observability,
+retention, and failure drills below before Hatchet mode or the operator viewer
+can be treated as production defaults.
 
 Known gaps from the current implementation:
 
-- `GET /agent-runs` derives some root/child classification from a bounded recent
-  event sample. That can become inaccurate when the tenant has many child-link
-  events.
+- `GET /agent-runs` now uses child-link event facts for root/child
+  classification instead of stale provider parent columns, but this is still a
+  bridge read path. Production root/child scope should come from normalized
+  persisted run/edge facts with indexes and retention semantics.
 - `GET /tasks/:taskId/run-graph` recursively reads task sessions and events for
   the whole graph. This is fine for investigation, but needs caps and progressive
   loading for large fan-out trees.
