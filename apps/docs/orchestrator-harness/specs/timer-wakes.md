@@ -58,20 +58,37 @@ type TimerWakeRecord = {
   kind: 'token_expiry' | 'sleep';
   status: 'scheduled' | 'firing' | 'fired' | 'canceled';
   idempotencyKey: string;
+  fireLeaseId?: string;
+  fireLeaseUntil?: string;
   payload?: unknown;
   createdAt: string;
   updatedAt: string;
   firedAt?: string;
+  canceledAt?: string;
   providerRunId?: string;
   providerTaskRunId?: string;
   error?: unknown;
 };
 ```
 
-Initial implementation may store this in the existing snapshot/pending-token
-shape if that is the lowest-risk bridge, but the record shape above is the
-semantic contract. Phase 5 should promote it to normalized indexed persistence if
-timer volume or retention requires it.
+Phase 4 bridge persistence must be queryable. Do not store the only timer record
+inside opaque task snapshots, because `TimerReconciler` must scan due timers
+without loading every task snapshot. The expected Phase 4 bridge is a small
+indexed timer table or an equivalent queryable store with this record shape.
+
+Minimum index/query paths:
+
+```text
+(tenantId, status, dueAt, timerId)
+(tenantId, taskId, token)
+unique(tenantId, taskId, token, timerId)
+unique(idempotencyKey)
+```
+
+The task snapshot may duplicate compact pending-token timer metadata for local
+turn execution, but the queryable timer record is the reconciler source of truth.
+Phase 5 may promote or merge this bridge into normalized run/effect persistence
+if timer volume or retention requires it.
 
 ## Runtime Contract
 
@@ -91,6 +108,15 @@ Phase 4 tightens the contract:
 
 1. `fireAt` is an absolute ISO timestamp.
 2. The driver returns a stable `timerId` for the persisted timer fact.
+   `timerId` must be deterministic across retries. Recommended derivation:
+
+   ```text
+   timer:<sha256(tenantId + "\0" + taskId + "\0" + token + "\0" + fireAt + "\0" + kind)>
+   ```
+
+   If a pre-existing token already carries a timer id, reuse that id. Do not use
+   a random UUID generated inside a retried scheduling path unless it is
+   persisted before any provider work can be retried.
 3. The deterministic idempotency key is:
 
    ```text
@@ -106,6 +132,32 @@ Phase 4 tightens the contract:
 5. Timer fire must route through the same wake application and durable dedupe
    path as other wakes. A duplicate timer fire for the same idempotency key is a
    no-op after the first effective boundary.
+
+## Timer Expiry Observation
+
+Timer wakes are converted into an inbox observation before the next segment runs.
+The observation shape must be stable so agent perception modules can distinguish
+expiry from normal user input or arbitrary external events:
+
+```ts
+type TimerExpiredObservation = {
+  kind: 'timer.expired';
+  token: string;
+  timerId: string;
+  dueAt: string;
+  firedAt: string;
+  reason: 'input_timeout' | 'sleep_due';
+  payload?: unknown;
+};
+```
+
+Mapping:
+
+- `await_input` with `expiresAt` uses `reason: 'input_timeout'`;
+- explicit `sleep` boundaries use `reason: 'sleep_due'`.
+
+The observation is the only semantic input to the resumed turn. A timer fire must
+not fabricate user input, tool output, or child output.
 
 ## Segment Boundary
 
@@ -157,6 +209,14 @@ The durable task must not keep timer-only correctness in local variables. It may
 use Hatchet durable sleep for efficiency, but the timer must also be visible in
 callAgent persisted state for reconciliation.
 
+Implementation note: before coding this branch, verify the exact Hatchet SDK
+pattern for racing a durable event wait against durable sleep. If Hatchet does
+not expose a direct race/selector primitive, implement the equivalent with the
+documented durable-task control flow and record that choice in this spec before
+landing code. The required semantic outcome is still "input wins before dueAt,
+timer wins at/after dueAt"; the SDK shape is an implementation detail, not a
+semantic change.
+
 ### `aplret.timer.fire`
 
 `aplret.timer.fire` is the repair/manual fire path used by `TimerReconciler`.
@@ -174,6 +234,19 @@ Responsibility:
 
 5. Mark `fired` only after the wake is durably accepted or the segment is
    scheduled.
+
+Lease rules:
+
+- acquiring fire ownership sets `status = 'firing'`, a unique `fireLeaseId`, and
+  `fireLeaseUntil = now + leaseTtl`;
+- default `leaseTtl` should be short (for example 2-5 minutes) and configurable;
+- a worker may acquire a timer when `status = 'scheduled'`, or when
+  `status = 'firing'` and `fireLeaseUntil < now`;
+- a worker may mark `fired` only if it still owns the current `fireLeaseId`;
+- if wake enqueue succeeds but marking `fired` fails, retry/reconcile is safe
+  because the timer wake idempotency key collapses duplicate fires;
+- if wake enqueue fails, keep or restore `scheduled`/retryable state with
+  readable error metadata.
 
 If the active durable parent task can receive `aplret.timer.<token>` directly,
 `aplret.timer.fire` may push that event. If there is no active parent run, it may
@@ -239,7 +312,7 @@ late input T arrives later
 
 Expected:
 
-- timer wake injects the documented timeout/expiry observation;
+- timer wake injects `TimerExpiredObservation` with `reason: 'input_timeout'`;
 - token is no longer resumable;
 - late input returns no-op or rejected-expired result;
 - operator graph shows the timer/expiry as the reason the next turn ran.
@@ -344,11 +417,13 @@ Required unit/integration coverage:
 4. Late input after timer expiry is no-op/rejected expired.
 5. Duplicate `aplret.timer.fire` produces one effective snapshot transition.
 6. Canceled task ignores later timer fire.
-7. `TimerReconciler` scans overdue scheduled timers on startup.
-8. `TimerReconciler` recovers downtime where dueAt passed while no worker was
+7. Stale `firing` leases are reacquired after `fireLeaseUntil`.
+8. `TimerExpiredObservation` shape is injected for input timeout and sleep due.
+9. `TimerReconciler` scans overdue scheduled timers on startup.
+10. `TimerReconciler` recovers downtime where dueAt passed while no worker was
    running.
-9. Operator graph includes timer schedule/fire effects and waiting reason.
-10. In-process driver parity remains green when `timers` surface is disabled.
+11. Operator graph includes timer schedule/fire effects and waiting reason.
+12. In-process driver parity remains green when `timers` surface is disabled.
 
 Manual POC B2:
 
@@ -376,4 +451,3 @@ The in-process `setTimeout` token-expiry path can be deleted only after:
 - operator graph exposes timer wait/fire state clearly;
 - production-readiness payload/observability gates are either passed or
   explicitly deferred for non-production use.
-
