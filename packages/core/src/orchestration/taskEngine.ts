@@ -1248,14 +1248,18 @@ export class TaskEngine {
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
             take: scope === 'roots' ? Math.min((limit + 1) * 5, 500) : limit + 1,
         });
+        const candidateTaskIds = [
+            ...new Set(rows.map((row) => row.taskId).filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)),
+        ];
         const childLinkEvents = prisma.wMEvent
             ? await prisma.wMEvent.findMany({
                   where: {
                       tenantId: params.tenantId,
+                      ...(candidateTaskIds.length > 0 ? { sessionId: { in: candidateTaskIds } } : {}),
                       type: { in: ['task.child_started', 'task.child_completed', 'task.child_failed'] },
                   },
                   orderBy: [{ createdAt: 'desc' }],
-                  take: 5000,
+                  take: Math.max(5000, candidateTaskIds.length * 20),
               })
             : [];
         const childTaskIds = new Set(

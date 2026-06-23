@@ -4,6 +4,7 @@ import { parse as parseDotenv } from 'dotenv';
 import { logger } from '@a2arium/callagent-utils';
 import { DEFAULT_AGENT_INDEX_PATH } from './AgentIndexBuilder.js';
 import { loadAgentIndex } from './AgentIndexLoader.js';
+import { PluginManager } from './pluginManager.js';
 
 const workspaceLogger = logger.createLogger({ prefix: 'WorkspaceLoader' });
 
@@ -215,12 +216,29 @@ async function loadWorkspace(workspace: WorkspaceDefinition, baseDir: string): P
         cwd: root,
     });
     const indexedAgents = await readWorkspaceAgentIndex(agentIndexPath, root);
+    const discoveredAgents = await discoverWorkspaceAgents(root);
+    for (const [agentName, entry] of discoveredAgents) {
+        if (!indexedAgents.has(agentName)) {
+            indexedAgents.set(agentName, entry);
+        }
+    }
 
-    if (result.loaded.length === 0) {
+    if (result.loaded.length === 0 && indexedAgents.size === 0) {
         throw new Error(`Workspace "${workspace.name}" did not load any agents from ${agentIndexPath}`);
     }
 
     const loadedAgentNames = new Set(result.loaded);
+    for (const [agentName, entry] of indexedAgents) {
+        if (loadedAgentNames.has(agentName) || PluginManager.isAgentLoaded(agentName)) {
+            loadedAgentNames.add(agentName);
+            continue;
+        }
+        const loaded = await PluginManager.loadAgent(entry.modulePath ?? agentName);
+        if (loaded) {
+            loadedAgentNames.add(loaded.resolved.agentCard.name);
+        }
+    }
+
     for (const [agentName, entry] of indexedAgents) {
         agentWorkspaceInfo.set(agentName, {
             workspaceName: workspace.name,
@@ -319,6 +337,68 @@ async function pathExists(candidate: string): Promise<boolean> {
     } catch {
         return false;
     }
+}
+
+async function discoverWorkspaceAgents(
+    workspaceRoot: string
+): Promise<Map<string, { modulePath?: string; agentCardPath?: string; runtimeManifestPath?: string }>> {
+    const entries = new Map<string, { modulePath?: string; agentCardPath?: string; runtimeManifestPath?: string }>();
+    await collectWorkspaceAgentCards(path.join(workspaceRoot, 'src', 'agents'), entries);
+    return entries;
+}
+
+async function collectWorkspaceAgentCards(
+    dir: string,
+    entries: Map<string, { modulePath?: string; agentCardPath?: string; runtimeManifestPath?: string }>
+): Promise<void> {
+    let dirents: Array<import('node:fs').Dirent>;
+    try {
+        dirents = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+        return;
+    }
+
+    if (dirents.some((entry) => entry.isFile() && entry.name === 'agent-card.json')) {
+        const agentCardPath = path.join(dir, 'agent-card.json');
+        const agentName = await readAgentNameFromCard(agentCardPath);
+        if (agentName !== undefined) {
+            const runtimeManifestPath = path.join(dir, 'agent-runtime.json');
+            entries.set(agentName, {
+                agentCardPath,
+                ...(await pathExists(runtimeManifestPath) ? { runtimeManifestPath } : {}),
+                ...(await firstExistingPath([
+                    path.join(dir, 'agent.ts'),
+                    path.join(dir, 'agent.js'),
+                    path.join(dir, 'index.ts'),
+                    path.join(dir, 'index.js'),
+                ]).then((modulePath) => modulePath ? { modulePath } : {})),
+            });
+        }
+    }
+
+    for (const entry of dirents) {
+        if (entry.isDirectory() && entry.name !== 'node_modules' && !entry.name.startsWith('.')) {
+            await collectWorkspaceAgentCards(path.join(dir, entry.name), entries);
+        }
+    }
+}
+
+async function readAgentNameFromCard(agentCardPath: string): Promise<string | undefined> {
+    try {
+        const parsed = JSON.parse(await fs.readFile(agentCardPath, 'utf8')) as { name?: unknown };
+        return typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+async function firstExistingPath(paths: string[]): Promise<string | undefined> {
+    for (const candidate of paths) {
+        if (await pathExists(candidate)) {
+            return candidate;
+        }
+    }
+    return undefined;
 }
 
 async function readWorkspaceAgentIndex(
