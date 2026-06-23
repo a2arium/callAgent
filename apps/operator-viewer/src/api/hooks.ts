@@ -56,8 +56,11 @@ export function useMemory(tenantId: string, taskId: string | undefined, enabled:
 
 function shouldLiveRefreshGraph(graph: AgentRunGraph | undefined): boolean {
   if (graph === undefined) return true;
-  return graph.nodes.some((node) => {
-    const status = node.status.toLowerCase();
-    return status === 'queued' || status === 'running' || status === 'unknown';
-  });
+  const isLiveStatus = (status: string | undefined) => {
+    const normalized = status?.toLowerCase();
+    return normalized === 'queued' || normalized === 'running' || normalized === 'unknown';
+  };
+  return graph.nodes.some((node) => isLiveStatus(node.status))
+    || graph.edges.some((edge) => isLiveStatus(edge.status))
+    || graph.turns.some((turn) => isLiveStatus(turn.status));
 }

@@ -115,6 +115,8 @@ export type TurnRun = {
   llmCalls?: LlmCallRun[];
   memoryOps?: MemoryOperationRun[];
   providerRunId?: string;
+  startedAt?: string;
+  finishedAt?: string;
   error?: unknown;
 };
 

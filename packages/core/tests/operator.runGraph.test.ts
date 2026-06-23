@@ -381,6 +381,112 @@ describe('buildAgentRunGraph', () => {
         ]);
     });
 
+    it('projects turn.started as a running event-only turn until completion is captured', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-live-turn',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-live-turn', 'task.started', {
+            taskId: 'task-live-turn',
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-live-turn', 'turn.completed', {
+            taskId: 'task-live-turn',
+            agentId: 'root-agent',
+            turnSeq: 3,
+            transition: { kind: 'await_child', token: 'child-token' },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-live-turn', 'turn.started', {
+            taskId: 'task-live-turn',
+            agentId: 'root-agent',
+            turnSeq: 4,
+            turnId: 'turn-4-id',
+            traceId: 'trace-1',
+            spanId: 'span-4',
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-live-turn',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'root-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-live-turn',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-live-turn',
+                    operation: 'agent.run',
+                    status: 'completed',
+                },
+                {
+                    providerRunId: 'turn-run-3',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-live-turn',
+                    agentId: 'root-agent',
+                    rootTaskId: 'task-live-turn',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    boundaryKind: 'await_child',
+                    turnSeq: 3,
+                },
+            ],
+        });
+
+        expect(graph.turns).toEqual([
+            expect.objectContaining({ turnSeq: 3, status: 'completed' }),
+            expect.objectContaining({
+                id: 'turn-4-id',
+                turnSeq: 4,
+                status: 'running',
+                turnTraceRef: { traceId: 'trace-1', spanId: 'span-4' },
+            }),
+        ]);
+    });
+
+    it('does not duplicate a turn.started event after matching turn.completed is captured', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-completed-turn',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-completed-turn', 'turn.started', {
+            taskId: 'task-completed-turn',
+            agentId: 'root-agent',
+            turnSeq: 4,
+            turnId: 'turn-4-start',
+        });
+        await sessionManager.appendEvent('tenant-1', 'task-completed-turn', 'turn.completed', {
+            taskId: 'task-completed-turn',
+            agentId: 'root-agent',
+            turnSeq: 4,
+            turnId: 'turn-4-complete',
+            transition: { kind: 'complete', result: { ok: true } },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-completed-turn',
+            sessionManager,
+            driverRuns: [],
+        });
+
+        expect(graph.turns).toHaveLength(1);
+        expect(graph.turns[0]).toEqual(expect.objectContaining({
+            id: 'turn-4-complete',
+            turnSeq: 4,
+            status: 'completed',
+        }));
+    });
+
     it('treats complete transitions with ok false as failed semantic outcomes', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);

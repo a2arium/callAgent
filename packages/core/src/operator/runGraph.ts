@@ -76,6 +76,8 @@ export type TurnRun = {
     llmCalls?: unknown[];
     memoryOps?: MemoryOperationRun[];
     providerRunId?: string;
+    startedAt?: string;
+    finishedAt?: string;
     error?: unknown;
 };
 
@@ -464,6 +466,14 @@ function buildTurnRuns(
     memoryOps: MemoryOperationRun[]
 ): TurnRun[] {
     const turnEvents = events.filter((event) => event.type === 'turn.completed');
+    const turnStartedEvents = events.filter((event) => event.type === 'turn.started');
+    const turnStartedByTurn = new Map<string, AgentRunSourceEvent>();
+    for (const event of turnStartedEvents) {
+        const turnSeq = numberField(event.payload, 'turnSeq');
+        if (turnSeq !== undefined) {
+            turnStartedByTurn.set(turnKey(stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId, turnSeq), event);
+        }
+    }
     const cognitionByTurn = new Map<string, AgentRunSourceEvent>();
     for (const event of turnEvents) {
         const turnSeq = numberField(event.payload, 'turnSeq');
@@ -476,13 +486,21 @@ function buildTurnRuns(
         .filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
         .map((run, index): TurnRun => {
             const turnSeq = run.turnSeq ?? index + 1;
-            const turnEvent = cognitionByTurn.get(turnKey(run.taskId ?? rootTaskId, turnSeq));
+            const key = turnKey(run.taskId ?? rootTaskId, turnSeq);
+            const turnEvent = cognitionByTurn.get(key);
+            const startedEvent = turnStartedByTurn.get(key);
+            const status = deriveTurnStatus(run.status, turnEvent);
+            const startedAt = run.createdAt ?? startedEvent?.createdAt;
+            const terminalTimestamp = run.updatedAt ?? run.createdAt ?? turnEvent?.createdAt ?? startedEvent?.createdAt;
+            const finishedAt = status === 'completed' || status === 'failed'
+                ? terminalTimestamp
+                : undefined;
             return {
                 id: run.providerTaskRunId ?? run.providerRunId ?? `turn-${index}`,
                 rootTaskId: run.rootTaskId ?? rootTaskId,
                 taskId: run.taskId ?? 'unknown',
                 ...(run.agentId ? { agentId: run.agentId } : {}),
-                status: deriveTurnStatus(run.status, turnEvent),
+                status,
                 operation: 'turn.segment',
                 turnSeq,
                 ...(run.boundaryKind ? { boundaryKind: run.boundaryKind } : {}),
@@ -497,6 +515,8 @@ function buildTurnRuns(
                 },
                 ...turnEventProjection(turnEvent, memoryOps),
                 ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
+                ...(startedAt ? { startedAt: toIso(startedAt) } : {}),
+                ...(finishedAt ? { finishedAt: toIso(finishedAt) } : {}),
                 ...(run.error ? { error: run.error } : {}),
             };
         });
@@ -509,12 +529,14 @@ function buildTurnRuns(
         })
         .map((event, index): TurnRun => {
             const turnSeq = numberField(event.payload, 'turnSeq');
+            const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
+            const startedEvent = turnSeq !== undefined ? turnStartedByTurn.get(turnKey(taskId, turnSeq)) : undefined;
             const traceId = stringField(event.payload, 'traceId');
             const spanId = stringField(event.payload, 'spanId');
             return {
                 id: stringField(event.payload, 'turnId') ?? `turn-event-${event.seq}-${index}`,
                 rootTaskId,
-                taskId: stringField(event.payload, 'taskId') ?? rootTaskId,
+                taskId,
                 ...(stringField(event.payload, 'agentId') ? { agentId: stringField(event.payload, 'agentId') } : {}),
                 status: deriveTurnStatus('completed', event),
                 operation: 'turn.segment',
@@ -526,10 +548,51 @@ function buildTurnRuns(
                     ...(spanId ? { spanId } : {}),
                 },
                 ...turnEventProjection(event, memoryOps),
+                startedAt: startedEvent?.createdAt ?? event.createdAt,
+                finishedAt: event.createdAt,
+            };
+        });
+    const existingCompletedOrDriverTurns = new Set([
+        ...existingTurns,
+        ...eventOnlyTurns.flatMap((turn) => turn.turnSeq === undefined ? [] : [turnKey(turn.taskId, turn.turnSeq)]),
+    ]);
+    const eventOnlyRunningTurns = turnStartedEvents
+        .filter((event) => {
+            const turnSeq = numberField(event.payload, 'turnSeq');
+            const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
+            return turnSeq !== undefined && !existingCompletedOrDriverTurns.has(turnKey(taskId, turnSeq));
+        })
+        .map((event, index): TurnRun => {
+            const turnSeq = numberField(event.payload, 'turnSeq');
+            const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
+            const traceId = stringField(event.payload, 'traceId');
+            const spanId = stringField(event.payload, 'spanId');
+            return {
+                id: stringField(event.payload, 'turnId') ?? `turn-started-${event.seq}-${index}`,
+                rootTaskId,
+                taskId,
+                ...(stringField(event.payload, 'agentId') ? { agentId: stringField(event.payload, 'agentId') } : {}),
+                status: 'running',
+                operation: 'turn.segment',
+                ...(turnSeq !== undefined ? { turnSeq } : {}),
+                ...(traceId ? { traceId } : {}),
+                ...(spanId ? { spanId } : {}),
+                turnTraceRef: {
+                    ...(traceId ? { traceId } : {}),
+                    ...(spanId ? { spanId } : {}),
+                },
+                startedAt: event.createdAt,
+                memoryOps: turnSeq !== undefined
+                    ? memoryOps.filter((op) => op.taskId === taskId && op.turnSeq === turnSeq)
+                    : [],
             };
         });
     return finalizeSupersededRunningTurns(
-        [...driverTurns, ...eventOnlyTurns].sort((a, b) => (a.turnSeq ?? 0) - (b.turnSeq ?? 0))
+        [...driverTurns, ...eventOnlyTurns, ...eventOnlyRunningTurns]
+            .sort((a, b) => {
+                if (a.taskId !== b.taskId) return a.taskId.localeCompare(b.taskId);
+                return (a.turnSeq ?? 0) - (b.turnSeq ?? 0);
+            })
     );
 }
 

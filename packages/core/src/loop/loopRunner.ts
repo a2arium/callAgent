@@ -223,6 +223,27 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
     });
 }
 
+async function appendOperatorTurnStartedEvent(
+    ctx: TaskContext,
+    turnSeq: number,
+    turnId?: string,
+    traceId?: string,
+    spanId?: string
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    if (!isOperatorCaptureEnabled(internal)) {
+        return;
+    }
+    await appendOperatorEvent(ctx, 'turn.started', {
+        taskId: ctx.task.id,
+        agentId: ctx.agentId,
+        turnSeq,
+        ...(turnId ? { turnId } : {}),
+        ...(traceId ? { traceId } : {}),
+        ...(spanId ? { spanId } : {}),
+    });
+}
+
 async function appendOperatorMemoryEvent(
     ctx: TaskContext,
     event: OperatorMemoryEvent
@@ -1257,6 +1278,14 @@ export async function runLoop<
                         turnSeq: event.turnSeq ?? env.turn,
                         agentId: event.agentId ?? ctx.agentId,
                     });
+
+                await appendOperatorTurnStartedEvent(
+                    ctx,
+                    turnIndex,
+                    iterationTurnNode.id,
+                    traceId,
+                    iterationTurnNode.id
+                );
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }

@@ -310,9 +310,10 @@ function buildFlow(
     .map((edge) => {
       const highlighted = insights.failurePathEdgeIds.includes(edge.id);
       const sourceTurn = edge.token ? turnByParentAndToken.get(`${edge.parentTaskId}:${edge.token}`) : undefined;
+      const temporalSourceTurn = sourceTurn ?? findTemporalSourceTurn(graph.turns, edge.parentTaskId, edge.startedAt);
       return {
         id: edge.id,
-        source: sourceTurn ? turnNodeId(sourceTurn) : byTask.get(edge.parentTaskId)?.id ?? edge.parentTaskId,
+        source: temporalSourceTurn ? turnNodeId(temporalSourceTurn) : byTask.get(edge.parentTaskId)?.id ?? edge.parentTaskId,
         target: byTask.get(edge.childTaskId ?? '')?.id ?? edge.childTaskId ?? edge.id,
         sourceHandle: 'right',
         targetHandle: 'left',
@@ -325,6 +326,24 @@ function buildFlow(
       };
     });
   return { nodes: [...agentNodes, ...turnNodes], edges: [...turnEdges, ...childEdges] };
+}
+
+function findTemporalSourceTurn(turns: TurnRun[], parentTaskId: string, edgeStartedAt: string | undefined): TurnRun | undefined {
+  const edgeStartedMs = edgeStartedAt ? Date.parse(edgeStartedAt) : Number.NaN;
+  const parentTurns = turns
+    .filter((turn) => turn.taskId === parentTaskId)
+    .sort((left, right) => (left.turnSeq ?? 0) - (right.turnSeq ?? 0));
+  if (!Number.isFinite(edgeStartedMs)) {
+    return parentTurns.find((turn) => normalizeRuntimeStatus(turn.status) === 'running');
+  }
+  return parentTurns
+    .filter((turn) => {
+      const startedMs = turn.startedAt ? Date.parse(turn.startedAt) : Number.NaN;
+      if (!Number.isFinite(startedMs) || startedMs > edgeStartedMs) return false;
+      const finishedMs = turn.finishedAt ? Date.parse(turn.finishedAt) : Number.NaN;
+      return !Number.isFinite(finishedMs) || finishedMs >= edgeStartedMs;
+    })
+    .at(-1);
 }
 
 type LayoutPoint = { x: number; y: number };
