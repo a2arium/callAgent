@@ -167,6 +167,13 @@ export function RunDetailPage(): React.ReactElement {
               <span className="inline-flex items-center gap-1.5">Started {formatRelative(graph?.root.startedAt)}</span>
               <span className="inline-flex items-center gap-1.5">Duration {formatDuration(durationBetween(graph?.root.startedAt, graph?.root.finishedAt))}</span>
               <span className="inline-flex items-center gap-1.5">Known cost {formatCost(rootRollup?.costUsd)}</span>
+              {graph?.projection ? (
+                <span className="inline-flex items-center gap-1.5">
+                  Projection {graph.projection.source}
+                  {graph.projection.lagMs !== undefined ? ` · ${graph.projection.lagMs}ms lag` : ''}
+                  {graph.projection.partial ? ' · partial' : ''}
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -198,6 +205,12 @@ export function RunDetailPage(): React.ReactElement {
       {graphQuery.error instanceof Error ? (
         <Notice kind="error" title="Run graph unavailable">
           Failed to load /tasks/{taskId}/run-graph: {graphQuery.error.message}
+        </Notice>
+      ) : null}
+
+      {graph?.caps?.truncated ? (
+        <Notice title="Graph is capped">
+          Showing {graph.nodes.length} nodes and {graph.edges.length} edges. {graph.collapsedBranches?.length ?? 0} branch groups are collapsed by the operator read model.
         </Notice>
       ) : null}
 

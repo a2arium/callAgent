@@ -119,6 +119,136 @@ model RuntimeTimer {
   @@map("runtime_timers")
 }
 
+model AgentRun {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  taskId          String   @map("task_id")
+  rootTaskId      String   @map("root_task_id")
+  agentId         String?  @map("agent_id")
+  operation       String   @default("agent.run")
+  scope           String
+  status          String
+  attention       String?
+  parentTaskId    String?  @map("parent_task_id")
+  parentAgentId   String?  @map("parent_agent_id")
+  parentTurnSeq   Int?     @map("parent_turn_seq")
+  childCount      Int      @default(0) @map("child_count")
+  turnCount       Int      @default(0) @map("turn_count")
+  llmCallCount    Int      @default(0) @map("llm_call_count")
+  memoryOpCount   Int      @default(0) @map("memory_op_count")
+  knownCostUsd    Decimal? @map("known_cost_usd") @db.Decimal(18, 6)
+  startedAt       DateTime? @map("started_at")
+  terminalAt      DateTime? @map("terminal_at")
+  durationMs      Int?     @map("duration_ms")
+  lastBoundaryKind String? @map("last_boundary_kind")
+  waitingReason   String? @map("waiting_reason")
+  terminalCode    String? @map("terminal_code")
+  terminalMessage String? @map("terminal_message")
+  cancelReason    String? @map("cancel_reason")
+  outputState     String  @default("not_captured") @map("output_state")
+  outputArtifactId String? @map("output_artifact_id")
+  traceId         String? @map("trace_id")
+  providerRunId   String? @map("provider_run_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId])
+  @@index([tenantId, rootTaskId])
+  @@index([tenantId, scope, updatedAt, taskId])
+  @@index([tenantId, agentId, updatedAt, taskId])
+  @@index([tenantId, status, updatedAt, taskId])
+  @@map("agent_runs")
+}
+
+model AgentRunEdge {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  rootTaskId      String   @map("root_task_id")
+  parentTaskId    String   @map("parent_task_id")
+  childTaskId     String   @map("child_task_id")
+  parentTurnSeq   Int?     @map("parent_turn_seq")
+  token           String?
+  edgeKind        String   @default("delegates_to") @map("edge_kind")
+  status          String
+  terminalCode    String?  @map("terminal_code")
+  terminalMessage String?  @map("terminal_message")
+  createdAt       DateTime @default(now()) @map("created_at")
+  resolvedAt      DateTime? @map("resolved_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, parentTaskId, childTaskId, token])
+  @@index([tenantId, rootTaskId, parentTaskId])
+  @@index([tenantId, childTaskId])
+  @@map("agent_run_edges")
+}
+
+model TurnRun {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  taskId          String   @map("task_id")
+  rootTaskId      String   @map("root_task_id")
+  agentId         String?  @map("agent_id")
+  turnSeq         Int      @map("turn_seq")
+  status          String
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  durationMs      Int?     @map("duration_ms")
+  fromState       String?  @map("from_state")
+  toState         String?  @map("to_state")
+  transitionKind  String?  @map("transition_kind")
+  boundaryKind    String?  @map("boundary_kind")
+  shieldOutcome   String?  @map("shield_outcome")
+  executionKind   String?  @map("execution_kind")
+  outputProduced  Boolean  @default(false) @map("output_produced")
+  llmCallCount    Int      @default(0) @map("llm_call_count")
+  memoryOpCount   Int      @default(0) @map("memory_op_count")
+  knownCostUsd    Decimal? @map("known_cost_usd") @db.Decimal(18, 6)
+  terminalCode    String?  @map("terminal_code")
+  terminalMessage String?  @map("terminal_message")
+  turnTraceId     String?  @map("turn_trace_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId, turnSeq])
+  @@index([tenantId, rootTaskId, taskId, turnSeq])
+  @@map("turn_runs")
+}
+
+model RunEffect {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  rootTaskId      String   @map("root_task_id")
+  taskId          String   @map("task_id")
+  turnSeq         Int?     @map("turn_seq")
+  operation       String
+  status          String
+  idempotencyKey  String?  @unique @map("idempotency_key")
+  token           String?
+  providerRunId   String?  @map("provider_run_id")
+  artifactId      String?  @map("artifact_id")
+  summary         String?
+  errorCode       String?  @map("error_code")
+  errorMessage    String?  @map("error_message")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, rootTaskId, operation, updatedAt])
+  @@index([tenantId, taskId, turnSeq, operation])
+  @@map("run_effects")
+}
+
+model OperatorProjectionCursor {
+  tenantId       String   @map("tenant_id")
+  source         String
+  cursor         String
+  processedCount Int     @default(0) @map("processed_count")
+  mismatchCount  Int     @default(0) @map("mismatch_count")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, source])
+  @@map("operator_projection_cursors")
+}
+
 model DurableSubscriptionCursor {
   tenantId       String   @map("tenant_id")
   streamId       String   @map("stream_id")

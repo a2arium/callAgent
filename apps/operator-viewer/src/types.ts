@@ -21,6 +21,12 @@ export type AgentRunListItem = {
 export type AgentRunListPage = {
   items: AgentRunListItem[];
   nextCursor?: string;
+  pageInfo?: {
+    nextCursor?: string;
+    hasMore: boolean;
+    limit: number;
+  };
+  projection?: ProjectionInfo;
 };
 
 export type AgentRunNode = {
@@ -194,6 +200,25 @@ export type AgentRunGraph = {
   debug: {
     driverRuns: DriverRunView[];
   };
+  caps?: {
+    nodeLimit: number;
+    edgeLimit: number;
+    depthLimit: number;
+    truncated: boolean;
+  };
+  collapsedBranches?: Array<{
+    parentTaskId: string;
+    hiddenChildCount: number;
+    expandCursor: string;
+    reason: 'node_limit' | 'depth_limit' | 'manual';
+  }>;
+  projection?: ProjectionInfo;
+};
+
+export type ProjectionInfo = {
+  source: 'bridge' | 'semantic';
+  lagMs?: number;
+  partial: boolean;
 };
 
 export type DriverRunView = {

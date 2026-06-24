@@ -16,6 +16,29 @@ export type AgentRunGraph = {
     debug: {
         driverRuns: DriverRunView[];
     };
+    caps?: AgentRunGraphCaps;
+    collapsedBranches?: CollapsedGraphBranch[];
+    projection?: OperatorProjectionInfo;
+};
+
+export type AgentRunGraphCaps = {
+    nodeLimit: number;
+    edgeLimit: number;
+    depthLimit: number;
+    truncated: boolean;
+};
+
+export type CollapsedGraphBranch = {
+    parentTaskId: string;
+    hiddenChildCount: number;
+    expandCursor: string;
+    reason: 'node_limit' | 'depth_limit' | 'manual';
+};
+
+export type OperatorProjectionInfo = {
+    source: 'bridge' | 'semantic';
+    lagMs?: number;
+    partial: boolean;
 };
 
 export type AgentRunNode = {

@@ -98,6 +98,11 @@ import {
     type AgentRunSourceEvent,
     type DriverRunView,
 } from '../operator/runGraph.js';
+import {
+    OperatorProjectionRepository,
+    readProjectionMode,
+    readProjectionWriteMode,
+} from '../operator/semanticProjection.js';
 
 export type {
     TaskEntity,
@@ -324,6 +329,79 @@ function isAwaitBoundaryKind(value: string | undefined): boolean {
     return value === 'await_input' || value === 'await_tool' || value === 'await_child' || value === 'await_event';
 }
 
+const GRAPH_NODE_LIMIT = 250;
+const GRAPH_EDGE_LIMIT = 350;
+const GRAPH_DEPTH_LIMIT = 4;
+
+function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): AgentRunGraph {
+    const overNodeLimit = graph.nodes.length > GRAPH_NODE_LIMIT;
+    const overEdgeLimit = graph.edges.length > GRAPH_EDGE_LIMIT;
+    if (!overNodeLimit && !overEdgeLimit) {
+        return {
+            ...graph,
+            projection: graph.projection ?? { source, partial: false },
+            caps: graph.caps ?? {
+                nodeLimit: GRAPH_NODE_LIMIT,
+                edgeLimit: GRAPH_EDGE_LIMIT,
+                depthLimit: GRAPH_DEPTH_LIMIT,
+                truncated: false,
+            },
+        };
+    }
+    const keptTaskIds = new Set(graph.nodes.slice(0, GRAPH_NODE_LIMIT).map((node) => node.taskId));
+    keptTaskIds.add(graph.root.taskId);
+    const nodes = graph.nodes.filter((node) => keptTaskIds.has(node.taskId)).slice(0, GRAPH_NODE_LIMIT);
+    const edges = graph.edges
+        .filter((edge) => keptTaskIds.has(edge.parentTaskId) && (edge.childTaskId === undefined || keptTaskIds.has(edge.childTaskId)))
+        .slice(0, GRAPH_EDGE_LIMIT);
+    const hiddenByParent = new Map<string, number>();
+    for (const edge of graph.edges) {
+        if (edge.childTaskId !== undefined && !keptTaskIds.has(edge.childTaskId)) {
+            hiddenByParent.set(edge.parentTaskId, (hiddenByParent.get(edge.parentTaskId) ?? 0) + 1);
+        }
+    }
+    return {
+        ...graph,
+        nodes,
+        edges,
+        turns: graph.turns.filter((turn) => keptTaskIds.has(turn.taskId)),
+        effects: graph.effects.filter((effect) => effect.taskId === undefined || keptTaskIds.has(effect.taskId)),
+        events: graph.events.filter((event) => keptTaskIds.has(event.taskId)),
+        collapsedBranches: [...hiddenByParent.entries()].map(([parentTaskId, hiddenChildCount]) => ({
+            parentTaskId,
+            hiddenChildCount,
+            expandCursor: Buffer.from(JSON.stringify({ parentTaskId }), 'utf8').toString('base64url'),
+            reason: overNodeLimit ? 'node_limit' : 'manual',
+        })),
+        projection: graph.projection ?? { source, partial: true },
+        caps: {
+            nodeLimit: GRAPH_NODE_LIMIT,
+            edgeLimit: GRAPH_EDGE_LIMIT,
+            depthLimit: GRAPH_DEPTH_LIMIT,
+            truncated: true,
+        },
+    };
+}
+
+function compareGraphShape(bridge: AgentRunGraph, semantic: AgentRunGraph): string | undefined {
+    const parts: string[] = [];
+    if (bridge.nodes.length !== semantic.nodes.length) parts.push(`nodes ${bridge.nodes.length}/${semantic.nodes.length}`);
+    if (bridge.edges.length !== semantic.edges.length) parts.push(`edges ${bridge.edges.length}/${semantic.edges.length}`);
+    if (bridge.turns.length !== semantic.turns.length) parts.push(`turns ${bridge.turns.length}/${semantic.turns.length}`);
+    if (bridge.root.status !== semantic.root.status) parts.push(`root status ${bridge.root.status}/${semantic.root.status}`);
+    return parts.length > 0 ? parts.join(', ') : undefined;
+}
+
+function compareListShape(bridge: AgentRunListPage, semantic: AgentRunListPage | undefined): string | undefined {
+    if (semantic === undefined) return 'semantic unavailable';
+    const parts: string[] = [];
+    if (bridge.items.length !== semantic.items.length) parts.push(`items ${bridge.items.length}/${semantic.items.length}`);
+    const bridgeIds = new Set(bridge.items.map((item) => item.taskId));
+    const missing = semantic.items.filter((item) => !bridgeIds.has(item.taskId)).slice(0, 5).map((item) => item.taskId);
+    if (missing.length > 0) parts.push(`semantic-only ${missing.join(',')}`);
+    return parts.length > 0 ? parts.join(', ') : undefined;
+}
+
 type PendingConversationActivation = {
     params: ConversationActivateParams;
     waiters: Array<{
@@ -356,6 +434,16 @@ export type AgentRunListItem = {
 export type AgentRunListPage = {
     items: AgentRunListItem[];
     nextCursor?: string;
+    pageInfo?: {
+        nextCursor?: string;
+        hasMore: boolean;
+        limit: number;
+    };
+    projection?: {
+        source: 'bridge' | 'semantic';
+        lagMs?: number;
+        partial: boolean;
+    };
 };
 
 type AgentRunListParams = {
@@ -390,6 +478,10 @@ type OperatorPrismaClient = {
     wMEvent?: {
         findMany: (args: Record<string, unknown>) => Promise<WMEventRow[]>;
     };
+    agentRun?: unknown;
+    agentRunEdge?: unknown;
+    turnRun?: unknown;
+    runEffect?: unknown;
 };
 
 type AgentRunCursor = {
@@ -1148,6 +1240,8 @@ export class TaskEngine {
         if (!this.sessionManager) {
             throw new Error('Session manager is not configured');
         }
+        const projectionMode = readProjectionMode();
+        const projectionWriteMode = readProjectionWriteMode();
         const prisma = this.getSessionStorePrisma() as
             | {
                   driverRun?: {
@@ -1161,6 +1255,13 @@ export class TaskEngine {
                   };
               }
             | undefined;
+        const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
+        if (projectionMode === 'semantic') {
+            const semanticGraph = await projection?.buildGraph(params);
+            if (semanticGraph !== undefined) {
+                return withGraphCaps(semanticGraph, 'semantic');
+            }
+        }
         const { events: sessionEvents, taskIds } = await this.collectRunGraphEvents({
             tenantId: params.tenantId,
             rootTaskId: params.taskId,
@@ -1175,13 +1276,43 @@ export class TaskEngine {
               })
             : [];
 
-        return buildAgentRunGraph({
+        const graph = await buildAgentRunGraph({
             tenantId: params.tenantId,
             taskId: params.taskId,
             sessionManager: this.sessionManager,
             driverRuns,
             events: sessionEvents,
         });
+        if (projectionWriteMode !== 'off') {
+            void projection?.projectGraph(graph).catch((error) => {
+                log.warn('Operator semantic graph projection failed', {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }
+        if (projectionMode === 'compare') {
+            void projection?.buildGraph(params).then((semanticGraph) => {
+                if (semanticGraph !== undefined) {
+                    const mismatch = compareGraphShape(graph, semanticGraph);
+                    if (mismatch !== undefined) {
+                        log.warn('Operator bridge/semantic graph mismatch', {
+                            tenantId: params.tenantId,
+                            taskId: params.taskId,
+                            mismatch,
+                        });
+                    }
+                }
+            }).catch((error) => {
+                log.warn('Operator semantic graph compare failed', {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }
+        return withGraphCaps(graph, 'bridge');
     }
 
     private async collectRunGraphEvents(params: {
@@ -1224,7 +1355,24 @@ export class TaskEngine {
         if (!prisma?.driverRun) {
             return { items: [] };
         }
+        const projectionMode = readProjectionMode();
+        const projectionWriteMode = readProjectionWriteMode();
+        const projection = new OperatorProjectionRepository(prisma as never);
         const limit = clampAgentRunLimit(params.limit);
+        if (projectionMode === 'semantic') {
+            const semanticPage = await projection.listAgentRuns({
+                tenantId: params.tenantId,
+                agentId: params.agentId,
+                status: params.status,
+                since: params.since,
+                cursor: params.cursor,
+                limit,
+                scope: params.scope ?? 'roots',
+            });
+            if (semanticPage !== undefined) {
+                return semanticPage;
+            }
+        }
         const cursor = decodeAgentRunCursor(params.cursor);
         const where: Record<string, unknown> = {
             tenantId: params.tenantId,
@@ -1390,17 +1538,55 @@ export class TaskEngine {
             .filter((item) => params.status === undefined || params.status.length === 0 || item.status === params.status);
 
         const overflow = filteredRows.length > limit ? filteredRows[limit] : undefined;
-        return {
+        const nextCursor = overflow
+            ? encodeAgentRunCursor({
+                  createdAt: overflow.createdAt instanceof Date ? overflow.createdAt.toISOString() : overflow.createdAt,
+                  id: overflow.id,
+              })
+            : undefined;
+        const page: AgentRunListPage = {
             items,
-            ...(overflow
-                ? {
-                      nextCursor: encodeAgentRunCursor({
-                          createdAt: overflow.createdAt instanceof Date ? overflow.createdAt.toISOString() : overflow.createdAt,
-                          id: overflow.id,
-                      }),
-                  }
-                : {}),
+            ...(nextCursor ? { nextCursor } : {}),
+            pageInfo: {
+                ...(nextCursor ? { nextCursor } : {}),
+                hasMore: nextCursor !== undefined,
+                limit,
+            },
+            projection: { source: 'bridge', partial: false },
         };
+        if (projectionWriteMode !== 'off') {
+            void projection.projectListPage(params.tenantId, page.items).catch((error) => {
+                log.warn('Operator semantic list projection failed', {
+                    tenantId: params.tenantId,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }
+        if (projectionMode === 'compare') {
+            void projection.listAgentRuns({
+                tenantId: params.tenantId,
+                agentId: params.agentId,
+                status: params.status,
+                since: params.since,
+                cursor: params.cursor,
+                limit,
+                scope: params.scope ?? 'roots',
+            }).then((semanticPage) => {
+                const mismatch = compareListShape(page, semanticPage);
+                if (mismatch !== undefined) {
+                    log.warn('Operator bridge/semantic list mismatch', {
+                        tenantId: params.tenantId,
+                        mismatch,
+                    });
+                }
+            }).catch((error) => {
+                log.warn('Operator semantic list compare failed', {
+                    tenantId: params.tenantId,
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }
+        return page;
     }
 
     async getAgentRunTurn(params: {

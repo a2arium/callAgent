@@ -83,6 +83,13 @@ export function FleetPage(): React.ReactElement {
           <p className="text-sm text-muted-foreground">
             {search.scope === 'all' ? 'Showing root and child agent runs.' : 'Showing root agent runs by default.'}
           </p>
+          {query.data?.projection ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Projection: {query.data.projection.source}
+              {query.data.projection.lagMs !== undefined ? ` · lag ${query.data.projection.lagMs}ms` : ''}
+              {query.data.projection.partial ? ' · partial' : ''}
+            </p>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-md border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground">
