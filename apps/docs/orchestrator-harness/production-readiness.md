@@ -9,6 +9,10 @@ limits are configured, but the current operator read path is not yet designed
 for 100k historical runs without a dedicated read model, indexes, retention, and
 load tests.
 
+Normative implementation spec: `specs/production-readiness-gates.md`. This file
+is the workstream plan and current assessment; the spec defines the required
+records, API behavior, query gates, tests, drills, and deletion criteria.
+
 Production readiness is required before:
 
 - the in-process fallback is deleted for any migrated surface;

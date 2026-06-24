@@ -236,7 +236,11 @@ Deletes (guarded): in-process `setTimeout` semantic waits for token expiry.
 
 Goal: prove the Hatchet-backed runtime and operator surface can run production
 traffic, retain large history, and support incidents before deleting in-process
-fallbacks. See `production-readiness.md` for the detailed workstreams and gates.
+fallbacks.
+
+Normative implementation spec: `specs/production-readiness-gates.md`.
+Read `production-readiness.md` for the higher-level workstream plan and current
+assessment.
 
 1. **Scale-oriented read model:** persist indexed run summaries, graph edges,
    turn summaries, child counts, output/error availability, and last semantic

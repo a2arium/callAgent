@@ -110,6 +110,9 @@ first POC candidate.
   `executeTurn` until Phase 2.
 - `specs/operator-viewer.md` — operator viewer data sources, event taxonomy,
   endpoints, SPA contract, and acceptance.
+- `specs/production-readiness-gates.md` — Phase 5 production-readiness contract:
+  semantic read model, query/index gates, payload budgets, observability,
+  failure drills, retention, security, and deletion gates.
 - `../operator-run-graph.md` — permanent semantic operator graph contract.
 - `production-readiness.md` — production promotion workstreams, gates, and
   scale/observability/payload/readiness criteria.

@@ -121,7 +121,7 @@ Key pages:
 - `migration-checklist.md` — promotion/deletion checklist.
 - `adr/` — decision records to review before implementation (0001–0010).
 - `specs/` — driver seam, kernel, Hatchet task model, timer wakes, worker
-  runtime, deletion inventory.
+  runtime, production-readiness gates, deletion inventory.
 - `harness/` — POC scenarios and expected outcomes.
 
 Start with `adr/0001-kernel-seam-and-two-drivers.md` when reviewing this
