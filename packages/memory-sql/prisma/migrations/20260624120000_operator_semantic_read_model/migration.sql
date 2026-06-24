@@ -41,7 +41,7 @@ CREATE TABLE "agent_run_edges" (
     "parent_task_id" TEXT NOT NULL,
     "child_task_id" TEXT NOT NULL,
     "parent_turn_seq" INTEGER,
-    "token" TEXT,
+    "token" TEXT NOT NULL DEFAULT '',
     "edge_kind" TEXT NOT NULL DEFAULT 'delegates_to',
     "status" TEXT NOT NULL,
     "terminal_code" TEXT,

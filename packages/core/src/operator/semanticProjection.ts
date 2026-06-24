@@ -67,6 +67,16 @@ type ProjectionPrisma = {
     runEffect?: PrismaDelegate;
 };
 
+export type OperatorProjectionEvent = {
+    tenantId: string;
+    sessionId: string;
+    type: string;
+    payload: Record<string, unknown>;
+    eventId?: string;
+    seq?: number;
+    createdAt?: Date | string;
+};
+
 type SemanticRunRow = {
     id: string;
     tenantId: string;
@@ -169,10 +179,18 @@ export class OperatorProjectionRepository {
     async projectGraph(graph: AgentRunGraph): Promise<void> {
         if (!this.isAvailable()) return;
         const nodesByTask = new Map(graph.nodes.map((node) => [node.taskId, node]));
-        await Promise.all(graph.nodes.map((node) => this.upsertRun(node, graph)));
-        await Promise.all(graph.edges.map((edge) => this.upsertEdge(edge, graph)));
-        await Promise.all(graph.turns.map((turn) => this.upsertTurn(turn, nodesByTask, graph)));
-        await Promise.all(graph.effects.map((effect) => this.upsertEffect(effect, graph)));
+        for (const node of graph.nodes) {
+            await this.upsertRun(node, graph);
+        }
+        for (const edge of graph.edges) {
+            await this.upsertEdge(edge, graph);
+        }
+        for (const turn of graph.turns) {
+            await this.upsertTurn(turn, nodesByTask, graph);
+        }
+        for (const effect of graph.effects) {
+            await this.upsertEffect(effect, graph);
+        }
     }
 
     async projectListPage(tenantId: string, items: SemanticAgentRunListItem[]): Promise<void> {
@@ -225,6 +243,215 @@ export class OperatorProjectionRepository {
         }));
     }
 
+    async projectEvent(event: OperatorProjectionEvent): Promise<void> {
+        if (!this.isAvailable()) return;
+        const createdAt = event.createdAt ? new Date(event.createdAt) : new Date();
+        const taskId = stringField(event.payload, 'taskId') ?? event.sessionId;
+        const agentId = stringField(event.payload, 'agentId') ?? stringField(event.payload, 'childAgentId');
+        const traceId = stringField(event.payload, 'traceparent') ?? stringField(event.payload, 'traceId');
+        const parentRootTaskId = await this.parentRootTaskId(event.tenantId, event.sessionId);
+        const rootTaskId = stringField(event.payload, 'rootTaskId') ?? parentRootTaskId ?? event.sessionId;
+
+        if (event.type === 'task.started') {
+            const existingRootTaskId = parentRootTaskId ?? taskId;
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId: existingRootTaskId,
+                agentId,
+                scope: existingRootTaskId === taskId ? 'root' : 'child',
+                status: 'running',
+                startedAt: createdAt,
+                traceId,
+                outputState: 'not_captured',
+            });
+            return;
+        }
+
+        if (event.type === 'task.completed') {
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId: parentRootTaskId ?? taskId,
+                status: 'completed',
+                terminalAt: createdAt,
+                traceId,
+                outputState: numberField(event.payload, 'artifactsCount') > 0 ? 'artifact_metadata' : undefined,
+            });
+            return;
+        }
+
+        if (event.type === 'task.failed') {
+            const error = event.payload.error;
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId: parentRootTaskId ?? taskId,
+                status: 'failed',
+                terminalAt: createdAt,
+                traceId,
+                terminalCode: errorCode(error),
+                terminalMessage: errorMessage(error) ?? (typeof error === 'string' ? error : undefined),
+            });
+            return;
+        }
+
+        if (event.type === 'task.child_started') {
+            const childTaskId = stringField(event.payload, 'childTaskId');
+            if (!childTaskId) return;
+            const childAgentId = stringField(event.payload, 'childAgentId') ?? stringField(event.payload, 'agentId');
+            const token = stringField(event.payload, 'token') ?? '';
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId: event.sessionId,
+                rootTaskId,
+                status: 'waiting',
+            });
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId: childTaskId,
+                rootTaskId,
+                parentTaskId: event.sessionId,
+                agentId: childAgentId,
+                scope: 'child',
+                status: 'queued',
+                startedAt: createdAt,
+                outputState: 'not_captured',
+            });
+            await this.upsertEventEdge({
+                tenantId: event.tenantId,
+                rootTaskId,
+                parentTaskId: event.sessionId,
+                childTaskId,
+                token,
+                status: 'running',
+                createdAt,
+            });
+            return;
+        }
+
+        if (event.type === 'task.child_completed' || event.type === 'task.child_failed') {
+            const childTaskId = stringField(event.payload, 'childTaskId');
+            if (!childTaskId) return;
+            const failed = event.type === 'task.child_failed';
+            const childAgentId = stringField(event.payload, 'childAgentId') ?? stringField(event.payload, 'agentId');
+            const token = stringField(event.payload, 'token') ?? '';
+            const error = event.payload.error;
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId: childTaskId,
+                rootTaskId,
+                parentTaskId: event.sessionId,
+                agentId: childAgentId,
+                scope: 'child',
+                status: failed ? 'failed' : 'completed',
+                terminalAt: createdAt,
+                terminalCode: failed ? errorCode(error) : undefined,
+                terminalMessage: failed ? errorMessage(error) ?? (typeof error === 'string' ? error : undefined) : undefined,
+            });
+            await this.upsertEventEdge({
+                tenantId: event.tenantId,
+                rootTaskId,
+                parentTaskId: event.sessionId,
+                childTaskId,
+                token,
+                status: failed ? 'failed' : 'completed',
+                resolvedAt: createdAt,
+                terminalCode: failed ? errorCode(error) : undefined,
+                terminalMessage: failed ? errorMessage(error) ?? (typeof error === 'string' ? error : undefined) : undefined,
+            });
+            return;
+        }
+
+        if (event.type === 'turn.started') {
+            const turnSeq = numberField(event.payload, 'turnSeq');
+            if (turnSeq <= 0) return;
+            await this.upsertEventTurn({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId,
+                agentId,
+                turnSeq,
+                status: 'running',
+                startedAt: createdAt,
+                turnTraceId: stringField(event.payload, 'turnId'),
+            });
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId,
+                agentId,
+                status: 'running',
+            });
+            return;
+        }
+
+        if (event.type === 'turn.completed') {
+            const turnSeq = numberField(event.payload, 'turnSeq');
+            if (turnSeq <= 0) return;
+            const transition = event.payload.transition;
+            const transitionKindValue = transitionKind(transition);
+            const boundary = isAwaitBoundaryKind(transitionKindValue) ? transitionKindValue : undefined;
+            const semanticError = eventHasOkFalse(transition);
+            const output = outputProduced({ cognition: { transition }, status: 'completed' } as TurnRun);
+            await this.upsertEventTurn({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId,
+                agentId,
+                turnSeq,
+                status: semanticError ? 'failed' : 'completed',
+                completedAt: createdAt,
+                transitionKind: transitionKindValue,
+                boundaryKind: boundary,
+                outputProduced: output,
+                llmCallCount: arrayCount(event.payload.llmCalls),
+                memoryOpCount: 0,
+                knownCostUsd: costFromUsage(event.payload.usage),
+                terminalCode: semanticError ? errorCode(transition) : undefined,
+                terminalMessage: semanticError ? errorMessage(transition) : undefined,
+                turnTraceId: stringField(event.payload, 'turnId'),
+            });
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId,
+                agentId,
+                status: semanticError ? 'failed' : boundary ? 'waiting' : transitionKindValue === 'complete' ? 'completed' : 'running',
+                terminalAt: semanticError || transitionKindValue === 'complete' ? createdAt : undefined,
+                terminalCode: semanticError ? errorCode(transition) : undefined,
+                terminalMessage: semanticError ? errorMessage(transition) : undefined,
+                outputState: output ? 'available' : undefined,
+            });
+            return;
+        }
+
+        if (event.type.startsWith('memory.')) {
+            await this.upsertEventEffect({
+                tenantId: event.tenantId,
+                rootTaskId,
+                taskId,
+                operation: event.type,
+                status: 'completed',
+                idempotencyKey: `${event.tenantId}:${event.sessionId}:${event.eventId ?? event.type}:${event.seq ?? 'unknown'}`,
+            });
+            return;
+        }
+
+        if (event.type === 'wm.snapshot_limit') {
+            await this.upsertEventEffect({
+                tenantId: event.tenantId,
+                rootTaskId,
+                taskId,
+                operation: event.type,
+                status: 'failed',
+                idempotencyKey: `${event.tenantId}:${event.sessionId}:${event.eventId ?? event.type}:${event.seq ?? 'unknown'}`,
+                errorCode: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+                errorMessage: 'Working-memory snapshot exceeded the configured size limit.',
+            });
+        }
+    }
+
     async listAgentRuns(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
         if (!this.isAvailable()) return undefined;
         const cursor = decodeCursor(params.cursor);
@@ -255,13 +482,41 @@ export class OperatorProjectionRepository {
             take: params.limit + 1,
         }) as SemanticRunRow[];
         const pageRows = rows.slice(0, params.limit);
+        const pageTaskIds = pageRows.map((row) => row.taskId);
+        const [edgeRows, turnRows] = pageTaskIds.length > 0
+            ? await Promise.all([
+                this.prisma.agentRunEdge!.findMany!({
+                    where: { tenantId: params.tenantId, parentTaskId: { in: pageTaskIds } },
+                }) as Promise<SemanticEdgeRow[]>,
+                this.prisma.turnRun!.findMany!({
+                    where: { tenantId: params.tenantId, taskId: { in: pageTaskIds } },
+                }) as Promise<SemanticTurnRow[]>,
+            ])
+            : [[], []] as [SemanticEdgeRow[], SemanticTurnRow[]];
+        const edgeCountByParent = new Map<string, number>();
+        for (const edge of edgeRows) {
+            edgeCountByParent.set(edge.parentTaskId, (edgeCountByParent.get(edge.parentTaskId) ?? 0) + 1);
+        }
+        const turnStatsByTask = new Map<string, { turns: number; llmCalls: number; memoryOps: number }>();
+        for (const turn of turnRows) {
+            const current = turnStatsByTask.get(turn.taskId) ?? { turns: 0, llmCalls: 0, memoryOps: 0 };
+            current.turns += 1;
+            current.llmCalls += turn.llmCallCount;
+            current.memoryOps += turn.memoryOpCount;
+            turnStatsByTask.set(turn.taskId, current);
+        }
         const overflow = rows.length > params.limit ? rows[params.limit] : undefined;
         const nextCursor = overflow ? encodeCursor({
             updatedAt: toIso(overflow.updatedAt) ?? new Date().toISOString(),
             id: overflow.id,
         }) : undefined;
         return {
-            items: pageRows.map(rowToListItem),
+            items: pageRows.map((row) => rowToListItem(row, {
+                children: edgeCountByParent.get(row.taskId),
+                turns: turnStatsByTask.get(row.taskId)?.turns,
+                llmCalls: turnStatsByTask.get(row.taskId)?.llmCalls,
+                memoryOps: turnStatsByTask.get(row.taskId)?.memoryOps,
+            })),
             ...(nextCursor ? { nextCursor } : {}),
             pageInfo: {
                 ...(nextCursor ? { nextCursor } : {}),
@@ -295,6 +550,9 @@ export class OperatorProjectionRepository {
             }) as Promise<SemanticEffectRow[]>,
         ]);
         const nodes = runs.map(rowToNode);
+        const expectedTurnCount = runs.reduce((sum, run) => sum + Math.max(0, run.turnCount ?? 0), 0);
+        const expectedEdgeCount = runs.reduce((sum, run) => sum + Math.max(0, run.childCount ?? 0), 0);
+        const partial = turns.length < expectedTurnCount || edges.length < expectedEdgeCount;
         return {
             schemaVersion: 1,
             tenantId: params.tenantId,
@@ -307,8 +565,176 @@ export class OperatorProjectionRepository {
             effects: effects.map(rowToEffect),
             events: [],
             debug: { driverRuns: [] },
-            projection: { source: 'semantic', partial: false },
+            projection: { source: 'semantic', partial },
         };
+    }
+
+    private async parentRootTaskId(tenantId: string, taskId: string): Promise<string | undefined> {
+        const rows = await this.prisma.agentRun!.findMany!({
+            where: { tenantId, taskId },
+            take: 1,
+        }) as SemanticRunRow[];
+        return rows[0]?.rootTaskId;
+    }
+
+    private async upsertEventRun(params: {
+        tenantId: string;
+        taskId: string;
+        rootTaskId: string;
+        agentId?: string;
+        scope?: 'root' | 'child';
+        status: string;
+        parentTaskId?: string;
+        startedAt?: Date;
+        terminalAt?: Date;
+        terminalCode?: string;
+        terminalMessage?: string;
+        traceId?: string;
+        outputState?: string;
+    }): Promise<void> {
+        const data = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            agentId: params.agentId,
+            operation: 'agent.run',
+            scope: params.scope ?? (params.taskId === params.rootTaskId ? 'root' : 'child'),
+            status: normalizeStatus(params.status),
+            parentTaskId: params.parentTaskId,
+            startedAt: params.startedAt,
+            terminalAt: params.terminalAt,
+            durationMs: params.startedAt && params.terminalAt ? Math.max(0, params.terminalAt.getTime() - params.startedAt.getTime()) : undefined,
+            terminalCode: params.terminalCode,
+            terminalMessage: params.terminalMessage,
+            traceId: params.traceId,
+            outputState: params.outputState,
+        });
+        await this.prisma.agentRun!.upsert!({
+            where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
+            create: {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                ...data,
+            },
+            update: data,
+        });
+    }
+
+    private async upsertEventEdge(params: {
+        tenantId: string;
+        rootTaskId: string;
+        parentTaskId: string;
+        childTaskId: string;
+        token: string;
+        status: string;
+        createdAt?: Date;
+        resolvedAt?: Date;
+        terminalCode?: string;
+        terminalMessage?: string;
+    }): Promise<void> {
+        const token = params.token ?? '';
+        const data = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            edgeKind: 'delegates_to',
+            status: normalizeStatus(params.status),
+            token,
+            resolvedAt: params.resolvedAt,
+            terminalCode: params.terminalCode,
+            terminalMessage: params.terminalMessage,
+        });
+        await this.prisma.agentRunEdge!.upsert!({
+            where: {
+                tenantId_parentTaskId_childTaskId_token: {
+                    tenantId: params.tenantId,
+                    parentTaskId: params.parentTaskId,
+                    childTaskId: params.childTaskId,
+                    token,
+                },
+            },
+            create: {
+                tenantId: params.tenantId,
+                parentTaskId: params.parentTaskId,
+                childTaskId: params.childTaskId,
+                createdAt: params.createdAt,
+                ...data,
+            },
+            update: data,
+        });
+    }
+
+    private async upsertEventTurn(params: {
+        tenantId: string;
+        taskId: string;
+        rootTaskId: string;
+        agentId?: string;
+        turnSeq: number;
+        status: string;
+        startedAt?: Date;
+        completedAt?: Date;
+        transitionKind?: string;
+        boundaryKind?: string;
+        outputProduced?: boolean;
+        llmCallCount?: number;
+        memoryOpCount?: number;
+        knownCostUsd?: number;
+        terminalCode?: string;
+        terminalMessage?: string;
+        turnTraceId?: string;
+    }): Promise<void> {
+        const data = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            agentId: params.agentId,
+            status: normalizeStatus(params.status),
+            startedAt: params.startedAt,
+            completedAt: params.completedAt,
+            durationMs: params.startedAt && params.completedAt ? Math.max(0, params.completedAt.getTime() - params.startedAt.getTime()) : undefined,
+            transitionKind: params.transitionKind,
+            boundaryKind: params.boundaryKind,
+            outputProduced: params.outputProduced,
+            llmCallCount: params.llmCallCount,
+            memoryOpCount: params.memoryOpCount,
+            knownCostUsd: params.knownCostUsd,
+            terminalCode: params.terminalCode,
+            terminalMessage: params.terminalMessage,
+            turnTraceId: params.turnTraceId,
+        });
+        await this.prisma.turnRun!.upsert!({
+            where: { tenantId_taskId_turnSeq: { tenantId: params.tenantId, taskId: params.taskId, turnSeq: params.turnSeq } },
+            create: {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                turnSeq: params.turnSeq,
+                ...data,
+            },
+            update: data,
+        });
+    }
+
+    private async upsertEventEffect(params: {
+        tenantId: string;
+        rootTaskId: string;
+        taskId: string;
+        operation: string;
+        status: string;
+        idempotencyKey: string;
+        errorCode?: string;
+        errorMessage?: string;
+    }): Promise<void> {
+        const data = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            taskId: params.taskId,
+            operation: params.operation,
+            status: normalizeStatus(params.status),
+            idempotencyKey: params.idempotencyKey,
+            errorCode: params.errorCode,
+            errorMessage: params.errorMessage,
+        });
+        await this.prisma.runEffect!.upsert!({
+            where: { idempotencyKey: params.idempotencyKey },
+            create: {
+                tenantId: params.tenantId,
+                ...data,
+            },
+            update: data,
+        });
     }
 
     private async upsertRun(node: AgentRunNode, graph: AgentRunGraph): Promise<void> {
@@ -440,7 +866,10 @@ export class OperatorProjectionRepository {
     }
 }
 
-function rowToListItem(row: SemanticRunRow): SemanticAgentRunListItem {
+function rowToListItem(
+    row: SemanticRunRow,
+    overrides: { children?: number; turns?: number; llmCalls?: number; memoryOps?: number } = {}
+): SemanticAgentRunListItem {
     return {
         ...(row.agentId ? { agentId: row.agentId } : {}),
         taskId: row.taskId,
@@ -449,10 +878,10 @@ function rowToListItem(row: SemanticRunRow): SemanticAgentRunListItem {
         ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
         ...(row.terminalAt ? { finishedAt: toIso(row.terminalAt) } : {}),
         ...(typeof row.durationMs === 'number' ? { durationMs: row.durationMs } : {}),
-        turns: row.turnCount,
-        children: row.childCount,
-        llmCalls: row.llmCallCount,
-        memoryOps: row.memoryOpCount,
+        turns: overrides.turns ?? row.turnCount,
+        children: overrides.children ?? row.childCount,
+        llmCalls: overrides.llmCalls ?? row.llmCallCount,
+        memoryOps: overrides.memoryOps ?? row.memoryOpCount,
         costUsd: decimalToNumber(row.knownCostUsd),
         ...(row.terminalCode || row.terminalMessage ? { error: { code: row.terminalCode, message: row.terminalMessage } } : {}),
         ...(row.traceId ? { traceId: row.traceId } : {}),
@@ -550,16 +979,66 @@ function transitionKind(value: unknown): string | undefined {
 
 function errorCode(value: unknown): string | undefined {
     if (!value || typeof value !== 'object') return undefined;
-    const code = (value as Record<string, unknown>).code;
-    return typeof code === 'string' ? code : undefined;
+    const record = value as Record<string, unknown>;
+    const code = record.code;
+    if (typeof code === 'string') return code;
+    const result = record.result;
+    if (result && typeof result === 'object') {
+        const error = (result as Record<string, unknown>).error;
+        if (error && typeof error === 'object') {
+            const nestedCode = (error as Record<string, unknown>).code;
+            return typeof nestedCode === 'string' ? nestedCode : undefined;
+        }
+    }
+    return undefined;
 }
 
 function errorMessage(value: unknown): string | undefined {
     if (!value || typeof value !== 'object') {
         return value instanceof Error ? value.message : undefined;
     }
-    const message = (value as Record<string, unknown>).message;
-    return typeof message === 'string' ? message : undefined;
+    const record = value as Record<string, unknown>;
+    const message = record.message;
+    if (typeof message === 'string') return message;
+    const result = record.result;
+    if (result && typeof result === 'object') {
+        const error = (result as Record<string, unknown>).error;
+        if (error && typeof error === 'object') {
+            const nestedMessage = (error as Record<string, unknown>).message;
+            return typeof nestedMessage === 'string' ? nestedMessage : undefined;
+        }
+    }
+    return undefined;
+}
+
+function eventHasOkFalse(value: unknown): boolean {
+    if (!value || typeof value !== 'object') return false;
+    const result = (value as Record<string, unknown>).result;
+    return !!result && typeof result === 'object' && (result as Record<string, unknown>).ok === false;
+}
+
+function isAwaitBoundaryKind(value: string | undefined): boolean {
+    return value === 'await_input' || value === 'await_tool' || value === 'await_child' || value === 'await_event';
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+    const field = value[key];
+    return typeof field === 'string' && field.length > 0 ? field : undefined;
+}
+
+function numberField(value: Record<string, unknown>, key: string): number {
+    const field = value[key];
+    return typeof field === 'number' && Number.isFinite(field) ? field : 0;
+}
+
+function arrayCount(value: unknown): number {
+    return Array.isArray(value) ? value.length : 0;
+}
+
+function costFromUsage(value: unknown): number | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const totalCost = (value as Record<string, unknown>).totalCost;
+    return typeof totalCost === 'number' && Number.isFinite(totalCost) ? totalCost : undefined;
 }
 
 function normalizeStatus(status: string): AgentRunStatus {

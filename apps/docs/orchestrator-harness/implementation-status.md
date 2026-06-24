@@ -390,19 +390,43 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 - All `packages/core/tests/TaskEngine*` suites — pass (151 tests).
 - **D5:** full monorepo suite — 174 passed, 952+ tests, 64 skipped (2026-06-16).
 
+## Phase 5 status
+
+Phase 5A is implemented behind rollout flags:
+
+- semantic tables exist for `agent_runs`, `agent_run_edges`, `turn_runs`,
+  `run_effects`, and projection cursors;
+- runtime `SessionManager.appendEvent` writes semantic task, child-edge, turn,
+  memory, and budget facts when `CALLAGENT_OPERATOR_PROJECTION_WRITE` is
+  `shadow` or `on`;
+- bridge graph/list reads still repair semantic records as bounded backfill;
+- semantic fleet reads derive child counts and turn metrics from edge/turn fact
+  rows rather than provider list aggregates;
+- semantic graph reads fall back to bridge if the semantic rows are incomplete;
+- graph loading is topology-capped with collapsed-branch metadata instead of
+  arbitrary array slicing;
+- `CALLAGENT_OPERATOR_PROJECTION_READ=bridge|compare|semantic` keeps bridge as
+  the default rollback path.
+
+Validation:
+
+- `yarn jest packages/core/tests/operator.agentRunsList.test.ts packages/core/tests/operator.runGraph.test.ts --runInBand`
+  — pass, including semantic read, runtime event projection, partial fallback,
+  and graph cap coverage.
+- `yarn workspace @a2arium/callagent-memory-sql build` — pass.
+- `yarn workspace @a2arium/callagent-core build` — pass.
+- `yarn workspace @a2arium/operator-viewer build` — pass.
+
 ## Next action
 
-Move to Phase 5 production readiness. The next work should not add more
-prototype UI first; it should harden the production substrate:
+Continue with Phase 5B-D production readiness gates:
 
-1. Persist normalized semantic run summaries, edge facts, child counts, turn
-   summaries, and terminal error/cancel facts outside `driver_runs`.
-2. Add query/index review and graph caps/progressive loading for large trees.
-3. Add payload-budget error surfacing and artifact-resolution discipline so
+1. Add payload-budget error surfacing and artifact-resolution discipline so
    oversized snapshots/LLM inputs fail semantically and visibly.
-4. Add operational observability: Prometheus/OTel metrics, timer lag, stuck run
+2. Add query/index review with `EXPLAIN ANALYZE` evidence on realistic data.
+3. Add operational observability: Prometheus/OTel metrics, timer lag, stuck run
    detection, DLQ/log-sink health, and alert runbooks.
-5. Run recorded failure drills and volume tests, including 100k historical runs,
+4. Run recorded failure drills and volume tests, including 100k historical runs,
    10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
    cancellation, missing child wake, and timeout scenarios.
 

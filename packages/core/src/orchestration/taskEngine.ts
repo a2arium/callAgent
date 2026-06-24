@@ -334,9 +334,48 @@ const GRAPH_EDGE_LIMIT = 350;
 const GRAPH_DEPTH_LIMIT = 4;
 
 function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): AgentRunGraph {
-    const overNodeLimit = graph.nodes.length > GRAPH_NODE_LIMIT;
-    const overEdgeLimit = graph.edges.length > GRAPH_EDGE_LIMIT;
-    if (!overNodeLimit && !overEdgeLimit) {
+    const adjacency = new Map<string, string[]>();
+    for (const edge of graph.edges) {
+        if (!edge.childTaskId) continue;
+        const current = adjacency.get(edge.parentTaskId) ?? [];
+        current.push(edge.childTaskId);
+        adjacency.set(edge.parentTaskId, current);
+    }
+
+    const keptTaskIds = new Set<string>([graph.root.taskId]);
+    const depthByTaskId = new Map<string, number>([[graph.root.taskId, 0]]);
+    const queue = [graph.root.taskId];
+    let truncatedByDepth = false;
+    let truncatedByNodeLimit = false;
+
+    while (queue.length > 0) {
+        const parentTaskId = queue.shift()!;
+        const depth = depthByTaskId.get(parentTaskId) ?? 0;
+        const children = adjacency.get(parentTaskId) ?? [];
+        if (depth >= GRAPH_DEPTH_LIMIT && children.length > 0) {
+            truncatedByDepth = true;
+            continue;
+        }
+        for (const childTaskId of children) {
+            if (keptTaskIds.has(childTaskId)) continue;
+            if (keptTaskIds.size >= GRAPH_NODE_LIMIT) {
+                truncatedByNodeLimit = true;
+                break;
+            }
+            keptTaskIds.add(childTaskId);
+            depthByTaskId.set(childTaskId, depth + 1);
+            queue.push(childTaskId);
+        }
+    }
+
+    const filteredEdges = graph.edges.filter((edge) =>
+        keptTaskIds.has(edge.parentTaskId) &&
+        (edge.childTaskId === undefined || keptTaskIds.has(edge.childTaskId))
+    );
+    const truncatedByEdgeLimit = filteredEdges.length > GRAPH_EDGE_LIMIT;
+    const truncated = truncatedByDepth || truncatedByNodeLimit || truncatedByEdgeLimit || keptTaskIds.size < graph.nodes.length;
+
+    if (!truncated) {
         return {
             ...graph,
             projection: graph.projection ?? { source, partial: false },
@@ -348,16 +387,15 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
             },
         };
     }
-    const keptTaskIds = new Set(graph.nodes.slice(0, GRAPH_NODE_LIMIT).map((node) => node.taskId));
-    keptTaskIds.add(graph.root.taskId);
-    const nodes = graph.nodes.filter((node) => keptTaskIds.has(node.taskId)).slice(0, GRAPH_NODE_LIMIT);
-    const edges = graph.edges
-        .filter((edge) => keptTaskIds.has(edge.parentTaskId) && (edge.childTaskId === undefined || keptTaskIds.has(edge.childTaskId)))
-        .slice(0, GRAPH_EDGE_LIMIT);
+    const nodes = graph.nodes.filter((node) => keptTaskIds.has(node.taskId));
+    const edges = filteredEdges.slice(0, GRAPH_EDGE_LIMIT);
     const hiddenByParent = new Map<string, number>();
+    const hiddenReasonByParent = new Map<string, 'node_limit' | 'depth_limit' | 'manual'>();
     for (const edge of graph.edges) {
-        if (edge.childTaskId !== undefined && !keptTaskIds.has(edge.childTaskId)) {
+        if (edge.childTaskId !== undefined && keptTaskIds.has(edge.parentTaskId) && !keptTaskIds.has(edge.childTaskId)) {
             hiddenByParent.set(edge.parentTaskId, (hiddenByParent.get(edge.parentTaskId) ?? 0) + 1);
+            const parentDepth = depthByTaskId.get(edge.parentTaskId) ?? 0;
+            hiddenReasonByParent.set(edge.parentTaskId, parentDepth >= GRAPH_DEPTH_LIMIT ? 'depth_limit' : 'node_limit');
         }
     }
     return {
@@ -371,7 +409,7 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
             parentTaskId,
             hiddenChildCount,
             expandCursor: Buffer.from(JSON.stringify({ parentTaskId }), 'utf8').toString('base64url'),
-            reason: overNodeLimit ? 'node_limit' : 'manual',
+            reason: hiddenReasonByParent.get(parentTaskId) ?? 'manual',
         })),
         projection: graph.projection ?? { source, partial: true },
         caps: {
@@ -1258,7 +1296,7 @@ export class TaskEngine {
         const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
         if (projectionMode === 'semantic') {
             const semanticGraph = await projection?.buildGraph(params);
-            if (semanticGraph !== undefined) {
+            if (semanticGraph !== undefined && semanticGraph.projection?.partial !== true) {
                 return withGraphCaps(semanticGraph, 'semantic');
             }
         }
@@ -1284,13 +1322,18 @@ export class TaskEngine {
             events: sessionEvents,
         });
         if (projectionWriteMode !== 'off') {
-            void projection?.projectGraph(graph).catch((error) => {
+            const writeProjection = projection?.projectGraph(graph).catch((error) => {
                 log.warn('Operator semantic graph projection failed', {
                     tenantId: params.tenantId,
                     taskId: params.taskId,
                     message: error instanceof Error ? error.message : String(error),
                 });
             });
+            if (projectionMode === 'compare' || projectionWriteMode === 'on') {
+                await writeProjection;
+            } else {
+                void writeProjection;
+            }
         }
         if (projectionMode === 'compare') {
             void projection?.buildGraph(params).then((semanticGraph) => {
@@ -1352,15 +1395,12 @@ export class TaskEngine {
 
     async listAgentRuns(params: AgentRunListParams): Promise<AgentRunListPage> {
         const prisma = this.getSessionStorePrisma() as OperatorPrismaClient | undefined;
-        if (!prisma?.driverRun) {
-            return { items: [] };
-        }
         const projectionMode = readProjectionMode();
         const projectionWriteMode = readProjectionWriteMode();
-        const projection = new OperatorProjectionRepository(prisma as never);
         const limit = clampAgentRunLimit(params.limit);
+        const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
         if (projectionMode === 'semantic') {
-            const semanticPage = await projection.listAgentRuns({
+            const semanticPage = await projection?.listAgentRuns({
                 tenantId: params.tenantId,
                 agentId: params.agentId,
                 status: params.status,
@@ -1372,6 +1412,9 @@ export class TaskEngine {
             if (semanticPage !== undefined) {
                 return semanticPage;
             }
+        }
+        if (!prisma?.driverRun) {
+            return { items: [] };
         }
         const cursor = decodeAgentRunCursor(params.cursor);
         const where: Record<string, unknown> = {
@@ -1555,15 +1598,20 @@ export class TaskEngine {
             projection: { source: 'bridge', partial: false },
         };
         if (projectionWriteMode !== 'off') {
-            void projection.projectListPage(params.tenantId, page.items).catch((error) => {
+            const writeProjection = projection?.projectListPage(params.tenantId, page.items).catch((error) => {
                 log.warn('Operator semantic list projection failed', {
                     tenantId: params.tenantId,
                     message: error instanceof Error ? error.message : String(error),
                 });
             });
+            if (projectionMode === 'compare' || projectionWriteMode === 'on') {
+                await writeProjection;
+            } else {
+                void writeProjection;
+            }
         }
         if (projectionMode === 'compare') {
-            void projection.listAgentRuns({
+            void projection?.listAgentRuns({
                 tenantId: params.tenantId,
                 agentId: params.agentId,
                 status: params.status,
@@ -2252,6 +2300,7 @@ export class TaskEngine {
             // Append start event and publish status via outbox; reducer entrypoint
             await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.started', {
                 taskId: sessionId,
+                agentId: typeof (ctx as Record<string, unknown>).agentId === 'string' ? (ctx as Record<string, unknown>).agentId : undefined,
                 traceparent,
                 inputPreview: task.input,
             });

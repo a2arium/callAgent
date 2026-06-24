@@ -1,16 +1,23 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
 
 const now = new Date('2026-06-23T12:00:00.000Z');
 
 describe('TaskEngine operator agent run list', () => {
     const previousReadMode = process.env.CALLAGENT_OPERATOR_PROJECTION_READ;
+    const previousWriteMode = process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE;
 
     afterEach(() => {
         if (previousReadMode === undefined) {
             delete process.env.CALLAGENT_OPERATOR_PROJECTION_READ;
         } else {
             process.env.CALLAGENT_OPERATOR_PROJECTION_READ = previousReadMode;
+        }
+        if (previousWriteMode === undefined) {
+            delete process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE;
+        } else {
+            process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = previousWriteMode;
         }
     });
 
@@ -241,10 +248,10 @@ describe('TaskEngine operator agent run list', () => {
                 agentId: 'root-agent',
                 scope: 'root',
                 status: 'completed',
-                childCount: 2,
-                turnCount: 3,
-                llmCallCount: 1,
-                memoryOpCount: 4,
+                childCount: 0,
+                turnCount: 0,
+                llmCallCount: 0,
+                memoryOpCount: 0,
                 knownCostUsd: '0.125000',
                 startedAt: now,
                 terminalAt: new Date('2026-06-23T12:01:00.000Z'),
@@ -266,8 +273,19 @@ describe('TaskEngine operator agent run list', () => {
             agentRun: {
                 findMany: jest.fn(async () => agentRunRows),
             },
-            agentRunEdge: {},
-            turnRun: {},
+            agentRunEdge: {
+                findMany: jest.fn(async () => [
+                    { id: 'edge-1', parentTaskId: 'root-task', childTaskId: 'child-1' },
+                    { id: 'edge-2', parentTaskId: 'root-task', childTaskId: 'child-2' },
+                ]),
+            },
+            turnRun: {
+                findMany: jest.fn(async () => [
+                    { id: 'turn-1', taskId: 'root-task', llmCallCount: 1, memoryOpCount: 2 },
+                    { id: 'turn-2', taskId: 'root-task', llmCallCount: 0, memoryOpCount: 1 },
+                    { id: 'turn-3', taskId: 'root-task', llmCallCount: 0, memoryOpCount: 1 },
+                ]),
+            },
             runEffect: {},
         };
 
@@ -327,7 +345,7 @@ describe('TaskEngine operator agent run list', () => {
                 parentTaskId: 'root-task',
                 status: 'completed',
                 childCount: 0,
-                turnCount: 1,
+                turnCount: 0,
                 llmCallCount: 0,
                 memoryOpCount: 0,
                 knownCostUsd: null,
@@ -412,6 +430,192 @@ describe('TaskEngine operator agent run list', () => {
                 taskId: 'root-task',
                 turnSeq: 1,
                 boundaryKind: 'await_child',
+            }),
+        ]);
+    });
+
+    it('projects durable task events when events are appended through the session manager', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'on';
+        const agentRunUpsert = jest.fn(async () => ({}));
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async () => []),
+                upsert: agentRunUpsert,
+            },
+            agentRunEdge: {
+                upsert: jest.fn(async () => ({})),
+            },
+            turnRun: {
+                upsert: jest.fn(async () => ({})),
+            },
+            runEffect: {
+                upsert: jest.fn(async () => ({})),
+            },
+        };
+        const store = {
+            prisma,
+            appendEvent: jest.fn(async () => ({ eventId: 'event-1', seq: 1 })),
+        };
+        const sessionManager = new SessionManager(store as never);
+
+        await sessionManager.appendEvent('default', 'root-task', 'task.started', {
+            taskId: 'root-task',
+            agentId: 'root-agent',
+            traceparent: 'trace-1',
+        });
+
+        expect(agentRunUpsert).toHaveBeenCalledWith(expect.objectContaining({
+            where: { tenantId_taskId: { tenantId: 'default', taskId: 'root-task' } },
+            create: expect.objectContaining({
+                tenantId: 'default',
+                taskId: 'root-task',
+                rootTaskId: 'root-task',
+                agentId: 'root-agent',
+                status: 'running',
+                scope: 'root',
+            }),
+        }));
+    });
+
+    it('keeps child scope when a child task emits its own task.started event', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'on';
+        const agentRunUpsert = jest.fn(async () => ({}));
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async () => [{ taskId: 'child-task', rootTaskId: 'root-task' }]),
+                upsert: agentRunUpsert,
+            },
+            agentRunEdge: {
+                upsert: jest.fn(async () => ({})),
+            },
+            turnRun: {
+                upsert: jest.fn(async () => ({})),
+            },
+            runEffect: {
+                upsert: jest.fn(async () => ({})),
+            },
+        };
+        const store = {
+            prisma,
+            appendEvent: jest.fn(async () => ({ eventId: 'event-1', seq: 1 })),
+        };
+        const sessionManager = new SessionManager(store as never);
+
+        await sessionManager.appendEvent('default', 'child-task', 'task.started', {
+            taskId: 'child-task',
+            agentId: 'child-agent',
+        });
+
+        expect(agentRunUpsert).toHaveBeenCalledWith(expect.objectContaining({
+            where: { tenantId_taskId: { tenantId: 'default', taskId: 'child-task' } },
+            update: expect.objectContaining({
+                rootTaskId: 'root-task',
+                scope: 'child',
+                agentId: 'child-agent',
+            }),
+        }));
+    });
+
+    it('falls back to bridge graph when semantic graph rows are incomplete', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        const semanticRunRows = [
+            {
+                id: 'root-row',
+                tenantId: 'default',
+                taskId: 'root-task',
+                rootTaskId: 'root-task',
+                agentId: 'root-agent',
+                scope: 'root',
+                status: 'running',
+                childCount: 1,
+                turnCount: 0,
+                llmCallCount: 0,
+                memoryOpCount: 0,
+                knownCostUsd: null,
+                startedAt: now,
+                terminalAt: null,
+                durationMs: null,
+                terminalCode: null,
+                terminalMessage: null,
+                outputState: 'not_captured',
+                traceId: null,
+                providerRunId: null,
+                updatedAt: now,
+            },
+        ];
+        const driverRows = [
+            {
+                id: 'run-root',
+                provider: 'hatchet',
+                tenantId: 'default',
+                taskId: 'root-task',
+                rootTaskId: 'root-task',
+                parentTaskId: null,
+                agentId: 'root-agent',
+                operation: 'agent.run',
+                status: 'running',
+                createdAt: now,
+                updatedAt: now,
+            },
+        ];
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async () => driverRows),
+            },
+            agentRun: {
+                findMany: jest.fn(async () => semanticRunRows),
+            },
+            agentRunEdge: {
+                findMany: jest.fn(async () => []),
+            },
+            turnRun: {
+                findMany: jest.fn(async () => []),
+            },
+            runEffect: {
+                findMany: jest.fn(async () => []),
+            },
+        };
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma }; listEventsSince: unknown } }).sessionManager.store.prisma = prisma;
+
+        const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
+
+        expect(graph.projection).toEqual({ source: 'bridge', partial: false });
+        expect(graph.root.taskId).toBe('root-task');
+    });
+
+    it('caps large graphs by preserving the root and reporting collapsed branches', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        const engine = new TaskEngine({});
+        const sessionManager = (engine as unknown as {
+            sessionManager: SessionManager;
+        }).sessionManager;
+        await sessionManager.appendEvent('default', 'root-task', 'task.started', {
+            taskId: 'root-task',
+            agentId: 'root-agent',
+        });
+        for (let index = 0; index < 260; index += 1) {
+            await sessionManager.appendEvent('default', 'root-task', 'task.child_started', {
+                token: `token-${index}`,
+                agentId: 'child-agent',
+                childTaskId: `child-${index}`,
+            });
+        }
+
+        const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
+
+        expect(graph.root.taskId).toBe('root-task');
+        expect(graph.nodes).toHaveLength(250);
+        expect(graph.caps).toEqual(expect.objectContaining({
+            nodeLimit: 250,
+            truncated: true,
+        }));
+        expect(graph.collapsedBranches).toEqual([
+            expect.objectContaining({
+                parentTaskId: 'root-task',
+                hiddenChildCount: 11,
+                reason: 'node_limit',
             }),
         ]);
     });

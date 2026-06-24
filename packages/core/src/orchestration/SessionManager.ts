@@ -22,6 +22,14 @@ import {
     currentSegmentIdempotencyKey,
     nextSegmentOutboxIdempotencyKey,
 } from '../runtime/segmentProcessedKeys.js';
+import {
+    OperatorProjectionRepository,
+    readProjectionWriteMode,
+    type OperatorProjectionEvent,
+} from '../operator/semanticProjection.js';
+import { logger } from '@a2arium/callagent-utils';
+
+const log = logger.createLogger({ prefix: 'SessionManager' });
 
 export type OutboxEnqueuedRef = {
     outboxRowId: string;
@@ -63,7 +71,43 @@ export class SessionManager {
 
     async appendEvent(tenantId: string, sessionId: string, type: string, payload: Record<string, unknown>) {
         if (!this.store) return { eventId: '', seq: 0 };
-        return this.store.appendEvent({ tenantId, sessionId, type, payload });
+        const result = await this.store.appendEvent({ tenantId, sessionId, type, payload });
+        await this.projectOperatorEvent({
+            tenantId,
+            sessionId,
+            type,
+            payload,
+            eventId: result.eventId,
+            seq: result.seq,
+            createdAt: new Date(),
+        });
+        return result;
+    }
+
+    private async projectOperatorEvent(event: OperatorProjectionEvent): Promise<void> {
+        const mode = readProjectionWriteMode();
+        if (mode === 'off') {
+            return;
+        }
+        const prisma = (this.store as unknown as { prisma?: unknown } | undefined)?.prisma;
+        if (!prisma) {
+            return;
+        }
+        const projection = new OperatorProjectionRepository(prisma as never);
+        if (mode === 'on') {
+            await projection.projectEvent(event);
+            return;
+        }
+        try {
+            await projection.projectEvent(event);
+        } catch (error) {
+            log.warn('Operator semantic event projection failed', {
+                tenantId: event.tenantId,
+                sessionId: event.sessionId,
+                type: event.type,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
     }
 
     async saveSnapshot(params: {

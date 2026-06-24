@@ -167,7 +167,7 @@ model AgentRunEdge {
   parentTaskId    String    @map("parent_task_id")
   childTaskId     String    @map("child_task_id")
   parentTurnSeq   Int?      @map("parent_turn_seq")
-  token           String?
+  token           String    @default("")
   edgeKind        String    @default("delegates_to") @map("edge_kind")
   status          String
   terminalCode    String?   @map("terminal_code")
