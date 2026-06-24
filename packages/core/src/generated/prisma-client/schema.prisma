@@ -154,6 +154,7 @@ model AgentRun {
 
   @@unique([tenantId, taskId])
   @@index([tenantId, rootTaskId])
+  @@index([tenantId, updatedAt, id])
   @@index([tenantId, scope, updatedAt, taskId])
   @@index([tenantId, agentId, updatedAt, taskId])
   @@index([tenantId, status, updatedAt, taskId])

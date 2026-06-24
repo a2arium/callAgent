@@ -501,25 +501,23 @@ operator harness:
   contract.
 - `production-readiness-evidence.md` records the first evidence pass: focused
   security/retention tests pass, a temp-table 100k query/index probe passes for
-  current semantic index shapes, and the local DB is blocked on applying the
-  semantic/audit migration before real retention and persisted-volume drills.
+  current semantic index shapes, the local DB migration plus retention dry-run
+  now pass, and a persisted 100k root-run semantic dataset has been benchmarked
+  through operator HTTP endpoints. That persisted benchmark exposed and fixed a
+  missing all-scope fleet recency index.
 
 ## Next action
 
 Continue with Phase 5D/5E production readiness gates:
 
-1. Apply the Phase 5D migration to the target local/staging database, then rerun
-   `yarn operator:retention -- --tenant default --dry-run` and record the JSON
-   plan.
-2. Validate Phase 5C automated tests and record at least one real failure drill
+1. Validate Phase 5C automated tests and record at least one real failure drill
    using `phase5c-observability-drills.md`. Controlled P6 is recorded; live P5
    provider-enqueue evidence is still recommended before closing Phase 5C.
-3. Repeat the 100k query/index review against a persisted migrated dataset and
-   API endpoints. The temporary-table probe is recorded but is not sufficient as
-   final load evidence.
-4. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
+2. Run concurrent operator polling and browser render checks against the
+   persisted 100k semantic dataset.
+3. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
    5D deployment hardening.
-5. Run recorded volume tests, including 100k historical runs,
+4. Run recorded volume tests, including 100k historical runs,
    10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
    cancellation, missing child wake, and timeout scenarios.
 
