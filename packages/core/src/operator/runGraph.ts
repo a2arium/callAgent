@@ -1,4 +1,5 @@
 import type { SessionManager } from '../orchestration/SessionManager.js';
+import { operatorPayloadEnvelope } from './payloadBudget.js';
 
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | 'unknown';
 
@@ -290,7 +291,7 @@ export async function buildAgentRunGraph(
     });
     const memoryOps = buildMemoryOps(params.taskId, events);
     const turns = buildTurnRuns(params.taskId, driverRuns, events, memoryOps);
-    const effects = buildEffectRuns(params.taskId, driverRuns);
+    const effects = buildEffectRuns(params.taskId, driverRuns, events);
     const graphEvents = buildGraphEvents(params.taskId, agentId ?? undefined, events, driverRuns);
 
     return {
@@ -741,8 +742,8 @@ function buildMemoryOps(rootTaskId: string, events: AgentRunSourceEvent[]): Memo
         .filter((event): event is MemoryOperationRun => event !== undefined);
 }
 
-function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[]): EffectRun[] {
-    return driverRuns
+function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[], events: AgentRunSourceEvent[]): EffectRun[] {
+    const driverEffects = driverRuns
         .filter((run) =>
             run.operation.startsWith('effect.') ||
             run.operation === 'outbox.dispatch' ||
@@ -763,6 +764,29 @@ function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[]): Effec
             hiddenByDefault: true,
             ...(run.error ? { error: run.error } : {}),
         }));
+    const budgetEffects = events
+        .filter((event) => event.type === 'payload.budget_exceeded' || event.type === 'wm.snapshot_limit')
+        .map((event): EffectRun => {
+            const code = stringField(event.payload, 'code') ?? (event.type === 'wm.snapshot_limit' ? 'LIMIT_WM_SNAPSHOT_TOO_LARGE' : 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE');
+            const message = stringField(event.payload, 'message') ?? 'Payload budget exceeded.';
+            return {
+                id: event.eventId,
+                rootTaskId,
+                taskId: event.sessionId ?? rootTaskId,
+                operation: event.type === 'wm.snapshot_limit' ? 'wm.snapshot_budget' : 'payload.budget',
+                status: 'failed',
+                hiddenByDefault: false,
+                error: {
+                    code,
+                    message,
+                    limitBytes: numberField(event.payload, 'limitBytes'),
+                    actualBytes: numberField(event.payload, 'actualBytes'),
+                    fieldPath: stringField(event.payload, 'fieldPath'),
+                    eventType: stringField(event.payload, 'eventType'),
+                },
+            };
+        });
+    return [...driverEffects, ...budgetEffects];
 }
 
 function buildGraphEvents(
@@ -796,7 +820,7 @@ function buildGraphEvents(
                 ...(spanId ? { turnId: spanId } : {}),
                 ...(token ? { token } : {}),
             },
-            payload: event.payload,
+            payload: { envelope: operatorPayloadEnvelope(event.payload) },
         };
     });
 }

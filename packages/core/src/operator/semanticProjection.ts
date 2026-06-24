@@ -438,12 +438,28 @@ export class OperatorProjectionRepository {
             return;
         }
 
+        if (event.type === 'payload.budget_exceeded') {
+            const code = stringField(event.payload, 'code') ?? 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE';
+            const message = stringField(event.payload, 'message') ?? 'Payload exceeded configured budget.';
+            await this.upsertEventEffect({
+                tenantId: event.tenantId,
+                rootTaskId,
+                taskId,
+                operation: 'payload.budget',
+                status: 'failed',
+                idempotencyKey: `${event.tenantId}:${event.sessionId}:${event.eventId ?? event.type}:${event.seq ?? 'unknown'}`,
+                errorCode: code,
+                errorMessage: message,
+            });
+            return;
+        }
+
         if (event.type === 'wm.snapshot_limit') {
             await this.upsertEventEffect({
                 tenantId: event.tenantId,
                 rootTaskId,
                 taskId,
-                operation: event.type,
+                operation: 'wm.snapshot_budget',
                 status: 'failed',
                 idempotencyKey: `${event.tenantId}:${event.sessionId}:${event.eventId ?? event.type}:${event.seq ?? 'unknown'}`,
                 errorCode: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',

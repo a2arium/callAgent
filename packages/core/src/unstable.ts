@@ -14,6 +14,23 @@ export {
 } from './runtime/bootstrapCompositionRoot.js';
 export * from './runtime/index.js';
 export {
+    budgetEnvelope,
+    budgetErrorPayload,
+    compactOperationalEventPayload,
+    compactPayload,
+    enforcePayloadBudget,
+    isPayloadEnvelope,
+    measureJsonBytes,
+    operatorPayloadEnvelope,
+    readDriverMetadataMaxBytes,
+    readEventPayloadMaxBytes,
+    readHatchetPayloadMaxBytes,
+    readOperatorRawPayloadMaxBytes,
+    type PayloadBudgetCode,
+    type PayloadBudgetResult,
+    type PayloadEnvelope,
+} from './operator/payloadBudget.js';
+export {
     dispatchOutboxRow,
     deleteOutboxRow,
     handleOutboxDispatchFailure,

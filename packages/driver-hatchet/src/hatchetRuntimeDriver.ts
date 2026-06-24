@@ -5,9 +5,15 @@ import type {
     EnqueueResumeParams,
     EnqueueStartParams,
     IEventBus,
+    PayloadBudgetCode,
     RuntimeDriver,
     RuntimeTimerRepository,
     ScheduleTimerParams,
+} from '@a2arium/callagent-core/unstable';
+import {
+    compactPayload,
+    enforcePayloadBudget,
+    readHatchetPayloadMaxBytes,
 } from '@a2arium/callagent-core/unstable';
 import type { TaskWorkflowDeclaration } from '@hatchet-dev/typescript-sdk/v1/declaration.js';
 import { logger } from '@a2arium/callagent-utils';
@@ -33,6 +39,20 @@ export type HatchetRunsCanceller = {
     cancel: (opts: { ids: string[] }) => Promise<unknown>;
 };
 
+export type PayloadBudgetEventRecorder = {
+    appendBudgetExceededEvent: (params: {
+        tenantId: string;
+        sessionId: string;
+        taskId?: string;
+        code: PayloadBudgetCode;
+        message?: string;
+        limitBytes: number;
+        actualBytes?: number;
+        fieldPath?: string;
+        eventType?: string;
+    }) => Promise<unknown>;
+};
+
 export class HatchetRuntimeDriver implements RuntimeDriver {
     constructor(
         private readonly delegate: RuntimeDriver,
@@ -50,7 +70,8 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         private readonly events?: HatchetEventPusher,
         private readonly runs?: HatchetRunsCanceller,
         private readonly runtimeTimers?: RuntimeTimerRepository,
-        private readonly timerFireTask?: TaskWorkflowDeclaration<TimerFireTaskInput, TimerFireTaskOutput>
+        private readonly timerFireTask?: TaskWorkflowDeclaration<TimerFireTaskInput, TimerFireTaskOutput>,
+        private readonly budgetEvents?: PayloadBudgetEventRecorder
     ) {}
 
     async enqueueStart(params: EnqueueStartParams): Promise<void> {
@@ -66,6 +87,15 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             input: params.input as TaskTaskInput['input'],
             idempotencyKey: params.idempotencyKey,
         };
+        const budget = enforcePayloadBudget(input, {
+            code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
+            limitBytes: readHatchetPayloadMaxBytes(),
+            summary: 'Hatchet task payload exceeded the configured budget.',
+        });
+        if (!budget.ok) {
+            await this.recordPayloadBudget(params.tenantId, params.taskId, budget, 'agent.run');
+            throw new Error(`LIMIT_HATCHET_PAYLOAD_TOO_LARGE: ${budget.summary}`);
+        }
         const ref = await taskTask.runNoWait(input, {
             additionalMetadata: buildTaskMetadata(params, 'agent.run'),
         });
@@ -95,15 +125,24 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             return this.delegate.enqueueResume(params);
         }
 
+        const payload = {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            idempotencyKey: params.idempotencyKey,
+            ...params.event,
+        };
+        const budget = enforcePayloadBudget(payload, {
+            code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
+            limitBytes: readHatchetPayloadMaxBytes(),
+            summary: 'Hatchet resume payload exceeded the configured budget.',
+        });
+        if (!budget.ok) {
+            await this.recordPayloadBudget(params.tenantId, params.taskId, budget, `resume.${params.event.kind}`);
+        }
         await this.events.push(
             `aplret.${params.event.kind}.${params.event.token}`,
-            {
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                agentId: params.agentId,
-                idempotencyKey: params.idempotencyKey,
-                ...params.event,
-            },
+            (budget.ok ? payload : compactPayload(budget.value)) as Record<string, unknown>,
             { key: `${params.tenantId}:${params.taskId}:${params.event.token}` }
         );
     }
@@ -270,6 +309,43 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             }
         }
         return this.taskTask;
+    }
+
+    private async recordPayloadBudget(
+        tenantId: string,
+        taskId: string,
+        budget: {
+            code: PayloadBudgetCode;
+            summary: string;
+            limitBytes: number;
+            actualBytes: number;
+            fieldPath?: string;
+        },
+        eventType: string
+    ): Promise<void> {
+        if (!this.budgetEvents) {
+            return;
+        }
+        try {
+            await this.budgetEvents.appendBudgetExceededEvent({
+                tenantId,
+                sessionId: taskId,
+                taskId,
+                code: budget.code,
+                message: budget.summary,
+                limitBytes: budget.limitBytes,
+                actualBytes: budget.actualBytes,
+                fieldPath: budget.fieldPath,
+                eventType,
+            });
+        } catch (error) {
+            log.warn('Failed to persist payload budget event', {
+                tenantId,
+                taskId,
+                code: budget.code,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
     }
 }
 

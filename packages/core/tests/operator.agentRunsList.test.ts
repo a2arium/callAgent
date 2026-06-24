@@ -7,6 +7,9 @@ const now = new Date('2026-06-23T12:00:00.000Z');
 describe('TaskEngine operator agent run list', () => {
     const previousReadMode = process.env.CALLAGENT_OPERATOR_PROJECTION_READ;
     const previousWriteMode = process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE;
+    const previousEventPayloadBudget = process.env.CALLAGENT_EVENT_PAYLOAD_MAX_BYTES;
+    const previousSnapshotBudget = process.env.WM_SNAPSHOT_MAX_BYTES;
+    const previousOperatorPayloadBudget = process.env.CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES;
 
     afterEach(() => {
         if (previousReadMode === undefined) {
@@ -18,6 +21,21 @@ describe('TaskEngine operator agent run list', () => {
             delete process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE;
         } else {
             process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = previousWriteMode;
+        }
+        if (previousEventPayloadBudget === undefined) {
+            delete process.env.CALLAGENT_EVENT_PAYLOAD_MAX_BYTES;
+        } else {
+            process.env.CALLAGENT_EVENT_PAYLOAD_MAX_BYTES = previousEventPayloadBudget;
+        }
+        if (previousSnapshotBudget === undefined) {
+            delete process.env.WM_SNAPSHOT_MAX_BYTES;
+        } else {
+            process.env.WM_SNAPSHOT_MAX_BYTES = previousSnapshotBudget;
+        }
+        if (previousOperatorPayloadBudget === undefined) {
+            delete process.env.CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES;
+        } else {
+            process.env.CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES = previousOperatorPayloadBudget;
         }
     });
 
@@ -514,6 +532,178 @@ describe('TaskEngine operator agent run list', () => {
                 agentId: 'child-agent',
             }),
         }));
+    });
+
+    it('compacts oversized event payloads and appends a semantic payload budget event', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        process.env.CALLAGENT_EVENT_PAYLOAD_MAX_BYTES = '200';
+        const appended: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
+        const store = {
+            appendEvent: jest.fn(async (event: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }) => {
+                appended.push(event);
+                return { eventId: `event-${appended.length}`, seq: appended.length };
+            }),
+        };
+        const sessionManager = new SessionManager(store as never);
+
+        await sessionManager.appendEvent('default', 'root-task', 'turn.completed', {
+            taskId: 'root-task',
+            turnSeq: 1,
+            transition: { kind: 'complete', result: { ok: true, html: 'x'.repeat(1000) } },
+        });
+
+        expect(appended).toHaveLength(2);
+        expect(appended[0]?.type).toBe('turn.completed');
+        expect(JSON.stringify(appended[0]?.payload).length).toBeLessThan(1000);
+        expect(appended[0]?.payload).toEqual(expect.objectContaining({
+            taskId: 'root-task',
+            turnSeq: 1,
+            transition: expect.objectContaining({
+                kind: 'complete',
+                result: expect.objectContaining({
+                    ok: true,
+                }),
+            }),
+        }));
+        expect(appended[1]).toEqual(expect.objectContaining({
+            type: 'payload.budget_exceeded',
+            payload: expect.objectContaining({
+                taskId: 'root-task',
+                code: 'LIMIT_EVENT_PAYLOAD_TOO_LARGE',
+                eventType: 'turn.completed',
+            }),
+        }));
+    });
+
+    it('surfaces payload budget events as graph effects', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        const engine = new TaskEngine({});
+        const sessionManager = (engine as unknown as { sessionManager: SessionManager }).sessionManager;
+        await sessionManager.appendEvent('default', 'root-task', 'task.started', {
+            taskId: 'root-task',
+            agentId: 'root-agent',
+        });
+        await sessionManager.appendEvent('default', 'root-task', 'payload.budget_exceeded', {
+            taskId: 'root-task',
+            code: 'LIMIT_EVENT_PAYLOAD_TOO_LARGE',
+            message: 'event payload too large',
+            limitBytes: 200,
+            actualBytes: 1000,
+            eventType: 'turn.completed',
+        });
+
+        const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
+
+        expect(graph.effects).toEqual([
+            expect.objectContaining({
+                operation: 'payload.budget',
+                status: 'failed',
+                hiddenByDefault: false,
+                error: expect.objectContaining({
+                    code: 'LIMIT_EVENT_PAYLOAD_TOO_LARGE',
+                    message: 'event payload too large',
+                    eventType: 'turn.completed',
+                }),
+            }),
+        ]);
+    });
+
+    it('surfaces artifact resolution failures as payload budget effects', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        const engine = new TaskEngine({});
+        const sessionManager = (engine as unknown as { sessionManager: SessionManager }).sessionManager;
+        await sessionManager.appendEvent('default', 'child-task', 'task.started', {
+            taskId: 'child-task',
+            agentId: 'child-agent',
+        });
+        await sessionManager.appendEvent('default', 'child-task', 'payload.budget_exceeded', {
+            taskId: 'child-task',
+            agentId: 'child-agent',
+            code: 'ARTIFACT_RESOLUTION_FAILED',
+            message: 'artifact art-1 could not be loaded',
+            limitBytes: 0,
+            eventType: 'a2a.live_result.hydrate',
+        });
+
+        const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'child-task' });
+
+        expect(graph.effects).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                operation: 'payload.budget',
+                status: 'failed',
+                error: expect.objectContaining({
+                    code: 'ARTIFACT_RESOLUTION_FAILED',
+                    message: 'artifact art-1 could not be loaded',
+                    eventType: 'a2a.live_result.hydrate',
+                }),
+            }),
+        ]));
+    });
+
+    it('records snapshot budget failures from SessionManager.saveSnapshot', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        process.env.WM_SNAPSHOT_MAX_BYTES = '120';
+        const appended: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
+        const store = {
+            getSessionSnapshot: jest.fn(async () => null),
+            writeSnapshotCAS: jest.fn(async () => ({ newVersion: BigInt(1) })),
+            appendEvent: jest.fn(async (event: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }) => {
+                appended.push(event);
+                return { eventId: `event-${appended.length}`, seq: appended.length };
+            }),
+        };
+        const sessionManager = new SessionManager(store as never);
+
+        await expect(sessionManager.saveSnapshot({
+            tenantId: 'default',
+            sessionId: 'root-task',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { html: 'x'.repeat(500) },
+        })).rejects.toThrow('LIMIT_WM_SNAPSHOT_TOO_LARGE');
+
+        expect(appended).toEqual([
+            expect.objectContaining({
+                type: 'wm.snapshot_limit',
+                payload: expect.objectContaining({
+                    taskId: 'root-task',
+                    code: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+                    limitBytes: 120,
+                }),
+            }),
+        ]);
+    });
+
+    it('caps oversized operator graph responses and surfaces a semantic effect', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        process.env.CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES = '900';
+        const engine = new TaskEngine({});
+        const sessionManager = (engine as unknown as { sessionManager: SessionManager }).sessionManager;
+        await sessionManager.appendEvent('default', 'root-task', 'task.started', {
+            taskId: 'root-task',
+            agentId: 'root-agent',
+        });
+        for (let index = 0; index < 40; index += 1) {
+            await sessionManager.appendEvent('default', 'root-task', 'debug.event', {
+                taskId: 'root-task',
+                index,
+                data: 'x'.repeat(200),
+            });
+        }
+
+        const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
+
+        expect(graph.projection).toEqual(expect.objectContaining({ partial: true }));
+        expect(graph.effects).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                operation: 'operator.response_budget',
+                status: 'failed',
+                error: expect.objectContaining({
+                    code: 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE',
+                }),
+            }),
+        ]));
+        expect(JSON.stringify(graph).length).toBeLessThan(1200);
     });
 
     it('falls back to bridge graph when semantic graph rows are incomplete', async () => {

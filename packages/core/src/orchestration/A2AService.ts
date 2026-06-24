@@ -133,6 +133,37 @@ export class A2AService implements IA2AService {
         }
     }
 
+    private async recordArtifactResolutionFailure(params: {
+        tenantId: string;
+        taskId: string;
+        targetAgent: string;
+        eventType: string;
+        error: unknown;
+    }): Promise<void> {
+        try {
+            const engine = EngineLocator.getEngine<TaskEngine>();
+            await engine?.appendOperatorEvent({
+                tenantId: params.tenantId,
+                sessionId: params.taskId,
+                type: 'payload.budget_exceeded',
+                payload: {
+                    taskId: params.taskId,
+                    agentId: params.targetAgent,
+                    code: 'ARTIFACT_RESOLUTION_FAILED',
+                    message: params.error instanceof Error ? params.error.message : String(params.error),
+                    limitBytes: 0,
+                    eventType: params.eventType,
+                },
+            });
+        } catch (recordError) {
+            a2aLogger.warn('Failed to record artifact resolution failure', {
+                taskId: params.taskId,
+                targetAgent: params.targetAgent,
+                error: recordError instanceof Error ? recordError.message : String(recordError),
+            });
+        }
+    }
+
     private trackNotification(promise: Promise<void>): void {
         this.pendingNotifications.add(promise);
         promise.finally(() => {
@@ -1067,6 +1098,13 @@ export class A2AService implements IA2AService {
                                     operationId,
                                     targetAgent: targetPlugin.resolved.agentCard.name
                                 });
+                                await this.recordArtifactResolutionFailure({
+                                    tenantId: targetCtx.tenantId,
+                                    taskId: targetCtx.task.id,
+                                    targetAgent: targetPlugin.resolved.agentCard.name,
+                                    eventType: 'a2a.cached_result.hydrate',
+                                    error: hydrationError,
+                                });
                                 // Continue even if hydration fails, returning the raw result
                             }
 
@@ -1169,6 +1207,13 @@ export class A2AService implements IA2AService {
                             a2aLogger.error('Failed to hydrate artifacts in live result', hydrationError, {
                                 operationId,
                                 targetAgent: targetPlugin.resolved.agentCard.name
+                            });
+                            await this.recordArtifactResolutionFailure({
+                                tenantId: targetCtx.tenantId,
+                                taskId: targetCtx.task.id,
+                                targetAgent: targetPlugin.resolved.agentCard.name,
+                                eventType: 'a2a.live_result.hydrate',
+                                error: hydrationError,
                             });
                         }
                     }

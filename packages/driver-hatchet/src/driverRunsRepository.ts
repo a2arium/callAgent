@@ -1,5 +1,11 @@
 import type { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
 import { Prisma } from '@a2arium/callagent-memory-sql/generated';
+import {
+    budgetErrorPayload,
+    compactPayload,
+    enforcePayloadBudget,
+    readDriverMetadataMaxBytes,
+} from '@a2arium/callagent-core/unstable';
 
 export type DriverRunRecord = {
     provider?: string;
@@ -178,6 +184,19 @@ function normalizeDriverRunStatus(status: string): string {
 }
 
 export function serializeDriverRunError(error: unknown): Prisma.InputJsonValue {
+    const budget = enforcePayloadBudget(error, {
+        code: 'LIMIT_DRIVER_METADATA_TOO_LARGE',
+        limitBytes: readDriverMetadataMaxBytes(),
+        summary: 'Driver run error metadata exceeded the configured budget.',
+    });
+    if (!budget.ok) {
+        return budgetErrorPayload({
+            code: budget.code,
+            message: budget.summary,
+            limitBytes: budget.limitBytes,
+            actualBytes: budget.actualBytes,
+        }) as Prisma.InputJsonObject;
+    }
     if (error instanceof Error) {
         return compactError({
             name: error.name,
@@ -186,7 +205,7 @@ export function serializeDriverRunError(error: unknown): Prisma.InputJsonValue {
         });
     }
     if (error && typeof error === 'object' && !Array.isArray(error)) {
-        const record = error as Record<string, unknown>;
+        const record = compactPayload(error) as Record<string, unknown>;
         return compactError({
             name: typeof record.name === 'string' ? record.name : undefined,
             message: typeof record.message === 'string' ? record.message : JSON.stringify(record).slice(0, 500),

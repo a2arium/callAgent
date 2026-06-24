@@ -103,6 +103,11 @@ import {
     readProjectionMode,
     readProjectionWriteMode,
 } from '../operator/semanticProjection.js';
+import {
+    budgetEnvelope,
+    measureJsonBytes,
+    readOperatorRawPayloadMaxBytes,
+} from '../operator/payloadBudget.js';
 
 export type {
     TaskEntity,
@@ -376,7 +381,7 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
     const truncated = truncatedByDepth || truncatedByNodeLimit || truncatedByEdgeLimit || keptTaskIds.size < graph.nodes.length;
 
     if (!truncated) {
-        return {
+        return withOperatorResponseBudget({
             ...graph,
             projection: graph.projection ?? { source, partial: false },
             caps: graph.caps ?? {
@@ -385,7 +390,7 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
                 depthLimit: GRAPH_DEPTH_LIMIT,
                 truncated: false,
             },
-        };
+        }, source);
     }
     const nodes = graph.nodes.filter((node) => keptTaskIds.has(node.taskId));
     const edges = filteredEdges.slice(0, GRAPH_EDGE_LIMIT);
@@ -398,7 +403,7 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
             hiddenReasonByParent.set(edge.parentTaskId, parentDepth >= GRAPH_DEPTH_LIMIT ? 'depth_limit' : 'node_limit');
         }
     }
-    return {
+    return withOperatorResponseBudget({
         ...graph,
         nodes,
         edges,
@@ -418,6 +423,61 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
             depthLimit: GRAPH_DEPTH_LIMIT,
             truncated: true,
         },
+    }, source);
+}
+
+function withOperatorResponseBudget(graph: AgentRunGraph, source: 'bridge' | 'semantic'): AgentRunGraph {
+    const limitBytes = readOperatorRawPayloadMaxBytes();
+    const initialBytes = measureJsonBytes(graph);
+    if (initialBytes <= limitBytes) {
+        return graph;
+    }
+    const budgetEffect = {
+        id: `${graph.taskId}:operator-response-budget`,
+        rootTaskId: graph.taskId,
+        taskId: graph.taskId,
+        operation: 'operator.response_budget',
+        status: 'failed' as const,
+        hiddenByDefault: false,
+        error: {
+            code: 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE',
+            message: 'Operator graph response exceeded the configured size limit. Raw debug events were omitted.',
+            limitBytes,
+            actualBytes: initialBytes,
+        },
+    };
+    const compacted: AgentRunGraph = {
+        ...graph,
+        events: graph.events.slice(0, 25).map((event) => ({
+            ...event,
+            payload: {
+                envelope: budgetEnvelope(
+                    'LIMIT_OPERATOR_RESPONSE_TOO_LARGE',
+                    limitBytes,
+                    initialBytes,
+                    'Raw event payload omitted because the operator response exceeded the configured size limit.'
+                ),
+            },
+        })),
+        debug: { driverRuns: [] },
+        effects: [...graph.effects, budgetEffect],
+        projection: {
+            source,
+            partial: true,
+        },
+        caps: {
+            nodeLimit: graph.caps?.nodeLimit ?? GRAPH_NODE_LIMIT,
+            edgeLimit: graph.caps?.edgeLimit ?? GRAPH_EDGE_LIMIT,
+            depthLimit: graph.caps?.depthLimit ?? GRAPH_DEPTH_LIMIT,
+            truncated: true,
+        },
+    };
+    if (measureJsonBytes(compacted) <= limitBytes || compacted.events.length === 0) {
+        return compacted;
+    }
+    return {
+        ...compacted,
+        events: [],
     };
 }
 
@@ -2444,9 +2504,9 @@ export class TaskEngine {
             // After handler: flush MentalState once (skip if already flushed earlier in this turn)
             if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
                 try { await flushMentalState(); } catch (e) {
-                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        await this.sessionManager!.appendEvent(tenantId as string, sessionId as string, 'wm.snapshot_limit', { size: 'unknown' });
-                    } else { throw e; }
+                    if ((e as Error).message !== 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        throw e;
+                    }
                 }
             }
 

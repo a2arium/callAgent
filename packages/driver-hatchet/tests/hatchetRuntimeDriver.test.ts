@@ -3,8 +3,15 @@ import { HatchetRuntimeDriver } from '../src/hatchetRuntimeDriver.js';
 import type { RuntimeDriver } from '@a2arium/callagent-core/unstable';
 
 describe('HatchetRuntimeDriver', () => {
+    const previousHatchetPayloadBudget = process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES;
+
     afterEach(() => {
         delete process.env.CALLAGENT_DRIVER_SURFACES;
+        if (previousHatchetPayloadBudget === undefined) {
+            delete process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES;
+        } else {
+            process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES = previousHatchetPayloadBudget;
+        }
     });
 
     it('delegates scheduling methods to the in-process driver', async () => {
@@ -488,5 +495,54 @@ describe('HatchetRuntimeDriver', () => {
 
         expect(agentTask.runNoWait).toHaveBeenCalled();
         expect(fallbackTask.runNoWait).not.toHaveBeenCalled();
+    });
+
+    it('records a semantic budget event before throwing on oversized Hatchet start payloads', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
+        process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES = '220';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const taskTask = {
+            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('agent-run') })),
+        };
+        const budgetEvents = {
+            appendBudgetExceededEvent: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            taskTask as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            budgetEvents
+        );
+
+        await expect(driver.enqueueStart({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            idempotencyKey: 'task-1:start',
+            input: { html: 'x'.repeat(1000) },
+        })).rejects.toThrow('LIMIT_HATCHET_PAYLOAD_TOO_LARGE');
+
+        expect(taskTask.runNoWait).not.toHaveBeenCalled();
+        expect(budgetEvents.appendBudgetExceededEvent).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            sessionId: 'task-1',
+            taskId: 'task-1',
+            code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
+            eventType: 'agent.run',
+        }));
     });
 });

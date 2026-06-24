@@ -15,6 +15,10 @@ export function JsonPreview(props: {
   hiddenLabel?: string;
 }): React.ReactElement {
   const maxPreviewRows = props.maxPreviewRows ?? 5;
+  const envelope = payloadEnvelope(props.value);
+  if (envelope) {
+    return <PayloadEnvelopePreview envelope={envelope} title={props.title} defaultExpanded={props.defaultExpanded} maxRawHeight={props.maxRawHeight ?? 320} />;
+  }
   const state = jsonState(props.value, props.hidden);
 
   if (state.kind === 'hidden') {
@@ -54,6 +58,73 @@ export function JsonPreview(props: {
           <CopyTextButton text={formatted} label="formatted JSON" />
         </summary>
         <HighlightedJson value={props.value} maxRawHeight={props.maxRawHeight ?? 320} />
+      </details>
+    </div>
+  );
+}
+
+type PayloadEnvelope =
+  | { state: 'available'; contentType: string; value: unknown; truncated: boolean }
+  | { state: 'artifact_only'; artifactId: string; summary?: string }
+  | { state: 'hidden'; reason: string }
+  | { state: 'not_captured'; reason?: string }
+  | { state: 'too_large'; limitBytes: number; actualBytes?: number; summary?: string };
+
+function PayloadEnvelopePreview(props: {
+  envelope: PayloadEnvelope;
+  title?: string;
+  defaultExpanded?: boolean;
+  maxRawHeight: number;
+}): React.ReactElement {
+  const envelope = props.envelope;
+  if (envelope.state === 'available') {
+    return (
+      <JsonPreview
+        value={envelope.value}
+        title={props.title}
+        defaultExpanded={props.defaultExpanded}
+        maxRawHeight={props.maxRawHeight}
+      />
+    );
+  }
+  if (envelope.state === 'hidden') {
+    return <Notice kind="unsafe" title={props.title ?? 'Payload hidden'}>{envelope.reason}</Notice>;
+  }
+  if (envelope.state === 'not_captured') {
+    return <Notice title={props.title ?? 'Payload not captured'} className="bg-background/50">{envelope.reason}</Notice>;
+  }
+  const rows: Array<[string, unknown]> = envelope.state === 'artifact_only'
+    ? [['state', 'artifact only'], ['artifactId', envelope.artifactId], ['summary', envelope.summary]]
+    : [['state', 'too large'], ['limitBytes', envelope.limitBytes], ['actualBytes', envelope.actualBytes], ['summary', envelope.summary]];
+  return (
+    <div className="json-preview grid min-w-0 max-w-full gap-2 overflow-x-hidden">
+      {props.title ? <p className="text-sm font-medium">{props.title}</p> : null}
+      <Notice
+        kind={envelope.state === 'too_large' ? 'warning' : 'info'}
+        title={envelope.state === 'too_large' ? 'Payload too large to display inline' : 'Payload available as artifact metadata'}
+      >
+        {envelope.summary}
+      </Notice>
+      <div className="overflow-hidden rounded-md border border-border">
+        <table className="w-full table-fixed text-sm">
+          <tbody>
+            {rows.filter(([, value]) => value !== undefined).map(([field, value]) => (
+              <tr key={field} className="border-t border-border first:border-t-0">
+                <td className="w-28 bg-muted/50 px-3 py-2 align-top text-xs text-muted-foreground">{field}</td>
+                <td className="min-w-0 px-3 py-2 align-top">
+                  <JsonValue value={value} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <details className="min-w-0 rounded-md border border-border bg-background/50" open={props.defaultExpanded}>
+        <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-sm font-medium">
+          View envelope JSON
+          <CopyTextButton text={prettyJson(envelope)} label="envelope JSON" />
+        </summary>
+        <HighlightedJson value={envelope} maxRawHeight={props.maxRawHeight} />
       </details>
     </div>
   );
@@ -237,6 +308,39 @@ function jsonState(value: unknown, hidden: boolean | undefined): { kind: 'hidden
     }
   }
   return { kind: 'primitive' };
+}
+
+function payloadEnvelope(value: unknown): PayloadEnvelope | undefined {
+  if (!isRecord(value)) return undefined;
+  const candidate = isRecord(value.envelope) ? value.envelope : value;
+  if (!isRecord(candidate)) return undefined;
+  const state = candidate.state;
+  if (state === 'available') {
+    return {
+      state,
+      contentType: typeof candidate.contentType === 'string' ? candidate.contentType : 'application/json',
+      value: candidate.value,
+      truncated: candidate.truncated === true,
+    };
+  }
+  if (state === 'artifact_only' && typeof candidate.artifactId === 'string') {
+    return { state, artifactId: candidate.artifactId, summary: stringField(candidate, 'summary') };
+  }
+  if (state === 'hidden') {
+    return { state, reason: stringField(candidate, 'reason') ?? 'Payload hidden.' };
+  }
+  if (state === 'not_captured') {
+    return { state, reason: stringField(candidate, 'reason') };
+  }
+  if (state === 'too_large') {
+    return {
+      state,
+      limitBytes: numberField(candidate, 'limitBytes') ?? 0,
+      actualBytes: numberField(candidate, 'actualBytes'),
+      summary: stringField(candidate, 'summary'),
+    };
+  }
+  return undefined;
 }
 
 function prettyJson(value: unknown): string {

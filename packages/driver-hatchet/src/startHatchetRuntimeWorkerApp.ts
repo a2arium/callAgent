@@ -3,7 +3,7 @@ import type {
     IEventBus,
     RuntimeCompositionRootInternal,
 } from '@a2arium/callagent-core/unstable';
-import { bootstrapCompositionRootInternal } from '@a2arium/callagent-core/unstable';
+import { bootstrapCompositionRootInternal, SessionManager } from '@a2arium/callagent-core/unstable';
 import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engine';
 import type { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
 import { createHatchetOutboxStack, startOutboxWorker } from './createHatchetOutboxStack.js';
@@ -55,6 +55,7 @@ export async function startHatchetRuntimeWorkerApp(
 
     const sessionStore = new WorkingMemorySessionStore();
     await sessionStore.connect();
+    const budgetEvents = new SessionManager(sessionStore);
 
     const natsUrl = options?.natsUrl ?? process.env.NATS_URL ?? 'nats://localhost:4222';
     const { eventBus, close: closeNats } = await createNatsJetStreamEventBusStandalone({
@@ -73,6 +74,7 @@ export async function startHatchetRuntimeWorkerApp(
                     eventBus,
                     prisma: sessionStore.getPrismaClient(),
                     turnExecutor: stack.turnExecutor,
+                    budgetEvents,
                 }).runtimeDriver,
         },
     });

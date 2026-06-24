@@ -1,3 +1,4 @@
+import { SessionManager } from '@a2arium/callagent-core/unstable';
 import type { IEventBus } from '@a2arium/callagent-core/unstable';
 import type { InProcessRuntimeStack, RuntimeDriver } from '@a2arium/callagent-core/unstable';
 import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engine';
@@ -20,6 +21,7 @@ export function resolveHatchetOutboxBootstrap(params: {
     }
     const prisma = params.sessionStore.getPrismaClient() as PrismaClient;
     const { eventBus } = params;
+    const budgetEvents = new SessionManager(params.sessionStore);
     return {
         runtimeDriverFactory: (stack) =>
             createHatchetOutboxStack({
@@ -27,6 +29,7 @@ export function resolveHatchetOutboxBootstrap(params: {
                 eventBus,
                 prisma,
                 turnExecutor: stack.turnExecutor,
+                budgetEvents,
             }).runtimeDriver,
     };
 }

@@ -3,6 +3,11 @@ import {
     withLoggingContext,
     type LoggingSinkEntry,
 } from '@a2arium/callagent-utils';
+import {
+    compactPayload,
+    enforcePayloadBudget,
+    readDriverMetadataMaxBytes,
+} from '@a2arium/callagent-core/unstable';
 
 type HatchetLogger = {
     info?: (message: string, extra?: Record<string, unknown>) => Promise<void> | Promise<void[]> | void;
@@ -124,7 +129,7 @@ function sanitizeMetadata(value: Record<string, unknown> | undefined): Record<st
     if (!value) {
         return undefined;
     }
-    return JSON.parse(JSON.stringify(value, (_key, nested) => {
+    const sanitized = JSON.parse(JSON.stringify(value, (_key, nested) => {
         if (typeof nested === 'function') {
             return undefined;
         }
@@ -133,6 +138,12 @@ function sanitizeMetadata(value: Record<string, unknown> | undefined): Record<st
         }
         return nested;
     })) as Record<string, unknown>;
+    const budget = enforcePayloadBudget(sanitized, {
+        code: 'LIMIT_DRIVER_METADATA_TOO_LARGE',
+        limitBytes: readDriverMetadataMaxBytes(),
+        summary: 'Hatchet log metadata exceeded the configured budget.',
+    });
+    return (budget.ok ? sanitized : compactPayload(budget.value)) as Record<string, unknown>;
 }
 
 function serializeError(error: unknown): Record<string, unknown> {

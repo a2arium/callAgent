@@ -399,13 +399,9 @@ export class TurnRunner {
             // explicit flush at end of turn (if not already flushed)
             if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
                 try { await flushMentalState(); } catch (e) {
-                    // simplified error handling for now - duplicate of TaskEngine logic?
-                    // Ideally flushMentalState handles logic internally or throws specific errors.
-                    // TaskEngine had retry logic here.
-                    // TurnRunner's flushMentalState handles saveSnapshot.
-                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: 'unknown' });
-                    } else { throw e; }
+                    if ((e as Error).message !== 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        throw e;
+                    }
                 }
             }
 

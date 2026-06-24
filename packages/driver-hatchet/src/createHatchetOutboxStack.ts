@@ -7,7 +7,7 @@ import type { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
 import { createHatchetClient, type HatchetClient } from './hatchetClient.js';
 import { DriverRunsRepository } from './driverRunsRepository.js';
 import { HatchetRuntimeDriver } from './hatchetRuntimeDriver.js';
-import type { HatchetEventPusher } from './hatchetRuntimeDriver.js';
+import type { HatchetEventPusher, PayloadBudgetEventRecorder } from './hatchetRuntimeDriver.js';
 import { createOutboxDispatchTask } from './tasks/outboxDispatch.js';
 import { createSegmentTask } from './tasks/segment.js';
 import { agentTaskName, createTaskTask } from './tasks/task.js';
@@ -32,6 +32,7 @@ export type CreateHatchetOutboxStackParams = {
     prisma: PrismaClient;
     hatchet?: HatchetClient;
     turnExecutor?: TurnExecutor;
+    budgetEvents?: PayloadBudgetEventRecorder;
 };
 
 export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams): HatchetOutboxStack {
@@ -78,7 +79,8 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
         resolveEventPusher(hatchet),
         resolveRunsCanceller(hatchet),
         runtimeTimers,
-        timerFireTask
+        timerFireTask,
+        params.budgetEvents
     );
     const timerReconciler = isTimerSurfaceEnabled()
         ? new TimerReconciler(runtimeTimers, timerFireTask)

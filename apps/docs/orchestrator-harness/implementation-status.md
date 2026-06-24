@@ -408,25 +408,51 @@ Phase 5A is implemented behind rollout flags:
 - `CALLAGENT_OPERATOR_PROJECTION_READ=bridge|compare|semantic` keeps bridge as
   the default rollback path.
 
+Phase 5B payload-budget surfacing is implemented for the primary runtime and
+operator paths:
+
+- shared payload budget helpers define envelopes, byte-budget readers,
+  deterministic compaction, and semantic budget error payloads;
+- `SessionManager.appendEvent` compacts oversized `wm_events` payloads while
+  preserving operational fields (`taskId`, `turnSeq`, transition kind/result,
+  child tokens) and emits `payload.budget_exceeded` facts;
+- `SessionManager.saveSnapshot` records `wm.snapshot_limit` before throwing, so
+  snapshot-limit failures are projected even when callers only retry/fail the
+  segment;
+- snapshot-limit, event payload, artifact-resolution, Hatchet payload, and
+  operator-response budget failures are projected as visible `run_effects`;
+- operator graph event payloads use explicit `PayloadEnvelope` states instead of
+  inlining oversized raw JSON;
+- Hatchet task/resume payloads and driver/log metadata are bounded or compacted,
+  and oversized Hatchet task payloads record a semantic budget fact before the
+  driver throws;
+- graph detail responses enforce a final operator-response budget by omitting raw
+  debug payloads and adding an `operator.response_budget` effect when needed;
+- `JsonPreview` renders `available`, `too_large`, `artifact_only`, `hidden`, and
+  `not_captured` envelope states.
+
 Validation:
 
-- `yarn jest packages/core/tests/operator.agentRunsList.test.ts packages/core/tests/operator.runGraph.test.ts --runInBand`
-  — pass, including semantic read, runtime event projection, partial fallback,
-  and graph cap coverage.
+- `yarn jest packages/core/tests/operator.agentRunsList.test.ts packages/core/tests/operator.runGraph.test.ts packages/core/tests/taskEngine.coverage.test.ts --runInBand`
+  — pass, including semantic read, runtime event projection, payload budget
+  surfacing, snapshot-budget recording, operator-response budget capping,
+  partial fallback, and graph cap coverage.
+- `yarn jest packages/driver-hatchet/tests/hatchetRuntimeDriver.test.ts --runInBand`
+  — pass, including semantic budget recording before oversized Hatchet task
+  payload failures.
 - `yarn workspace @a2arium/callagent-memory-sql build` — pass.
 - `yarn workspace @a2arium/callagent-core build` — pass.
+- `yarn workspace @a2arium/callagent-driver-hatchet build` — pass.
 - `yarn workspace @a2arium/operator-viewer build` — pass.
 
 ## Next action
 
-Continue with Phase 5B-D production readiness gates:
+Continue with Phase 5C-D production readiness gates:
 
-1. Add payload-budget error surfacing and artifact-resolution discipline so
-   oversized snapshots/LLM inputs fail semantically and visibly.
-2. Add query/index review with `EXPLAIN ANALYZE` evidence on realistic data.
-3. Add operational observability: Prometheus/OTel metrics, timer lag, stuck run
+1. Add query/index review with `EXPLAIN ANALYZE` evidence on realistic data.
+2. Add operational observability: Prometheus/OTel metrics, timer lag, stuck run
    detection, DLQ/log-sink health, and alert runbooks.
-4. Run recorded failure drills and volume tests, including 100k historical runs,
+3. Run recorded failure drills and volume tests, including 100k historical runs,
    10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
    cancellation, missing child wake, and timeout scenarios.
 

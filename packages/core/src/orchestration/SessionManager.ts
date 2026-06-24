@@ -27,6 +27,13 @@ import {
     readProjectionWriteMode,
     type OperatorProjectionEvent,
 } from '../operator/semanticProjection.js';
+import {
+    budgetErrorPayload,
+    compactOperationalEventPayload,
+    enforcePayloadBudget,
+    readEventPayloadMaxBytes,
+    type PayloadBudgetCode,
+} from '../operator/payloadBudget.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'SessionManager' });
@@ -71,17 +78,77 @@ export class SessionManager {
 
     async appendEvent(tenantId: string, sessionId: string, type: string, payload: Record<string, unknown>) {
         if (!this.store) return { eventId: '', seq: 0 };
-        const result = await this.store.appendEvent({ tenantId, sessionId, type, payload });
+        const budget = enforcePayloadBudget(payload, {
+            code: 'LIMIT_EVENT_PAYLOAD_TOO_LARGE',
+            limitBytes: readEventPayloadMaxBytes(),
+            summary: `Working-memory event "${type}" exceeded the configured payload budget.`,
+        });
+        const payloadToWrite = budget.ok ? budget.value : compactOperationalEventPayload(type, payload);
+        const result = await this.store.appendEvent({ tenantId, sessionId, type, payload: payloadToWrite });
         await this.projectOperatorEvent({
             tenantId,
             sessionId,
             type,
-            payload,
+            payload: payloadToWrite,
             eventId: result.eventId,
             seq: result.seq,
             createdAt: new Date(),
         });
+        if (!budget.ok) {
+            await this.appendBudgetExceededEvent({
+                tenantId,
+                sessionId,
+                taskId: typeof payload.taskId === 'string' ? payload.taskId : sessionId,
+                code: budget.code,
+                message: budget.summary,
+                limitBytes: budget.limitBytes,
+                actualBytes: budget.actualBytes,
+                fieldPath: budget.fieldPath,
+                eventType: type,
+            });
+        }
         return result;
+    }
+
+    async appendBudgetExceededEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        taskId?: string;
+        code: PayloadBudgetCode;
+        message?: string;
+        limitBytes: number;
+        actualBytes?: number;
+        fieldPath?: string;
+        eventType?: string;
+    }): Promise<{ eventId: string; seq: number } | undefined> {
+        if (!this.store) return undefined;
+        const budgetPayload = {
+            taskId: params.taskId ?? params.sessionId,
+            ...budgetErrorPayload({
+                code: params.code,
+                message: params.message,
+                limitBytes: params.limitBytes,
+                actualBytes: params.actualBytes,
+                fieldPath: params.fieldPath,
+                eventType: params.eventType,
+            }),
+        };
+        const budgetEvent = await this.store.appendEvent({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            type: 'payload.budget_exceeded',
+            payload: budgetPayload,
+        });
+        await this.projectOperatorEvent({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            type: 'payload.budget_exceeded',
+            payload: budgetPayload,
+            eventId: budgetEvent.eventId,
+            seq: budgetEvent.seq,
+            createdAt: new Date(),
+        });
+        return budgetEvent;
     }
 
     private async projectOperatorEvent(event: OperatorProjectionEvent): Promise<void> {
@@ -138,6 +205,12 @@ export class SessionManager {
             const envCap = Number(process.env.WM_SNAPSHOT_MAX_BYTES);
             const maxBytes = Number.isFinite(envCap) && envCap > 0 ? envCap : 2 * 1024 * 1024; // 2MB default cap
             if (serialized.length > maxBytes) {
+                await this.appendSnapshotLimitEvent({
+                    tenantId: params.tenantId,
+                    sessionId: params.sessionId,
+                    limitBytes: maxBytes,
+                    actualBytes: serialized.length,
+                });
                 throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
             }
         } catch (e) {
@@ -148,6 +221,45 @@ export class SessionManager {
 
         const result = await this.store.writeSnapshotCAS(paramsToWrite);
         return result;
+    }
+
+    private async appendSnapshotLimitEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        limitBytes: number;
+        actualBytes: number;
+    }): Promise<void> {
+        if (!this.store) return;
+        try {
+            const payload = {
+                taskId: params.sessionId,
+                code: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+                message: 'Working-memory snapshot exceeded the configured size limit.',
+                limitBytes: params.limitBytes,
+                actualBytes: params.actualBytes,
+            };
+            const event = await this.store.appendEvent({
+                tenantId: params.tenantId,
+                sessionId: params.sessionId,
+                type: 'wm.snapshot_limit',
+                payload,
+            });
+            await this.projectOperatorEvent({
+                tenantId: params.tenantId,
+                sessionId: params.sessionId,
+                type: 'wm.snapshot_limit',
+                payload,
+                eventId: event.eventId,
+                seq: event.seq,
+                createdAt: new Date(),
+            });
+        } catch (error) {
+            log.warn('Failed to record working-memory snapshot budget event', {
+                tenantId: params.tenantId,
+                sessionId: params.sessionId,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
     }
 
     async enqueueOutbox(
