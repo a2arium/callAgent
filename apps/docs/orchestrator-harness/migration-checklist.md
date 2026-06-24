@@ -71,6 +71,9 @@ harness checklist style.
 - [x] Queued Hatchet runs cancelled best-effort; running segment finishes its
       current effect boundary (no mid-segment kill).
 - [x] `cancel` idempotent (`taskId:cancel`); cancel-after-complete is a no-op.
+- [x] Child cancellation notifies A2A parents and schedules the parent resume in
+      Hatchet mode, so operator graphs converge instead of leaving parent runs
+      waiting indefinitely.
 
 ## Parity & cutover
 
@@ -152,11 +155,17 @@ See `specs/deletion-inventory.md` for exact line references.
 ## POC gates (from requirements §13)
 
 - [ ] B1 crash mid-segment safe (one effective transition via durable dedupe).
-- [ ] B2 timer survives restart (durable sleep + reconciler).
+- [x] B2 timer survives restart (durable sleep + reconciler). Implemented via
+      persisted `runtime_timers`, idempotent `aplret.timer.fire`, and
+      `TimerReconciler`; validated in the 2026-06-24 Phase 4 focused suite.
+      The 2026-06-24 manual real-flow restart drill also confirmed no stale
+      waiting/running operator state after runtime restart.
 - [ ] B3 duplicate resume no-op.
 - [ ] B4 per-task serialization.
 - [ ] B5 operator search by IDs and/or semantic run graph.
-- [ ] B6 failed-run replay/cancel/inspection.
+- [x] B6 failed-run replay/cancel/inspection. Replay/inspection passed in the
+      Hatchet POC; root and child cancel behavior was manually rechecked on
+      2026-06-24 through the operator.
 - [ ] B7 self-hosted dashboard works as debug infra, while semantic run graph
       answers product/operator questions (incl. security sub-gates).
 - [ ] B8 hot-resume latency protected.

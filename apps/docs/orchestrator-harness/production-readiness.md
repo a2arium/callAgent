@@ -1,6 +1,6 @@
 # Production Readiness Plan
 
-Last updated: 2026-06-23.
+Last updated: 2026-06-24.
 
 This is the promotion gate for running the Hatchet orchestration harness as a
 production substrate, not a dashboard polish list. The runtime can plausibly run
@@ -24,12 +24,14 @@ snapshots, idempotency, and semantic operator graph. The remaining production
 risk is mostly in read-side scale, payload discipline, operational controls, and
 failure drills.
 
-As of the 2026-06-23 harness sweep, the Phase 3 child wake/fan-in,
-external-wake, cancellation, and operator-hardening slice is closed enough to
-start Phase 4 timer work. That does not change the production gate: the system
-still needs the read model, query validation, payload budgets, observability,
-retention, and failure drills below before Hatchet mode or the operator viewer
-can be treated as production defaults.
+As of the 2026-06-24 harness sweep, Phase 4 durable timers/restart hardening is
+implemented and validated for harness purposes. Timer facts are persisted,
+Hatchet timer fires are idempotent, `TimerReconciler` repairs overdue timers on
+startup/interval, and manual cancel/restart drills no longer leave stale
+waiting/running operator state. That does not change the production gate: the
+system still needs the read model, query validation, payload budgets,
+observability, retention, and failure drills below before Hatchet mode or the
+operator viewer can be treated as production defaults.
 
 Known gaps from the current implementation:
 
@@ -50,6 +52,9 @@ Known gaps from the current implementation:
   remain references until the exact consumer that needs content resolves them.
 - Hatchet/log connectivity failures can create noisy retry loops. Logging must
   degrade without hiding the original segment error or flooding the worker.
+- The Phase 4 restart/cancel checks are focused correctness drills, not load
+  tests. 10-20 active parallel agent tasks and 100k historical runs still need
+  recorded capacity runs before they become supported operating targets.
 
 ## Readiness Workstreams
 

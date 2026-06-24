@@ -208,6 +208,12 @@ Goal: native, restart-safe timers.
 
 Normative implementation spec: `specs/timer-wakes.md`.
 
+Status as of 2026-06-24: implemented and validated for harness purposes.
+Persisted `runtime_timers`, idempotent `aplret.timer.fire`, `TimerReconciler`,
+operator timer projection, root/child cancellation convergence, and manual
+runtime restart checks are in place. Production promotion still depends on Phase
+5 readiness gates.
+
 1. Persist timer facts for token expiry and explicit sleep boundaries. callAgent
    state remains the source of truth; Hatchet durable sleep is the efficient wait
    primitive, not the only record of timer existence.

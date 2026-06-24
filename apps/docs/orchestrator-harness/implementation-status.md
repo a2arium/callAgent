@@ -1,13 +1,14 @@
 # Implementation Status
 
-Last updated: 2026-06-23.
+Last updated: 2026-06-24.
 
 ## Stage
 
 **Phase 2 durable loop + Operator Experience MVP implemented; Phase 3
 external-wake, child fan-in, cancellation, and operator-hardening slice closed
-for harness purposes; Phase 4 timer work is next; production-readiness track
-added for promotion gates.**
+for harness purposes; Phase 4 durable timers/restart hardening implemented and
+validated for harness purposes; production-readiness track remains the promotion
+gate.**
 Hatchet-backed
 `aplret.outbox.dispatch`, `aplret.segment`, and `aplret.task` / `agent.<agentId>`
 parent workflows exist behind driver-surface flags. The runtime now exposes a
@@ -39,10 +40,14 @@ parent columns, workspace agent discovery no longer depends on stale
 segments supersede worker-abort root rows, and live run graphs show started
 event-only turns before their final `turn.completed` trace is captured.
 
-Phase 3 is therefore closed enough to start Phase 4. Remaining work around
-normalized read-model persistence, query/index validation, retention,
-production-grade observability, payload budgets, and volume/failure drills is
-tracked as Phase 5 production readiness, not as a blocker for timer work.
+Phase 4 is now closed enough for harness purposes: timer facts are durable,
+Hatchet timer fires are idempotent, the startup/periodic reconciler repairs
+overdue timers, cancellation propagates coherently through child/parent graphs,
+and manual restart/cancel drills no longer leave stale waiting/running operator
+state. Remaining work around normalized read-model persistence, query/index
+validation, retention, production-grade observability, payload budgets, and
+volume/failure drills is tracked as Phase 5 production readiness, not as a Phase
+4 blocker.
 Conversation activation still has runtime-seam coverage only and remains a
 follow-up until the kernel has a first-class conversation boundary.
 
@@ -257,6 +262,23 @@ first POC candidate.
   - `apps/examples/runtime-host` serves the built viewer at `/operator` when
     `apps/operator-viewer/dist/index.html` (or `OPERATOR_VIEWER_DIST`) exists.
 
+- Phase 4 durable timers and restart hardening:
+  - `runtime_timers` persisted timer facts back token-expiry and sleep waits.
+  - Hatchet mode schedules timer wakes through `aplret.timer.fire` with stable
+    idempotency keys, fire leases, and duplicate/late no-op handling.
+  - `TimerReconciler` scans overdue scheduled timers on worker startup and
+    periodically, so downtime through `dueAt` is repaired by enqueueing the
+    same idempotent timer fire.
+  - Cancel requests cancel pending task timers best-effort and late timer fires
+    observe canceled/no-longer-pending state as success no-ops.
+  - Operator graph projection exposes timer schedule/fire effects and keeps
+    resumed runs active when newer running segments supersede stale provider
+    abort/root rows.
+  - Operator cancel controls call the runtime cancel API for root and selected
+    agent runs; canceled child agents notify their A2A parent via
+    `handleChildFailed`, and Hatchet parents schedule an async resume so the
+    graph converges instead of leaving parents waiting forever.
+
 - Production-readiness findings (added 2026-06-21):
   - 10-20 active parallel agent tasks is a realistic target once Hatchet worker
     concurrency, external tool/browser pools, LLM provider limits, and DB pool
@@ -324,6 +346,25 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
     graph polling/edge changes. Vite still reports the known large
     bundle/chunk-size warning.
   - `yarn workspace @a2arium/callagent-core build` — core build passes.
+- 2026-06-24 Phase 4 hardening verification:
+  - `yarn jest packages/core/tests/taskEngine.coverage.test.ts packages/core/tests/operator.runGraph.test.ts --runInBand --no-cache`
+    — cancellation propagation and graph projection coverage passed.
+  - `yarn jest packages/core/tests/taskEngine.coverage.test.ts packages/core/tests/operator.runGraph.test.ts packages/core/tests/api.router.default.test.ts packages/driver-hatchet/tests/task.test.ts packages/driver-hatchet/tests/hatchetRuntimeDriver.test.ts --runInBand`
+    — focused runtime/API/Hatchet suite passed: 94 tests. Expected console
+    warnings/errors remain from tests that intentionally drive failed stores,
+    trigger failures, cancellation, and timeout paths.
+  - `yarn workspace @a2arium/callagent-core build` — core build passes.
+  - `yarn workspace @a2arium/operator-viewer build` — viewer build passes. Vite
+    still reports the known large bundle/chunk-size warning.
+  - Manual root cancel check: canceling a live root run projects `canceled`
+    instead of leaving stale running/waiting rows.
+  - Manual child cancel check: canceling an in-flight child now causes the
+    parent chain to converge to failed/canceled semantics instead of leaving
+    parents waiting forever; child graph status is not overwritten by later
+    completed segment rows.
+  - Manual full real-flow restart check: start `discover-listing-selectors`, let
+    it continue, kill `yarn runtime` mid-run, restart runtime, and verify the run
+    resumes or fails coherently with no stale waiting/running operator state.
 - `packages/core/tests/runtime/*` — runtime seam coverage for mapper, driver,
   wake applicator, segment executor, bootstrap, Scenario 0 parity, and driver
   routing.
@@ -348,25 +389,19 @@ after the replacing Hatchet surface is proven and a reversible flag is in place.
 
 ## Next action
 
-Start Phase 4: timers via durable sleep + reconciler. Use
-`specs/timer-wakes.md` as the implementation contract. The implementation
-should make timer/token expiry restart-safe before deleting in-process
-`setTimeout` semantic waits:
+Move to Phase 5 production readiness. The next work should not add more
+prototype UI first; it should harden the production substrate:
 
-1. Define the timer wake contract and boundary shape (`sleep` / `sleep_until` /
-   token expiry) in the runtime seam.
-2. Add the Hatchet durable sleep path and idempotent `aplret.timer.fire` wake.
-3. Add `TimerReconciler` startup/periodic scans for expired pending tokens so
-   downtime is recovered.
-4. Add tests for restart survival, late/duplicate timer fire, and downtime
-   recovery.
-5. Run the manual B2 POC: start a timer, stop runtime/worker during the wait,
-   restart, and verify the timer fires once and resumes the correct task.
-
-In parallel, keep Phase 5 production-readiness work visible: normalized semantic
-run summaries, edge facts, child counts, query/index review, graph caps,
-payload-budget error surfacing, retention, observability, and 100k-run volume
-testing.
+1. Persist normalized semantic run summaries, edge facts, child counts, turn
+   summaries, and terminal error/cancel facts outside `driver_runs`.
+2. Add query/index review and graph caps/progressive loading for large trees.
+3. Add payload-budget error surfacing and artifact-resolution discipline so
+   oversized snapshots/LLM inputs fail semantically and visibly.
+4. Add operational observability: Prometheus/OTel metrics, timer lag, stuck run
+   detection, DLQ/log-sink health, and alert runbooks.
+5. Run recorded failure drills and volume tests, including 100k historical runs,
+   10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
+   cancellation, missing child wake, and timeout scenarios.
 
 ## Open questions (carried from requirements §11)
 
