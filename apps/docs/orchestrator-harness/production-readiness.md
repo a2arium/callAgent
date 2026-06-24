@@ -12,6 +12,7 @@ load tests.
 Normative implementation spec: `specs/production-readiness-gates.md`. This file
 is the workstream plan and current assessment; the spec defines the required
 records, API behavior, query gates, tests, drills, and deletion criteria.
+Recorded command/query evidence lives in `production-readiness-evidence.md`.
 
 Production readiness is required before:
 
@@ -32,10 +33,14 @@ As of the 2026-06-24 harness sweep, Phase 4 durable timers/restart hardening is
 implemented and validated for harness purposes. Timer facts are persisted,
 Hatchet timer fires are idempotent, `TimerReconciler` repairs overdue timers on
 startup/interval, and manual cancel/restart drills no longer leave stale
-waiting/running operator state. That does not change the production gate: the
-system still needs the read model, query validation, payload budgets,
-observability, retention, and failure drills below before Hatchet mode or the
-operator viewer can be treated as production defaults.
+waiting/running operator state.
+
+Phase 5D security/retention scaffolding is implemented and has focused
+automated coverage. A temporary-table 100k query/index probe shows the semantic
+index shapes are directionally correct for fleet and small-root graph reads.
+The local database used for the probe has not yet applied the semantic/audit
+migration, so real retention dry-run and persisted 100k semantic-table evidence
+remain blocked until migration.
 
 Known gaps from the current implementation:
 

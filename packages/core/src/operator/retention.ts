@@ -110,7 +110,7 @@ export class OperatorRetentionService {
                     where,
                     take: Math.min(this.policy.batchSize, 10),
                     orderBy: { [target.dateField]: 'asc' },
-                    select: { id: true, eventId: true },
+                    select: { [target.idField]: true },
                 }),
             ]);
             tables.push({
@@ -118,7 +118,7 @@ export class OperatorRetentionService {
                 retentionClass: target.retentionClass,
                 cutoff,
                 count,
-                sampleIds: samples.map((row) => String(row.id ?? row.eventId ?? 'unknown')),
+                sampleIds: samples.map((row) => String(row[target.idField] ?? 'unknown')),
                 preserved: target.preserved,
                 applyEnabled: targetApplyEnabled(target),
                 ...(targetApplyEnabled(target) ? {} : { applyBlocker: `${target.applyGuardEnv}=true is required` }),

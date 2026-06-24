@@ -40,6 +40,9 @@ describe('OperatorRetentionService', () => {
             expect.objectContaining({ table: 'agent_runs', count: 0, retentionClass: 'semantic', preserved: true }),
             expect.objectContaining({ table: 'turn_runs', count: 0, retentionClass: 'semantic', preserved: true }),
         ]));
+        expect(driverRun.findMany).toHaveBeenCalledWith(expect.objectContaining({
+            select: { id: true },
+        }));
         expect(driverRun.deleteMany).not.toHaveBeenCalled();
     });
 
@@ -132,6 +135,9 @@ describe('OperatorRetentionService', () => {
                 applyBlocker: 'CALLAGENT_RETENTION_PRUNE_WM_EVENTS=true is required',
             }),
         ]));
+        expect(wMEvent.findMany).toHaveBeenCalledWith(expect.objectContaining({
+            select: { eventId: true },
+        }));
         expect(wMEvent.deleteMany).not.toHaveBeenCalled();
 
         process.env.CALLAGENT_RETENTION_PRUNE_WM_EVENTS = 'true';

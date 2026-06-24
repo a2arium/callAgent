@@ -40,6 +40,9 @@ function parseArgs(argv: string[]): CliArgs {
     let reason: string | undefined;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
+        if (arg === '--') {
+            continue;
+        }
         if (arg === '--tenant' || arg === '--tenant-id') {
             tenantId = requiredValue(argv, index);
             index += 1;

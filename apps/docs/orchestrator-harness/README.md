@@ -62,6 +62,8 @@ This workspace covers:
   `TurnTrace`, and Hatchet debug run ids).
 - Production readiness for scale, payload budgets, retention, observability,
   failure drills, and operator UI safety.
+- Production-readiness evidence records in
+  `production-readiness-evidence.md`.
 - The line-referenced deletion inventory and reversibility rules.
 - POC scenarios and pass/fail gates.
 
