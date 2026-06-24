@@ -1684,6 +1684,12 @@ export class TaskEngine {
                 expectedWmVersion: loaded.wmVersion ?? BigInt(0),
                 snapshot: markSegmentCancellationRequested(snapshot, reason),
             });
+            await this.notifyA2AParentOfCancellation({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                snapshot,
+                reason,
+            });
         }
 
         await this.runtimeDriver.cancel({
@@ -1695,6 +1701,34 @@ export class TaskEngine {
         });
 
         return { acknowledged: true };
+    }
+
+    private async notifyA2AParentOfCancellation(params: {
+        tenantId: string;
+        taskId: string;
+        snapshot: Record<string, unknown>;
+        reason: string;
+    }): Promise<void> {
+        const meta = isRecordValue(params.snapshot.meta) ? params.snapshot.meta : undefined;
+        const parent = isRecordValue(meta?.a2aParent) ? meta.a2aParent : undefined;
+        const parentTenantId =
+            typeof parent?.parentTenantId === 'string' ? parent.parentTenantId : undefined;
+        const parentTaskId =
+            typeof parent?.parentTaskId === 'string' ? parent.parentTaskId : undefined;
+        const parentChildToken =
+            typeof parent?.parentChildToken === 'string' ? parent.parentChildToken : undefined;
+
+        if (!parentTenantId || !parentTaskId || !parentChildToken) {
+            return;
+        }
+
+        await this.handleChildFailed({
+            tenantId: parentTenantId,
+            parentTaskId,
+            childToken: parentChildToken,
+            childTaskId: params.taskId,
+            error: new Error(`Child task canceled: ${params.reason}`),
+        });
     }
 
     private async hasTerminalTaskEvent(tenantId: string, taskId: string): Promise<boolean> {
@@ -3916,6 +3950,24 @@ export class TaskEngine {
                     },
                 }));
             }
+        }
+        if (this.shouldScheduleAsyncThroughRuntimeDriver('resume')) {
+            await this.runtimeDriver.enqueueResume({
+                tenantId,
+                taskId: parentTaskId,
+                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId ?? (snap as { agentId?: string }).agentId,
+                token,
+                idempotencyKey: `${parentTaskId}:child:${token}`,
+                event: {
+                    kind: 'child',
+                    token,
+                    childTaskId: childTaskId ?? token,
+                    output: {
+                        ok: false,
+                        error: childFailedPayload.error,
+                    },
+                },
+            });
         }
         if (handlerName && this.handlerInvoker) {
             await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: error });

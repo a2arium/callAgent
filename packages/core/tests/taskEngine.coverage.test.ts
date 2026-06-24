@@ -368,6 +368,92 @@ describe('TaskEngine orchestration coverage', () => {
         });
     });
 
+    test('cancelTask notifies an A2A parent and schedules async resume for child cancellation', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const enqueueResume = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume,
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed(
+            't',
+            'parent-task',
+            setPendingTasks(
+                { meta: { agentId: 'parent-agent' } },
+                {
+                    'child-token': {
+                        childTaskId: 'child-task',
+                        target: 'child-agent',
+                    },
+                } as any
+            ),
+            BigInt(0),
+            'parent-agent'
+        );
+        store.seed('t', 'child-task', {
+            meta: {
+                agentId: 'child-agent',
+                a2aParent: {
+                    parentTenantId: 't',
+                    parentTaskId: 'parent-task',
+                    parentChildToken: 'child-token',
+                },
+            },
+        }, BigInt(0), 'child-agent');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'child-task',
+            agentId: 'child-agent',
+            reason: 'operator child stop',
+        });
+
+        const parentEvents = store.getEvents('t', 'parent-task');
+        expect(parentEvents).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                type: 'task.child_failed',
+                payload: expect.objectContaining({
+                    token: 'child-token',
+                    childTaskId: 'child-task',
+                    error: 'Child task canceled: operator child stop',
+                }),
+            }),
+        ]));
+        expect(enqueueResume).toHaveBeenCalledWith({
+            tenantId: 't',
+            taskId: 'parent-task',
+            agentId: 'parent-agent',
+            token: 'child-token',
+            idempotencyKey: 'parent-task:child:child-token',
+            event: {
+                kind: 'child',
+                token: 'child-token',
+                childTaskId: 'child-task',
+                output: {
+                    ok: false,
+                    error: 'Child task canceled: operator child stop',
+                },
+            },
+        });
+        expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 't',
+            taskId: 'child-task',
+            agentId: 'child-agent',
+            reason: 'operator child stop',
+        }));
+    });
+
     test('cancelTask is a no-op when cancellation was already requested', async () => {
         const store = new FakeSessionStore();
         const cancel = jest.fn(async () => undefined);

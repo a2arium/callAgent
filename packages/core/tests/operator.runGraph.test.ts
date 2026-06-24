@@ -462,6 +462,62 @@ describe('buildAgentRunGraph', () => {
         expect(graph.root.cancellation?.reason).toBe('operator stop');
     });
 
+    it('keeps an operator-canceled root terminal even if an already-running segment completes later', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-canceled-late-complete',
+            agentId: 'child-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: {
+                    agentId: 'child-agent',
+                    cancellation: {
+                        requested: true,
+                        reason: 'operator child stop',
+                        requestedAt: '2026-06-24T04:30:02.000Z',
+                    },
+                },
+            },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-canceled-late-complete',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'agent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-canceled-late-complete',
+                    agentId: 'child-agent',
+                    rootTaskId: 'task-canceled-late-complete',
+                    operation: 'agent.run',
+                    status: 'canceled',
+                    boundaryKind: 'canceled',
+                    updatedAt: '2026-06-24T04:30:03.000Z',
+                },
+                {
+                    providerRunId: 'turn-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'task-canceled-late-complete',
+                    agentId: 'child-agent',
+                    rootTaskId: 'task-canceled-late-complete',
+                    operation: 'turn.segment',
+                    status: 'completed',
+                    boundaryKind: 'complete',
+                    turnSeq: 1,
+                    updatedAt: '2026-06-24T04:30:24.000Z',
+                },
+            ],
+        });
+
+        expect(graph.root.status).toBe('canceled');
+        expect(graph.root.finishedAt).toBe('2026-06-24T04:30:03.000Z');
+        expect(graph.root.cancellation?.reason).toBe('operator child stop');
+    });
+
     it('finalizes stale running turns when a later turn exists for the same task', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);

@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { ReactFlowProvider } from 'reactflow';
-import { ArrowLeft, Ban, PanelRightOpen, RefreshCw } from 'lucide-react';
+import { ArrowLeft, PanelRightOpen, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCancelRun, useOperatorConfig, useRunGraph } from '../../api/hooks';
 import { Button } from '../../design/components/ui/button';
@@ -175,13 +175,14 @@ export function RunDetailPage(): React.ReactElement {
               Refresh
             </Button>
             <Button
-              variant="destructive"
+              variant="ghost"
               size="sm"
               onClick={cancelRootRun}
               disabled={cancelDisabled}
+              className="text-danger hover:bg-danger-bg hover:text-danger"
               title={isTerminalStatus(graph?.root.status) ? 'Run is already terminal' : 'Cancel root run'}
             >
-              <Ban className="h-4 w-4" />
+              <XCircle className="h-4 w-4" />
               {cancelRun.isPending ? 'Canceling...' : 'Cancel run'}
             </Button>
           </div>

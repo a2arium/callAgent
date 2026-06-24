@@ -1,4 +1,4 @@
-import { Ban, ExternalLink, PanelRightClose } from 'lucide-react';
+import { ExternalLink, PanelRightClose, XCircle } from 'lucide-react';
 import { hatchetRunUrl, opikTraceUrl, type OperatorConfig } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
@@ -45,8 +45,22 @@ export function NodeInspector(props: {
 
   return (
     <aside className="flex min-w-0 overflow-hidden overflow-x-hidden rounded-lg border border-border bg-card xl:h-full xl:max-h-[calc(100vh-250px)] xl:flex-col">
-      <div className="border-b border-border px-4 py-3">
-        <div className="flex items-start justify-between gap-3">
+      <div className="relative border-b border-border px-4 py-3 pr-12">
+        {props.onCollapse ? (
+          <Button
+            ref={props.collapseButtonRef}
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={props.onCollapse}
+            aria-label="Collapse inspector"
+            title="Collapse inspector"
+            className="absolute right-3 top-3 h-7 w-7 text-muted-foreground hover:text-foreground"
+          >
+            <PanelRightClose className="h-4 w-4" />
+          </Button>
+        ) : null}
+        <div className="grid min-w-0 gap-3">
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Selected agent</p>
             <h3 className="mt-1 truncate text-lg font-semibold">{props.node.agentId ?? 'unknown agent'}</h3>
@@ -56,34 +70,24 @@ export function NodeInspector(props: {
               <CopyableId value={props.node.taskId} label="task ID" max={18} />
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
             <StatusBadge status={status.status} derived={status.derived} />
-            {props.onCancel ? (
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={props.onCancel}
-                disabled={!props.canCancel || props.cancelPending}
-                title={props.canCancel ? 'Cancel selected agent task' : 'Selected agent is already terminal'}
-              >
-                <Ban className="h-4 w-4" />
-                {props.cancelPending ? 'Canceling...' : 'Cancel'}
-              </Button>
-            ) : null}
-            {props.onCollapse ? (
-              <Button
-                ref={props.collapseButtonRef}
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={props.onCollapse}
-                aria-label="Collapse inspector"
-                title="Collapse inspector"
-              >
-                <PanelRightClose className="h-4 w-4" />
-              </Button>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-1.5">
+              {props.onCancel ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={props.onCancel}
+                  disabled={!props.canCancel || props.cancelPending}
+                  className="h-7 px-2 text-danger hover:bg-danger-bg hover:text-danger"
+                  title={props.canCancel ? 'Cancel selected agent task' : 'Selected agent is already terminal'}
+                >
+                  <XCircle className="h-3.5 w-3.5" />
+                  {props.cancelPending ? 'Canceling...' : 'Cancel'}
+                </Button>
+              ) : null}
+            </div>
           </div>
         </div>
       </div>

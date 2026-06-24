@@ -227,7 +227,9 @@ export async function buildAgentRunGraph(
     const rootCancellation = readCancellation(snapshot?.snapshot);
     const rootStartedAt = firstEventTime(rootEvents) ?? rootRun?.createdAt;
     const rootFinishedAt =
-        isTerminalRunStatus(rootStatus)
+        rootStatus === 'canceled'
+            ? latestTerminalEventTime(rootEvents) ?? driverRunTime(rootRun)
+            : isTerminalRunStatus(rootStatus)
             ? latestTerminalEventTime(rootEvents) ?? latestTerminalDriverRunTime(rootDriverRuns)
             : undefined;
     const root: AgentRunNode = {
@@ -303,6 +305,12 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
         return 'failed';
     }
 
+    const root = chooseRootRun(driverRuns);
+    const rootStatus = normalizeStatus(root?.status);
+    if (rootStatus === 'canceled') {
+        return 'canceled';
+    }
+
     const latestSegment = [...driverRuns]
         .reverse()
         .find((run) => run.operation === 'turn.segment' || run.operation === 'segment');
@@ -320,13 +328,8 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
         return 'completed';
     }
 
-    const root = chooseRootRun(driverRuns);
-    const rootStatus = normalizeStatus(root?.status);
     if (rootStatus === 'failed') {
         return 'failed';
-    }
-    if (rootStatus === 'canceled') {
-        return 'canceled';
     }
 
     const latestTurnBoundary = latestTurnCompleted ? turnTransitionKind(latestTurnCompleted.payload) : undefined;
@@ -912,6 +915,11 @@ function latestTerminalDriverRunTime(driverRuns: DriverRunView[]): string | unde
         })
         .sort();
     return terminalTimes.at(-1);
+}
+
+function driverRunTime(run: DriverRunView | undefined): string | undefined {
+    const timestamp = run?.updatedAt ?? run?.createdAt;
+    return timestamp !== undefined ? toIso(timestamp) : undefined;
 }
 
 function toIso(value: Date | string): string {
