@@ -374,11 +374,162 @@ Conclusion:
   client, no concurrent polling, no browser rendering measurement, no active
   worker load, and no external provider traffic.
 
+## 2026-06-24 — Concurrent Polling and Browser Render Probe
+
+Goal:
+
+- validate concurrent operator polling and basic browser rendering against the
+  persisted 100k semantic dataset.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Dataset:
+
+- tenant: `perf-100k-20260624`;
+- root runs: 100,000;
+- total `agent_runs`: 120,000;
+- `agent_run_edges`: 20,000;
+- `turn_runs`: 220,000.
+
+### Concurrent API Polling
+
+Benchmark shape:
+
+- 5 endpoints:
+  - `/agent-runs?scope=roots&limit=50`;
+  - `/agent-runs?scope=all&limit=50`;
+  - `/agent-runs?scope=roots&agentId=fetch-html&limit=50`;
+  - `/agent-runs?scope=roots&status=completed&limit=50`;
+  - `/tasks/perf-root-19999/run-graph`;
+- tenant header: `x-tenant-id: perf-100k-20260624`;
+- Node `fetch`;
+- one response body read per request.
+
+20-concurrent result:
+
+```json
+{
+  "concurrency": 20,
+  "totalRequests": 200,
+  "totalMs": 1468.86,
+  "errors": [],
+  "endpoints": {
+    "roots": { "count": 40, "p50Ms": 69.6, "p95Ms": 653.08, "maxMs": 732.63 },
+    "all": { "count": 40, "p50Ms": 67.07, "p95Ms": 618.0, "maxMs": 737.07 },
+    "agent": { "count": 40, "p50Ms": 70.05, "p95Ms": 742.83, "maxMs": 760.22 },
+    "status": { "count": 40, "p50Ms": 66.36, "p95Ms": 641.23, "maxMs": 780.46 },
+    "graph": { "count": 40, "p50Ms": 67.41, "p95Ms": 553.84, "maxMs": 780.89 }
+  }
+}
+```
+
+10-concurrent result:
+
+```json
+{
+  "concurrency": 10,
+  "totalRequests": 100,
+  "totalMs": 512.72,
+  "errors": [],
+  "endpoints": {
+    "roots": { "count": 20, "p50Ms": 33.38, "p95Ms": 150.18, "maxMs": 153.4 },
+    "all": { "count": 20, "p50Ms": 34.88, "p95Ms": 133.97, "maxMs": 134.47 },
+    "agent": { "count": 20, "p50Ms": 28.92, "p95Ms": 140.18, "maxMs": 166.94 },
+    "status": { "count": 20, "p50Ms": 32.64, "p95Ms": 152.24, "maxMs": 165.84 },
+    "graph": { "count": 20, "p50Ms": 28.71, "p95Ms": 150.85, "maxMs": 166.14 }
+  }
+}
+```
+
+Metrics snapshot after polling:
+
+```json
+{
+  "seriesCount": { "total": 5, "counters": 2, "gauges": 0, "durations": 3 },
+  "alerts": [
+    { "name": "api_p95:agent-runs", "state": "ok", "value": 409, "threshold": 2000 },
+    { "name": "api_p95:agent-runs", "state": "ok", "value": 23, "threshold": 2000 },
+    { "name": "api_p95:run-graph", "state": "ok", "value": 293, "threshold": 2000 }
+  ],
+  "requestCounts": {
+    "agent-runs": 242,
+    "run-graph": 61
+  }
+}
+```
+
+Conclusion:
+
+- no API errors under 10 or 20 concurrent local pollers;
+- 10 concurrent pollers are acceptable locally for this data shape;
+- 20 concurrent pollers stay below the current 2s warning threshold, but p95
+  rises into the 550-750 ms range and should not be treated as a final
+  production capacity pass;
+- the next scale pass should identify whether this is Node/API serialization,
+  Prisma query concurrency, Postgres connection pool pressure, response JSON
+  serialization, or local machine contention.
+
+### Browser Render
+
+The gstack `browse` skill metadata is installed, but the `browse` binary was not
+available in this environment and the repo does not include Playwright. Browser
+render evidence used installed Google Chrome headless as a fallback.
+
+Fleet render command shape:
+
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --headless=new \
+  --window-size=1440,1000 \
+  --virtual-time-budget=8000 \
+  --screenshot=/tmp/callagent-operator-100k-fleet.png \
+  'http://127.0.0.1:8790/operator/?tenantId=perf-100k-20260624&scope=roots'
+```
+
+Run-detail render command shape:
+
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --headless=new \
+  --window-size=1440,1000 \
+  --virtual-time-budget=8000 \
+  --screenshot=/tmp/callagent-operator-100k-detail.png \
+  'http://127.0.0.1:8790/operator/runs/perf-root-19999?tenantId=perf-100k-20260624&scope=roots'
+```
+
+Rendered artifacts:
+
+- `/tmp/callagent-operator-100k-fleet.png`;
+- `/tmp/callagent-operator-100k-detail.png`.
+
+Observed:
+
+- fleet page rendered with `Projection: semantic`;
+- tenant input showed `perf-100k-20260624`;
+- fleet table rendered 100 visible rows from the persisted semantic dataset;
+- run detail rendered the semantic graph, root node, turn nodes, child node,
+  edge, and inspector;
+- no visible blank-state or catastrophic layout failure at 1440x1000.
+
+Limitations:
+
+- this was screenshot-based verification, not a Playwright trace;
+- no automated DOM assertions or Core Web Vitals were captured;
+- no mobile/tablet render check was run;
+- Chrome emitted noisy updater logs unrelated to app behavior.
+
 ## Remaining Evidence Needed
 
-- Run concurrent operator polling against the persisted 100k dataset.
-- Measure browser/operator UI render behavior against the persisted 100k
-  dataset.
+- Profile 20-concurrent operator polling to find the p95 source before claiming
+  production capacity.
+- Add a first-class browser automation dependency or restore the gstack `browse`
+  binary so render checks can include DOM assertions and responsive screenshots.
+- Measure browser/operator UI render behavior with trace-level timing, not only
+  screenshot evidence.
 - Run 10-20 active parallel real agent tasks with child agents.
 - During that active run, exercise:
   - runtime kill/restart;
