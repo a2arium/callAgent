@@ -31,9 +31,11 @@ import {
     budgetErrorPayload,
     compactOperationalEventPayload,
     enforcePayloadBudget,
+    measureJsonBytes,
     readEventPayloadMaxBytes,
     type PayloadBudgetCode,
 } from '../operator/payloadBudget.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { logger } from '@a2arium/callagent-utils';
 
 const log = logger.createLogger({ prefix: 'SessionManager' });
@@ -83,6 +85,16 @@ export class SessionManager {
             limitBytes: readEventPayloadMaxBytes(),
             summary: `Working-memory event "${type}" exceeded the configured payload budget.`,
         });
+        defaultMetricsRegistry.setGauge('payload.event_size_bytes', budget.ok ? budget.sizeBytes : budget.actualBytes, {
+            type,
+        });
+        if (!budget.ok) {
+            defaultMetricsRegistry.increment('payload.budget_failure_total', {
+                surface: 'wm_event',
+                code: budget.code,
+                type,
+            });
+        }
         const payloadToWrite = budget.ok ? budget.value : compactOperationalEventPayload(type, payload);
         const result = await this.store.appendEvent({ tenantId, sessionId, type, payload: payloadToWrite });
         await this.projectOperatorEvent({
@@ -151,6 +163,49 @@ export class SessionManager {
         return budgetEvent;
     }
 
+    async appendIncidentEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        taskId?: string;
+        operation: string;
+        message: string;
+        errorCode?: string;
+        eventType?: string;
+        surface?: string;
+        providerRunId?: string;
+        providerTaskRunId?: string;
+        traceId?: string;
+    }): Promise<{ eventId: string; seq: number } | undefined> {
+        if (!this.store) return undefined;
+        const payload = {
+            taskId: params.taskId ?? params.sessionId,
+            operation: params.operation,
+            message: params.message,
+            ...(params.errorCode ? { errorCode: params.errorCode } : {}),
+            ...(params.eventType ? { eventType: params.eventType } : {}),
+            ...(params.surface ? { surface: params.surface } : {}),
+            ...(params.providerRunId ? { providerRunId: params.providerRunId } : {}),
+            ...(params.providerTaskRunId ? { providerTaskRunId: params.providerTaskRunId } : {}),
+            ...(params.traceId ? { traceId: params.traceId } : {}),
+        };
+        const event = await this.store.appendEvent({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            type: 'observability.incident',
+            payload,
+        });
+        await this.projectOperatorEvent({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            type: 'observability.incident',
+            payload,
+            eventId: event.eventId,
+            seq: event.seq,
+            createdAt: new Date(),
+        });
+        return event;
+    }
+
     private async projectOperatorEvent(event: OperatorProjectionEvent): Promise<void> {
         const mode = readProjectionWriteMode();
         if (mode === 'off') {
@@ -201,15 +256,23 @@ export class SessionManager {
 
         // Enforce WM snapshot size cap (bytes)
         try {
-            const serialized = JSON.stringify(snapshotToWrite);
+            JSON.stringify(snapshotToWrite);
+            const sizeBytes = measureJsonBytes(snapshotToWrite);
+            defaultMetricsRegistry.setGauge('payload.snapshot_size_bytes', sizeBytes, {
+                surface: 'wm_snapshot',
+            });
             const envCap = Number(process.env.WM_SNAPSHOT_MAX_BYTES);
             const maxBytes = Number.isFinite(envCap) && envCap > 0 ? envCap : 2 * 1024 * 1024; // 2MB default cap
-            if (serialized.length > maxBytes) {
+            if (sizeBytes > maxBytes) {
+                defaultMetricsRegistry.increment('payload.budget_failure_total', {
+                    surface: 'wm_snapshot',
+                    code: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+                });
                 await this.appendSnapshotLimitEvent({
                     tenantId: params.tenantId,
                     sessionId: params.sessionId,
                     limitBytes: maxBytes,
-                    actualBytes: serialized.length,
+                    actualBytes: sizeBytes,
                 });
                 throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
             }

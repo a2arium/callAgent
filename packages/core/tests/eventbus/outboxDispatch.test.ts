@@ -13,12 +13,14 @@ import {
     type OutboxRow,
 } from '../../src/eventbus/outboxDispatch.js';
 import { createInMemoryEventBus } from '../../src/eventbus/inMemoryEventBus.js';
+import { defaultMetricsRegistry } from '../../src/observability/metrics.js';
 
 describe('outboxDispatch', () => {
     const originalEnv = { ...process.env };
 
     afterEach(() => {
         process.env = { ...originalEnv };
+        defaultMetricsRegistry.reset();
     });
 
     describe('outboxChannel', () => {
@@ -102,6 +104,16 @@ describe('outboxDispatch', () => {
             };
             await dispatchOutboxRow({ eventBus: bus, row });
             expect(published).toHaveLength(1);
+            expect(defaultMetricsRegistry.snapshot().counters).toEqual(expect.arrayContaining([
+                expect.objectContaining({
+                    name: 'runtime.outbox_dispatch_total',
+                    dimensions: { status: 'attempted', type: 'task.status' },
+                }),
+                expect.objectContaining({
+                    name: 'runtime.outbox_dispatch_total',
+                    dimensions: { status: 'completed', type: 'task.status' },
+                }),
+            ]));
             const ev = published[0] as {
                 channel: string;
                 partitionKey: string;
@@ -164,6 +176,16 @@ describe('outboxDispatch', () => {
                 where: { id: 'row-1' },
                 data: { retryCount: 1 },
             });
+            expect(defaultMetricsRegistry.snapshot().counters).toEqual(expect.arrayContaining([
+                expect.objectContaining({
+                    name: 'runtime.outbox_dispatch_total',
+                    dimensions: { status: 'failed', type: 'task.status', errorCode: 'Error' },
+                }),
+                expect.objectContaining({
+                    name: 'runtime.retry_total',
+                    dimensions: { operation: 'effect.outbox.dispatch', type: 'task.status' },
+                }),
+            ]));
         });
 
         it('dead-letters and deletes at max retries', async () => {
@@ -182,6 +204,12 @@ describe('outboxDispatch', () => {
             });
             expect(prisma.conversationDeadLetter.create).toHaveBeenCalled();
             expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
+            expect(defaultMetricsRegistry.snapshot().counters).toEqual(expect.arrayContaining([
+                expect.objectContaining({
+                    name: 'runtime.dead_letter_total',
+                    dimensions: { surface: 'outbox', type: 'task.status' },
+                }),
+            ]));
         });
     });
 });

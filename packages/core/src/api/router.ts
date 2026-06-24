@@ -12,6 +12,7 @@ import type { TaskEngine } from '../orchestration/taskEngine.js';
 import { getAgentWorkspaceInfo, listAgentWorkspaceInfos } from '../plugin/WorkspaceLoader.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentCard } from '@a2arium/callagent-types';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 type ListedAgent = {
     id: string;
@@ -36,7 +37,7 @@ export function createApiRouter(): Router {
     const router = Router();
 
     // JSON-RPC endpoint
-    router.post('/rpc', async (req, res) => {
+    router.post('/rpc', observeRoute('rpc', async (req, res) => {
         const { method } = req.body;
 
         // Route to the appropriate handler based on method
@@ -69,9 +70,20 @@ export function createApiRouter(): Router {
                     id: req.body.id || null
                 });
         }
+    }));
+
+    router.get('/metrics', (_req, res) => {
+        if (process.env.CALLAGENT_METRICS_ENABLED === 'false') {
+            res.status(404).json({ ok: false, error: 'Metrics endpoint is disabled' });
+            return;
+        }
+        res.json({
+            ok: true,
+            metrics: defaultMetricsRegistry.snapshot(),
+        });
     });
 
-    router.get('/agent-runs', async (req, res) => {
+    router.get('/agent-runs', observeRoute('agent-runs', async (req, res) => {
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
@@ -95,9 +107,9 @@ export function createApiRouter(): Router {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to list agent runs', message });
         }
-    });
+    }));
 
-    router.get('/agents', async (_req, res) => {
+    router.get('/agents', observeRoute('agents', async (_req, res) => {
         const agentsById = new Map<string, ListedAgent>();
 
         for (const card of PluginManager.listAgents()) {
@@ -148,9 +160,9 @@ export function createApiRouter(): Router {
         const agents = Array.from(agentsById.values()).sort((left, right) => left.name.localeCompare(right.name));
 
         res.json({ items: agents });
-    });
+    }));
 
-    router.get('/tasks/:taskId/run-graph', async (req, res) => {
+    router.get('/tasks/:taskId/run-graph', observeRoute('run-graph', async (req, res) => {
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
@@ -172,9 +184,9 @@ export function createApiRouter(): Router {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to build run graph', message });
         }
-    });
+    }));
 
-    router.post('/tasks/:taskId/cancel', async (req, res) => {
+    router.post('/tasks/:taskId/cancel', observeRoute('task-cancel', async (req, res) => {
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
@@ -205,9 +217,9 @@ export function createApiRouter(): Router {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to cancel task', message });
         }
-    });
+    }));
 
-    router.get('/tasks/:taskId/turns/:turnSeq', async (req, res) => {
+    router.get('/tasks/:taskId/turns/:turnSeq', observeRoute('turn-detail', async (req, res) => {
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
@@ -236,9 +248,9 @@ export function createApiRouter(): Router {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to load turn', message });
         }
-    });
+    }));
 
-    router.get('/tasks/:taskId/memory', async (req, res) => {
+    router.get('/tasks/:taskId/memory', observeRoute('memory-detail', async (req, res) => {
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
@@ -257,9 +269,47 @@ export function createApiRouter(): Router {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to load memory', message });
         }
-    });
+    }));
 
     return router;
+}
+
+function observeRoute(route: string, handler: (req: any, res: any, next?: any) => Promise<void> | void) {
+    return async (req: any, res: any, next?: any) => {
+        const method = req.method ?? 'unknown';
+        const end = defaultMetricsRegistry.startTimer('operator.api_request_ms', {
+            route,
+            method,
+        });
+        defaultMetricsRegistry.increment('operator.api_request_total', {
+            route,
+            method,
+        });
+        try {
+            await handler(req, res, next);
+        } catch (error) {
+            defaultMetricsRegistry.increment('operator.api_error_total', {
+                route,
+                method,
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
+            throw error;
+        } finally {
+            const status = res.statusCode ?? 200;
+            if (status >= 500) {
+                defaultMetricsRegistry.increment('operator.api_error_total', {
+                    route,
+                    method,
+                    status,
+                });
+            }
+            end({
+                route,
+                method,
+                status,
+            });
+        }
+    };
 }
 
 async function readIndexedAgentCard(agentName: string, agentCardPath: string | undefined): Promise<AgentCard> {

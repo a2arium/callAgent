@@ -729,7 +729,7 @@ Exit:
 
 Scope:
 
-- metrics and alerts;
+- metrics and alerts, initially via the internal JSON `/metrics` endpoint;
 - log-sink degradation behavior;
 - retry/DLQ visibility;
 - recorded P3/P4/P5 drills.
@@ -737,7 +737,12 @@ Scope:
 Exit:
 
 - incident paths have metrics, logs, semantic summaries, and deep links;
+- metrics are memory-bounded and do not use task/run identifiers as labels;
 - failure drills produce recorded evidence.
+
+Prometheus/OpenTelemetry exporters are acceptable follow-ups as long as the
+internal metrics contract exists first and every listed drill has machine-readable
+signals.
 
 ### Phase 5D — Retention, Security, and Deletion Gates
 

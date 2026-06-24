@@ -5,6 +5,7 @@ import {
 } from '@a2arium/callagent-utils';
 import {
     compactPayload,
+    defaultMetricsRegistry,
     enforcePayloadBudget,
     readDriverMetadataMaxBytes,
 } from '@a2arium/callagent-core/unstable';
@@ -43,6 +44,13 @@ export function withHatchetTaskLogging<T>(
     const workflowRunId = safeRead(() => ctx.workflowRunId?.());
     const taskRunExternalId = safeRead(() => ctx.taskRunExternalId?.());
     const retryCount = safeRead(() => ctx.retryCount?.());
+    const timer = defaultMetricsRegistry.startTimer('runtime.worker_task_ms', {
+        operation,
+    });
+    defaultMetricsRegistry.increment('runtime.worker_task_total', {
+        operation,
+        status: 'started',
+    });
 
     return withLoggingContext(
         {
@@ -55,7 +63,7 @@ export function withHatchetTaskLogging<T>(
             logSink: (entry) => forwardLogToHatchet(ctx, operation, entry),
         },
         async () => {
-                await callHatchetLogger(ctx, 'info', `${operation} started`, {
+            await callHatchetLogger(ctx, 'info', `${operation} started`, {
                 operation,
                 tenantId: input.tenantId,
                 taskId: input.taskId,
@@ -66,6 +74,11 @@ export function withHatchetTaskLogging<T>(
             });
             try {
                 const result = await fn();
+                defaultMetricsRegistry.increment('runtime.worker_task_total', {
+                    operation,
+                    status: 'completed',
+                });
+                timer({ status: 'completed' });
                 await callHatchetLogger(ctx, 'info', `${operation} completed`, {
                     operation,
                     tenantId: input.tenantId,
@@ -77,6 +90,12 @@ export function withHatchetTaskLogging<T>(
                 });
                 return result;
             } catch (error) {
+                defaultMetricsRegistry.increment('runtime.worker_task_total', {
+                    operation,
+                    status: 'failed',
+                    errorCode: error instanceof Error ? error.name : 'Error',
+                });
+                timer({ status: 'failed' });
                 await callHatchetLogger(ctx, 'error', `${operation} failed: ${errorMessage(error)}`, {
                     operation,
                     tenantId: input.tenantId,
@@ -115,7 +134,15 @@ async function callHatchetLogger(
     if (!method) {
         return;
     }
-    await method.call(logger, truncateHatchetLog(message), sanitizeMetadata(extra));
+    try {
+        await method.call(logger, truncateHatchetLog(message), sanitizeMetadata(extra));
+    } catch (error) {
+        defaultMetricsRegistry.increment('observability.log_sink_failure_total', {
+            level,
+            operation: typeof extra?.operation === 'string' ? extra.operation : undefined,
+            errorCode: error instanceof Error ? error.name : 'Error',
+        });
+    }
 }
 
 function truncateHatchetLog(message: string): string {
@@ -143,6 +170,12 @@ function sanitizeMetadata(value: Record<string, unknown> | undefined): Record<st
         limitBytes: readDriverMetadataMaxBytes(),
         summary: 'Hatchet log metadata exceeded the configured budget.',
     });
+    if (!budget.ok) {
+        defaultMetricsRegistry.increment('payload.budget_failure_total', {
+            code: budget.code,
+            surface: 'hatchet.log_metadata',
+        });
+    }
     return (budget.ok ? sanitized : compactPayload(budget.value)) as Record<string, unknown>;
 }
 

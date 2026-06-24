@@ -445,14 +445,52 @@ Validation:
 - `yarn workspace @a2arium/callagent-driver-hatchet build` — pass.
 - `yarn workspace @a2arium/operator-viewer build` — pass.
 
+Phase 5C observability scaffolding is implemented for the primary runtime and
+operator paths:
+
+- `packages/core/src/observability/metrics.ts` provides an in-process metrics
+  registry with counters, gauges, durations, bounded samples, and derived warning
+  alerts;
+- the metrics registry now enforces production-safety cardinality limits:
+  low-cardinality label allow-listing, bounded total/per-metric series, overflow
+  buckets, dropped-series accounting, and endpoint-reported memory limits;
+- `GET /metrics` exposes the current process metrics as JSON for operator/API
+  smoke checks and can be disabled with `CALLAGENT_METRICS_ENABLED=false`;
+- operator APIs record request counts, latency, status, and handled 5xx errors;
+- Hatchet worker task wrappers record worker-task counts/durations and treat log
+  sink failures as degraded observability, not task failure;
+- Hatchet provider enqueue/cancel paths record enqueue/cancel metrics, and
+  enqueue failures with task context append bounded `observability.incident`
+  facts;
+- `observability.incident` projects into `run_effects` and the operator graph as
+  failed observability effects;
+- timer reconciliation records due count, max lag, scan duration, failures, and
+  timer-fire enqueue success/failure;
+- working-memory event and snapshot sizes are exposed as metrics, and payload
+  budget failures increment `payload.budget_failure_total`;
+- outbox dispatch, retry, dead-letter, and inline fallback paths expose aggregate
+  metrics without task/run labels;
+- `phase5c-observability-drills.md` defines the drill evidence template and P3-P6
+  observability drills, including the metric label/memory policy;
+- controlled P6 log-sink degradation drill is recorded and passes, proving that
+  Hatchet log sink failure does not mask successful task completion or the
+  original task error.
+
+Phase 5C is not yet a full production observability stack. Prometheus/OTel
+exporters, paging integrations, and historical metrics persistence remain
+follow-ups unless pulled into Phase 5D.
+
 ## Next action
 
 Continue with Phase 5C-D production readiness gates:
 
-1. Add query/index review with `EXPLAIN ANALYZE` evidence on realistic data.
-2. Add operational observability: Prometheus/OTel metrics, timer lag, stuck run
-   detection, DLQ/log-sink health, and alert runbooks.
-3. Run recorded failure drills and volume tests, including 100k historical runs,
+1. Validate Phase 5C automated tests and record at least one real failure drill
+   using `phase5c-observability-drills.md`. Controlled P6 is recorded; live P5
+   provider-enqueue evidence is still recommended before closing Phase 5C.
+2. Add query/index review with `EXPLAIN ANALYZE` evidence on realistic data.
+3. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
+   5D deployment hardening.
+4. Run recorded volume tests, including 100k historical runs,
    10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
    cancellation, missing child wake, and timeout scenarios.
 

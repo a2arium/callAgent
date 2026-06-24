@@ -765,8 +765,29 @@ function buildEffectRuns(rootTaskId: string, driverRuns: DriverRunView[], events
             ...(run.error ? { error: run.error } : {}),
         }));
     const budgetEffects = events
-        .filter((event) => event.type === 'payload.budget_exceeded' || event.type === 'wm.snapshot_limit')
+        .filter((event) => event.type === 'payload.budget_exceeded' || event.type === 'wm.snapshot_limit' || event.type === 'observability.incident')
         .map((event): EffectRun => {
+            if (event.type === 'observability.incident') {
+                const operation = stringField(event.payload, 'operation') ?? 'observability.incident';
+                const message = stringField(event.payload, 'message') ?? 'Observability incident recorded.';
+                return {
+                    id: event.eventId,
+                    rootTaskId,
+                    taskId: event.sessionId ?? rootTaskId,
+                    operation,
+                    status: 'failed',
+                    hiddenByDefault: false,
+                    traceId: stringField(event.payload, 'traceId'),
+                    providerRunId: stringField(event.payload, 'providerRunId'),
+                    error: {
+                        code: stringField(event.payload, 'errorCode') ?? 'OBSERVABILITY_INCIDENT',
+                        message,
+                        eventType: stringField(event.payload, 'eventType'),
+                        surface: stringField(event.payload, 'surface'),
+                        providerTaskRunId: stringField(event.payload, 'providerTaskRunId'),
+                    },
+                };
+            }
             const code = stringField(event.payload, 'code') ?? (event.type === 'wm.snapshot_limit' ? 'LIMIT_WM_SNAPSHOT_TOO_LARGE' : 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE');
             const message = stringField(event.payload, 'message') ?? 'Payload budget exceeded.';
             return {

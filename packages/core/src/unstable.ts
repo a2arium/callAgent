@@ -31,6 +31,13 @@ export {
     type PayloadEnvelope,
 } from './operator/payloadBudget.js';
 export {
+    MetricsRegistry,
+    defaultMetricsRegistry,
+    type MetricDimensions,
+    type MetricsRegistryOptions,
+    type MetricsSnapshot,
+} from './observability/metrics.js';
+export {
     dispatchOutboxRow,
     deleteOutboxRow,
     handleOutboxDispatchFailure,

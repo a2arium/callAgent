@@ -1,11 +1,12 @@
 import { afterEach, describe, it, expect, jest } from '@jest/globals';
 import { HatchetRuntimeDriver } from '../src/hatchetRuntimeDriver.js';
-import type { RuntimeDriver } from '@a2arium/callagent-core/unstable';
+import { defaultMetricsRegistry, type RuntimeDriver } from '@a2arium/callagent-core/unstable';
 
 describe('HatchetRuntimeDriver', () => {
     const previousHatchetPayloadBudget = process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES;
 
     afterEach(() => {
+        defaultMetricsRegistry.reset();
         delete process.env.CALLAGENT_DRIVER_SURFACES;
         if (previousHatchetPayloadBudget === undefined) {
             delete process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES;
@@ -543,6 +544,82 @@ describe('HatchetRuntimeDriver', () => {
             taskId: 'task-1',
             code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
             eventType: 'agent.run',
+        }));
+        expect(defaultMetricsRegistry.snapshot().counters).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                name: 'payload.budget_failure_total',
+                count: 1,
+                dimensions: expect.objectContaining({
+                    surface: 'hatchet.task_payload',
+                    operation: 'agent.run',
+                    code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
+                }),
+            }),
+        ]));
+    });
+
+    it('records provider enqueue failures as metrics and semantic incidents', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const taskTask = {
+            runNoWait: jest.fn(async () => {
+                throw new Error('hatchet unavailable');
+            }),
+        };
+        const budgetEvents = {
+            appendBudgetExceededEvent: jest.fn(async () => undefined),
+            appendIncidentEvent: jest.fn(async () => undefined),
+        };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            undefined,
+            undefined,
+            taskTask as never,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            budgetEvents
+        );
+
+        await expect(driver.enqueueStart({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            idempotencyKey: 'task-1:start',
+            input: { text: 'hello' },
+        })).rejects.toThrow('hatchet unavailable');
+
+        expect(budgetEvents.appendIncidentEvent).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            sessionId: 'task-1',
+            taskId: 'task-1',
+            operation: 'observability.provider_enqueue_failed',
+            eventType: 'agent.run',
+        }));
+        expect(defaultMetricsRegistry.snapshot().counters).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                name: 'hatchet.enqueue_total',
+                count: 1,
+                dimensions: expect.objectContaining({
+                    operation: 'agent.run',
+                    status: 'failed',
+                }),
+            }),
+        ]));
+        expect(defaultMetricsRegistry.snapshot().counters.find((counter) => counter.name === 'hatchet.enqueue_total')?.dimensions).not.toEqual(expect.objectContaining({
+            tenantId: expect.any(String),
+            taskId: expect.any(String),
+            agentId: expect.any(String),
         }));
     });
 });

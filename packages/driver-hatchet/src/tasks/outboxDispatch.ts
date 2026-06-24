@@ -1,5 +1,6 @@
 import type { IEventBus } from '@a2arium/callagent-core/unstable';
 import {
+    defaultMetricsRegistry,
     deleteOutboxRow,
     dispatchOutboxRow,
     handleOutboxDispatchFailure,
@@ -128,6 +129,18 @@ async function executeOutboxDispatchInner(
 
         return { ok: true };
     } catch (error) {
+        defaultMetricsRegistry.increment('runtime.outbox_dispatch_total', {
+            status: 'failed',
+            type: row.topic,
+            errorCode: error instanceof Error ? error.name : 'Error',
+        });
+        if (ctx.retryCount() < HATCHET_OUTBOX_DISPATCH_RETRIES) {
+            defaultMetricsRegistry.increment('runtime.retry_total', {
+                operation: 'effect.outbox.dispatch',
+                type: row.topic,
+            });
+        }
+
         if (deps.driverRuns) {
             await deps.driverRuns.upsertByProviderRunId({
                 providerRunId: ctx.workflowRunId(),

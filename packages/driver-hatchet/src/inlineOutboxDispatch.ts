@@ -1,5 +1,6 @@
 import type { IEventBus } from '@a2arium/callagent-core/unstable';
 import {
+    defaultMetricsRegistry,
     deleteOutboxRow,
     dispatchOutboxRow,
     type OutboxRow,
@@ -30,6 +31,10 @@ export async function dispatchOutboxRowInline(params: {
     }
     await dispatchOutboxRow({ eventBus: params.eventBus, row });
     await deleteOutboxRow({ prisma: params.prisma, id: row.id });
+    defaultMetricsRegistry.increment('runtime.inline_fallback_total', {
+        operation: 'effect.outbox.dispatch',
+        status: 'completed',
+    });
     log.warn('Hatchet trigger failed; delivered outbox row inline', {
         outboxRowId: params.outboxRowId,
         topic: row.topic,

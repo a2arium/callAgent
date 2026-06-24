@@ -12,6 +12,7 @@ import type {
 } from '@a2arium/callagent-core/unstable';
 import {
     compactPayload,
+    defaultMetricsRegistry,
     enforcePayloadBudget,
     readHatchetPayloadMaxBytes,
 } from '@a2arium/callagent-core/unstable';
@@ -50,6 +51,19 @@ export type PayloadBudgetEventRecorder = {
         actualBytes?: number;
         fieldPath?: string;
         eventType?: string;
+    }) => Promise<unknown>;
+    appendIncidentEvent?: (params: {
+        tenantId: string;
+        sessionId: string;
+        taskId?: string;
+        operation: string;
+        message: string;
+        errorCode?: string;
+        eventType?: string;
+        surface?: string;
+        providerRunId?: string;
+        providerTaskRunId?: string;
+        traceId?: string;
     }) => Promise<unknown>;
 };
 
@@ -93,13 +107,36 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             summary: 'Hatchet task payload exceeded the configured budget.',
         });
         if (!budget.ok) {
+            defaultMetricsRegistry.increment('payload.budget_failure_total', {
+                code: budget.code,
+                surface: 'hatchet.task_payload',
+                operation: 'agent.run',
+            });
             await this.recordPayloadBudget(params.tenantId, params.taskId, budget, 'agent.run');
             throw new Error(`LIMIT_HATCHET_PAYLOAD_TOO_LARGE: ${budget.summary}`);
         }
-        const ref = await taskTask.runNoWait(input, {
-            additionalMetadata: buildTaskMetadata(params, 'agent.run'),
-        });
-        const providerRunId = await ref.runId;
+        let providerRunId: string;
+        try {
+            const ref = await taskTask.runNoWait(input, {
+                additionalMetadata: buildTaskMetadata(params, 'agent.run'),
+            }) as { runId: Promise<string> | string };
+            providerRunId = await ref.runId;
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: 'agent.run',
+                status: 'completed',
+            });
+        } catch (error) {
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: 'agent.run',
+                status: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
+            await this.recordIncident(params.tenantId, params.taskId, 'observability.provider_enqueue_failed', error, 'agent.run', {
+                surface: 'hatchet.enqueue',
+                traceId: params.traceId,
+            });
+            throw error;
+        }
         if (this.driverRuns) {
             await this.driverRuns.upsertByProviderRunId({
                 providerRunId,
@@ -138,13 +175,35 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             summary: 'Hatchet resume payload exceeded the configured budget.',
         });
         if (!budget.ok) {
+            defaultMetricsRegistry.increment('payload.budget_failure_total', {
+                code: budget.code,
+                surface: 'hatchet.resume_payload',
+                operation: `resume.${params.event.kind}`,
+            });
             await this.recordPayloadBudget(params.tenantId, params.taskId, budget, `resume.${params.event.kind}`);
         }
-        await this.events.push(
-            `aplret.${params.event.kind}.${params.event.token}`,
-            (budget.ok ? payload : compactPayload(budget.value)) as Record<string, unknown>,
-            { key: `${params.tenantId}:${params.taskId}:${params.event.token}` }
-        );
+        try {
+            await this.events.push(
+                `aplret.${params.event.kind}.${params.event.token}`,
+                (budget.ok ? payload : compactPayload(budget.value)) as Record<string, unknown>,
+                { key: `${params.tenantId}:${params.taskId}:${params.event.token}` }
+            );
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: `resume.${params.event.kind}`,
+                status: 'completed',
+            });
+        } catch (error) {
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: `resume.${params.event.kind}`,
+                status: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
+            await this.recordIncident(params.tenantId, params.taskId, 'observability.provider_enqueue_failed', error, `resume.${params.event.kind}`, {
+                surface: 'hatchet.enqueue',
+                traceId: params.traceId,
+            });
+            throw error;
+        }
     }
 
     async enqueueChildDispatch(params: EnqueueChildDispatchParams): Promise<void> {
@@ -235,6 +294,10 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                 providerRunIds,
                 error: error instanceof Error ? error.message : String(error),
             });
+            defaultMetricsRegistry.increment('hatchet.cancel_total', {
+                status: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
         }
     }
 
@@ -272,6 +335,21 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             log.error('Hatchet outbox trigger failed', error as { message?: string }, {
                 outboxRowId: params.outboxRowId,
                 eventType: params.eventType,
+            });
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: 'effect.outbox.dispatch',
+                status: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
+            if (this.inlineFallback) {
+                defaultMetricsRegistry.increment('runtime.inline_fallback_total', {
+                    operation: 'effect.outbox.dispatch',
+                    status: 'attempted',
+                });
+            }
+            await this.recordIncident(params.tenantId, params.taskId, 'observability.provider_enqueue_failed', error, 'effect.outbox.dispatch', {
+                surface: 'hatchet.enqueue',
+                traceId: params.traceId,
             });
             if (this.inlineFallback) {
                 await dispatchOutboxRowInline({
@@ -344,6 +422,43 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                 taskId,
                 code: budget.code,
                 message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    private async recordIncident(
+        tenantId: string | undefined,
+        taskId: string | undefined,
+        operation: string,
+        error: unknown,
+        eventType: string,
+        metadata: {
+            surface?: string;
+            providerRunId?: string;
+            providerTaskRunId?: string;
+            traceId?: string;
+        } = {}
+    ): Promise<void> {
+        if (tenantId === undefined || taskId === undefined || !this.budgetEvents?.appendIncidentEvent) {
+            return;
+        }
+        try {
+            await this.budgetEvents.appendIncidentEvent({
+                tenantId,
+                sessionId: taskId,
+                taskId,
+                operation,
+                message: error instanceof Error ? error.message : String(error),
+                errorCode: error instanceof Error ? error.name : 'Error',
+                eventType,
+                ...metadata,
+            });
+        } catch (recordError) {
+            log.warn('Failed to persist provider enqueue incident', {
+                tenantId,
+                taskId,
+                operation,
+                message: recordError instanceof Error ? recordError.message : String(recordError),
             });
         }
     }

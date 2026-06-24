@@ -244,6 +244,49 @@ describe('buildAgentRunGraph', () => {
         expect(graph.debug.driverRuns[1]?.error).toEqual(error);
     });
 
+    it('projects observability incidents as visible failed effects', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-incident',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendIncidentEvent({
+            tenantId: 'tenant-1',
+            sessionId: 'task-incident',
+            taskId: 'task-incident',
+            operation: 'observability.provider_enqueue_failed',
+            message: 'Hatchet enqueue failed.',
+            errorCode: 'Error',
+            eventType: 'agent.run',
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-incident',
+            sessionManager,
+            driverRuns: [],
+        });
+
+        expect(graph.effects).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                rootTaskId: 'task-incident',
+                taskId: 'task-incident',
+                operation: 'observability.provider_enqueue_failed',
+                status: 'failed',
+                hiddenByDefault: false,
+                error: expect.objectContaining({
+                    code: 'Error',
+                    message: 'Hatchet enqueue failed.',
+                    eventType: 'agent.run',
+                }),
+            }),
+        ]));
+    });
+
     it('marks the root completed from a terminal segment when the parent driver row is stale', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);

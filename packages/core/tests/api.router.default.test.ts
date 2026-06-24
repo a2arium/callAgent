@@ -1,5 +1,6 @@
 import { createApiRouter } from '../src/api/router.js';
 import { EngineLocator } from '../src/orchestration/EngineLocator.js';
+import { defaultMetricsRegistry } from '../src/observability/metrics.js';
 
 const getRpcHandler = () => {
     const router = createApiRouter() as any;
@@ -28,6 +29,8 @@ const fakeRes = () => {
 describe('API router default branch', () => {
     afterEach(() => {
         EngineLocator.setEngine(null);
+        defaultMetricsRegistry.reset();
+        delete process.env.CALLAGENT_METRICS_ENABLED;
     });
 
     it('returns method not found for unknown methods', async () => {
@@ -59,5 +62,51 @@ describe('API router default branch', () => {
             reason: 'operator stop',
         });
         expect(res.body).toEqual({ acknowledged: true });
+    });
+
+    it('exposes operator API metrics', async () => {
+        const listAgentRuns = jest.fn(async () => ({ items: [], nextCursor: null }));
+        EngineLocator.setEngine({ listAgentRuns });
+        const agentRunsHandler = getHandler('/agent-runs', 'get');
+        const metricsHandler = getHandler('/metrics', 'get');
+        const res = fakeRes();
+
+        await agentRunsHandler({
+            method: 'GET',
+            query: { tenantId: 'tenant-1' },
+            header: () => undefined,
+        }, res);
+
+        const metricsRes = fakeRes();
+        await metricsHandler({ method: 'GET' }, metricsRes);
+
+        expect(metricsRes.body.ok).toBe(true);
+        expect(metricsRes.body.metrics.counters).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                name: 'operator.api_request_total',
+                count: 1,
+                dimensions: expect.objectContaining({ route: 'agent-runs', method: 'GET' }),
+            }),
+        ]));
+        expect(metricsRes.body.metrics.durations).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                name: 'operator.api_request_ms',
+                dimensions: expect.objectContaining({ route: 'agent-runs', method: 'GET', status: '200' }),
+            }),
+        ]));
+    });
+
+    it('can disable the metrics endpoint by config', async () => {
+        process.env.CALLAGENT_METRICS_ENABLED = 'false';
+        const metricsHandler = getHandler('/metrics', 'get');
+        const res = fakeRes();
+
+        await metricsHandler({ method: 'GET' }, res);
+
+        expect(res.statusCode).toBe(404);
+        expect(res.body).toEqual({
+            ok: false,
+            error: 'Metrics endpoint is disabled',
+        });
     });
 });

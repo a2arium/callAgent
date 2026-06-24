@@ -1,6 +1,6 @@
-import { describe, it, expect, jest } from '@jest/globals';
+import { afterEach, describe, it, expect, jest } from '@jest/globals';
 import { executeOutboxDispatch } from '../src/tasks/outboxDispatch.js';
-import type { BusEventHandler, IEventBus } from '@a2arium/callagent-core/unstable';
+import { defaultMetricsRegistry, type BusEventHandler, type IEventBus } from '@a2arium/callagent-core/unstable';
 import type { OutboxRow } from '@a2arium/callagent-core/unstable';
 
 function createTestEventBus(): IEventBus {
@@ -28,6 +28,10 @@ function createTestEventBus(): IEventBus {
 }
 
 describe('executeOutboxDispatch', () => {
+    afterEach(() => {
+        defaultMetricsRegistry.reset();
+    });
+
     const row: OutboxRow = {
         id: 'row-1',
         tenantId: 'tenant-a',
@@ -101,6 +105,16 @@ describe('executeOutboxDispatch', () => {
             )
         ).rejects.toThrow('provider failed');
 
+        expect(defaultMetricsRegistry.snapshot().counters).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                name: 'runtime.outbox_dispatch_total',
+                dimensions: { status: 'failed', type: 'task.status', errorCode: 'Error' },
+            }),
+            expect.objectContaining({
+                name: 'runtime.retry_total',
+                dimensions: { operation: 'effect.outbox.dispatch', type: 'task.status' },
+            }),
+        ]));
         expect(ctx.logger.error).toHaveBeenCalledWith(
             expect.stringContaining('provider failed'),
             expect.objectContaining({ operation: 'effect.outbox.dispatch' })

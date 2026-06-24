@@ -2,6 +2,7 @@ import { logger } from '@a2arium/callagent-utils';
 import type { IEventBus } from '../public-types/eventbus/types.js';
 import { createBusEvent } from './busEventHelpers.js';
 import { taskChannel } from './taskEventEmitter.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 const log = logger.createLogger({ prefix: 'OutboxDispatch' });
 
@@ -127,6 +128,10 @@ export async function dispatchOutboxRow(params: {
 }): Promise<void> {
     const { eventBus, row } = params;
     const channel = outboxChannel(row);
+    defaultMetricsRegistry.increment('runtime.outbox_dispatch_total', {
+        status: 'attempted',
+        type: row.topic,
+    });
     await eventBus.publish(
         createBusEvent({
             channel,
@@ -141,6 +146,10 @@ export async function dispatchOutboxRow(params: {
             },
         })
     );
+    defaultMetricsRegistry.increment('runtime.outbox_dispatch_total', {
+        status: 'completed',
+        type: row.topic,
+    });
 }
 
 export async function deleteOutboxRow(params: {
@@ -170,6 +179,11 @@ export async function handleOutboxDispatchFailure(params: {
         topic: row.topic,
     });
     const nextRetry = (row.retryCount ?? 0) + 1;
+    defaultMetricsRegistry.increment('runtime.outbox_dispatch_total', {
+        status: 'failed',
+        type: row.topic,
+        errorCode: error instanceof Error ? error.name : 'Error',
+    });
     if (nextRetry >= maxRetries) {
         try {
             await prisma.conversationDeadLetter.create({
@@ -184,12 +198,26 @@ export async function handleOutboxDispatchFailure(params: {
                     deadletteredAt: new Date(),
                 },
             });
+            defaultMetricsRegistry.increment('runtime.dead_letter_total', {
+                surface: 'outbox',
+                type: row.topic,
+            });
         } catch (dlqErr) {
+            defaultMetricsRegistry.increment('runtime.dead_letter_total', {
+                surface: 'outbox',
+                type: row.topic,
+                status: 'failed',
+                errorCode: dlqErr instanceof Error ? dlqErr.name : 'Error',
+            });
             log.error('Dead-letter insert failed', dlqErr as { message?: string }, { id: row.id });
         }
         await prisma.outbox.delete({ where: { id: row.id } }).catch(() => undefined);
         return;
     }
+    defaultMetricsRegistry.increment('runtime.retry_total', {
+        operation: 'effect.outbox.dispatch',
+        type: row.topic,
+    });
     await prisma.outbox
         .update({
             where: { id: row.id },

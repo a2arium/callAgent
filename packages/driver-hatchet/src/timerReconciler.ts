@@ -3,6 +3,7 @@ import type {
     RuntimeTimerRecord,
     RuntimeTimerRepository,
 } from '@a2arium/callagent-core/unstable';
+import { defaultMetricsRegistry } from '@a2arium/callagent-core/unstable';
 import type { TaskWorkflowDeclaration } from '@hatchet-dev/typescript-sdk/v1/declaration.js';
 import type { TimerFireTaskInput, TimerFireTaskOutput } from './tasks/timerFire.js';
 
@@ -23,12 +24,32 @@ export class TimerReconciler {
     ) {}
 
     async scanOnce(now = new Date()): Promise<number> {
-        const timers = await this.runtimeTimers.listDue({
-            now,
-            take: this.options.batchSize ?? 100,
-        });
-        await Promise.all(timers.map((timer) => this.enqueueTimerFire(timer)));
-        return timers.length;
+        const end = defaultMetricsRegistry.startTimer('runtime.timer_reconcile_ms');
+        try {
+            const timers = await this.runtimeTimers.listDue({
+                now,
+                take: this.options.batchSize ?? 100,
+            });
+            defaultMetricsRegistry.setGauge('runtime.timer_due_count', timers.length);
+            const maxLag = timers.reduce((current, timer) => {
+                const lag = Math.max(0, now.getTime() - timer.dueAt.getTime());
+                return Math.max(current, lag);
+            }, 0);
+            defaultMetricsRegistry.setGauge('runtime.timer_lag_ms', maxLag);
+            await Promise.all(timers.map((timer) => this.enqueueTimerFire(timer)));
+            end({ status: 'completed' });
+            return timers.length;
+        } catch (error) {
+            defaultMetricsRegistry.increment('runtime.timer_reconcile_failure_total', {
+                phase: 'scan',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
+            end({
+                status: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
+            throw error;
+        }
     }
 
     start(): void {
@@ -81,7 +102,16 @@ export class TimerReconciler {
                 id: timer.id,
                 providerRunId: await ref.runId,
             });
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: 'timer.fire',
+                status: 'completed',
+            });
         } catch (error) {
+            defaultMetricsRegistry.increment('hatchet.enqueue_total', {
+                operation: 'timer.fire',
+                status: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            });
             log.error('Failed to enqueue timer fire', {
                 tenantId: timer.tenantId,
                 taskId: timer.taskId,

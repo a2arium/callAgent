@@ -465,6 +465,20 @@ export class OperatorProjectionRepository {
                 errorCode: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
                 errorMessage: 'Working-memory snapshot exceeded the configured size limit.',
             });
+            return;
+        }
+
+        if (event.type === 'observability.incident') {
+            await this.upsertEventEffect({
+                tenantId: event.tenantId,
+                rootTaskId,
+                taskId,
+                operation: stringField(event.payload, 'operation') ?? 'observability.incident',
+                status: 'failed',
+                idempotencyKey: `${event.tenantId}:${event.sessionId}:${event.eventId ?? event.type}:${event.seq ?? 'unknown'}`,
+                errorCode: stringField(event.payload, 'errorCode') ?? 'OBSERVABILITY_INCIDENT',
+                errorMessage: stringField(event.payload, 'message') ?? 'Observability incident recorded.',
+            });
         }
     }
 
