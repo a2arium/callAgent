@@ -505,9 +505,11 @@ operator harness:
   now pass, and a persisted 100k root-run semantic dataset has been benchmarked
   through operator HTTP endpoints. That persisted benchmark exposed and fixed a
   missing all-scope fleet recency index. A concurrent polling/browser-render
-  pass is also recorded: 10 concurrent pollers look acceptable locally, while
-  20 concurrent pollers show 550-750 ms p95 and need profiling before production
-  capacity claims.
+  pass is also recorded. The initial 20-poller pass showed 550-750 ms p95; the
+  follow-up profile found redundant fleet aggregation reads and duplicate
+  in-flight projection work. Fleet list now uses denormalized semantic counters,
+  identical in-flight semantic reads are coalesced, and the local warm
+  20-poller p95 is recorded at roughly 116-137 ms.
 
 ## Next action
 
@@ -516,11 +518,9 @@ Continue with Phase 5D/5E production readiness gates:
 1. Validate Phase 5C automated tests and record at least one real failure drill
    using `phase5c-observability-drills.md`. Controlled P6 is recorded; live P5
    provider-enqueue evidence is still recommended before closing Phase 5C.
-2. Profile 20-concurrent operator polling against the persisted 100k semantic
-   dataset to locate the p95 source.
-3. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
+2. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
    5D deployment hardening.
-4. Run recorded volume tests, including 100k historical runs,
+3. Run recorded volume tests, including 100k historical runs,
    10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
    cancellation, missing child wake, and timeout scenarios.
 

@@ -469,9 +469,8 @@ Conclusion:
 - 20 concurrent pollers stay below the current 2s warning threshold, but p95
   rises into the 550-750 ms range and should not be treated as a final
   production capacity pass;
-- the next scale pass should identify whether this is Node/API serialization,
-  Prisma query concurrency, Postgres connection pool pressure, response JSON
-  serialization, or local machine contention.
+- this result is superseded by the profiling/fix pass below, which identified
+  duplicate concurrent projection reads as the primary controllable cause.
 
 ### Browser Render
 
@@ -522,10 +521,100 @@ Limitations:
 - no mobile/tablet render check was run;
 - Chrome emitted noisy updater logs unrelated to app behavior.
 
+## 2026-06-24 — 20-Poller Projection Profile and Fix
+
+Goal:
+
+- identify why 20 concurrent operator pollers produced high p95 latency against
+  the persisted 100k semantic dataset.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Profiling method:
+
+- direct `pg` SQL benchmark against the same tenant and query shapes;
+- API benchmark split into time-to-headers and body-read time;
+- temporary env-gated projection phase logging with
+  `CALLAGENT_OPERATOR_PROFILE=1`;
+- mixed dashboard-shaped poller benchmark using:
+  - `/agent-runs?scope=roots&limit=50`;
+  - `/agent-runs?scope=all&limit=50`;
+  - `/agent-runs?scope=roots&status=completed&limit=50`;
+  - `/tasks/perf-root-19999/run-graph`.
+
+Findings:
+
+- response body read was not material: body-read p95 was about `0.1-0.2 ms`
+  for ~13-14 KB fleet responses;
+- list result mapping was not material: projection `mapMs` was generally
+  `< 1 ms`;
+- direct SQL after warmup was much lower than the original API tail, indicating
+  app/projection query multiplication rather than JSON serialization;
+- `listAgentRuns()` was doing redundant secondary reads from `agent_run_edges`
+  and `turn_runs` even though `agent_runs` already stores the semantic counters
+  needed by fleet rows;
+- concurrent dashboard polling also caused identical in-flight list/graph reads
+  to execute repeatedly, producing a thundering herd against Prisma/Postgres.
+
+Changes made:
+
+- semantic fleet list now uses denormalized `agent_runs` counters
+  (`child_count`, `turn_count`, `llm_call_count`, `memory_op_count`) instead of
+  re-aggregating edges/turns per page;
+- semantic list tests now assert fleet list does not call edge/turn delegates;
+- env-gated projection profiler added:
+  - `CALLAGENT_OPERATOR_PROFILE=1`;
+  - `CALLAGENT_OPERATOR_PROFILE_SLOW_MS=<ms>`;
+- bounded in-flight single-flight added for identical semantic list/graph reads;
+  entries are removed immediately after the shared promise settles;
+- `CALLAGENT_OPERATOR_READ_SINGLE_FLIGHT=0` disables single-flight if needed.
+
+Post-fix warm mixed 20-poller result:
+
+```json
+{
+  "concurrency": 20,
+  "totalRequests": 200,
+  "errors": 0,
+  "endpoints": {
+    "fleet-roots": { "count": 50, "minMs": 3.7, "p50Ms": 9.8, "p95Ms": 130.7, "maxMs": 152.8 },
+    "fleet-all": { "count": 50, "minMs": 2.7, "p50Ms": 7.2, "p95Ms": 116.1, "maxMs": 122.0 },
+    "fleet-status": { "count": 50, "minMs": 4.9, "p50Ms": 9.1, "p95Ms": 134.7, "maxMs": 135.0 },
+    "detail-graph": { "count": 50, "minMs": 15.2, "p50Ms": 31.0, "p95Ms": 137.4, "maxMs": 138.8 }
+  }
+}
+```
+
+Verification:
+
+```bash
+yarn jest packages/core/tests/operator.agentRunsList.test.ts \
+  packages/core/tests/operator.runGraph.test.ts \
+  --runInBand
+
+yarn build
+```
+
+Result:
+
+- targeted operator tests passed: 2 suites, 30 tests;
+- full repository build passed: 20 packages.
+
+Conclusion:
+
+- the largest controllable source was repeated concurrent projection DB work;
+- removing redundant fleet aggregation and coalescing identical in-flight reads
+  moves the local 20-poller warm p95 from roughly `550-750 ms` to
+  `116-137 ms`;
+- this is still local-machine evidence, not a final hosted production capacity
+  claim.
+
 ## Remaining Evidence Needed
 
-- Profile 20-concurrent operator polling to find the p95 source before claiming
-  production capacity.
 - Add a first-class browser automation dependency or restore the gstack `browse`
   binary so render checks can include DOM assertions and responsive screenshots.
 - Measure browser/operator UI render behavior with trace-level timing, not only

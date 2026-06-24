@@ -67,6 +67,57 @@ type ProjectionPrisma = {
     runEffect?: PrismaDelegate;
 };
 
+const operatorProjectionProfileEnabled = () => process.env.CALLAGENT_OPERATOR_PROFILE === '1';
+const operatorProjectionSlowMs = () => {
+    const raw = Number.parseInt(process.env.CALLAGENT_OPERATOR_PROFILE_SLOW_MS ?? '', 10);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 50;
+};
+
+function projectionNow(): number {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+}
+
+function logProjectionProfile(
+    operation: string,
+    startedAt: number,
+    details: Record<string, unknown>,
+): void {
+    if (!operatorProjectionProfileEnabled()) return;
+    const durationMs = projectionNow() - startedAt;
+    if (durationMs < operatorProjectionSlowMs()) return;
+    console.warn('[OperatorProjectionProfile]', {
+        operation,
+        durationMs: Number(durationMs.toFixed(1)),
+        ...details,
+    });
+}
+
+const operatorProjectionInFlight = new Map<string, Promise<unknown>>();
+
+function operatorProjectionSingleFlightEnabled(): boolean {
+    return process.env.CALLAGENT_OPERATOR_READ_SINGLE_FLIGHT !== '0';
+}
+
+async function operatorProjectionSingleFlight<T>(
+    key: string,
+    factory: () => Promise<T>,
+): Promise<T> {
+    if (!operatorProjectionSingleFlightEnabled()) {
+        return factory();
+    }
+    const existing = operatorProjectionInFlight.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const promise = factory().finally(() => {
+        if (operatorProjectionInFlight.get(key) === promise) {
+            operatorProjectionInFlight.delete(key);
+        }
+    });
+    operatorProjectionInFlight.set(key, promise);
+    return promise;
+}
+
 export type OperatorProjectionEvent = {
     tenantId: string;
     sessionId: string;
@@ -484,6 +535,23 @@ export class OperatorProjectionRepository {
 
     async listAgentRuns(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
         if (!this.isAvailable()) return undefined;
+        return operatorProjectionSingleFlight(
+            [
+                'agentRuns',
+                params.tenantId,
+                params.scope,
+                params.agentId ?? '',
+                params.status ?? '',
+                params.since ?? '',
+                params.cursor ?? '',
+                params.limit,
+            ].join('\x1f'),
+            () => this.listAgentRunsUncoalesced(params),
+        );
+    }
+
+    private async listAgentRunsUncoalesced(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
+        const profileStartedAt = projectionNow();
         const cursor = decodeCursor(params.cursor);
         const where: Record<string, unknown> = {
             tenantId: params.tenantId,
@@ -506,47 +574,35 @@ export class OperatorProjectionRepository {
                 ];
             }
         }
+        const pageStartedAt = projectionNow();
         const rows = await this.prisma.agentRun!.findMany!({
             where,
             orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
             take: params.limit + 1,
         }) as SemanticRunRow[];
+        const pageMs = projectionNow() - pageStartedAt;
         const pageRows = rows.slice(0, params.limit);
-        const pageTaskIds = pageRows.map((row) => row.taskId);
-        const [edgeRows, turnRows] = pageTaskIds.length > 0
-            ? await Promise.all([
-                this.prisma.agentRunEdge!.findMany!({
-                    where: { tenantId: params.tenantId, parentTaskId: { in: pageTaskIds } },
-                }) as Promise<SemanticEdgeRow[]>,
-                this.prisma.turnRun!.findMany!({
-                    where: { tenantId: params.tenantId, taskId: { in: pageTaskIds } },
-                }) as Promise<SemanticTurnRow[]>,
-            ])
-            : [[], []] as [SemanticEdgeRow[], SemanticTurnRow[]];
-        const edgeCountByParent = new Map<string, number>();
-        for (const edge of edgeRows) {
-            edgeCountByParent.set(edge.parentTaskId, (edgeCountByParent.get(edge.parentTaskId) ?? 0) + 1);
-        }
-        const turnStatsByTask = new Map<string, { turns: number; llmCalls: number; memoryOps: number }>();
-        for (const turn of turnRows) {
-            const current = turnStatsByTask.get(turn.taskId) ?? { turns: 0, llmCalls: 0, memoryOps: 0 };
-            current.turns += 1;
-            current.llmCalls += turn.llmCallCount;
-            current.memoryOps += turn.memoryOpCount;
-            turnStatsByTask.set(turn.taskId, current);
-        }
+        const mapStartedAt = projectionNow();
         const overflow = rows.length > params.limit ? rows[params.limit] : undefined;
         const nextCursor = overflow ? encodeCursor({
             updatedAt: toIso(overflow.updatedAt) ?? new Date().toISOString(),
             id: overflow.id,
         }) : undefined;
+        const items = pageRows.map((row) => rowToListItem(row));
+        const mapMs = projectionNow() - mapStartedAt;
+        logProjectionProfile('listAgentRuns', profileStartedAt, {
+            tenantId: params.tenantId,
+            scope: params.scope,
+            agentId: params.agentId ?? null,
+            status: params.status ?? null,
+            limit: params.limit,
+            rows: rows.length,
+            pageRows: pageRows.length,
+            pageMs: Number(pageMs.toFixed(1)),
+            mapMs: Number(mapMs.toFixed(1)),
+        });
         return {
-            items: pageRows.map((row) => rowToListItem(row, {
-                children: edgeCountByParent.get(row.taskId),
-                turns: turnStatsByTask.get(row.taskId)?.turns,
-                llmCalls: turnStatsByTask.get(row.taskId)?.llmCalls,
-                memoryOps: turnStatsByTask.get(row.taskId)?.memoryOps,
-            })),
+            items,
             ...(nextCursor ? { nextCursor } : {}),
             pageInfo: {
                 ...(nextCursor ? { nextCursor } : {}),
@@ -559,12 +615,23 @@ export class OperatorProjectionRepository {
 
     async buildGraph(params: { tenantId: string; taskId: string }): Promise<AgentRunGraph | undefined> {
         if (!this.isAvailable()) return undefined;
+        return operatorProjectionSingleFlight(
+            ['runGraph', params.tenantId, params.taskId].join('\x1f'),
+            () => this.buildGraphUncoalesced(params),
+        );
+    }
+
+    private async buildGraphUncoalesced(params: { tenantId: string; taskId: string }): Promise<AgentRunGraph | undefined> {
+        const profileStartedAt = projectionNow();
+        const runsStartedAt = projectionNow();
         const runs = await this.prisma.agentRun!.findMany!({
             where: { tenantId: params.tenantId, rootTaskId: params.taskId },
             orderBy: [{ startedAt: 'asc' }, { updatedAt: 'asc' }],
         }) as SemanticRunRow[];
+        const runsMs = projectionNow() - runsStartedAt;
         const root = runs.find((run) => run.taskId === params.taskId);
         if (!root) return undefined;
+        const joinStartedAt = projectionNow();
         const [edges, turns, effects] = await Promise.all([
             this.prisma.agentRunEdge!.findMany!({
                 where: { tenantId: params.tenantId, rootTaskId: params.taskId },
@@ -579,11 +646,13 @@ export class OperatorProjectionRepository {
                 orderBy: [{ createdAt: 'asc' }],
             }) as Promise<SemanticEffectRow[]>,
         ]);
+        const joinMs = projectionNow() - joinStartedAt;
+        const mapStartedAt = projectionNow();
         const nodes = runs.map(rowToNode);
         const expectedTurnCount = runs.reduce((sum, run) => sum + Math.max(0, run.turnCount ?? 0), 0);
         const expectedEdgeCount = runs.reduce((sum, run) => sum + Math.max(0, run.childCount ?? 0), 0);
         const partial = turns.length < expectedTurnCount || edges.length < expectedEdgeCount;
-        return {
+        const graph: AgentRunGraph = {
             schemaVersion: 1,
             tenantId: params.tenantId,
             taskId: params.taskId,
@@ -597,6 +666,19 @@ export class OperatorProjectionRepository {
             debug: { driverRuns: [] },
             projection: { source: 'semantic', partial },
         };
+        const mapMs = projectionNow() - mapStartedAt;
+        logProjectionProfile('buildGraph', profileStartedAt, {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            runs: runs.length,
+            edges: edges.length,
+            turns: turns.length,
+            effects: effects.length,
+            runsMs: Number(runsMs.toFixed(1)),
+            joinMs: Number(joinMs.toFixed(1)),
+            mapMs: Number(mapMs.toFixed(1)),
+        });
+        return graph;
     }
 
     private async parentRootTaskId(tenantId: string, taskId: string): Promise<string | undefined> {

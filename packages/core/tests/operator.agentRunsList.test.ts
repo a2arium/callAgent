@@ -266,10 +266,10 @@ describe('TaskEngine operator agent run list', () => {
                 agentId: 'root-agent',
                 scope: 'root',
                 status: 'completed',
-                childCount: 0,
-                turnCount: 0,
-                llmCallCount: 0,
-                memoryOpCount: 0,
+                childCount: 2,
+                turnCount: 3,
+                llmCallCount: 1,
+                memoryOpCount: 4,
                 knownCostUsd: '0.125000',
                 startedAt: now,
                 terminalAt: new Date('2026-06-23T12:01:00.000Z'),
@@ -325,6 +325,8 @@ describe('TaskEngine operator agent run list', () => {
                 costUsd: 0.125,
             }),
         ]);
+        expect(prisma.agentRunEdge.findMany).not.toHaveBeenCalled();
+        expect(prisma.turnRun.findMany).not.toHaveBeenCalled();
     });
 
     it('can build a graph from semantic projection records when semantic read mode is enabled', async () => {
