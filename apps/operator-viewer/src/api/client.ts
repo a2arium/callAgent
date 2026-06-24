@@ -88,13 +88,19 @@ export type CancelRunResponse = {
   acknowledged: true;
 };
 
+function operatorAuthHeaders(): Record<string, string> {
+  const token = window.localStorage.getItem('callagent.operator.token')?.trim();
+  return token ? { 'x-callagent-operator-key': token } : {};
+}
+
 async function fetchJson<T>(path: string, tenantId?: string): Promise<T> {
   const response = await fetch(path, {
     headers: tenantId
       ? {
           'x-tenant-id': tenantId,
+          ...operatorAuthHeaders(),
         }
-      : undefined,
+      : operatorAuthHeaders(),
   });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
@@ -128,6 +134,7 @@ export async function cancelRun(input: CancelRunInput): Promise<CancelRunRespons
     headers: {
       'content-type': 'application/json',
       'x-tenant-id': input.tenantId,
+      ...operatorAuthHeaders(),
     },
     body: JSON.stringify({
       ...(input.agentId ? { agentId: input.agentId } : {}),
@@ -158,8 +165,8 @@ export async function getOperatorConfig(): Promise<OperatorConfig> {
   }
 }
 
-export async function listAgents(): Promise<ListedAgentsPage> {
-  return fetchJson<ListedAgentsPage>('/agents');
+export async function listAgents(tenantId = 'default'): Promise<ListedAgentsPage> {
+  return fetchJson<ListedAgentsPage>('/agents', tenantId);
 }
 
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> {
@@ -168,6 +175,8 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> 
     headers: {
       'content-type': 'application/json',
       'x-tenant-id': input.tenantId,
+      'x-callagent-operator-launch': 'true',
+      ...operatorAuthHeaders(),
     },
     body: JSON.stringify({
       jsonrpc: '2.0',

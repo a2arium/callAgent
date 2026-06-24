@@ -7,12 +7,21 @@ import {
     handleTasksResubscribe,
     handleTasksInput
 } from './rpc/index.js';
+import { normalizeRpcTaskParams } from './rpc/taskParams.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
 import type { TaskEngine } from '../orchestration/taskEngine.js';
 import { getAgentWorkspaceInfo, listAgentWorkspaceInfos } from '../plugin/WorkspaceLoader.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentCard } from '@a2arium/callagent-types';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
+import {
+    isProductionMode,
+    isPublicRpcEnabled,
+    OperatorAuthError,
+    resolveOperatorRequestContext,
+    type OperatorRequestContext,
+} from '../operator/operatorAuth.js';
+import { writeOperatorAudit } from '../operator/operatorAudit.js';
 
 type ListedAgent = {
     id: string;
@@ -38,7 +47,29 @@ export function createApiRouter(): Router {
 
     // JSON-RPC endpoint
     router.post('/rpc', observeRoute('rpc', async (req, res) => {
-        const { method } = req.body;
+        const method = req.body?.method;
+        const protectedRpc = isOperatorLaunch(req) || shouldProtectRpcMethod(method);
+        const operatorContext = protectedRpc ? contextOrThrow(req) : undefined;
+        if (operatorContext && isTaskStartingRpcMethod(method)) {
+            const normalized = normalizeRpcTaskParams(req.body?.params);
+            if (normalized) {
+                normalized.tenantId = operatorContext.tenantId;
+                req.body.params = normalized;
+                await auditOperatorAction(operatorContext, {
+                    action: 'payload.launch',
+                    taskId: normalized.id,
+                    agentId: typeof normalized.agentId === 'string' ? normalized.agentId : undefined,
+                    accepted: true,
+                    resultStatus: 'requested',
+                    metadata: { method, payloadKeys: Object.keys(normalized).sort() },
+                });
+            }
+        } else if (operatorContext && method === 'tasks/input') {
+            const params = req.body?.params;
+            if (params && typeof params === 'object' && !Array.isArray(params)) {
+                (params as Record<string, unknown>).tenantId = operatorContext.tenantId;
+            }
+        }
 
         // Route to the appropriate handler based on method
         switch (method) {
@@ -73,6 +104,8 @@ export function createApiRouter(): Router {
     }));
 
     router.get('/metrics', (_req, res) => {
+        const context = contextOrRespond(_req, res);
+        if (!context) return;
         if (process.env.CALLAGENT_METRICS_ENABLED === 'false') {
             res.status(404).json({ ok: false, error: 'Metrics endpoint is disabled' });
             return;
@@ -85,16 +118,17 @@ export function createApiRouter(): Router {
 
     router.get('/agent-runs', observeRoute('agent-runs', async (req, res) => {
         try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
                 res.status(503).json({ error: 'Task engine is not available' });
                 return;
             }
-            const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
             const limitRaw = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
             const scope = req.query.scope === 'all' ? 'all' : 'roots';
             const page = await engine.listAgentRuns({
-                tenantId,
+                tenantId: context.tenantId,
                 ...(typeof req.query.agentId === 'string' && req.query.agentId.length > 0 ? { agentId: req.query.agentId } : {}),
                 ...(typeof req.query.status === 'string' && req.query.status.length > 0 ? { status: req.query.status } : {}),
                 ...(typeof req.query.since === 'string' && req.query.since.length > 0 ? { since: req.query.since } : {}),
@@ -109,7 +143,9 @@ export function createApiRouter(): Router {
         }
     }));
 
-    router.get('/agents', observeRoute('agents', async (_req, res) => {
+    router.get('/agents', observeRoute('agents', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
         const agentsById = new Map<string, ListedAgent>();
 
         for (const card of PluginManager.listAgents()) {
@@ -164,6 +200,8 @@ export function createApiRouter(): Router {
 
     router.get('/tasks/:taskId/run-graph', observeRoute('run-graph', async (req, res) => {
         try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
                 res.status(503).json({ error: 'Task engine is not available' });
@@ -174,9 +212,8 @@ export function createApiRouter(): Router {
                 res.status(400).json({ error: 'taskId is required' });
                 return;
             }
-            const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
             const graph = await engine.buildAgentRunGraph({
-                tenantId,
+                tenantId: context.tenantId,
                 taskId,
             });
             res.json(graph);
@@ -187,27 +224,39 @@ export function createApiRouter(): Router {
     }));
 
     router.post('/tasks/:taskId/cancel', observeRoute('task-cancel', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        const requestedAt = new Date();
+        const taskId = req.params.taskId;
+        const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+        const reason = typeof body.reason === 'string' && body.reason.trim().length > 0
+            ? body.reason.trim()
+            : 'operator cancel';
+        const agentId = typeof body.agentId === 'string' && body.agentId.length > 0
+            ? body.agentId
+            : undefined;
         try {
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
                 res.status(503).json({ error: 'Task engine is not available' });
                 return;
             }
-            const taskId = req.params.taskId;
             if (taskId === undefined || taskId.length === 0) {
                 res.status(400).json({ error: 'taskId is required' });
                 return;
             }
-            const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
-            const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
-            const reason = typeof body.reason === 'string' && body.reason.trim().length > 0
-                ? body.reason.trim()
-                : 'operator cancel';
-            const agentId = typeof body.agentId === 'string' && body.agentId.length > 0
-                ? body.agentId
-                : undefined;
+            await auditOperatorAction(context, {
+                action: agentId ? 'agent.cancel' : 'run.cancel',
+                taskId,
+                agentId,
+                reason,
+                requestedAt,
+                accepted: true,
+                resultStatus: 'requested',
+                childPropagation: 'best_effort',
+            });
             const result = await engine.cancelTask({
-                tenantId,
+                tenantId: context.tenantId,
                 taskId,
                 ...(agentId !== undefined ? { agentId } : {}),
                 reason,
@@ -215,12 +264,24 @@ export function createApiRouter(): Router {
             res.json(result);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            await auditOperatorAction(context, {
+                action: agentId ? 'agent.cancel' : 'run.cancel',
+                taskId,
+                agentId,
+                reason,
+                requestedAt,
+                accepted: false,
+                resultStatus: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+            }).catch(() => undefined);
             res.status(500).json({ error: 'Failed to cancel task', message });
         }
     }));
 
     router.get('/tasks/:taskId/turns/:turnSeq', observeRoute('turn-detail', async (req, res) => {
         try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
                 res.status(503).json({ error: 'Task engine is not available' });
@@ -237,8 +298,7 @@ export function createApiRouter(): Router {
                 res.status(400).json({ error: 'turnSeq must be a number' });
                 return;
             }
-            const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
-            const turn = await engine.getAgentRunTurn({ tenantId, taskId, turnSeq });
+            const turn = await engine.getAgentRunTurn({ tenantId: context.tenantId, taskId, turnSeq });
             if (turn === null) {
                 res.status(404).json({ error: 'Turn not found' });
                 return;
@@ -252,6 +312,8 @@ export function createApiRouter(): Router {
 
     router.get('/tasks/:taskId/memory', observeRoute('memory-detail', async (req, res) => {
         try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
             const engine = EngineLocator.getEngine<TaskEngine>();
             if (!engine) {
                 res.status(503).json({ error: 'Task engine is not available' });
@@ -262,8 +324,7 @@ export function createApiRouter(): Router {
                 res.status(400).json({ error: 'taskId is required' });
                 return;
             }
-            const tenantId = req.header('x-tenant-id') ?? String(req.query.tenantId ?? 'default');
-            const memory = await engine.getAgentRunMemory({ tenantId, taskId });
+            const memory = await engine.getAgentRunMemory({ tenantId: context.tenantId, taskId });
             res.json(memory);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -288,6 +349,15 @@ function observeRoute(route: string, handler: (req: any, res: any, next?: any) =
         try {
             await handler(req, res, next);
         } catch (error) {
+            if (error instanceof OperatorAuthError) {
+                defaultMetricsRegistry.increment('operator.api_error_total', {
+                    route,
+                    method,
+                    errorCode: error.code,
+                });
+                res.status(error.status).json({ error: error.code, message: error.message });
+                return;
+            }
             defaultMetricsRegistry.increment('operator.api_error_total', {
                 route,
                 method,
@@ -310,6 +380,51 @@ function observeRoute(route: string, handler: (req: any, res: any, next?: any) =
             });
         }
     };
+}
+
+function contextOrThrow(req: any): OperatorRequestContext {
+    return resolveOperatorRequestContext(req);
+}
+
+function contextOrRespond(req: any, res: any): OperatorRequestContext | undefined {
+    try {
+        return contextOrThrow(req);
+    } catch (error) {
+        if (error instanceof OperatorAuthError) {
+            res.status(error.status).json({ error: error.code, message: error.message });
+            return undefined;
+        }
+        throw error;
+    }
+}
+
+function isOperatorLaunch(req: any): boolean {
+    return req.header?.('x-callagent-operator-launch') === 'true';
+}
+
+function shouldProtectRpcMethod(method: unknown): boolean {
+    if (!isProductionMode() || isPublicRpcEnabled()) return false;
+    return method === 'tasks/send' || method === 'tasks/sendSubscribe' || method === 'tasks/input';
+}
+
+function isTaskStartingRpcMethod(method: unknown): method is 'tasks/send' | 'tasks/sendSubscribe' {
+    return method === 'tasks/send' || method === 'tasks/sendSubscribe';
+}
+
+async function auditOperatorAction(
+    context: OperatorRequestContext,
+    record: Parameters<typeof writeOperatorAudit>[0]['record']
+): Promise<void> {
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    const prisma = engine && typeof (engine as any).getOperatorPrismaClient === 'function'
+        ? (engine as any).getOperatorPrismaClient()
+        : undefined;
+    await writeOperatorAudit({
+        prisma: prisma as never,
+        context,
+        record,
+        required: context.production,
+    });
 }
 
 async function readIndexedAgentCard(agentName: string, agentCardPath: string | undefined): Promise<AgentCard> {

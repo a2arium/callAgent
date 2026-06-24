@@ -118,6 +118,8 @@ Key pages:
 - `implementation-plan.md` — staged implementation plan.
 - `production-readiness.md` — production promotion gates for scale, reliability,
   payload safety, observability, retention, and incident workflow.
+- `specs/phase5d-retention-security-deletion.md` — operator auth, audit,
+  retention, and deletion-gate contract.
 - `migration-checklist.md` — promotion/deletion checklist.
 - `adr/` — decision records to review before implementation (0001–0010).
 - `specs/` — driver seam, kernel, Hatchet task model, timer wakes, worker

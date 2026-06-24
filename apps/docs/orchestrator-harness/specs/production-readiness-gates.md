@@ -748,17 +748,30 @@ signals.
 
 Scope:
 
-- retention/pruning jobs;
-- audit records for destructive actions;
-- tenant isolation tests;
-- parity harness for deletion candidates;
-- per-surface deletion approvals.
+- shared-token operator auth with production fail-closed behavior;
+- tenant normalization and isolation tests across operator endpoints;
+- audit records for destructive and raw-payload operator actions;
+- retention/pruning dry-run plus explicit apply mode;
+- per-surface deletion-gate validation.
 
 Exit:
 
 - old runs remain intelligible after raw/debug expiry;
 - destructive actions are audited;
-- deletion candidates are explicitly approved or left behind flags.
+- deletion candidates are explicitly approved or left behind as candidates.
+
+Phase 5D defaults:
+
+- debug/provider/raw retention: 7 days;
+- semantic summaries: 365 days and preserved by Phase 5D;
+- audit records: 365 days;
+- pruning apply requires `CALLAGENT_RETENTION_APPLY=true`;
+- raw `wm_events` pruning additionally requires
+  `CALLAGENT_RETENTION_PRUNE_WM_EVENTS=true`;
+- outbox rows are not pruned until the schema has a resolved/dispatched state;
+- production operator auth requires `CALLAGENT_OPERATOR_AUTH_TOKEN`.
+- production `/rpc` `tasks/send`, `tasks/sendSubscribe`, and `tasks/input` are
+  operator-auth protected unless `CALLAGENT_RPC_PUBLIC=true`.
 
 ## Tests
 

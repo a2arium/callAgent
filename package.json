@@ -34,7 +34,8 @@
     "version:patch": "yarn workspaces run version:patch",
     "version:minor": "yarn workspaces run version:minor",
     "version:major": "yarn workspaces run version:major",
-    "operator:run-graph": "node scripts/operator-run-graph.mjs"
+    "operator:run-graph": "node scripts/operator-run-graph.mjs",
+    "operator:retention": "tsx scripts/operator-retention.ts"
   },
   "keywords": [
     "ai",

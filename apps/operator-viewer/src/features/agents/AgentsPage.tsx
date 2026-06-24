@@ -53,8 +53,9 @@ type AgentViewState = {
 };
 
 export function AgentsPage(): React.ReactElement {
-  const query = useAgents();
   const navigate = useNavigate();
+  const [tenantId, setTenantId] = useState('default');
+  const query = useAgents(tenantId);
   const agents = query.data?.items ?? [];
   const [usageState, setUsageState] = useState<AgentUsageState>(() => loadAgentUsageState());
   const [viewState, setViewState] = useState<AgentViewState>(() => loadAgentViewState());
@@ -63,7 +64,6 @@ export function AgentsPage(): React.ReactElement {
     () => agents.find((agent) => agent.id === selectedAgentId) ?? agents[0],
     [agents, selectedAgentId]
   );
-  const [tenantId, setTenantId] = useState('default');
   const [presetState, setPresetState] = useState<AgentPayloadPresetState>(() => loadAgentPayloadPresetState('__initial__'));
   const [runState, setRunState] = useState<RunState>({ state: 'idle' });
 

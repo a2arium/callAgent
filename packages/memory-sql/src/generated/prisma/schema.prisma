@@ -382,6 +382,30 @@ model OperatorProjectionCursor {
   @@map("operator_projection_cursors")
 }
 
+model OperatorAuditEvent {
+  id               String   @id @default(cuid())
+  tenantId         String   @map("tenant_id")
+  action           String
+  actorType        String   @map("actor_type")
+  actorId          String   @map("actor_id")
+  rootTaskId       String?  @map("root_task_id")
+  taskId           String?  @map("task_id")
+  agentId          String?  @map("agent_id")
+  reason           String?
+  accepted         Boolean
+  resultStatus     String?  @map("result_status")
+  errorCode        String?  @map("error_code")
+  childPropagation String?  @map("child_propagation")
+  metadata         Json?
+  requestedAt      DateTime @map("requested_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action, createdAt])
+  @@index([tenantId, taskId, createdAt])
+  @@map("operator_audit_events")
+}
+
 model DurableSubscriptionCursor {
   tenantId       String   @map("tenant_id")
   streamId       String   @map("stream_id")

@@ -36,7 +36,9 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
             task,
             isStreaming: true,
             agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
-            tenantId: typeof params.tenantId === 'string' ? params.tenantId : undefined,
+            tenantId: typeof params.tenantId === 'string'
+                ? params.tenantId
+                : ((req as RequestWithTenant).tenantId || req.header('x-tenant-id') || undefined),
         }).catch((error: unknown) => {
             console.error('Error in streaming task execution:', error);
         });

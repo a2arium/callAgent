@@ -4,6 +4,8 @@ import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { normalizeRpcTaskParams } from './taskParams.js';
 
+type RequestWithTenant = Request & { tenantId?: string };
+
 /**
  * Handler for the tasks/send method
  */
@@ -31,7 +33,9 @@ export async function handleTasksSend(req: Request, res: Response): Promise<void
             task,
             isStreaming: false,
             agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
-            tenantId: typeof params.tenantId === 'string' ? params.tenantId : undefined,
+            tenantId: typeof params.tenantId === 'string'
+                ? params.tenantId
+                : ((req as RequestWithTenant).tenantId || req.header('x-tenant-id') || undefined),
         });
 
         // Send the JSON-RPC response with the complete task results

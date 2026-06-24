@@ -480,9 +480,29 @@ Phase 5C is not yet a full production observability stack. Prometheus/OTel
 exporters, paging integrations, and historical metrics persistence remain
 follow-ups unless pulled into Phase 5D.
 
+Phase 5D retention/security/deletion-gate scaffolding is implemented for the
+operator harness:
+
+- operator endpoints now share tenant normalization and shared-token production
+  auth, with local development open by default;
+- production non-public `/rpc` protects `tasks/send`, `tasks/sendSubscribe`, and
+  `tasks/input`, with task-starting calls audited as payload launches;
+- destructive/raw-payload operator actions write durable `operator_audit_events`;
+- the operator launcher marks raw JSON runs as operator launches for audit;
+- retention policy defaults preserve semantic summaries for 365 days, audit rows
+  for 365 days, and debug/provider data for 7 days;
+- `yarn operator:retention` provides dry-run by default and explicit
+  `CALLAGENT_RETENTION_APPLY=true` apply mode with bounded batches;
+- raw `wm_events` apply requires `CALLAGENT_RETENTION_PRUNE_WM_EVENTS=true`, and
+  outbox rows are not pruned until pending/resolved state is represented;
+- deletion-gate registry validation prevents marking legacy surfaces approved
+  without parity, drill, rollback, metrics, retention, and approval evidence;
+- `specs/phase5d-retention-security-deletion.md` records the operational
+  contract.
+
 ## Next action
 
-Continue with Phase 5C-D production readiness gates:
+Continue with Phase 5D/5E production readiness gates:
 
 1. Validate Phase 5C automated tests and record at least one real failure drill
    using `phase5c-observability-drills.md`. Controlled P6 is recorded; live P5

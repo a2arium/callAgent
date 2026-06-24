@@ -1314,6 +1314,10 @@ export class TaskEngine {
         return (this.sessionManager as any)?.store?.prisma;
     }
 
+    getOperatorPrismaClient(): unknown {
+        return this.getSessionStorePrisma();
+    }
+
     async appendOperatorEvent(params: {
         tenantId: string;
         sessionId: string;

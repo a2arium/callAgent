@@ -119,8 +119,8 @@ production incident UI.
       after terminal status.
 - [ ] Production mode is explicit from runtime configuration; development mode
       is the default.
-- [ ] Auth and tenant isolation are implemented and tested before production data
-      is exposed.
+- [x] Shared-token operator auth and tenant isolation are implemented and tested
+      before production data is exposed.
 - [ ] Failure drills pass: worker kill mid-segment, worker kill while awaiting
       child, Hatchet unavailable, Postgres restart, NATS unavailable, missing
       child wake, timeout, and cancellation.
@@ -137,7 +137,10 @@ production incident UI.
       `agent_runs`, `agent_run_edges`, `turn_runs`, `effect_runs`.
 - [ ] Deep link Hatchet run → callAgent task → `TurnTrace`.
 - [ ] Prometheus/OTel wired; alerts for DLQ/stuck/failure/timer-lag.
-- [ ] Retention policy decided (Hatchet ~30d; audit stays in TurnTrace/snapshots).
+- [x] Retention policy decided and implemented for the operator store:
+      semantic summaries 365d/preserved, audit 365d, raw/debug/provider 7d by
+      default with dry-run and explicit apply mode. Raw `wm_events` apply is
+      gated by semantic-read readiness; ambiguous outbox rows are not pruned.
 
 ## Deletion (guarded, per surface)
 
@@ -149,6 +152,8 @@ production incident UI.
       deferral removed.
 - [ ] `setTimeout` token-expiry waits removed.
 - [ ] Each deletion verified reversible (flag flip restores in-process path).
+      Phase 5D adds per-surface gate validation; no legacy surface should be
+      removed until its evidence is complete.
 
 See `specs/deletion-inventory.md` for exact line references.
 

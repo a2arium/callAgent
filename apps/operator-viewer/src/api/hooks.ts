@@ -18,10 +18,10 @@ export function useAgentRuns(input: ListAgentRunsInput) {
   });
 }
 
-export function useAgents() {
+export function useAgents(tenantId = 'default') {
   return useQuery({
-    queryKey: ['agents'],
-    queryFn: listAgents,
+    queryKey: ['agents', tenantId],
+    queryFn: () => listAgents(tenantId),
     staleTime: 30_000,
   });
 }
