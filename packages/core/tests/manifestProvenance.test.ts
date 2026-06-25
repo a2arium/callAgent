@@ -34,6 +34,34 @@ describe('manifestProvenance', () => {
             const hash = computeStableHash({ name: 'test', version: '1.0' });
             expect(hash).toMatch(/^[a-f0-9]{64}$/);
         });
+
+        it('does not recurse forever on circular objects', () => {
+            const circular: Record<string, unknown> = { name: 'test', version: '1.0' };
+            circular.self = circular;
+
+            const hash = computeStableHash(circular);
+
+            expect(hash).toMatch(/^[a-f0-9]{64}$/);
+            expect(computeStableHash(circular)).toBe(hash);
+        });
+
+        it('does not traverse non-plain runtime objects', () => {
+            class RuntimeObject {
+                name = 'runtime';
+                version = '1.0';
+            }
+
+            const value = {
+                name: 'test',
+                version: '1.0',
+                runtime: new RuntimeObject(),
+            };
+
+            const hash = computeStableHash(value);
+
+            expect(hash).toMatch(/^[a-f0-9]{64}$/);
+            expect(computeStableHash(value)).toBe(hash);
+        });
     });
 
     describe('validateManifestIdentity', () => {

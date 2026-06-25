@@ -17,21 +17,40 @@ export type ManifestResolutionInput = {
 /**
  * Canonicalize a value to a stable JSON string (sorted keys, no extra whitespace).
  */
-function canonicalize(obj: unknown): string {
+function canonicalize(obj: unknown, seen = new WeakSet<object>()): string {
     if (obj === null || typeof obj !== 'object') {
-        return JSON.stringify(obj);
+        return JSON.stringify(obj) ?? JSON.stringify(String(obj));
     }
     if (Array.isArray(obj)) {
-        return '[' + obj.map(canonicalize).join(',') + ']';
+        if (seen.has(obj)) return '"[Circular]"';
+        seen.add(obj);
+        try {
+            return '[' + obj.map((item) => canonicalize(item, seen)).join(',') + ']';
+        } finally {
+            seen.delete(obj);
+        }
     }
+    if (seen.has(obj)) return '"[Circular]"';
+    seen.add(obj);
+
+    const proto = Object.getPrototypeOf(obj);
+    if (proto !== Object.prototype && proto !== null) {
+        seen.delete(obj);
+        return JSON.stringify(Object.prototype.toString.call(obj));
+    }
+
     const keys = Object.keys(obj as Record<string, unknown>).sort();
-    const pairs = keys.map(
-        (k) =>
-            JSON.stringify(k) +
-            ':' +
-            canonicalize((obj as Record<string, unknown>)[k])
-    );
-    return '{' + pairs.join(',') + '}';
+    try {
+        const pairs = keys.map(
+            (k) =>
+                JSON.stringify(k) +
+                ':' +
+                canonicalize((obj as Record<string, unknown>)[k], seen)
+        );
+        return '{' + pairs.join(',') + '}';
+    } finally {
+        seen.delete(obj);
+    }
 }
 
 /**
