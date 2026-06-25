@@ -1263,6 +1263,125 @@ Conclusion:
   already-started child runs were allowed to complete and the graph settled with
   completed child nodes/edges under canceled roots.
 
+## 2026-06-25 — P3 Missing Child Wake Drill
+
+Goal:
+
+- prove a parent waiting on `await_child` does not wait forever when the Hatchet
+  child wake event is missing;
+- verify the durable parent recovers from persisted child terminal facts;
+- verify no duplicate child delegation is created during recovery;
+- verify roots, children, and edges converge to terminal semantic state.
+
+Implementation hardening:
+
+- await-child waits now race the Hatchet child event against a configurable
+  watchdog sleep;
+- when the watchdog wins, the parent checks persisted `task.child_started` plus
+  child terminal `turn.completed` / `task.completed` / `task.failed` events;
+- if persisted child terminal output exists, the parent resumes from that data
+  instead of waiting indefinitely for the missing Hatchet event;
+- a scoped drill switch,
+  `CALLAGENT_HATCHET_SUPPRESS_CHILD_WAKE_PREFIX=<prefix>`, can suppress the
+  provider child wake for matching parent task ids without mutating database
+  rows by hand.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic \
+CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS=2000 \
+CALLAGENT_HATCHET_SUPPRESS_CHILD_WAKE_PREFIX=phase5-p3-missing-child-wake-1782417200000 \
+yarn runtime --no-dashboard
+```
+
+Command:
+
+```bash
+node apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs \
+  --prefix phase5-p3-missing-child-wake-1782417200000 \
+  --count 8 \
+  --poll-ms 2000 \
+  --max-polls 90
+```
+
+Action:
+
+- launched 8 real `fetch-page-router` roots;
+- all 8 roots reached `waiting` with 8 running child edges by poll tick 1;
+- all provider child wake events for those roots were suppressed by prefix;
+- continued polling until the watchdog recovered from persisted child terminal
+  facts and all roots completed.
+
+Final summary:
+
+```json
+{
+  "launchHttp": { "200": 8 },
+  "launchErrors": 0,
+  "activeTick": 1,
+  "terminalTick": 5,
+  "finalRoots": { "completed": 8 },
+  "finalEdgeStatuses": { "completed": 8 },
+  "childStatuses": { "completed": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalEdgeCounts": [1, 1, 1, 1, 1, 1, 1, 1],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3],
+  "duplicateChildEdges": []
+}
+```
+
+Persisted event count check:
+
+```text
+roots=8
+child_started=8
+parent_child_completed=0
+min_child_started=1
+max_child_started=1
+root_turn_completed=16
+```
+
+Semantic read-model terminal check:
+
+```text
+children completed=8
+edges completed=8
+roots completed=8
+```
+
+Graph polling timing across 64 graph polls:
+
+```json
+{
+  "count": 64,
+  "p50Ms": 23.9,
+  "p95Ms": 118.4,
+  "maxMs": 119.3
+}
+```
+
+Verification:
+
+```bash
+yarn test packages/driver-hatchet/tests/task.test.ts
+yarn build
+```
+
+Result:
+
+- targeted driver task suite passed: 23 tests;
+- full repository build passed: 20 packages.
+
+Conclusion:
+
+- missing Hatchet child wake recovery works for this parent/child workload;
+- parents did not wait forever despite zero persisted parent
+  `task.child_completed` events;
+- persisted child terminal facts were sufficient to resume all roots;
+- no duplicate child delegation or stale `waiting`, `running`, or `unknown`
+  projection remained after terminal outcomes.
+
 ## Remaining Evidence Needed
 
 - Add a first-class browser automation dependency or restore the gstack `browse`
@@ -1271,7 +1390,6 @@ Conclusion:
   screenshot evidence.
 - During active real-agent runs, exercise:
   - Postgres interruption where practical;
-  - missing child wake;
   - timeout.
 - Capture operator screenshots or API responses proving no stale
   waiting/running state remains after terminal outcomes.

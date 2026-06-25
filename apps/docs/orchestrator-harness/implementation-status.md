@@ -528,6 +528,10 @@ operator harness:
   canceling 8 waiting roots returns HTTP 200 for all requests, persists
   `task.canceled` events, preserves canceled roots against late non-terminal
   events, and settles the graph with canceled roots plus no active child state.
+  P3 missing-child-wake evidence is recorded: suppressing provider child wake
+  events for 8 waiting roots still completed all roots from persisted child
+  terminal facts, with zero parent `task.child_completed` events and no duplicate
+  child edges.
 
 ## Next action
 
@@ -540,7 +544,7 @@ Continue with Phase 5D/5E production readiness gates:
    5D deployment hardening.
 3. Complete the remaining P2/P3 production-readiness evidence:
    - run Postgres interruption evidence where practical;
-   - run missing-child-wake and timeout scenarios;
+   - run timeout scenario;
    - capture operator API/UI proof that no stale waiting/running states remain
      after terminal outcomes.
 

@@ -27,6 +27,8 @@ import { withHatchetTaskLogging } from '../hatchetLogging.js';
 export const TASK_TASK_NAME = 'aplret.task';
 const BOUNDARY_EVENT_LOOKBACK = '5m';
 const TASK_EXECUTION_TIMEOUT = '30m';
+const DEFAULT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = 30_000;
+const DEFAULT_AWAIT_CHILD_MAX_WAIT_MS = 25 * 60_000;
 
 export function agentTaskName(agentId: string): string {
     return `agent.${agentId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
@@ -360,6 +362,10 @@ async function notifyPersistedA2AParentIfTerminal(
         return;
     }
 
+    if (shouldSuppressChildWakeForDrill(parentTaskId)) {
+        return;
+    }
+
     const idempotencyKey = `${parentTaskId}:child:${parentChildToken}`;
     await deps.events.push(
         `aplret.child.${parentChildToken}`,
@@ -375,6 +381,18 @@ async function notifyPersistedA2AParentIfTerminal(
         },
         { key: `${parentTenantId}:${parentTaskId}:${parentChildToken}` }
     );
+}
+
+function shouldSuppressChildWakeForDrill(parentTaskId: string): boolean {
+    const raw = process.env.CALLAGENT_HATCHET_SUPPRESS_CHILD_WAKE_PREFIX;
+    if (raw === undefined || raw.trim().length === 0) {
+        return false;
+    }
+    return raw
+        .split(',')
+        .map((prefix) => prefix.trim())
+        .filter((prefix) => prefix.length > 0)
+        .some((prefix) => parentTaskId.startsWith(prefix));
 }
 
 function outputFromTerminalBoundary(boundary: SegmentTaskBoundary): unknown {
@@ -524,14 +542,16 @@ async function waitForBoundaryEvent(
         return waitForInputOrTimer(ctx, input, boundary, deps.runtimeTimers);
     }
 
+    if (boundary.kind === 'await_child') {
+        return waitForChildBoundaryEvent(ctx, input, boundary, deps);
+    }
+
     const eventKind =
         boundary.kind === 'await_input'
             ? 'input'
             : boundary.kind === 'await_tool'
               ? 'tool'
-              : boundary.kind === 'await_child'
-                ? 'child'
-                : 'external';
+              : 'external';
     const payload = await ctx.waitForEvent(
         `aplret.${eventKind}.${boundary.token}`,
         `input.tenantId == "${input.tenantId}" && input.taskId == "${input.taskId}"`,
@@ -541,6 +561,56 @@ async function waitForBoundaryEvent(
         `wait:${eventKind}:${boundary.token}`
     );
     return normalizeWakeEvent(eventKind, boundary.token, payload);
+}
+
+async function waitForChildBoundaryEvent(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
+    deps?: TaskTaskDeps
+): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    const eventKey = `aplret.child.${boundary.token}`;
+    const expression = `input.tenantId == "${input.tenantId}" && input.taskId == "${input.taskId}"`;
+    const intervalMs = readPositiveMsEnv(
+        'CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS',
+        DEFAULT_AWAIT_CHILD_RECOVERY_INTERVAL_MS
+    );
+    const maxWaitMs = readPositiveMsEnv(
+        'CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS',
+        DEFAULT_AWAIT_CHILD_MAX_WAIT_MS
+    );
+    const startedAt = Date.now();
+    let attempt = 0;
+
+    for (;;) {
+        const waitable = Or(
+            new UserEventCondition(eventKey, expression, 'child'),
+            new SleepCondition(durationFromMs(intervalMs), 'watchdog')
+        );
+        const result = await ctx.waitFor(waitable, `wait:child-or-watchdog:${boundary.token}:${attempt}`);
+        const extracted = extractWaitResult(result);
+        if (extracted.key === 'child') {
+            return normalizeWakeEvent('child', boundary.token, extracted.payload);
+        }
+
+        const persisted = await findPersistedBoundaryEvent(input, boundary, deps);
+        if (persisted !== undefined) {
+            return persisted;
+        }
+
+        if (Date.now() - startedAt >= maxWaitMs) {
+            const childTaskId = await findPersistedChildTaskId(input, boundary, deps ?? {});
+            return childWake(input, boundary.token, childTaskId ?? boundary.token, {
+                ok: false,
+                error: {
+                    code: 'CHILD_WAKE_TIMEOUT',
+                    message: `Timed out waiting for child wake for token ${boundary.token}.`,
+                },
+            });
+        }
+
+        attempt += 1;
+    }
 }
 
 async function waitForInputOrTimer(
@@ -720,8 +790,17 @@ function extractWaitResult(value: Record<string, unknown>): { key: string; paylo
 
 function durationUntil(fireAt: string): Duration {
     const remainingMs = Date.parse(fireAt) - Date.now();
-    const seconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    return durationFromMs(remainingMs);
+}
+
+function durationFromMs(ms: number): Duration {
+    const seconds = Math.max(1, Math.ceil(ms / 1000));
     return `${seconds}s` as Duration;
+}
+
+function readPositiveMsEnv(name: string, fallback: number): number {
+    const raw = Number.parseInt(process.env[name] ?? '', 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
 async function findPersistedBoundaryEvent(
