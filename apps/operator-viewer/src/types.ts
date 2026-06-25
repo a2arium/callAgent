@@ -1,4 +1,4 @@
-export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | 'cancelled' | 'unknown';
+export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'cancelled' | 'unknown';
 
 export type AgentRunListItem = {
   agentId?: string;

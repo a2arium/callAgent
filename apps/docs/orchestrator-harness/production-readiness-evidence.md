@@ -613,14 +613,139 @@ Conclusion:
 - this is still local-machine evidence, not a final hosted production capacity
   claim.
 
+## 2026-06-24 — Partial P2 Active Root Drill
+
+Goal:
+
+- verify real active parent/child runs against the Hatchet runtime and semantic
+  operator projection, not only synthetic persisted rows;
+- confirm root/child graph edges resolve terminal state when child completion is
+  observed through child turn projection;
+- confirm active await-child roots display as `waiting`, not `unknown`.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Payload shape:
+
+- root agent: `fetch-page-router`;
+- child agent: `fetch-html`;
+- page type: `listing`;
+- fetch mode: `static_html`;
+- URL:
+  `https://update-fixtures.staticdomains.app/pages/listing/static.html`;
+- site config included listing access/items/pagination and a minimal detail
+  extraction section required by the `fetch-page-router` input contract.
+
+### 10-root drill
+
+Root prefix:
+
+```text
+phase5-p2-fetch-page-router-1782329374154
+```
+
+Result:
+
+- launched 10 real root tasks through the runtime API;
+- each root delegated to one `fetch-html` child;
+- all 10 roots completed;
+- all 10 child nodes completed;
+- each graph ended with 2 nodes, 1 edge, and 3 turns;
+- each final parent-child edge resolved to `completed`;
+- no API launch errors.
+
+Graph polling timing across 50 graph polls:
+
+```json
+{
+  "count": 50,
+  "p50Ms": 39.7,
+  "p95Ms": 110.3,
+  "maxMs": 121.8
+}
+```
+
+Issues found and fixed:
+
+- child edges could remain `running` when the child reached terminal state via
+  child `turn.completed` projection but no parent `task.child_completed` event
+  was present. Semantic projection now resolves matching
+  `agent_run_edges.child_task_id` rows when a child task is projected terminal.
+- active await-child roots were shown as `unknown` because `waiting` was missing
+  from the core and operator-viewer status normalization contracts. `waiting` is
+  now a first-class `AgentRunStatus` in core projection, graph normalization, and
+  operator UI normalization.
+
+### Waiting-status regression smoke
+
+Root prefix:
+
+```text
+phase5-p2-waiting-smoke-1782329873917
+```
+
+Result:
+
+- launched 3 real root tasks through `/rpc`;
+- all three roots entered `waiting` while their `fetch-html` children ran;
+- no root ever displayed `unknown`;
+- all three roots completed;
+- all three child nodes completed;
+- all three final parent-child edges resolved to `completed`.
+
+Graph polling timing across 117 graph polls:
+
+```json
+{
+  "count": 117,
+  "p50Ms": 6.6,
+  "p95Ms": 26.1,
+  "maxMs": 118.5
+}
+```
+
+Verification:
+
+```bash
+yarn jest packages/core/tests/operator.agentRunsList.test.ts \
+  packages/core/tests/operator.runGraph.test.ts \
+  --runInBand
+
+yarn workspace @a2arium/operator-viewer test src/domain/derive.test.ts
+
+yarn workspace @a2arium/operator-viewer build
+
+yarn build
+```
+
+Result:
+
+- targeted core operator tests passed: 2 suites, 31 tests;
+- operator-viewer status/domain tests passed: 1 suite, 6 tests;
+- operator-viewer production build passed;
+- full repository build passed: 20 packages.
+
+Limitations:
+
+- this is partial P2 evidence: the active drill covered 10 roots, not the full
+  20-active-root gate;
+- this drill did not include runtime kill/restart, Hatchet/Postgres/NATS
+  interruption, cancellation, timeout, or missing-child-wake scenarios;
+- this is local-machine evidence, not a hosted production capacity claim.
+
 ## Remaining Evidence Needed
 
 - Add a first-class browser automation dependency or restore the gstack `browse`
   binary so render checks can include DOM assertions and responsive screenshots.
 - Measure browser/operator UI render behavior with trace-level timing, not only
   screenshot evidence.
-- Run 10-20 active parallel real agent tasks with child agents.
-- During that active run, exercise:
+- Scale the active real-agent drill from 10 roots to the full 20-active-root P2
+  gate.
+- During active real-agent runs, exercise:
   - runtime kill/restart;
   - Hatchet/Postgres/NATS interruption where practical;
   - cancellation;

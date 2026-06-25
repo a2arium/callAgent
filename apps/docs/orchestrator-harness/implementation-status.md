@@ -509,7 +509,11 @@ operator harness:
   follow-up profile found redundant fleet aggregation reads and duplicate
   in-flight projection work. Fleet list now uses denormalized semantic counters,
   identical in-flight semantic reads are coalesced, and the local warm
-  20-poller p95 is recorded at roughly 116-137 ms.
+  20-poller p95 is recorded at roughly 116-137 ms. A partial P2 real-agent drill
+  is also recorded: 10 active `fetch-page-router` roots delegated to
+  `fetch-html` children and completed with resolved semantic edges; a follow-up
+  3-root smoke confirmed active await-child roots project as `waiting`, not
+  `unknown`.
 
 ## Next action
 
@@ -520,9 +524,13 @@ Continue with Phase 5D/5E production readiness gates:
    provider-enqueue evidence is still recommended before closing Phase 5C.
 2. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
    5D deployment hardening.
-3. Run recorded volume tests, including 100k historical runs,
-   10-20 active parallel agent tasks, runtime/Hatchet/Postgres/NATS restarts,
-   cancellation, missing child wake, and timeout scenarios.
+3. Complete the remaining P2/P3 production-readiness evidence:
+   - scale the active real-agent drill from 10 roots to 20 roots;
+   - run active runtime kill/restart evidence;
+   - run Hatchet/Postgres/NATS interruption evidence where practical;
+   - run cancellation, missing-child-wake, and timeout scenarios;
+   - capture operator API/UI proof that no stale waiting/running states remain
+     after terminal outcomes.
 
 ## Open questions (carried from requirements §11)
 

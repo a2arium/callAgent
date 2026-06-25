@@ -58,6 +58,7 @@ type PrismaDelegate = {
     upsert?: (args: Record<string, unknown>) => Promise<unknown>;
     findMany?: (args: Record<string, unknown>) => Promise<unknown[]>;
     count?: (args: Record<string, unknown>) => Promise<number>;
+    updateMany?: (args: Record<string, unknown>) => Promise<unknown>;
 };
 
 type ProjectionPrisma = {
@@ -329,6 +330,12 @@ export class OperatorProjectionRepository {
                 traceId,
                 outputState: numberField(event.payload, 'artifactsCount') > 0 ? 'artifact_metadata' : undefined,
             });
+            await this.resolveEdgesForTerminalChild({
+                tenantId: event.tenantId,
+                childTaskId: taskId,
+                status: 'completed',
+                resolvedAt: createdAt,
+            });
             return;
         }
 
@@ -341,6 +348,14 @@ export class OperatorProjectionRepository {
                 status: 'failed',
                 terminalAt: createdAt,
                 traceId,
+                terminalCode: errorCode(error),
+                terminalMessage: errorMessage(error) ?? (typeof error === 'string' ? error : undefined),
+            });
+            await this.resolveEdgesForTerminalChild({
+                tenantId: event.tenantId,
+                childTaskId: taskId,
+                status: 'failed',
+                resolvedAt: createdAt,
                 terminalCode: errorCode(error),
                 terminalMessage: errorMessage(error) ?? (typeof error === 'string' ? error : undefined),
             });
@@ -463,17 +478,28 @@ export class OperatorProjectionRepository {
                 terminalMessage: semanticError ? errorMessage(transition) : undefined,
                 turnTraceId: stringField(event.payload, 'turnId'),
             });
+            const runStatus = semanticError ? 'failed' : boundary ? 'waiting' : transitionKindValue === 'complete' ? 'completed' : 'running';
             await this.upsertEventRun({
                 tenantId: event.tenantId,
                 taskId,
                 rootTaskId,
                 agentId,
-                status: semanticError ? 'failed' : boundary ? 'waiting' : transitionKindValue === 'complete' ? 'completed' : 'running',
+                status: runStatus,
                 terminalAt: semanticError || transitionKindValue === 'complete' ? createdAt : undefined,
                 terminalCode: semanticError ? errorCode(transition) : undefined,
                 terminalMessage: semanticError ? errorMessage(transition) : undefined,
                 outputState: output ? 'available' : undefined,
             });
+            if (semanticError || transitionKindValue === 'complete') {
+                await this.resolveEdgesForTerminalChild({
+                    tenantId: event.tenantId,
+                    childTaskId: taskId,
+                    status: runStatus,
+                    resolvedAt: createdAt,
+                    terminalCode: semanticError ? errorCode(transition) : undefined,
+                    terminalMessage: semanticError ? errorMessage(transition) : undefined,
+                });
+            }
             return;
         }
 
@@ -769,6 +795,30 @@ export class OperatorProjectionRepository {
                 ...data,
             },
             update: data,
+        });
+    }
+
+    private async resolveEdgesForTerminalChild(params: {
+        tenantId: string;
+        childTaskId: string;
+        status: string;
+        resolvedAt: Date;
+        terminalCode?: string;
+        terminalMessage?: string;
+    }): Promise<void> {
+        const updateMany = this.prisma.agentRunEdge?.updateMany;
+        if (typeof updateMany !== 'function') return;
+        await updateMany({
+            where: {
+                tenantId: params.tenantId,
+                childTaskId: params.childTaskId,
+            },
+            data: stripUndefined({
+                status: normalizeStatus(params.status),
+                resolvedAt: params.resolvedAt,
+                terminalCode: params.terminalCode,
+                terminalMessage: params.terminalMessage,
+            }),
         });
     }
 
@@ -1157,6 +1207,7 @@ function normalizeStatus(status: string): AgentRunStatus {
     switch (status) {
         case 'queued':
         case 'running':
+        case 'waiting':
         case 'completed':
         case 'failed':
         case 'canceled':

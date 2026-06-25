@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { OperatorProjectionRepository } from '../src/operator/semanticProjection.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
 
@@ -329,6 +330,84 @@ describe('TaskEngine operator agent run list', () => {
         expect(prisma.turnRun.findMany).not.toHaveBeenCalled();
     });
 
+    it('resolves child edges when a child reaches terminal via turn completion without child_completed event', async () => {
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async ({ where }: { where: { tenantId: string; taskId?: string } }) => {
+                    if (where.taskId === 'root-task') {
+                        return [{
+                            id: 'root-row',
+                            tenantId: where.tenantId,
+                            taskId: 'root-task',
+                            rootTaskId: 'root-task',
+                            scope: 'root',
+                            status: 'waiting',
+                            updatedAt: now,
+                        }];
+                    }
+                    if (where.taskId === 'child-task') {
+                        return [{
+                            id: 'child-row',
+                            tenantId: where.tenantId,
+                            taskId: 'child-task',
+                            rootTaskId: 'root-task',
+                            parentTaskId: 'root-task',
+                            scope: 'child',
+                            status: 'running',
+                            updatedAt: now,
+                        }];
+                    }
+                    return [];
+                }),
+                upsert: jest.fn(async () => ({})),
+            },
+            agentRunEdge: {
+                upsert: jest.fn(async () => ({})),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+            },
+            turnRun: {
+                upsert: jest.fn(async () => ({})),
+            },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+
+        await projection.projectEvent({
+            tenantId: 'default',
+            sessionId: 'root-task',
+            type: 'task.child_started',
+            payload: {
+                token: 'child-token',
+                childTaskId: 'child-task',
+                childAgentId: 'child-agent',
+            },
+            createdAt: now,
+        });
+        await projection.projectEvent({
+            tenantId: 'default',
+            sessionId: 'child-task',
+            type: 'turn.completed',
+            payload: {
+                taskId: 'child-task',
+                agentId: 'child-agent',
+                turnSeq: 1,
+                transition: { kind: 'complete', result: { ok: true } },
+            },
+            createdAt: new Date('2026-06-23T12:01:00.000Z'),
+        });
+
+        expect(prisma.agentRunEdge.updateMany).toHaveBeenCalledWith({
+            where: {
+                tenantId: 'default',
+                childTaskId: 'child-task',
+            },
+            data: {
+                status: 'completed',
+                resolvedAt: new Date('2026-06-23T12:01:00.000Z'),
+            },
+        });
+    });
+
     it('can build a graph from semantic projection records when semantic read mode is enabled', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
         const runRows = [
@@ -339,7 +418,7 @@ describe('TaskEngine operator agent run list', () => {
                 rootTaskId: 'root-task',
                 agentId: 'root-agent',
                 scope: 'root',
-                status: 'running',
+                status: 'waiting',
                 childCount: 1,
                 turnCount: 1,
                 llmCallCount: 0,
@@ -437,6 +516,7 @@ describe('TaskEngine operator agent run list', () => {
 
         const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
         expect(graph.projection).toEqual({ source: 'semantic', partial: false });
+        expect(graph.root.status).toBe('waiting');
         expect(graph.nodes.map((node) => node.taskId)).toEqual(['root-task', 'child-task']);
         expect(graph.edges).toEqual([
             expect.objectContaining({

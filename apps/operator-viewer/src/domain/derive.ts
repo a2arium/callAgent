@@ -57,6 +57,8 @@ export function normalizeRuntimeStatus(status: string | undefined): RuntimeStatu
       return 'queued';
     case 'running':
       return 'running';
+    case 'waiting':
+      return 'waiting';
     case 'completed':
     case 'success':
     case 'succeeded':

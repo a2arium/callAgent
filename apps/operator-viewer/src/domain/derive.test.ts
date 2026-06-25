@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveGraphInsights, deriveStatus } from './derive';
+import { deriveGraphInsights, deriveStatus, normalizeRuntimeStatus } from './derive';
 import { semanticFailureFromTurns } from './semanticFailure';
 import type { AgentRunGraph } from '../types';
 
@@ -16,6 +16,11 @@ describe('deriveGraphInsights', () => {
 });
 
 describe('deriveStatus', () => {
+  it('preserves waiting statuses from semantic operator projections', () => {
+    expect(normalizeRuntimeStatus('waiting')).toBe('waiting');
+    expect(deriveStatus({ status: 'waiting' }).status).toBe('waiting');
+  });
+
   it('derives waiting and stuck from await boundary turns', () => {
     const waiting = deriveStatus({
       status: 'running',

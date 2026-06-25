@@ -1,7 +1,7 @@
 import type { SessionManager } from '../orchestration/SessionManager.js';
 import { operatorPayloadEnvelope } from './payloadBudget.js';
 
-export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | 'unknown';
+export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'unknown';
 
 export type AgentRunGraph = {
     schemaVersion: 1;
@@ -916,7 +916,7 @@ function normalizeStatus(status: string | undefined | null): AgentRunStatus {
     if (status === 'canceled' || status === 'cancelled') {
         return 'canceled';
     }
-    if (status === 'running' || status === 'queued') {
+    if (status === 'running' || status === 'queued' || status === 'waiting') {
         return status;
     }
     return 'unknown';
