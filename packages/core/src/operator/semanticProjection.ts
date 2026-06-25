@@ -96,6 +96,7 @@ function logProjectionProfile(
 }
 
 const operatorProjectionInFlight = new Map<string, Promise<unknown>>();
+const TERMINAL_AGENT_RUN_STATUSES = new Set(['completed', 'failed', 'canceled']);
 
 function operatorProjectionSingleFlightEnabled(): boolean {
     return process.env.CALLAGENT_OPERATOR_READ_SINGLE_FLIGHT !== '0';
@@ -358,6 +359,28 @@ export class OperatorProjectionRepository {
                 resolvedAt: createdAt,
                 terminalCode: errorCode(error),
                 terminalMessage: errorMessage(error) ?? (typeof error === 'string' ? error : undefined),
+            });
+            return;
+        }
+
+        if (event.type === 'task.canceled') {
+            const reason = stringField(event.payload, 'reason');
+            await this.upsertEventRun({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId: parentRootTaskId ?? taskId,
+                agentId,
+                status: 'canceled',
+                terminalAt: createdAt,
+                traceId,
+                cancelReason: reason,
+            });
+            await this.resolveEdgesForTerminalChild({
+                tenantId: event.tenantId,
+                childTaskId: taskId,
+                status: 'canceled',
+                resolvedAt: createdAt,
+                terminalMessage: reason,
             });
             return;
         }
@@ -727,21 +750,36 @@ export class OperatorProjectionRepository {
         terminalAt?: Date;
         terminalCode?: string;
         terminalMessage?: string;
+        cancelReason?: string;
         traceId?: string;
         outputState?: string;
     }): Promise<void> {
+        const status = normalizeStatus(params.status);
+        const existingRows = await this.prisma.agentRun!.findMany!({
+            where: { tenantId: params.tenantId, taskId: params.taskId },
+            take: 1,
+        }) as SemanticRunRow[];
+        const existing = existingRows[0];
+        const existingStatus = existing ? normalizeStatus(existing.status) : undefined;
+        const preserveTerminal =
+            existingStatus !== undefined &&
+            TERMINAL_AGENT_RUN_STATUSES.has(existingStatus) &&
+            existingStatus !== status;
         const data = stripUndefined({
             rootTaskId: params.rootTaskId,
             agentId: params.agentId,
             operation: 'agent.run',
             scope: params.scope ?? (params.taskId === params.rootTaskId ? 'root' : 'child'),
-            status: normalizeStatus(params.status),
+            status: preserveTerminal ? undefined : status,
             parentTaskId: params.parentTaskId,
             startedAt: params.startedAt,
-            terminalAt: params.terminalAt,
-            durationMs: params.startedAt && params.terminalAt ? Math.max(0, params.terminalAt.getTime() - params.startedAt.getTime()) : undefined,
-            terminalCode: params.terminalCode,
-            terminalMessage: params.terminalMessage,
+            terminalAt: preserveTerminal ? undefined : params.terminalAt,
+            durationMs: preserveTerminal
+                ? undefined
+                : params.startedAt && params.terminalAt ? Math.max(0, params.terminalAt.getTime() - params.startedAt.getTime()) : undefined,
+            terminalCode: preserveTerminal ? undefined : params.terminalCode,
+            terminalMessage: preserveTerminal ? undefined : params.terminalMessage,
+            cancelReason: params.cancelReason,
             traceId: params.traceId,
             outputState: params.outputState,
         });

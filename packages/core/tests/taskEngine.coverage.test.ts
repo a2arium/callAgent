@@ -359,6 +359,19 @@ describe('TaskEngine orchestration coverage', () => {
             reason: 'operator stop',
             requestedAt: expect.any(String),
         });
+        expect(store.getEvents('t', 'task-cancel')).toEqual([
+            {
+                tenantId: 't',
+                sessionId: 'task-cancel',
+                type: 'task.canceled',
+                payload: {
+                    taskId: 'task-cancel',
+                    agentId: 'agent-a',
+                    reason: 'operator stop',
+                    requestedAt: expect.any(String),
+                },
+            },
+        ]);
         expect(cancel).toHaveBeenCalledWith({
             tenantId: 't',
             taskId: 'task-cancel',
@@ -366,6 +379,44 @@ describe('TaskEngine orchestration coverage', () => {
             idempotencyKey: 'task-cancel:cancel',
             reason: 'operator stop',
         });
+    });
+
+    test('cancelTask still acknowledges when provider cancellation fails after durable marker', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => {
+            throw new Error('task state cleaned up');
+        });
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-cancel-provider-fails', {
+            meta: { agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-token' } },
+        }, BigInt(0), 'agent-a');
+
+        await expect(engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-cancel-provider-fails',
+            agentId: 'agent-a',
+            reason: 'operator stop',
+        })).resolves.toEqual({ acknowledged: true });
+
+        expect(readSegmentCancellation(store.getSnapshot('t', 'task-cancel-provider-fails')?.snapshot)).toEqual({
+            requested: true,
+            reason: 'operator stop',
+            requestedAt: expect.any(String),
+        });
+        expect(store.getEvents('t', 'task-cancel-provider-fails').map((event) => event.type)).toEqual(['task.canceled']);
+        expect(cancel).toHaveBeenCalled();
     });
 
     test('cancelTask notifies an A2A parent and schedules async resume for child cancellation', async () => {

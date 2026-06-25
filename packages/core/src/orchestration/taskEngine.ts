@@ -1982,6 +1982,12 @@ export class TaskEngine {
                 expectedWmVersion: loaded.wmVersion ?? BigInt(0),
                 snapshot: markSegmentCancellationRequested(snapshot, reason),
             });
+            await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.canceled', {
+                taskId: params.taskId,
+                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                reason,
+                requestedAt: new Date().toISOString(),
+            });
             await this.notifyA2AParentOfCancellation({
                 tenantId: params.tenantId,
                 taskId: params.taskId,
@@ -1990,13 +1996,21 @@ export class TaskEngine {
             });
         }
 
-        await this.runtimeDriver.cancel({
-            tenantId: params.tenantId,
-            taskId: params.taskId,
-            ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
-            idempotencyKey: `${params.taskId}:cancel`,
-            reason,
-        });
+        try {
+            await this.runtimeDriver.cancel({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                idempotencyKey: `${params.taskId}:cancel`,
+                reason,
+            });
+        } catch (error) {
+            log.warn('Runtime provider cancellation failed after durable cancellation marker was saved', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
 
         return { acknowledged: true };
     }

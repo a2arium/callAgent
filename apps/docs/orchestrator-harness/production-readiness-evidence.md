@@ -1,7 +1,7 @@
 # Production Readiness Evidence
 
 Status: active evidence ledger.
-Last updated: 2026-06-24.
+Last updated: 2026-06-25.
 
 This file records repeatable evidence for
 `specs/production-readiness-gates.md` and `production-readiness.md`. It is not a
@@ -613,7 +613,7 @@ Conclusion:
 - this is still local-machine evidence, not a final hosted production capacity
   claim.
 
-## 2026-06-24 — Partial P2 Active Root Drill
+## 2026-06-24/25 — P2 Active Root Drill
 
 Goal:
 
@@ -639,6 +639,64 @@ Payload shape:
   `https://update-fixtures.staticdomains.app/pages/listing/static.html`;
 - site config included listing access/items/pagination and a minimal detail
   extraction section required by the `fetch-page-router` input contract.
+
+### 20-root drill
+
+Root prefix:
+
+```text
+phase5-p2-20-active-1782405152643
+```
+
+Result:
+
+- launched 20 real root tasks through `/rpc`;
+- all 20 launches returned HTTP 200;
+- each root delegated to one `fetch-html` child;
+- active roots entered `waiting` while children ran;
+- no root displayed `unknown`;
+- all 20 roots completed;
+- all 20 child nodes completed;
+- each graph ended with 2 nodes, 1 edge, and 3 turns;
+- all 20 final parent-child edges resolved to `completed`;
+- terminal graph state was reached at poll tick 38.
+
+Graph polling timing across 780 graph polls:
+
+```json
+{
+  "count": 780,
+  "p50Ms": 6.1,
+  "p95Ms": 29.3,
+  "maxMs": 1038.4
+}
+```
+
+Final summary:
+
+```json
+{
+  "launchCount": 20,
+  "launchHttp": { "200": 20 },
+  "launchErrors": 0,
+  "sawWaiting": true,
+  "sawUnknown": false,
+  "terminalTick": 38,
+  "finalRoots": { "completed": 20 },
+  "finalEdgeStatuses": { "completed": 20 },
+  "childStatuses": { "completed": 20 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+}
+```
+
+Conclusion:
+
+- the local P2 20-active-root gate passed for this `fetch-page-router` ->
+  `fetch-html` workload;
+- operator graph projection stayed coherent under active parent/child fanout;
+- the `maxMs` graph poll outlier should be watched in later outage/restart
+  drills, but p95 stayed well below the current 2s operator warning budget.
 
 ### 10-root drill
 
@@ -731,11 +789,479 @@ Result:
 
 Limitations:
 
-- this is partial P2 evidence: the active drill covered 10 roots, not the full
-  20-active-root gate;
 - this drill did not include runtime kill/restart, Hatchet/Postgres/NATS
   interruption, cancellation, timeout, or missing-child-wake scenarios;
 - this is local-machine evidence, not a hosted production capacity claim.
+
+## 2026-06-25 — P3 Runtime Kill/Restart Drill
+
+Goal:
+
+- kill the runtime while real parent/child runs are active;
+- restart the runtime worker;
+- verify active work resumes or reaches terminal state coherently;
+- verify operator projection does not leave stale `waiting`, `running`, or
+  `unknown` states after restart.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Root prefix:
+
+```text
+phase5-p3-runtime-restart-1782405279624
+```
+
+Pre-kill state:
+
+- launched 8 real `fetch-page-router` roots through `/rpc`;
+- each root used the same static fixture payload as the P2 active-root drill;
+- all 8 launches returned HTTP 200;
+- immediately before the kill, operator graph projection showed:
+
+```json
+{
+  "roots": { "waiting": 6, "running": 2 },
+  "edges": { "running": 6 },
+  "minNodes": 1,
+  "maxNodes": 2
+}
+```
+
+Kill/restart action:
+
+- terminated the runtime host/worker process tree while the batch was active:
+
+```bash
+kill -9 <runtime-host-and-worker-pids>
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Post-restart result:
+
+- the restarted worker picked up outstanding Hatchet work;
+- first post-restart graph poll already showed all roots terminal;
+- all 8 roots completed;
+- all 8 child `fetch-html` nodes completed;
+- all 8 final parent-child edges resolved to `completed`;
+- no post-restart graph read showed `unknown`.
+
+Graph polling timing across 8 post-restart graph polls:
+
+```json
+{
+  "count": 8,
+  "p50Ms": 10.7,
+  "p95Ms": 15.8,
+  "maxMs": 558.2
+}
+```
+
+Final summary:
+
+```json
+{
+  "ids": 8,
+  "sawUnknown": false,
+  "sawWaitingAfterRestart": false,
+  "terminalTick": 0,
+  "finalRoots": { "completed": 8 },
+  "finalEdgeStatuses": { "completed": 8 },
+  "childStatuses": { "completed": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3]
+}
+```
+
+Conclusion:
+
+- runtime kill/restart recovered this active parent/child workload coherently;
+- no stale operator `waiting`, `running`, or `unknown` state remained after
+  terminal outcomes;
+- this does not yet cover Hatchet, Postgres, or NATS interruption.
+
+## 2026-06-25 — P3 Hatchet Engine Interruption Drill
+
+Goal:
+
+- stop Hatchet engine while real parent/child runs are active;
+- restart Hatchet engine;
+- verify durable parent `agent.run` rows do not duplicate child delegation;
+- verify all roots, children, and semantic graph edges reach terminal state.
+
+Repeatable script:
+
+```bash
+node apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs \
+  --prefix <prefix> \
+  --count 8 \
+  --interrupt-hatchet true \
+  --poll-ms 2000 \
+  --max-polls 90
+```
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+### First attempt exposed duplicate delegation
+
+Root prefix:
+
+```text
+phase5-p3-hatchet-interrupt-1782405428681
+```
+
+Result:
+
+- launched 8 real `fetch-page-router` roots through `/rpc`;
+- stopped `hatchet-engine` while roots were waiting on `fetch-html` children;
+- restarted `hatchet-engine`;
+- all 8 roots eventually completed, but one root produced 3 nodes, 2 child
+  edges, and 5 turns instead of the expected 2 nodes, 1 edge, and 3 turns.
+
+Root cause:
+
+- after the engine interruption, durable parent `agent.run` could re-enter from
+  its initial `start` wake even though the persisted root had already reached an
+  `await_child` boundary;
+- the driver only looked for parent `task.child_completed` events before
+  waiting, but Hatchet-mode child completion currently pushes the Hatchet wake
+  event and does not append a parent `task.child_completed` event;
+- when the Hatchet wake replay returned an empty payload after interruption,
+  the parent resumed with `child.output === undefined`; the agent interpreted
+  that as empty child content and delegated a second child.
+
+Fix:
+
+- durable parent startup now checks the latest persisted root `turn.completed`
+  event; if it is an await boundary, startup waits/resumes that boundary instead
+  of running another `start` segment;
+- await-child recovery now falls back from parent `task.child_completed` /
+  `task.child_failed` events to the persisted `task.child_started` child task
+  id and the child task's own terminal `turn.completed` / `task.completed` /
+  `task.failed` event;
+- empty Hatchet child wake replay is hydrated from persisted child terminal
+  output before running the resume segment.
+
+Regression coverage:
+
+```bash
+yarn test packages/driver-hatchet/tests/task.test.ts
+yarn build
+```
+
+Result:
+
+- targeted driver task suite passed: 22 tests;
+- full repository build passed: 20 packages.
+
+### Passing rerun
+
+Root prefix:
+
+```text
+phase5-p3-hatchet-interrupt-fixed2-1782406950000
+```
+
+Action:
+
+- launched 8 real `fetch-page-router` roots;
+- all 8 roots reached `waiting` with 8 running child edges by poll tick 1;
+- stopped `hatchet-engine`;
+- waited 8 seconds;
+- restarted `hatchet-engine`;
+- continued polling operator graph projection until terminal.
+
+Final summary:
+
+```json
+{
+  "launchHttp": { "200": 8 },
+  "launchErrors": 0,
+  "activeTick": 1,
+  "terminalTick": 10,
+  "finalRoots": { "completed": 8 },
+  "finalEdgeStatuses": { "completed": 8 },
+  "childStatuses": { "completed": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalEdgeCounts": [1, 1, 1, 1, 1, 1, 1, 1],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3],
+  "duplicateChildEdges": []
+}
+```
+
+Persisted event count check:
+
+```text
+roots=8
+child_started=8
+min_child_started=1
+max_child_started=1
+root_turn_completed=16
+```
+
+Graph polling timing across 104 graph polls:
+
+```json
+{
+  "count": 104,
+  "p50Ms": 46,
+  "p95Ms": 956.5,
+  "maxMs": 987.5
+}
+```
+
+Conclusion:
+
+- Hatchet engine stop/start recovered this active parent/child workload
+  coherently after the driver fix;
+- durable parent re-entry no longer duplicated child delegation;
+- empty Hatchet child wake replay no longer causes a second child call when
+  persisted child terminal output exists;
+- no stale operator `waiting`, `running`, or `unknown` state remained after
+  terminal outcomes;
+- p95 graph polling stayed below the current 2s operator warning budget, but is
+  noticeably slower than the warm non-interruption drill and should remain on
+  the performance watch list.
+
+## 2026-06-25 — P3 NATS Interruption Drill
+
+Goal:
+
+- stop NATS while real parent/child runs are active;
+- restart NATS;
+- verify Hatchet/event-bus recovery does not leave parent roots waiting forever;
+- verify all roots, children, and semantic graph edges reach terminal state.
+
+Command:
+
+```bash
+node apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs \
+  --prefix phase5-p3-nats-interrupt-1782410000000 \
+  --count 8 \
+  --interrupt-service nats \
+  --poll-ms 2000 \
+  --max-polls 90
+```
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Action:
+
+- launched 8 real `fetch-page-router` roots;
+- all 8 roots reached `waiting` with 8 running child edges by poll tick 2;
+- stopped the Compose `nats` service;
+- waited 8 seconds;
+- restarted `nats`;
+- continued polling operator graph projection until terminal.
+
+Final summary:
+
+```json
+{
+  "launchHttp": { "200": 8 },
+  "launchErrors": 0,
+  "activeTick": 2,
+  "terminalTick": 1,
+  "finalRoots": { "completed": 8 },
+  "finalEdgeStatuses": { "completed": 8 },
+  "childStatuses": { "completed": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalEdgeCounts": [1, 1, 1, 1, 1, 1, 1, 1],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3],
+  "duplicateChildEdges": []
+}
+```
+
+Persisted event count check:
+
+```text
+roots=8
+child_started=8
+min_child_started=1
+max_child_started=1
+root_turn_completed=16
+```
+
+Graph polling timing across 40 graph polls:
+
+```json
+{
+  "count": 40,
+  "p50Ms": 125.2,
+  "p95Ms": 223.6,
+  "maxMs": 277.3
+}
+```
+
+Conclusion:
+
+- NATS stop/start recovered this active parent/child workload coherently;
+- no duplicate child delegation was observed;
+- no stale operator `waiting`, `running`, or `unknown` state remained after
+  terminal outcomes;
+- this is local Compose evidence, not a hosted multi-node broker availability
+  claim.
+
+## 2026-06-25 — P3 Root Cancellation Drill
+
+Goal:
+
+- cancel real root runs while they are waiting on active child agents;
+- verify cancellation is persisted as a semantic terminal state;
+- verify late child/turn events do not reopen canceled roots as `waiting`;
+- verify the graph eventually reaches an idle terminal state with no active
+  child edges or child nodes.
+
+Command:
+
+```bash
+node apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs \
+  --prefix phase5-p3-root-cancel-strict-1782414700000 \
+  --count 8 \
+  --cancel-roots true \
+  --poll-ms 2000 \
+  --max-polls 90
+```
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+### First attempts exposed stale waiting projection
+
+Root prefixes:
+
+```text
+phase5-p3-root-cancel-1782411800000
+phase5-p3-root-cancel-fixed-1782414100000
+```
+
+Findings:
+
+- initial cancellation returned HTTP 500 for one root and left seven roots
+  semantically `waiting`;
+- durable cancellation metadata was saved in the task snapshot, but no
+  `task.canceled` working-memory event was appended, so the semantic projection
+  had no terminal event to consume;
+- provider cancellation errors could escape the cancel API even after durable
+  cancellation intent had been saved;
+- after adding `task.canceled`, all eight roots received the event, but late
+  `turn.completed` / child events could still downgrade some semantic rows from
+  `canceled` back to `waiting`.
+
+Fix:
+
+- `TaskEngine.cancelTask` now appends a `task.canceled` event after saving the
+  durable cancellation marker;
+- provider cancellation is best-effort after the durable marker is saved, so a
+  provider cleanup race no longer turns the operator cancel request into HTTP
+  500;
+- semantic projection handles `task.canceled` as a terminal run state;
+- semantic projection now preserves terminal run states (`completed`, `failed`,
+  `canceled`) when late non-terminal events arrive;
+- the live drill script now waits for terminal roots and an idle child graph on
+  cancellation runs.
+
+Regression coverage:
+
+```bash
+yarn test packages/core/tests/operator.agentRunsList.test.ts
+yarn test packages/core/tests/taskEngine.coverage.test.ts -t cancelTask
+yarn build
+```
+
+Result:
+
+- semantic projection suite passed: 17 tests;
+- targeted cancel-task suite passed: 5 tests;
+- full repository build passed: 20 packages.
+
+### Passing strict rerun
+
+Root prefix:
+
+```text
+phase5-p3-root-cancel-strict-1782414700000
+```
+
+Action:
+
+- launched 8 real `fetch-page-router` roots;
+- all 8 roots reached `waiting` with 8 running child edges by poll tick 1;
+- canceled all 8 roots through the operator cancel API;
+- continued polling until all roots were terminal and child nodes/edges were no
+  longer active.
+
+Final summary:
+
+```json
+{
+  "launchHttp": { "200": 8 },
+  "launchErrors": 0,
+  "activeTick": 1,
+  "terminalTick": 8,
+  "finalRoots": { "canceled": 8 },
+  "finalEdgeStatuses": { "completed": 8 },
+  "childStatuses": { "completed": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalEdgeCounts": [1, 1, 1, 1, 1, 1, 1, 1],
+  "finalTurnCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "duplicateChildEdges": []
+}
+```
+
+Persisted event count check:
+
+```text
+roots=8
+canceled_events=8
+child_started=8
+min_child_started=1
+max_child_started=1
+turn_completed=8
+```
+
+Semantic read-model terminal check:
+
+```text
+children completed=8
+edges completed=8
+roots canceled=8
+```
+
+Graph polling timing across 88 graph polls:
+
+```json
+{
+  "count": 88,
+  "p50Ms": 23.8,
+  "p95Ms": 66.4,
+  "maxMs": 85.2
+}
+```
+
+Conclusion:
+
+- root cancellation now persists and projects a terminal `canceled` state;
+- late child/turn events no longer reopen canceled roots as `waiting`;
+- no stale operator `waiting`, `running`, or `unknown` state remained after
+  terminal outcomes;
+- root cancellation is semantic cancellation of the parent run. In this drill,
+  already-started child runs were allowed to complete and the graph settled with
+  completed child nodes/edges under canceled roots.
 
 ## Remaining Evidence Needed
 
@@ -743,12 +1269,8 @@ Limitations:
   binary so render checks can include DOM assertions and responsive screenshots.
 - Measure browser/operator UI render behavior with trace-level timing, not only
   screenshot evidence.
-- Scale the active real-agent drill from 10 roots to the full 20-active-root P2
-  gate.
 - During active real-agent runs, exercise:
-  - runtime kill/restart;
-  - Hatchet/Postgres/NATS interruption where practical;
-  - cancellation;
+  - Postgres interruption where practical;
   - missing child wake;
   - timeout.
 - Capture operator screenshots or API responses proving no stale

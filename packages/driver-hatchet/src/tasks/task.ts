@@ -131,6 +131,17 @@ async function executeTaskTaskInner(
     let turnSeq = 0;
 
     try {
+        const persistedBoundary = await findPersistedAwaitBoundary(input, deps);
+        if (persistedBoundary !== undefined) {
+            const event =
+                await findPersistedBoundaryEvent(input, persistedBoundary.boundary, deps)
+                ?? await waitForBoundaryEvent(ctx, input, persistedBoundary.boundary, deps);
+            const hydratedEvent = await hydratePersistedBoundaryEvent(input, persistedBoundary.boundary, event, deps);
+            wake = boundaryEventToWake(persistedBoundary.boundary, hydratedEvent);
+            idempotencyKey = hydratedEvent.idempotencyKey ?? `${input.taskId}:${hydratedEvent.kind}:${hydratedEvent.token}`;
+            turnSeq = persistedBoundary.turnSeq;
+        }
+
         for (;;) {
             turnSeq += 1;
             const segmentInput: SegmentTaskInput = {
@@ -167,8 +178,9 @@ async function executeTaskTaskInner(
                 const event =
                     await findPersistedBoundaryEvent(input, segment.boundary, deps)
                     ?? await waitForBoundaryEvent(ctx, input, segment.boundary, deps);
-                wake = boundaryEventToWake(segment.boundary, event);
-                idempotencyKey = event.idempotencyKey ?? `${input.taskId}:${event.kind}:${event.token}`;
+                const hydratedEvent = await hydratePersistedBoundaryEvent(input, segment.boundary, event, deps);
+                wake = boundaryEventToWake(segment.boundary, hydratedEvent);
+                idempotencyKey = hydratedEvent.idempotencyKey ?? `${input.taskId}:${hydratedEvent.kind}:${hydratedEvent.token}`;
                 continue;
             }
 
@@ -721,6 +733,19 @@ async function findPersistedBoundaryEvent(
         return undefined;
     }
 
+    return await findPersistedParentChildEvent(input, boundary, deps)
+        ?? await findPersistedChildTerminalEvent(input, boundary, deps);
+}
+
+async function findPersistedParentChildEvent(
+    input: TaskTaskInput,
+    boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
+    deps: TaskTaskDeps
+): Promise<(RuntimeWakeEvent & { idempotencyKey?: string }) | undefined> {
+    if (deps.prisma?.wMEvent === undefined) {
+        return undefined;
+    }
+
     const rows = await deps.prisma.wMEvent.findMany({
         where: {
             tenantId: input.tenantId,
@@ -760,6 +785,192 @@ async function findPersistedBoundaryEvent(
         output: 'resultPreview' in payload ? payload.resultPreview : payload.result,
         idempotencyKey: `${input.taskId}:child:${boundary.token}`,
     };
+}
+
+async function findPersistedChildTerminalEvent(
+    input: TaskTaskInput,
+    boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
+    deps?: TaskTaskDeps
+): Promise<(RuntimeWakeEvent & { idempotencyKey?: string }) | undefined> {
+    if (deps?.prisma?.wMEvent === undefined) {
+        return undefined;
+    }
+
+    const childTaskId = await findPersistedChildTaskId(input, boundary, deps);
+    if (childTaskId === undefined) {
+        return undefined;
+    }
+
+    const rows = await deps.prisma.wMEvent.findMany({
+        where: {
+            tenantId: input.tenantId,
+            sessionId: childTaskId,
+            type: { in: ['task.completed', 'task.failed', 'turn.completed'] },
+        },
+        orderBy: { seq: 'desc' },
+        take: 50,
+    });
+
+    for (const row of rows) {
+        const payload = jsonObjectOrEmpty(row.payload);
+        if (row.type === 'task.failed') {
+            return childWake(input, boundary.token, childTaskId, {
+                ok: false,
+                error: payload.error,
+            });
+        }
+        if (row.type === 'task.completed') {
+            return childWake(input, boundary.token, childTaskId, 'result' in payload ? payload.result : payload.output);
+        }
+        if (row.type !== 'turn.completed') {
+            continue;
+        }
+
+        const transition = jsonObjectOrEmpty(payload.transition as JsonValue);
+        if (transition.kind === 'complete') {
+            return childWake(input, boundary.token, childTaskId, transition.result);
+        }
+        if (transition.kind === 'fail') {
+            return childWake(input, boundary.token, childTaskId, {
+                ok: false,
+                error: 'error' in transition ? transition.error : transition.reason,
+            });
+        }
+    }
+
+    return undefined;
+}
+
+async function hydratePersistedBoundaryEvent(
+    input: TaskTaskInput,
+    boundary: AwaitableBoundary,
+    event: RuntimeWakeEvent & { idempotencyKey?: string },
+    deps?: TaskTaskDeps
+): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    if (boundary.kind !== 'await_child' || event.kind !== 'child') {
+        return event;
+    }
+    if (event.output !== undefined && event.childTaskId !== boundary.token) {
+        return event;
+    }
+    return await findPersistedChildTerminalEvent(input, boundary, deps) ?? event;
+}
+
+async function findPersistedChildTaskId(
+    input: TaskTaskInput,
+    boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
+    deps: TaskTaskDeps
+): Promise<string | undefined> {
+    if (deps.prisma?.wMEvent === undefined) {
+        return undefined;
+    }
+
+    const rows = await deps.prisma.wMEvent.findMany({
+        where: {
+            tenantId: input.tenantId,
+            sessionId: input.taskId,
+            type: { in: ['task.child_started'] },
+        },
+        orderBy: { seq: 'desc' },
+        take: 100,
+    });
+
+    for (const row of rows) {
+        if (row.type !== 'task.child_started') {
+            continue;
+        }
+        const payload = jsonObjectOrEmpty(row.payload);
+        if (payload.token !== boundary.token) {
+            continue;
+        }
+        return typeof payload.childTaskId === 'string' ? payload.childTaskId : undefined;
+    }
+
+    return undefined;
+}
+
+function childWake(
+    input: TaskTaskInput,
+    token: string,
+    childTaskId: string,
+    output: unknown
+): RuntimeWakeEvent & { idempotencyKey?: string } {
+    return {
+        kind: 'child',
+        token,
+        childTaskId,
+        output,
+        idempotencyKey: `${input.taskId}:child:${token}`,
+    };
+}
+
+async function findPersistedAwaitBoundary(
+    input: TaskTaskInput,
+    deps?: TaskTaskDeps
+): Promise<{ boundary: AwaitableBoundary; turnSeq: number } | undefined> {
+    if (deps?.prisma?.wMEvent === undefined) {
+        return undefined;
+    }
+
+    const rows = await deps.prisma.wMEvent.findMany({
+        where: {
+            tenantId: input.tenantId,
+            sessionId: input.taskId,
+            type: { in: ['turn.completed', 'task.completed', 'task.failed', 'task.canceled'] },
+        },
+        orderBy: { seq: 'desc' },
+        take: 50,
+    });
+
+    for (const row of rows) {
+        if (row.type === 'task.completed' || row.type === 'task.failed' || row.type === 'task.canceled') {
+            return undefined;
+        }
+        if (row.type !== 'turn.completed') {
+            continue;
+        }
+
+        const payload = jsonObjectOrEmpty(row.payload);
+        const boundary = awaitableBoundaryFromTransition(payload.transition);
+        if (boundary === undefined) {
+            return undefined;
+        }
+        return {
+            boundary,
+            turnSeq: typeof payload.turnSeq === 'number' && Number.isFinite(payload.turnSeq)
+                ? payload.turnSeq
+                : 0,
+        };
+    }
+
+    return undefined;
+}
+
+function awaitableBoundaryFromTransition(value: unknown): AwaitableBoundary | undefined {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        return undefined;
+    }
+    const record = value as Record<string, unknown>;
+    const token = typeof record.token === 'string' ? record.token : undefined;
+    if (token === undefined || token.length === 0) {
+        return undefined;
+    }
+
+    if (record.kind === 'await_input') {
+        return typeof record.expiresAt === 'string'
+            ? { kind: 'await_input', token, expiresAt: record.expiresAt }
+            : { kind: 'await_input', token };
+    }
+    if (record.kind === 'await_tool') {
+        return { kind: 'await_tool', token };
+    }
+    if (record.kind === 'await_child') {
+        return { kind: 'await_child', token };
+    }
+    if (record.kind === 'await_event') {
+        return { kind: 'await_event', token };
+    }
+    return undefined;
 }
 
 function normalizeWakeEvent(

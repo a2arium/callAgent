@@ -408,6 +408,119 @@ describe('TaskEngine operator agent run list', () => {
         });
     });
 
+    it('projects task.canceled events as terminal semantic run state', async () => {
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async () => []),
+                upsert: jest.fn(async () => ({})),
+            },
+            agentRunEdge: {
+                updateMany: jest.fn(async () => ({ count: 0 })),
+            },
+            turnRun: {},
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+        const canceledAt = new Date('2026-06-23T12:02:00.000Z');
+
+        await projection.projectEvent({
+            tenantId: 'default',
+            sessionId: 'root-task',
+            type: 'task.canceled',
+            payload: {
+                taskId: 'root-task',
+                agentId: 'root-agent',
+                reason: 'operator stop',
+            },
+            createdAt: canceledAt,
+        });
+
+        expect(prisma.agentRun.upsert).toHaveBeenCalledWith({
+            where: { tenantId_taskId: { tenantId: 'default', taskId: 'root-task' } },
+            create: expect.objectContaining({
+                tenantId: 'default',
+                taskId: 'root-task',
+                rootTaskId: 'root-task',
+                agentId: 'root-agent',
+                status: 'canceled',
+                terminalAt: canceledAt,
+                cancelReason: 'operator stop',
+            }),
+            update: expect.objectContaining({
+                rootTaskId: 'root-task',
+                agentId: 'root-agent',
+                status: 'canceled',
+                terminalAt: canceledAt,
+                cancelReason: 'operator stop',
+            }),
+        });
+    });
+
+    it('does not reopen a canceled semantic run when late turn completion arrives', async () => {
+        const rows = new Map<string, Record<string, unknown>>();
+        const upsert = jest.fn(async (args: {
+            where: { tenantId_taskId: { taskId: string } };
+            create: Record<string, unknown>;
+            update: Record<string, unknown>;
+        }) => {
+            const taskId = args.where.tenantId_taskId.taskId;
+            const existing = rows.get(taskId);
+            rows.set(taskId, existing ? { ...existing, ...args.update } : args.create);
+            return rows.get(taskId);
+        });
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async ({ where }: { where: { taskId?: string } }) => {
+                    const taskId = where.taskId;
+                    return taskId && rows.has(taskId) ? [rows.get(taskId)] : [];
+                }),
+                upsert,
+            },
+            agentRunEdge: {
+                updateMany: jest.fn(async () => ({ count: 0 })),
+            },
+            turnRun: {
+                upsert: jest.fn(async () => ({})),
+            },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+        const canceledAt = new Date('2026-06-23T12:02:00.000Z');
+
+        await projection.projectEvent({
+            tenantId: 'default',
+            sessionId: 'root-task',
+            type: 'task.canceled',
+            payload: {
+                taskId: 'root-task',
+                agentId: 'root-agent',
+                reason: 'operator stop',
+            },
+            createdAt: canceledAt,
+        });
+        await projection.projectEvent({
+            tenantId: 'default',
+            sessionId: 'root-task',
+            type: 'turn.completed',
+            payload: {
+                taskId: 'root-task',
+                agentId: 'root-agent',
+                turnSeq: 1,
+                transition: { kind: 'await_child', token: 'child-token' },
+            },
+            createdAt: new Date('2026-06-23T12:02:05.000Z'),
+        });
+
+        expect(rows.get('root-task')).toEqual(expect.objectContaining({
+            status: 'canceled',
+            terminalAt: canceledAt,
+            cancelReason: 'operator stop',
+        }));
+        expect(upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+            update: expect.not.objectContaining({ status: 'waiting' }),
+        }));
+    });
+
     it('can build a graph from semantic projection records when semantic read mode is enabled', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
         const runRows = [

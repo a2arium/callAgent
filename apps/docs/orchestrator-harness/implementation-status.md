@@ -1,6 +1,6 @@
 # Implementation Status
 
-Last updated: 2026-06-24.
+Last updated: 2026-06-25.
 
 ## Stage
 
@@ -509,11 +509,25 @@ operator harness:
   follow-up profile found redundant fleet aggregation reads and duplicate
   in-flight projection work. Fleet list now uses denormalized semantic counters,
   identical in-flight semantic reads are coalesced, and the local warm
-  20-poller p95 is recorded at roughly 116-137 ms. A partial P2 real-agent drill
-  is also recorded: 10 active `fetch-page-router` roots delegated to
-  `fetch-html` children and completed with resolved semantic edges; a follow-up
-  3-root smoke confirmed active await-child roots project as `waiting`, not
-  `unknown`.
+  20-poller p95 is recorded at roughly 116-137 ms. P2 active real-agent evidence
+  is now recorded: 20 active `fetch-page-router` roots delegated to `fetch-html`
+  children, projected as `waiting` while children ran, avoided `unknown`, and
+  completed with resolved semantic edges. Earlier 10-root and 3-root regression
+  drills remain in the evidence ledger as historical sub-drills. P3 runtime
+  kill/restart evidence is also recorded: 8 active roots were killed mid-run,
+  the runtime restarted, and all roots/children/edges reached completed terminal
+  state without stale `waiting`, `running`, or `unknown` projection. P3 Hatchet
+  engine interruption evidence is recorded as well: the first drill exposed
+  duplicate child delegation after durable parent re-entry, the driver now
+  resumes persisted await boundaries and hydrates empty child wakes from child
+  terminal events, and the passing rerun completed 8 roots with exactly one
+  child edge per root. P3 NATS interruption evidence is also recorded: stopping
+  and restarting the Compose `nats` service during 8 active roots still
+  completed all roots/children/edges without duplicate children or stale
+  waiting/running projection. P3 root cancellation evidence is recorded:
+  canceling 8 waiting roots returns HTTP 200 for all requests, persists
+  `task.canceled` events, preserves canceled roots against late non-terminal
+  events, and settles the graph with canceled roots plus no active child state.
 
 ## Next action
 
@@ -525,10 +539,8 @@ Continue with Phase 5D/5E production readiness gates:
 2. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
    5D deployment hardening.
 3. Complete the remaining P2/P3 production-readiness evidence:
-   - scale the active real-agent drill from 10 roots to 20 roots;
-   - run active runtime kill/restart evidence;
-   - run Hatchet/Postgres/NATS interruption evidence where practical;
-   - run cancellation, missing-child-wake, and timeout scenarios;
+   - run Postgres interruption evidence where practical;
+   - run missing-child-wake and timeout scenarios;
    - capture operator API/UI proof that no stale waiting/running states remain
      after terminal outcomes.
 
