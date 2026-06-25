@@ -535,7 +535,11 @@ operator harness:
   provider child wake and persisted child-terminal recovery for 8 waiting roots
   failed all roots with readable timeout-derived messages, persisted terminal
   driver-run error metadata for `complete ok:false`, and still settled child
-  nodes and child edges to completed after child completion.
+  nodes and child edges to completed after child completion. P3 Postgres
+  connection interruption evidence is recorded: terminating 20 active DB
+  connections during 8 waiting parent/child runs still completed all roots,
+  children, edges, and turns with no duplicate child edges and no stale active or
+  unknown semantic state.
 
 ## Next action
 
@@ -546,10 +550,9 @@ Continue with Phase 5D/5E production readiness gates:
    provider-enqueue evidence is still recommended before closing Phase 5C.
 2. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
    5D deployment hardening.
-3. Complete the remaining P2/P3 production-readiness evidence:
-   - run Postgres interruption evidence where practical;
-   - capture operator API/UI proof that no stale waiting/running states remain
-     after terminal outcomes.
+3. Capture remaining operator API/UI proof that no stale waiting/running states
+   remain after terminal outcomes, ideally with browser/DOM evidence once the
+   browser automation dependency is restored.
 
 ## Open questions (carried from requirements §11)
 

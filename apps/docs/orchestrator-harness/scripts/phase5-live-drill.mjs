@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8790';
 const FIXTURE_URL = 'https://update-fixtures.staticdomains.app/pages/listing/static.html';
@@ -29,6 +30,8 @@ const waitForActive = args.get('wait-for-active') !== 'false';
 const interruptHatchet = args.get('interrupt-hatchet') === 'true';
 const interruptService = args.get('interrupt-service') ?? (interruptHatchet ? 'hatchet-engine' : undefined);
 const interruptSleepMs = Number.parseInt(args.get('interrupt-sleep-ms') ?? '8000', 10);
+const interruptPostgresConnections = args.get('interrupt-postgres-connections') === 'true';
+const postgresUrl = args.get('postgres-url') ?? process.env.MEMORY_DATABASE_URL ?? readDotEnvValue('MEMORY_DATABASE_URL');
 const cancelRoots = args.get('cancel-roots') === 'true';
 const cancelReason = args.get('cancel-reason') ?? 'phase5 cancellation drill';
 
@@ -79,6 +82,67 @@ function dockerComposeService(service, action) {
     ...(action === 'up' ? ['-d'] : []),
     service,
   ], { stdio: 'inherit' });
+}
+
+function readDotEnvValue(name) {
+  let text;
+  try {
+    text = readFileSync('.env', 'utf8');
+  } catch {
+    return undefined;
+  }
+  const line = text
+    .split(/\r?\n/)
+    .map((candidate) => candidate.trim())
+    .find((candidate) => candidate.startsWith(`${name}=`));
+  if (line === undefined) {
+    return undefined;
+  }
+  const raw = line.slice(name.length + 1).trim();
+  return raw.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+}
+
+function interruptPostgres() {
+  if (postgresUrl === undefined || postgresUrl.trim().length === 0) {
+    throw new Error('Postgres interruption requires MEMORY_DATABASE_URL or --postgres-url');
+  }
+  const connection = postgresConnection(postgresUrl);
+  const sql = `
+    select count(*)
+    from (
+      select pg_terminate_backend(pid)
+      from pg_stat_activity
+      where datname = current_database()
+        and pid <> pg_backend_pid()
+        and usename = current_user
+    ) terminated;
+  `;
+  const output = execFileSync('psql', [...connection.args, '-At', '-c', sql], {
+    encoding: 'utf8',
+    env: connection.env,
+  }).trim();
+  return Number.parseInt(output, 10);
+}
+
+function postgresConnection(urlString) {
+  const url = new URL(urlString);
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  if (url.hostname.length === 0 || url.username.length === 0 || database.length === 0) {
+    throw new Error('Postgres interruption requires a complete MEMORY_DATABASE_URL');
+  }
+  return {
+    args: [
+      '-h', url.hostname,
+      '-p', url.port || '5432',
+      '-U', decodeURIComponent(url.username),
+      '-d', database,
+    ],
+    env: {
+      ...process.env,
+      PGPASSWORD: decodeURIComponent(url.password),
+      ...(url.searchParams.get('sslmode') ? { PGSSLMODE: url.searchParams.get('sslmode') } : {}),
+    },
+  };
 }
 
 async function postJson(url, body) {
@@ -287,6 +351,16 @@ if (cancelRoots) {
     cancelErrors: cancelResults.filter((result) => !result.ok || result.json?.error).length,
   }));
 }
+let postgresTerminatedConnections;
+if (interruptPostgresConnections) {
+  console.log(JSON.stringify({ phase: 'interrupt-postgres-connections', prefix }));
+  postgresTerminatedConnections = interruptPostgres();
+  console.log(JSON.stringify({
+    phase: 'interrupt-postgres-connections-result',
+    prefix,
+    terminatedConnections: postgresTerminatedConnections,
+  }));
+}
 if (interruptService !== undefined) {
   console.log(JSON.stringify({ phase: 'interrupt-service-stop', prefix, service: interruptService }));
   dockerComposeService(interruptService, 'stop');
@@ -302,5 +376,8 @@ console.log(JSON.stringify({
         cancelHttp: countBy(cancelResults.map((result) => String(result.status))),
         cancelErrors: cancelResults.filter((result) => !result.ok || result.json?.error).length,
       }
+    : {}),
+  ...(postgresTerminatedConnections !== undefined
+    ? { postgresTerminatedConnections }
     : {}),
 }, null, 2));

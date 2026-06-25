@@ -1527,13 +1527,136 @@ Conclusion:
 - late child completion still settles child and edge projection cleanly;
 - no duplicate child delegation was observed.
 
+## 2026-06-25 — P3 Postgres Connection Interruption Drill
+
+Goal:
+
+- exercise active real-agent parent/child runs while existing runtime DB
+  connections are interrupted;
+- verify Prisma/runtime reconnect behavior without stopping the local Postgres
+  app;
+- verify roots, child nodes, child edges, and turns converge to terminal
+  completed state;
+- verify no duplicate child delegation or stale active/unknown semantic state
+  remains.
+
+Implementation hardening:
+
+- `phase5-live-drill.mjs` now supports
+  `--interrupt-postgres-connections true`;
+- the drill reads `MEMORY_DATABASE_URL` from the environment or repo `.env`;
+- interruption terminates current DB sessions for the configured agent database
+  and current user with `pg_terminate_backend`, leaving the Postgres server
+  process running.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Command:
+
+```bash
+node apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs \
+  --prefix phase5-p3-postgres-terminate-1782421800000 \
+  --count 8 \
+  --poll-ms 2000 \
+  --max-polls 90 \
+  --interrupt-postgres-connections true
+```
+
+Action:
+
+- launched 8 real `fetch-page-router` roots;
+- all 8 roots reached `waiting` with 8 running child edges by poll tick 1;
+- terminated 20 existing Postgres connections to the `agent` database;
+- continued graph polling until all roots, children, and edges completed.
+
+Final summary:
+
+```json
+{
+  "launchHttp": { "200": 8 },
+  "launchErrors": 0,
+  "activeTick": 1,
+  "terminalTick": 23,
+  "finalRoots": { "completed": 8 },
+  "finalEdgeStatuses": { "completed": 8 },
+  "childStatuses": { "completed": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalEdgeCounts": [1, 1, 1, 1, 1, 1, 1, 1],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3],
+  "duplicateChildEdges": [],
+  "postgresTerminatedConnections": 20,
+  "graphPollTiming": {
+    "count": 208,
+    "p50Ms": 35.7,
+    "p95Ms": 230.6,
+    "maxMs": 291.7
+  }
+}
+```
+
+Settled semantic read-model check:
+
+```text
+agent_runs:
+  completed=16
+
+agent_run_edges:
+  completed=8
+
+turn_runs:
+  completed=24
+
+active_or_unknown=0
+duplicate child edges=0
+```
+
+Persisted event count check:
+
+```text
+task.started=8
+task.child_started=8
+turn.started=16
+turn.completed=16
+```
+
+Driver-run check:
+
+```text
+driver_runs completed=32
+```
+
+Operator graph API spot check:
+
+```text
+root.status=completed
+child.status=completed
+edge.status=completed
+projection.source=semantic
+projection.partial=false
+```
+
+Verification:
+
+```bash
+node --check apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs
+```
+
+Conclusion:
+
+- active parent/child runs recovered from terminated DB sessions;
+- no stale `waiting`, `running`, `unknown`, or `stuck` semantic state remained;
+- no duplicate child edge was created;
+- graph polling p95 stayed under 250 ms during the interruption run.
+
 ## Remaining Evidence Needed
 
 - Add a first-class browser automation dependency or restore the gstack `browse`
   binary so render checks can include DOM assertions and responsive screenshots.
 - Measure browser/operator UI render behavior with trace-level timing, not only
   screenshot evidence.
-- During active real-agent runs, exercise:
-  - Postgres interruption where practical.
 - Capture operator screenshots or API responses proving no stale
   waiting/running state remains after terminal outcomes.
