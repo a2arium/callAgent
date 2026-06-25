@@ -531,7 +531,11 @@ operator harness:
   P3 missing-child-wake evidence is recorded: suppressing provider child wake
   events for 8 waiting roots still completed all roots from persisted child
   terminal facts, with zero parent `task.child_completed` events and no duplicate
-  child edges.
+  child edges. P3 child-wait-timeout evidence is recorded: suppressing both the
+  provider child wake and persisted child-terminal recovery for 8 waiting roots
+  failed all roots with readable timeout-derived messages, persisted terminal
+  driver-run error metadata for `complete ok:false`, and still settled child
+  nodes and child edges to completed after child completion.
 
 ## Next action
 
@@ -544,7 +548,6 @@ Continue with Phase 5D/5E production readiness gates:
    5D deployment hardening.
 3. Complete the remaining P2/P3 production-readiness evidence:
    - run Postgres interruption evidence where practical;
-   - run timeout scenario;
    - capture operator API/UI proof that no stale waiting/running states remain
      after terminal outcomes.
 

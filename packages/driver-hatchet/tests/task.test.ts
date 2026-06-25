@@ -944,6 +944,137 @@ describe('executeTaskTask', () => {
         }
     });
 
+    it('converts an unrecoverable missing child wake into a readable timeout child result', async () => {
+        const previousInterval = process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS;
+        const previousMaxWait = process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS;
+        const dateNow = jest.spyOn(Date, 'now');
+        let now = 1_000;
+        dateNow.mockImplementation(() => {
+            now += 2_000;
+            return now;
+        });
+        process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = '1000';
+        process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS = '1000';
+        try {
+            const finalizeRootRun = jest.fn(async () => undefined);
+            const segmentOutputs = [
+                {
+                    tenantId: 'tenant-1',
+                    taskId: 'task-1',
+                    agentId: 'agent-1',
+                    boundary: { kind: 'await_child', token: 'child-token' },
+                    taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:00.000Z' },
+                },
+                {
+                    tenantId: 'tenant-1',
+                    taskId: 'task-1',
+                    agentId: 'agent-1',
+                    boundary: {
+                        kind: 'complete',
+                        result: {
+                            ok: false,
+                            error: {
+                                code: 'CHILD_WAKE_TIMEOUT',
+                                message: 'Timed out waiting for child wake for token child-token.',
+                            },
+                        },
+                    },
+                    taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+                },
+            ];
+            const ctx = {
+                runChild: jest.fn(async () => segmentOutputs.shift()),
+                runNoWaitChild: jest.fn(async () => undefined),
+                waitFor: jest.fn(async () => ({ watchdog: {} })),
+            };
+            const wMEvent = {
+                findMany: jest.fn(async (args: { where: { sessionId: string; type: { in: string[] } } }) => {
+                    if (args.where.sessionId === 'task-1' && args.where.type.in.includes('task.child_started')) {
+                        return [{
+                            eventId: 'child-started-1',
+                            tenantId: 'tenant-1',
+                            sessionId: 'task-1',
+                            seq: 2,
+                            type: 'task.child_started',
+                            payload: {
+                                token: 'child-token',
+                                childTaskId: 'child-task-1',
+                                agentId: 'fetch-html',
+                            },
+                            createdAt: new Date('2026-06-19T00:00:00.000Z'),
+                        }];
+                    }
+                    return [];
+                }),
+            };
+
+            await executeTaskTask(
+                {
+                    tenantId: 'tenant-1',
+                    taskId: 'task-1',
+                    agentId: 'agent-1',
+                    input: { value: 'hello' },
+                    idempotencyKey: 'task-1:start',
+                },
+                ctx as never,
+                {
+                    driverRuns: { finalizeRootRun } as never,
+                    prisma: {
+                        outbox: { findMany: jest.fn(async () => []) },
+                        wMEvent,
+                    } as never,
+                }
+            );
+
+            expect(ctx.runChild).toHaveBeenNthCalledWith(
+                2,
+                expect.any(String),
+                expect.objectContaining({
+                    wake: {
+                        trigger: 'child',
+                        event: {
+                            kind: 'child',
+                            token: 'child-token',
+                            childTaskId: 'child-task-1',
+                            output: {
+                                ok: false,
+                                error: {
+                                    code: 'CHILD_WAKE_TIMEOUT',
+                                    message: 'Timed out waiting for child wake for token child-token.',
+                                },
+                            },
+                            idempotencyKey: 'task-1:child:child-token',
+                        },
+                    },
+                    idempotencyKey: 'task-1:child:child-token',
+                }),
+                expect.any(Object)
+            );
+            expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                status: 'failed',
+                boundaryKind: 'complete',
+                error: expect.objectContaining({
+                    code: 'CHILD_WAKE_TIMEOUT',
+                    message: 'Timed out waiting for child wake for token child-token.',
+                }),
+            }));
+        } finally {
+            dateNow.mockRestore();
+            if (previousInterval === undefined) {
+                delete process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS;
+            } else {
+                process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = previousInterval;
+            }
+            if (previousMaxWait === undefined) {
+                delete process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS;
+            } else {
+                process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS = previousMaxWait;
+            }
+        }
+    });
+
     it('resumes await_child from an already persisted child failure as an ok:false child wake', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const segmentOutputs = [

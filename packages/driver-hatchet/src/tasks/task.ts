@@ -4,6 +4,7 @@ import type {
     RuntimeTimerRepository,
 } from '@a2arium/callagent-core/unstable';
 import { readSegmentCancellation, timerKindToReason } from '@a2arium/callagent-core/unstable';
+import { Prisma } from '@a2arium/callagent-memory-sql/generated';
 import type { DurableContext } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
 import type { JsonObject, JsonValue } from '@hatchet-dev/typescript-sdk/v1/types.js';
@@ -222,6 +223,7 @@ async function finalizeRootRun(
         traceId: segment.traceId ?? null,
         boundaryKind: segment.boundary.kind,
         turnTraceId: segment.turnTraceId ?? null,
+        error: errorFromTerminalBoundary(segment.boundary),
     });
 }
 
@@ -283,6 +285,24 @@ function hasOkFalse(value: unknown): boolean {
         return false;
     }
     return (value as Record<string, unknown>).ok === false;
+}
+
+function errorFromTerminalBoundary(boundary: SegmentTaskBoundary): Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined {
+    if (boundary.kind === 'fail') {
+        return toPrismaJson(boundary.error);
+    }
+    if (boundary.kind !== 'complete' || !hasOkFalse(boundary.result)) {
+        return undefined;
+    }
+    if (boundary.result && typeof boundary.result === 'object' && !Array.isArray(boundary.result)) {
+        const result = boundary.result as Record<string, unknown>;
+        return toPrismaJson((result.error ?? result) as JsonValue);
+    }
+    return toPrismaJson(boundary.result);
+}
+
+function toPrismaJson(value: JsonValue): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+    return value === null ? Prisma.JsonNull : value as Prisma.InputJsonValue;
 }
 
 function isHatchetDurableEvictionAbort(error: unknown): boolean {
@@ -384,7 +404,15 @@ async function notifyPersistedA2AParentIfTerminal(
 }
 
 function shouldSuppressChildWakeForDrill(parentTaskId: string): boolean {
-    const raw = process.env.CALLAGENT_HATCHET_SUPPRESS_CHILD_WAKE_PREFIX;
+    return taskIdMatchesPrefixEnv(parentTaskId, 'CALLAGENT_HATCHET_SUPPRESS_CHILD_WAKE_PREFIX');
+}
+
+function shouldSuppressChildTerminalRecoveryForDrill(parentTaskId: string): boolean {
+    return taskIdMatchesPrefixEnv(parentTaskId, 'CALLAGENT_HATCHET_SUPPRESS_CHILD_TERMINAL_RECOVERY_PREFIX');
+}
+
+function taskIdMatchesPrefixEnv(taskId: string, envName: string): boolean {
+    const raw = process.env[envName];
     if (raw === undefined || raw.trim().length === 0) {
         return false;
     }
@@ -392,7 +420,7 @@ function shouldSuppressChildWakeForDrill(parentTaskId: string): boolean {
         .split(',')
         .map((prefix) => prefix.trim())
         .filter((prefix) => prefix.length > 0)
-        .some((prefix) => parentTaskId.startsWith(prefix));
+        .some((prefix) => taskId.startsWith(prefix));
 }
 
 function outputFromTerminalBoundary(boundary: SegmentTaskBoundary): unknown {
@@ -872,6 +900,9 @@ async function findPersistedChildTerminalEvent(
     deps?: TaskTaskDeps
 ): Promise<(RuntimeWakeEvent & { idempotencyKey?: string }) | undefined> {
     if (deps?.prisma?.wMEvent === undefined) {
+        return undefined;
+    }
+    if (shouldSuppressChildTerminalRecoveryForDrill(input.taskId)) {
         return undefined;
     }
 

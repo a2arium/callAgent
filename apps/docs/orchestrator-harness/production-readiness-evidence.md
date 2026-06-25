@@ -1382,6 +1382,151 @@ Conclusion:
 - no duplicate child delegation or stale `waiting`, `running`, or `unknown`
   projection remained after terminal outcomes.
 
+## 2026-06-25 — P3 Child Wait Timeout Drill
+
+Goal:
+
+- prove a parent waiting on `await_child` does not wait forever when neither the
+  Hatchet child wake nor persisted child terminal recovery is available;
+- verify the parent reaches a readable terminal failure;
+- verify child and edge projection still converges after child completion;
+- verify root finalization persists semantic `complete ok:false` error details.
+
+Implementation hardening:
+
+- await-child watchdog waits now have a configured maximum wait,
+  `CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS`, defaulting to 25 minutes;
+- when the maximum wait is exceeded, the parent receives an `ok:false` child
+  wake with `CHILD_WAKE_TIMEOUT`;
+- root driver-run finalization now preserves error metadata for terminal
+  `complete` boundaries whose result is `ok:false`;
+- a scoped drill switch,
+  `CALLAGENT_HATCHET_SUPPRESS_CHILD_TERMINAL_RECOVERY_PREFIX=<prefix>`, can
+  suppress persisted child-terminal recovery for matching parent task ids. This
+  is failure injection only; normal runtime still recovers from persisted child
+  terminal facts.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic \
+CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS=1000 \
+CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS=3000 \
+CALLAGENT_HATCHET_SUPPRESS_CHILD_WAKE_PREFIX=phase5-p3-child-timeout-1782419000000 \
+CALLAGENT_HATCHET_SUPPRESS_CHILD_TERMINAL_RECOVERY_PREFIX=phase5-p3-child-timeout-1782419000000 \
+yarn runtime --no-dashboard
+```
+
+Command:
+
+```bash
+node apps/docs/orchestrator-harness/scripts/phase5-live-drill.mjs \
+  --prefix phase5-p3-child-timeout-1782419000000 \
+  --count 8 \
+  --poll-ms 2000 \
+  --max-polls 90
+```
+
+Action:
+
+- launched 8 real `fetch-page-router` roots;
+- all 8 roots reached `waiting` with 8 running child edges by poll tick 1;
+- provider child wake and persisted child terminal recovery were both
+  suppressed by prefix;
+- the parent wait timed out and resumed each root with an `ok:false` child wake;
+- follow-up settled-state checks were run after children completed.
+
+Initial timeout summary:
+
+```json
+{
+  "launchHttp": { "200": 8 },
+  "launchErrors": 0,
+  "activeTick": 1,
+  "terminalTick": 3,
+  "finalRoots": { "failed": 8 },
+  "finalEdgeStatuses": { "running": 8 },
+  "childStatuses": { "running": 8 },
+  "finalNodeCounts": [2, 2, 2, 2, 2, 2, 2, 2],
+  "finalEdgeCounts": [1, 1, 1, 1, 1, 1, 1, 1],
+  "finalTurnCounts": [3, 3, 3, 3, 3, 3, 3, 3],
+  "duplicateChildEdges": [],
+  "graphPollTiming": {
+    "count": 48,
+    "p50Ms": 39.4,
+    "p95Ms": 149.3,
+    "maxMs": 157.5
+  }
+}
+```
+
+Settled semantic read-model check:
+
+```text
+agent_runs:
+  child completed=8
+  root failed=8
+
+agent_run_edges:
+  completed=8
+
+turn_runs:
+  completed=16
+  failed=8
+
+wm_events:
+  task.child_started=8
+  task.started=8
+  turn.started=16
+  turn.completed=16
+```
+
+Root terminal messages:
+
+```text
+terminal_code=ALL_MODES_FAILED
+terminal_message=All fetch modes failed. Last error: Timed out waiting for child wake for token <token>.
+```
+
+Driver-run finalization check:
+
+```text
+status=failed
+boundary_kind=complete
+error={"code":"ALL_MODES_FAILED","message":"All fetch modes failed. Last error: Timed out waiting for child wake for token <token>."}
+```
+
+Operator graph API spot check:
+
+```text
+root.status=failed
+root.error.code=ALL_MODES_FAILED
+child.status=completed
+edge.status=completed
+projection.source=semantic
+projection.partial=false
+```
+
+Verification:
+
+```bash
+yarn test packages/driver-hatchet/tests/task.test.ts
+yarn build
+```
+
+Result:
+
+- targeted driver task suite passed: 24 tests;
+- full repository build passed: 20 packages.
+
+Conclusion:
+
+- unrecoverable missing child wake does not wait forever;
+- parent failure is terminal and readable in the operator graph and driver-run
+  metadata;
+- late child completion still settles child and edge projection cleanly;
+- no duplicate child delegation was observed.
+
 ## Remaining Evidence Needed
 
 - Add a first-class browser automation dependency or restore the gstack `browse`
@@ -1389,7 +1534,6 @@ Conclusion:
 - Measure browser/operator UI render behavior with trace-level timing, not only
   screenshot evidence.
 - During active real-agent runs, exercise:
-  - Postgres interruption where practical;
-  - timeout.
+  - Postgres interruption where practical.
 - Capture operator screenshots or API responses proving no stale
   waiting/running state remains after terminal outcomes.
