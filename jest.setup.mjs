@@ -2,11 +2,6 @@
 // Tests should explicitly start/stop services they need
 process.env.DISABLE_OUTBOX_PUBLISHER = '1';
 
-// Avoid async Opik flush after Jest has finished (spurious "Cannot log after tests are done")
-if (process.env.CALLAGENT_OPIK_ENABLED === undefined) {
-    process.env.CALLAGENT_OPIK_ENABLED = '0';
-}
-
 const testLogsEnabled = process.env.CALLAGENT_TEST_LOGS === '1';
 
 const noisyErrorPatterns = [

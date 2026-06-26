@@ -237,7 +237,7 @@ open apps/operator-viewer against runtime-host
 filter by tenant, agentId, status, and since timestamp
 open one failed run and one completed multi-child run
 inspect DAG, turn rail, LLM drawer, memory drawer, effects drawer
-follow Hatchet and Opik links when provider/trace ids exist
+follow Hatchet links and copy trace/span ids when provider/trace ids exist
 ```
 
 Expected:
@@ -248,7 +248,8 @@ Expected:
 - LLM drawer shows model/tokens/cost/latency metadata without storing prompts;
 - memory drawer shows `memory.read` / `memory.write` / `memory.delete` keys,
   not raw memory values;
-- Hatchet and Opik remain deep-link destinations, not the primary product UI.
+- Hatchet remains a deep-link destination, and trace/span ids remain correlation
+  handles, not the primary product UI.
 
 Additional scale/cost checks:
 

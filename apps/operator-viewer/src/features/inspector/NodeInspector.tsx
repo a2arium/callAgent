@@ -1,5 +1,5 @@
 import { ExternalLink, PanelRightClose, XCircle } from 'lucide-react';
-import { hatchetRunUrl, opikTraceUrl, type OperatorConfig } from '../../api/client';
+import { hatchetRunUrl, type OperatorConfig } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -119,7 +119,7 @@ export function NodeInspector(props: {
           )}
         </TabsContent>
         <TabsContent value="llm" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-          <LlmCallsTable calls={rollup.llmCalls} config={props.config} />
+          <LlmCallsTable calls={rollup.llmCalls} />
         </TabsContent>
         <TabsContent value="memory" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
           <MemoryOpsTable operations={rollup.memoryOps} />
@@ -194,11 +194,14 @@ function SummaryTab(props: {
 
 function LinksTab(props: { node: AgentRunNode; config: OperatorConfig }): React.ReactElement {
   const hatchetUrl = props.node.providerRunId ? hatchetRunUrl(props.node.providerRunId, props.config) : undefined;
-  const opikUrl = props.node.traceId ? opikTraceUrl(props.node.traceId, undefined, props.config) : undefined;
   return (
     <div className="grid gap-4">
       <InspectorSection title="Trace">
-        {opikUrl ? <ExternalButton href={opikUrl}>Open in Opik</ExternalButton> : <FactRow label="Opik">Not captured</FactRow>}
+        {props.node.traceId ? (
+          <FactRow label="Trace ID"><CopyableId value={props.node.traceId} /></FactRow>
+        ) : (
+          <FactRow label="Trace">Not captured</FactRow>
+        )}
       </InspectorSection>
       <InspectorSection title="Backend run">
         {hatchetUrl ? <ExternalButton href={hatchetUrl}>Open in Hatchet</ExternalButton> : <FactRow label="Hatchet">Provider run ID not captured</FactRow>}

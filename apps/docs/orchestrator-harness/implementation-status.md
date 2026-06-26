@@ -267,7 +267,8 @@ first POC candidate.
   - `driver_runs` has list-oriented indexes for tenant/time, tenant/agent/time,
     and tenant/status/time.
   - `apps/operator-viewer` is a Vite/React SPA with a virtualized fleet table,
-    React Flow DAG, turn/LLM/memory/effects drawers, and Hatchet/Opik deep links.
+    React Flow DAG, turn/LLM/memory/effects drawers, Hatchet deep links, and
+    copyable trace/span identifiers.
   - `apps/examples/runtime-host` serves the built viewer at `/operator` when
     `apps/operator-viewer/dist/index.html` (or `OPERATOR_VIEWER_DIST`) exists.
 

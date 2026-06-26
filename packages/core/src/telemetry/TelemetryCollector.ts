@@ -7,12 +7,6 @@ import { logger } from '@a2arium/callagent-utils';
 const log = logger.createLogger({ prefix: 'TelemetryCollector' });
 
 import { ConsoleProvider } from './providers/ConsoleProvider.js';
-import { OpikProvider } from './providers/OpikProvider.js';
-import { turnOpikDiagEnabled } from './turnOpikDiagEnv.js';
-
-function isTestRuntime(): boolean {
-    return process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
-}
 
 export class TelemetryCollector {
     private static instance: TelemetryCollector;
@@ -30,19 +24,6 @@ export class TelemetryCollector {
 
         if (process.env.TELEMETRY_CONSOLE === 'true' || process.env.CONSOLE_TELEMETRY === 'true') {
             this.addProvider(new ConsoleProvider());
-        }
-
-        if (isTestRuntime()) {
-            return;
-        }
-
-        if (process.env.CALLAGENT_OPIK_ENABLED === 'true' || !!process.env.OPIK_API_KEY) {
-            this.addProvider(
-                new OpikProvider(
-                    (id: string) => this.nodeRegistry.get(id),
-                    () => [...this.nodeRegistry.values()]
-                )
-            );
         }
     }
 
@@ -92,13 +73,13 @@ export class TelemetryCollector {
         return this.nodeRegistry.get(id);
     }
 
-    /** Snapshot of registered nodes (e.g. Opik replay after async client init). */
+    /** Snapshot of registered nodes for diagnostics and custom providers. */
     public getRegisteredNodes(): TelemetryNode[] {
         return [...this.nodeRegistry.values()];
     }
 
     /**
-     * Best-effort flush for providers that buffer (e.g. Opik). Call before process exit in CLIs.
+     * Best-effort flush for providers that buffer. Call before process exit in CLIs.
      */
     public async shutdownProviders(): Promise<void> {
         for (const p of this.providers) {
@@ -116,15 +97,6 @@ export class TelemetryCollector {
     /** Emit the assembled TurnTrace to all providers. Called exactly once per turn by loopRunner. */
     public emitTurnTrace(trace: TurnTrace): void {
         this.initializeDefaultProviders();
-        if (turnOpikDiagEnabled()) {
-            log.info('[CALLAGENT_DEBUG_TURN_OPIK] TelemetryCollector.emitTurnTrace → providers', {
-                providerNames: this.providers.map((p) => p.name),
-                turn: trace.turn,
-                traceId: trace.traceId,
-                spanId: trace.spanId,
-                parentSpanId: trace.parentSpanId,
-            });
-        }
         this.broadcast((p) => p.onTurnTrace(trace));
     }
 

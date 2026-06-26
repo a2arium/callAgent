@@ -13,7 +13,7 @@ The Operator Dashboard is no longer only a passive viewer. It now has:
 
 - A fleet view backed by `driver_runs`.
 - A run detail view backed by `AgentRunGraph`.
-- Turn, LLM, memory, effect, Hatchet, and Opik drill-down surfaces.
+- Turn, LLM, memory, effect, Hatchet, and trace/span correlation surfaces.
 - A registered Agents page that can launch agents from the browser.
 - Workspace loading so one callagent runtime can load external agent folders
   such as `itupdated`, including their `.env` files.

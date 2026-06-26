@@ -1,12 +1,9 @@
-import { ExternalLink } from 'lucide-react';
-import { opikTraceUrl, type OperatorConfig } from '../../api/client';
-import { Button } from '../../design/components/ui/button';
+import { CopyableId } from '../../design/components/ui/copyable';
 import { formatCost, formatDuration, formatNumber } from '../../design/format';
 import type { LlmCallRun } from '../../types';
 
 export function LlmCallsTable(props: {
   calls: LlmCallRun[];
-  config: OperatorConfig;
 }): React.ReactElement {
   if (props.calls.length === 0) {
     return <p className="text-sm text-muted-foreground">No LLM calls were captured for this scope.</p>;
@@ -27,7 +24,6 @@ export function LlmCallsTable(props: {
         </thead>
         <tbody>
           {props.calls.map((call, index) => {
-            const traceUrl = call.traceId ? opikTraceUrl(call.traceId, call.spanId, props.config) : undefined;
             return (
               <tr key={`${call.traceId ?? call.model ?? 'call'}-${index}`} className="border-t border-border">
                 <td className="px-3 py-2">{call.provider ?? 'Not captured'}</td>
@@ -37,13 +33,11 @@ export function LlmCallsTable(props: {
                 <td className="px-3 py-2">{formatDuration(call.durationMs)}</td>
                 <td className="px-3 py-2">{contractStatus(call)}</td>
                 <td className="px-3 py-2">
-                  {traceUrl ? (
-                    <Button asChild size="sm" variant="outline">
-                      <a href={traceUrl} target="_blank" rel="noreferrer">
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        Open
-                      </a>
-                    </Button>
+                  {call.traceId ? (
+                    <div className="grid gap-1">
+                      <CopyableId value={call.traceId} label="trace ID" max={14} />
+                      {call.spanId ? <CopyableId value={call.spanId} label="span ID" max={14} /> : null}
+                    </div>
                   ) : (
                     <span className="text-muted-foreground">Not captured</span>
                   )}

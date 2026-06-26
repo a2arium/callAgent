@@ -40,7 +40,7 @@ The framework is excellent at *running* agents and *recording* what happened. It
 poor at letting a human **see and understand** what happened. Today the truth is
 spread across:
 
-- `TurnTrace` records (ephemeral or shipped to an external trace backend like Opik),
+- compact `TurnTrace` and operator events,
 - Hatchet workflow runs (`aplret.task`, `aplret.segment`, `aplret.outbox.dispatch`)
   named in execution vocabulary, not product vocabulary,
 - `driver_runs` / `wm_events` / snapshots in SQL,
@@ -67,7 +67,7 @@ A user can, in minutes and without reading code:
 5. Inspect **cognition** — what the agent perceived, decided, and why.
 6. Inspect **memory** — what it read and wrote, and whether a cache hit/miss
    changed the outcome.
-7. Jump to the deep backend (Hatchet for infra, Opik for full traces) only when
+7. Jump to backend detail (Hatchet for infra, local trace/span ids for correlation) only when
    they truly need raw detail.
 
 ---
@@ -132,7 +132,7 @@ The dashboard serves several personas. They share one trait: they need to
   fail the contract? which turn is the first wrong turn? did Learning actually
   write the fact?* Cost matters, but correctness matters more.
 - **Frustrations today:** has to add `console.log`, re-run locally, or dig through
-  Opik to reconstruct a turn story. Cannot easily see the whole agent tree.
+  low-level telemetry/logs to reconstruct a turn story. Cannot easily see the whole agent tree.
 - **Success:** finds the first wrong turn and the responsible module
   (Perception / Learning / Policy / Shield / Execution / Transition) in minutes.
 
@@ -257,13 +257,14 @@ thing a user is actually looking for.
 9. **Timeline** — the turn sequence within an agent, and the time span of the run.
 10. **Provenance & config** — which Agent Card / Runtime Manifest (source + hash)
     produced this behavior, to catch config drift between environments.
-11. **Deep-link escape hatches** — to Hatchet (raw infra run) and Opik (full
-    trace, full prompts/responses) when summaries are not enough.
+11. **Debug escape hatches** — Hatchet for raw infra runs, plus copyable
+    trace/span identifiers for correlation when summaries are not enough.
 
 ### Explicitly **not** stored/shown by default (and why)
 
-- **Raw LLM prompts/responses inline** — large, sensitive, and already in the
-  trace backend (Opik). Show metadata + deep-link.
+- **Raw LLM prompts/responses inline** — large and sensitive. Show compact
+  metadata in callagent; full prompt/response capture belongs to callllm or
+  application telemetry, not the operator SQL projection.
 - **Raw memory values inline** — only keys/metadata; values can be huge or
   sensitive. (See [Operator Run Graph](./operator-run-graph.md): memory events do
   not store raw values.)
@@ -366,8 +367,8 @@ decode `aplret.segment` to reach this conclusion.
 4. Checks **memory** for this site → confirms there *was* a cached selector, but a
    prior write overwrote it with a bad one after a layout change.
 5. Conclusion: the validation step accepted a bad selector and cached it. Fix is in
-   Learning/validation. Maya opens Opik via deep-link for the full prompt/response
-   to confirm.
+   Learning/validation. Maya uses the copied trace/span ids to correlate with
+   application-level LLM telemetry if full prompt/response inspection is needed.
 
 **Friction to avoid:** moving between "the decision", "the LLM call behind it", and
 "the memory state that explains it" must be a couple of steps, not a database query.
@@ -406,8 +407,8 @@ product needs. The dashboard must make each answerable visually.
 | "Where's the real failure in the tree?" | Failure propagation from leaf agent to root. |
 
 For raw, full-fidelity detail (full prompts, full payloads, kernel-level infra),
-the answer is a **deep-link** to Opik (traces) or Hatchet (infra run), not inline
-rendering.
+the answer is **Hatchet** for infra runs plus trace/span correlation to
+application-level telemetry, not inline rendering.
 
 ---
 
@@ -448,7 +449,8 @@ follow-up; "Could" = later.
   latency, and output-contract status.
 - **Must** roll up LLM cost/tokens to turn, agent, run, and fleet.
 - **Should** support spend grouping by model and by customer over time.
-- **Must not** render raw prompts/responses inline (deep-link to Opik instead).
+- **Must not** render raw prompts/responses inline; expose compact metadata and
+  copyable trace/span ids instead.
 
 ### 9.5 Memory capability
 - **Must** show memory operations (read / write / delete) with keys, key count,
@@ -463,8 +465,8 @@ follow-up; "Could" = later.
 
 ### 9.7 Provenance & deep-link capability
 - **Must** show Agent Card / Runtime Manifest source + hash per run (config-drift).
-- **Must** deep-link each node/turn to its Hatchet infra run and Opik trace where
-  references exist.
+- **Must** deep-link each node/turn to its Hatchet infra run where references
+  exist and expose copyable trace/span ids where captured.
 
 ### 9.8 Intervention capability
 - **Should** allow cancelling a run and clearly communicate child blast radius.
@@ -478,15 +480,15 @@ follow-up; "Could" = later.
   never force operators to interpret `aplret.*` backend names.
 - **Must** scale visually and in queries to **thousands of concurrent runs** and
   **deep trees**.
-- **Should** degrade gracefully when optional data (TurnTrace capture, Opik) is
+- **Should** degrade gracefully when optional data (TurnTrace capture, LLM telemetry) is
   disabled — core status/topology/cost still work.
 
 ---
 
 ## 10. Non-goals
 
-- Not a replacement for Hatchet (infra/execution control) or Opik (full trace
-  store). It is the **semantic layer** above them and links out to them.
+- Not a replacement for Hatchet (infra/execution control) or application-level
+  prompt/response telemetry. It is the **semantic operator layer** above them.
 - Not an agent **authoring / editing** tool. It observes; it does not build agents.
 - Not a general APM/log aggregator. It is scoped to **agent-run semantics**.
 - Not a billing system. It attributes cost; it does not invoice.

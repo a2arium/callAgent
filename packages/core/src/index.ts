@@ -291,7 +291,6 @@ export {
 export type { TelemetryProvider } from './telemetry/Provider.js';
 export { telemetry, TelemetryCollector } from './telemetry/TelemetryCollector.js';
 export { ConsoleProvider } from './telemetry/providers/ConsoleProvider.js';
-export { OpikProvider } from './telemetry/providers/OpikProvider.js';
 export { CallagentBridgeProvider } from './telemetry/providers/CallagentBridgeProvider.js';
 
 // Telemetry nodes (no ModuleNode)

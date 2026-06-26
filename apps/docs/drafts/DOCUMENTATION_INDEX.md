@@ -10,7 +10,7 @@ This document provides an index of all documentation in the CallAgent framework,
 - [Monorepo Overview](./monorepo-overview.md) - Project structure and setup
 - [Agent Runner](./runner.md) - CLI tool for running agents (with auto-resume support)
 - [Usage Tracking](./usage-tracking.md) - Usage metrics and monitoring
-- [Telemetry & Observability](./telemetry.md) - Tracing, Opik integration, and zero-code configuration
+- [Telemetry & Observability](./telemetry.md) - TurnTrace, generic providers, and local console telemetry
 - [Runtime Streaming Contract](../17-runtime_streaming_contract.md) - Canonical runtime stream events, visibility, SSE, chat bridge, and finality rules
 
 ### Loop-First Architecture

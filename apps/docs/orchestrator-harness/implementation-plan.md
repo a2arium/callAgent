@@ -176,7 +176,8 @@ final production-scale read model.
    The capture is gated by `observability.turnTrace.enabled` and sized by
    `observability.turnTrace.level` (`summary` default, `full` still truncated).
    Full prompts/responses and raw memory values remain outside callAgent storage;
-   operators deep-link to Opik when that detail is needed.
+   operators correlate trace/span ids with application-level telemetry when that
+   detail is needed.
 2. Extend the projection API rather than adding DB tables:
    `GET /tasks/:taskId/run-graph` includes per-turn cognition, LLM metadata, and
    memory operation timelines; `GET /agent-runs` lists root runs with filters and
@@ -190,8 +191,8 @@ final production-scale read model.
    effects. The built SPA is served by `runtime-host` at `/operator` when present.
 5. Acceptance: an operator can start from thousands of runs, filter by tenant /
    agent / status / time, open a run DAG, inspect child agents, decisions, LLM
-   cost/latency metadata, and memory read/write keys, and deep-link to Hatchet or
-   Opik for backend/full-trace debugging.
+   cost/latency metadata, and memory read/write keys, and use Hatchet plus
+   trace/span correlation for backend/full-trace debugging.
 
 Deferred: normalized `agent_runs`, `agent_run_edges`, `turn_runs`,
 `effect_runs`, and full prompt/response/value persistence. Operator actions

@@ -40,7 +40,7 @@ type LLMCallerExtended = LLMCaller & {
     _history?: unknown[];
 };
 
-/** ProviderInit env: empty to avoid callllm loading Opik/OTel; we export via callagent. */
+/** ProviderInit env: empty so callllm external telemetry is not initialized from callagent env. */
 const EMPTY_ENV = {} as Record<string, string | undefined>;
 
 /**

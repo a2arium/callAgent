@@ -13,7 +13,6 @@ export type ListAgentRunsInput = {
 export type OperatorConfig = {
   hatchetDashboardUrl?: string;
   hatchetDashboardTenantId?: string;
-  opikDashboardUrl?: string;
   environment?: string;
 };
 
@@ -206,12 +205,4 @@ export function hatchetRunUrl(providerRunId: string, config: OperatorConfig): st
     (import.meta.env.VITE_HATCHET_DASHBOARD_TENANT_ID as string | undefined) ||
     '707d0855-80ab-4e1f-a156-f1c4546cbf52';
   return `${base.replace(/\/$/, '')}/tenants/${encodeURIComponent(dashboardTenantId)}/runs/${encodeURIComponent(providerRunId)}`;
-}
-
-export function opikTraceUrl(traceId: string, spanId: string | undefined, config: OperatorConfig): string | undefined {
-  const base = config.opikDashboardUrl || (import.meta.env.VITE_OPIK_DASHBOARD_URL as string | undefined);
-  if (!base) return undefined;
-  const url = new URL(`${base.replace(/\/$/, '')}/traces/${encodeURIComponent(traceId)}`);
-  if (spanId) url.searchParams.set('spanId', spanId);
-  return url.toString();
 }

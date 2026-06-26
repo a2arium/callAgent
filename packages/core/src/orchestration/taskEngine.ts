@@ -589,8 +589,7 @@ type AgentRunCursor = {
 
 /**
  * Merge ctx.telemetry into snapshot meta on every persist path (not only TaskExecutor.saveSnapshot).
- * Without this, a flush before tool await can drop meta.telemetry; tool resume then lacks traceId and
- * Opik turn spans attach to a new trace or are dropped.
+ * Without this, a flush before tool await can drop meta.telemetry; tool resume then loses trace continuity.
  */
 function mergeSnapshotMetaWithCtxTelemetry(
     baseSnap: Record<string, unknown>,
@@ -1935,7 +1934,7 @@ export class TaskEngine {
     }
 
     /**
-     * Close the execution AgentNode for Opik and other providers.
+     * Close the execution AgentNode for telemetry providers.
      * Applies to TaskEngine-created nodes and reused nodes from A2AService (loop subagents).
      */
     private finalizeAgentNodeTelemetry(

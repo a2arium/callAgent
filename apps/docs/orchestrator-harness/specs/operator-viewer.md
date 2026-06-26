@@ -15,7 +15,7 @@ Canonical companion docs:
 The operator viewer is the customer-facing surface for understanding agent
 orchestration. It starts at a fleet list, drills into one semantic agent DAG, and
 then exposes turn cognition, LLM metadata, memory key activity, and debug effects.
-Hatchet and Opik are deep-link targets, not the primary product model.
+Hatchet remains a deep-link target for backend execution debugging, not the primary product model.
 
 ## Data Sources
 
@@ -26,7 +26,7 @@ No graph tables are introduced in this track.
 - `wm_events`: task lifecycle plus compact operator events:
   `turn.completed`, `memory.read`, `memory.write`, `memory.delete`.
 - `wm_sessions`: current task snapshot and agent attribution.
-- Opik: optional full trace/prompt/response destination via trace/span links.
+- callllm/application telemetry: optional owner of full prompt/response capture outside callagent.
 
 ## Capture Rules
 
@@ -145,12 +145,11 @@ fleet aggregates, and server-side graph windowing are deferred backend scope.
 - Node inspector:
   - Summary
   - Turns with APLRET cognition stepper
-  - LLM metadata and Opik links
+  - LLM metadata and copyable trace/span identifiers
   - Memory key timeline
-  - Hatchet/Opik links and copyable identifiers
+  - Hatchet links and copyable identifiers
 - Deep links:
   - `VITE_HATCHET_DASHBOARD_URL` for provider run ids
-  - `VITE_OPIK_DASHBOARD_URL` for trace/span ids
 
 Safety rules:
 
@@ -175,4 +174,4 @@ or `OPERATOR_VIEWER_DIST` contains `index.html`.
   metadata, and memory key activity.
 - Full prompts/responses and raw memory values are absent from callAgent SQL
   storage.
-- Hatchet and Opik links are available when provider/trace ids exist.
+- Hatchet links are available when provider run ids exist, and trace/span ids are copyable when captured.

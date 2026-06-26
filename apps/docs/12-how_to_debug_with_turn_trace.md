@@ -40,15 +40,13 @@ Each **TurnTrace** can include compact summaries of sub-calls made during that t
 - **`trace.toolCalls`** — array of **ToolCallTrace** (tool name, durationMs, status, optional module).
 - **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, **`childAgentNodeId`**, **`childTraceId`**, resultSummary, error). Phase 3 onward, **`childTraceId`** / **`childAgentNodeId`** are **reliably present on successful dispatch** when telemetry is available; on failure they are **absent** (not `null`) — test with `typeof x === 'string'`. **Walking parent → child:** use **`trace.childCalls[n].childTraceId`** to correlate with the child agent’s **`TurnTrace`** / telemetry (**`collectTraces`** on the child run or your trace backend).
 
-Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or export traces to your observability backend.
+Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or the operator run graph.
 
 For cross-agent topology, start from the operator run graph (`GET /tasks/:taskId/run-graph`; see [Operator Run Graph](./operator-run-graph.md)). It shows root/child `AgentRun` nodes and `AgentRunEdge` links first, then points each turn back to TurnTrace via `traceId` / `spanId` / `turnTraceRef`. TurnTrace remains the turn-level source of truth; the run graph is the higher-level navigation surface.
 
-### Opik export and payload size
+### Payload size
 
-When **`CALLAGENT_OPIK_ENABLED=true`** (or **`OPIK_API_KEY`** is set), spans sent to Opik are **sanitized** so a single trace does not exceed typical HTTP/API limits: long strings are truncated (default **8192** characters per string), arrays are capped, depth is limited, and objects with **`kind: "artifact"`** are reduced to metadata (**`id`**, **`mimeType`**, **`estimatedSize`**, **`name`**, **`uri`**) so HTML and other large bodies are not inlined. Override the string cap with **`CALLAGENT_OPIK_MAX_STRING_CHARS`** (positive integer). Full payloads remain in your local **`TurnTrace`** when you use **`collectTraces: true`**; Opik is a trimmed view.
-
-Opik may advertise a large maximum object size (e.g. tens of MB) for a project or upload, but **missing spans are often not a size issue**: the JS client loads asynchronously, SDK batching and ordering still apply, and the UI may group or collapse rows. The framework **buffers turn spans** until the Opik client has finished initializing so early loop turns are not dropped. Use **`CALLAGENT_DEBUG_TURN_OPIK=1`** to log emit vs buffer vs defer paths when diagnosing gaps.
+TurnTrace and operator events are compact operational telemetry, not a raw payload archive. Large values should be represented by artifact metadata, trace/span references, hashes, summaries, or truncated previews. Use the artifact store or the application-level LLM tooling for full prompt/response/body inspection when that level of detail is required.
 
 ## First rule
 
@@ -383,4 +381,3 @@ Interpretation:
 - `fanoutSummary.rejected > 0` with non-empty `resolvedMembers` usually indicates queue/busy failures after selection
 - for multi-seat agents, two rows may share `agentId` but differ by `memberId` (this is expected under Phase 2a)
 - `inviteDelivery.received` without matching `accepted|declined|expired` indicates an invite is still pending in lifecycle state
-

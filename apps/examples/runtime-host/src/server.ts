@@ -116,7 +116,6 @@ async function main(): Promise<void> {
             hatchetDashboardUrl: process.env.HATCHET_DASHBOARD_URL ?? 'http://127.0.0.1:8080',
             hatchetDashboardTenantId: process.env.HATCHET_DASHBOARD_TENANT_ID ??
                 '707d0855-80ab-4e1f-a156-f1c4546cbf52',
-            opikDashboardUrl: process.env.OPIK_DASHBOARD_URL,
             environment: process.env.OPERATOR_ENVIRONMENT ?? 'local-dev',
         });
     });

@@ -19,7 +19,6 @@ import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
-import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
@@ -224,18 +223,6 @@ export class TurnRunner {
                 const parentTelNode = parentId ? telemetry.getNode(parentId) : undefined;
                 if (parentTelNode?.traceId && !ctx.telemetry.traceId) {
                     ctx.telemetry.traceId = parentTelNode.traceId;
-                }
-                if (turnOpikDiagEnabled()) {
-                    log.info('[CALLAGENT_DEBUG_TURN_OPIK] TurnRunner telemetry context', {
-                        sessionId,
-                        trigger,
-                        parentId,
-                        hadPersistedMetaTelemetry: !!(base as { meta?: { telemetry?: unknown } })?.meta
-                            ?.telemetry,
-                        ctxNodeId: ctx.telemetry?.nodeId,
-                        ctxTraceId: ctx.telemetry?.traceId,
-                        usedTempAgent: !!tempAgentNode,
-                    });
                 }
             } catch { }
             // -----------------------

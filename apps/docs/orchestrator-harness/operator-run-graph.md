@@ -13,7 +13,7 @@ The product-level unit is an **Agent Run**, not a Hatchet workflow. Hatchet rema
 - which turn/effect failed
 - which decision/stage/transition occurred inside each turn
 - which LLM calls and memory keys were touched
-- where to find TurnTrace, Opik, and raw backend IDs for debugging
+- where to find TurnTrace references and raw backend IDs for debugging
 
 The current implementation exposes this as a projection over `driver_runs`,
 `wm_events`, snapshots, and available trace/span references. Phase 2 persists the
@@ -191,7 +191,7 @@ fields on `driver_runs`: `rootTaskId`, parent/child task and agent ids, edge
 tokens/kinds, turn sequence, boundary kind, and TurnTrace ids where available.
 The Operator Experience track reuses `wm_events` for compact `turn.completed`
 and `memory.*` events; full prompts/responses and raw memory values are deferred
-to external trace systems such as Opik.
+to application-level telemetry outside callagent.
 
 The durable end state should persist enough normalized data to answer operator
 questions without parsing arbitrary JSON:

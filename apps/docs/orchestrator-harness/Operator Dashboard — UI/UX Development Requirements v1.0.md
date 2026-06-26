@@ -103,7 +103,7 @@ It is not:
 * a workflow builder;
 * a generic DevOps dashboard;
 * a replacement for Hatchet;
-* a replacement for Opik;
+* a raw prompt/response telemetry viewer;
 * a general log explorer;
 * an agent authoring tool.
 
@@ -394,7 +394,7 @@ MVP must include:
 7. LLM call metadata
 8. Memory operation metadata
 9. Cost summary at run/node/turn/call level where captured
-10. Deep links to Opik and Hatchet where references exist
+10. Hatchet deep links and copyable trace/span identifiers where references exist
 11. Explicit missing-data states
 12. URL-shareable investigation state
 13. Safe preview behavior
@@ -427,7 +427,7 @@ MVP is successful when an operator or developer can:
 5. Inspect the turn timeline.
 6. Find the first failed or abnormal turn.
 7. See LLM/memory/cost metadata related to that turn.
-8. Open Opik or Hatchet only if full raw detail is needed.
+8. Open Hatchet or correlate trace/span identifiers only if full raw detail is needed.
 
 ---
 
@@ -749,7 +749,7 @@ These are hard requirements, independent of auth implementation timing.
 * **No raw payloads cross the boundary unsanitized.** Input/output/prompt/
   response/memory-value sanitization (§4.1 Unsafe, §17) must happen
   server-side before data reaches the browser, not in the client.
-* **Deep links are not access grants.** Opik/Hatchet links may point to systems
+* **Deep links are not access grants.** Hatchet links may point to systems
   the user cannot access; the dashboard cannot pre-flight that authorization and
   must not imply it (see §18.3).
 * **Operator actions are audited.** Any state-changing action (future) is logged
@@ -1096,8 +1096,8 @@ If hit/miss is not captured:
 
 Shows:
 
-* Opik trace link, if available;
 * Hatchet run link, if available;
+* copy trace/span IDs, if available;
 * copy task ID;
 * copy root task ID;
 * copy agent ID;
@@ -1345,7 +1345,7 @@ Instead show:
 
 If user needs full prompt/response:
 
-> Open full trace in Opik.
+> Use the trace/span IDs to correlate with application-level LLM telemetry.
 
 ---
 
@@ -1536,9 +1536,9 @@ Deep links are escape hatches for full raw detail.
 
 ## 18.2 Link behavior
 
-Opik and Hatchet links must open in a new tab.
+Hatchet links must open in a new tab.
 
-The dashboard should not embed full Opik/Hatchet UI in MVP.
+The dashboard should not embed the full Hatchet UI in MVP.
 
 ## 18.3 Link states
 
@@ -2078,9 +2078,9 @@ Given a run with hundreds of nodes, when the user opens the graph, then:
 
 ## 29.3 Missing trace
 
-Given a run without Opik reference, then:
+Given a run without trace/span references, then:
 
-* trace link shows `Not captured` or `Unavailable`;
+* trace/span rows show `Not captured` or `Unavailable`;
 * no broken link is shown;
 * user can still inspect available graph/turn data.
 
@@ -2238,7 +2238,7 @@ This document is accepted for MVP design/build only if the team agrees to the fo
 8. Missing data is explicit, not hidden.
 9. Status never relies on color alone.
 10. Large graphs are collapsed/lazy-rendered by default.
-11. Opik/Hatchet are deep-link escape hatches, not primary surfaces.
+11. Hatchet is a deep-link escape hatch; trace/span IDs are copyable correlation handles.
 12. The UI never pretends to know what the system did not capture.
 
 The product quality bar:

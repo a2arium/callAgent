@@ -20,7 +20,6 @@ import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { WorkflowNode } from '../telemetry/nodes/WorkflowNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
-import { turnOpikDiagEnabled } from '../telemetry/turnOpikDiagEnv.js';
 import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
@@ -41,7 +40,7 @@ import {
 
 const log = logger.createLogger({ prefix: 'runLoop' });
 
-/** Walk telemetry parents and ctx so TurnNode always gets the session trace id (Opik drops turns with undefined traceId). */
+/** Walk telemetry parents and ctx so TurnNode keeps the session trace id across async boundaries. */
 function resolveTraceIdForTurnParent(
     parentId: string | undefined,
     ctx: TaskContext
@@ -1596,19 +1595,6 @@ export async function runLoop<
                 iterationTurnNode.turnTrace = trace;
             }
             try {
-                if (turnOpikDiagEnabled()) {
-                    log.info('[CALLAGENT_DEBUG_TURN_OPIK] loopRunner emitTurnTrace', {
-                        envTurn: turn,
-                        loopTurnIdx: turnIdx,
-                        traceId: trace.traceId,
-                        spanId: trace.spanId,
-                        parentSpanId: trace.parentSpanId,
-                        transitionKind: trace.transition?.kind,
-                        stageAfter: trace.stageAfter,
-                        taskId: (ctx as { task?: { id?: string } }).task?.id,
-                        agentId: (ctx as { agentId?: string }).agentId,
-                    });
-                }
                 telemetry.emitTurnTrace(trace);
             } catch (emitErr) {
                 log.warn('TurnTrace emission failed', {

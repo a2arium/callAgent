@@ -41,8 +41,8 @@ summaries and identifiers, but not raw LLM prompts/responses or raw memory
 values. `observability.turnTrace.enabled` gates capture. `summary` is the
 default level; `full` may include larger previews, but still applies truncation
 and remains unsuitable for long-term prompt/value audit. Full cognition and
-prompt/response debugging should deep-link to external trace systems such as
-Opik.
+prompt/response debugging belongs to application-level telemetry outside the
+callagent SQL projection.
 
 Outbox migration uses one authoritative delivery path per event type:
 
@@ -79,5 +79,5 @@ Deletion policy:
   what it received/output, what child agents it called, what failed, and where
   the relevant TurnTrace/raw Hatchet run ids are.
 - Operator Experience validation verifies fleet filtering, DAG drill-down,
-  compact LLM cost/latency metadata, memory key timelines, and Hatchet/Opik
-  deep links without adding graph tables.
+  compact LLM cost/latency metadata, memory key timelines, Hatchet deep links,
+  and copyable trace/span identifiers without adding graph tables.

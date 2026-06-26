@@ -205,7 +205,7 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
             this.conversationNodes.delete(ctx.conversationId);
         }
 
-        // Cleanup stack map (do not endNode pending LLM/tool nodes here — that races endLLM and clears span content in Opik)
+        // Cleanup stack map; pending LLM/tool nodes are ended by their own lifecycle callbacks.
         this.nodeStack.delete(ctx.conversationId);
     }
 
@@ -432,7 +432,7 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         }
     }
 
-    /** When parent is still `'root'` or chain lacks traceId, fall back to task context (Opik span routing). */
+    /** When parent is still `'root'` or the chain lacks traceId, fall back to task context. */
     private resolveBridgeTraceId(
         parentId: string,
         parentNode: TelemetryNode | undefined
