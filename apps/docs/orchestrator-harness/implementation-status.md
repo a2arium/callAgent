@@ -489,9 +489,17 @@ operator paths:
   failed semantic effect in the operator graph/UI, and terminalizes the root run
   as `failed` instead of stale `running`.
 
-Phase 5C is not yet a full production observability stack. Prometheus/OTel
-exporters, paging integrations, and historical metrics persistence remain
-follow-ups unless pulled into Phase 5D.
+Phase 5C is complete for the harness production-readiness gate. The committed
+scope is internal bounded JSON metrics (`GET /metrics`), low-cardinality metric
+enforcement, semantic observability incidents, and recorded failure drills.
+Prometheus/OTel exporters, paging integrations, and historical metrics
+persistence are explicit post-Phase-5 integrations rather than blockers.
+
+Callagent no longer includes built-in Opik support. Full prompt/response
+telemetry remains outside callagent, owned by callllm or application-level
+instrumentation. Callagent keeps the generic `TelemetryProvider` interface,
+`ConsoleProvider`, `CallagentBridgeProvider`, TurnTrace capture, semantic
+operator events, and `/metrics` JSON.
 
 Phase 5D retention/security/deletion-gate scaffolding is implemented for the
 operator harness:
@@ -554,15 +562,38 @@ operator harness:
   children, edges, and turns with no duplicate child edges and no stale active or
   unknown semantic state.
 
+### Phase 5 closure
+
+Phase 5 is closed for the local harness gate. Completed scope:
+
+- 5A semantic read model and API migration scaffolding;
+- 5B payload budgets and semantic error surfacing;
+- 5C bounded observability, `/metrics`, and failure-drill evidence;
+- 5D retention, security, audit, and deletion-gate scaffolding;
+- removal of callagent-owned Opik support, with full prompt/response telemetry
+  delegated to callllm/application telemetry.
+
+Closure verification recorded on 2026-06-26:
+
+- `rg` over active implementation, UI, runtime-host, Jest setup, and product/spec
+  docs confirms no callagent Opik provider/env/UI references remain; status and
+  evidence docs mention the removal decision, and `yarn.lock` still contains Opik
+  only as a transitive callllm dependency.
+- `yarn jest packages/core/tests/turnTrace.telemetry.test.ts packages/core/tests/LLMCallerAdapter.typed.test.ts packages/core/tests/observability.metrics.test.ts --runInBand`
+  — pass.
+- `yarn workspace @a2arium/operator-viewer build` — pass.
+- `yarn build` — pass.
+
 ## Next action
 
-Continue with Phase 5D/5E production readiness gates:
+Start Phase 6 planning from the Phase 5 baseline. Recommended focus:
 
-1. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
-   5D deployment hardening.
-2. Run hosted/staging operator browser proof after deployment. Local browser
-   proof for stale terminal waiting/running state is recorded in
-   `production-readiness-evidence.md`.
+1. decide the Phase 6 production deployment target and hosted/staging evidence
+   requirements;
+2. choose whether to invest first in durable normalized operator read-model
+   hardening or production operations/runbook hardening;
+3. keep Prometheus/OTel export as an integration decision, not a Phase 5
+   blocker, unless the deployment target requires it.
 
 ## Open questions (carried from requirements §11)
 

@@ -918,7 +918,8 @@ Phase 5 is done when:
 6. Payload/artifact budgets produce readable semantic failures and preserve refs.
 7. Runtime timeouts, retries, concurrency, cancellation, DLQ behavior, and
    duplicate-safe effects are configured and tested.
-8. Logs, metrics, alerts, and deep links support incident investigation.
+8. Logs, bounded metrics, semantic observability incidents, Hatchet links, and
+   trace/span correlation support incident investigation.
 9. Operator UI production behaviors are implemented and tested.
 10. Retention/pruning policy is implemented or documented with explicit blockers.
 11. Security, tenant-isolation, and operator-audit tests pass.

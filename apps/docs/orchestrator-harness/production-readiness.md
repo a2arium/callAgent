@@ -1,6 +1,6 @@
 # Production Readiness Plan
 
-Last updated: 2026-06-24.
+Last updated: 2026-06-26.
 
 This is the promotion gate for running the Hatchet orchestration harness as a
 production substrate, not a dashboard polish list. The runtime can plausibly run
@@ -35,35 +35,31 @@ Hatchet timer fires are idempotent, `TimerReconciler` repairs overdue timers on
 startup/interval, and manual cancel/restart drills no longer leave stale
 waiting/running operator state.
 
-Phase 5D security/retention scaffolding is implemented and has focused
-automated coverage. A temporary-table 100k query/index probe shows the semantic
-index shapes are directionally correct for fleet and small-root graph reads.
-The local database used for the probe has not yet applied the semantic/audit
-migration, so real retention dry-run and persisted 100k semantic-table evidence
-remain blocked until migration.
+Phase 5A-5D are complete for the local harness production-readiness gate.
+Semantic read-model scaffolding, payload budgets, bounded JSON metrics,
+observability incidents, retention/audit scaffolding, deletion gates, and
+operator controls have focused automated and manual evidence. Persisted 100k
+semantic-table HTTP evidence, 20-poller profiling, active real-agent recovery
+drills, runtime kill/restart, Hatchet engine interruption, NATS interruption,
+cancel, missing-child-wake, child-wait-timeout, Postgres interruption, and
+provider-enqueue failure drills are recorded in
+`production-readiness-evidence.md`.
 
-Known gaps from the current implementation:
+Callagent-owned Opik support has been removed. The supported observability
+boundary is compact TurnTrace/operator events plus bounded `/metrics` JSON.
+Full prompt/response telemetry belongs to callllm or application-level
+instrumentation.
 
-- `GET /agent-runs` now uses child-link event facts for root/child
-  classification instead of stale provider parent columns, but this is still a
-  bridge read path. Production root/child scope should come from normalized
-  persisted run/edge facts with indexes and retention semantics.
-- `GET /tasks/:taskId/run-graph` recursively reads task sessions and events for
-  the whole graph. This is fine for investigation, but needs caps and progressive
-  loading for large fan-out trees.
-- The operator viewer polls fleet and live detail APIs. Polling is acceptable for
-  now, but it needs backoff, stale-tab behavior, and server-side query budgets
-  before many users can watch many live runs.
-- `driver_runs` is still carrying product-projection duties. It is useful bridge
-  data, but production should persist normalized summary/graph records instead
-  of rebuilding everything from provider rows and `wm_events`.
-- Large payload and snapshot failures are real production risks. Artifacts must
-  remain references until the exact consumer that needs content resolves them.
-- Hatchet/log connectivity failures can create noisy retry loops. Logging must
-  degrade without hiding the original segment error or flooding the worker.
-- The Phase 4 restart/cancel checks are focused correctness drills, not load
-  tests. 10-20 active parallel agent tasks and 100k historical runs still need
-  recorded capacity runs before they become supported operating targets.
+Known post-Phase-5 gaps:
+
+- hosted/staging browser proof is still needed before using the operator as the
+  primary production incident UI;
+- Prometheus/OTel export, paging integration, and historical metrics persistence
+  are not implemented; the current contract is process-local JSON metrics;
+- long-term production scale should continue hardening normalized semantic
+  records, graph pagination/windowing, and deployment-specific query budgets;
+- polling remains the accepted short-term live-update mechanism and should be
+  revisited if many users watch many runs concurrently.
 
 ## Readiness Workstreams
 

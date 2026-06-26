@@ -1862,6 +1862,73 @@ Conclusion:
 - RPC latency warning correctly fired because the Hatchet SDK failure path took
   about 80 seconds locally.
 
+## 2026-06-26 — Phase 5 Closure Verification
+
+Purpose:
+
+- close Phase 5 after Opik removal and confirm the final observability boundary;
+- verify generic telemetry, `/metrics`, operator build, and workspace build still
+  pass;
+- record that callagent no longer owns Opik integration.
+
+Boundary:
+
+- kept in callagent: `TelemetryProvider`, `ConsoleProvider`,
+  `CallagentBridgeProvider`, TurnTrace capture, semantic operator events, and
+  JSON `/metrics`;
+- removed from callagent: built-in Opik provider, Opik env flags, Opik dashboard
+  links, Opik payload sanitizer, and Opik-specific tests;
+- retained outside callagent: Opik remains a transitive `callllm` dependency in
+  `yarn.lock`, which is intentional because full prompt/response telemetry is
+  delegated to callllm/application-level instrumentation.
+
+Reference scan:
+
+```bash
+rg -n "Opik|opik|CALLAGENT_OPIK|CALLAGENT_DEBUG_TURN_OPIK|OPIK_|VITE_OPIK|sanitizeForOpikPayload|turnOpikDiagEnabled" \
+  --glob '!apps/docs/todo/done/**' \
+  --glob '!apps/docs/orchestrator-harness/implementation-status.md' \
+  --glob '!apps/docs/orchestrator-harness/production-readiness.md' \
+  --glob '!apps/docs/orchestrator-harness/production-readiness-evidence.md' \
+  --glob '!test_results.json' \
+  --glob '!node_modules/**' \
+  --glob '!dist/**' \
+  --glob '!**/.turbo/**'
+```
+
+Observed:
+
+- no active callagent source, operator source, runtime-host config, Jest setup,
+  or product/spec harness-doc references remain;
+- closure/status docs mention Opik only to record the removal decision and final
+  telemetry boundary;
+- remaining hits are only `yarn.lock` transitive `opik` entries from `callllm`.
+
+Verification:
+
+```bash
+yarn jest packages/core/tests/turnTrace.telemetry.test.ts packages/core/tests/LLMCallerAdapter.typed.test.ts packages/core/tests/observability.metrics.test.ts --runInBand
+yarn workspace @a2arium/operator-viewer build
+yarn build
+git diff --check
+```
+
+Observed:
+
+- focused telemetry/metrics tests passed: 3 suites, 9 tests;
+- operator production build passed; Vite still reports the known large chunk
+  warning;
+- full workspace build passed: 20 successful packages;
+- diff whitespace check passed.
+
+Conclusion:
+
+- Phase 5C remains complete without Opik because the committed scope is bounded
+  generic telemetry plus `/metrics` JSON;
+- Phase 5A-5D are complete for the local harness gate;
+- hosted/staging browser evidence and deployment-specific metrics export are
+  Phase 6 or deployment-readiness follow-ups, not Phase 5 blockers.
+
 ## Remaining Evidence Needed
 
 - Add repo-owned browser automation if promotion requires hermetic CI browser
