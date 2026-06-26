@@ -116,6 +116,48 @@ describe('TaskEngine runtime driver routing', () => {
         startSpy.mockRestore();
     });
 
+    it('persists task.failed when async start scheduling fails before a turn runs', async () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
+        const runtimeDriver = createAsyncOnlyDriver();
+        jest.mocked(runtimeDriver.enqueueStart).mockRejectedValue(new Error('provider enqueue failed'));
+        const store = new InMemorySessionManager();
+        const engine = new TaskEngine({
+            sessionStore: store,
+            runtimeDriver,
+        });
+
+        const result = await engine.startTask({
+            tenantId: 't',
+            agentId: 'driver-test-agent',
+            isStreaming: false,
+            task: {
+                id: 't-start-fail',
+                input: { x: 1 },
+                status: { state: 'submitted', timestamp: new Date().toISOString() },
+            },
+        });
+
+        expect(result.status?.state).toBe('failed');
+        expect(runtimeDriver.enqueueStart).toHaveBeenCalledTimes(1);
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+        const events = await store.listEventsSince({
+            tenantId: 't',
+            sessionId: 't-start-fail',
+            sinceSeq: -1,
+        });
+        expect(events.map((event) => event.type)).toEqual(expect.arrayContaining([
+            'task.started',
+            'task.failed',
+        ]));
+        expect(events.find((event) => event.type === 'task.failed')?.payload).toEqual(expect.objectContaining({
+            taskId: 't-start-fail',
+            error: 'provider enqueue failed',
+        }));
+
+        executeTurnSpy.mockRestore();
+    });
+
     it('restores persisted A2A parent link before notifying a completed child', async () => {
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn').mockResolvedValue({
             M: initialM({ task: { id: 'child-task', input: {} } } as TaskContext),

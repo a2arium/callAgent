@@ -221,6 +221,103 @@ Expected:
 - the operator graph shows a failed observability effect;
 - the original runtime failure is not hidden by observability code.
 
+Recorded live drill result:
+
+- Date/time: 2026-06-26T06:44:40Z.
+- Commit: recorded with the P5 terminal-projection fix changeset.
+- Config:
+  - `CALLAGENT_OPERATOR_PROJECTION_READ=semantic`;
+  - `CALLAGENT_DRIVER_SURFACES=start`;
+  - `yarn runtime --no-dashboard`;
+  - local Compose Hatchet/NATS stack.
+- Induced failure:
+
+```bash
+docker compose -f apps/hatchet-poc/docker-compose.yml --env-file .env stop hatchet-engine
+```
+
+- Task:
+
+```text
+phase5c-p5-provider-enqueue-fixed-1782456170000-01
+```
+
+- RPC launch shape:
+
+```text
+POST /rpc tasks/send
+agentId=fetch-page-router
+pageType=listing
+url=https://update-fixtures.staticdomains.app/pages/listing/static.html
+```
+
+- Expected:
+  - provider `agent.run` enqueue fails while Hatchet engine is stopped;
+  - `hatchet.enqueue_total{operation="agent.run",status="failed"}` increments;
+  - `observability.incident` persists with task context;
+  - operator graph root reaches terminal `failed`, not stale `running`;
+  - operator summary shows the runtime error and failed observability effect;
+  - metric labels remain bounded and do not include task/run identifiers.
+- First attempt finding:
+  - metrics and `observability.provider_enqueue_failed` effects were present;
+  - semantic graph root stayed `running` because non-streaming start-scheduling
+    failure returned a failed task entity without appending `task.failed`.
+- Fix:
+  - `TaskEngine.startTask` now appends `task.failed` and a final failed
+    `task.status` outbox row for non-streaming caught failures.
+- Fixed rerun actual:
+  - RPC returned HTTP 200 JSON-RPC result with `status.state="failed"`;
+  - graph API reported `root.status=failed`, one failed root node, no turns, no
+    child edges, and `projection.source=semantic`;
+  - graph effects included `observability.provider_enqueue_failed` with
+    `status=failed` and `error.code=HatchetError`;
+  - `/metrics` included:
+
+```json
+{
+  "counters": [
+    {
+      "name": "hatchet.enqueue_total",
+      "count": 1,
+      "dimensions": {
+        "operation": "agent.run",
+        "status": "failed",
+        "errorCode": "HatchetError"
+      }
+    }
+  ],
+  "droppedSeriesCount": 0,
+  "alerts": [
+    {
+      "name": "api_p95:rpc",
+      "state": "warning",
+      "value": 80245,
+      "threshold": 2000
+    }
+  ]
+}
+```
+
+- Browser/operator evidence:
+  - screenshot: `/tmp/callagent-phase5c-p5-provider-enqueue-failure.png`;
+  - page showed run status `Failed`;
+  - selected-agent summary showed runtime error message from Hatchet enqueue;
+  - `observability.provider_enqueue_failed` was visible as a failed effect;
+  - no browser console errors.
+- Restoration:
+
+```bash
+docker compose -f apps/hatchet-poc/docker-compose.yml --env-file .env up -d hatchet-engine
+```
+
+- Verification:
+
+```bash
+yarn jest packages/core/tests/runtime/taskEngineDriverRouting.test.ts --runInBand
+yarn jest packages/driver-hatchet/tests/hatchetRuntimeDriver.test.ts --runInBand
+yarn build
+```
+
 ## P6 — Log Sink Degradation
 
 Goal: Hatchet log sink failures do not mask the original task outcome.
@@ -307,5 +404,4 @@ yarn jest packages/driver-hatchet/tests/hatchetLogging.test.ts --runInBand
 - OpenTelemetry traces/metrics.
 - paging/alert routing.
 - historical aggregation across process restarts.
-- live provider-enqueue drill evidence.
 - 100k-run volume evidence.

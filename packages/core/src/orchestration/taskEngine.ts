@@ -2589,6 +2589,21 @@ export class TaskEngine {
                     },
                     timestamp: new Date().toISOString()
                 };
+                await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.failed', {
+                    taskId: sessionId,
+                    error: err.message,
+                    traceparent
+                });
+                await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
+                    taskId: sessionId,
+                    status: {
+                        state: 'failed',
+                        message: { role: 'agent', parts: [{ type: 'text', text: err.message }] },
+                        timestamp: new Date().toISOString()
+                    },
+                    final: true,
+                    traceparent
+                });
                 this.finalizeAgentNodeTelemetry(agentNode, task, err);
                 return task;
             }

@@ -480,7 +480,13 @@ operator paths:
   observability drills, including the metric label/memory policy;
 - controlled P6 log-sink degradation drill is recorded and passes, proving that
   Hatchet log sink failure does not mask successful task completion or the
-  original task error.
+  original task error;
+- live P5 provider-enqueue failure evidence is recorded and passes after fixing
+  non-streaming scheduling failures to append terminal `task.failed` facts:
+  stopping `hatchet-engine` before `agent.run` enqueue increments failed Hatchet
+  enqueue metrics, records `observability.provider_enqueue_failed`, shows a
+  failed semantic effect in the operator graph/UI, and terminalizes the root run
+  as `failed` instead of stale `running`.
 
 Phase 5C is not yet a full production observability stack. Prometheus/OTel
 exporters, paging integrations, and historical metrics persistence remain
@@ -551,14 +557,11 @@ operator harness:
 
 Continue with Phase 5D/5E production readiness gates:
 
-1. Validate Phase 5C automated tests and record at least one real failure drill
-   using `phase5c-observability-drills.md`. Controlled P6 is recorded; live P5
-   provider-enqueue evidence is still recommended before closing Phase 5C.
-2. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
+1. Decide whether Prometheus/OTel export belongs in Phase 5C follow-up or Phase
    5D deployment hardening.
-3. Capture remaining operator API/UI proof that no stale waiting/running states
-   remain after terminal outcomes, ideally with browser/DOM evidence once the
-   browser automation dependency is restored.
+2. Run hosted/staging operator browser proof after deployment. Local browser
+   proof for stale terminal waiting/running state is recorded in
+   `production-readiness-evidence.md`.
 
 ## Open questions (carried from requirements §11)
 

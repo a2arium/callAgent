@@ -1735,6 +1735,133 @@ Conclusion:
 - the page no longer exposes cancel controls for terminal completed runs;
 - this is still a local browser proof, not a hosted production browser trace.
 
+## 2026-06-26 — Phase 5C P5 Provider Enqueue Failure Drill
+
+Goal:
+
+- prove Hatchet provider enqueue failures are observable and not silent;
+- verify metrics, semantic incidents, and operator UI all show the failure;
+- ensure a provider enqueue failure terminalizes the semantic root run rather
+  than leaving stale `running` state.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic \
+CALLAGENT_DRIVER_SURFACES=start \
+yarn runtime --no-dashboard
+```
+
+Induced failure:
+
+```bash
+docker compose -f apps/hatchet-poc/docker-compose.yml --env-file .env stop hatchet-engine
+```
+
+Task:
+
+```text
+phase5c-p5-provider-enqueue-fixed-1782456170000-01
+```
+
+RPC result:
+
+```text
+HTTP 200 JSON-RPC result
+status.state=failed
+message=Task execution failed: /WorkflowService/TriggerWorkflow UNAVAILABLE...
+```
+
+Metrics excerpt:
+
+```json
+{
+  "seriesCount": { "total": 11, "counters": 7, "gauges": 3, "durations": 1 },
+  "droppedSeriesCount": 0,
+  "counters": [
+    {
+      "name": "hatchet.enqueue_total",
+      "count": 1,
+      "dimensions": {
+        "operation": "agent.run",
+        "status": "failed",
+        "errorCode": "HatchetError"
+      }
+    }
+  ],
+  "alerts": [
+    {
+      "name": "api_p95:rpc",
+      "state": "warning",
+      "value": 80245,
+      "threshold": 2000
+    }
+  ]
+}
+```
+
+Operator graph API spot check:
+
+```text
+root.status=failed
+node.status=failed
+turns=0
+edges=0
+effects included observability.provider_enqueue_failed status=failed
+effect.error.code=HatchetError
+projection.source=semantic
+projection.partial=false
+```
+
+Browser proof:
+
+```bash
+/Users/maximantonov/.codex/skills/gstack/browse/dist/browse chain \
+  'goto http://127.0.0.1:8790/operator/runs/phase5c-p5-provider-enqueue-fixed-1782456170000-01?tenantId=default&nodeId=phase5c-p5-provider-enqueue-fixed-1782456170000-01&tab=summary | wait --networkidle | text | screenshot /tmp/callagent-phase5c-p5-provider-enqueue-failure.png | console --errors'
+```
+
+Observed:
+
+- screenshot: `/tmp/callagent-phase5c-p5-provider-enqueue-failure.png`;
+- page loaded with HTTP 200;
+- header, graph node, and selected-agent inspector showed `Failed`;
+- summary showed the Hatchet enqueue runtime error;
+- failed `observability.provider_enqueue_failed` effects were visible;
+- no browser console errors.
+
+Issue found and fixed:
+
+- first attempt recorded enqueue-failure metrics and observability effects, but
+  left the semantic root run `running`;
+- root cause: non-streaming `TaskEngine.startTask` caught scheduling failure and
+  returned a failed `TaskEntity` without appending `task.failed`;
+- fix: non-streaming caught failures now append `task.failed` and a final failed
+  `task.status` outbox row before returning.
+
+Verification:
+
+```bash
+yarn jest packages/core/tests/runtime/taskEngineDriverRouting.test.ts --runInBand
+yarn jest packages/driver-hatchet/tests/hatchetRuntimeDriver.test.ts --runInBand
+yarn build
+```
+
+Restoration:
+
+```bash
+docker compose -f apps/hatchet-poc/docker-compose.yml --env-file .env up -d hatchet-engine
+```
+
+Conclusion:
+
+- provider enqueue failure is visible in metrics, semantic effects, graph API,
+  and browser UI;
+- metric cardinality remained bounded (`droppedSeriesCount=0`);
+- semantic root state no longer leaks as stale `running` after start-scheduling
+  failure;
+- RPC latency warning correctly fired because the Hatchet SDK failure path took
+  about 80 seconds locally.
+
 ## Remaining Evidence Needed
 
 - Add repo-owned browser automation if promotion requires hermetic CI browser
