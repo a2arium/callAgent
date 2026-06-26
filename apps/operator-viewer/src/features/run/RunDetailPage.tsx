@@ -53,8 +53,9 @@ export function RunDetailPage(): React.ReactElement {
     turns: rootRollup?.turns,
   });
   const liveRefresh = graph === undefined || graph.nodes.some((node) => ['queued', 'running', 'unknown'].includes(node.status));
-  const cancelDisabled = taskId === undefined || graph === undefined || isTerminalStatus(graph.root.status) || cancelRun.isPending;
-  const selectedNodeCancelable = selectedNode !== undefined && !isTerminalStatus(selectedNode.status) && !cancelRun.isPending;
+  const rootCancelable = taskId !== undefined && graph !== undefined && !isTerminalStatus(graph.root.status);
+  const cancelDisabled = !rootCancelable || cancelRun.isPending;
+  const selectedNodeCancelable = selectedNode !== undefined && !isTerminalStatus(selectedNode.status);
 
   const updateSearch = (patch: Partial<typeof search>) => {
     void navigate({
@@ -181,17 +182,19 @@ export function RunDetailPage(): React.ReactElement {
               <RefreshCw className={cn('h-4 w-4', graphQuery.isFetching ? 'animate-spin' : '')} />
               Refresh
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={cancelRootRun}
-              disabled={cancelDisabled}
-              className="text-danger hover:bg-danger-bg hover:text-danger"
-              title={isTerminalStatus(graph?.root.status) ? 'Run is already terminal' : 'Cancel root run'}
-            >
-              <XCircle className="h-4 w-4" />
-              {cancelRun.isPending ? 'Canceling...' : 'Cancel run'}
-            </Button>
+            {rootCancelable ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={cancelRootRun}
+                disabled={cancelDisabled}
+                className="text-danger hover:bg-danger-bg hover:text-danger"
+                title="Cancel root run"
+              >
+                <XCircle className="h-4 w-4" />
+                {cancelRun.isPending ? 'Canceling...' : 'Cancel run'}
+              </Button>
+            ) : null}
           </div>
         </div>
       </header>
@@ -256,7 +259,7 @@ export function RunDetailPage(): React.ReactElement {
                 onTurnSelect={selectTurn}
                 onTurnBack={() => updateSearch({ turn: '', tab: 'turns' })}
                 onCollapse={() => setInspectorOpen(false)}
-                onCancel={cancelSelectedNode}
+                onCancel={selectedNodeCancelable ? cancelSelectedNode : undefined}
               />
             </div>
           )}

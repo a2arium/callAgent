@@ -1,7 +1,7 @@
 # Production Readiness Evidence
 
 Status: active evidence ledger.
-Last updated: 2026-06-25.
+Last updated: 2026-06-26.
 
 This file records repeatable evidence for
 `specs/production-readiness-gates.md` and `production-readiness.md`. It is not a
@@ -1652,11 +1652,92 @@ Conclusion:
 - no duplicate child edge was created;
 - graph polling p95 stayed under 250 ms during the interruption run.
 
+## 2026-06-26 — Operator Browser Stale-State Proof
+
+Goal:
+
+- verify the operator detail page in a real browser after the Postgres
+  interruption drill;
+- assert the user-visible graph/inspector state matches the semantic API;
+- capture browser timing, console health, and screenshot evidence for stale
+  state regressions.
+
+Runtime config:
+
+```bash
+CALLAGENT_OPERATOR_PROJECTION_READ=semantic yarn runtime --no-dashboard
+```
+
+Task checked:
+
+```text
+phase5-p3-postgres-terminate-1782421800000-01
+```
+
+Browser command:
+
+```bash
+/Users/maximantonov/.codex/skills/gstack/browse/dist/browse chain \
+  'goto http://127.0.0.1:8790/operator/runs/phase5-p3-postgres-terminate-1782421800000-01?tenantId=default&nodeId=phase5-p3-postgres-terminate-1782421800000-01&tab=summary | wait --networkidle | text | screenshot /tmp/callagent-phase5-operator-stale-state-proof.png | perf | console --errors'
+```
+
+Browser evidence:
+
+- screenshot: `/tmp/callagent-phase5-operator-stale-state-proof.png`;
+- page loaded with HTTP 200;
+- root graph node visible as `Completed`;
+- child `fetch-html` graph node visible as `Completed`;
+- selected-agent inspector visible as `Completed`;
+- turn nodes visible as completed / await-child resolved;
+- no visible `Waiting`, `Running`, `Unknown`, or `Stuck` terminal-state leak;
+- no terminal `Cancel run` / selected-agent `Cancel` control is visible;
+- no browser console errors;
+- load timing:
+
+```text
+dns       0 ms
+tcp       1 ms
+ttfb     16 ms
+domReady 166 ms
+load     166 ms
+total    166 ms
+```
+
+API spot check for the same task:
+
+```text
+root.status=completed
+child.status=completed
+edge.status=completed
+root.turns=2
+child.turns=1
+projection.source=semantic
+projection.partial=false
+```
+
+Issue found and fixed:
+
+- terminal completed run-detail pages still rendered disabled cancel controls in
+  the header and selected-agent inspector;
+- the detail page now renders root/agent cancel controls only for non-terminal
+  runs, while preserving the selected node and inspector state.
+
+Verification:
+
+```bash
+yarn build
+```
+
+Conclusion:
+
+- the browser-visible operator state matches the semantic API for the
+  Postgres-interruption recovery task;
+- the page no longer exposes cancel controls for terminal completed runs;
+- this is still a local browser proof, not a hosted production browser trace.
+
 ## Remaining Evidence Needed
 
-- Add a first-class browser automation dependency or restore the gstack `browse`
-  binary so render checks can include DOM assertions and responsive screenshots.
-- Measure browser/operator UI render behavior with trace-level timing, not only
-  screenshot evidence.
-- Capture operator screenshots or API responses proving no stale
-  waiting/running state remains after terminal outcomes.
+- Add repo-owned browser automation if promotion requires hermetic CI browser
+  checks rather than local gstack browse/Chrome evidence.
+- Run a hosted/staging browser trace after deployment; current browser evidence
+  is local only.

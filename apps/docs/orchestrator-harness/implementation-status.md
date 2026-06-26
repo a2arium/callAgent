@@ -1,6 +1,6 @@
 # Implementation Status
 
-Last updated: 2026-06-25.
+Last updated: 2026-06-26.
 
 ## Stage
 
@@ -48,6 +48,12 @@ state. Remaining work around normalized read-model persistence, query/index
 validation, retention, production-grade observability, payload budgets, and
 volume/failure drills is tracked as Phase 5 production readiness, not as a Phase
 4 blocker.
+Phase 5 local readiness evidence now includes persisted 100k semantic API
+checks, a 20-poller profile/fix, active parent/child drills, runtime/Hatchet/NATS
+/Postgres interruption drills, and a browser operator stale-state proof for the
+Postgres-interruption run. The remaining promotion evidence is hosted/staging
+validation, live provider-enqueue evidence, and the final observability export
+decision.
 Conversation activation still has runtime-seam coverage only and remains a
 follow-up until the kernel has a first-class conversation boundary.
 
