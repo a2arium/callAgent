@@ -123,7 +123,7 @@ export function hasLoggingContext(): boolean {
 
 let consoleBridgeInstalled = false;
 let forwardingToSink = false;
-let originalConsole: Pick<Console, 'debug' | 'info' | 'warn' | 'error'> | undefined;
+let originalConsole: Pick<Console, 'debug' | 'info' | 'log' | 'warn' | 'error'> | undefined;
 
 /**
  * Install a process-wide console bridge that mirrors console output to the current
@@ -140,6 +140,7 @@ export function installLoggingContextConsoleBridge(): void {
     originalConsole = {
         debug: console.debug.bind(console),
         info: console.info.bind(console),
+        log: console.log.bind(console),
         warn: console.warn.bind(console),
         error: console.error.bind(console),
     };
@@ -150,6 +151,10 @@ export function installLoggingContextConsoleBridge(): void {
     };
     console.info = (...args: unknown[]) => {
         originalConsole!.info(...args);
+        emitConsoleArgsToLoggingSink('info', args);
+    };
+    console.log = (...args: unknown[]) => {
+        originalConsole!.log(...args);
         emitConsoleArgsToLoggingSink('info', args);
     };
     console.warn = (...args: unknown[]) => {

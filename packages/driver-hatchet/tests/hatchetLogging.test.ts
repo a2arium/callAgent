@@ -89,4 +89,38 @@ describe('withHatchetTaskLogging', () => {
             }),
         ]));
     });
+
+    it('mirrors console.log from a Hatchet task to Hatchet info logs', async () => {
+        const ctx = {
+            workflowRunId: () => 'run-1',
+            taskRunExternalId: () => 'task-run-1',
+            retryCount: () => 0,
+            logger: {
+                info: jest.fn(async () => undefined),
+                debug: jest.fn(async () => undefined),
+                warn: jest.fn(async () => undefined),
+                error: jest.fn(async () => undefined),
+            },
+        };
+
+        await expect(withHatchetTaskLogging(
+            { tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1' },
+            ctx,
+            'aplret.segment',
+            async () => {
+                console.log('agent log visible', { step: 'execution' });
+                return 'ok';
+            }
+        )).resolves.toBe('ok');
+
+        expect(ctx.logger.info).toHaveBeenCalledWith(
+            expect.stringContaining('agent log visible'),
+            expect.objectContaining({
+                operation: 'aplret.segment',
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+            })
+        );
+    });
 });
