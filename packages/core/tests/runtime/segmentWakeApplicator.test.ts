@@ -1,6 +1,29 @@
-import { describe, it, expect } from '@jest/globals';
-import { applyWakeToSnapshot } from '../../src/runtime/segmentWakeApplicator.js';
+import { describe, it, expect, jest } from '@jest/globals';
+import { applyWakeToSnapshot, prepareSegmentWake } from '../../src/runtime/segmentWakeApplicator.js';
 import { InboxManager } from '../../src/orchestration/InboxManager.js';
+
+const createFakeArtifactPrisma = () => {
+    const artifacts = new Map<string, unknown>();
+    return {
+        agentResultCache: {
+            upsert: jest.fn(async (args: any) => {
+                artifacts.set(args.create.cacheKey, args.create.result);
+                return args.create;
+            }),
+            findUnique: jest.fn(async (args: any) => {
+                const cacheKey = args.where?.tenantId_agentName_cacheKey?.cacheKey;
+                if (!artifacts.has(cacheKey)) return null;
+                return {
+                    id: cacheKey,
+                    result: artifacts.get(cacheKey),
+                    createdAt: new Date(),
+                    expiresAt: new Date(Date.now() + 60_000),
+                };
+            }),
+            delete: jest.fn(async () => ({})),
+        },
+    };
+};
 
 describe('applyWakeToSnapshot', () => {
     const base = {
@@ -57,6 +80,139 @@ describe('applyWakeToSnapshot', () => {
         expect(prepared.trigger).toBe('resume');
         const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string }> };
         expect(inbox.current[0]?.kind).toBe('child.completed');
+    });
+
+    it('child wake hydrates artifact markers before staging child.completed', () => {
+        const artifactMarker = {
+            kind: 'artifact',
+            id: 'html-artifact-1',
+            mimeType: 'text/html',
+            estimatedSize: 1024,
+        };
+        const prepared = applyWakeToSnapshot(base, {
+            trigger: 'child',
+            event: {
+                kind: 'child',
+                token: 'child-tok',
+                childTaskId: 'child-1',
+                output: {
+                    ok: true,
+                    data: { html: artifactMarker },
+                },
+            },
+        }, {
+            hydrateChildResult: (result) => {
+                const html = (result as any)?.data?.html;
+                Object.defineProperty(html, 'then', {
+                    enumerable: false,
+                    value: () => Promise.resolve('<html></html>'),
+                });
+                Object.defineProperty(html, 'load', {
+                    enumerable: false,
+                    value: () => Promise.resolve('<html></html>'),
+                });
+            },
+        });
+
+        const inbox = prepared.snapshot.inbox as { current: Array<{ payload: { result?: { data?: { html?: unknown } } } }> };
+        const html = inbox.current[0]?.payload.result?.data?.html as { then?: unknown; kind?: string };
+        expect(html?.kind).toBe('artifact');
+        expect(typeof html?.then).toBe('function');
+    });
+
+    it('prepareSegmentWake hydrates artifact markers for persisted child wakes', async () => {
+        let savedSnapshot: Record<string, unknown> | undefined;
+        const sessionManager = {
+            store: { prisma: {} },
+            load: async () => ({
+                snapshot: base,
+                wmVersion: BigInt(7),
+            }),
+            saveSnapshot: async (params: { snapshot: Record<string, unknown> }) => {
+                savedSnapshot = params.snapshot;
+                return { wmVersion: BigInt(8) };
+            },
+        };
+
+        await prepareSegmentWake(sessionManager as any, {
+            tenantId: 'default',
+            taskId: 'parent-1',
+            agentId: 'agent-a',
+            wake: {
+                trigger: 'child',
+                event: {
+                    kind: 'child',
+                    token: 'child-tok',
+                    childTaskId: 'child-1',
+                    output: {
+                        ok: true,
+                        data: {
+                            html: {
+                                kind: 'artifact',
+                                id: 'html-artifact-1',
+                                mimeType: 'text/html',
+                                estimatedSize: 1024,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        const inbox = savedSnapshot?.inbox as { current: Array<{ payload: { result?: { data?: { html?: unknown } } } }> };
+        const html = inbox.current[0]?.payload.result?.data?.html as { then?: unknown; load?: unknown; kind?: string };
+        expect(html?.kind).toBe('artifact');
+        expect(typeof html?.then).toBe('function');
+        expect(typeof html?.load).toBe('function');
+    });
+
+    it('prepareSegmentWake stores raw large child wake output as artifact-backed inbox data', async () => {
+        const rawHtml = `<html>${'segment-wake-child-html'.repeat(5000)}</html>`;
+        let savedSnapshot: Record<string, unknown> | undefined;
+        const sessionManager = {
+            store: { prisma: createFakeArtifactPrisma() },
+            load: async () => ({
+                snapshot: base,
+                wmVersion: BigInt(7),
+            }),
+            saveSnapshot: async (params: { snapshot: Record<string, unknown> }) => {
+                savedSnapshot = params.snapshot;
+                return { wmVersion: BigInt(8) };
+            },
+        };
+
+        await prepareSegmentWake(sessionManager as any, {
+            tenantId: 'default',
+            taskId: 'parent-1',
+            agentId: 'agent-a',
+            wake: {
+                trigger: 'child',
+                event: {
+                    kind: 'child',
+                    token: 'child-tok',
+                    childTaskId: 'child-1',
+                    output: {
+                        ok: true,
+                        data: {
+                            html: rawHtml,
+                            content: rawHtml,
+                        },
+                    },
+                },
+            },
+        });
+
+        const serialized = JSON.stringify(savedSnapshot);
+        expect(serialized).not.toContain(rawHtml);
+        const inbox = savedSnapshot?.inbox as { current: Array<{ payload: { result?: { data?: { html?: unknown; content?: unknown } } } }> };
+        expect(inbox.current[0]?.payload.result?.data?.html).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
+        expect(inbox.current[0]?.payload.result?.data?.content).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
     });
 
     it('child wake clears completed pending child and stored token by default', () => {

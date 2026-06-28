@@ -182,3 +182,45 @@ a {
 .react-flow__attribution {
   display: none;
 }
+
+.artifact-markdown-preview h1,
+.artifact-markdown-preview h2,
+.artifact-markdown-preview h3,
+.artifact-markdown-preview h4,
+.artifact-markdown-preview h5,
+.artifact-markdown-preview h6 {
+  margin: 0 0 0.75rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.artifact-markdown-preview h1 {
+  font-size: 1.5rem;
+}
+
+.artifact-markdown-preview h2 {
+  font-size: 1.25rem;
+}
+
+.artifact-markdown-preview h3 {
+  font-size: 1.1rem;
+}
+
+.artifact-markdown-preview p,
+.artifact-markdown-preview ul {
+  margin: 0 0 0.875rem;
+}
+
+.artifact-markdown-preview ul {
+  padding-left: 1.25rem;
+  list-style: disc;
+}
+
+.artifact-markdown-preview code {
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.25rem;
+  background: hsl(var(--muted));
+  padding: 0.1rem 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.85em;
+}

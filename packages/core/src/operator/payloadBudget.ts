@@ -199,12 +199,7 @@ export function compactPayload(value: unknown, depth = 0): unknown {
     }
     if (typeof value === 'object') {
         if (isArtifactLike(value)) {
-            const artifactId = artifactIdFrom(value);
-            return {
-                state: 'artifact_only',
-                artifactId: artifactId ?? 'unknown',
-                summary: artifactId ? `Artifact ${artifactId}` : 'Artifact reference',
-            } satisfies PayloadEnvelope;
+            return compactArtifactMetadata(value);
         }
         if (depth >= COMPACT_DEPTH) {
             return `[truncated object, ${Object.keys(value as Record<string, unknown>).length} keys]`;
@@ -304,15 +299,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isArtifactLike(value: object): boolean {
     const record = value as Record<string, unknown>;
-    return typeof record.artifactId === 'string' ||
+    return record.kind === 'artifact_local' ||
+        record.state === 'artifact_only' ||
+        typeof record.artifactId === 'string' ||
         typeof record.id === 'string' && (record.kind === 'artifact' || record.type === 'artifact') ||
         typeof record.uri === 'string' && String(record.uri).startsWith('artifact:');
 }
 
-function artifactIdFrom(value: object): string | undefined {
+function compactArtifactMetadata(value: object): PayloadEnvelope {
     const record = value as Record<string, unknown>;
-    if (typeof record.artifactId === 'string') return record.artifactId;
-    if (typeof record.id === 'string') return record.id;
-    if (typeof record.uri === 'string') return record.uri;
-    return undefined;
+    const artifactId =
+        typeof record.artifactId === 'string'
+            ? record.artifactId
+            : typeof record.id === 'string'
+                ? record.id
+                : typeof record.uri === 'string'
+                    ? record.uri
+                    : record.kind === 'artifact_local'
+                        ? 'local'
+                        : 'unknown';
+    const mimeType = typeof record.mimeType === 'string' ? record.mimeType : undefined;
+    const estimatedSize =
+        typeof record.estimatedSize === 'number'
+            ? record.estimatedSize
+            : typeof record.size === 'number'
+                ? record.size
+                : record.kind === 'artifact_local' && typeof record.value === 'string'
+                    ? record.value.length
+                    : undefined;
+    return {
+        state: 'artifact_only',
+        artifactId,
+        summary: artifactId === 'local'
+            ? 'Local artifact'
+            : artifactId === 'unknown'
+                ? 'Artifact reference'
+                : `Artifact ${artifactId}`,
+        ...(mimeType ? { mimeType } : {}),
+        ...(estimatedSize !== undefined ? { estimatedSize } : {}),
+    };
 }

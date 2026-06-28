@@ -10,6 +10,7 @@ import { cn } from '../../lib/utils';
 
 export function TurnTimeline(props: {
   turns: TurnRun[];
+  tenantId?: string;
   onSelect: (turn: TurnRun) => void;
 }): React.ReactElement {
   const duplicateSeqs = duplicateTurnSeqs(props.turns);
@@ -73,6 +74,7 @@ export function TurnDetail(props: {
   turn: TurnRun | undefined;
   agentId?: string;
   events?: AgentRunEvent[];
+  tenantId?: string;
   onBack: () => void;
 }): React.ReactElement {
   if (!props.turn) return <p className="text-sm text-muted-foreground">Select a turn to inspect APLRET cognition.</p>;
@@ -155,7 +157,7 @@ export function TurnDetail(props: {
                     <span className="shrink-0 text-xs text-muted-foreground">Show details</span>
                   </summary>
                   <div className="border-t border-border p-3">
-                    <JsonPreview value={event.payload} summaryFields={['turnSeq', 'kind', 'status', 'boundaryKind', 'error']} maxPreviewRows={5} maxRawHeight={220} />
+                    <JsonPreview value={event.payload} tenantId={props.tenantId} summaryFields={['turnSeq', 'kind', 'status', 'boundaryKind', 'error']} maxPreviewRows={5} maxRawHeight={220} />
                   </div>
                 </details>
               ))}
@@ -170,14 +172,14 @@ export function TurnDetail(props: {
           <StageTimingRail turn={turn} />
         </div>
         {stages.map((stage, index) => (
-          <StageDetailCard key={stage.name} index={index + 1} name={stage.name} value={stage.value} turn={turn} />
+          <StageDetailCard key={stage.name} index={index + 1} name={stage.name} value={stage.value} turn={turn} tenantId={props.tenantId} />
         ))}
       </div>
     </section>
   );
 }
 
-function StageDetailCard(props: { index: number; name: string; value: unknown; turn: TurnRun }): React.ReactElement {
+function StageDetailCard(props: { index: number; name: string; value: unknown; turn: TurnRun; tenantId?: string }): React.ReactElement {
   const facts = stageFacts(props.name, props.value, props.turn);
   const hasValue = props.value !== undefined && props.value !== null;
   const shouldOpen = defaultStageOpen(props.name, props.turn);
@@ -210,6 +212,7 @@ function StageDetailCard(props: { index: number; name: string; value: unknown; t
         {hasValue ? (
           <JsonPreview
             value={props.value}
+            tenantId={props.tenantId}
             summaryFields={props.name === 'Transition' ? ['kind', 'status', 'result', 'error'] : ['kind', 'intent', 'action', 'status', 'url', 'message']}
             maxPreviewRows={5}
           />

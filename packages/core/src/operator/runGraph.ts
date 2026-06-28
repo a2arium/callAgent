@@ -56,6 +56,7 @@ export type AgentRunNode = {
     error?: unknown;
     traceId?: string;
     providerRunId?: string;
+    executionOrigin?: 'runtime' | 'cache' | 'projected';
     cancellation?: AgentRunCancellation;
     startedAt?: string;
     finishedAt?: string;
@@ -79,6 +80,8 @@ export type AgentRunEdge = {
     edgeToken?: string;
     edgeKind: 'delegates_to';
     status: AgentRunStatus;
+    executionOrigin?: 'runtime' | 'cache' | 'projected';
+    inputPreview?: unknown;
     resultPreview?: unknown;
     error?: unknown;
     startedAt?: string;
@@ -456,6 +459,12 @@ function buildChildEdges(
             ...(event.type === 'task.child_completed' || event.type === 'task.child_failed'
                 ? { finishedAt: event.createdAt }
                 : {}),
+            ...(event.type === 'task.child_completed' && childCompletionOrigin(event.payload) === 'cache'
+                ? { executionOrigin: 'cache' as const }
+                : {}),
+            ...(Object.prototype.hasOwnProperty.call(event.payload, 'inputPreview')
+                ? { inputPreview: event.payload.inputPreview }
+                : {}),
             ...(Object.prototype.hasOwnProperty.call(event.payload, 'resultPreview')
                 ? { resultPreview: event.payload.resultPreview }
                 : {}),
@@ -493,14 +502,38 @@ function edgeToNode(
         parentTaskId: edge.parentTaskId,
         ...(edge.childAgentId ? { agentId: edge.childAgentId } : {}),
         status,
-        inputPreview: deriveInputPreview(childEvents, undefined),
+        inputPreview: deriveInputPreview(childEvents, undefined) ?? edge.inputPreview,
         outputPreview: deriveOutputPreview(childEvents) ?? edge.resultPreview,
         ...(error ? { error } : {}),
         ...(childRun?.traceId ? { traceId: childRun.traceId } : {}),
         ...(childRun?.providerRunId ? { providerRunId: childRun.providerRunId } : {}),
+        executionOrigin: childExecutionOrigin(edge, childEvents, childDriverRuns),
         ...(startedAt ? { startedAt: toIso(startedAt) } : {}),
         ...(finishedAt ? { finishedAt } : {}),
     };
+}
+
+function childExecutionOrigin(
+    edge: AgentRunEdge,
+    events: AgentRunSourceEvent[],
+    driverRuns: DriverRunView[]
+): AgentRunNode['executionOrigin'] {
+    if (edge.executionOrigin === 'cache') return 'cache';
+    if (driverRuns.length > 0) return 'runtime';
+    if (edge.status === 'completed' && events.length === 0) return 'projected';
+    return undefined;
+}
+
+function childCompletionOrigin(payload: Record<string, unknown>): 'cache' | undefined {
+    const metadata = payload.executionMetadata;
+    if (
+        metadata &&
+        typeof metadata === 'object' &&
+        (metadata as Record<string, unknown>).origin === 'cache'
+    ) {
+        return 'cache';
+    }
+    return undefined;
 }
 
 function eventsForTask(events: AgentRunSourceEvent[], taskId: string): AgentRunSourceEvent[] {
@@ -817,11 +850,18 @@ function buildGraphEvents(
     driverRuns: DriverRunView[]
 ): AgentRunEvent[] {
     const firstTraceId = driverRuns.find((run) => run.traceId)?.traceId ?? undefined;
+    const agentIdByTaskId = new Map(
+        driverRuns
+            .filter((run) => typeof run.taskId === 'string' && typeof run.agentId === 'string')
+            .map((run) => [run.taskId as string, run.agentId as string])
+    );
     return events.map((event) => {
         const token = stringField(event.payload, 'token');
+        const eventTaskId = event.sessionId ?? rootTaskId;
         const agentId =
             stringField(event.payload, 'agentId') ??
             stringField(event.payload, 'childAgentId') ??
+            agentIdByTaskId.get(eventTaskId) ??
             rootAgentId;
         const traceId = stringField(event.payload, 'traceId') ?? firstTraceId ?? undefined;
         const spanId = stringField(event.payload, 'spanId');
@@ -829,12 +869,12 @@ function buildGraphEvents(
             id: event.eventId,
             source: 'wm_event',
             type: event.type,
-            taskId: rootTaskId,
+            taskId: eventTaskId,
             seq: event.seq,
             timestamp: event.createdAt,
-            visibility: event.type.startsWith('task.child_') ? 'operator' : 'debug',
+            visibility: event.type.startsWith('task.child_') || event.type.startsWith('task.tool_') ? 'operator' : 'debug',
             group: {
-                taskId: rootTaskId,
+                taskId: eventTaskId,
                 ...(agentId ? { agentId } : {}),
                 ...(traceId ? { traceId } : {}),
                 ...(spanId ? { spanId } : {}),

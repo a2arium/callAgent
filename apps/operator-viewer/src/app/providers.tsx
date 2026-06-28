@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
+import { ArtifactModalProvider } from '../features/inspector/JsonPreview';
 import { ThemeProvider } from './theme';
 
 export function Providers(props: { children: React.ReactNode }): React.ReactElement {
@@ -16,7 +17,9 @@ export function Providers(props: { children: React.ReactNode }): React.ReactElem
   );
   return (
     <ThemeProvider>
-      <QueryClientProvider client={client}>{props.children}</QueryClientProvider>
+      <QueryClientProvider client={client}>
+        <ArtifactModalProvider>{props.children}</ArtifactModalProvider>
+      </QueryClientProvider>
     </ThemeProvider>
   );
 }

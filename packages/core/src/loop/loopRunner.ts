@@ -159,6 +159,10 @@ function compactOperatorValue(value: unknown, level: 'summary' | 'full', depth =
     }
     if (typeof value === 'object') {
         const record = value as Record<string, unknown>;
+        const artifact = compactOperatorArtifact(record);
+        if (artifact !== undefined) {
+            return artifact;
+        }
         const output: Record<string, unknown> = {};
         for (const [key, entry] of Object.entries(record)) {
             const compact = compactOperatorValue(entry, level, depth + 1);
@@ -169,6 +173,44 @@ function compactOperatorValue(value: unknown, level: 'summary' | 'full', depth =
         return output;
     }
     return String(value);
+}
+
+function compactOperatorArtifact(value: Record<string, unknown>): Record<string, unknown> | undefined {
+    const kind = typeof value.kind === 'string' ? value.kind : undefined;
+    if (kind === 'artifact_local') {
+        return value;
+    }
+    if (kind !== 'artifact' && value.state !== 'artifact_only') {
+        return undefined;
+    }
+    const artifactId =
+        typeof value.id === 'string'
+            ? value.id
+            : typeof value.artifactId === 'string'
+                ? value.artifactId
+                : kind === 'artifact_local'
+                    ? 'local'
+                    : 'unknown';
+    const mimeType = typeof value.mimeType === 'string' ? value.mimeType : undefined;
+    const estimatedSize =
+        typeof value.estimatedSize === 'number'
+            ? value.estimatedSize
+            : typeof value.size === 'number'
+                ? value.size
+                : kind === 'artifact_local' && typeof value.value === 'string'
+                    ? value.value.length
+                    : undefined;
+    return {
+        state: 'artifact_only',
+        artifactId,
+        summary: artifactId === 'local'
+            ? 'Local artifact'
+            : artifactId === 'unknown'
+                ? 'Artifact reference'
+                : `Artifact ${artifactId}`,
+        ...(mimeType ? { mimeType } : {}),
+        ...(estimatedSize !== undefined ? { estimatedSize } : {}),
+    };
 }
 
 async function appendOperatorEvent(

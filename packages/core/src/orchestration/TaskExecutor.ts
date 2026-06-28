@@ -19,6 +19,7 @@ import {
     addProcessedSegmentKey,
     currentSegmentIdempotencyKey,
 } from '../runtime/segmentProcessedKeys.js';
+import { prepareChildResultsInInboxForPersistence } from './childResultPersistence.js';
 
 import type {
     EnvironmentState,
@@ -159,7 +160,10 @@ export class TaskExecutor {
         const defaultBackend = (ctx as any).memory?.semantic?.getDefaultBackend?.();
 
         if (semanticBackends.length === 0 || defaultBackend === 'none') {
-            log.warn('Memory backends empty or stub detected, reinitializing...', { turn: env.turn, agentId });
+            log.debug('Memory backends empty or stub detected, reinitializing', {
+                turn: env.turn,
+                agentId,
+            });
 
             try {
                 const { extendContextWithMemory, getMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
@@ -427,6 +431,8 @@ export class TaskExecutor {
         if (prune) {
             mNextEffective = pruneSnapshot(mNext);
         }
+        const snapshotPrisma = getSessionStorePrisma() || (sessionManager as any).prisma;
+        const childResultCache = snapshotPrisma ? new AgentResultCache(snapshotPrisma) : undefined;
 
         // Merge Inbox (Lost Update Fix)
         const remoteInbox = filterInboxCurrentByConversationDeliveryKeys(
@@ -439,6 +445,7 @@ export class TaskExecutor {
             consumedKeys
         );
         let nextInbox = InboxManager.mergeInboxes(localInbox, remoteInbox, pendingChildren);
+        nextInbox = await prepareChildResultsInInboxForPersistence(nextInbox, childResultCache, tenantId);
 
         if (prune) {
             nextInbox = InboxManager.normalizeInbox(pruneSnapshot(nextInbox as any) as any);
@@ -477,9 +484,8 @@ export class TaskExecutor {
 
         // Offload Artifacts
         try {
-            const prisma = getSessionStorePrisma() || (sessionManager as any).prisma;
-            if (prisma) {
-                const cache = new AgentResultCache(prisma);
+            if (snapshotPrisma) {
+                const cache = new AgentResultCache(snapshotPrisma);
                 await offloadArtifacts(next, cache, tenantId);
             }
         } catch (offloadErr) {

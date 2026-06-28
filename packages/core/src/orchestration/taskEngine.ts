@@ -31,6 +31,7 @@ import { BackpressureManager } from '../internal/conversation/BackpressureManage
 import { createTraceparent } from '../tracing/Tracing.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../streaming/sessionEventMapper.js';
 import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
+import { makeSafeEventPreview } from './safeEventPreview.js';
 import type {
     GoalId,
     GoalNode,
@@ -108,6 +109,11 @@ import {
     measureJsonBytes,
     readOperatorRawPayloadMaxBytes,
 } from '../operator/payloadBudget.js';
+import {
+    prepareChildResultForPersistence,
+    prepareChildResultsInInboxForPersistence,
+} from './childResultPersistence.js';
+import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
 
 export type {
     TaskEntity,
@@ -142,6 +148,35 @@ type A2AParentLink = {
     parentTenantId: string;
     parentTaskId: string;
     parentChildToken: string;
+};
+
+type BackgroundTaskMetadata = {
+    kind: string;
+    label?: string;
+    tenantId?: string;
+    taskId?: string;
+    agentId?: string;
+    token?: string;
+    toolName?: string;
+    childAgent?: string;
+    childTaskId?: string;
+    source?: string;
+    startedAt: number;
+};
+
+type BackgroundTaskSummary = {
+    index: number;
+    kind: string;
+    label: string;
+    ageMs?: number;
+    tenantId?: string;
+    taskId?: string;
+    agentId?: string;
+    token?: string;
+    toolName?: string;
+    childAgent?: string;
+    childTaskId?: string;
+    source?: string;
 };
 
 type A2AChildContext = TaskContext & {
@@ -236,6 +271,9 @@ function deriveListRunStatus(
     relatedRuns: DriverRunListRow[],
     turnEvents: WMEventRow[]
 ): string {
+    if (turnEvents.some((event) => event.type === 'task.canceled')) {
+        return 'canceled';
+    }
     if (turnEvents.some((event) => event.type === 'task.failed')) {
         return 'failed';
     }
@@ -264,8 +302,14 @@ function deriveListRunStatus(
     if (terminalSegment?.boundaryKind === 'complete') {
         return 'completed';
     }
+    if (terminalSegment?.boundaryKind === 'canceled') {
+        return 'canceled';
+    }
 
     const rootStatus = normalizeListRunStatus(rootRun.status);
+    if (rootStatus === 'canceled' || rootStatus === 'completed') {
+        return rootStatus;
+    }
     if (rootStatus === 'failed') {
         return 'failed';
     }
@@ -286,6 +330,9 @@ function deriveListRunStatus(
 
 function normalizeListRunStatus(status: string | null | undefined): string {
     switch ((status ?? '').toLowerCase()) {
+        case 'canceled':
+        case 'cancelled':
+            return 'canceled';
         case 'success':
         case 'succeeded':
         case 'complete':
@@ -500,6 +547,121 @@ function compareListShape(bridge: AgentRunListPage, semantic: AgentRunListPage |
     return parts.length > 0 ? parts.join(', ') : undefined;
 }
 
+function artifactMetadataForOperator(artifacts: unknown): unknown[] {
+    if (!Array.isArray(artifacts)) {
+        return [];
+    }
+    return artifacts
+        .map((artifact) => makeSafeEventPreview(artifact))
+        .filter((artifact) => artifact !== undefined);
+}
+
+function cloneJsonLike<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value, (_key, nested) => typeof nested === 'bigint' ? nested.toString() : nested)) as T;
+}
+
+function summarizeAgentRunItems(items: AgentRunListItem[]): AgentRunListSummary {
+    return items.reduce<AgentRunListSummary>(
+        (summary, item) => {
+            const status = item.status.toLowerCase();
+            summary.total += 1;
+            if (status === 'failed' || status === 'error') summary.failed += 1;
+            if (status === 'running' || status === 'queued' || status === 'waiting') summary.waiting += 1;
+            if (status === 'completed' || status === 'succeeded' || status === 'success') summary.completed += 1;
+            if (typeof item.costUsd === 'number') summary.costCaptured += 1;
+            else summary.costUnavailable += 1;
+            return summary;
+        },
+        { total: 0, failed: 0, waiting: 0, stuck: 0, completed: 0, costCaptured: 0, costUnavailable: 0 },
+    );
+}
+
+function buildBridgeAgentRunWhere(params: AgentRunListParams): Record<string, unknown> {
+    const and: Record<string, unknown>[] = [{
+        tenantId: params.tenantId,
+        operation: { in: ['agent.run', 'task.start'] },
+        ...(params.agentId !== undefined && params.agentId.length > 0 ? { agentId: params.agentId } : {}),
+        ...(params.status !== undefined && params.status.length > 0 ? { status: params.status } : {}),
+    }];
+    if (params.taskId !== undefined && params.taskId.length > 0) {
+        and.push({
+            OR: [
+                { taskId: { contains: params.taskId } },
+                { rootTaskId: { contains: params.taskId } },
+            ],
+        });
+    }
+    if (params.since !== undefined && params.since.length > 0) {
+        const sinceDate = new Date(params.since);
+        if (!Number.isNaN(sinceDate.getTime())) {
+            and.push({ createdAt: { gte: sinceDate } });
+        }
+    }
+    return and.length === 1 ? and[0]! : { AND: and };
+}
+
+function withBridgeCursor(where: Record<string, unknown>, cursor: AgentRunCursor | undefined): Record<string, unknown> {
+    if (cursor === undefined) {
+        return where;
+    }
+    const cursorDate = new Date(cursor.createdAt);
+    if (Number.isNaN(cursorDate.getTime())) {
+        return where;
+    }
+    return {
+        AND: [
+            where,
+            {
+                OR: [
+                    { createdAt: { lt: cursorDate } },
+                    { createdAt: cursorDate, id: { lt: cursor.id } },
+                ],
+            },
+        ],
+    };
+}
+
+async function summarizeBridgeAgentRuns(
+    prisma: OperatorPrismaClient,
+    params: AgentRunListParams,
+    baseWhere: Record<string, unknown>,
+    childTaskIds: Set<string>
+): Promise<AgentRunListSummary> {
+    const summary: AgentRunListSummary = { total: 0, failed: 0, waiting: 0, stuck: 0, completed: 0, costCaptured: 0, costUnavailable: 0 };
+    const batchSize = 1000;
+    let cursor: AgentRunCursor | undefined;
+    for (let guard = 0; guard < 100; guard += 1) {
+        const rows = await prisma.driverRun!.findMany({
+            where: withBridgeCursor(baseWhere, cursor),
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            take: batchSize,
+        });
+        if (rows.length === 0) {
+            break;
+        }
+        for (const row of rows) {
+            if ((params.scope ?? 'roots') === 'roots' && !isRootDriverRun(row, childTaskIds)) {
+                continue;
+            }
+            summary.total += 1;
+            const status = String(row.status ?? 'unknown').toLowerCase();
+            if (status === 'failed' || status === 'error') summary.failed += 1;
+            if (status === 'running' || status === 'queued' || status === 'waiting') summary.waiting += 1;
+            if (status === 'completed' || status === 'succeeded' || status === 'success') summary.completed += 1;
+        }
+        const last = rows[rows.length - 1];
+        if (rows.length < batchSize || last === undefined) {
+            break;
+        }
+        cursor = {
+            createdAt: last.createdAt instanceof Date ? last.createdAt.toISOString() : last.createdAt,
+            id: last.id,
+        };
+    }
+    summary.costUnavailable = summary.total;
+    return summary;
+}
+
 type PendingConversationActivation = {
     params: ConversationActivateParams;
     waiters: Array<{
@@ -523,6 +685,7 @@ export type AgentRunListItem = {
     turns: number;
     children: number;
     llmCalls: number;
+    memoryOps?: number;
     costUsd: number;
     error?: unknown;
     traceId?: string;
@@ -532,6 +695,7 @@ export type AgentRunListItem = {
 export type AgentRunListPage = {
     items: AgentRunListItem[];
     nextCursor?: string;
+    summary?: AgentRunListSummary;
     pageInfo?: {
         nextCursor?: string;
         hasMore: boolean;
@@ -544,6 +708,16 @@ export type AgentRunListPage = {
     };
 };
 
+export type AgentRunListSummary = {
+    total: number;
+    failed: number;
+    waiting: number;
+    stuck: number;
+    completed: number;
+    costCaptured: number;
+    costUnavailable: number;
+};
+
 type AgentRunListParams = {
     tenantId: string;
     agentId?: string;
@@ -552,6 +726,10 @@ type AgentRunListParams = {
     cursor?: string;
     limit?: number;
     scope?: 'roots' | 'all';
+    taskId?: string;
+    hasLlm?: boolean;
+    hasMemory?: boolean;
+    costState?: 'captured' | 'missing';
 };
 
 type DriverRunListRow = DriverRunView & {
@@ -572,6 +750,12 @@ type WMEventRow = {
 type OperatorPrismaClient = {
     driverRun?: {
         findMany: (args: Record<string, unknown>) => Promise<DriverRunListRow[]>;
+        count?: (args: { where?: Record<string, unknown> }) => Promise<number>;
+        groupBy?: (args: {
+            by: string[];
+            where?: Record<string, unknown>;
+            _count: { _all: true };
+        }) => Promise<Array<{ status: string; _count: { _all: number } }>>;
     };
     wMEvent?: {
         findMany: (args: Record<string, unknown>) => Promise<WMEventRow[]>;
@@ -686,6 +870,7 @@ export class TaskEngine {
     private handlerInvoker?: DurableHandlerInvoker;
     // Track background task promises for cleanup (especially in tests)
     private readonly backgroundTaskPromises = new Set<Promise<void>>();
+    private readonly backgroundTaskMetadata = new Map<Promise<void>, BackgroundTaskMetadata>();
     private apiBinder: ApiBinder;
     private turnRunner: TurnRunner;
     /** Phase 0.3: scheduling seam; default is in-process (ADR 0001). */
@@ -744,7 +929,15 @@ export class TaskEngine {
                 sessionId: `${threadId}:${recipientAgentId}`,
             }),
             activateConversationRecipient: (p) =>
-                this.trackBackgroundTask(this.ensureConversationActivation(p)),
+                this.trackBackgroundTask(this.ensureConversationActivation(p), {
+                    kind: 'conversation.activation',
+                    label: `conversation.activation ${p.kind}:${p.recipientAgentId}`,
+                    tenantId: p.tenantId,
+                    taskId: p.routingSessionId,
+                    agentId: p.recipientAgentId,
+                    token: p.kind === 'invite' ? p.token : undefined,
+                    source: 'ConversationService.activateConversationRecipient',
+                }),
             publishConversationEvent: async (channel, event) => {
                 await this.eventBus.publish(
                     createBusEvent({
@@ -827,6 +1020,7 @@ export class TaskEngine {
             getSessionStorePrisma: () => this.getSessionStorePrisma(),
             taskCreationMutex: this.taskCreationMutex,
             backgroundTaskPromises: this.backgroundTaskPromises,
+            trackBackgroundTask: (promise, metadata) => this.trackBackgroundTask(promise, metadata),
             handleChildCompleted: (p) => this.handleChildCompleted(p),
             handleToolCompleted: (p) => this.handleToolCompleted(p),
             conversationService: this.conversationService,
@@ -1145,15 +1339,47 @@ export class TaskEngine {
         return result;
     }
 
-    private trackBackgroundTask<T>(promise: Promise<T>): Promise<T> {
+    private trackBackgroundTask<T>(
+        promise: Promise<T>,
+        metadata: Omit<BackgroundTaskMetadata, 'startedAt'> = {
+            kind: 'unknown',
+            label: 'background task',
+        }
+    ): Promise<T> {
         let tracked: Promise<void>;
         tracked = promise
             .then(() => undefined, () => undefined)
             .finally(() => {
                 this.backgroundTaskPromises.delete(tracked);
+                this.backgroundTaskMetadata.delete(tracked);
             });
         this.backgroundTaskPromises.add(tracked);
+        this.backgroundTaskMetadata.set(tracked, {
+            ...metadata,
+            label: metadata.label ?? metadata.kind,
+            startedAt: Date.now(),
+        });
         return promise;
+    }
+
+    private describeBackgroundTasks(now = Date.now()): BackgroundTaskSummary[] {
+        return Array.from(this.backgroundTaskPromises).map((promise, index) => {
+            const metadata = this.backgroundTaskMetadata.get(promise);
+            return {
+                index,
+                kind: metadata?.kind ?? 'unknown',
+                label: metadata?.label ?? 'untracked background promise',
+                ageMs: metadata ? Math.max(0, now - metadata.startedAt) : undefined,
+                tenantId: metadata?.tenantId,
+                taskId: metadata?.taskId,
+                agentId: metadata?.agentId,
+                token: metadata?.token,
+                toolName: metadata?.toolName,
+                childAgent: metadata?.childAgent,
+                childTaskId: metadata?.childTaskId,
+                source: metadata?.source,
+            };
+        });
     }
 
     private rememberConversationActivationTarget(params: ConversationActivateParams): void {
@@ -1169,7 +1395,15 @@ export class TaskEngine {
         for (const params of targets) {
             if (await this.hasCurrentInboundConversationDelivery(params)) {
                 scheduled += 1;
-                this.trackBackgroundTask(this.ensureConversationActivation(params));
+                this.trackBackgroundTask(this.ensureConversationActivation(params), {
+                    kind: 'conversation.activation',
+                    label: `conversation.activation ${params.kind}:${params.recipientAgentId}`,
+                    tenantId: params.tenantId,
+                    taskId: params.routingSessionId,
+                    agentId: params.recipientAgentId,
+                    token: params.kind === 'invite' ? params.token : undefined,
+                    source: 'TaskEngine.reconcileCurrentConversationDeliveries',
+                });
             }
         }
         return scheduled;
@@ -1326,11 +1560,25 @@ export class TaskEngine {
         if (!this.sessionManager) {
             return undefined;
         }
+        let payload = params.payload;
+        const prisma = this.getSessionStorePrisma();
+        if (prisma) {
+            try {
+                payload = cloneJsonLike(params.payload);
+                await offloadArtifacts(payload, new AgentResultCache(prisma), params.tenantId);
+            } catch (error) {
+                log.warn('Failed to offload operator event artifacts', {
+                    type: params.type,
+                    taskId: params.sessionId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
         return this.sessionManager.appendEvent(
             params.tenantId,
             params.sessionId,
             params.type,
-            params.payload
+            payload
         );
     }
 
@@ -1471,6 +1719,10 @@ export class TaskEngine {
                 cursor: params.cursor,
                 limit,
                 scope: params.scope ?? 'roots',
+                taskId: params.taskId,
+                hasLlm: params.hasLlm,
+                hasMemory: params.hasMemory,
+                costState: params.costState,
             });
             if (semanticPage !== undefined) {
                 return semanticPage;
@@ -1480,28 +1732,8 @@ export class TaskEngine {
             return { items: [] };
         }
         const cursor = decodeAgentRunCursor(params.cursor);
-        const where: Record<string, unknown> = {
-            tenantId: params.tenantId,
-            operation: { in: ['agent.run', 'task.start'] },
-        };
-        if (params.agentId !== undefined && params.agentId.length > 0) {
-            where.agentId = params.agentId;
-        }
-        if (params.since !== undefined && params.since.length > 0) {
-            const sinceDate = new Date(params.since);
-            if (!Number.isNaN(sinceDate.getTime())) {
-                where.createdAt = { gte: sinceDate };
-            }
-        }
-        if (cursor !== undefined) {
-            const cursorDate = new Date(cursor.createdAt);
-            if (!Number.isNaN(cursorDate.getTime())) {
-                where.OR = [
-                    { createdAt: { lt: cursorDate } },
-                    { createdAt: cursorDate, id: { lt: cursor.id } },
-                ];
-            }
-        }
+        const baseWhere = buildBridgeAgentRunWhere(params);
+        const where = withBridgeCursor(baseWhere, cursor);
 
         const scope = params.scope ?? 'roots';
         const rows = await prisma.driverRun.findMany({
@@ -1528,6 +1760,7 @@ export class TaskEngine {
                 .map((event) => childTaskIdFromEvent(event))
                 .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
         );
+        const bridgeSummary = await summarizeBridgeAgentRuns(prisma, params, baseWhere, childTaskIds);
         const filteredRows = rows.filter((row) => scope === 'all' || isRootDriverRun(row, childTaskIds));
         const pageRows = filteredRows.slice(0, limit);
         const rootTaskIds = [
@@ -1554,7 +1787,7 @@ export class TaskEngine {
                   where: {
                       tenantId: params.tenantId,
                       sessionId: { in: rootTaskIds },
-                      type: { in: ['task.failed', 'task.completed', 'task.started', 'task.child_started', 'task.child_completed', 'task.child_failed', 'turn.completed'] },
+                      type: { in: ['task.failed', 'task.completed', 'task.canceled', 'task.started', 'task.child_started', 'task.child_completed', 'task.child_failed', 'turn.completed'] },
                   },
                   orderBy: [{ createdAt: 'asc' }],
               })
@@ -1641,7 +1874,11 @@ export class TaskEngine {
                 };
             })
             .filter((item): item is AgentRunListItem => item !== undefined)
-            .filter((item) => params.status === undefined || params.status.length === 0 || item.status === params.status);
+            .filter((item) => params.status === undefined || params.status.length === 0 || item.status === params.status)
+            .filter((item) => !params.hasLlm || item.llmCalls > 0)
+            .filter((item) => !params.hasMemory || (item.memoryOps ?? 0) > 0)
+            .filter((item) => params.costState !== 'captured' || typeof item.costUsd === 'number')
+            .filter((item) => params.costState !== 'missing' || typeof item.costUsd !== 'number');
 
         const overflow = filteredRows.length > limit ? filteredRows[limit] : undefined;
         const nextCursor = overflow
@@ -1653,6 +1890,7 @@ export class TaskEngine {
         const page: AgentRunListPage = {
             items,
             ...(nextCursor ? { nextCursor } : {}),
+            summary: bridgeSummary,
             pageInfo: {
                 ...(nextCursor ? { nextCursor } : {}),
                 hasMore: nextCursor !== undefined,
@@ -2491,9 +2729,11 @@ export class TaskEngine {
                 }
 
                 if (task.status?.state === 'completed') {
+                    const artifacts = artifactMetadataForOperator(task.artifacts);
                     await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                         taskId: sessionId,
                         artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
+                        ...(artifacts.length > 0 ? { artifacts } : {}),
                         traceparent
                     });
                     await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
@@ -2551,9 +2791,11 @@ export class TaskEngine {
             }
 
             // Append completed event and publish status via outbox
+            const artifacts = artifactMetadataForOperator(task.artifacts);
             await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                 taskId: sessionId,
                 artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
+                ...(artifacts.length > 0 ? { artifacts } : {}),
                 traceparent
             });
             await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
@@ -2975,7 +3217,7 @@ export class TaskEngine {
         };
         (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, toolObservation);
         const saveResult = await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-        const toolCompletedPayload = { token, toolName: entry?.name, resultPreview: result };
+        const toolCompletedPayload = { token, toolName: entry?.name, resultPreview: makeSafeEventPreview(result) };
         const toolCompletedEvent = await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', toolCompletedPayload);
         if (toolCompletedEvent) {
             const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
@@ -3201,24 +3443,30 @@ export class TaskEngine {
                 tokenFound: !!token
             });
 
-            const stagingPrisma = this.getSessionStorePrisma();
-            if (stagingPrisma && result && typeof result === 'object') {
-                log.debug('hydrating child result while staging observation', { parentTaskId, token });
-                const cache = new AgentResultCache(stagingPrisma);
-                ArtifactHydrationService.tryHydrateChildResult(result, cache, tenantId);
-            }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
             const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
+            const a2aTelemetry = readA2aResultTelemetry(result);
+            const childExecutionMetadata = {
+                ...(cleanChildResult.executionMetadata ?? {}),
+                ...(a2aTelemetry?.executionOrigin ? { origin: a2aTelemetry.executionOrigin } : {}),
+            };
+            const stagingPrisma = this.getSessionStorePrisma();
+            const stagingCache = stagingPrisma ? new AgentResultCache(stagingPrisma) : undefined;
+            const childResultForParent = await prepareChildResultForPersistence(
+                cleanChildResult.result,
+                stagingCache,
+                tenantId
+            );
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
                 payload: {
                     token,
                     childTaskId: cleanChildResult.childTaskId || childTaskId || token,
-                    result: cleanChildResult.result, // Use clean extracted result
+                    result: childResultForParent,
                     agentId: childAgentId,
-                    executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
+                    executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined
                 },
                 provenance: {
                     ts: Date.now(),
@@ -3355,24 +3603,34 @@ export class TaskEngine {
             const nextSnapshot = setPendingTasks(base, tasks) as Record<string, unknown> | undefined;
             let next = nextSnapshot ?? ({ ...(base || {}) } as Record<string, unknown>);
             (next as any).inbox = (next as any).inbox || { current: [], all: [] };
-            const parentPrisma = this.getSessionStorePrisma();
-            if (parentPrisma && result && typeof result === 'object') {
-                log.debug('hydrating child result in handleChildCompleted', { parentTaskId, token });
-                const cache = new AgentResultCache(parentPrisma);
-                ArtifactHydrationService.tryHydrateChildResult(result, cache, tenantId);
-            }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
             const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
+            const a2aTelemetry = readA2aResultTelemetry(result);
+            const childExecutionMetadata = {
+                ...(cleanChildResult.executionMetadata ?? {}),
+                ...(a2aTelemetry?.executionOrigin ? { origin: a2aTelemetry.executionOrigin } : {}),
+            };
+            const parentPrisma = this.getSessionStorePrisma();
+            const parentArtifactCache = parentPrisma ? new AgentResultCache(parentPrisma) : undefined;
+            const childResultForParent = await prepareChildResultForPersistence(
+                cleanChildResult.result,
+                parentArtifactCache,
+                tenantId
+            );
+            if (parentArtifactCache && childResultForParent && typeof childResultForParent === 'object') {
+                log.debug('hydrating child result in handleChildCompleted', { parentTaskId, token });
+                ArtifactHydrationService.tryHydrateChildResult(childResultForParent, parentArtifactCache, tenantId);
+            }
             const childObservation: EngineObservation = {
                 source: 'child',
                 kind: 'child.completed',
                 payload: {
                     token,
                     childTaskId: cleanChildResult.childTaskId || childTaskId || token,
-                    result: cleanChildResult.result, // Use clean extracted result
+                    result: childResultForParent, // Persist bounded, artifact-backed result shape
                     agentId: childAgentId,
-                    executionMetadata: cleanChildResult.executionMetadata // Add execution metadata at payload level
+                    executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined
                 },
                 provenance: {
                     ts: Date.now(),
@@ -3506,7 +3764,9 @@ export class TaskEngine {
                 token,
                 childTaskId: cleanChildResult.childTaskId || childTaskId || token,
                 agentId: childAgentId,
-                resultPreview: cleanChildResult.result,
+                result: childResultForParent,
+                executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined,
+                resultPreview: makeSafeEventPreview(childResultForParent),
             };
             try {
                 const childCompletedEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', childCompletedPayload);
@@ -3555,7 +3815,7 @@ export class TaskEngine {
                         kind: 'child',
                         token,
                         childTaskId: childCompletedPayload.childTaskId,
-                        output: cleanChildResult.result,
+                        output: childResultForParent,
                     },
                 });
                 return;
@@ -3628,11 +3888,11 @@ export class TaskEngine {
                         // ✅ FIX: Always ensure inbox has the observation, even if snapshotSaved is true
                         // This handles race conditions where stageChildCompletionObservation saved but
                         // handleChildCompleted loaded an older version
-                        const finalInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
+                        let finalInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
                         const finalPrisma = this.getSessionStorePrisma();
                         if (finalPrisma) {
                             const cache = new AgentResultCache(finalPrisma);
-                            hydrateArtifacts(finalInbox, cache, tenantId);
+                            finalInbox = await prepareChildResultsInInboxForPersistence(finalInbox, cache, tenantId);
                         }
                         const observationPredicateForCheck = (obs: EngineObservation) =>
                             obs?.kind === 'child.completed' &&
@@ -3741,6 +4001,12 @@ export class TaskEngine {
                         // This ensures we have the most recent MentalState including any updates
                         const latestBase = (absoluteLatestSnap?.snapshot as Record<string, unknown>) || {};
                         let M: MentalState = (latestBase as any).M as MentalState || initialM(ctx);
+                        const resumedA2AParent = readA2AParentLink(
+                            (latestBase as { meta?: { a2aParent?: unknown } }).meta?.a2aParent
+                        );
+                        if (resumedA2AParent) {
+                            (ctx as A2AChildContext).__a2aParent = resumedA2AParent;
+                        }
 
                         // Hydrate artifacts immediately
                         M = (ArtifactHydrationService.hydrateMentalStateArtifacts(
@@ -3784,9 +4050,15 @@ export class TaskEngine {
 
                         const startTurnTotal2 = recordedTurn;
                         let envInbox = InboxManager.normalizeInbox((latestBase as any)?.inbox);
+                        const envPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
+                        envInbox = await prepareChildResultsInInboxForPersistence(
+                            envInbox,
+                            envPrisma ? new AgentResultCache(envPrisma) : undefined,
+                            tenantId
+                        );
                         envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
                             envInbox,
-                            this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
+                            envPrisma,
                             tenantId,
                             'handleChildCompleted'
                         );
@@ -3937,6 +4209,15 @@ export class TaskEngine {
                                 eventBus: this.eventBus,
                                 throwOnSaveFailure: true // Rethrow CAS/save errors to trigger retry loop
                             });
+                            await this.notifyA2AParentIfTerminal(
+                                ctx,
+                                {
+                                    id: parentTaskId,
+                                    input: {},
+                                    status: taskStatus,
+                                } as TaskEntity,
+                                agentName || undefined
+                            );
                             const channel = taskChannel(parentTaskId);
                             try {
                                 void this.eventBus.publish(
@@ -4018,7 +4299,7 @@ export class TaskEngine {
                             console.log(`[TaskEngine.handleChildCompleted] Found group ${gToken} with token ${token}, childTokens=${g.childTokens.length}`);
                         }
                         g.results = g.results || {} as any;
-                        (g.results as any)[token] = { ok: true, value: result };
+                        (g.results as any)[token] = { ok: true, value: childResultForParent };
                         mutated = true;
                         // Check if all children have results recorded
                         const allDone = g.childTokens.every((ct: string) => (g.results as any)[ct] !== undefined);
@@ -4838,8 +5119,12 @@ export class TaskEngine {
         const remainingCount = this.backgroundTaskPromises.size;
         const activeConversationActivations = Array.from(this.activeConversationActivations);
         const pendingConversationActivations = Array.from(this.pendingConversationActivations.keys());
+        const remainingTasks = this.describeBackgroundTasks();
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Wait completed after ${elapsed}ms, remaining promises=${remainingCount}`);
+            if (remainingTasks.length > 0) {
+                console.log(`[TaskEngine] Remaining background tasks: ${JSON.stringify(remainingTasks)}`);
+            }
             console.log(`[TaskEngine] Active handles after wait: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);
             console.log(`[TaskEngine] Active requests after wait: ${(process as any)._getActiveRequests?.()?.length ?? 'unknown'}`);
         }
@@ -4856,11 +5141,19 @@ export class TaskEngine {
             options.throwOnTimeout === true &&
             (remainingCount > 0 || activeConversationActivations.length > 0 || pendingConversationActivations.length > 0)
         ) {
+            log.warn('Background task drain incomplete', {
+                elapsed,
+                remainingPromises: remainingCount,
+                remainingTasks,
+                activeConversationActivations,
+                pendingConversationActivations,
+            });
             throw new Error(
                 `Background task drain incomplete after ${elapsed}ms: ` +
                 `remainingPromises=${remainingCount}, ` +
                 `activeConversationActivations=${activeConversationActivations.length}, ` +
-                `pendingConversationActivations=${pendingConversationActivations.length}`
+                `pendingConversationActivations=${pendingConversationActivations.length}, ` +
+                `remainingTasks=${JSON.stringify(remainingTasks)}`
             );
         }
     }

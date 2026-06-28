@@ -48,7 +48,19 @@ describe('ApiBinder.requestTool unified API', () => {
             getSessionStorePrisma: () => null,
             taskCreationMutex: { runExclusive: jest.fn((key, fn) => fn()) } as any,
             backgroundTaskPromises: new Set(),
-            handleChildCompleted: jest.fn().mockResolvedValue(undefined)
+            handleChildCompleted: jest.fn().mockResolvedValue(undefined),
+            conversationService: {
+                startThread: jest.fn().mockResolvedValue({
+                    thread: { threadId: 'thread-1' },
+                    receipt: { status: 'accepted', messageId: 'msg-1', sequenceNumber: 1 },
+                }),
+                send: jest.fn().mockResolvedValue({
+                    status: 'accepted',
+                    messageId: 'msg-1',
+                    sequenceNumber: 1,
+                }),
+                close: jest.fn().mockResolvedValue(undefined),
+            } as any,
         });
     });
 
@@ -80,6 +92,18 @@ describe('ApiBinder.requestTool unified API', () => {
             taskCreationMutex: { runExclusive: jest.fn((key, fn) => fn()) } as any,
             backgroundTaskPromises: new Set(),
             handleChildCompleted: jest.fn().mockResolvedValue(undefined),
+            conversationService: {
+                startThread: jest.fn().mockResolvedValue({
+                    thread: { threadId: 'thread-1' },
+                    receipt: { status: 'accepted', messageId: 'msg-1', sequenceNumber: 1 },
+                }),
+                send: jest.fn().mockResolvedValue({
+                    status: 'accepted',
+                    messageId: 'msg-1',
+                    sequenceNumber: 1,
+                }),
+                close: jest.fn().mockResolvedValue(undefined),
+            } as any,
             enqueueChildStart
         });
 
@@ -99,7 +123,8 @@ describe('ApiBinder.requestTool unified API', () => {
             });
 
             const result = await ctx.sendTaskToAgent('child-agent', { url: 'https://example.test' }, {
-                awaitCompletion: false
+                awaitCompletion: false,
+                cache: { enabled: true, ttlSeconds: 900, excludePaths: ['traceparent'] }
             });
 
             expect(result).toHaveProperty('token');
@@ -108,12 +133,22 @@ describe('ApiBinder.requestTool unified API', () => {
                 tenantId: 't1',
                 agentId: 'child-agent',
                 input: { url: 'https://example.test' },
+                cache: { enabled: true, ttlSeconds: 900, excludePaths: ['traceparent'] },
                 token: result.token,
                 traceId: 'trace-1'
             }));
             const scheduledTaskId = (enqueueChildStart.mock.calls[0]?.[0] as any)?.taskId;
             expect(typeof scheduledTaskId).toBe('string');
             expect(scheduledTaskId).toContain('a2a_s1_child-agent_');
+            expect(mockSessionManager.appendEvent).toHaveBeenCalledWith(
+                't1',
+                's1',
+                'task.child_started',
+                expect.objectContaining({
+                    childTaskId: scheduledTaskId,
+                    inputPreview: { url: 'https://example.test' },
+                })
+            );
             expect(mockSessionManager.saveSnapshot).toHaveBeenCalledWith(expect.objectContaining({
                 tenantId: 't1',
                 sessionId: scheduledTaskId,
@@ -132,6 +167,67 @@ describe('ApiBinder.requestTool unified API', () => {
         } finally {
             delete process.env.CALLAGENT_DRIVER_SURFACES;
             localA2ASpy.mockRestore();
+        }
+    });
+
+    it('redacts and bounds sync child completion result previews', async () => {
+        const html = `<html>${'x'.repeat(80 * 1024)}</html>`;
+        const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
+            id: 'child-task-1',
+            status: {
+                state: 'completed',
+                timestamp: new Date().toISOString(),
+                metadata: {
+                    result: {
+                        ok: true,
+                        data: {
+                            html: {
+                                kind: 'artifact_local',
+                                value: html,
+                                mimeType: 'text/html',
+                            },
+                            content: html,
+                            statusCode: 200,
+                        },
+                    },
+                },
+            },
+        } as any);
+        const ctx: any = {
+            task: { id: 's1', input: {} },
+            tenantId: 't1',
+            agentId: 'parent-agent',
+        };
+
+        try {
+            await apiBinder.attachOrchestrationAPIs(ctx, {
+                tenantId: 't1',
+                sessionId: 's1',
+                agentId: 'parent-agent',
+                flushMentalState: jest.fn(),
+            });
+
+            await ctx.sendTaskToAgent('child-agent', { url: 'https://example.test' });
+
+            const childCompletedCall = mockSessionManager.appendEvent.mock.calls.find(
+                (call) => call[2] === 'task.child_completed'
+            );
+            expect(childCompletedCall).toBeDefined();
+            const payload = childCompletedCall?.[3] as any;
+            expect(payload.result.data.html).toEqual(expect.objectContaining({
+                state: 'artifact_only',
+                mimeType: 'text/html',
+            }));
+            expect(payload.result.data.content).toBe(`[html/text truncated, ${html.length} chars]`);
+            expect(payload.resultPreview.result.data.html).toEqual(expect.objectContaining({
+                state: 'artifact_only',
+                artifactId: 'local',
+                mimeType: 'text/html',
+            }));
+            expect(payload.resultPreview.result.data.content).toBe(`[html/text truncated, ${html.length} chars]`);
+            expect(JSON.stringify(payload)).not.toContain(html);
+        } finally {
+            sendSpy.mockRestore();
         }
     });
 
@@ -285,6 +381,47 @@ describe('ApiBinder.requestTool unified API', () => {
         const pend = savedSnapshot.pending.tools[result.token];
         expect(pend).toBeDefined();
         expect(pend.handlers.completed).toBe('myHandler');
+    });
+
+    it('redacts persisted async tool request previews without changing pending execution args', async () => {
+        const mockTools = { invoke: jest.fn() };
+        const ctx: any = { tools: mockTools };
+        const args = {
+            url: 'https://example.test',
+            env_vars: {
+                OPENAI_API_KEY: 'sk-secret-value-that-should-not-persist',
+                BROWSER_USE_API_KEY: 'bu_secret-value-that-should-not-persist',
+            },
+            prompt: 'Use Bearer abcdefghijklmnopqrstuvwxyz123456 for nothing',
+        };
+
+        let savedSnapshot: any;
+        mockSessionManager.saveSnapshot.mockImplementation(async (params: any) => {
+            savedSnapshot = params.snapshot;
+            return { newVersion: BigInt(2) };
+        });
+
+        await apiBinder.attachOrchestrationAPIs(ctx, { tenantId: 't1', sessionId: 's1', agentId: 'a1', flushMentalState: jest.fn() });
+
+        const result = await ctx.requestTool('mcp:browser-use.navigate_and_extract', args, { awaitCompletion: false });
+
+        expect(savedSnapshot.pending.tools[result.token].args).toEqual(args);
+        expect(mockSessionManager.appendEvent).toHaveBeenCalledWith(
+            't1',
+            's1',
+            'task.tool_requested',
+            expect.objectContaining({
+                token: result.token,
+                argsPreview: {
+                    url: 'https://example.test',
+                    env_vars: {
+                        OPENAI_API_KEY: '[redacted]',
+                        BROWSER_USE_API_KEY: '[redacted]',
+                    },
+                    prompt: 'Use [redacted] for nothing',
+                },
+            })
+        );
     });
 
     it('should be backwards compatible without awaitCompletion flag', async () => {

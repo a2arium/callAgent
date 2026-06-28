@@ -117,7 +117,9 @@ const setupTeardown = async () => {
         try {
             const { EngineLocator } = await import('./packages/core/src/orchestration/EngineLocator.js');
             const engine = EngineLocator.getEngine();
+            await engine?.waitForBackgroundTasks?.({ timeoutMs: 5000 });
             engine?.stopOutboxPublisher?.();
+            await engine?.closeTransportAdapters?.();
         } catch {
             /* noop */
         }

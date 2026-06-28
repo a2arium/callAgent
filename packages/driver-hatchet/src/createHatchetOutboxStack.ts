@@ -1,4 +1,4 @@
-import { RuntimeTimerRepository } from '@a2arium/callagent-core/unstable';
+import { RuntimeTimerRepository, SessionManager } from '@a2arium/callagent-core/unstable';
 import type { IEventBus } from '@a2arium/callagent-core/unstable';
 import type { RuntimeDriver } from '@a2arium/callagent-core/unstable';
 import type { TurnExecutor } from '@a2arium/callagent-core/unstable';
@@ -91,6 +91,7 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
 export async function startOutboxWorker(params: {
     eventBus: IEventBus;
     prisma: PrismaClient;
+    sessionManager?: SessionManager;
     workerName?: string;
     hatchet?: HatchetClient;
     turnExecutor?: TurnExecutor;
@@ -119,9 +120,12 @@ export async function startOutboxWorker(params: {
                 hatchet,
                 {
                     prisma: params.prisma,
+                    sessionManager: params.sessionManager,
                     driverRuns,
                     runtimeTimers,
                     events: resolveEventPusher(hatchet),
+                    resolveCacheConfig: (agentId) =>
+                        PluginManager.findAgent(agentId ?? agent.name)?.resolved.runtimeManifest.cache,
                 },
                 agentTaskName(agent.name),
                 {
@@ -140,9 +144,12 @@ export async function startOutboxWorker(params: {
             ),
             createTaskTask(hatchet, {
                 prisma: params.prisma,
+                sessionManager: params.sessionManager,
                 driverRuns,
                 runtimeTimers,
                 events: resolveEventPusher(hatchet),
+                resolveCacheConfig: (agentId) =>
+                    PluginManager.findAgent(agentId ?? '')?.resolved.runtimeManifest.cache,
             }),
             timerFireTask,
             ...agentTasks,

@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { createApiRouter } from '../src/api/router.js';
 import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 import { defaultMetricsRegistry } from '../src/observability/metrics.js';
@@ -112,6 +113,45 @@ describe('API router default branch', () => {
         ]));
     });
 
+    it('passes fleet filters to the agent-runs list engine', async () => {
+        const listAgentRuns = jest.fn(async () => ({ items: [], nextCursor: null }));
+        EngineLocator.setEngine({ listAgentRuns });
+        const handler = getHandler('/agent-runs', 'get');
+        const res = fakeRes();
+
+        await handler({
+            method: 'GET',
+            query: {
+                tenantId: 'tenant-1',
+                scope: 'all',
+                agentId: 'discover',
+                status: 'failed',
+                since: '2026-06-23T00:00:00.000Z',
+                cursor: 'cursor-1',
+                limit: '75',
+                taskId: 'root-task',
+                hasLlm: 'true',
+                hasMemory: 'true',
+                costState: 'missing',
+            },
+            header: () => undefined,
+        }, res);
+
+        expect(listAgentRuns).toHaveBeenCalledWith({
+            tenantId: 'tenant-1',
+            scope: 'all',
+            agentId: 'discover',
+            status: 'failed',
+            since: '2026-06-23T00:00:00.000Z',
+            cursor: 'cursor-1',
+            limit: 75,
+            taskId: 'root-task',
+            hasLlm: true,
+            hasMemory: true,
+            costState: 'missing',
+        });
+    });
+
     it('can disable the metrics endpoint by config', async () => {
         process.env.CALLAGENT_METRICS_ENABLED = 'false';
         const metricsHandler = getHandler('/metrics', 'get');
@@ -175,6 +215,7 @@ describe('API router default branch', () => {
         const cases = [
             { path: '/metrics', method: 'get', req: { method: 'GET', header: () => undefined } },
             { path: '/agent-runs', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
+            { path: '/artifacts/:artifactId', method: 'get', req: { method: 'GET', params: { artifactId: 'artifact-1' }, query: {}, header: () => undefined } },
             { path: '/agents', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
             { path: '/tasks/:taskId/run-graph', method: 'get', req: { method: 'GET', params: { taskId: 'task-1' }, query: {}, header: () => undefined } },
             { path: '/tasks/:taskId/cancel', method: 'post', req: { method: 'POST', params: { taskId: 'task-1' }, query: {}, body: {}, header: () => undefined } },
@@ -204,6 +245,71 @@ describe('API router default branch', () => {
 
         expect(res.statusCode).toBe(403);
         expect(res.body).toEqual(expect.objectContaining({ error: 'TENANT_NOT_ALLOWED' }));
+    });
+
+    it('resolves operator artifacts on demand', async () => {
+        const findUnique = jest.fn(async () => ({
+            result: '<html>artifact</html>',
+            expiresAt: new Date(Date.now() + 60_000),
+            createdAt: new Date(),
+        }));
+        EngineLocator.setEngine({
+            getOperatorPrismaClient: () => ({ agentResultCache: { findUnique } }),
+        });
+        const handler = getHandler('/artifacts/:artifactId', 'get');
+        const res = fakeRes();
+
+        await handler({
+            method: 'GET',
+            params: { artifactId: 'artifact-1' },
+            query: {},
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toEqual(expect.objectContaining({
+            artifactId: 'artifact-1',
+            contentType: 'text/html',
+            filename: 'artifact-artifact-1.html',
+            value: '<html>artifact</html>',
+        }));
+        expect(res.body.sizeBytes).toBeGreaterThan(0);
+        expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                tenantId_agentName_cacheKey: expect.objectContaining({
+                    tenantId: 'tenant-1',
+                    agentName: 'artifact_store',
+                }),
+            }),
+        }));
+    });
+
+    it('returns unavailable states for missing artifact storage or expired artifacts', async () => {
+        const handler = getHandler('/artifacts/:artifactId', 'get');
+
+        EngineLocator.setEngine({});
+        const noStore = fakeRes();
+        await handler({
+            method: 'GET',
+            params: { artifactId: 'artifact-1' },
+            query: {},
+            header: () => undefined,
+        }, noStore);
+        expect(noStore.statusCode).toBe(503);
+        expect(noStore.body).toEqual({ error: 'Artifact store is not available' });
+
+        EngineLocator.setEngine({
+            getOperatorPrismaClient: () => ({ agentResultCache: { findUnique: jest.fn(async () => null) } }),
+        });
+        const missing = fakeRes();
+        await handler({
+            method: 'GET',
+            params: { artifactId: 'artifact-1' },
+            query: {},
+            header: () => undefined,
+        }, missing);
+        expect(missing.statusCode).toBe(404);
+        expect(missing.body).toEqual({ error: 'Artifact not found or expired' });
     });
 
     it('uses the server configured operator tenant and rejects mismatches', async () => {

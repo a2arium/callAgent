@@ -41,17 +41,10 @@ import { PrismaClient } from '../generated/prisma-client/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
+import { resolveBackgroundTaskDrainTimeout } from './backgroundTaskTimeout.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
-
-const parsePositiveInt = (value: string | undefined, fallback: number): number => {
-    if (value === undefined) {
-        return fallback;
-    }
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-};
 
 // Detect if running in dev mode with ts-node. Library imports may not have argv[1].
 const argv0 = process.argv[0] ?? '';
@@ -603,12 +596,22 @@ export async function runAgentWithStreaming(
                 }
                 // Wait for any background tool executions or nonblocking conversation wakeups to complete.
                 // CLI runs must not validate/exit while the active task graph still has background turns in flight.
-                const backgroundTaskTimeoutMs = parsePositiveInt(
-                    process.env.CALLAGENT_BACKGROUND_TASK_TIMEOUT_MS ??
-                    process.env.REAL_RUN_TIMEOUT_MS,
-                    60000
-                );
-                await engine.waitForBackgroundTasks(backgroundTaskTimeoutMs, { throwOnTimeout: true });
+                // If startTask returned an await_* status, this is active graph execution, not cleanup; use
+                // a run-sized wait budget instead of the short terminal cleanup budget.
+                const backgroundDrain = resolveBackgroundTaskDrainTimeout({
+                    explicitTimeoutMs: process.env.CALLAGENT_BACKGROUND_TASK_TIMEOUT_MS,
+                    realRunTimeoutMs: process.env.REAL_RUN_TIMEOUT_MS,
+                    latencyBudgetMs: plugin.resolved.runtimeManifest.budgets?.latencyMs,
+                    taskState: returnedTask?.status?.state,
+                });
+                runnerLogger.info('Waiting for background task drain', {
+                    taskId: taskCtx.task.id,
+                    activeGraph: backgroundDrain.activeGraph,
+                    timeoutMs: backgroundDrain.timeoutMs,
+                    source: backgroundDrain.source,
+                    taskState: returnedTask?.status?.state ?? 'unknown',
+                });
+                await engine.waitForBackgroundTasks(backgroundDrain.timeoutMs, { throwOnTimeout: true });
                 logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
                 if (!options.isStreaming) {
                     logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);

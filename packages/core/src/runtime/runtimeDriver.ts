@@ -33,6 +33,12 @@ export type RuntimeDriverIds = {
     idempotencyKey: string;
 };
 
+export type RuntimeResultCachePolicy = {
+    enabled?: boolean;
+    ttlSeconds?: number;
+    excludePaths?: string[];
+};
+
 /**
  * A wake delivered to a waiting task. Conversation transport stays out of scope;
  * the conversation layer translates a delivered message into a `conversation`
@@ -54,7 +60,10 @@ export type RuntimeWakeEvent =
     | { kind: 'external'; token: string; type: string; data: unknown }
     | { kind: 'conversation'; token: string; messageId: string; data: unknown };
 
-export type EnqueueStartParams = RuntimeDriverIds & { input: unknown };
+export type EnqueueStartParams = RuntimeDriverIds & {
+    input: unknown;
+    cache?: RuntimeResultCachePolicy;
+};
 export type EnqueueResumeParams = RuntimeDriverIds & { event: RuntimeWakeEvent };
 export type EnqueueChildDispatchParams = RuntimeDriverIds & {
     parentTaskId: string;

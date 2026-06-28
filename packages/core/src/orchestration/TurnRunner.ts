@@ -12,11 +12,12 @@ import type { ManifestProvenance } from '../types/turnTrace.js';
 import { InboxManager, EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { PluginManager } from '../plugin/pluginManager.js';
-import { AgentResultCache, hydrateArtifacts } from '@a2arium/callagent-memory-engine';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import type { IEventBus } from '../public-types/eventbus/types.js';
 import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
+import { prepareChildResultForPersistence } from './childResultPersistence.js';
 import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
@@ -239,7 +240,7 @@ export class TurnRunner {
                     pendingChildTokens.forEach(t => tokensToCheck.add(t));
 
                     if (tokensToCheck.size > 0) {
-                        const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: 0 });
+                        const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: -1 });
                         const childCompletedEvents = events.filter((e: any) => e.type === 'task.child_completed');
 
                         for (const token of tokensToCheck) {
@@ -255,24 +256,22 @@ export class TurnRunner {
                                     (obs as any)?.payload &&
                                     (obs as any).payload.token === token;
 
-                                const childPrisma = this.getSessionStorePrisma();
-                                if (childPrisma) {
-                                    const p = (completionEvent.payload as any);
-                                    if (p?.result) {
-                                        const cache = new AgentResultCache(childPrisma);
-                                        p.result = hydrateArtifacts(p.result, cache, tenantId);
-                                    }
-                                }
-
                                 const completionResult = (completionEvent.payload as any)?.result;
                                 const cleanChildResult = TaskStateUtils.extractCleanChildResult(completionResult);
+                                const childPrisma = this.getSessionStorePrisma();
+                                const cache = childPrisma ? new AgentResultCache(childPrisma) : undefined;
+                                const childResultForParent = await prepareChildResultForPersistence(
+                                    cleanChildResult.result,
+                                    cache,
+                                    tenantId
+                                );
                                 const childObservation: EngineObservation = {
                                     source: 'child',
                                     kind: 'child.completed',
                                     payload: {
                                         token,
                                         childTaskId: cleanChildResult.childTaskId || (completionEvent.payload as any)?.childTaskId,
-                                        result: cleanChildResult.result,
+                                        result: childResultForParent,
                                         agentId: (completionEvent.payload as any)?.agentId,
                                         executionMetadata: cleanChildResult.executionMetadata
                                     },

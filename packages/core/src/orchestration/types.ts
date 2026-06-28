@@ -26,6 +26,7 @@ export interface CleanChildResult {
         rewards?: unknown;
         state?: string;
         timestamp?: string;
+        origin?: 'cache';
     };
 }
 

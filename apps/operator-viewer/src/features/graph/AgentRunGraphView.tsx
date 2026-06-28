@@ -157,7 +157,10 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
       >
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold">{node.agentId ?? 'unknown agent'}</p>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <p className="truncate text-sm font-semibold">{node.agentId ?? 'unknown agent'}</p>
+              {node.executionOrigin === 'cache' ? <CacheBadge compact /> : null}
+            </div>
             <CopyableId value={node.taskId} label="task ID" max={18} />
           </div>
           <StatusBadge status={status.status} derived={status.derived} />
@@ -175,10 +178,26 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
         ) : null}
         <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
           <Shrink className="h-3.5 w-3.5" />
-          {node.parentTaskId ? 'Child agent' : 'Root agent'} · {node.startedAt ? formatDuration(durationBetween(node.startedAt, node.finishedAt)) : 'duration not captured'}
+          {node.executionOrigin === 'cache'
+            ? 'Cache-served child'
+            : node.parentTaskId ? 'Child agent' : 'Root agent'} · {node.startedAt ? formatDuration(durationBetween(node.startedAt, node.finishedAt)) : 'duration not captured'}
         </div>
       </article>
     </div>
+  );
+}
+
+function CacheBadge(props: { compact?: boolean }): React.ReactElement {
+  return (
+    <span
+      className={cn(
+        'inline-flex shrink-0 items-center rounded-full border border-info-border bg-info-bg font-medium text-info',
+        props.compact ? 'px-1.5 py-0 text-[10px]' : 'px-2 py-0.5 text-xs'
+      )}
+      title="Served from previous run result cache"
+    >
+      Cached
+    </span>
   );
 }
 

@@ -13,6 +13,7 @@ import type { TaskEngine } from '../orchestration/taskEngine.js';
 import { getAgentWorkspaceInfo, listAgentWorkspaceInfos } from '../plugin/WorkspaceLoader.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentCard } from '@a2arium/callagent-types';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import {
     isProductionMode,
@@ -127,12 +128,17 @@ export function createApiRouter(): Router {
             }
             const limitRaw = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
             const scope = req.query.scope === 'all' ? 'all' : 'roots';
+            const costState = req.query.costState === 'captured' || req.query.costState === 'missing' ? req.query.costState : undefined;
             const page = await engine.listAgentRuns({
                 tenantId: context.tenantId,
                 ...(typeof req.query.agentId === 'string' && req.query.agentId.length > 0 ? { agentId: req.query.agentId } : {}),
                 ...(typeof req.query.status === 'string' && req.query.status.length > 0 ? { status: req.query.status } : {}),
                 ...(typeof req.query.since === 'string' && req.query.since.length > 0 ? { since: req.query.since } : {}),
                 ...(typeof req.query.cursor === 'string' && req.query.cursor.length > 0 ? { cursor: req.query.cursor } : {}),
+                ...(typeof req.query.taskId === 'string' && req.query.taskId.length > 0 ? { taskId: req.query.taskId } : {}),
+                ...(req.query.hasLlm === 'true' ? { hasLlm: true } : {}),
+                ...(req.query.hasMemory === 'true' ? { hasMemory: true } : {}),
+                ...(costState ? { costState } : {}),
                 ...(limitRaw !== undefined && Number.isFinite(limitRaw) ? { limit: limitRaw } : {}),
                 scope,
             });
@@ -140,6 +146,45 @@ export function createApiRouter(): Router {
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to list agent runs', message });
+        }
+    }));
+
+    router.get('/artifacts/:artifactId', observeRoute('artifact-detail', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const artifactId = req.params.artifactId;
+            if (artifactId === undefined || artifactId.length === 0 || artifactId === 'local' || artifactId === 'unknown') {
+                res.status(400).json({ error: 'artifactId is required' });
+                return;
+            }
+            const engine = EngineLocator.getEngine<TaskEngine>();
+            const prisma = engine && typeof (engine as any).getOperatorPrismaClient === 'function'
+                ? (engine as any).getOperatorPrismaClient()
+                : undefined;
+            if (!prisma) {
+                res.status(503).json({ error: 'Artifact store is not available' });
+                return;
+            }
+            const cache = new AgentResultCache(prisma as never);
+            let value: unknown;
+            try {
+                value = await cache.loadArtifact(context.tenantId, artifactId);
+            } catch {
+                res.status(404).json({ error: 'Artifact not found or expired' });
+                return;
+            }
+            const contentType = inferArtifactContentType(value);
+            res.json({
+                artifactId,
+                contentType,
+                filename: artifactFilename(artifactId, contentType, value),
+                sizeBytes: artifactSizeBytes(value),
+                value,
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to load artifact', message });
         }
     }));
 
@@ -333,6 +378,32 @@ export function createApiRouter(): Router {
     }));
 
     return router;
+}
+
+function inferArtifactContentType(value: unknown): string {
+    if (typeof value === 'string') {
+        return value.trimStart().startsWith('<') ? 'text/html' : 'text/plain';
+    }
+    if (value !== null && typeof value === 'object') {
+        return 'application/json';
+    }
+    return 'text/plain';
+}
+
+function artifactSizeBytes(value: unknown): number {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    return Buffer.byteLength(serialized ?? '', 'utf8');
+}
+
+function artifactFilename(artifactId: string, contentType: string, value: unknown): string {
+    const shortId = artifactId.length > 16 ? artifactId.slice(0, 16) : artifactId;
+    const safeId = shortId.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'artifact';
+    const extension = contentType === 'text/html'
+        ? 'html'
+        : contentType === 'application/json' || (value !== null && typeof value === 'object')
+            ? 'json'
+            : 'txt';
+    return `artifact-${safeId}.${extension}`;
 }
 
 function observeRoute(route: string, handler: (req: any, res: any, next?: any) => Promise<void> | void) {

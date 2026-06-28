@@ -61,7 +61,8 @@ export const ChildEnvelopeSchema = z.object({
         timings: z.unknown().optional(),
         rewards: z.unknown().optional(),
         state: z.string().optional(),
-        timestamp: z.string().optional()
+        timestamp: z.string().optional(),
+        origin: z.enum(['cache']).optional()
     }).optional()
 });
 

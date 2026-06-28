@@ -1,8 +1,9 @@
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { ReactFlowProvider } from 'reactflow';
-import { ArrowLeft, PanelRightOpen, RefreshCw, XCircle } from 'lucide-react';
+import { ArrowLeft, PanelRightOpen, Play, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCancelRun, useOperatorConfig, useRunGraph } from '../../api/hooks';
+import { runAgent } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -31,6 +32,7 @@ export function RunDetailPage(): React.ReactElement {
   const graphQuery = useRunGraph(search.tenantId, taskId);
   const configQuery = useOperatorConfig();
   const cancelRun = useCancelRun();
+  const [launchState, setLaunchState] = useState<{ state: 'idle' } | { state: 'running' } | { state: 'error'; message: string }>({ state: 'idle' });
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false;
     return window.localStorage.getItem(INSPECTOR_COLLAPSED_KEY) === 'true';
@@ -56,6 +58,8 @@ export function RunDetailPage(): React.ReactElement {
   const rootCancelable = taskId !== undefined && graph !== undefined && !isTerminalStatus(graph.root.status);
   const cancelDisabled = !rootCancelable || cancelRun.isPending;
   const selectedNodeCancelable = selectedNode !== undefined && !isTerminalStatus(selectedNode.status);
+  const replayPayload = graph ? replayPayloadFromInputPreview(graph.root.inputPreview) : undefined;
+  const canRunNewInstance = graph?.root.agentId !== undefined && isTerminalStatus(graph.root.status) && replayPayload !== undefined;
 
   const updateSearch = (patch: Partial<typeof search>) => {
     void navigate({
@@ -140,6 +144,41 @@ export function RunDetailPage(): React.ReactElement {
     });
   };
 
+  const runNewInstance = async () => {
+    if (!graph?.root.agentId || !replayPayload) return;
+    setLaunchState({ state: 'running' });
+    try {
+      const response = await runAgent({
+        tenantId: search.tenantId,
+        agentId: graph.root.agentId,
+        payload: replayPayload,
+      });
+      if (response.error) {
+        setLaunchState({ state: 'error', message: response.error.message });
+        return;
+      }
+      const nextTaskId = response.result?.id;
+      if (!nextTaskId) {
+        setLaunchState({ state: 'error', message: 'Runtime accepted the request but did not return a task id.' });
+        return;
+      }
+      setLaunchState({ state: 'idle' });
+      await navigate({
+        to: '/runs/$taskId',
+        params: { taskId: nextTaskId },
+        search: {
+          ...search,
+          taskId: '',
+          nodeId: '',
+          turn: '',
+          tab: 'summary',
+        },
+      });
+    } catch (error) {
+      setLaunchState({ state: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
   return (
     <div className="grid min-h-0 gap-4">
       <header className="sticky top-[73px] z-10 rounded-xl border border-border bg-card/95 p-4 backdrop-blur">
@@ -178,6 +217,18 @@ export function RunDetailPage(): React.ReactElement {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {canRunNewInstance ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void runNewInstance()}
+                disabled={launchState.state === 'running'}
+                title="Run a new task with the same captured input params"
+              >
+                <Play className="h-4 w-4" />
+                {launchState.state === 'running' ? 'Starting...' : 'Run new instance'}
+              </Button>
+            ) : null}
             <Button variant="outline" size="sm" onClick={() => void graphQuery.refetch()}>
               <RefreshCw className={cn('h-4 w-4', graphQuery.isFetching ? 'animate-spin' : '')} />
               Refresh
@@ -202,6 +253,12 @@ export function RunDetailPage(): React.ReactElement {
       {cancelRun.error instanceof Error ? (
         <Notice kind="error" title="Cancel failed">
           {cancelRun.error.message}
+        </Notice>
+      ) : null}
+
+      {launchState.state === 'error' ? (
+        <Notice kind="error" title="Could not start new instance">
+          {launchState.message}
         </Notice>
       ) : null}
 
@@ -249,6 +306,7 @@ export function RunDetailPage(): React.ReactElement {
               <NodeInspector
                 graph={graph}
                 node={selectedNode}
+                tenantId={search.tenantId}
                 activeTab={search.tab}
                 selectedTurnSeq={selectedTurnSeq}
                 config={configQuery.data ?? {}}
@@ -276,6 +334,19 @@ export function RunDetailPage(): React.ReactElement {
 function isTerminalStatus(status: string | undefined): boolean {
   const normalized = status?.toLowerCase();
   return normalized === 'completed' || normalized === 'failed' || normalized === 'canceled' || normalized === 'cancelled';
+}
+
+function replayPayloadFromInputPreview(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const next = { ...value };
+  delete next.id;
+  delete next.agentId;
+  delete next.tenantId;
+  return next;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function InspectorSplitter(props: {

@@ -17,6 +17,7 @@ import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, TurnRun } f
 export function NodeInspector(props: {
   graph: AgentRunGraph;
   node: AgentRunNode | undefined;
+  tenantId: string;
   activeTab: string;
   selectedTurnSeq?: number;
   config: OperatorConfig;
@@ -97,6 +98,7 @@ export function NodeInspector(props: {
           <TabsList className="h-8 w-full justify-start rounded-none bg-transparent p-0">
             <TabsTrigger value="summary" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Summary</TabsTrigger>
             <TabsTrigger value="turns" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Turns</TabsTrigger>
+            <TabsTrigger value="tools" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Tools</TabsTrigger>
             <TabsTrigger value="llm" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">LLM</TabsTrigger>
             <TabsTrigger value="memory" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Memory</TabsTrigger>
             <TabsTrigger value="links" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Links</TabsTrigger>
@@ -104,7 +106,7 @@ export function NodeInspector(props: {
         </div>
 
         <TabsContent value="summary" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-          <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} />
+          <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} tenantId={props.tenantId} />
         </TabsContent>
         <TabsContent value="turns" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-0">
           {selectedTurn ? (
@@ -112,11 +114,15 @@ export function NodeInspector(props: {
               turn={selectedTurn}
               agentId={props.node.agentId ?? props.node.taskId}
               events={eventsForTurn(props.graph, props.node, selectedTurn)}
+              tenantId={props.tenantId}
               onBack={props.onTurnBack}
             />
           ) : (
-            <TurnTimeline turns={rollup.turns} onSelect={props.onTurnSelect} />
+            <TurnTimeline turns={rollup.turns} tenantId={props.tenantId} onSelect={props.onTurnSelect} />
           )}
+        </TabsContent>
+        <TabsContent value="tools" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
+          <ToolsTab rows={toolRowsForNode(props.graph, props.node)} tenantId={props.tenantId} />
         </TabsContent>
         <TabsContent value="llm" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
           <LlmCallsTable calls={rollup.llmCalls} />
@@ -137,6 +143,7 @@ function SummaryTab(props: {
   node: AgentRunNode;
   rollup: ReturnType<typeof buildNodeRollup>;
   status: ReturnType<typeof deriveStatus>['status'];
+  tenantId: string;
 }): React.ReactElement {
   const children = props.graph.nodes.filter((node) => node.parentTaskId === props.node.taskId).length;
   const outboxRows = outboxRowsForNode(props.graph, props.node);
@@ -145,6 +152,7 @@ function SummaryTab(props: {
   return (
     <div className="grid gap-4">
       <InspectorSection title="At a glance">
+        {props.node.executionOrigin === 'cache' ? <CacheOriginNotice /> : null}
         {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}
         {runtimeError ? <RuntimeErrorNotice error={runtimeError} /> : null}
         {props.node.cancellation ? <CancellationNotice cancellation={props.node.cancellation} /> : null}
@@ -168,6 +176,7 @@ function SummaryTab(props: {
       <InspectorSection title="Task input">
         <JsonPreview
           value={props.node.inputPreview}
+          tenantId={props.tenantId}
           summaryFields={['taskId', 'traceparent', 'agentId', 'kind', 'url']}
           emptyLabel="Input preview was not captured."
           maxPreviewRows={5}
@@ -175,19 +184,30 @@ function SummaryTab(props: {
       </InspectorSection>
 
       <InspectorSection title="Final output">
-        <FinalOutputPreview graph={props.graph} node={props.node} />
+        <FinalOutputPreview graph={props.graph} node={props.node} tenantId={props.tenantId} />
       </InspectorSection>
 
       <InspectorSection title="Outbox">
-        <OutboxTable rows={outboxRows} />
+        <OutboxTable rows={outboxRows} tenantId={props.tenantId} />
       </InspectorSection>
 
       <InspectorSection title="Data availability">
         <FactRow label="Input preview">{props.node.inputPreview === undefined ? 'Not captured' : 'Available'}</FactRow>
         <FactRow label="Output preview">{props.node.outputPreview === undefined ? 'Not captured' : 'Available'}</FactRow>
         <FactRow label="Trace">{props.node.traceId ? 'Available' : 'Not captured'}</FactRow>
-        <FactRow label="Provider run">{props.node.providerRunId ? 'Available' : 'Not captured'}</FactRow>
+        <FactRow label="Provider run">{props.node.providerRunId ? 'Available' : props.node.executionOrigin === 'cache' ? 'Not created for cache hit' : 'Not captured'}</FactRow>
       </InspectorSection>
+    </div>
+  );
+}
+
+function CacheOriginNotice(): React.ReactElement {
+  return (
+    <div className="rounded-md border border-info-border bg-info-bg px-3 py-2 text-sm text-info">
+      <p className="font-medium">Served from cache</p>
+      <p className="mt-1 text-xs opacity-90">
+        This child returned from the previous run result cache, so no Hatchet provider run or turn trace was created for it.
+      </p>
     </div>
   );
 }
@@ -217,11 +237,12 @@ function LinksTab(props: { node: AgentRunNode; config: OperatorConfig }): React.
   );
 }
 
-function FinalOutputPreview(props: { graph: AgentRunGraph; node: AgentRunNode }): React.ReactElement {
+function FinalOutputPreview(props: { graph: AgentRunGraph; node: AgentRunNode; tenantId: string }): React.ReactElement {
   if (props.node.outputPreview !== undefined && props.node.outputPreview !== null) {
     return (
       <JsonPreview
         value={props.node.outputPreview}
+        tenantId={props.tenantId}
         summaryFields={['kind', 'status', 'statusCode', 'url', 'savedPath', 'html', 'content', 'error']}
         emptyLabel="Final output not captured."
         maxPreviewRows={6}
@@ -231,7 +252,10 @@ function FinalOutputPreview(props: { graph: AgentRunGraph; node: AgentRunNode })
 
   const transitionEvent = [...props.graph.events]
     .reverse()
-    .find((event) => eventBelongsToNode(event, props.node) && isRecord(event.payload.transition));
+    .find((event) => eventBelongsToNode(event, props.node) && isRecord(eventPayloadValue(event).transition));
+  const completedEvent = [...props.graph.events]
+    .reverse()
+    .find((event) => eventBelongsToNode(event, props.node) && event.type === 'task.completed' && Array.isArray(eventPayloadValue(event).artifacts));
   const effect = props.graph.effects.find((candidate) => effectBelongsToNode(candidate, props.node));
 
   if (transitionEvent) {
@@ -240,7 +264,18 @@ function FinalOutputPreview(props: { graph: AgentRunGraph; node: AgentRunNode })
         <Notice title="Final output available only in transition event">
           Final output was not captured as a task.completed preview. Output-like data is available in Transition / execution events.
         </Notice>
-        <JsonPreview value={transitionEvent.payload.transition} summaryFields={['kind', 'result', 'status', 'error']} maxPreviewRows={5} />
+        <JsonPreview value={eventPayloadValue(transitionEvent).transition} tenantId={props.tenantId} summaryFields={['kind', 'result', 'status', 'error']} maxPreviewRows={5} />
+      </div>
+    );
+  }
+
+  if (completedEvent) {
+    return (
+      <div className="grid gap-2">
+        <Notice title="Final output available as artifact metadata">
+          Final output was not captured as a task.completed preview. Artifact metadata is available below.
+        </Notice>
+        <JsonPreview value={eventPayloadValue(completedEvent)} tenantId={props.tenantId} summaryFields={['taskId', 'artifactsCount', 'artifacts', 'traceparent']} maxPreviewRows={5} />
       </div>
     );
   }
@@ -248,10 +283,10 @@ function FinalOutputPreview(props: { graph: AgentRunGraph; node: AgentRunNode })
   if (effect) {
     return (
       <div className="grid gap-2">
-        <Notice title="Final output available as artifact metadata">
+        <Notice title="Final output available as effect metadata">
           Final output was not captured as a task.completed preview. Effect metadata is available below.
         </Notice>
-        <JsonPreview value={effect} summaryFields={['operation', 'status', 'token', 'outboxRowId', 'providerRunId']} maxPreviewRows={5} />
+        <JsonPreview value={effect} tenantId={props.tenantId} summaryFields={['operation', 'status', 'token', 'outboxRowId', 'providerRunId']} maxPreviewRows={5} />
       </div>
     );
   }
@@ -384,7 +419,7 @@ function RuntimeErrorNotice(props: { error: RuntimeErrorSummary }): React.ReactE
   );
 }
 
-function OutboxTable(props: { rows: Array<OutboxRow> }): React.ReactElement {
+function OutboxTable(props: { rows: Array<OutboxRow>; tenantId: string }): React.ReactElement {
   if (props.rows.length === 0) {
     return <p className="text-sm text-muted-foreground">No execution events or effects captured for this agent.</p>;
   }
@@ -405,7 +440,7 @@ function OutboxTable(props: { rows: Array<OutboxRow> }): React.ReactElement {
           <details className="min-w-0">
             <summary className="cursor-pointer text-xs font-medium text-foreground">Show details</summary>
             <div className="mt-2">
-              <JsonPreview value={row.payload} maxPreviewRows={4} maxRawHeight={220} />
+              <JsonPreview value={row.payload} tenantId={props.tenantId} maxPreviewRows={4} maxRawHeight={220} />
             </div>
           </details>
         </article>
@@ -434,17 +469,146 @@ type OutboxRow = {
   payload: unknown;
 };
 
+type ToolRow = {
+  token: string;
+  toolName: string;
+  provider: 'mcp' | 'tool';
+  server?: string;
+  tool?: string;
+  status: 'requested' | 'completed' | 'failed';
+  requestedAt?: string;
+  completedAt?: string;
+  argsPreview?: unknown;
+  resultPreview?: unknown;
+  requestedPayload?: unknown;
+  completedPayload?: unknown;
+};
+
+function ToolsTab(props: { rows: ToolRow[]; tenantId: string }): React.ReactElement {
+  if (props.rows.length === 0) {
+    return <Notice title="No tool calls captured" className="bg-background/50">This agent did not record MCP/tool calls, or the run predates tool event projection.</Notice>;
+  }
+  return (
+    <div className="grid gap-3">
+      {props.rows.map((row) => (
+        <article key={`${row.token}-${row.toolName}`} className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/50 p-3">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="rounded-full border border-info-border bg-info-bg px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.08em] text-info">
+                  {row.provider === 'mcp' ? 'MCP' : 'Tool'}
+                </span>
+                <span className="break-words font-mono text-sm font-semibold [overflow-wrap:anywhere]">{row.toolName}</span>
+              </div>
+              {row.provider === 'mcp' ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Server <span className="font-mono text-foreground">{row.server ?? 'unknown'}</span>
+                  {' · '}
+                  Tool <span className="font-mono text-foreground">{row.tool ?? 'unknown'}</span>
+                </p>
+              ) : null}
+              <p className="mt-1 text-xs text-muted-foreground">Token <CopyableId value={row.token} label="tool token" max={24} /></p>
+            </div>
+            <StatusBadge status={row.status === 'requested' ? 'running' : row.status} />
+          </div>
+
+          <div className="grid gap-2 text-sm">
+            <FactRow label="Requested">{row.requestedAt ? formatRelative(row.requestedAt) : 'Not captured'}</FactRow>
+            <FactRow label="Completed">{row.completedAt ? formatRelative(row.completedAt) : row.status === 'requested' ? 'Pending' : 'Not captured'}</FactRow>
+          </div>
+
+          <details className="min-w-0 rounded-md border border-border bg-card/60">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium">Input params</summary>
+            <div className="border-t border-border p-3">
+              <JsonPreview value={row.argsPreview} tenantId={props.tenantId} emptyLabel="Tool input params were not captured." maxPreviewRows={6} maxRawHeight={260} />
+            </div>
+          </details>
+
+          <details className="min-w-0 rounded-md border border-border bg-card/60">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium">Output</summary>
+            <div className="border-t border-border p-3">
+              <JsonPreview value={row.resultPreview} tenantId={props.tenantId} emptyLabel={row.status === 'requested' ? 'Tool output is not available yet.' : 'Tool output was not captured.'} maxPreviewRows={6} maxRawHeight={300} />
+            </div>
+          </details>
+
+          <details className="min-w-0">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">Raw tool events</summary>
+            <div className="mt-2 grid gap-2">
+              {row.requestedPayload !== undefined ? <JsonPreview value={row.requestedPayload} tenantId={props.tenantId} title="Requested event" maxPreviewRows={4} maxRawHeight={180} /> : null}
+              {row.completedPayload !== undefined ? <JsonPreview value={row.completedPayload} tenantId={props.tenantId} title="Completed event" maxPreviewRows={4} maxRawHeight={180} /> : null}
+            </div>
+          </details>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function toolRowsForNode(graph: AgentRunGraph, node: AgentRunNode): ToolRow[] {
+  const rows = new Map<string, ToolRow>();
+  const events = graph.events
+    .filter((event) => eventBelongsToNode(event, node))
+    .filter((event) => event.type === 'task.tool_requested' || event.type === 'task.tool_completed')
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.seq - right.seq);
+
+  for (const event of events) {
+    const payload = eventPayloadValue(event);
+    const token = stringField(payload, 'token') ?? event.group.token;
+    const toolName = stringField(payload, 'toolName') ?? stringField(payload, 'tool');
+    if (!token || !toolName) continue;
+    const existing = rows.get(token) ?? {
+      token,
+      toolName,
+      ...toolDisplayParts(toolName),
+      status: 'requested' as const,
+    };
+    if (event.type === 'task.tool_requested') {
+      rows.set(token, {
+        ...existing,
+        requestedAt: event.timestamp,
+        argsPreview: payload.argsPreview,
+        requestedPayload: payload,
+      });
+    } else {
+      rows.set(token, {
+        ...existing,
+        status: toolEventFailed(payload) ? 'failed' : 'completed',
+        completedAt: event.timestamp,
+        resultPreview: payload.resultPreview,
+        completedPayload: payload,
+      });
+    }
+  }
+  return [...rows.values()];
+}
+
+function toolDisplayParts(toolName: string): Pick<ToolRow, 'provider' | 'server' | 'tool'> {
+  if (!toolName.startsWith('mcp:')) return { provider: 'tool' };
+  const parts = toolName.slice(4).split('.');
+  return {
+    provider: 'mcp',
+    server: parts[0],
+    tool: parts.slice(1).join('.') || undefined,
+  };
+}
+
+function toolEventFailed(payload: Record<string, unknown>): boolean {
+  if (payload.status === 'failed') return true;
+  const result = recordField(payload, 'resultPreview');
+  return result?.error === true || typeof result?.message === 'string' && result.error === true;
+}
+
 function outboxRowsForNode(graph: AgentRunGraph, node: AgentRunNode): OutboxRow[] {
   const events = graph.events
     .filter((event) => eventBelongsToNode(event, node))
     .filter((event) => event.type.startsWith('task.') || event.type === 'turn.completed')
     .map((event): OutboxRow => ({
       id: event.id,
-      turn: numberField(event.payload, 'turnSeq'),
+      turn: numberField(eventPayloadValue(event), 'turnSeq'),
       kind: event.type,
-      status: stringField(event.payload, 'status'),
+      status: stringField(eventPayloadValue(event), 'status'),
       preview: eventPreview(event),
-      payload: event.payload,
+      payload: eventPayloadValue(event),
     }));
   const effects = graph.effects
     .filter((effect) => effectBelongsToNode(effect, node))
@@ -459,16 +623,23 @@ function outboxRowsForNode(graph: AgentRunGraph, node: AgentRunNode): OutboxRow[
 }
 
 function eventBelongsToNode(event: AgentRunEvent, node: AgentRunNode): boolean {
-  const payloadTaskId = stringField(event.payload, 'taskId');
-  const payloadAgentId = stringField(event.payload, 'agentId') ?? stringField(event.payload, 'childAgentId');
-  return payloadTaskId === node.taskId || payloadAgentId === node.agentId || event.group.agentId === node.agentId;
+  const payload = eventPayloadValue(event);
+  const payloadTaskId = stringField(payload, 'taskId');
+  const payloadAgentId = stringField(payload, 'agentId') ?? stringField(payload, 'childAgentId');
+  const childTaskId = stringField(payload, 'childTaskId');
+  return event.taskId === node.taskId ||
+    event.group.taskId === node.taskId ||
+    payloadTaskId === node.taskId ||
+    childTaskId === node.taskId ||
+    payloadAgentId === node.agentId ||
+    event.group.agentId === node.agentId;
 }
 
 function eventsForTurn(graph: AgentRunGraph, node: AgentRunNode, turn: TurnRun): AgentRunEvent[] {
   return graph.events
     .filter((event) => eventBelongsToNode(event, node))
     .filter((event) => {
-      const payloadTurnSeq = numberField(event.payload, 'turnSeq');
+      const payloadTurnSeq = numberField(eventPayloadValue(event), 'turnSeq');
       if (turn.turnSeq !== undefined && payloadTurnSeq === turn.turnSeq) return true;
       const turnId = turn.cognition?.turnId ?? turn.turnTraceRef?.turnTraceId;
       return Boolean(turnId && event.group.turnId === turnId);
@@ -480,13 +651,30 @@ function effectBelongsToNode(effect: EffectRun, node: AgentRunNode): boolean {
 }
 
 function eventPreview(event: AgentRunEvent): string {
-  const payload = event.payload;
+  const payload = eventPayloadValue(event);
+  if (event.type === 'task.tool_requested') {
+    const toolName = stringField(payload, 'toolName') ?? 'tool';
+    return `Requested ${toolName}`;
+  }
+  if (event.type === 'task.tool_completed') {
+    const toolName = stringField(payload, 'toolName') ?? stringField(payload, 'tool') ?? 'tool';
+    return `${toolEventFailed(payload) ? 'Failed' : 'Completed'} ${toolName}`;
+  }
   const status = stringField(payload, 'status');
   const kind = stringField(payload, 'kind');
   const token = stringField(payload, 'token');
   const transition = recordField(payload, 'transition');
   const transitionKind = stringField(transition, 'kind');
   return [status, kind, transitionKind, token].filter(Boolean).join(' · ') || semanticSummary(payload);
+}
+
+function eventPayloadValue(event: AgentRunEvent): Record<string, unknown> {
+  const envelope = recordField(event.payload, 'envelope');
+  if (envelope?.state === 'available') {
+    const value = envelope.value;
+    if (isRecord(value)) return value;
+  }
+  return event.payload;
 }
 
 function semanticSummary(value: unknown): string {

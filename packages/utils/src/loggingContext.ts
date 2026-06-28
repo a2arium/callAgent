@@ -123,6 +123,7 @@ export function hasLoggingContext(): boolean {
 
 let consoleBridgeInstalled = false;
 let forwardingToSink = false;
+let consoleSinkSuppressed = 0;
 let originalConsole: Pick<Console, 'debug' | 'info' | 'log' | 'warn' | 'error'> | undefined;
 
 /**
@@ -167,8 +168,26 @@ export function installLoggingContextConsoleBridge(): void {
     };
 }
 
+export function withConsoleSinkSuppressed<T>(fn: () => T | Promise<T>): T | Promise<T> {
+    consoleSinkSuppressed++;
+
+    try {
+        const result = fn();
+        if (result && typeof (result as Promise<T>).then === 'function') {
+            return (result as Promise<T>).finally(() => {
+                consoleSinkSuppressed = Math.max(0, consoleSinkSuppressed - 1);
+            });
+        }
+        consoleSinkSuppressed = Math.max(0, consoleSinkSuppressed - 1);
+        return result;
+    } catch (error) {
+        consoleSinkSuppressed = Math.max(0, consoleSinkSuppressed - 1);
+        throw error;
+    }
+}
+
 function emitConsoleArgsToLoggingSink(level: LoggingSinkLevel, args: unknown[]): void {
-    if (forwardingToSink) {
+    if (forwardingToSink || consoleSinkSuppressed > 0) {
         return;
     }
     const context = getLoggingContext();

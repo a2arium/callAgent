@@ -1,4 +1,4 @@
-import type { AgentRunGraph, AgentRunListItem, AgentRunNode, LlmCallRun, MemoryOperationRun, TurnRun } from '../types';
+import type { AgentRunGraph, AgentRunListItem, AgentRunNode, FleetSummary, LlmCallRun, MemoryOperationRun, TurnRun } from '../types';
 import type { RuntimeStatus } from '../design/tokens';
 
 export type Thresholds = {
@@ -39,16 +39,6 @@ export type NodeRollup = {
   llmCalls: LlmCallRun[];
   memoryOps: MemoryOperationRun[];
   costUsd?: number;
-};
-
-export type FleetSummary = {
-  total: number;
-  failed: number;
-  waiting: number;
-  stuck: number;
-  completed: number;
-  costCaptured: number;
-  costUnavailable: number;
 };
 
 export function normalizeRuntimeStatus(status: string | undefined): RuntimeStatus {

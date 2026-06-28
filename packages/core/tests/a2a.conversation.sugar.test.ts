@@ -12,8 +12,11 @@ describe('sendTaskToAgent conversation sugar', () => {
     const tenantId = 't-a2a-sugar';
     const parentTaskId = 'parent-a2a-1';
     const parentAgentId = 'parent-agent';
+    let currentEngine: TaskEngine | undefined;
 
-    afterEach(() => {
+    afterEach(async () => {
+        await currentEngine?.waitForBackgroundTasks?.({ timeoutMs: 5000 });
+        currentEngine = undefined;
         EngineLocator.setEngine(undefined as never);
         jest.restoreAllMocks();
     });
@@ -21,6 +24,7 @@ describe('sendTaskToAgent conversation sugar', () => {
     it('creates thread conversation_messages via startThread path', async () => {
         const childName = `sugar-child-${Date.now()}`;
         const engine = new TaskEngine({});
+        currentEngine = engine;
         EngineLocator.setEngine(engine);
         const sessionManager = (engine as unknown as { sessionManager: import('../src/orchestration/SessionManager.js').SessionManager }).sessionManager;
 

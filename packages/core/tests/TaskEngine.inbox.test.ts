@@ -6,17 +6,21 @@ import { normalizeObservationInbox } from '../src/loop/types.js';
 describe('TaskEngine inbox coordination', () => {
     const tenantId = 'tenant-test';
     const parentTaskId = 'parent-task';
+    let currentEngine: TaskEngine | undefined;
 
     const buildEngine = () => {
         process.env.DISABLE_OUTBOX_PUBLISHER = 'true';
         const store = new InMemorySessionManager();
         const engine = new TaskEngine({ sessionStore: store });
+        currentEngine = engine;
         // Access sessionManager for assertions; it's a private field at type level only
         const sessionManager = (engine as any).sessionManager as import('../src/orchestration/SessionManager.js').SessionManager;
         return { engine, sessionManager };
     };
 
-    afterEach(() => {
+    afterEach(async () => {
+        await currentEngine?.waitForBackgroundTasks?.({ timeoutMs: 5000 });
+        currentEngine = undefined;
         delete process.env.DISABLE_OUTBOX_PUBLISHER;
     });
 
@@ -48,7 +52,10 @@ describe('TaskEngine inbox coordination', () => {
 
     it('removes pending child mapping and stages observation when parent is not awaiting the child', async () => {
         const { engine, sessionManager } = buildEngine();
-        const baseWithPending = setPendingTasks({ meta: { turn: 0 } } as Record<string, unknown>, { child999: { childTaskId: 'child-task' } });
+        const baseWithPending = setPendingTasks(
+            { meta: { turn: 0, awaiting: { kind: 'await_child', token: 'different-child' } } } as Record<string, unknown>,
+            { child999: { childTaskId: 'child-task' } }
+        );
         await sessionManager.saveSnapshot({
             tenantId,
             sessionId: parentTaskId,

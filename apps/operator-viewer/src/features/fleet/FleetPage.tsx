@@ -13,7 +13,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { Ban, RefreshCw } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import { useAgentRuns, useCancelRun } from '../../api/hooks';
+import { useCancelRun, useInfiniteAgentRuns } from '../../api/hooks';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -38,26 +38,34 @@ export function FleetPage(): React.ReactElement {
   const queryClient = useQueryClient();
   const cancelRun = useCancelRun();
   const [sorting, setSorting] = useState<SortingState>([]);
-  const query = useAgentRuns({
+  const query = useInfiniteAgentRuns({
     tenantId: search.tenantId,
     scope: search.scope,
     agentId: search.agentId || undefined,
     status: search.status || undefined,
     since: search.since || undefined,
-    limit: 150,
+    taskId: search.taskId || undefined,
+    hasLlm: search.hasLlm || undefined,
+    hasMemory: search.hasMemory || undefined,
+    costState: search.costState || undefined,
+    limit: 100,
   });
+  const loadedItems = useMemo(() => query.data?.pages.flatMap((page) => page.items) ?? [], [query.data?.pages]);
+  const firstPage = query.data?.pages[0];
   const rows = useMemo(
     () =>
-      filterRows(query.data?.items ?? [], search).map((row) => {
+      loadedItems.map((row) => {
         const graph = queryClient.getQueryData<AgentRunGraph>(['run-graph', search.tenantId, row.rootTaskId]);
+        const graphStatus = graph?.root.status;
         return {
           ...row,
-          displayStatus: graph?.root.status ?? row.status,
+          displayStatus:
+            isTerminalStatus(graphStatus) ? graphStatus! : row.status,
         };
       }),
-    [query.data?.items, queryClient, search]
+    [loadedItems, queryClient, search.tenantId]
   );
-  const summary = useMemo(() => deriveFleetSummary(rows), [rows]);
+  const summary = useMemo(() => firstPage?.summary ?? deriveFleetSummary(rows.map((row) => ({ ...row, status: row.displayStatus }))), [firstPage?.summary, rows]);
   const cancelFleetRun = (row: FleetRow) => {
     if (isTerminalStatus(row.displayStatus)) return;
     const defaultReason = 'operator cancel';
@@ -83,11 +91,11 @@ export function FleetPage(): React.ReactElement {
           <p className="text-sm text-muted-foreground">
             {search.scope === 'all' ? 'Showing root and child agent runs.' : 'Showing root agent runs by default.'}
           </p>
-          {query.data?.projection ? (
+          {firstPage?.projection ? (
             <p className="mt-1 text-xs text-muted-foreground">
-              Projection: {query.data.projection.source}
-              {query.data.projection.lagMs !== undefined ? ` · lag ${query.data.projection.lagMs}ms` : ''}
-              {query.data.projection.partial ? ' · partial' : ''}
+              Projection: {firstPage.projection.source}
+              {firstPage.projection.lagMs !== undefined ? ` · lag ${firstPage.projection.lagMs}ms` : ''}
+              {firstPage.projection.partial ? ' · partial' : ''}
             </p>
           ) : null}
         </div>
@@ -135,6 +143,9 @@ export function FleetPage(): React.ReactElement {
         }}
         onCancel={cancelFleetRun}
         cancelingTaskId={cancelRun.isPending ? cancelRun.variables?.taskId : undefined}
+        hasMore={query.hasNextPage}
+        isFetchingMore={query.isFetchingNextPage}
+        onLoadMore={() => void query.fetchNextPage()}
       />
     </div>
   );
@@ -233,6 +244,9 @@ function FleetTable(props: {
   onOpen: (row: AgentRunListItem) => void;
   onCancel: (row: FleetRow) => void;
   cancelingTaskId?: string;
+  hasMore: boolean;
+  isFetchingMore: boolean;
+  onLoadMore: () => void;
 }): React.ReactElement {
   const columns = useMemo(
     () => [
@@ -309,12 +323,6 @@ function FleetTable(props: {
   });
   return (
     <section className="overflow-hidden rounded-lg border border-border bg-card shadow-[0_12px_35px_hsl(220_20%_10%/0.04)]">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <div>
-          <h3 className="font-semibold">Runs</h3>
-          <p className="text-xs text-muted-foreground">{props.isLoading ? 'Loading...' : `${formatNumber(props.rows.length)} visible rows`}</p>
-        </div>
-      </div>
       <div className="overflow-x-auto">
         <div className="min-w-[1280px]">
           {table.getHeaderGroups().map((headerGroup) => (
@@ -362,6 +370,13 @@ function FleetTable(props: {
           </div>
         </div>
       </div>
+      {props.hasMore ? (
+        <div className="flex items-center justify-center border-t border-border px-4 py-3">
+          <Button type="button" variant="outline" size="sm" disabled={props.isFetchingMore} onClick={props.onLoadMore}>
+            {props.isFetchingMore ? 'Loading...' : 'Load more'}
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -399,23 +414,4 @@ function Toggle(props: { checked: boolean; onClick: () => void; children: React.
 function isTerminalStatus(status: string | undefined): boolean {
   const normalized = status?.toLowerCase();
   return normalized === 'completed' || normalized === 'failed' || normalized === 'canceled' || normalized === 'cancelled';
-}
-
-function filterRows(rows: AgentRunListItem[], search: FleetSearch): AgentRunListItem[] {
-  return rows.filter((row) => {
-    if (search.taskId && !row.taskId.includes(search.taskId) && !row.rootTaskId.includes(search.taskId)) return false;
-    if (search.hasLlm && row.llmCalls <= 0) return false;
-    if (search.hasMemory) {
-      const memoryOps = readNumber(row, 'memoryOps');
-      if ((memoryOps ?? 0) <= 0) return false;
-    }
-    if (search.costState === 'captured' && typeof row.costUsd !== 'number') return false;
-    if (search.costState === 'missing' && typeof row.costUsd === 'number') return false;
-    return true;
-  });
-}
-
-function readNumber(row: AgentRunListItem, key: string): number | undefined {
-  const value = (row as Record<string, unknown>)[key];
-  return typeof value === 'number' ? value : undefined;
 }

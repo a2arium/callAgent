@@ -121,6 +121,139 @@ describe('executeTaskTask', () => {
         });
     });
 
+    it('writes successful durable task results to the previous-run result cache when enabled', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const setCachedResult = jest.fn(async () => undefined);
+        const getCachedResult = jest.fn(async () => null);
+        const ctx = {
+            runChild: jest.fn(async () => ({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'fetch-html',
+                boundary: { kind: 'complete', result: { ok: true, data: { html: '<html>ok</html>' } } },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:00.000Z' },
+            })),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'fetch-html',
+                input: { url: 'https://example.test/listing.html' },
+                cache: { enabled: true, ttlSeconds: 900, excludePaths: ['traceparent'] },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            {
+                driverRuns: { finalizeRootRun } as never,
+                agentResultCache: { getCachedResult, setCachedResult } as never,
+            }
+        );
+
+        expect(getCachedResult).toHaveBeenCalledWith(
+            'fetch-html',
+            { url: 'https://example.test/listing.html' },
+            ['traceparent'],
+            'tenant-1'
+        );
+        expect(setCachedResult).toHaveBeenCalledWith(
+            'fetch-html',
+            { url: 'https://example.test/listing.html' },
+            { ok: true, data: { html: '<html>ok</html>' } },
+            900,
+            ['traceparent'],
+            'tenant-1'
+        );
+    });
+
+    it('does not cache durable semantic failures', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const setCachedResult = jest.fn(async () => undefined);
+        const ctx = {
+            runChild: jest.fn(async () => ({
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'fetch-html',
+                boundary: {
+                    kind: 'complete',
+                    result: {
+                        ok: false,
+                        error: { code: 'NO_HTML', message: 'No HTML available' },
+                    },
+                },
+                taskStatus: { state: 'failed', timestamp: '2026-06-19T00:00:00.000Z' },
+            })),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'fetch-html',
+                input: { url: 'https://example.test/listing.html' },
+                cache: { enabled: true },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            {
+                driverRuns: { finalizeRootRun } as never,
+                agentResultCache: {
+                    getCachedResult: jest.fn(async () => null),
+                    setCachedResult,
+                } as never,
+            }
+        );
+
+        expect(setCachedResult).not.toHaveBeenCalled();
+    });
+
+    it('returns cached durable task results without running a segment', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const ctx = {
+            runChild: jest.fn(async () => {
+                throw new Error('segment should not run on cache hit');
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        const result = await executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'fetch-html',
+                input: { url: 'https://example.test/listing.html' },
+                cache: { enabled: true },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            {
+                driverRuns: { finalizeRootRun } as never,
+                agentResultCache: {
+                    getCachedResult: jest.fn(async () => ({ ok: true, data: { html: '<html>cached</html>' } })),
+                    setCachedResult: jest.fn(async () => undefined),
+                } as never,
+            }
+        );
+
+        expect(ctx.runChild).not.toHaveBeenCalled();
+        expect(result).toEqual(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'fetch-html',
+            boundary: { kind: 'complete', result: { ok: true, data: { html: '<html>cached</html>' } } },
+            executionMetadata: { origin: 'cache' },
+        }));
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'completed',
+            boundaryKind: 'complete',
+        }));
+    });
+
     it('finalizes complete ok:false outcomes as failed semantic runs', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const ctx = {
@@ -199,6 +332,7 @@ describe('executeTaskTask', () => {
     it('pushes a parent child wake event when an async durable child reaches a terminal boundary', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const events = { push: jest.fn(async () => undefined) };
+        const appendEvent = jest.fn(async () => ({ eventId: 'event-1', seq: 1 }));
         const ctx = {
             runChild: jest.fn(async () => ({
                 tenantId: 'tenant-1',
@@ -227,6 +361,7 @@ describe('executeTaskTask', () => {
             ctx as never,
             {
                 driverRuns: { finalizeRootRun } as never,
+                sessionManager: { appendEvent },
                 events,
                 prisma: {
                     outbox: { findMany: jest.fn(async () => []) },
@@ -247,6 +382,25 @@ describe('executeTaskTask', () => {
             }
         );
 
+        expect(appendEvent).toHaveBeenCalledWith(
+            'tenant-1',
+            'parent-task-1',
+            'task.child_completed',
+            {
+                token: 'parent-token',
+                childTaskId: 'child-task-1',
+                agentId: 'agent-1',
+                childAgentId: 'agent-1',
+                result: {
+                    ok: false,
+                    error: { code: 'ALL_MODES_FAILED', message: 'No content' },
+                },
+                resultPreview: {
+                    ok: false,
+                    error: { code: 'ALL_MODES_FAILED', message: 'No content' },
+                },
+            }
+        );
         expect(events.push).toHaveBeenCalledWith(
             'aplret.child.parent-token',
             {
@@ -553,7 +707,21 @@ describe('executeTaskTask', () => {
                 payload: {
                     token: 'child-token',
                     childTaskId: 'child-task-1',
-                    resultPreview: { ok: true },
+                    result: {
+                        ok: true,
+                        data: {
+                            html: {
+                                kind: 'artifact',
+                                id: 'artifact-full',
+                                mimeType: 'text/html',
+                                estimatedSize: 524_192,
+                            },
+                        },
+                    },
+                    resultPreview: {
+                        ok: true,
+                        data: { html: '<html>... [truncated 1028 chars]' },
+                    },
                 },
                 createdAt: new Date('2026-06-19T00:00:00.500Z'),
             }]),
@@ -597,7 +765,17 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
-                        output: { ok: true },
+                        output: {
+                            ok: true,
+                            data: {
+                                html: {
+                                    kind: 'artifact',
+                                    id: 'artifact-full',
+                                    mimeType: 'text/html',
+                                    estimatedSize: 524_192,
+                                },
+                            },
+                        },
                         idempotencyKey: 'task-1:child:child-token',
                     },
                 },
@@ -708,7 +886,7 @@ describe('executeTaskTask', () => {
         }));
     });
 
-    it('recovers persisted child terminal output when Hatchet child wake replay is empty', async () => {
+    it('recovers persisted child terminal output from an authoritative task.completed event when Hatchet child wake replay is empty', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const ctx = {
             runChild: jest.fn(async () => ({
@@ -753,20 +931,25 @@ describe('executeTaskTask', () => {
                         createdAt: new Date('2026-06-19T00:00:00.000Z'),
                     }];
                 }
-                if (args.where.sessionId === 'child-task-1' && types.includes('turn.completed')) {
+                if (args.where.sessionId === 'child-task-1' && types.includes('task.completed')) {
                     return [{
-                        eventId: 'child-turn-1',
+                        eventId: 'child-completed-1',
                         tenantId: 'tenant-1',
                         sessionId: 'child-task-1',
                         seq: 3,
-                        type: 'turn.completed',
+                        type: 'task.completed',
                         payload: {
-                            turnSeq: 1,
-                            transition: {
-                                kind: 'complete',
-                                result: {
-                                    ok: true,
-                                    data: { html: '<html>ok</html>', statusCode: 200 },
+                            taskId: 'child-task-1',
+                            result: {
+                                ok: true,
+                                data: {
+                                    html: {
+                                        kind: 'artifact',
+                                        id: 'artifact-full',
+                                        mimeType: 'text/html',
+                                        estimatedSize: 524_192,
+                                    },
+                                    statusCode: 200,
                                 },
                             },
                         },
@@ -807,7 +990,15 @@ describe('executeTaskTask', () => {
                         childTaskId: 'child-task-1',
                         output: {
                             ok: true,
-                            data: { html: '<html>ok</html>', statusCode: 200 },
+                            data: {
+                                html: {
+                                    kind: 'artifact',
+                                    id: 'artifact-full',
+                                    mimeType: 'text/html',
+                                    estimatedSize: 524_192,
+                                },
+                                statusCode: 200,
+                            },
                         },
                         idempotencyKey: 'task-1:child:child-token',
                     },
@@ -819,9 +1010,17 @@ describe('executeTaskTask', () => {
         );
     });
 
-    it('recovers await_child from persisted child terminal output when the child wake is missing', async () => {
+    it('does not recover successful await_child output from compact child turn.completed summaries', async () => {
         const previousInterval = process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS;
+        const previousMaxWait = process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS;
+        const dateNow = jest.spyOn(Date, 'now');
+        let now = 1_000;
+        dateNow.mockImplementation(() => {
+            now += 2_000;
+            return now;
+        });
         process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = '1000';
+        process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS = '1000';
         try {
             const finalizeRootRun = jest.fn(async () => undefined);
             let watchdogFired = false;
@@ -883,7 +1082,7 @@ describe('executeTaskTask', () => {
                                     kind: 'complete',
                                     result: {
                                         ok: true,
-                                        data: { html: '<html>ok</html>', statusCode: 200 },
+                                        data: { html: '<html>... [truncated 1028 chars]', statusCode: 200 },
                                     },
                                 },
                             },
@@ -925,8 +1124,11 @@ describe('executeTaskTask', () => {
                             token: 'child-token',
                             childTaskId: 'child-task-1',
                             output: {
-                                ok: true,
-                                data: { html: '<html>ok</html>', statusCode: 200 },
+                                ok: false,
+                                error: {
+                                    code: 'CHILD_WAKE_TIMEOUT',
+                                    message: 'Timed out waiting for child wake for token child-token.',
+                                },
                             },
                             idempotencyKey: 'task-1:child:child-token',
                         },
@@ -941,6 +1143,12 @@ describe('executeTaskTask', () => {
             } else {
                 process.env.CALLAGENT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = previousInterval;
             }
+            if (previousMaxWait === undefined) {
+                delete process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS;
+            } else {
+                process.env.CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS = previousMaxWait;
+            }
+            dateNow.mockRestore();
         }
     });
 

@@ -54,6 +54,8 @@ import { segmentEffectIdempotencyKey } from '../../runtime/segmentProcessedKeys.
 import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
 import type { TaskState } from '../../shared/types/StreamingEvents.js';
 import type { EnqueueStartParams } from '../../runtime/runtimeDriver.js';
+import { makeSafeEventPreview } from '../safeEventPreview.js';
+import { prepareChildResultForPersistence } from '../childResultPersistence.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -84,6 +86,18 @@ export interface ApiBinderDependencies {
     getSessionStorePrisma: () => any;
     taskCreationMutex: { runExclusive: <T>(key: string, fn: () => Promise<T>) => Promise<T> };
     backgroundTaskPromises: Set<Promise<void>>;
+    trackBackgroundTask?: <T>(promise: Promise<T>, metadata: {
+        kind: string;
+        label?: string;
+        tenantId?: string;
+        taskId?: string;
+        agentId?: string;
+        token?: string;
+        toolName?: string;
+        childAgent?: string;
+        childTaskId?: string;
+        source?: string;
+    }) => Promise<T>;
     handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
     conversationService: InternalConversationApi;
@@ -288,7 +302,12 @@ export class ApiBinder {
         const idempotencyKey =
             childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
 
-        const childStartedPayload = { token, agentId: agent, childTaskId };
+        const childStartedPayload = {
+            token,
+            agentId: agent,
+            childTaskId,
+            inputPreview: makeSafeEventPreview(childInput),
+        };
         const childStartedEvent = await deps.sessionManager.appendEvent(tenantId, sessionId, 'task.child_started', childStartedPayload);
         if (deps.eventBus) {
             const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
@@ -366,6 +385,7 @@ export class ApiBinder {
                 taskId: childTaskId,
                 agentId: agent,
                 input: childInput,
+                cache: options?.cache,
                 idempotencyKey,
                 token,
                 traceId,
@@ -449,20 +469,34 @@ export class ApiBinder {
         const childIsTerminal = isTerminalChildState(childState);
         childCallNode.childTaskId = cleanChildResult.childTaskId;
         const a2aTel = readA2aResultTelemetry(result);
+        const childExecutionMetadata = {
+            ...(cleanChildResult.executionMetadata ?? {}),
+            ...(a2aTel?.executionOrigin ? { origin: a2aTel.executionOrigin } : {}),
+        };
+        let childResultForParent = cleanChildResult.result;
 
         if (childIsTerminal) {
             childCallNode.endTime = Date.now();
             childCallNode.end(cleanChildResult.result, 'success');
             telemetry.endNode(childCallNode);
+            const prisma = deps.getSessionStorePrisma();
+            const cache = prisma ? new AgentResultCache(prisma) : undefined;
+            childResultForParent = await prepareChildResultForPersistence(
+                cleanChildResult.result,
+                cache,
+                tenantId
+            );
 
             const childCompletedPayload = {
                 token,
                 agentId: agent,
                 childAgentId: agent,
                 childTaskId: cleanChildResult.childTaskId,
+                result: childResultForParent,
+                executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined,
                 resultPreview:
-                    cleanChildResult.result != null
-                        ? compactModuleOutput({ result: cleanChildResult.result })
+                    childResultForParent != null
+                        ? makeSafeEventPreview({ result: childResultForParent })
                         : undefined,
             };
             await deps.sessionManager.appendEvent(
@@ -531,8 +565,8 @@ export class ApiBinder {
                     payload: {
                         token,
                         childTaskId: cleanChildResult.childTaskId,
-                        result: cleanChildResult.result,
-                        executionMetadata: cleanChildResult.executionMetadata,
+                        result: childResultForParent,
+                        executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined,
                     },
                     provenance: {
                         ts: Date.now(),
@@ -903,7 +937,7 @@ export class ApiBinder {
             const toolRequestedPayload = {
                 token: toolToken,
                 toolName,
-                argsPreview: args,
+                argsPreview: makeSafeEventPreview(args),
                 ...(effectIdempotencyKey !== undefined ? { idempotencyKey: effectIdempotencyKey } : {}),
             };
             const toolRequestedEvent = await this.deps.sessionManager.appendEvent(tenantId, sessionId, 'task.tool_requested', toolRequestedPayload);
@@ -941,10 +975,24 @@ export class ApiBinder {
                 // Don't await - let it run in the background, but track the promise
                 const toolPromise = (ctx as any).__autoExecuteTool(tenantId, sessionId, toolToken, toolName, args).catch((e: Error) => {
                     log.error('[ApiBinder] Background tool execution failed', { token: toolToken, toolName, error: e.message });
-                }).finally(() => {
-                    this.deps.backgroundTaskPromises.delete(toolPromise);
                 });
-                this.deps.backgroundTaskPromises.add(toolPromise);
+                if (this.deps.trackBackgroundTask) {
+                    this.deps.trackBackgroundTask(toolPromise, {
+                        kind: 'tool.auto_execute',
+                        label: `tool.auto_execute ${toolName}`,
+                        tenantId,
+                        taskId: sessionId,
+                        agentId,
+                        token: toolToken,
+                        toolName,
+                        source: 'ApiBinder.requestTool',
+                    });
+                } else {
+                    const trackedToolPromise = toolPromise.finally(() => {
+                        this.deps.backgroundTaskPromises.delete(trackedToolPromise);
+                    });
+                    this.deps.backgroundTaskPromises.add(trackedToolPromise);
+                }
             }
 
             return { token: toolToken } as any;
@@ -1016,11 +1064,24 @@ export class ApiBinder {
                             childAgent: child.agent,
                             error: er.message,
                         });
-                    })
-                    .finally(() => {
-                        this.deps.backgroundTaskPromises.delete(taskPromise as Promise<void>);
                     });
-                this.deps.backgroundTaskPromises.add(taskPromise as Promise<void>);
+                if (this.deps.trackBackgroundTask) {
+                    this.deps.trackBackgroundTask(taskPromise, {
+                        kind: 'agent.child_dispatch',
+                        label: `agent.child_dispatch ${child.agent}`,
+                        tenantId,
+                        taskId: sessionId,
+                        agentId,
+                        token,
+                        childAgent: child.agent,
+                        source: 'ApiBinder.allTasks',
+                    });
+                } else {
+                    const trackedTaskPromise = taskPromise.finally(() => {
+                        this.deps.backgroundTaskPromises.delete(trackedTaskPromise as Promise<void>);
+                    });
+                    this.deps.backgroundTaskPromises.add(trackedTaskPromise as Promise<void>);
+                }
             }
             const { handle: groupHandle, groupToken } = await createGroupHandle(this.deps.sessionManager, tenantId, sessionId, childTokens);
             const snap = await this.deps.sessionManager.load(tenantId, sessionId);

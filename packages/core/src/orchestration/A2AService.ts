@@ -517,6 +517,7 @@ export class A2AService implements IA2AService {
             __activeLoopInbox: undefined,
             __activeLoopEnv: undefined,
             __env: undefined,
+            __autoExecuteTool: undefined,
             currentTurnNodeId: undefined,
             telemetry: { nodeId: undefined },
         };
@@ -642,6 +643,7 @@ export class A2AService implements IA2AService {
             __activeLoopInbox: undefined,
             __activeLoopEnv: undefined,
             __env: undefined,
+            __autoExecuteTool: undefined,
             currentTurnNodeId: undefined,
             telemetry: { nodeId: undefined },
         };
@@ -1120,6 +1122,7 @@ export class A2AService implements IA2AService {
                             attachA2aResultTelemetry(servedCachedResult, {
                                 childTraceId: targetCtx.telemetry?.traceId,
                                 childAgentNodeId: agentNode?.id,
+                                executionOrigin: 'cache',
                             });
                             return servedCachedResult;
                         } else if (cachedResult) {

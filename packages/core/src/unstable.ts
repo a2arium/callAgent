@@ -37,6 +37,8 @@ export {
     type MetricsRegistryOptions,
     type MetricsSnapshot,
 } from './observability/metrics.js';
+export { makeSafeEventPreview } from './orchestration/safeEventPreview.js';
+export { prepareChildResultForPersistence } from './orchestration/childResultPersistence.js';
 export {
     dispatchOutboxRow,
     deleteOutboxRow,

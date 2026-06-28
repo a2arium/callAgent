@@ -19,6 +19,10 @@ export type SemanticAgentRunListParams = {
     cursor?: string;
     limit: number;
     scope: 'roots' | 'all';
+    taskId?: string;
+    hasLlm?: boolean;
+    hasMemory?: boolean;
+    costState?: 'captured' | 'missing';
 };
 
 export type SemanticAgentRunListItem = {
@@ -42,6 +46,7 @@ export type SemanticAgentRunListItem = {
 export type SemanticAgentRunListPage = {
     items: SemanticAgentRunListItem[];
     nextCursor?: string;
+    summary?: SemanticAgentRunListSummary;
     pageInfo?: {
         nextCursor?: string;
         hasMore: boolean;
@@ -52,6 +57,16 @@ export type SemanticAgentRunListPage = {
         lagMs?: number;
         partial: boolean;
     };
+};
+
+export type SemanticAgentRunListSummary = {
+    total: number;
+    failed: number;
+    waiting: number;
+    stuck: number;
+    completed: number;
+    costCaptured: number;
+    costUnavailable: number;
 };
 
 type PrismaDelegate = {
@@ -150,6 +165,7 @@ type SemanticRunRow = {
     durationMs?: number | null;
     terminalCode?: string | null;
     terminalMessage?: string | null;
+    cancelReason?: string | null;
     outputState?: string | null;
     traceId?: string | null;
     providerRunId?: string | null;
@@ -250,48 +266,53 @@ export class OperatorProjectionRepository {
         if (!this.isAvailable()) return;
         await Promise.all(items.map(async (item) => {
             const isRoot = item.taskId === item.rootTaskId;
+            const status = normalizeStatus(item.status);
+            const existing = await this.findRun(tenantId, item.taskId);
+            const preserveTerminal = shouldPreserveTerminal(existing?.status, status);
+            const createData = stripUndefined({
+                tenantId,
+                taskId: item.taskId,
+                rootTaskId: item.rootTaskId,
+                agentId: item.agentId,
+                operation: 'agent.run',
+                scope: isRoot ? 'root' : 'child',
+                status,
+                childCount: item.children,
+                turnCount: item.turns,
+                llmCallCount: item.llmCalls,
+                memoryOpCount: item.memoryOps ?? 0,
+                knownCostUsd: item.costUsd,
+                startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
+                terminalAt: item.finishedAt ? new Date(item.finishedAt) : undefined,
+                durationMs: item.durationMs,
+                terminalCode: errorCode(item.error),
+                terminalMessage: errorMessage(item.error),
+                outputState: 'not_captured',
+                traceId: item.traceId,
+                providerRunId: item.providerRunId ?? undefined,
+            });
+            const updateData = stripUndefined({
+                rootTaskId: item.rootTaskId,
+                agentId: item.agentId,
+                scope: isRoot ? 'root' : 'child',
+                status: preserveTerminal ? undefined : status,
+                childCount: item.children,
+                turnCount: item.turns,
+                llmCallCount: item.llmCalls,
+                memoryOpCount: item.memoryOps ?? 0,
+                knownCostUsd: item.costUsd,
+                startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
+                terminalAt: preserveTerminal ? undefined : item.finishedAt ? new Date(item.finishedAt) : undefined,
+                durationMs: preserveTerminal ? undefined : item.durationMs,
+                terminalCode: preserveTerminal ? undefined : errorCode(item.error),
+                terminalMessage: preserveTerminal ? undefined : errorMessage(item.error),
+                traceId: item.traceId,
+                providerRunId: item.providerRunId ?? undefined,
+            });
             await this.prisma.agentRun!.upsert!({
                 where: { tenantId_taskId: { tenantId, taskId: item.taskId } },
-                create: stripUndefined({
-                    tenantId,
-                    taskId: item.taskId,
-                    rootTaskId: item.rootTaskId,
-                    agentId: item.agentId,
-                    operation: 'agent.run',
-                    scope: isRoot ? 'root' : 'child',
-                    status: normalizeStatus(item.status),
-                    childCount: item.children,
-                    turnCount: item.turns,
-                    llmCallCount: item.llmCalls,
-                    memoryOpCount: item.memoryOps ?? 0,
-                    knownCostUsd: item.costUsd,
-                    startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
-                    terminalAt: item.finishedAt ? new Date(item.finishedAt) : undefined,
-                    durationMs: item.durationMs,
-                    terminalCode: errorCode(item.error),
-                    terminalMessage: errorMessage(item.error),
-                    outputState: 'not_captured',
-                    traceId: item.traceId,
-                    providerRunId: item.providerRunId ?? undefined,
-                }),
-                update: stripUndefined({
-                    rootTaskId: item.rootTaskId,
-                    agentId: item.agentId,
-                    scope: isRoot ? 'root' : 'child',
-                    status: normalizeStatus(item.status),
-                    childCount: item.children,
-                    turnCount: item.turns,
-                    llmCallCount: item.llmCalls,
-                    memoryOpCount: item.memoryOps ?? 0,
-                    knownCostUsd: item.costUsd,
-                    startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
-                    terminalAt: item.finishedAt ? new Date(item.finishedAt) : undefined,
-                    durationMs: item.durationMs,
-                    terminalCode: errorCode(item.error),
-                    terminalMessage: errorMessage(item.error),
-                    traceId: item.traceId,
-                    providerRunId: item.providerRunId ?? undefined,
-                }),
+                create: createData,
+                update: updateData,
             });
         }));
     }
@@ -434,6 +455,7 @@ export class OperatorProjectionRepository {
                 agentId: childAgentId,
                 scope: 'child',
                 status: failed ? 'failed' : 'completed',
+                outputState: failed ? undefined : childCompletionOutputState(event.payload),
                 terminalAt: createdAt,
                 terminalCode: failed ? errorCode(error) : undefined,
                 terminalMessage: failed ? errorMessage(error) ?? (typeof error === 'string' ? error : undefined) : undefined,
@@ -592,6 +614,10 @@ export class OperatorProjectionRepository {
                 params.agentId ?? '',
                 params.status ?? '',
                 params.since ?? '',
+                params.taskId ?? '',
+                params.hasLlm ? 'llm' : '',
+                params.hasMemory ? 'memory' : '',
+                params.costState ?? '',
                 params.cursor ?? '',
                 params.limit,
             ].join('\x1f'),
@@ -602,18 +628,7 @@ export class OperatorProjectionRepository {
     private async listAgentRunsUncoalesced(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
         const profileStartedAt = projectionNow();
         const cursor = decodeCursor(params.cursor);
-        const where: Record<string, unknown> = {
-            tenantId: params.tenantId,
-            ...(params.scope === 'roots' ? { scope: 'root' } : {}),
-            ...(params.agentId ? { agentId: params.agentId } : {}),
-            ...(params.status ? { status: params.status } : {}),
-        };
-        if (params.since) {
-            const since = new Date(params.since);
-            if (!Number.isNaN(since.getTime())) {
-                where.updatedAt = { gte: since };
-            }
-        }
+        const where = buildSemanticAgentRunWhere(params);
         if (cursor) {
             const cursorDate = new Date(cursor.updatedAt);
             if (!Number.isNaN(cursorDate.getTime())) {
@@ -638,12 +653,17 @@ export class OperatorProjectionRepository {
             id: overflow.id,
         }) : undefined;
         const items = pageRows.map((row) => rowToListItem(row));
+        const summary = await this.summarizeAgentRuns(where);
         const mapMs = projectionNow() - mapStartedAt;
         logProjectionProfile('listAgentRuns', profileStartedAt, {
             tenantId: params.tenantId,
             scope: params.scope,
             agentId: params.agentId ?? null,
             status: params.status ?? null,
+            taskId: params.taskId ?? null,
+            hasLlm: params.hasLlm ?? null,
+            hasMemory: params.hasMemory ?? null,
+            costState: params.costState ?? null,
             limit: params.limit,
             rows: rows.length,
             pageRows: pageRows.length,
@@ -653,12 +673,41 @@ export class OperatorProjectionRepository {
         return {
             items,
             ...(nextCursor ? { nextCursor } : {}),
+            summary,
             pageInfo: {
                 ...(nextCursor ? { nextCursor } : {}),
                 hasMore: nextCursor !== undefined,
                 limit: params.limit,
             },
             projection: { source: 'semantic', partial: false },
+        };
+    }
+
+    private async summarizeAgentRuns(where: Record<string, unknown>): Promise<SemanticAgentRunListSummary | undefined> {
+        const agentRun = this.prisma.agentRun as {
+            count?: (args: { where?: Record<string, unknown> }) => Promise<number>;
+            groupBy?: (args: { by: string[]; where?: Record<string, unknown>; _count: { _all: true } }) => Promise<Array<{ status: string; _count: { _all: number } }>>;
+        } | undefined;
+        if (!agentRun?.count || !agentRun.groupBy) {
+            return undefined;
+        }
+        const [total, byStatus, costCaptured] = await Promise.all([
+            agentRun.count({ where }),
+            agentRun.groupBy({ by: ['status'], where, _count: { _all: true } }),
+            agentRun.count({ where: { ...where, knownCostUsd: { not: null } } }),
+        ]);
+        const statusCounts = new Map(byStatus.map((entry) => [normalizeStatusKey(entry.status), entry._count._all]));
+        const running = statusCounts.get('running') ?? 0;
+        const queued = statusCounts.get('queued') ?? 0;
+        const waiting = statusCounts.get('waiting') ?? 0;
+        return {
+            total,
+            failed: statusCounts.get('failed') ?? 0,
+            waiting: running + queued + waiting,
+            stuck: 0,
+            completed: (statusCounts.get('completed') ?? 0) + (statusCounts.get('succeeded') ?? 0) + (statusCounts.get('success') ?? 0),
+            costCaptured,
+            costUnavailable: Math.max(0, total - costCaptured),
         };
     }
 
@@ -755,17 +804,25 @@ export class OperatorProjectionRepository {
         outputState?: string;
     }): Promise<void> {
         const status = normalizeStatus(params.status);
-        const existingRows = await this.prisma.agentRun!.findMany!({
-            where: { tenantId: params.tenantId, taskId: params.taskId },
-            take: 1,
-        }) as SemanticRunRow[];
-        const existing = existingRows[0];
-        const existingStatus = existing ? normalizeStatus(existing.status) : undefined;
-        const preserveTerminal =
-            existingStatus !== undefined &&
-            TERMINAL_AGENT_RUN_STATUSES.has(existingStatus) &&
-            existingStatus !== status;
-        const data = stripUndefined({
+        const existing = await this.findRun(params.tenantId, params.taskId);
+        const preserveTerminal = shouldPreserveTerminal(existing?.status, status);
+        const createData = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            agentId: params.agentId,
+            operation: 'agent.run',
+            scope: params.scope ?? (params.taskId === params.rootTaskId ? 'root' : 'child'),
+            status,
+            parentTaskId: params.parentTaskId,
+            startedAt: params.startedAt,
+            terminalAt: params.terminalAt,
+            durationMs: params.startedAt && params.terminalAt ? Math.max(0, params.terminalAt.getTime() - params.startedAt.getTime()) : undefined,
+            terminalCode: params.terminalCode,
+            terminalMessage: params.terminalMessage,
+            cancelReason: params.cancelReason,
+            traceId: params.traceId,
+            outputState: params.outputState,
+        });
+        const updateData = stripUndefined({
             rootTaskId: params.rootTaskId,
             agentId: params.agentId,
             operation: 'agent.run',
@@ -788,9 +845,9 @@ export class OperatorProjectionRepository {
             create: {
                 tenantId: params.tenantId,
                 taskId: params.taskId,
-                ...data,
+                ...createData,
             },
-            update: data,
+            update: updateData,
         });
     }
 
@@ -945,12 +1002,15 @@ export class OperatorProjectionRepository {
         const memoryOpCount = turns.reduce((count, turn) => count + (Array.isArray(turn.memoryOps) ? turn.memoryOps.length : 0), 0);
         const terminalAt = node.finishedAt ? new Date(node.finishedAt) : undefined;
         const startedAt = node.startedAt ? new Date(node.startedAt) : undefined;
-        const data = stripUndefined({
+        const status = normalizeStatus(node.status);
+        const existing = await this.findRun(node.tenantId, node.taskId);
+        const preserveTerminal = shouldPreserveTerminal(existing?.status, status);
+        const createData = stripUndefined({
             rootTaskId: node.rootTaskId,
             agentId: node.agentId,
             operation: 'agent.run',
             scope: isRoot ? 'root' : 'child',
-            status: normalizeStatus(node.status),
+            status,
             parentTaskId: node.parentTaskId,
             childCount,
             turnCount: turns.length,
@@ -966,15 +1026,44 @@ export class OperatorProjectionRepository {
             traceId: node.traceId,
             providerRunId: node.providerRunId,
         });
+        const updateData = stripUndefined({
+            rootTaskId: node.rootTaskId,
+            agentId: node.agentId,
+            operation: 'agent.run',
+            scope: isRoot ? 'root' : 'child',
+            status: preserveTerminal ? undefined : status,
+            parentTaskId: node.parentTaskId,
+            childCount,
+            turnCount: turns.length,
+            llmCallCount,
+            memoryOpCount,
+            startedAt,
+            terminalAt: preserveTerminal ? undefined : terminalAt,
+            durationMs: preserveTerminal ? undefined : startedAt && terminalAt ? Math.max(0, terminalAt.getTime() - startedAt.getTime()) : undefined,
+            terminalCode: preserveTerminal ? undefined : errorCode(node.error),
+            terminalMessage: preserveTerminal ? undefined : errorMessage(node.error),
+            cancelReason: node.cancellation?.reason,
+            outputState: node.outputPreview === undefined ? 'not_captured' : 'available',
+            traceId: node.traceId,
+            providerRunId: node.providerRunId,
+        });
         await this.prisma.agentRun!.upsert!({
             where: { tenantId_taskId: { tenantId: node.tenantId, taskId: node.taskId } },
             create: {
                 tenantId: node.tenantId,
                 taskId: node.taskId,
-                ...data,
+                ...createData,
             },
-            update: data,
+            update: updateData,
         });
+    }
+
+    private async findRun(tenantId: string, taskId: string): Promise<SemanticRunRow | undefined> {
+        const rows = await this.prisma.agentRun!.findMany!({
+            where: { tenantId, taskId },
+            take: 1,
+        }) as SemanticRunRow[];
+        return rows[0];
     }
 
     private async upsertEdge(edge: AgentRunEdge, graph: AgentRunGraph): Promise<void> {
@@ -1070,11 +1159,12 @@ function rowToListItem(
     row: SemanticRunRow,
     overrides: { children?: number; turns?: number; llmCalls?: number; memoryOps?: number } = {}
 ): SemanticAgentRunListItem {
+    const status = semanticRunStatus(row);
     return {
         ...(row.agentId ? { agentId: row.agentId } : {}),
         taskId: row.taskId,
         rootTaskId: row.rootTaskId,
-        status: row.status,
+        status,
         ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
         ...(row.terminalAt ? { finishedAt: toIso(row.terminalAt) } : {}),
         ...(typeof row.durationMs === 'number' ? { durationMs: row.durationMs } : {}),
@@ -1089,7 +1179,60 @@ function rowToListItem(
     };
 }
 
+function buildSemanticAgentRunWhere(params: SemanticAgentRunListParams): Record<string, unknown> {
+    const and: Record<string, unknown>[] = [{
+        tenantId: params.tenantId,
+        ...(params.scope === 'roots' ? { scope: 'root' } : {}),
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        ...(params.status ? { status: params.status } : {}),
+    }];
+    if (params.since) {
+        const since = new Date(params.since);
+        if (!Number.isNaN(since.getTime())) {
+            and.push({ updatedAt: { gte: since } });
+        }
+    }
+    if (params.taskId) {
+        and.push({
+            OR: [
+                { taskId: { contains: params.taskId } },
+                { rootTaskId: { contains: params.taskId } },
+            ],
+        });
+    }
+    if (params.hasLlm) {
+        and.push({ llmCallCount: { gt: 0 } });
+    }
+    if (params.hasMemory) {
+        and.push({ memoryOpCount: { gt: 0 } });
+    }
+    if (params.costState === 'captured') {
+        and.push({ knownCostUsd: { not: null } });
+    } else if (params.costState === 'missing') {
+        and.push({ knownCostUsd: null });
+    }
+    return and.length === 1 ? and[0]! : { AND: and };
+}
+
+function normalizeStatusKey(status: string | undefined): string {
+    return (status ?? 'unknown').toLowerCase();
+}
+
+function childCompletionOutputState(payload: Record<string, unknown>): string {
+    const metadata = payload.executionMetadata;
+    if (
+        metadata &&
+        typeof metadata === 'object' &&
+        (metadata as Record<string, unknown>).origin === 'cache'
+    ) {
+        return 'cache';
+    }
+    return Object.prototype.hasOwnProperty.call(payload, 'result') ? 'available' : 'not_captured';
+}
+
 function rowToNode(row: SemanticRunRow): AgentRunNode {
+    const status = semanticRunStatus(row);
+    const executionOrigin = semanticExecutionOrigin(row, status);
     return {
         id: row.taskId,
         kind: 'agent',
@@ -1098,13 +1241,32 @@ function rowToNode(row: SemanticRunRow): AgentRunNode {
         taskId: row.taskId,
         ...(row.agentId ? { agentId: row.agentId } : {}),
         ...(row.scope === 'child' ? { parentTaskId: row.parentTaskId ?? undefined } : {}),
-        status: normalizeStatus(row.status),
+        status,
         ...(row.terminalCode || row.terminalMessage ? { error: { code: row.terminalCode, message: row.terminalMessage } } : {}),
+        ...(status === 'canceled' || row.cancelReason ? { cancellation: { requested: true, reason: row.cancelReason ?? undefined } } : {}),
         ...(row.traceId ? { traceId: row.traceId } : {}),
         ...(row.providerRunId ? { providerRunId: row.providerRunId } : {}),
+        ...(executionOrigin ? { executionOrigin } : {}),
         ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
         ...(row.terminalAt ? { finishedAt: toIso(row.terminalAt) } : {}),
     };
+}
+
+function semanticExecutionOrigin(row: SemanticRunRow, status: AgentRunStatus): AgentRunNode['executionOrigin'] {
+    if (row.outputState === 'cache') return 'cache';
+    if (row.providerRunId) return 'runtime';
+    if (
+        row.scope === 'child' &&
+        status === 'completed' &&
+        (row.turnCount ?? 0) === 0 &&
+        row.outputState === 'available'
+    ) {
+        return 'cache';
+    }
+    if (row.scope === 'child' && status === 'completed' && (row.turnCount ?? 0) === 0) {
+        return 'projected';
+    }
+    return undefined;
 }
 
 function rowToEdge(row: SemanticEdgeRow): AgentRunEdge {
@@ -1255,6 +1417,29 @@ function normalizeStatus(status: string): AgentRunStatus {
         default:
             return 'unknown';
     }
+}
+
+function shouldPreserveTerminal(existingStatus: string | undefined, incomingStatus: AgentRunStatus): boolean {
+    if (existingStatus === undefined) return false;
+    const normalizedExisting = normalizeStatus(existingStatus);
+    return TERMINAL_AGENT_RUN_STATUSES.has(normalizedExisting) && normalizedExisting !== incomingStatus;
+}
+
+function semanticRunStatus(row: SemanticRunRow): AgentRunStatus {
+    const status = normalizeStatus(row.status);
+    if (TERMINAL_AGENT_RUN_STATUSES.has(status)) {
+        return status;
+    }
+    if (!row.terminalAt) {
+        return status;
+    }
+    if (row.cancelReason) {
+        return 'canceled';
+    }
+    if (row.terminalCode || row.terminalMessage) {
+        return 'failed';
+    }
+    return 'completed';
 }
 
 function toIso(value: Date | string | null | undefined): string | undefined {

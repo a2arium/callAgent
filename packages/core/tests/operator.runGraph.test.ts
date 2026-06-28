@@ -183,6 +183,110 @@ describe('buildAgentRunGraph', () => {
         ]));
     });
 
+    it('preserves child task ownership for tool events in the operator graph', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'root-task',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'task.started', {
+            taskId: 'root-task',
+            agentId: 'root-agent',
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'task.child_started', {
+            token: 'child-token',
+            childTaskId: 'child-task',
+            childAgentId: 'browser-agent',
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'task.child_completed', {
+            token: 'child-token',
+            childTaskId: 'child-task',
+            childAgentId: 'browser-agent',
+            resultPreview: { ok: true },
+        });
+        await sessionManager.appendEvent('tenant-1', 'child-task', 'task.tool_requested', {
+            token: 'tool-token',
+            toolName: 'mcp:browser-use.run',
+            argsPreview: { url: 'https://example.test/detail' },
+        });
+        await sessionManager.appendEvent('tenant-1', 'child-task', 'task.tool_completed', {
+            token: 'tool-token',
+            toolName: 'mcp:browser-use.run',
+            resultPreview: { ok: true, extractedData: { phone: ['+1-408-555-1901'] } },
+        });
+
+        const rootEvents = await sessionManager.listEventsSince({
+            tenantId: 'tenant-1',
+            sessionId: 'root-task',
+            sinceSeq: -1,
+        });
+        const childEvents = await sessionManager.listEventsSince({
+            tenantId: 'tenant-1',
+            sessionId: 'child-task',
+            sinceSeq: -1,
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'root-task',
+            sessionManager,
+            events: [
+                ...rootEvents.map((event) => ({ ...event, sessionId: 'root-task' })),
+                ...childEvents.map((event) => ({ ...event, sessionId: 'child-task' })),
+            ],
+            driverRuns: [
+                {
+                    provider: 'hatchet',
+                    providerRunId: 'run-root',
+                    tenantId: 'tenant-1',
+                    taskId: 'root-task',
+                    rootTaskId: 'root-task',
+                    agentId: 'root-agent',
+                    operation: 'agent.run',
+                    status: 'running',
+                },
+                {
+                    provider: 'hatchet',
+                    providerRunId: 'run-child',
+                    tenantId: 'tenant-1',
+                    taskId: 'child-task',
+                    rootTaskId: 'root-task',
+                    parentTaskId: 'root-task',
+                    agentId: 'browser-agent',
+                    operation: 'agent.run',
+                    status: 'completed',
+                },
+            ],
+        });
+
+        expect(graph.events).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                type: 'task.tool_requested',
+                taskId: 'child-task',
+                visibility: 'operator',
+                group: expect.objectContaining({
+                    taskId: 'child-task',
+                    agentId: 'browser-agent',
+                    token: 'tool-token',
+                }),
+            }),
+            expect.objectContaining({
+                type: 'task.tool_completed',
+                taskId: 'child-task',
+                visibility: 'operator',
+                group: expect.objectContaining({
+                    taskId: 'child-task',
+                    agentId: 'browser-agent',
+                    token: 'tool-token',
+                }),
+            }),
+        ]));
+    });
+
     it('projects driver run errors onto failed turns and root nodes', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
@@ -1196,6 +1300,92 @@ describe('buildAgentRunGraph', () => {
                 status: 'failed',
                 error,
                 finishedAt: '2026-06-20T17:42:10.000Z',
+            }),
+        ]));
+    });
+
+    it('marks durable cache-hit child nodes as cache even when Hatchet created an agent run', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'root-task',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        const events: AgentRunSourceEvent[] = [
+            {
+                eventId: 'child-started',
+                sessionId: 'root-task',
+                seq: 1,
+                type: 'task.child_started',
+                payload: {
+                    token: 'child-token',
+                    childTaskId: 'child-task',
+                    childAgentId: 'fetch-page-router',
+                    inputPreview: { url: 'https://example.test/listing.html' },
+                },
+                createdAt: '2026-06-27T20:45:57.000Z',
+            },
+            {
+                eventId: 'child-completed',
+                sessionId: 'root-task',
+                seq: 2,
+                type: 'task.child_completed',
+                payload: {
+                    token: 'child-token',
+                    childTaskId: 'child-task',
+                    childAgentId: 'fetch-page-router',
+                    resultPreview: { ok: true },
+                    executionMetadata: { origin: 'cache' },
+                },
+                createdAt: '2026-06-27T20:45:58.000Z',
+            },
+        ];
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'root-task',
+            sessionManager,
+            events,
+            driverRuns: [
+                {
+                    providerRunId: 'root-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'root-task',
+                    agentId: 'root-agent',
+                    rootTaskId: 'root-task',
+                    operation: 'agent.run',
+                    status: 'completed',
+                    boundaryKind: 'complete',
+                },
+                {
+                    providerRunId: 'child-agent-run',
+                    tenantId: 'tenant-1',
+                    taskId: 'child-task',
+                    agentId: 'fetch-page-router',
+                    rootTaskId: 'child-task',
+                    token: 'child-token',
+                    operation: 'agent.run',
+                    status: 'completed',
+                    boundaryKind: 'complete',
+                },
+            ],
+        });
+
+        expect(graph.edges).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                childTaskId: 'child-task',
+                executionOrigin: 'cache',
+            }),
+        ]));
+        expect(graph.nodes).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                taskId: 'child-task',
+                providerRunId: 'child-agent-run',
+                executionOrigin: 'cache',
+                inputPreview: { url: 'https://example.test/listing.html' },
             }),
         ]));
     });

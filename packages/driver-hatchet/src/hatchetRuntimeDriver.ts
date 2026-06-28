@@ -99,6 +99,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             taskId: params.taskId,
             ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
             input: params.input as TaskTaskInput['input'],
+            ...(params.cache !== undefined ? { cache: params.cache } : {}),
             idempotencyKey: params.idempotencyKey,
         };
         const budget = enforcePayloadBudget(input, {

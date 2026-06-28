@@ -66,6 +66,7 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
     private shouldFailWrite = false;
     public failureCount = 0;
     private snapshots = new Map<string, WMSessionSnapshot>();
+    private events = new Map<string, Array<{ type: string; payload: Record<string, unknown> }>>();
     private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
 
     configure(options: { failLoad?: boolean; failWrite?: boolean; maxRetries?: number }) {
@@ -144,8 +145,20 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
         return [];
     }
 
-    async appendEvent(): Promise<{ eventId: string; seq: number }> {
-        return { eventId: `evt-${Date.now()}`, seq: 0 };
+    async appendEvent(params?: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }): Promise<{ eventId: string; seq: number }> {
+        if (!params) {
+            return { eventId: `evt-${Date.now()}`, seq: 0 };
+        }
+        const key = `${params.tenantId}:${params.sessionId}`;
+        const eventList = this.events.get(key) ?? [];
+        const seq = eventList.length;
+        eventList.push({ type: params.type, payload: params.payload });
+        this.events.set(key, eventList);
+        return { eventId: `evt-${Date.now()}`, seq };
+    }
+
+    getEvents(tenantId: string, sessionId: string) {
+        return this.events.get(`${tenantId}:${sessionId}`) ?? [];
     }
 
     async enqueueOutbox(params: { tenantId: string; topic: string; key: string; payload: Record<string, unknown> }): Promise<void> {
@@ -596,6 +609,255 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             const afterResume = store.getSnapshot('t', 'parent');
             expect(((afterResume?.snapshot as any)?.meta as any)?.awaiting).toBeUndefined();
         });
+
+        test('propagates terminal resumed child completion to its own A2A parent', async () => {
+            process.env.CALLAGENT_DRIVER_SURFACES = '';
+            const store = new FailingSessionStore();
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+            const mentalState = {
+                memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } },
+                worldModel: {},
+                goalState: { hierarchy: { nodes: {}, roots: [] } },
+                emotion: { valence: 0, arousal: 0 },
+                rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 },
+                policyParams: { theta: undefined, stochastic: false },
+            };
+
+            store.seed('t', 'root', {
+                M: mentalState,
+                meta: { turn: 1, agentId: 'root-agent', awaiting: { kind: 'await_child', token: 'router-token' } },
+                pending: {
+                    tasks: {
+                        'router-token': { target: 'fetch-page-router', input: {} },
+                    },
+                },
+                inbox: { current: [], all: [] },
+            } as any, BigInt(0), 'root-agent');
+
+            store.seed('t', 'router', {
+                M: mentalState,
+                meta: {
+                    turn: 1,
+                    agentId: 'fetch-page-router',
+                    awaiting: { kind: 'await_child', token: 'browser-token' },
+                    a2aParent: {
+                        parentTenantId: 't',
+                        parentTaskId: 'root',
+                        parentChildToken: 'router-token',
+                    },
+                },
+                pending: {
+                    tasks: {
+                        'browser-token': { target: 'fetch-browser', input: {} },
+                    },
+                },
+                inbox: { current: [], all: [] },
+            } as any, BigInt(0), 'fetch-page-router');
+
+            const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn').mockImplementation(async (params: any) => {
+                const latest = await params.sessionManager.load(params.tenantId, params.sessionId);
+                const snapshot = JSON.parse(JSON.stringify(latest?.snapshot ?? {})) as Record<string, unknown>;
+                const meta = { ...((snapshot as any).meta ?? {}) };
+                delete (meta as any).awaiting;
+                (snapshot as any).meta = meta;
+                await params.sessionManager.saveSnapshot({
+                    tenantId: params.tenantId,
+                    sessionId: params.sessionId,
+                    agentId: params.agentId,
+                    expectedWmVersion: latest?.wmVersion ?? BigInt(0),
+                    snapshot,
+                });
+                return {
+                    M: params.M,
+                    outcome: { kind: 'complete', result: { ok: true, data: { content: '<html></html>' } } },
+                    metrics: {},
+                    taskStatus: {
+                        state: 'completed',
+                        timestamp: new Date().toISOString(),
+                        metadata: { result: { ok: true, data: { content: '<html></html>' } } },
+                    },
+                } as any;
+            });
+            const handleChildSpy = jest.spyOn(engine, 'handleChildCompleted');
+
+            await engine.handleChildCompleted({
+                tenantId: 't',
+                parentTaskId: 'router',
+                childToken: 'browser-token',
+                result: {
+                    id: 'browser',
+                    status: {
+                        state: 'completed',
+                        timestamp: new Date().toISOString(),
+                        metadata: { result: { ok: true, data: { html: '<html></html>' } } },
+                    },
+                },
+                childAgentId: 'fetch-browser',
+            });
+
+            expect(executeTurnSpy).toHaveBeenCalled();
+            expect(handleChildSpy).toHaveBeenCalledWith(expect.objectContaining({
+                tenantId: 't',
+                parentTaskId: 'root',
+                childToken: 'router-token',
+                childAgentId: 'fetch-page-router',
+            }));
+        });
+
+        test('records bounded artifact-aware child completion previews', async () => {
+            const store = new FailingSessionStore();
+            const artifactWrites: unknown[] = [];
+            (store as any).prisma = {
+                agentResultCache: {
+                    upsert: jest.fn(async (args: any) => {
+                        artifactWrites.push(args.create?.result ?? args.update?.result);
+                        return args.create ?? args.update;
+                    }),
+                    findUnique: jest.fn(async () => null),
+                },
+            };
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+            const html = `<html>${'x'.repeat(80 * 1024)}</html>`;
+            store.seed('t', 'parent', {
+                M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
+                meta: { turn: 0, agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'different-token' } },
+                pending: {
+                    tasks: {
+                        'child-token': { agentId: 'child-agent', input: {} },
+                    },
+                },
+                inbox: { current: [], all: [] },
+            } as any, BigInt(0), 'agent-a');
+
+            await engine.handleChildCompleted({
+                tenantId: 't',
+                parentTaskId: 'parent',
+                childToken: 'child-token',
+                childAgentId: 'child-agent',
+                result: {
+                    id: 'child-task-1',
+                    status: {
+                        state: 'completed',
+                        timestamp: new Date().toISOString(),
+                        metadata: {
+                            result: {
+                                ok: true,
+                                data: {
+                                    html: {
+                                        kind: 'artifact_local',
+                                        value: html,
+                                        mimeType: 'text/html',
+                                    },
+                                    content: html,
+                                    statusCode: 200,
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+
+            const childCompleted = store.getEvents('t', 'parent').find((event) => event.type === 'task.child_completed');
+            expect(childCompleted).toBeDefined();
+            const persistedResult = (childCompleted?.payload as any).result;
+            expect(persistedResult.data.html).toEqual(expect.objectContaining({
+                kind: 'artifact',
+                mimeType: 'text/html',
+            }));
+            expect(persistedResult.data.content).toEqual(expect.objectContaining({
+                kind: 'artifact',
+                mimeType: 'text/html',
+            }));
+            const preview = (childCompleted?.payload as any).resultPreview;
+            expect(preview.data.html).toEqual(expect.objectContaining({
+                state: 'artifact_only',
+                mimeType: 'text/html',
+            }));
+            expect(preview.data.content).toEqual(expect.objectContaining({
+                state: 'artifact_only',
+                mimeType: 'text/html',
+            }));
+            expect(JSON.stringify(childCompleted?.payload)).not.toContain(html);
+            expect(artifactWrites).toEqual(expect.arrayContaining([html]));
+
+            const snapshot = store.getSnapshot('t', 'parent')?.snapshot as any;
+            const inboxResult = snapshot.inbox.all.find((obs: any) => obs.kind === 'child.completed')?.payload.result;
+            expect(inboxResult.data.html).toEqual(expect.objectContaining({
+                kind: 'artifact',
+                mimeType: 'text/html',
+            }));
+            expect(inboxResult.data.content).toEqual(expect.objectContaining({
+                kind: 'artifact',
+                mimeType: 'text/html',
+            }));
+            expect(JSON.stringify(snapshot)).not.toContain(html);
+        });
+
+        test('offloads local artifacts before persisting operator turn events', async () => {
+            const store = new FailingSessionStore();
+            const artifactWrites: unknown[] = [];
+            (store as any).prisma = {
+                agentResultCache: {
+                    upsert: jest.fn(async (args: any) => {
+                        artifactWrites.push(args.create?.result ?? args.update?.result);
+                        return args.create ?? args.update;
+                    }),
+                    findUnique: jest.fn(async () => null),
+                },
+            };
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+            const html = `<html>${'x'.repeat(80 * 1024)}</html>`;
+
+            await engine.appendOperatorEvent({
+                tenantId: 't',
+                sessionId: 'operator-task',
+                type: 'turn.completed',
+                payload: {
+                    taskId: 'operator-task',
+                    turnSeq: 1,
+                    transition: {
+                        kind: 'complete',
+                        result: {
+                            ok: true,
+                            data: {
+                                html: {
+                                    kind: 'artifact_local',
+                                    value: html,
+                                    mimeType: 'text/html',
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+
+            const event = store.getEvents('t', 'operator-task').find((item) => item.type === 'turn.completed');
+            expect(event?.payload.transition).toEqual(expect.objectContaining({
+                kind: 'complete',
+                result: expect.objectContaining({
+                    ok: true,
+                    data: expect.objectContaining({
+                        html: expect.objectContaining({
+                            kind: 'artifact',
+                            id: expect.any(String),
+                            mimeType: 'text/html',
+                            estimatedSize: expect.any(Number),
+                        }),
+                    }),
+                }),
+            }));
+            expect(JSON.stringify(event?.payload)).not.toContain('<html>');
+            expect(artifactWrites).toEqual(expect.arrayContaining([html]));
+        });
     });
 
     describe('Child and Tool Event Handling Edge Cases', () => {
@@ -1041,6 +1303,52 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
             expect(result).toBeDefined();
             expect(startTaskStates).toContain(result.status.state);
+        });
+
+        test('records completed task artifact metadata for operator resolution', async () => {
+            const store = new FailingSessionStore();
+            const artifact = { kind: 'artifact', id: 'artifact-1', mimeType: 'text/html', estimatedSize: 128 };
+            const runtimeDriver = {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel: jest.fn(async () => undefined),
+                dispatchOutbox: jest.fn(async () => undefined),
+                enqueueStartSync: jest.fn(async (params: any) => ({
+                    taskEntity: {
+                        id: params.taskId,
+                        input: params.input,
+                        status: { state: 'completed', timestamp: new Date().toISOString() },
+                        artifacts: [artifact],
+                    },
+                })),
+                enqueueResumeSync: jest.fn(async () => ({})),
+            };
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any,
+                runtimeDriver: runtimeDriver as any,
+            });
+
+            const result = await engine.startTask({
+                task: { id: 'artifact-output-task', input: {} },
+                isStreaming: false,
+                tenantId: 't',
+            });
+
+            expect(result.artifacts).toEqual([artifact]);
+            const completed = store.getEvents('t', 'artifact-output-task').find((event) => event.type === 'task.completed');
+            expect(completed?.payload).toEqual(expect.objectContaining({
+                taskId: 'artifact-output-task',
+                artifactsCount: 1,
+                artifacts: [expect.objectContaining({
+                    state: 'artifact_only',
+                    artifactId: 'artifact-1',
+                    mimeType: 'text/html',
+                    estimatedSize: 128,
+                })],
+            }));
         });
     });
 

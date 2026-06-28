@@ -8,6 +8,10 @@ export type ListAgentRunsInput = {
   since?: string;
   cursor?: string;
   limit?: number;
+  taskId?: string;
+  hasLlm?: boolean;
+  hasMemory?: boolean;
+  costState?: 'captured' | 'missing' | '';
 };
 
 export type OperatorConfig = {
@@ -87,6 +91,14 @@ export type CancelRunResponse = {
   acknowledged: true;
 };
 
+export type ArtifactPayload = {
+  artifactId: string;
+  contentType: string;
+  filename: string;
+  sizeBytes: number;
+  value: unknown;
+};
+
 function operatorAuthHeaders(): Record<string, string> {
   const token = window.localStorage.getItem('callagent.operator.token')?.trim();
   return token ? { 'x-callagent-operator-key': token } : {};
@@ -119,6 +131,10 @@ export async function listAgentRuns(input: ListAgentRunsInput): Promise<AgentRun
   if (input.since) params.set('since', input.since);
   if (input.cursor) params.set('cursor', input.cursor);
   if (input.limit !== undefined) params.set('limit', String(input.limit));
+  if (input.taskId) params.set('taskId', input.taskId);
+  if (input.hasLlm) params.set('hasLlm', 'true');
+  if (input.hasMemory) params.set('hasMemory', 'true');
+  if (input.costState) params.set('costState', input.costState);
   const suffix = params.toString();
   return fetchJson<AgentRunListPage>(`/agent-runs${suffix ? `?${suffix}` : ''}`, input.tenantId);
 }
@@ -152,6 +168,10 @@ export async function getTurn(tenantId: string, taskId: string, turnSeq: number)
 
 export async function getMemory(tenantId: string, taskId: string): Promise<AgentRunMemoryView> {
   return fetchJson<AgentRunMemoryView>(`/tasks/${encodeURIComponent(taskId)}/memory`, tenantId);
+}
+
+export async function getArtifact(tenantId: string, artifactId: string): Promise<ArtifactPayload> {
+  return fetchJson<ArtifactPayload>(`/artifacts/${encodeURIComponent(artifactId)}`, tenantId);
 }
 
 export async function getOperatorConfig(): Promise<OperatorConfig> {

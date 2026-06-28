@@ -172,6 +172,59 @@ describe('TaskEngine operator agent run list', () => {
         expect(allRuns.items.map((item) => item.taskId)).toEqual(['root-task', 'a2a_root-task_child-agent_123']);
     });
 
+    it('returns bridge fleet summary for all matching rows, not only the current page', async () => {
+        const runs = Array.from({ length: 150 }, (_, index) => ({
+            id: `run-${index.toString().padStart(3, '0')}`,
+            provider: 'hatchet',
+            providerRunId: `provider-${index}`,
+            tenantId: 'default',
+            taskId: `root-task-${index}`,
+            rootTaskId: `root-task-${index}`,
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'agent.run',
+            status: index < 10 ? 'failed' : index < 70 ? 'completed' : 'running',
+            createdAt: new Date(now.getTime() - index * 1000),
+            updatedAt: new Date(now.getTime() - index * 1000),
+        }));
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async (args: { where?: Record<string, unknown>; take?: number }) => {
+                    if (args.take === 1000) {
+                        return runs;
+                    }
+                    if (Array.isArray(args.where?.OR)) {
+                        return runs.filter((run) => args.where?.OR?.some((clause: unknown) => {
+                            const typed = clause as { rootTaskId?: { in?: string[] }; taskId?: { in?: string[] } };
+                            const ids = typed.rootTaskId?.in ?? typed.taskId?.in ?? [];
+                            return ids.includes(run.rootTaskId);
+                        }));
+                    }
+                    return runs.slice(0, args.take ?? runs.length);
+                }),
+            },
+            wMEvent: {
+                findMany: jest.fn(async () => []),
+            },
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 20 });
+
+        expect(page.items).toHaveLength(20);
+        expect(page.summary).toEqual({
+            total: 150,
+            failed: 10,
+            waiting: 80,
+            stuck: 0,
+            completed: 60,
+            costCaptured: 0,
+            costUnavailable: 150,
+        });
+    });
+
     it('shows a resumed task as running when a newer turn segment is active after root AbortError', async () => {
         const failedRootRun = {
             id: 'run-root',
@@ -256,6 +309,160 @@ describe('TaskEngine operator agent run list', () => {
         expect(page.items[0]?.finishedAt).toBeUndefined();
     });
 
+    it('surfaces canceled run state from driver status', async () => {
+        const rootRun = {
+            id: 'run-root',
+            provider: 'hatchet',
+            providerRunId: 'provider-root',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'agent.run',
+            status: 'canceled',
+            createdAt: now,
+            updatedAt: now,
+        };
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async (args: { where?: Record<string, unknown> }) => {
+                    if (Array.isArray(args.where?.OR)) {
+                        return [rootRun];
+                    }
+                    return [rootRun];
+                }),
+            },
+            wMEvent: {
+                findMany: jest.fn(async () => []),
+            },
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 20 });
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0]).toEqual(expect.objectContaining({
+            taskId: 'root-task',
+            status: 'canceled',
+            finishedAt: now.toISOString(),
+        }));
+    });
+
+    it('does not reopen a canceled driver root because the latest turn awaited a child', async () => {
+        const canceledRoot = {
+            id: 'run-root',
+            provider: 'hatchet',
+            providerRunId: 'provider-root',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'agent.run',
+            status: 'canceled',
+            boundaryKind: 'canceled',
+            createdAt: now,
+            updatedAt: new Date('2026-06-23T12:02:00.000Z'),
+        };
+        const awaitTurnSegment = {
+            id: 'turn-1',
+            provider: 'hatchet',
+            providerRunId: 'provider-turn-1',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'turn.segment',
+            status: 'completed',
+            boundaryKind: 'await_child',
+            turnSeq: 1,
+            createdAt: new Date('2026-06-23T12:01:00.000Z'),
+            updatedAt: new Date('2026-06-23T12:01:05.000Z'),
+        };
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async (args: { where?: Record<string, unknown> }) => {
+                    if (Array.isArray(args.where?.OR)) {
+                        return [canceledRoot, awaitTurnSegment];
+                    }
+                    return [canceledRoot];
+                }),
+            },
+            wMEvent: {
+                findMany: jest.fn(async () => []),
+            },
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 20 });
+
+        expect(page.items[0]).toEqual(expect.objectContaining({
+            taskId: 'root-task',
+            status: 'canceled',
+            finishedAt: new Date('2026-06-23T12:02:00.000Z').toISOString(),
+        }));
+    });
+
+    it('surfaces canceled terminal segment boundary as canceled', async () => {
+        const awaitTurnSegment = {
+            id: 'turn-1',
+            provider: 'hatchet',
+            providerRunId: 'provider-turn-1',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'turn.segment',
+            status: 'completed',
+            boundaryKind: 'canceled',
+            turnSeq: 1,
+            createdAt: new Date('2026-06-23T11:59:50.000Z'),
+            updatedAt: new Date('2026-06-23T11:59:51.000Z'),
+        };
+        const activeRoot = {
+            id: 'run-root',
+            provider: 'hatchet',
+            providerRunId: 'provider-root',
+            tenantId: 'default',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            parentTaskId: null,
+            agentId: 'root-agent',
+            operation: 'agent.run',
+            status: 'running',
+            createdAt: now,
+            updatedAt: new Date('2026-06-23T12:00:10.000Z'),
+        };
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async (args: { where?: Record<string, unknown> }) => {
+                    if (Array.isArray(args.where?.OR)) {
+                        return [activeRoot, awaitTurnSegment];
+                    }
+                    return [activeRoot];
+                }),
+            },
+            wMEvent: {
+                findMany: jest.fn(async () => []),
+            },
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 20 });
+        expect(page.items[0]).toEqual(expect.objectContaining({
+            taskId: 'root-task',
+            status: 'canceled',
+        }));
+    });
+
     it('can list runs from semantic projection records when semantic read mode is enabled', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
         const agentRunRows = [
@@ -328,6 +535,97 @@ describe('TaskEngine operator agent run list', () => {
         ]);
         expect(prisma.agentRunEdge.findMany).not.toHaveBeenCalled();
         expect(prisma.turnRun.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns semantic fleet summary and applies filters before pagination', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
+        const rootRow = {
+            id: 'semantic-root-row',
+            tenantId: 'default',
+            taskId: 'root-task-abc',
+            rootTaskId: 'root-task-abc',
+            agentId: 'root-agent',
+            scope: 'root',
+            status: 'running',
+            childCount: 0,
+            turnCount: 2,
+            llmCallCount: 1,
+            memoryOpCount: 3,
+            knownCostUsd: null,
+            startedAt: now,
+            terminalAt: null,
+            durationMs: null,
+            terminalCode: null,
+            terminalMessage: null,
+            outputState: 'not_captured',
+            traceId: 'trace-1',
+            providerRunId: 'provider-root',
+            updatedAt: now,
+        };
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async () => {
+                    throw new Error('bridge path should not be used');
+                }),
+            },
+            agentRun: {
+                findMany: jest.fn(async () => [rootRow]),
+                count: jest.fn(async ({ where }: { where?: Record<string, unknown> }) => {
+                    const serialized = JSON.stringify(where);
+                    return serialized.includes('"knownCostUsd":{"not":null}') ? 0 : 1;
+                }),
+                groupBy: jest.fn(async () => [
+                    { status: 'running', _count: { _all: 1 } },
+                ]),
+            },
+            agentRunEdge: {},
+            turnRun: {},
+            runEffect: {},
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({
+            tenantId: 'default',
+            scope: 'roots',
+            limit: 20,
+            taskId: 'abc',
+            hasLlm: true,
+            hasMemory: true,
+            costState: 'missing',
+        });
+
+        expect(page.summary).toEqual({
+            total: 1,
+            failed: 0,
+            waiting: 1,
+            stuck: 0,
+            completed: 0,
+            costCaptured: 0,
+            costUnavailable: 1,
+        });
+        expect(prisma.agentRun.findMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                AND: expect.arrayContaining([
+                    expect.objectContaining({ tenantId: 'default', scope: 'root' }),
+                    expect.objectContaining({
+                        OR: [
+                            { taskId: { contains: 'abc' } },
+                            { rootTaskId: { contains: 'abc' } },
+                        ],
+                    }),
+                    { llmCallCount: { gt: 0 } },
+                    { memoryOpCount: { gt: 0 } },
+                    { knownCostUsd: null },
+                ]),
+            }),
+        }));
+        expect(prisma.agentRun.count).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                AND: expect.arrayContaining([{ knownCostUsd: null }]),
+            }),
+        }));
     });
 
     it('resolves child edges when a child reaches terminal via turn completion without child_completed event', async () => {
@@ -517,7 +815,210 @@ describe('TaskEngine operator agent run list', () => {
             cancelReason: 'operator stop',
         }));
         expect(upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+            create: expect.objectContaining({ status: 'waiting' }),
             update: expect.not.objectContaining({ status: 'waiting' }),
+        }));
+    });
+
+    it('keeps graph projection upsert create data schema-complete while preserving terminal updates', async () => {
+        const canceledAt = new Date('2026-06-23T12:02:00.000Z');
+        const rows = new Map<string, Record<string, unknown>>([
+            ['root-task', {
+                id: 'root-row',
+                tenantId: 'default',
+                taskId: 'root-task',
+                rootTaskId: 'root-task',
+                agentId: 'root-agent',
+                scope: 'root',
+                status: 'canceled',
+                terminalAt: canceledAt,
+                cancelReason: 'operator stop',
+            }],
+        ]);
+        const upsert = jest.fn(async (args: {
+            where: { tenantId_taskId: { taskId: string } };
+            create: Record<string, unknown>;
+            update: Record<string, unknown>;
+        }) => {
+            const taskId = args.where.tenantId_taskId.taskId;
+            const existing = rows.get(taskId);
+            rows.set(taskId, existing ? { ...existing, ...args.update } : args.create);
+            return rows.get(taskId);
+        });
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async ({ where }: { where: { taskId?: string } }) => {
+                    const taskId = where.taskId;
+                    return taskId && rows.has(taskId) ? [rows.get(taskId)] : [];
+                }),
+                upsert,
+            },
+            agentRunEdge: {
+                upsert: jest.fn(async () => ({})),
+            },
+            turnRun: {
+                upsert: jest.fn(async () => ({})),
+            },
+            runEffect: {
+                upsert: jest.fn(async () => ({})),
+            },
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+
+        await projection.projectGraph({
+            schemaVersion: 1,
+            tenantId: 'default',
+            taskId: 'root-task',
+            root: {
+                id: 'root-task',
+                kind: 'agent',
+                tenantId: 'default',
+                rootTaskId: 'root-task',
+                taskId: 'root-task',
+                agentId: 'root-agent',
+                status: 'running',
+                startedAt: now.toISOString(),
+            },
+            nodes: [{
+                id: 'root-task',
+                kind: 'agent',
+                tenantId: 'default',
+                rootTaskId: 'root-task',
+                taskId: 'root-task',
+                agentId: 'root-agent',
+                status: 'running',
+                startedAt: now.toISOString(),
+            }],
+            edges: [],
+            turns: [],
+            memoryOps: [],
+            effects: [],
+            events: [],
+            debug: { driverRuns: [] },
+        });
+
+        expect(rows.get('root-task')).toEqual(expect.objectContaining({
+            status: 'canceled',
+            terminalAt: canceledAt,
+            cancelReason: 'operator stop',
+        }));
+        expect(upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+            create: expect.objectContaining({ status: 'running' }),
+            update: expect.not.objectContaining({ status: 'running' }),
+        }));
+    });
+
+    it('does not reopen a canceled semantic run from list-page projection writes', async () => {
+        const canceledAt = new Date('2026-06-23T12:02:00.000Z');
+        const rows = new Map<string, Record<string, unknown>>([
+            ['root-task', {
+                id: 'root-row',
+                tenantId: 'default',
+                taskId: 'root-task',
+                rootTaskId: 'root-task',
+                agentId: 'root-agent',
+                scope: 'root',
+                status: 'canceled',
+                terminalAt: canceledAt,
+                cancelReason: 'operator stop',
+            }],
+        ]);
+        const upsert = jest.fn(async (args: {
+            where: { tenantId_taskId: { taskId: string } };
+            create: Record<string, unknown>;
+            update: Record<string, unknown>;
+        }) => {
+            const taskId = args.where.tenantId_taskId.taskId;
+            const existing = rows.get(taskId);
+            rows.set(taskId, existing ? { ...existing, ...args.update } : args.create);
+            return rows.get(taskId);
+        });
+        const prisma = {
+            agentRun: {
+                findMany: jest.fn(async ({ where }: { where: { taskId?: string } }) => {
+                    const taskId = where.taskId;
+                    return taskId && rows.has(taskId) ? [rows.get(taskId)] : [];
+                }),
+                upsert,
+            },
+            agentRunEdge: {},
+            turnRun: {},
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+
+        await projection.projectListPage('default', [{
+            agentId: 'root-agent',
+            taskId: 'root-task',
+            rootTaskId: 'root-task',
+            status: 'running',
+            startedAt: now.toISOString(),
+            turns: 8,
+            children: 12,
+            llmCalls: 0,
+            memoryOps: 0,
+            costUsd: 0,
+        }]);
+
+        expect(rows.get('root-task')).toEqual(expect.objectContaining({
+            status: 'canceled',
+            terminalAt: canceledAt,
+            cancelReason: 'operator stop',
+        }));
+        expect(upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+            update: expect.not.objectContaining({ status: 'running' }),
+        }));
+    });
+
+    it('normalizes stale semantic rows with cancellation metadata as canceled on read', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
+        const terminalAt = new Date('2026-06-23T12:02:00.000Z');
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async () => {
+                    throw new Error('bridge path should not be used');
+                }),
+            },
+            agentRun: {
+                findMany: jest.fn(async () => [{
+                    id: 'root-row',
+                    tenantId: 'default',
+                    taskId: 'root-task',
+                    rootTaskId: 'root-task',
+                    agentId: 'root-agent',
+                    scope: 'root',
+                    status: 'running',
+                    childCount: 0,
+                    turnCount: 0,
+                    llmCallCount: 0,
+                    memoryOpCount: 0,
+                    knownCostUsd: null,
+                    startedAt: now,
+                    terminalAt,
+                    durationMs: null,
+                    terminalCode: null,
+                    terminalMessage: null,
+                    cancelReason: 'operator stop',
+                    outputState: 'not_captured',
+                    traceId: null,
+                    providerRunId: null,
+                    updatedAt: terminalAt,
+                }]),
+            },
+            agentRunEdge: {},
+            turnRun: {},
+            runEffect: {},
+        };
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 20 });
+
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0]).toEqual(expect.objectContaining({
+            taskId: 'root-task',
+            status: 'canceled',
+            finishedAt: terminalAt.toISOString(),
         }));
     });
 
@@ -768,6 +1269,57 @@ describe('TaskEngine operator agent run list', () => {
                 eventType: 'turn.completed',
             }),
         }));
+    });
+
+    it('compacts local artifacts as metadata instead of truncated inline values', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        process.env.CALLAGENT_EVENT_PAYLOAD_MAX_BYTES = '200';
+        const html = `<html>${'x'.repeat(5000)}</html>`;
+        const appended: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
+        const store = {
+            appendEvent: jest.fn(async (event: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }) => {
+                appended.push(event);
+                return { eventId: `event-${appended.length}`, seq: appended.length };
+            }),
+        };
+        const sessionManager = new SessionManager(store as never);
+
+        await sessionManager.appendEvent('default', 'root-task', 'turn.completed', {
+            taskId: 'root-task',
+            turnSeq: 1,
+            transition: {
+                kind: 'complete',
+                result: {
+                    ok: true,
+                    data: {
+                        html: {
+                            kind: 'artifact_local',
+                            value: html,
+                            mimeType: 'text/html',
+                        },
+                    },
+                },
+            },
+        });
+
+        expect(appended).toHaveLength(2);
+        expect(appended[0]?.payload.transition).toEqual(expect.objectContaining({
+            kind: 'complete',
+            result: expect.objectContaining({
+                ok: true,
+                data: expect.objectContaining({
+                    html: {
+                        state: 'artifact_only',
+                        artifactId: 'local',
+                        summary: 'Local artifact',
+                        mimeType: 'text/html',
+                        estimatedSize: html.length,
+                    },
+                }),
+            }),
+        }));
+        expect(JSON.stringify(appended[0]?.payload)).not.toContain('<html>');
+        expect(JSON.stringify(appended[0]?.payload)).not.toContain('[truncated');
     });
 
     it('surfaces payload budget events as graph effects', async () => {

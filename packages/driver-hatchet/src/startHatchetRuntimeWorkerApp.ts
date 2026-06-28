@@ -82,6 +82,7 @@ export async function startHatchetRuntimeWorkerApp(
     const { worker } = await startOutboxWorker({
         eventBus,
         prisma: sessionStore.getPrismaClient(),
+        sessionManager: budgetEvents,
         turnExecutor: composition.turnExecutor,
         workerName:
             options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker',

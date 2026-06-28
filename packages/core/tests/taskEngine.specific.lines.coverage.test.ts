@@ -10,6 +10,7 @@ import * as Handles from '@a2arium/callagent-core/orchestration/Handles.js';
 
 const runLoopMock = jest.fn<any>();
 const mockCreateMemoryRegistry = jest.fn<any>();
+let currentEngine: TaskEngine | undefined;
 
 // Mock other dependencies
 jest.mock('@a2arium/callagent-core/eventbus/outboxPublisher.js', () => ({
@@ -69,9 +70,12 @@ beforeAll(() => {
     process.env.MEMORY_DATABASE_URL = 'postgresql://fake';
 });
 
-afterEach(() => {
+afterEach(async () => {
+    await currentEngine?.waitForBackgroundTasks?.({ timeoutMs: 5000 });
+    currentEngine = undefined;
     runLoopMock.mockReset();
     mockCreateMemoryRegistry.mockReset();
+    jest.restoreAllMocks();
 });
 
 function createMockMHiearchy(goals: any[]) {
@@ -99,6 +103,7 @@ describe('TaskEngine Specific Line Coverage Tests', () => {
             sessionStore: store as any,
             handlerInvoker: { invoke: jest.fn() } as any
         });
+        currentEngine = engine;
     });
 
     describe('Semantic Memory Read Functionality', () => {

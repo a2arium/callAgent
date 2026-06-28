@@ -19,6 +19,9 @@ import { getPendingTools, setPendingTools } from '../orchestration/ToolsRegistry
 import { TaskStateUtils } from '../orchestration/utils/TaskStateUtils.js';
 import { getPendingTasks, setPendingTasks } from '../orchestration/Handles.js';
 import type { TurnExecutionParams, TurnTrigger as TurnRunnerTrigger } from '../orchestration/TurnRunner.js';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
+import { ArtifactHydrationService } from '../orchestration/ArtifactHydrationService.js';
+import { prepareChildResultForPersistence } from '../orchestration/childResultPersistence.js';
 import type { ConversationPayload } from '../types/observation.js';
 import type { TurnWake } from './turnExecutor.js';
 
@@ -56,7 +59,7 @@ function observationProvenance(token: string, turn: number, toolId?: string): En
 export function applyWakeToSnapshot(
     base: Record<string, unknown>,
     wake: TurnWake,
-    opts?: { agentId?: string }
+    opts?: { agentId?: string; hydrateChildResult?: (result: unknown) => void }
 ): PreparedSegmentWake {
     switch (wake.trigger) {
         case 'start':
@@ -127,6 +130,7 @@ export function applyWakeToSnapshot(
             const shouldSetToken = options.setToken !== false;
             const shouldAutoClear = options.autoClearToken !== false;
             const childTokenPath = options.tokenPath ?? 'child.token';
+            opts?.hydrateChildResult?.(event.output);
             const clean = TaskStateUtils.extractCleanChildResult(event.output);
             const observation: EngineObservation = {
                 source: 'child',
@@ -256,6 +260,20 @@ export function applyWakeToSnapshot(
     }
 }
 
+function hydrateChildWakeOutput(
+    sessionManager: SessionManager,
+    tenantId: string
+): ((result: unknown) => void) | undefined {
+    const prisma = (sessionManager as unknown as { store?: { prisma?: unknown } }).store?.prisma;
+    if (!prisma) {
+        return undefined;
+    }
+    const cache = new AgentResultCache(prisma as any);
+    return (result: unknown) => {
+        ArtifactHydrationService.tryHydrateChildResult(result, cache, tenantId);
+    };
+}
+
 /**
  * Load snapshot, apply wake, persist when needed, return prepared state for runTurn.
  */
@@ -293,7 +311,23 @@ export async function prepareSegmentWake(
         throw new Error(`Session not found for ${taskId}`);
     }
     const base = (snap.snapshot as Record<string, unknown>) || {};
-    const prepared = applyWakeToSnapshot(base, wake, { agentId });
+    let wakeToApply = wake;
+    if (wake.trigger === 'child' && wake.event.kind === 'child') {
+        const prisma = (sessionManager as unknown as { store?: { prisma?: unknown } }).store?.prisma;
+        const cache = prisma ? new AgentResultCache(prisma as any) : undefined;
+        const output = await prepareChildResultForPersistence(wake.event.output, cache, tenantId);
+        wakeToApply = {
+            ...wake,
+            event: {
+                ...wake.event,
+                output,
+            },
+        };
+    }
+    const prepared = applyWakeToSnapshot(base, wakeToApply, {
+        agentId,
+        hydrateChildResult: wakeToApply.trigger === 'child' ? hydrateChildWakeOutput(sessionManager, tenantId) : undefined,
+    });
 
     const saveResult = await sessionManager.saveSnapshot({
         tenantId,

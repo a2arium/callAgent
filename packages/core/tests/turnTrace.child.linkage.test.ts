@@ -11,8 +11,11 @@ describe('TurnTrace child linkage (sendTaskToAgent)', () => {
     const tenantId = 't-link';
     const parentTaskId = 'parent-link-1';
     const parentAgentId = 'parent-agent';
+    let currentEngine: TaskEngine | undefined;
 
-    afterEach(() => {
+    afterEach(async () => {
+        await currentEngine?.waitForBackgroundTasks?.({ timeoutMs: 5000 });
+        currentEngine = undefined;
         EngineLocator.setEngine(undefined as never);
         jest.restoreAllMocks();
     });
@@ -20,6 +23,7 @@ describe('TurnTrace child linkage (sendTaskToAgent)', () => {
     it('stamps childAgentNodeId and childTraceId on successful handleTask child', async () => {
         const childName = `link-child-${Date.now()}`;
         const engine = new TaskEngine({});
+        currentEngine = engine;
         EngineLocator.setEngine(engine);
 
         PluginManager.registerAgent({

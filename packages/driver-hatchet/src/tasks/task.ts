@@ -1,9 +1,16 @@
 import type {
+    RuntimeResultCachePolicy,
     RuntimeWakeEvent,
     RuntimeTimerRecord,
     RuntimeTimerRepository,
 } from '@a2arium/callagent-core/unstable';
-import { readSegmentCancellation, timerKindToReason } from '@a2arium/callagent-core/unstable';
+import {
+    makeSafeEventPreview,
+    prepareChildResultForPersistence,
+    readSegmentCancellation,
+    timerKindToReason,
+} from '@a2arium/callagent-core/unstable';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { Prisma } from '@a2arium/callagent-memory-sql/generated';
 import type { DurableContext } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
@@ -24,12 +31,14 @@ import type {
 import { OUTBOX_DISPATCH_TASK_NAME } from './outboxDispatch.js';
 import { serializeDriverRunError, type DriverRunsRepository } from '../driverRunsRepository.js';
 import { withHatchetTaskLogging } from '../hatchetLogging.js';
+import { logger } from '@a2arium/callagent-utils';
 
 export const TASK_TASK_NAME = 'aplret.task';
 const BOUNDARY_EVENT_LOOKBACK = '5m';
 const TASK_EXECUTION_TIMEOUT = '30m';
 const DEFAULT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = 30_000;
 const DEFAULT_AWAIT_CHILD_MAX_WAIT_MS = 25 * 60_000;
+const log = logger.createLogger({ prefix: 'HatchetTask' });
 
 export function agentTaskName(agentId: string): string {
     return `agent.${agentId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
@@ -40,14 +49,27 @@ export type TaskTaskInput = JsonObject & {
     taskId: string;
     agentId?: string;
     input: JsonValue;
+    cache?: RuntimeResultCachePolicy;
     idempotencyKey: string;
 };
 
 export type TaskTaskOutput = SegmentTaskOutput;
 
+type TaskResultCache = Pick<AgentResultCache, 'getCachedResult' | 'setCachedResult'>;
+
 export type TaskTaskDeps = {
     driverRuns?: DriverRunsRepository;
     runtimeTimers?: RuntimeTimerRepository;
+    agentResultCache?: TaskResultCache;
+    resolveCacheConfig?: (agentId: string | undefined) => RuntimeResultCachePolicy | undefined;
+    sessionManager?: {
+        appendEvent: (
+            tenantId: string,
+            sessionId: string,
+            type: string,
+            payload: Record<string, unknown>
+        ) => Promise<unknown>;
+    };
     events?: {
         push: (
             eventKey: string,
@@ -145,6 +167,15 @@ async function executeTaskTaskInner(
             turnSeq = persistedBoundary.turnSeq;
         }
 
+        if (persistedBoundary === undefined) {
+            const cachedSegment = await resolveCachedStartSegment(input, deps);
+            if (cachedSegment !== undefined) {
+                await finalizeRootRun(input, cachedSegment, deps);
+                await notifyPersistedA2AParentIfTerminal(input, cachedSegment, deps);
+                return cachedSegment;
+            }
+        }
+
         for (;;) {
             turnSeq += 1;
             const segmentInput: SegmentTaskInput = {
@@ -167,6 +198,7 @@ async function executeTaskTaskInner(
             await dispatchPendingOutboxChildren(ctx, input, segment, deps);
 
             if (isTerminalBoundary(segment.boundary)) {
+                await writeDurableResultCache(input, segment, deps);
                 await finalizeRootRun(input, segment, deps);
                 await notifyPersistedA2AParentIfTerminal(input, segment, deps);
                 return segment;
@@ -204,6 +236,146 @@ async function executeTaskTaskInner(
         }
         throw error;
     }
+}
+
+async function resolveCachedStartSegment(
+    input: TaskTaskInput,
+    deps?: TaskTaskDeps
+): Promise<SegmentTaskOutput | undefined> {
+    const cacheConfig = resolveEffectiveCacheConfig(input, deps);
+    if (!cacheConfig.enabled || input.agentId === undefined) {
+        return undefined;
+    }
+    const cache = resolveResultCache(input, deps);
+    if (cache === undefined) {
+        return undefined;
+    }
+
+    let cachedResult: unknown;
+    try {
+        cachedResult = await cache.getCachedResult(
+            input.agentId,
+            input.input as never,
+            cacheConfig.excludePaths ?? [],
+            input.tenantId
+        );
+    } catch (error) {
+        log.warn('Failed to read durable task result cache', {
+            tenantId: input.tenantId,
+            taskId: input.taskId,
+            agentId: input.agentId,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+    }
+    const normalized = normalizeDurableCacheableResult(cachedResult);
+    if (cachedResult == null || !normalized.cacheable) {
+        return undefined;
+    }
+
+    return {
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        agentId: input.agentId,
+        boundary: { kind: 'complete', result: normalized.result as JsonValue },
+        taskStatus: {
+            state: 'completed',
+            timestamp: new Date().toISOString(),
+            metadata: { source: 'cache', origin: 'cache' },
+        } as never,
+        executionMetadata: { origin: 'cache' },
+    } as TaskTaskOutput;
+}
+
+async function writeDurableResultCache(
+    input: TaskTaskInput,
+    segment: SegmentTaskOutput,
+    deps?: TaskTaskDeps
+): Promise<void> {
+    const cacheConfig = resolveEffectiveCacheConfig(input, deps);
+    const boundary = segment.boundary;
+    if (!cacheConfig.enabled || input.agentId === undefined || !isSuccessfulCompleteBoundary(boundary)) {
+        return;
+    }
+    const cache = resolveResultCache(input, deps);
+    if (cache === undefined) {
+        return;
+    }
+
+    try {
+        const preparedResult = await prepareChildResultForPersistence(
+            boundary.result,
+            cache as AgentResultCache,
+            input.tenantId
+        );
+        await cache.setCachedResult(
+            input.agentId,
+            input.input as never,
+            preparedResult,
+            cacheConfig.ttlSeconds ?? 300,
+            cacheConfig.excludePaths ?? [],
+            input.tenantId
+        );
+    } catch (error) {
+        log.warn('Failed to write durable task result cache', {
+            tenantId: input.tenantId,
+            taskId: input.taskId,
+            agentId: input.agentId,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+}
+
+function resolveEffectiveCacheConfig(
+    input: TaskTaskInput,
+    deps?: TaskTaskDeps
+): Required<RuntimeResultCachePolicy> {
+    const manifest = deps?.resolveCacheConfig?.(input.agentId) ?? {};
+    return {
+        enabled: input.cache?.enabled ?? manifest.enabled ?? false,
+        ttlSeconds: input.cache?.ttlSeconds ?? manifest.ttlSeconds ?? 300,
+        excludePaths: input.cache?.excludePaths ?? manifest.excludePaths ?? [],
+    };
+}
+
+function resolveResultCache(input: TaskTaskInput, deps?: TaskTaskDeps): TaskResultCache | undefined {
+    if (deps?.agentResultCache !== undefined) {
+        return deps.agentResultCache;
+    }
+    if (deps?.prisma === undefined) {
+        return undefined;
+    }
+    return new AgentResultCache(deps.prisma as never);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isTaskEntityLike(value: unknown): value is {
+    id: string;
+    status?: { state?: string; metadata?: { result?: unknown } };
+} {
+    return isRecord(value) && typeof value.id === 'string' && isRecord(value.status);
+}
+
+function normalizeDurableCacheableResult(value: unknown): { cacheable: boolean; result?: unknown } {
+    if (!isTaskEntityLike(value)) {
+        return { cacheable: true, result: value };
+    }
+    if (value.status?.state !== 'completed') {
+        return { cacheable: false };
+    }
+    const result = value.status.metadata?.result;
+    return result === undefined
+        ? { cacheable: false }
+        : { cacheable: true, result };
+}
+
+function isSuccessfulCompleteBoundary(
+    boundary: SegmentTaskBoundary
+): boundary is Extract<SegmentTaskBoundary, { kind: 'complete' }> {
+    return boundary.kind === 'complete' && !hasOkFalse(boundary.result);
 }
 
 async function finalizeRootRun(
@@ -355,7 +527,7 @@ async function notifyPersistedA2AParentIfTerminal(
     segment: SegmentTaskOutput,
     deps?: TaskTaskDeps
 ): Promise<void> {
-    if (deps?.events === undefined || deps.prisma?.wMSession === undefined) {
+    if (deps?.prisma?.wMSession === undefined) {
         return;
     }
 
@@ -382,11 +554,28 @@ async function notifyPersistedA2AParentIfTerminal(
         return;
     }
 
-    if (shouldSuppressChildWakeForDrill(parentTaskId)) {
+    const idempotencyKey = `${parentTaskId}:child:${parentChildToken}`;
+    const output = outputFromTerminalBoundary(segment.boundary);
+    const childResultForParent = await prepareChildResultForPersistence(
+        output,
+        deps.prisma ? new AgentResultCache(deps.prisma as never) : undefined,
+        parentTenantId
+    );
+    await persistParentChildCompletedEvent({
+        tenantId: parentTenantId,
+        taskId: parentTaskId,
+        token: parentChildToken,
+        childTaskId: input.taskId,
+        agentId: input.agentId,
+        result: childResultForParent,
+        executionMetadata: segment.executionMetadata,
+        deps,
+    });
+
+    if (deps.events === undefined || shouldSuppressChildWakeForDrill(parentTaskId)) {
         return;
     }
 
-    const idempotencyKey = `${parentTaskId}:child:${parentChildToken}`;
     await deps.events.push(
         `aplret.child.${parentChildToken}`,
         {
@@ -397,10 +586,53 @@ async function notifyPersistedA2AParentIfTerminal(
             kind: 'child',
             token: parentChildToken,
             childTaskId: input.taskId,
-            output: outputFromTerminalBoundary(segment.boundary),
+            output: childResultForParent,
+            ...(segment.executionMetadata !== undefined ? { executionMetadata: segment.executionMetadata } : {}),
         },
         { key: `${parentTenantId}:${parentTaskId}:${parentChildToken}` }
     );
+}
+
+async function persistParentChildCompletedEvent(params: {
+    tenantId: string;
+    taskId: string;
+    token: string;
+    childTaskId: string;
+    agentId?: string;
+    result: unknown;
+    executionMetadata?: SegmentTaskOutput['executionMetadata'];
+    deps?: TaskTaskDeps;
+}): Promise<void> {
+    if (params.deps?.sessionManager === undefined) {
+        return;
+    }
+
+    try {
+        await params.deps.sessionManager.appendEvent(
+            params.tenantId,
+            params.taskId,
+            'task.child_completed',
+            {
+                token: params.token,
+                childTaskId: params.childTaskId,
+                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                ...(params.agentId !== undefined ? { childAgentId: params.agentId } : {}),
+                result: params.result,
+                ...(params.executionMetadata !== undefined
+                    ? { executionMetadata: params.executionMetadata }
+                    : {}),
+                resultPreview: makeSafeEventPreview(params.result),
+            }
+        );
+    } catch (error) {
+        log.warn('Failed to persist durable child completion event', {
+            tenantId: params.tenantId,
+            parentTaskId: params.taskId,
+            childTaskId: params.childTaskId,
+            token: params.token,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
 }
 
 function shouldSuppressChildWakeForDrill(parentTaskId: string): boolean {
@@ -889,7 +1121,7 @@ async function findPersistedParentChildEvent(
         kind: 'child',
         token: boundary.token,
         childTaskId: typeof payload.childTaskId === 'string' ? payload.childTaskId : boundary.token,
-        output: 'resultPreview' in payload ? payload.resultPreview : payload.result,
+        output: 'result' in payload ? payload.result : payload.resultPreview,
         idempotencyKey: `${input.taskId}:child:${boundary.token}`,
     };
 }
@@ -938,7 +1170,7 @@ async function findPersistedChildTerminalEvent(
 
         const transition = jsonObjectOrEmpty(payload.transition as JsonValue);
         if (transition.kind === 'complete') {
-            return childWake(input, boundary.token, childTaskId, transition.result);
+            continue;
         }
         if (transition.kind === 'fail') {
             return childWake(input, boundary.token, childTaskId, {

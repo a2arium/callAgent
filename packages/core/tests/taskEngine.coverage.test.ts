@@ -205,6 +205,29 @@ class FakeSessionStore extends InMemorySessionManager {
     }
 }
 
+function createFakeArtifactPrisma() {
+    const artifacts = new Map<string, unknown>();
+    return {
+        agentResultCache: {
+            upsert: jest.fn(async (args: any) => {
+                artifacts.set(args.create.cacheKey, args.create.result);
+                return args.create;
+            }),
+            findUnique: jest.fn(async (args: any) => {
+                const cacheKey = args.where?.tenantId_agentName_cacheKey?.cacheKey;
+                if (!artifacts.has(cacheKey)) return null;
+                return {
+                    id: cacheKey,
+                    result: artifacts.get(cacheKey),
+                    createdAt: new Date(),
+                    expiresAt: new Date(Date.now() + 60_000),
+                };
+            }),
+            delete: jest.fn(async () => ({})),
+        },
+    };
+}
+
 const buildObservation = (token: string): EngineObservation => ({
     source: 'child',
     kind: 'child.completed',
@@ -274,21 +297,21 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         llmAdapter: {},
         tenantId: 'test-tenant'
     });
-    await jest.unstable_mockModule('../src/orchestration/A2AService.js', () => ({
+    await jest.unstable_mockModule(path.join(srcDir, 'orchestration/A2AService.ts'), () => ({
         globalA2AService: { sendTaskToAgent: sendMock, findLocalAgent: findMock }
     } as any));
-    await jest.unstable_mockModule('../src/eventbus/outboxPublisher.js', () => ({
+    await jest.unstable_mockModule(path.join(srcDir, 'eventbus/outboxPublisher.ts'), () => ({
         OutboxPublisher: jest.fn().mockImplementation(() => ({
             start: jest.fn(),
             stop: jest.fn(),
         })),
     }));
-    await jest.unstable_mockModule('../src/loop/loopRunner.js', () => ({
+    await jest.unstable_mockModule(path.join(srcDir, 'loop/loopRunner.ts'), () => ({
         runLoop: (...args: any[]) => runLoopMock(...args)
     }));
     await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
-    const mod = await import('../src/orchestration/taskEngine.js');
-    const a2aModule = await import('../src/orchestration/A2AService.js');
+    const mod = await import(path.join(srcDir, 'orchestration/taskEngine.ts'));
+    const a2aModule = await import(path.join(srcDir, 'orchestration/A2AService.ts'));
     (a2aModule as any).globalA2AService.sendTaskToAgent = sendMock;
     (a2aModule as any).globalA2AService.findLocalAgent = findMock;
     return { TaskEngine: (mod as any).TaskEngine, sendMock, findMock };
@@ -611,6 +634,38 @@ describe('TaskEngine orchestration coverage', () => {
         expect(matchingAll).toHaveLength(1);
         expect(inbox.current.some(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'tok-1')).toBe(true);
         expect((snap?.snapshot as any).pending?.tasks?.['tok-1']).toBeDefined();
+    });
+
+    test('stageChildCompletionObservation stores large child HTML as artifact-backed snapshot data', async () => {
+        const rawHtml = `<html>${'stage-child-raw-html'.repeat(5000)}</html>`;
+        const store = new FakeSessionStore();
+        (store as any).prisma = createFakeArtifactPrisma();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const pending = setPendingTasks({}, { 'tok-large': { handlers: {} } });
+        const base = { ...pending, meta: { turn: 0 }, inbox: { current: [], all: [] } } as Record<string, unknown>;
+        store.seed('t', 'parent-large', base, BigInt(0), 'parent-agent');
+
+        await engine.stageChildCompletionObservation({
+            tenantId: 't',
+            parentTaskId: 'parent-large',
+            childToken: 'tok-large',
+            result: { ok: true, data: { html: rawHtml, content: rawHtml } },
+            childAgentId: 'child-agent'
+        });
+
+        const saved = store.getSnapshot('t', 'parent-large')?.snapshot as any;
+        const serialized = JSON.stringify(saved);
+        expect(serialized).not.toContain(rawHtml);
+        const obs = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox)
+            .all.find((entry: any) => entry?.payload?.token === 'tok-large') as any;
+        expect(obs?.payload?.result?.data?.html).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
+        expect(obs?.payload?.result?.data?.content).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
     });
 
     test('resumes awaiting child and clears mappings/control vars', async () => {
@@ -1450,6 +1505,31 @@ describe('TaskEngine orchestration coverage', () => {
             expect(logSpy).toHaveBeenCalledWith('[TaskEngine] No background tasks to wait for');
             logSpy.mockRestore();
             process.env.DEBUG_BACKGROUND_TASKS = original;
+        });
+
+        test('waitForBackgroundTasks names tracked pending background tasks on timeout', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const pending = new Promise<void>(() => undefined);
+            const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => { });
+
+            (engine as any).trackBackgroundTask(pending, {
+                kind: 'tool.auto_execute',
+                label: 'tool.auto_execute mcp:browser-use',
+                tenantId: 'default',
+                taskId: 'task-1',
+                agentId: 'fetch-browser',
+                token: 'tool-token-1',
+                toolName: 'mcp:browser-use',
+                source: 'ApiBinder.requestTool',
+            });
+
+            try {
+                await expect(engine.waitForBackgroundTasks(5, { throwOnTimeout: true })).rejects.toThrow(
+                    /tool\.auto_execute mcp:browser-use[\s\S]*tool-token-1/
+                );
+            } finally {
+                warnSpy.mockRestore();
+            }
         });
     });
 

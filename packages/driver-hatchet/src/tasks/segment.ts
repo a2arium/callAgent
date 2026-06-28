@@ -66,6 +66,7 @@ export type SegmentTaskOutput = JsonObject & {
     taskStatus: SegmentResult['taskStatus'];
     traceId?: string;
     turnTraceId?: string;
+    executionMetadata?: { origin?: 'cache' | 'runtime' };
 };
 
 export type SegmentTaskDeps = {

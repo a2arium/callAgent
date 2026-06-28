@@ -6,6 +6,8 @@ export type A2aResultTelemetry = {
     childAgentNodeId?: string;
     /** Child context `telemetry.traceId` after the child run. */
     childTraceId?: string;
+    /** Execution source for this A2A result. */
+    executionOrigin?: 'cache';
 };
 
 export function attachA2aResultTelemetry(result: unknown, telemetry: A2aResultTelemetry): void {

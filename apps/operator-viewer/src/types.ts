@@ -21,12 +21,23 @@ export type AgentRunListItem = {
 export type AgentRunListPage = {
   items: AgentRunListItem[];
   nextCursor?: string;
+  summary?: FleetSummary;
   pageInfo?: {
     nextCursor?: string;
     hasMore: boolean;
     limit: number;
   };
   projection?: ProjectionInfo;
+};
+
+export type FleetSummary = {
+  total: number;
+  failed: number;
+  waiting: number;
+  stuck: number;
+  completed: number;
+  costCaptured: number;
+  costUnavailable: number;
 };
 
 export type AgentRunNode = {
@@ -43,6 +54,7 @@ export type AgentRunNode = {
   error?: unknown;
   traceId?: string;
   providerRunId?: string;
+  executionOrigin?: 'runtime' | 'cache' | 'projected';
   cancellation?: AgentRunCancellation;
   startedAt?: string;
   finishedAt?: string;
@@ -66,6 +78,7 @@ export type AgentRunEdge = {
   edgeToken?: string;
   edgeKind: 'delegates_to';
   status: AgentRunStatus;
+  executionOrigin?: 'runtime' | 'cache' | 'projected';
   resultPreview?: unknown;
   error?: unknown;
   startedAt?: string;

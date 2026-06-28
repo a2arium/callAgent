@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { cancelRun, getMemory, getOperatorConfig, getRunGraph, getTurn, listAgentRuns, listAgents, type CancelRunInput, type ListAgentRunsInput } from './client';
 import type { AgentRunGraph } from '../types';
 
@@ -14,6 +14,16 @@ export function useAgentRuns(input: ListAgentRunsInput) {
   return useQuery({
     queryKey: ['agent-runs', input],
     queryFn: () => listAgentRuns(input),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useInfiniteAgentRuns(input: ListAgentRunsInput) {
+  return useInfiniteQuery({
+    queryKey: ['agent-runs', 'infinite', input],
+    queryFn: ({ pageParam }) => listAgentRuns({ ...input, cursor: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.pageInfo?.nextCursor ?? lastPage.nextCursor,
     refetchInterval: 5_000,
   });
 }

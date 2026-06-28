@@ -1,5 +1,6 @@
 import {
     installLoggingContextConsoleBridge,
+    withConsoleSinkSuppressed,
     withLoggingContext,
     type LoggingSinkEntry,
 } from '@a2arium/callagent-utils';
@@ -135,7 +136,9 @@ async function callHatchetLogger(
         return;
     }
     try {
-        await method.call(logger, truncateHatchetLog(message), sanitizeMetadata(extra));
+        await withConsoleSinkSuppressed(async () => {
+            await method.call(logger, truncateHatchetLog(message), sanitizeMetadata(extra));
+        });
     } catch (error) {
         defaultMetricsRegistry.increment('observability.log_sink_failure_total', {
             level,
