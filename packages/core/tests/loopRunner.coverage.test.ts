@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import { runLoop } from '../src/loop/loopRunner.js';
 import { initialM } from '../src/loop/init.js';
 import { normalizeObservationInbox, type EnvironmentState } from '../src/loop/types.js';
+import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 
 const baseEnv = (overrides: Partial<EnvironmentState> = {}): EnvironmentState => ({
     time: new Date().toISOString(),
@@ -17,6 +18,7 @@ const baseEnv = (overrides: Partial<EnvironmentState> = {}): EnvironmentState =>
 afterEach(() => {
     jest.clearAllMocks();
     jest.restoreAllMocks();
+    EngineLocator.setEngine(null);
 });
 
 describe('runLoop memory wiring and defaults', () => {
@@ -28,6 +30,8 @@ describe('runLoop memory wiring and defaults', () => {
             set: jest.fn(),
             delete: jest.fn()
         };
+        const appendOperatorEvent = jest.fn(async () => ({ eventId: 'event-1', seq: 1 }));
+        EngineLocator.setEngine({ appendOperatorEvent });
 
         const ctx: any = { 
             task: { id: 'memory-task', input: 'hello' }, 
@@ -101,6 +105,15 @@ describe('runLoop memory wiring and defaults', () => {
         expect(result.M.goalState?.hierarchy?.nodes?.root?.status).toBe('done');
         expect(result.metrics?.timings?.length).toBeGreaterThan(0);
         expect(result.metrics?.rewards?.length).toBeGreaterThan(0);
+        expect(appendOperatorEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'memory.read',
+            payload: expect.objectContaining({
+                query: expect.objectContaining({ id: 'reg' }),
+                resultKeys: ['reg'],
+                resultCount: 1,
+                status: 'success',
+            }),
+        }));
 
         expect(env.inbox.current.length).toBe(0);
         expect(env.inbox.all.length).toBeGreaterThan(0);

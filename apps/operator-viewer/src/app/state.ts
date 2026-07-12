@@ -16,6 +16,20 @@ export type RunSearch = FleetSearch & {
   tab: string;
 };
 
+export type MemorySearch = {
+  tenantId: string;
+  tab: 'overview' | 'probe' | 'inventory' | 'activity' | 'entities';
+  key: string;
+  tag: string;
+  entity: string;
+  entityType: string;
+  agentId: string;
+  taskId: string;
+  op: '' | 'read' | 'write' | 'delete';
+  since: string;
+  selectedKey: string;
+};
+
 export const defaultTenantId = 'default';
 
 export function parseFleetSearch(value: Record<string, unknown>): FleetSearch {
@@ -39,6 +53,26 @@ export function parseRunSearch(value: Record<string, unknown>): RunSearch {
     nodeId: stringParam(value.nodeId, ''),
     turn: stringParam(value.turn, ''),
     tab: stringParam(value.tab, 'summary'),
+  };
+}
+
+export function parseMemorySearch(value: Record<string, unknown>): MemorySearch {
+  const tab = value.tab === 'probe' || value.tab === 'inventory' || value.tab === 'activity' || value.tab === 'entities'
+    ? value.tab
+    : 'overview';
+  const op = value.op === 'read' || value.op === 'write' || value.op === 'delete' ? value.op : '';
+  return {
+    tenantId: stringParam(value.tenantId, defaultTenantId),
+    tab,
+    key: stringParam(value.key, ''),
+    tag: stringParam(value.tag, ''),
+    entity: stringParam(value.entity, ''),
+    entityType: stringParam(value.entityType, ''),
+    agentId: stringParam(value.agentId, ''),
+    taskId: stringParam(value.taskId, ''),
+    op,
+    since: stringParam(value.since, ''),
+    selectedKey: stringParam(value.selectedKey, ''),
   };
 }
 

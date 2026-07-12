@@ -292,7 +292,8 @@ async function appendOperatorMemoryEvent(
     event: OperatorMemoryEvent
 ): Promise<void> {
     const internal = ctx as InternalTaskContext;
-    if (!isOperatorCaptureEnabled(internal) || event.keys.length === 0) {
+    const hasPayload = event.keys.length > 0 || (event.resultKeys?.length ?? 0) > 0 || event.query !== undefined;
+    if (!isOperatorCaptureEnabled(internal) || !hasPayload) {
         return;
     }
     await appendOperatorEvent(ctx, `memory.${event.op}`, {
@@ -302,6 +303,10 @@ async function appendOperatorMemoryEvent(
         op: event.op,
         keys: event.keys.slice(0, 100),
         keyCount: event.keys.length,
+        ...(event.query !== undefined ? { query: compactOperatorValue(event.query, operatorCaptureLevel(internal)) } : {}),
+        ...(event.resultKeys ? { resultKeys: event.resultKeys.slice(0, 100) } : {}),
+        ...(event.resultCount !== undefined ? { resultCount: event.resultCount } : {}),
+        ...(event.status ? { status: event.status } : {}),
         backend: event.backend,
         source: event.source,
         traceId: ctx.telemetry?.traceId,
@@ -322,6 +327,40 @@ function semanticReadKeys(query: {
         return query.id;
     }
     return [];
+}
+
+function semanticQuerySummary(query: unknown): unknown {
+    if (typeof query === 'string') {
+        return { pattern: query };
+    }
+    if (!query || typeof query !== 'object' || Array.isArray(query)) {
+        return query ?? {};
+    }
+    const raw = query as Record<string, unknown>;
+    return {
+        ...(raw.id !== undefined ? { id: raw.id } : {}),
+        ...(raw.tag !== undefined ? { tag: raw.tag } : {}),
+        ...(raw.tags !== undefined ? { tags: raw.tags } : {}),
+        ...(raw.filters !== undefined ? { filters: raw.filters } : {}),
+        ...(raw.limit !== undefined ? { limit: raw.limit } : {}),
+        ...(raw.orderBy !== undefined ? { orderBy: raw.orderBy } : {}),
+        ...(raw.random !== undefined ? { random: raw.random } : {}),
+        ...(raw.backend !== undefined ? { backend: raw.backend } : {}),
+    };
+}
+
+function semanticResultKeys(results: unknown): string[] {
+    if (!Array.isArray(results)) return [];
+    return results
+        .map((item) => {
+            if (item && typeof item === 'object') {
+                const record = item as Record<string, unknown>;
+                if (typeof record.key === 'string') return record.key;
+                if (typeof record.id === 'string') return record.id;
+            }
+            return undefined;
+        })
+        .filter((key): key is string => key !== undefined);
 }
 
 function usageFromTurnCalls(iCtx: InternalTaskContext): TurnUsage | undefined {
@@ -432,10 +471,15 @@ export async function runLoop<
                 read: async (q) => {
                     if (semanticRegistry?.read) {
                         const res = await semanticRegistry.read(q);
+                        const resultKeys = semanticResultKeys(res);
                         try {
                             await appendOperatorMemoryEvent(ctx, {
                                 op: 'read',
                                 keys: semanticReadKeys(q),
+                                query: semanticQuerySummary(q),
+                                resultKeys,
+                                resultCount: Array.isArray(res) ? res.length : 0,
+                                status: 'success',
                                 backend: 'semantic',
                                 turnSeq: env.turn,
                                 agentId: ctx.agentId,
@@ -449,16 +493,52 @@ export async function runLoop<
                         return Array.isArray(res) ? res.map(normalizeSemantic) : [];
                     }
                     const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
-                    if (!q || (!q.id && !q.tag && !q.tags)) return concepts;
+                    if (!q || (!q.id && !q.tag && !q.tags)) {
+                        try {
+                            await appendOperatorMemoryEvent(ctx, {
+                                op: 'read',
+                                keys: [],
+                                query: semanticQuerySummary(q),
+                                resultKeys: semanticResultKeys(concepts),
+                                resultCount: concepts.length,
+                                status: 'success',
+                                backend: 'semantic',
+                                turnSeq: env.turn,
+                                agentId: ctx.agentId,
+                                source: 'loop.memory',
+                            });
+                        } catch { /* noop */ }
+                        return concepts;
+                    }
                     const ids = q.id ? (Array.isArray(q.id) ? q.id : [q.id]) : undefined;
-                    return concepts.filter((c: any) => (!ids || ids.includes(c.id)));
+                    const filtered = concepts.filter((c: any) => (!ids || ids.includes(c.id)));
+                    try {
+                        await appendOperatorMemoryEvent(ctx, {
+                            op: 'read',
+                            keys: semanticReadKeys(q),
+                            query: semanticQuerySummary(q),
+                            resultKeys: semanticResultKeys(filtered),
+                            resultCount: filtered.length,
+                            status: 'success',
+                            backend: 'semantic',
+                            turnSeq: env.turn,
+                            agentId: ctx.agentId,
+                            source: 'loop.memory',
+                        });
+                    } catch { /* noop */ }
+                    return filtered;
                 },
                 get: async (id) => {
                     const res = await (semanticRegistry?.read ? semanticRegistry.read(id) : undefined);
+                    const resultKeys = semanticResultKeys(res);
                     try {
                         await appendOperatorMemoryEvent(ctx, {
                             op: 'read',
                             keys: [id],
+                            query: { id },
+                            resultKeys,
+                            resultCount: Array.isArray(res) ? res.length : 0,
+                            status: 'success',
                             backend: 'semantic',
                             turnSeq: env.turn,
                             agentId: ctx.agentId,
@@ -643,6 +723,7 @@ export async function runLoop<
                     await appendOperatorMemoryEvent(ctx, {
                         op: 'write',
                         keys: writeKeys,
+                        status: 'success',
                         backend: 'semantic',
                         turnSeq: env.turn,
                         agentId: ctx.agentId,
@@ -654,6 +735,7 @@ export async function runLoop<
                     await appendOperatorMemoryEvent(ctx, {
                         op: 'delete',
                         keys: deleteKeys,
+                        status: 'success',
                         backend: 'semantic',
                         turnSeq: env.turn,
                         agentId: ctx.agentId,

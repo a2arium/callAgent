@@ -128,7 +128,7 @@ export function NodeInspector(props: {
           <LlmCallsTable calls={rollup.llmCalls} />
         </TabsContent>
         <TabsContent value="memory" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-          <MemoryOpsTable operations={rollup.memoryOps} />
+          <MemoryOpsTable operations={rollup.memoryOps} tenantId={props.tenantId} />
         </TabsContent>
         <TabsContent value="links" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
           <LinksTab node={props.node} config={props.config} />

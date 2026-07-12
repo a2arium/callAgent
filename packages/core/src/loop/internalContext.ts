@@ -15,6 +15,10 @@ export type OperatorTurnTraceCapture = {
 export type OperatorMemoryEvent = {
     op: 'read' | 'write' | 'delete';
     keys: string[];
+    query?: unknown;
+    resultKeys?: string[];
+    resultCount?: number;
+    status?: 'success' | 'failure';
     backend?: string;
     turnSeq?: number;
     agentId?: string;

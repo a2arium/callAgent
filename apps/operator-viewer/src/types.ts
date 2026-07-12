@@ -111,6 +111,10 @@ export type MemoryOperationRun = {
   op: 'read' | 'write' | 'delete';
   keys: string[];
   keyCount: number;
+  resultKeys?: string[];
+  resultCount?: number;
+  query?: unknown;
+  status?: string;
   backend?: string;
   source?: string;
   turnSeq?: number;

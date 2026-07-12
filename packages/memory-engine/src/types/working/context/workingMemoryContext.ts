@@ -19,6 +19,10 @@ type OperatorMemoryEventSink = {
     __operatorMemoryEvent?: (event: {
         op: 'read' | 'write' | 'delete';
         keys: string[];
+        query?: unknown;
+        resultKeys?: string[];
+        resultCount?: number;
+        status?: 'success' | 'failure';
         backend?: string;
         source: 'loop.memory' | 'context.memory';
     }) => Promise<void> | void;

@@ -141,6 +141,10 @@ export type MemoryOperationRun = {
     op: 'read' | 'write' | 'delete';
     keys: string[];
     keyCount: number;
+    resultKeys?: string[];
+    resultCount?: number;
+    query?: unknown;
+    status?: string;
     backend?: string;
     source?: string;
     turnSeq?: number;
@@ -764,6 +768,10 @@ function buildMemoryOps(rootTaskId: string, events: AgentRunSourceEvent[]): Memo
                 op,
                 keys,
                 keyCount,
+                ...(arrayField(event.payload, 'resultKeys').length > 0 ? { resultKeys: stringArrayField(event.payload, 'resultKeys') } : {}),
+                ...(numberField(event.payload, 'resultCount') !== undefined ? { resultCount: numberField(event.payload, 'resultCount') } : {}),
+                ...(Object.prototype.hasOwnProperty.call(event.payload, 'query') ? { query: event.payload.query } : {}),
+                ...(stringField(event.payload, 'status') ? { status: stringField(event.payload, 'status') } : {}),
                 ...(stringField(event.payload, 'backend') ? { backend: stringField(event.payload, 'backend') } : {}),
                 ...(stringField(event.payload, 'source') ? { source: stringField(event.payload, 'source') } : {}),
                 ...(numberField(event.payload, 'turnSeq') !== undefined ? { turnSeq: numberField(event.payload, 'turnSeq') } : {}),

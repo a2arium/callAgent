@@ -217,6 +217,14 @@ describe('API router default branch', () => {
             { path: '/agent-runs', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
             { path: '/artifacts/:artifactId', method: 'get', req: { method: 'GET', params: { artifactId: 'artifact-1' }, query: {}, header: () => undefined } },
             { path: '/agents', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
+            { path: '/memory/semantic', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
+            { path: '/memory/semantic/:key', method: 'get', req: { method: 'GET', params: { key: 'memory-1' }, query: {}, header: () => undefined } },
+            { path: '/memory/activity', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
+            { path: '/memory/entities', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
+            { path: '/memory/probe', method: 'post', req: { method: 'POST', query: {}, body: {}, header: () => undefined } },
+            { path: '/memory/semantic/:key', method: 'patch', req: { method: 'PATCH', params: { key: 'memory-1' }, query: {}, body: {}, header: () => undefined } },
+            { path: '/memory/semantic/:key/tags', method: 'patch', req: { method: 'PATCH', params: { key: 'memory-1' }, query: {}, body: {}, header: () => undefined } },
+            { path: '/memory/semantic/:key', method: 'delete', req: { method: 'DELETE', params: { key: 'memory-1' }, query: {}, body: {}, header: () => undefined } },
             { path: '/tasks/:taskId/run-graph', method: 'get', req: { method: 'GET', params: { taskId: 'task-1' }, query: {}, header: () => undefined } },
             { path: '/tasks/:taskId/cancel', method: 'post', req: { method: 'POST', params: { taskId: 'task-1' }, query: {}, body: {}, header: () => undefined } },
             { path: '/tasks/:taskId/turns/:turnSeq', method: 'get', req: { method: 'GET', params: { taskId: 'task-1', turnSeq: '1' }, query: {}, header: () => undefined } },
@@ -421,6 +429,218 @@ describe('API router default branch', () => {
                 resultStatus: 'requested',
             }),
         });
+    });
+
+    it('lists semantic memory through the operator memory endpoint', async () => {
+        const findMany = jest.fn(async () => [{
+            key: 'customer:1',
+            value: { name: 'Ada' },
+            tags: ['customer'],
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+            updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+        }]);
+        EngineLocator.setEngine({
+            getOperatorPrismaClient: () => ({
+                agentMemoryStore: { findMany },
+                entityAlignment: { findMany: jest.fn(async () => []) },
+                wMEvent: { findMany: jest.fn(async () => []) },
+            }),
+        });
+        const handler = getHandler('/memory/semantic', 'get');
+        const res = fakeRes();
+
+        await handler({
+            method: 'GET',
+            query: { key: 'customer', tag: 'customer', limit: '10' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ tenantId: 'tenant-1' }),
+            take: 11,
+        }));
+        expect(res.body.items[0]).toEqual(expect.objectContaining({
+            key: 'customer:1',
+            tags: ['customer'],
+        }));
+    });
+
+    it('requires reason and matching key before deleting semantic memory', async () => {
+        const create = jest.fn(async () => ({}));
+        const deleteRow = jest.fn(async () => ({}));
+        EngineLocator.setEngine({
+            getOperatorPrismaClient: () => ({
+                agentMemoryStore: { findMany: jest.fn(async () => []), delete: deleteRow },
+                operatorAuditEvent: { create },
+            }),
+        });
+        const handler = getHandler('/memory/semantic/:key', 'delete');
+
+        const rejected = fakeRes();
+        await handler({
+            method: 'DELETE',
+            params: { key: 'customer:1' },
+            query: {},
+            body: { reason: 'bad data', confirmKey: 'wrong' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, rejected);
+        expect(rejected.statusCode).toBe(400);
+        expect(deleteRow).not.toHaveBeenCalled();
+        expect(create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                tenantId: 'tenant-1',
+                action: 'memory.delete',
+                accepted: false,
+                resultStatus: 'rejected',
+            }),
+        });
+
+        const accepted = fakeRes();
+        await handler({
+            method: 'DELETE',
+            params: { key: 'customer:1' },
+            query: {},
+            body: { reason: 'bad data', confirmKey: 'customer:1' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, accepted);
+
+        expect(accepted.statusCode).toBe(200);
+        expect(deleteRow).toHaveBeenCalledWith({
+            where: { tenantId_key: { tenantId: 'tenant-1', key: 'customer:1' } },
+        });
+        expect(create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                tenantId: 'tenant-1',
+                action: 'memory.delete',
+                accepted: true,
+                resultStatus: 'completed',
+            }),
+        });
+    });
+
+    it('updates semantic memory key and value with audit', async () => {
+        const create = jest.fn(async () => ({}));
+        const update = jest.fn(async () => ({}));
+        const updateMany = jest.fn(async () => ({}));
+        const findUnique = jest.fn(async () => ({
+            key: 'customer:2',
+            value: { name: 'Grace' },
+            tags: ['customer'],
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+            updatedAt: new Date('2026-01-03T00:00:00.000Z'),
+        }));
+        const prisma = {
+                agentMemoryStore: { findMany: jest.fn(async () => []), findUnique, update },
+                entityAlignment: { findMany: jest.fn(async () => []), updateMany },
+                wMEvent: { findMany: jest.fn(async () => []) },
+                operatorAuditEvent: { create },
+        };
+        EngineLocator.setEngine({
+            getOperatorPrismaClient: () => ({
+                ...prisma,
+                $transaction: async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma),
+            }),
+        });
+        const handler = getHandler('/memory/semantic/:key', 'patch');
+
+        const rejected = fakeRes();
+        await handler({
+            method: 'PATCH',
+            params: { key: 'customer:1' },
+            query: {},
+            body: { key: 'customer:2', value: { name: 'Grace' } },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, rejected);
+        expect(rejected.statusCode).toBe(400);
+        expect(update).not.toHaveBeenCalled();
+        expect(create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                action: 'memory.update',
+                accepted: false,
+                resultStatus: 'rejected',
+            }),
+        });
+
+        const accepted = fakeRes();
+        await handler({
+            method: 'PATCH',
+            params: { key: 'customer:1' },
+            query: {},
+            body: { key: 'customer:2', value: { name: 'Grace' }, reason: 'correct stale profile' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, accepted);
+
+        expect(accepted.statusCode).toBe(200);
+        expect(update).toHaveBeenCalledWith({
+            where: { tenantId_key: { tenantId: 'tenant-1', key: 'customer:1' } },
+            data: expect.objectContaining({
+                key: 'customer:2',
+                value: { name: 'Grace' },
+            }),
+        });
+        expect(updateMany).toHaveBeenCalledWith({
+            where: { tenantId: 'tenant-1', memoryKey: 'customer:1' },
+            data: { memoryKey: 'customer:2' },
+        });
+        expect(create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                action: 'memory.update',
+                accepted: true,
+                resultStatus: 'completed',
+                reason: 'correct stale profile',
+            }),
+        });
+        expect(accepted.body).toEqual(expect.objectContaining({ key: 'customer:2' }));
+    });
+
+    it('lists audit reasons for a selected semantic memory item', async () => {
+        const findMany = jest.fn(async () => [{
+            id: 'audit-1',
+            tenantId: 'tenant-1',
+            action: 'memory.update',
+            actorType: 'dev-local',
+            actorId: 'dev-local',
+            reason: 'correct stale profile',
+            accepted: true,
+            resultStatus: 'completed',
+            metadata: { key: 'customer:1', valueChanged: true },
+            requestedAt: new Date('2026-01-04T00:00:00.000Z'),
+            createdAt: new Date('2026-01-04T00:00:01.000Z'),
+        }]);
+        EngineLocator.setEngine({
+            getOperatorPrismaClient: () => ({
+                operatorAuditEvent: { findMany },
+            }),
+        });
+        const handler = getHandler('/memory/semantic/:key/audit', 'get');
+        const res = fakeRes();
+
+        await handler({
+            method: 'GET',
+            params: { key: 'customer:1' },
+            query: { limit: '10' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                tenantId: 'tenant-1',
+                action: { in: ['memory.update', 'memory.retag', 'memory.delete'] },
+            }),
+            take: 10,
+        }));
+        expect(res.body.items[0]).toEqual(expect.objectContaining({
+            id: 'audit-1',
+            action: 'memory.update',
+            reason: 'correct stale profile',
+            actorType: 'dev-local',
+            actorId: 'dev-local',
+            resultStatus: 'completed',
+            metadata: { key: 'customer:1', valueChanged: true },
+            requestedAt: '2026-01-04T00:00:00.000Z',
+        }));
     });
 
     it('protects production tasks/send even without the operator launch marker', async () => {

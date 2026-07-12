@@ -22,7 +22,8 @@ import {
     resolveOperatorRequestContext,
     type OperatorRequestContext,
 } from '../operator/operatorAuth.js';
-import { writeOperatorAudit } from '../operator/operatorAudit.js';
+import { OperatorAuditRepository, writeOperatorAudit } from '../operator/operatorAudit.js';
+import { SemanticMemoryObserverRepository } from '../operator/semanticMemoryObserver.js';
 
 type ListedAgent = {
     id: string;
@@ -146,6 +147,317 @@ export function createApiRouter(): Router {
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({ error: 'Failed to list agent runs', message });
+        }
+    }));
+
+    router.get('/memory/semantic', observeRoute('memory-semantic-list', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const repository = semanticMemoryRepository();
+            const limit = numberQuery(req.query.limit, 50);
+            const page = await repository.list({
+                tenantId: context.tenantId,
+                key: stringQuery(req.query.key),
+                tag: stringQuery(req.query.tag),
+                entity: stringQuery(req.query.entity),
+                entityType: stringQuery(req.query.entityType),
+                agentId: stringQuery(req.query.agentId),
+                taskId: stringQuery(req.query.taskId),
+                since: stringQuery(req.query.since),
+                until: stringQuery(req.query.until),
+                hasBlob: req.query.hasBlob === 'true',
+                hasAlignment: req.query.hasAlignment === 'true',
+                cursor: stringQuery(req.query.cursor),
+                limit,
+            });
+            res.json(page);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to list semantic memory', message });
+        }
+    }));
+
+    router.get('/memory/semantic/:key', observeRoute('memory-semantic-detail', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const key = req.params.key;
+            if (!key) {
+                res.status(400).json({ error: 'key is required' });
+                return;
+            }
+            const detail = await semanticMemoryRepository().detail({ tenantId: context.tenantId, key });
+            if (!detail) {
+                res.status(404).json({ error: 'Memory item not found' });
+                return;
+            }
+            res.json(detail);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to load semantic memory item', message });
+        }
+    }));
+
+    router.get('/memory/activity', observeRoute('memory-activity', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const page = await semanticMemoryRepository().activity({
+                tenantId: context.tenantId,
+                key: stringQuery(req.query.key),
+                taskId: stringQuery(req.query.taskId),
+                agentId: stringQuery(req.query.agentId),
+                op: memoryOpQuery(req.query.op),
+                since: stringQuery(req.query.since),
+                until: stringQuery(req.query.until),
+                cursor: stringQuery(req.query.cursor),
+                limit: numberQuery(req.query.limit, 100),
+            });
+            res.json(page);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to list memory activity', message });
+        }
+    }));
+
+    router.get('/memory/entities', observeRoute('memory-entities', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const page = await semanticMemoryRepository().entities({
+                tenantId: context.tenantId,
+                search: stringQuery(req.query.search),
+                entityType: stringQuery(req.query.entityType),
+                cursor: stringQuery(req.query.cursor),
+                limit: numberQuery(req.query.limit, 100),
+            });
+            res.json(page);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to list memory entities', message });
+        }
+    }));
+
+    router.get('/memory/semantic/:key/audit', observeRoute('memory-semantic-audit', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const key = req.params.key;
+            if (!key) {
+                res.status(400).json({ error: 'key is required' });
+                return;
+            }
+            const page = await operatorAuditRepository().listMemoryEvents({
+                tenantId: context.tenantId,
+                key,
+                limit: numberQuery(req.query.limit, 20),
+            });
+            res.json(page);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to list semantic memory audit events', message });
+        }
+    }));
+
+    router.post('/memory/probe', observeRoute('memory-probe', async (req, res) => {
+        try {
+            const context = contextOrRespond(req, res);
+            if (!context) return;
+            const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+            if (body.filters !== undefined && (!Array.isArray(body.filters) || !body.filters.every(isProbeFilter))) {
+                res.status(400).json({ error: 'filters must use a supported operator and a non-empty path' });
+                return;
+            }
+            const result = await semanticMemoryRepository().probe({
+                tenantId: context.tenantId,
+                pattern: typeof body.pattern === 'string' ? body.pattern : undefined,
+                tag: typeof body.tag === 'string' ? body.tag : undefined,
+                filters: Array.isArray(body.filters) ? body.filters : undefined,
+                limit: typeof body.limit === 'number' ? body.limit : 50,
+                random: body.random === true,
+                expectedKey: typeof body.expectedKey === 'string' ? body.expectedKey : undefined,
+            });
+            res.json(result);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ error: 'Failed to probe semantic memory', message });
+        }
+    }));
+
+    router.patch('/memory/semantic/:key/tags', observeRoute('memory-retag', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        const requestedAt = new Date();
+        const key = req.params.key;
+        const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+        const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+        const tags = Array.isArray(body.tags) ? body.tags.filter((tag): tag is string => typeof tag === 'string') : [];
+        try {
+            if (!key) {
+                res.status(400).json({ error: 'key is required' });
+                return;
+            }
+            if (!reason) {
+                await auditOperatorAction(context, {
+                    action: 'memory.retag',
+                    reason,
+                    requestedAt,
+                    accepted: false,
+                    resultStatus: 'rejected',
+                    errorCode: 'REASON_REQUIRED',
+                    metadata: { key },
+                });
+                res.status(400).json({ error: 'reason is required' });
+                return;
+            }
+            const result = await semanticMemoryRepository().retag({ tenantId: context.tenantId, key, tags });
+            await auditOperatorAction(context, {
+                action: 'memory.retag',
+                reason,
+                requestedAt,
+                accepted: true,
+                resultStatus: 'completed',
+                metadata: { key, tags },
+            });
+            res.json(result);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await auditOperatorAction(context, {
+                action: 'memory.retag',
+                reason,
+                requestedAt,
+                accepted: false,
+                resultStatus: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+                metadata: { key },
+            }).catch(() => undefined);
+            res.status(500).json({ error: 'Failed to retag semantic memory item', message });
+        }
+    }));
+
+    router.patch('/memory/semantic/:key', observeRoute('memory-update', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        const requestedAt = new Date();
+        const key = req.params.key;
+        const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+        const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+        const nextKey = typeof body.key === 'string' ? body.key.trim() : undefined;
+        const hasValue = Object.prototype.hasOwnProperty.call(body, 'value');
+        try {
+            if (!key) {
+                res.status(400).json({ error: 'key is required' });
+                return;
+            }
+            if (!reason) {
+                await auditOperatorAction(context, {
+                    action: 'memory.update',
+                    reason,
+                    requestedAt,
+                    accepted: false,
+                    resultStatus: 'rejected',
+                    errorCode: 'REASON_REQUIRED',
+                    metadata: { key, nextKey, hasValue },
+                });
+                res.status(400).json({ error: 'reason is required' });
+                return;
+            }
+            if (nextKey !== undefined && nextKey.length === 0) {
+                await auditOperatorAction(context, {
+                    action: 'memory.update',
+                    reason,
+                    requestedAt,
+                    accepted: false,
+                    resultStatus: 'rejected',
+                    errorCode: 'KEY_REQUIRED',
+                    metadata: { key, hasValue },
+                });
+                res.status(400).json({ error: 'new key cannot be empty' });
+                return;
+            }
+            if (nextKey === undefined && !hasValue) {
+                res.status(400).json({ error: 'key or value must be provided' });
+                return;
+            }
+            const result = await semanticMemoryRepository().update({
+                tenantId: context.tenantId,
+                key,
+                ...(nextKey !== undefined ? { nextKey } : {}),
+                ...(hasValue ? { value: body.value } : {}),
+            });
+            await auditOperatorAction(context, {
+                action: 'memory.update',
+                reason,
+                requestedAt,
+                accepted: true,
+                resultStatus: 'completed',
+                metadata: { key, nextKey, keyChanged: nextKey !== undefined && nextKey !== key, valueChanged: hasValue },
+            });
+            res.json(result);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await auditOperatorAction(context, {
+                action: 'memory.update',
+                reason,
+                requestedAt,
+                accepted: false,
+                resultStatus: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+                metadata: { key, nextKey, hasValue },
+            }).catch(() => undefined);
+            res.status(500).json({ error: 'Failed to update semantic memory item', message });
+        }
+    }));
+
+    router.delete('/memory/semantic/:key', observeRoute('memory-delete', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        const requestedAt = new Date();
+        const key = req.params.key;
+        const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+        const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+        const confirmKey = typeof body.confirmKey === 'string' ? body.confirmKey : '';
+        try {
+            if (!key) {
+                res.status(400).json({ error: 'key is required' });
+                return;
+            }
+            if (!reason || confirmKey !== key) {
+                await auditOperatorAction(context, {
+                    action: 'memory.delete',
+                    reason,
+                    requestedAt,
+                    accepted: false,
+                    resultStatus: 'rejected',
+                    errorCode: !reason ? 'REASON_REQUIRED' : 'CONFIRM_KEY_MISMATCH',
+                    metadata: { key },
+                });
+                res.status(400).json({ error: !reason ? 'reason is required' : 'confirmKey must match key' });
+                return;
+            }
+            const result = await semanticMemoryRepository().delete({ tenantId: context.tenantId, key });
+            await auditOperatorAction(context, {
+                action: 'memory.delete',
+                reason,
+                requestedAt,
+                accepted: true,
+                resultStatus: 'completed',
+                metadata: { key },
+            });
+            res.json(result);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await auditOperatorAction(context, {
+                action: 'memory.delete',
+                reason,
+                requestedAt,
+                accepted: false,
+                resultStatus: 'failed',
+                errorCode: error instanceof Error ? error.name : 'Error',
+                metadata: { key },
+            }).catch(() => undefined);
+            res.status(500).json({ error: 'Failed to delete semantic memory item', message });
         }
     }));
 
@@ -467,6 +779,45 @@ function contextOrRespond(req: any, res: any): OperatorRequestContext | undefine
         }
         throw error;
     }
+}
+
+function semanticMemoryRepository(): SemanticMemoryObserverRepository {
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    const prisma = engine && typeof (engine as any).getOperatorPrismaClient === 'function'
+        ? (engine as any).getOperatorPrismaClient()
+        : undefined;
+    return new SemanticMemoryObserverRepository(prisma as never);
+}
+
+function operatorAuditRepository(): OperatorAuditRepository {
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    const prisma = engine && typeof (engine as any).getOperatorPrismaClient === 'function'
+        ? (engine as any).getOperatorPrismaClient()
+        : undefined;
+    return new OperatorAuditRepository(prisma as never);
+}
+
+function stringQuery(value: unknown): string | undefined {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+    return undefined;
+}
+
+function numberQuery(value: unknown, fallback: number): number {
+    const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : undefined;
+    return Number.isFinite(parsed) ? parsed! : fallback;
+}
+
+function memoryOpQuery(value: unknown): 'read' | 'write' | 'delete' | undefined {
+    return value === 'read' || value === 'write' || value === 'delete' ? value : undefined;
+}
+
+function isProbeFilter(value: unknown): value is { path: string; operator: string; value: unknown } {
+    return !!value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        typeof (value as Record<string, unknown>).path === 'string' &&
+        ((value as Record<string, unknown>).path as string).trim().length > 0 &&
+        ['=', '!=', 'CONTAINS', 'STARTS_WITH', 'ENDS_WITH'].includes(String((value as Record<string, unknown>).operator));
 }
 
 function isOperatorLaunch(req: any): boolean {

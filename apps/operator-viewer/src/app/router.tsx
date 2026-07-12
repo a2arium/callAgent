@@ -4,6 +4,8 @@ import { parseFleetSearch, parseRunSearch } from './state';
 import { FleetPage } from '../features/fleet/FleetPage';
 import { RunDetailPage } from '../features/run/RunDetailPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
+import { MemoryPage } from '../features/memory/MemoryPage';
+import { parseMemorySearch } from './state';
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -29,7 +31,14 @@ const agentsRoute = createRoute({
   component: AgentsPage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, agentsRoute, runRoute]);
+const memoryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/memory',
+  validateSearch: (search: Record<string, unknown>) => parseMemorySearch(search),
+  component: MemoryPage,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, agentsRoute, memoryRoute, runRoute]);
 
 export const router = createRouter({
   routeTree,

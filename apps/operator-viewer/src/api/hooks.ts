@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { cancelRun, getMemory, getOperatorConfig, getRunGraph, getTurn, listAgentRuns, listAgents, type CancelRunInput, type ListAgentRunsInput } from './client';
+import { cancelRun, deleteSemanticMemory, getMemory, getOperatorConfig, getRunGraph, getSemanticMemory, getTurn, listAgentRuns, listAgents, listMemoryActivity, listMemoryEntities, listSemanticMemory, listSemanticMemoryAudit, probeSemanticMemory, retagSemanticMemory, updateSemanticMemory, type CancelRunInput, type ListAgentRunsInput, type ListMemoryActivityInput, type ListSemanticMemoryInput, type SemanticProbeInput } from './client';
 import type { AgentRunGraph } from '../types';
 
 export function useOperatorConfig() {
@@ -61,6 +61,94 @@ export function useMemory(tenantId: string, taskId: string | undefined, enabled:
     queryKey: ['memory', tenantId, taskId],
     queryFn: () => getMemory(tenantId, taskId ?? ''),
     enabled: enabled && taskId !== undefined && taskId.length > 0,
+  });
+}
+
+export function useSemanticMemory(input: ListSemanticMemoryInput) {
+  return useQuery({
+    queryKey: ['semantic-memory', input],
+    queryFn: () => listSemanticMemory(input),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useSemanticMemoryDetail(tenantId: string, key: string | undefined) {
+  return useQuery({
+    queryKey: ['semantic-memory-detail', tenantId, key],
+    queryFn: () => getSemanticMemory(tenantId, key ?? ''),
+    enabled: key !== undefined && key.length > 0,
+  });
+}
+
+export function useSemanticMemoryAudit(tenantId: string, key: string | undefined, limit = 10) {
+  return useQuery({
+    queryKey: ['semantic-memory-audit', tenantId, key, limit],
+    queryFn: () => listSemanticMemoryAudit({ tenantId, key: key ?? '', limit }),
+    enabled: key !== undefined && key.length > 0,
+  });
+}
+
+export function useMemoryActivity(input: ListMemoryActivityInput) {
+  return useQuery({
+    queryKey: ['memory-activity', input],
+    queryFn: () => listMemoryActivity(input),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useMemoryEntities(input: { tenantId: string; search?: string; entityType?: string; cursor?: string; limit?: number }) {
+  return useQuery({
+    queryKey: ['memory-entities', input],
+    queryFn: () => listMemoryEntities(input),
+    refetchInterval: 15_000,
+  });
+}
+
+export function useProbeSemanticMemory() {
+  return useMutation({
+    mutationFn: (input: SemanticProbeInput) => probeSemanticMemory(input),
+  });
+}
+
+export function useRetagSemanticMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: retagSemanticMemory,
+    onSuccess: (_result, input) => {
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory'] });
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory-detail', input.tenantId, input.key] });
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory-audit', input.tenantId, input.key] });
+    },
+  });
+}
+
+export function useDeleteSemanticMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: deleteSemanticMemory,
+    onSuccess: (_result, input) => {
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory'] });
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory-detail', input.tenantId, input.key] });
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory-audit', input.tenantId, input.key] });
+      void queryClient.invalidateQueries({ queryKey: ['memory-activity'] });
+    },
+  });
+}
+
+export function useUpdateSemanticMemory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateSemanticMemory,
+    onSuccess: (result, input) => {
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory'] });
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory-detail', input.tenantId, input.key] });
+      void queryClient.invalidateQueries({ queryKey: ['semantic-memory-audit', input.tenantId, input.key] });
+      if (result.key !== input.key) {
+        void queryClient.invalidateQueries({ queryKey: ['semantic-memory-detail', input.tenantId, result.key] });
+        void queryClient.invalidateQueries({ queryKey: ['semantic-memory-audit', input.tenantId, result.key] });
+      }
+      void queryClient.invalidateQueries({ queryKey: ['memory-activity'] });
+    },
   });
 }
 
