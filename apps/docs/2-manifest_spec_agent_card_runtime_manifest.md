@@ -314,6 +314,8 @@ type AgentRuntimeManifestV1 = {
   /** Human-in-the-loop policy. */
   hitl?: {
     level?: 'advise' | 'consent' | 'guardrails';
+    /** Defaults to 86_400_000 (24 hours). */
+    consentTtlMs?: number;
     requireConsentFor?: {
       intents?: string[];
       tools?: string[];
@@ -402,6 +404,12 @@ type AgentRuntimeManifestV1 = {
 ### Runtime semantics
 
 The exact behavioral meaning of runtime fields such as `budgets`, `hitl`, `cache`, and `safety` MUST be defined by CallAgent runtime documentation.
+
+### Manifest consent enforcement
+
+`hitl.requireConsentFor.intents` and `.tools` are runtime-enforced after Shield and before Execution. Values are case-sensitive, trimmed, non-empty, and unique. Generic wrappers (`prompt_user`, `answer_with_llm`, `call_tool`, and `delegate_to_child`) are not valid domain intent identifiers; tools are declared under `.tools`. An `internal` intent is declared by its `intent` value, for example `activate_bundle`; other declarable built-ins use their `kind`.
+
+Shield `veto` and `defer` win. A Shield `transform` is matched using the transformed intent. Consent expires after `consentTtlMs` (24 hours by default), is bound to the exact canonical intent, and requires structured input `{ decision: 'approve' | 'reject' }`. See [manifest consent](./19-how_to_use_manifest_consent.md).
 
 This manifest spec defines the configuration surface, not every execution detail.
 

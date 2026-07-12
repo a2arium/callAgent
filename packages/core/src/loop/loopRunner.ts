@@ -65,6 +65,7 @@ type LoopRunnerOptions = {
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;
+    hitl?: import('./manifestConsent.js').ManifestHitlConfig;
     onTurnCheckpoint?: (state: {
         M: MentalState;
         env: EnvironmentState;
@@ -247,6 +248,7 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
         transition: compactOperatorValue(trace.transition, level),
         intent: compactOperatorValue(trace.intent, level),
         shield: compactOperatorValue(trace.shield, level),
+        manifestConsent: compactOperatorValue(trace.manifestConsent, level),
         perception: compactOperatorValue(trace.perception, level),
         execAction: compactOperatorValue(trace.execAction, level),
         execResult: compactOperatorValue(trace.execResult, level),
@@ -406,6 +408,7 @@ export async function runLoop<
         configurable: true,
     });
     iCtx.__activeLoopEnv = env;
+    iCtx.__manifestHitl = opts.hitl;
 
     const provenance = opts.manifestProvenance ?? iCtx.__manifestProvenance ?? DEFAULT_PROVENANCE;
     const collectTraces = opts.collectTraces ?? false;
@@ -803,7 +806,7 @@ export async function runLoop<
                     safety?: { costLimit?: number; piiPatterns?: string[] };
                     lastAdvise?: unknown;
                 };
-                const level = mWithHitl.hitl ?? mWithHitl.policyParams?.hitl;
+                const level = iCtx.__manifestHitl?.level ?? mWithHitl.hitl ?? mWithHitl.policyParams?.hitl;
                 const safety = mWithHitl.safety ?? {};
                 if (!level) return { action: 'pass', intent: a };
                 if (level === 'guardrails' && (a.kind === 'call_tool' || a.kind === 'delegate_to_child')) {
@@ -1573,6 +1576,7 @@ export async function runLoop<
                 mentalStateAfterHash: step.mentalStateAfterHash,
                 intent: step.intent,
                 shield: step.shield,
+                manifestConsent: step.manifestConsent,
                 execAction: step.exec?.action
                     ? {
                           kind: step.exec.action.kind,

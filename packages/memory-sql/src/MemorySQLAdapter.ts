@@ -3,7 +3,24 @@ import { PrismaClient } from './generated/prisma/index.js';
 import type { PrismaClient as PrismaClientType, Prisma } from './generated/prisma/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
-import { SemanticMemoryBackend, MemoryQueryOptions, MemoryQueryResult, MemoryFilter, FilterOperator, MemoryError, RecognitionOptions, RecognitionResult, EnrichmentOptions, EnrichmentResult } from '@a2arium/callagent-types';
+import {
+    SemanticMemoryBackend,
+    SemanticAtomicCapability,
+    SemanticCompareAndSetInput,
+    SemanticCompareAndSetOptions,
+    SemanticCompareAndSetResult,
+    SemanticVersionedValue,
+    SemanticAtomicError,
+    MemoryQueryOptions,
+    MemoryQueryResult,
+    MemoryFilter,
+    FilterOperator,
+    MemoryError,
+    RecognitionOptions,
+    RecognitionResult,
+    EnrichmentOptions,
+    EnrichmentResult
+} from '@a2arium/callagent-types';
 import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetManyOptions, GetManyQuery } from './types.js';
 import { EntityFieldParser } from './EntityFieldParser.js';
 import { EntityAlignmentService } from './EntityAlignmentService.js';
@@ -34,6 +51,7 @@ export interface MemorySQLConfig {
 // Define system tenant constants locally for this adapter
 const SYSTEM_TENANT = '__system__';
 const DEFAULT_ENTITY_ALIGNMENT_THRESHOLD = 0.7;
+const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT;
 
 export class MemorySQLAdapter implements SemanticMemoryBackend {
@@ -45,6 +63,12 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     private enrichmentService?: EnrichmentService;
     private defaultTenantId: string;
     private readonly DEFAULT_QUERY_LIMIT = 1000;
+
+    public readonly atomic: SemanticAtomicCapability = {
+        getVersioned: <T>(key: string) => this.getVersioned<T>(key),
+        compareAndSet: <T>(input: SemanticCompareAndSetInput<T>, opts?: SemanticCompareAndSetOptions) =>
+            this.compareAndSet(input, opts),
+    };
 
     // Support both old and new constructor signatures for backward compatibility
     constructor(
@@ -409,6 +433,187 @@ new MemorySQLAdapter({
         }
 
         return value as T;
+    }
+
+    private validateSemanticVersion(version: string): bigint {
+        if (!/^[1-9][0-9]*$/.test(version)) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_INVALID_VERSION',
+                'Semantic version must be a canonical positive decimal string'
+            );
+        }
+        const parsed = BigInt(version);
+        if (parsed > MAX_POSTGRES_BIGINT) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_INVALID_VERSION',
+                'Semantic version exceeds the PostgreSQL bigint range'
+            );
+        }
+        return parsed;
+    }
+
+    private serializeAtomicValue(value: unknown): string {
+        if (value && typeof value === 'object' && 'data' in value) {
+            const dataType = detectDataType((value as { data?: unknown }).data);
+            if (dataType !== 'unknown') {
+                throw new SemanticAtomicError(
+                    'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED',
+                    'Semantic CAS v1 does not support binary-backed values'
+                );
+            }
+        }
+        try {
+            const serialized = JSON.stringify(value);
+            if (serialized === undefined) throw new Error('Value is not JSON serializable');
+            return serialized;
+        } catch {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED',
+                'Semantic CAS v1 requires a JSON-serializable value'
+            );
+        }
+    }
+
+    private validateAtomicOptions(options?: SemanticCompareAndSetOptions): void {
+        const runtimeOptions = options as Record<string, unknown> | undefined;
+        if (runtimeOptions && (
+            runtimeOptions.entities !== undefined
+            || runtimeOptions.alignmentThreshold !== undefined
+            || runtimeOptions.autoCreateEntities !== undefined
+        )) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_OPTION_UNSUPPORTED',
+                'Semantic CAS v1 does not support entity-alignment options'
+            );
+        }
+    }
+
+    async getVersioned<T>(key: string): Promise<SemanticVersionedValue<T> | null> {
+        const tenantId = this.defaultTenantId;
+        const rows = await this.prisma.$queryRaw<Array<{
+            value: unknown;
+            version: bigint | string;
+            blob_data: Buffer | null;
+            has_alignment: boolean;
+        }>>`
+            SELECT memory.value,
+                   memory.version,
+                   memory.blob_data,
+                   EXISTS (
+                       SELECT 1
+                       FROM entity_alignment alignment
+                       WHERE alignment.tenant_id = memory.tenant_id
+                           AND alignment.memory_key = memory.key
+                   ) AS has_alignment
+            FROM agent_memory_store memory
+            WHERE memory.tenant_id = ${tenantId} AND memory.key = ${key}
+        `;
+        const row = rows[0];
+        if (!row) return null;
+        if (row.has_alignment) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_OPTION_UNSUPPORTED',
+                'Semantic CAS v1 does not support entity-aligned rows'
+            );
+        }
+        if (row.blob_data || (
+            row.value
+            && typeof row.value === 'object'
+            && (row.value as { encoding?: unknown }).encoding === 'base64'
+        )) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED',
+                'Semantic CAS v1 does not support binary-backed values'
+            );
+        }
+        return { value: row.value as T, version: String(row.version) };
+    }
+
+    async compareAndSet<T>(
+        input: SemanticCompareAndSetInput<T>,
+        options?: SemanticCompareAndSetOptions
+    ): Promise<SemanticCompareAndSetResult> {
+        this.validateAtomicOptions(options);
+        const expectedVersion = input.expectedVersion === null
+            ? null
+            : this.validateSemanticVersion(input.expectedVersion);
+        const serializedValue = this.serializeAtomicValue(input.value);
+        const normalizedTags = TagNormalizer.normalizeTags(options?.tags || []);
+        const tenantId = this.defaultTenantId;
+
+        let updated: Array<{ version: bigint | string }>;
+        if (expectedVersion === null) {
+            updated = await this.prisma.$queryRaw<Array<{ version: bigint | string }>>`
+                INSERT INTO agent_memory_store
+                    (tenant_id, key, value, tags, created_at, updated_at)
+                VALUES
+                    (${tenantId}, ${input.key}, ${serializedValue}::jsonb, ${normalizedTags}::text[], NOW(), NOW())
+                ON CONFLICT (tenant_id, key) DO NOTHING
+                RETURNING version
+            `;
+        } else {
+            updated = await this.prisma.$queryRaw<Array<{ version: bigint | string }>>`
+                UPDATE agent_memory_store
+                SET value = ${serializedValue}::jsonb,
+                    tags = ${normalizedTags}::text[],
+                    blob_data = NULL,
+                    blob_metadata = NULL,
+                    updated_at = NOW()
+                WHERE tenant_id = ${tenantId}
+                    AND key = ${input.key}
+                    AND version = ${expectedVersion}
+                    AND blob_data IS NULL
+                    AND COALESCE(value->>'encoding', '') <> 'base64'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM entity_alignment alignment
+                        WHERE alignment.tenant_id = agent_memory_store.tenant_id
+                            AND alignment.memory_key = agent_memory_store.key
+                    )
+                RETURNING version
+            `;
+        }
+
+        if (updated[0]) return { status: 'updated', version: String(updated[0].version) };
+
+        const current = await this.prisma.$queryRaw<Array<{
+            version: bigint | string;
+            blob_data: Buffer | null;
+            value: unknown;
+            has_alignment: boolean;
+        }>>`
+            SELECT memory.version,
+                   memory.blob_data,
+                   memory.value,
+                   EXISTS (
+                       SELECT 1
+                       FROM entity_alignment alignment
+                       WHERE alignment.tenant_id = memory.tenant_id
+                           AND alignment.memory_key = memory.key
+                   ) AS has_alignment
+            FROM agent_memory_store memory
+            WHERE memory.tenant_id = ${tenantId} AND memory.key = ${input.key}
+        `;
+        if (expectedVersion !== null && current[0]?.has_alignment) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_OPTION_UNSUPPORTED',
+                'Semantic CAS v1 does not support entity-aligned rows'
+            );
+        }
+        if (expectedVersion !== null && (current[0]?.blob_data || (
+            current[0]?.value
+            && typeof current[0].value === 'object'
+            && (current[0].value as { encoding?: unknown }).encoding === 'base64'
+        ))) {
+            throw new SemanticAtomicError(
+                'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED',
+                'Semantic CAS v1 does not support binary-backed values'
+            );
+        }
+        return {
+            status: 'conflict',
+            currentVersion: current[0] ? String(current[0].version) : null,
+        };
     }
 
     private async getAlignmentsForMemory(memoryKey: string, tenantId?: string): Promise<Record<string, EntityAlignment>> {
@@ -2193,4 +2398,4 @@ new MemorySQLAdapter({
             updatedAt: result.updatedAt
         }));
     }
-} 
+}

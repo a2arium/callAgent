@@ -224,6 +224,24 @@ export type ControlPendingState = {
     events?: Record<string, unknown>;
     groups?: Record<string, unknown>;
     controlVars?: Record<string, unknown>;
+    manifestConsents?: Record<string, IntentConsentReceipt>;
+};
+
+export type IntentConsentReceiptStatus = 'pending' | 'approved' | 'dispatching' | 'consumed' | 'rejected' | 'expired' | 'cancelled';
+
+export type IntentConsentReceipt = {
+    token: string;
+    taskId: string;
+    agentId: string;
+    tenantId: string;
+    intentId: string;
+    intentDigest: string;
+    requestedAt: string;
+    expiresAt: string;
+    effectIdempotencyKey: string;
+    status: IntentConsentReceiptStatus;
+    decidedAt?: string;
+    consumedAt?: string;
 };
 
 export type ControlState = {
@@ -245,6 +263,7 @@ export type EnvironmentState = {
         events?: Record<string, unknown>;
         groups: Record<string, unknown>;
         controlVars?: Record<string, unknown>;
+        manifestConsents?: Record<string, IntentConsentReceipt>;
     };
     // Optional control surface for modules needing control signals without ctx.vars
     control?: ControlState;

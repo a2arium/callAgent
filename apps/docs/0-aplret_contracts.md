@@ -811,6 +811,8 @@ Rules:
 
 ### Suspending the loop (`await_input` / `await_tool` / `await_child`)
 
+Runtime obligations may also suspend after Shield and before Execution. Manifest consent uses the same durable `await_input` token contract, but its receipt belongs to private `env.pending` control state—not MentalState—and its structured decision is normalized by the resume boundary. Policy must re-propose the exact approved intent; Execution must not parse raw approval input. See [manifest consent](./19-how_to_use_manifest_consent.md).
+
 `continue` is not a sleep mode. It must carry at least one observation; returning
 `{ kind: 'continue', observations: [] }` violates runtime invariants and triggers
 `CONTINUE_WITHOUT_OBSERVATIONS`.
@@ -1848,4 +1850,3 @@ Avoid:
 - letting **`flow.md`** drift from code after behavior changes
 
 A stable framework gives users less ambiguity, not more.
-

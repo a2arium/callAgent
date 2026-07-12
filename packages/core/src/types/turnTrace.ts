@@ -43,6 +43,15 @@ export const ShieldTraceSchema = z.object({
 });
 export type ShieldTrace = z.infer<typeof ShieldTraceSchema>;
 
+export const ManifestConsentTraceSchema = z.object({
+    action: z.enum(['defer', 'approve', 'dispatch', 'reject', 'expire', 'cancel', 'consume']),
+    reason: z.string(),
+    intentId: z.string(),
+    tokenPresent: z.boolean(),
+    receiptStatus: z.enum(['pending', 'approved', 'dispatching', 'consumed', 'rejected', 'expired', 'cancelled']),
+});
+export type ManifestConsentTrace = z.infer<typeof ManifestConsentTraceSchema>;
+
 export const IntentTraceSchema = z.object({
     kind: z.string(),
     summary: z.string().optional(),
@@ -271,6 +280,7 @@ export const TurnTraceSchema = z.object({
     mentalStateAfterHash: z.string().optional(),
     intent: IntentTraceSchema.optional(),
     shield: ShieldTraceSchema.optional(),
+    manifestConsent: ManifestConsentTraceSchema.optional(),
     execAction: ExecActionTraceSchema.optional(),
     execResult: ExecResultTraceSchema.optional(),
     transition: TransitionTraceSchema.optional(),

@@ -65,4 +65,29 @@ describe('AgentRuntimeManifestSchema', () => {
         const result = AgentRuntimeManifestSchema.safeParse(runtime);
         expect(result.success).toBe(true);
     });
+
+    it('validates manifest consent identifiers and defaults the TTL', () => {
+        const result = AgentRuntimeManifestSchema.parse({
+            name: 'test-agent', version: '1.0.0',
+            hitl: { requireConsentFor: { intents: ['activate_bundle'], tools: ['publish'] } },
+        });
+        expect(result.hitl?.consentTtlMs).toBe(86_400_000);
+    });
+
+    it.each([
+        { intents: [''] },
+        { intents: ['activate_bundle', 'activate_bundle'] },
+        { intents: ['call_tool'] },
+        { tools: ['publish', 'publish'] },
+    ])('rejects invalid manifest consent configuration %#', (requireConsentFor) => {
+        expect(AgentRuntimeManifestSchema.safeParse({
+            name: 'test-agent', version: '1.0.0', hitl: { requireConsentFor },
+        }).success).toBe(false);
+    });
+
+    it('rejects a non-positive consent TTL', () => {
+        expect(AgentRuntimeManifestSchema.safeParse({
+            name: 'test-agent', version: '1.0.0', hitl: { consentTtlMs: 0 },
+        }).success).toBe(false);
+    });
 });

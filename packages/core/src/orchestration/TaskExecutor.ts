@@ -52,6 +52,7 @@ export type LoopOpts = {
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;
+    hitl?: import('../loop/manifestConsent.js').ManifestHitlConfig;
     topicSweeper?: {
         intervalMs: number;
         batchSize: number;
@@ -474,6 +475,17 @@ export class TaskExecutor {
             M: mNextEffective,
             meta: nextMeta,
             inbox: nextInbox,
+            pending: {
+                ...((baseNow as any).pending ?? {}),
+                ...(env.pending ?? {}),
+                inputs: { ...((baseNow as any).pending?.inputs ?? {}), ...(env.pending?.inputs ?? {}) },
+                children: { ...((baseNow as any).pending?.children ?? {}), ...(env.pending?.children ?? {}) },
+                tools: { ...((baseNow as any).pending?.tools ?? {}), ...(env.pending?.tools ?? {}) },
+                events: { ...((baseNow as any).pending?.events ?? {}), ...(env.pending?.events ?? {}) },
+                groups: { ...((baseNow as any).pending?.groups ?? {}), ...(env.pending?.groups ?? {}) },
+                controlVars: { ...((baseNow as any).pending?.controlVars ?? {}), ...(env.pending?.controlVars ?? {}) },
+                manifestConsents: { ...((baseNow as any).pending?.manifestConsents ?? {}), ...(env.pending?.manifestConsents ?? {}) },
+            },
             ...(attachedLlmState ? { llmState: attachedLlmState } : {})
         } as Record<string, unknown>;
 

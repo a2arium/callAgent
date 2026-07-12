@@ -331,7 +331,6 @@ export class TurnRunner {
                 const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                 const hitl = plugin?.resolved.runtimeManifest.hitl;
                 const communication = plugin?.resolved.runtimeManifest.communication;
-                if (hitl) { try { (M as Record<string, unknown>).hitl = hitl; } catch { } }
 
                 const topicSw = communication?.topicSweeper;
                 const topicSweeperResolved =
@@ -366,6 +365,7 @@ export class TurnRunner {
                 if (topicSweeperResolved !== undefined) {
                     loopOpts.topicSweeper = topicSweeperResolved;
                 }
+                if (hitl) loopOpts.hitl = hitl;
             } catch (err) {
                 // ignore
             }

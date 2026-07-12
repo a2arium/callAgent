@@ -138,6 +138,11 @@ export type TaskContext = {
         traceId?: string;
     };
 
+    /** Present only while Execution is dispatching a manifest-approved effect. */
+    effect?: {
+        readonly idempotencyKey: string;
+    };
+
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 

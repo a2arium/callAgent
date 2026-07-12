@@ -17,7 +17,7 @@ export type ManifestResolutionInput = {
 /**
  * Canonicalize a value to a stable JSON string (sorted keys, no extra whitespace).
  */
-function canonicalize(obj: unknown, seen = new WeakSet<object>()): string {
+export function canonicalize(obj: unknown, seen = new WeakSet<object>()): string {
     if (obj === null || typeof obj !== 'object') {
         return JSON.stringify(obj) ?? JSON.stringify(String(obj));
     }

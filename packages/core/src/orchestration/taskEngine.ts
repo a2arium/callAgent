@@ -2212,12 +2212,21 @@ export class TaskEngine {
             ) {
                 return { acknowledged: true };
             }
+            const pending = { ...((snapshot as any).pending ?? {}) };
+            const manifestConsents = { ...(pending.manifestConsents ?? {}) };
+            const cancelledAt = new Date().toISOString();
+            for (const [token, receipt] of Object.entries(manifestConsents) as Array<[string, any]>) {
+                if (receipt.status === 'pending' || receipt.status === 'approved' || receipt.status === 'dispatching') {
+                    manifestConsents[token] = { ...receipt, status: 'cancelled', decidedAt: cancelledAt };
+                }
+            }
+            const cancelledSnapshot = { ...snapshot, pending: { ...pending, manifestConsents } };
             await this.sessionManager!.saveSnapshot({
                 tenantId: params.tenantId,
                 sessionId: params.taskId,
                 agentId: params.agentId ?? loaded.agentId,
                 expectedWmVersion: loaded.wmVersion ?? BigInt(0),
-                snapshot: markSegmentCancellationRequested(snapshot, reason),
+                snapshot: markSegmentCancellationRequested(cancelledSnapshot, reason),
             });
             await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.canceled', {
                 taskId: params.taskId,
@@ -2944,7 +2953,11 @@ export class TaskEngine {
         } catch (e) {
             throw e instanceof Error ? e : new Error('INPUT_TOKEN_INVALID');
         }
-        const { next } = applyInputProvided(base, token, input);
+        const { next } = applyInputProvided(base, token, input, {
+            tenantId,
+            taskId,
+            agentId: String((snap as any)?.agentId ?? (base as any)?.meta?.agentId ?? 'default'),
+        });
         // Hydrate input if it contains artifacts (e.g. from resumeInput)
         if (input && typeof input === 'object') {
             const prisma = this.getSessionStorePrisma();
@@ -4152,7 +4165,8 @@ export class TaskEngine {
                                 children: ((latestBase as any)?.pending?.children) || {},
                                 tools: ((latestBase as any)?.pending?.tools) || {},
                                 groups: ((latestBase as any)?.pending?.groups) || {},
-                                controlVars: ((latestBase as any)?.pending?.controlVars) || {}
+                                controlVars: ((latestBase as any)?.pending?.controlVars) || {},
+                                manifestConsents: ((latestBase as any)?.pending?.manifestConsents) || {}
                             },
                             inbox: envInbox,
                             lastExec: (latestBase as any)?.meta?.lastExec || undefined,
@@ -4167,7 +4181,7 @@ export class TaskEngine {
                             (ctx as InternalTaskContext).__manifestProvenance = latestMeta.manifestProvenance;
                         }
 
-                        let loopOpts: { maxTurns?: number; latencyMs?: number; manifestProvenance?: ManifestProvenance } = {};
+                        let loopOpts: import('./TaskExecutor.js').LoopOpts = {};
                         try {
                             // Restore budgets from snapshot first, then fallback to manifest
                             const persistedBudgets = readLoopBudgetsFromSnapshotMeta(
@@ -4175,7 +4189,6 @@ export class TaskEngine {
                             );
                             const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                             const hitl = plugin?.resolved.runtimeManifest.hitl;
-                            if (hitl) { try { (M as any).hitl = hitl; } catch { } }
 
                             if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
                                 loopOpts = persistedBudgets;
@@ -4193,6 +4206,7 @@ export class TaskEngine {
                             if (typeof loopOpts.maxTurns === 'number') {
                                 env.budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
                             }
+                            if (hitl) loopOpts.hitl = hitl;
                         } catch (err) {
                             try { (ctx as { logger?: { warn?: (msg: string, o?: unknown) => void } }).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
                         }
@@ -4754,6 +4768,7 @@ export class TaskEngine {
                     getDefaultBackend: () => 'none',
                     setDefaultBackend: () => { },
                     backends: {},
+                    getAtomic: () => undefined,
                     get: async () => null,
                     set: async () => { },
                     read: async () => [],

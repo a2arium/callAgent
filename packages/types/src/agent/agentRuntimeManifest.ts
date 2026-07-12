@@ -1,5 +1,20 @@
 import { z } from 'zod';
 
+const uniqueNonEmptyStrings = z.array(z.string().trim().min(1)).superRefine((values, ctx) => {
+  if (new Set(values).size !== values.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Values must be unique' });
+  }
+});
+
+const declarableIntentIdentifiers = uniqueNonEmptyStrings.superRefine((values, ctx) => {
+  const wrappers = new Set(['prompt_user', 'answer_with_llm', 'call_tool', 'delegate_to_child']);
+  values.forEach((value, index) => {
+    if (wrappers.has(value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Generic intent wrapper "${value}" cannot be configured as a domain intent`, path: [index] });
+    }
+  });
+});
+
 /**
  * Agent Runtime Manifest Schema (Internal Execution Contract)
  *
@@ -32,9 +47,10 @@ export const AgentRuntimeManifestSchema = z.object({
   /** Human-in-the-loop policy */
   hitl: z.object({
     level: z.enum(['advise', 'consent', 'guardrails']).optional(),
+    consentTtlMs: z.number().int().positive().optional().default(86_400_000),
     requireConsentFor: z.object({
-      intents: z.array(z.string()).optional(),
-      tools: z.array(z.string()).optional(),
+      intents: declarableIntentIdentifiers.optional(),
+      tools: uniqueNonEmptyStrings.optional(),
     }).strict().optional(),
   }).strict().optional(),
 

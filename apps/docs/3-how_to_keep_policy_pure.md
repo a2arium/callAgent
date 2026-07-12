@@ -61,6 +61,8 @@ If yes, it belongs in:
 
 not in Policy and not in `MentalState`
 
+Manifest consent is one such runtime control concern. Policy proposes the domain intent normally. The runtime evaluates the post-Shield intent, keeps approval receipts in durable pending state, and emits a normalized framework observation after approval, rejection, or expiry. Do not read the manifest, pending receipt, or raw approval input in Policy or Execution. See [manifest consent](./19-how_to_use_manifest_consent.md).
+
 ## Policy and selectors
 
 Policy should stay **sync and `MentalState`-only**, but it should not **deep-read** arbitrary nested paths everywhere. The standard pattern is a **`selectors.ts`** module that exposes a compact **decision-ready view** (e.g. `readPolicyView(m)`), and Policy reads only that view before emitting a **domain-named** intent. That keeps Policy easy to scan and aligns with [APLRET contracts](./0-aplret_contracts.md) and [Agent repository layout](./14-agent_repository_layout_for_aplret.md).

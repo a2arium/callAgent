@@ -8,7 +8,15 @@ import {
     RecognitionOptions,
     RecognitionResult,
     EnrichmentOptions,
-    EnrichmentResult
+    EnrichmentResult,
+    SemanticAtomicCapability,
+    SemanticCompareAndSetInput,
+    SemanticCompareAndSetOptions,
+    SemanticAddInput as PublicSemanticAddInput,
+    SemanticItem,
+    SemanticReadFilter,
+    SemanticRemoveFilter,
+    SemanticPredicateFilter
 } from '@a2arium/callagent-types';
 
 export type SemanticMemoryEvent = {
@@ -18,7 +26,7 @@ export type SemanticMemoryEvent = {
     source: 'context.memory';
 };
 
-export type SemanticAddInput = {
+export type FacadeSemanticAddInput = {
     id: string;
     value?: unknown;
     data?: unknown;
@@ -68,7 +76,8 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
     constructor(
         backends: Record<string, SemanticMemoryBackend>,
         defaultBackend: string,
-        private eventSink?: (event: SemanticMemoryEvent) => Promise<void> | void
+        private eventSink?: (event: SemanticMemoryEvent) => Promise<void> | void,
+        private taskContext?: unknown
     ) {
         this.backends = backends;
         this.defaultBackend = defaultBackend;
@@ -97,6 +106,30 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
     setDefaultBackend(name: string): void {
         if (!this.backends[name]) throw new Error(`No such backend: ${name}`);
         this.defaultBackend = name;
+    }
+
+    /** Return the real atomic capability bound to the selected backend, if supported. */
+    getAtomic(opts?: { backend?: string }): SemanticAtomicCapability | undefined {
+        const backendName = opts?.backend ?? this.defaultBackend;
+        const backend = this.backends[backendName];
+        if (!backend) throw new Error(`No such backend: ${backendName}`);
+        if (!backend.atomic) return undefined;
+
+        const atomic = backend.atomic;
+        return {
+            getVersioned: async <T>(key: string) => {
+                const result = await atomic.getVersioned<T>(key);
+                await this.emit({ op: 'read', keys: [key], backend: backendName, source: 'context.memory' });
+                return result;
+            },
+            compareAndSet: async <T>(input: SemanticCompareAndSetInput<T>, options?: SemanticCompareAndSetOptions) => {
+                const result = await atomic.compareAndSet<T>(input, options);
+                if (result.status === 'updated') {
+                    await this.emit({ op: 'write', keys: [input.key], backend: backendName, source: 'context.memory' });
+                }
+                return result;
+            },
+        };
     }
 
     /**
@@ -130,13 +163,85 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * Kept in parity with createMemoryRegistry so ctx.memory.semantic.add()
      * persists and is visible to operator memory telemetry.
      */
-    async add(item: SemanticAddInput, opts?: MemorySetOptions): Promise<void> {
-        const value = item.value !== undefined ? item.value : item.data;
+    async add(item: FacadeSemanticAddInput | PublicSemanticAddInput, opts?: MemorySetOptions): Promise<void> {
+        const value = item.value !== undefined
+            ? item.value
+            : ('data' in item ? item.data : undefined);
         await this.set(item.id, value, {
             ...opts,
             tags: opts?.tags ?? item.tags,
             entities: opts?.entities ?? item.entities,
+            backend: opts?.backend ?? ('backend' in item ? item.backend : undefined),
         });
+    }
+
+    async readItems(filter?: SemanticReadFilter): Promise<SemanticItem[]> {
+        if (filter?.id) {
+            const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
+            const results: SemanticItem[] = [];
+            for (const id of ids) {
+                const value = await this.get<unknown>(id, { backend: filter.backend });
+                if (value !== null && value !== undefined) results.push({ id, value });
+            }
+            return typeof filter.limit === 'number' ? results.slice(0, filter.limit) : results;
+        }
+
+        const query: Record<string, unknown> = {};
+        if (filter?.tag) query.tag = filter.tag;
+        if (filter?.filters) query.filters = filter.filters;
+        if (filter?.limit !== undefined) query.limit = filter.limit;
+        if (filter?.orderBy) query.orderBy = filter.orderBy;
+        if (filter?.random !== undefined) query.random = filter.random;
+
+        const rawResults = await this.read<unknown>(Object.keys(query).length > 0 ? query as GetManyInput : '*', {
+            backend: filter?.backend,
+            limit: filter?.limit,
+            orderBy: filter?.orderBy,
+            random: filter?.random,
+        });
+        const mapped = rawResults.map((item: MemoryQueryResult<unknown> & Partial<SemanticItem>) => ({
+            id: item.key ?? item.id!,
+            value: item.value,
+            tags: item.tags,
+            entities: item.entities,
+        }));
+        if (filter?.tags?.length && !filter.tag) {
+            return mapped.filter((item) => filter.tags!.every((tag) => item.tags?.includes(tag)));
+        }
+        return mapped;
+    }
+
+    async removeItem(idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter): Promise<void> {
+        try {
+            await this.removeItemUnchecked(idOrFilter);
+        } catch {
+            // Preserve the existing high-level facade's best-effort remove behavior.
+        }
+    }
+
+    private async removeItemUnchecked(idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter): Promise<void> {
+        if (typeof idOrFilter === 'string') {
+            await this.delete(idOrFilter);
+            return;
+        }
+        if (typeof idOrFilter === 'function') {
+            const all = await this.read<unknown>('*');
+            for (const rawItem of all) {
+                const item: SemanticItem = {
+                    id: rawItem.key,
+                    value: rawItem.value,
+                    tags: (rawItem as MemoryQueryResult<unknown> & Partial<SemanticItem>).tags,
+                    entities: (rawItem as MemoryQueryResult<unknown> & Partial<SemanticItem>).entities,
+                };
+                if (idOrFilter(item)) await this.delete(item.id);
+            }
+            return;
+        }
+        const query: Record<string, unknown> = {};
+        if (idOrFilter.tag) query.tag = idOrFilter.tag;
+        if (idOrFilter.filters) query.filters = idOrFilter.filters;
+        if (idOrFilter.limit !== undefined) query.limit = idOrFilter.limit;
+        if (Object.keys(query).length > 0) await this.remove(query as GetManyInput);
     }
 
     /**
@@ -211,7 +316,10 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
     async recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>> {
         const backendName = options?.entities?.backend ?? this.defaultBackend;
         const backend = this.backends[backendName];
-        return backend.recognize<T>(candidateData, options);
+        return backend.recognize<T>(candidateData, {
+            ...options,
+            taskContext: options?.taskContext ?? this.taskContext,
+        });
     }
 
     /**
@@ -227,6 +335,9 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
         if (!backend.enrich) {
             throw new Error('Enrichment not available on selected semantic memory backend');
         }
-        return backend.enrich<T>(key, additionalData, options);
+        return backend.enrich<T>(key, additionalData, {
+            ...options,
+            taskContext: options?.taskContext ?? this.taskContext,
+        });
     }
 } 

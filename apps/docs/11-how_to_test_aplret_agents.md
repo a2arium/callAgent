@@ -435,6 +435,8 @@ it('resumes correctly after tool completion', async () => {
 });
 ```
 
+For manifest-gated effects, also test the full consent branch: first-turn defer, structured token-matched approval, exact post-Shield re-proposal, stable `ctx.effect.idempotencyKey`, rejection, expiry, changed-payload mismatch, restore, and replay. The fake effect should deduplicate the key and prove that a crash retry produces one logical commit. Assert `trace.manifestConsent`; never snapshot private receipts or digests into public golden traces.
+
 ### 3) Failure path
 
 - Malformed observation rejected by Perception

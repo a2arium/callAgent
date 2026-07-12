@@ -1,10 +1,32 @@
-import { IMemory, MemoryQueryOptions, MemoryQueryResult, FilterOperator, MemoryFilter, BaseError, MemoryError } from '../src/index.js';
-import type { SemanticAddInput, SemanticItem, SemanticReadFilter, SemanticRemoveFilter, SemanticPredicateFilter } from '../src/index.js';
+import {
+    IMemory,
+    MemoryQueryOptions,
+    MemoryQueryResult,
+    FilterOperator,
+    MemoryFilter,
+    BaseError,
+    MemoryError,
+    SemanticAtomicError,
+} from '../src/index.js';
+import type {
+    SemanticAddInput,
+    SemanticItem,
+    SemanticReadFilter,
+    SemanticRemoveFilter,
+    SemanticPredicateFilter,
+    SemanticAtomicCapability,
+    SemanticCompareAndSetInput,
+    SemanticCompareAndSetOptions,
+    SemanticCompareAndSetResult,
+    SemanticMemoryBackend,
+    SemanticVersionedValue,
+} from '../src/index.js';
 
 describe('Type exports', () => {
     it('should export all public classes', () => {
         expect(BaseError).toBeDefined();
         expect(MemoryError).toBeDefined();
+        expect(SemanticAtomicError).toBeDefined();
     });
 
     it('should allow importing all public types', () => {
@@ -13,7 +35,6 @@ describe('Type exports', () => {
         type _MemoryQueryResult = MemoryQueryResult<unknown>;
         type _FilterOperator = FilterOperator;
         type _MemoryFilter = MemoryFilter;
-        // If this compiles, the types are exported correctly
         expect(true).toBe(true);
     });
 
@@ -23,7 +44,25 @@ describe('Type exports', () => {
         type _SemanticReadFilter = SemanticReadFilter;
         type _SemanticRemoveFilter = SemanticRemoveFilter;
         type _SemanticPredicateFilter = SemanticPredicateFilter;
-        // If this compiles, the semantic types are exported correctly
+        type _SemanticAtomicCapability = SemanticAtomicCapability;
+        type _SemanticCompareAndSetInput = SemanticCompareAndSetInput<unknown>;
+        type _SemanticCompareAndSetOptions = SemanticCompareAndSetOptions;
+        type _SemanticCompareAndSetResult = SemanticCompareAndSetResult;
+        type _SemanticVersionedValue = SemanticVersionedValue<unknown>;
         expect(true).toBe(true);
     });
-}); 
+
+    it('keeps pre-CAS semantic backends source-compatible', () => {
+        const backend = {
+            get: async () => null,
+            read: async () => [],
+            set: async () => undefined,
+            delete: async () => undefined,
+            remove: async () => 0,
+            recognize: async () => ({ recognized: false }),
+            enrich: async () => ({ enriched: false }),
+        } satisfies SemanticMemoryBackend;
+
+        expect('atomic' in backend).toBe(false);
+    });
+});

@@ -261,6 +261,7 @@ Look for the first turn where `transition.kind` is `await_input`, `await_tool`, 
 Checklist:
 
 - What intent caused the await?
+- Does `manifestConsent.reason` equal `manifest_consent_required`? If so, inspect only its identifier, token presence, and receipt status. Digests, effect keys, and payloads are intentionally absent.
 - Does `execAction` include a token?
 - Does `transition.token` match that token?
 - Does `pendingAfter` record the token under the expected category?

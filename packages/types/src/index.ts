@@ -2,6 +2,7 @@ export * from './conversationPersistence.js';
 export * from './IMemory.js';
 export * from './BaseError.js';
 export * from './MemoryError.js';
+export * from './SemanticAtomicError.js';
 export * from './workingMemory.js';
 export * from './agent/agentCard.js';
 export * from './agent/agentRuntimeManifest.js';
@@ -17,6 +18,11 @@ export type {
     SemanticReadFilter,
     SemanticRemoveFilter,
     SemanticPredicateFilter,
+    SemanticVersionedValue,
+    SemanticCompareAndSetInput,
+    SemanticCompareAndSetResult,
+    SemanticCompareAndSetOptions,
+    SemanticAtomicCapability,
 } from './IMemory.js';
 
 export type {
@@ -37,4 +43,4 @@ export type TenantContext = {
 export type AgentConfig = {
     tenantId?: string;
     // Future: Additional agent configuration options
-}; 
+};

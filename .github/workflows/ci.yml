@@ -52,3 +52,39 @@ jobs:
         env:
           CI: true
 
+  semantic-cas-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: callagent
+          POSTGRES_PASSWORD: callagent
+          POSTGRES_DB: callagent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U callagent -d callagent_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MEMORY_DATABASE_URL: postgresql://callagent:callagent@localhost:5432/callagent_test
+      CI: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          cache: yarn
+      - name: Install dependencies
+        run: yarn install --immutable
+      - name: Apply memory SQL migrations
+        run: yarn workspace @a2arium/callagent-memory-sql db:migrate
+      - name: Build packages
+        run: yarn build
+      - name: Run real PostgreSQL memory tests
+        run: yarn workspace @a2arium/callagent-memory-sql test --runInBand

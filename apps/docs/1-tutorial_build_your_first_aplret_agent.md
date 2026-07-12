@@ -355,6 +355,7 @@ Once this minimal agent works, the next guides to read are:
 - How-to: Keep Policy pure when the implementation wants to put too much there
 - How-to: Child-Agent Await and Resume (APLRET)
 - How-to: Use Artifacts Correctly (APLRET)
+- [How-to: Use manifest intent consent](./19-how_to_use_manifest_consent.md)
 
 When you add awaits, multiple branches, or structured LLM-driven control flow, adopt **`flow.md`** and the **non-trivial repository layout** as standard practice: [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md) and [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
 
@@ -369,4 +370,3 @@ You now have a minimal APLRET agent with the correct boundaries:
 - explicit Transition
 
 That is the correct foundation for adding tools, child agents, and larger memory patterns later.
-

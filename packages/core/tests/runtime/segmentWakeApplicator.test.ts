@@ -54,6 +54,33 @@ describe('applyWakeToSnapshot', () => {
         expect((prepared.snapshot.pending as { inputs?: Record<string, unknown> }).inputs?.['tok-in']).toBeUndefined();
     });
 
+    it('input timeout expires a manifest consent receipt and clears its input token', () => {
+        const timed = {
+            ...base,
+            pending: {
+                ...base.pending,
+                inputs: { consent: { expiresAt: '2026-01-01T00:00:00.000Z' } },
+                manifestConsents: {
+                    consent: {
+                        token: 'consent', taskId: 'task-a', agentId: 'agent-a', tenantId: 'tenant-a',
+                        intentId: 'activate_bundle', intentDigest: 'd', effectIdempotencyKey: 'e',
+                        requestedAt: '2025-12-31T00:00:00.000Z', expiresAt: '2026-01-01T00:00:00.000Z', status: 'pending',
+                    },
+                },
+            },
+        };
+        const prepared = applyWakeToSnapshot(timed, {
+            trigger: 'timer',
+            event: {
+                kind: 'timer', token: 'consent', timerId: 'timer-1',
+                dueAt: '2026-01-01T00:00:00.000Z', firedAt: '2026-01-01T00:00:01.000Z', reason: 'input_timeout',
+            },
+        });
+        expect((prepared.snapshot as any).pending.inputs.consent).toBeUndefined();
+        expect((prepared.snapshot as any).pending.manifestConsents.consent.status).toBe('expired');
+        expect((prepared.snapshot as any).inbox.current[0].kind).toBe('timer.expired');
+    });
+
     it('tool wake adds tool.completed observation and clears pending tool', () => {
         const prepared = applyWakeToSnapshot(base, {
             trigger: 'tool',

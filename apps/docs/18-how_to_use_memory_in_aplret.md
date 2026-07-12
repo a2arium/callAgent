@@ -322,6 +322,7 @@ Use **`ctx.memory.semantic`** — not `ctx.semantic`:
 | Read by id / filter | `await ctx.memory.semantic.readItems({ id?, tag?, tags?, limit? })` |
 | Remove | `await ctx.memory.semantic.removeItem(id \| filter \| predicate)` |
 | Low-level get/set | `get` / `set` / `delete` / `read` (adapter-level; prefer high-level API in agents) |
+| Optional atomic update | `getAtomic({ backend })` → `getVersioned` / `compareAndSet` |
 
 Advanced: `recognize`, `enrich`, entity alignment — optional SQL adapter features.
 
@@ -359,6 +360,41 @@ await ctx.memory.semantic.add({ id: key, value: record, tags });
 ```
 
 Do not assume the default semantic backend is SQL. Use `backend: 'sql'` on low-level `set`/`get`, or use `add`.
+
+### Atomic single-key updates (optional CAS)
+
+Use compare-and-set (CAS) when multiple workers may replace the same durable semantic pointer. Discover the capability on the exact backend you intend to use:
+
+```ts
+const atomic = ctx.memory.semantic.getAtomic({ backend: 'sql' });
+if (!atomic) {
+    throw new Error('The SQL semantic backend does not support atomic writes');
+}
+
+const current = await atomic.getVersioned<{ activeBundleId: string }>('site:active');
+const result = await atomic.compareAndSet(
+    {
+        key: 'site:active',
+        expectedVersion: current?.version ?? null,
+        value: { activeBundleId: 'bundle-8' },
+    },
+    { tags: ['site-config', 'active'] }
+);
+
+if (result.status === 'conflict') {
+    // Re-read and decide whether to retry. The memory layer never retries for you.
+}
+```
+
+Rules:
+
+- `expectedVersion: null` means create only when the key is absent.
+- Versions are opaque, non-contiguous decimal strings. Compare or return them; never parse, increment, or order them.
+- `currentVersion` on a conflict is diagnostic and may already be stale by the time the caller receives it.
+- Never fall back to `get` followed by `set`; that sequence is not atomic.
+- CAS v1 supports JSON values and tags. Blob-backed values and entity-alignment options throw typed `SemanticAtomicError` codes.
+- An unsupported selected backend returns `undefined` from `getAtomic()`. Existing semantic APIs remain unconditional and unchanged.
+- Direct async memory access remains forbidden in Policy. Use CAS from Execution or handlers/tools outside the loop when performing the durable side effect.
 
 **Saving after an MCP or async tool**
 
@@ -486,6 +522,7 @@ Do not use these in new agents:
 3. **Flush** — Integration tests assert `writer.semantic.add` persists to `ctx.memory.semantic` after turn.
 4. **Snapshot round-trip** — Episodic / goals / plans survive save/load via `snapshot.M`.
 5. **Selectors** — Policy reads views derived from `M`, not raw nested paths scattered in Policy.
+6. **Atomic writes** — Real-PostgreSQL tests race independent adapters, test create-only contention, and prove ordinary writes plus delete/recreate invalidate stale CAS tokens.
 
 See [How-to: Test APLRET agents](./11-how_to_test_aplret_agents.md).
 
@@ -498,6 +535,7 @@ READ for decisions:     m.goalState, m.plans, m.worldModel, m.memory.*
 WRITE cognition:        Learning module only
 Durable semantic write: writer.semantic → flush → ctx.memory.semantic
 Durable semantic read:  mem.semantic (Learning)
+Atomic durable update:  ctx.memory.semantic.getAtomic({ backend: 'sql' })
 Policy:                 sync, M only, no ctx, no DB
 Large payloads:         artifacts → Learning derives facts → M
 Deprecated:             ctx.semantic, ctx.vars, ctx.world.patch

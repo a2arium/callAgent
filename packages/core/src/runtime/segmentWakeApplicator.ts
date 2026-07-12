@@ -59,7 +59,7 @@ function observationProvenance(token: string, turn: number, toolId?: string): En
 export function applyWakeToSnapshot(
     base: Record<string, unknown>,
     wake: TurnWake,
-    opts?: { agentId?: string; hydrateChildResult?: (result: unknown) => void }
+    opts?: { tenantId?: string; taskId?: string; agentId?: string; hydrateChildResult?: (result: unknown) => void }
 ): PreparedSegmentWake {
     switch (wake.trigger) {
         case 'start':
@@ -78,7 +78,11 @@ export function applyWakeToSnapshot(
             const pendingBefore = (base as { pending?: { inputs?: Record<string, { expiresAt?: string }> } })
                 .pending?.inputs;
             const inputExpiresAt = pendingBefore?.[wake.event.token]?.expiresAt;
-            const { next } = applyInputProvided(base, wake.event.token, wake.event.value);
+            const { next } = applyInputProvided(base, wake.event.token, wake.event.value, {
+                tenantId: opts?.tenantId,
+                taskId: opts?.taskId,
+                agentId: opts?.agentId ?? agentIdFromSnapshot(base),
+            });
             return {
                 snapshot: next,
                 wmVersion: BigInt(0),
@@ -216,9 +220,21 @@ export function applyWakeToSnapshot(
                 },
                 provenance: observationProvenance(event.token, turnFromSnapshot(base)),
             };
+            let timerBase = base;
+            if (event.reason === 'input_timeout') {
+                const pending = { ...((base as any).pending ?? {}) };
+                const inputs = { ...(pending.inputs ?? {}) };
+                delete inputs[event.token];
+                const manifestConsents = { ...(pending.manifestConsents ?? {}) };
+                const receipt = manifestConsents[event.token];
+                if (receipt?.status === 'pending') {
+                    manifestConsents[event.token] = { ...receipt, status: 'expired', decidedAt: event.firedAt };
+                }
+                timerBase = { ...base, pending: { ...pending, inputs, manifestConsents } };
+            }
             const next = {
-                ...base,
-                inbox: InboxManager.addObservationToInbox((base as { inbox?: unknown }).inbox, observation),
+                ...timerBase,
+                inbox: InboxManager.addObservationToInbox((timerBase as { inbox?: unknown }).inbox, observation),
             };
             return {
                 snapshot: next,
@@ -293,7 +309,7 @@ export async function prepareSegmentWake(
         const base = (existing?.snapshot as Record<string, unknown> | undefined) ?? {
             meta: { agentId: agentId ?? 'default', turn: 0 },
         };
-        const prepared = applyWakeToSnapshot(base, wake, { agentId });
+        const prepared = applyWakeToSnapshot(base, wake, { tenantId, taskId, agentId });
         if (existing === null || existing === undefined) {
             await sessionManager.saveSnapshot({
                 tenantId,
@@ -325,6 +341,8 @@ export async function prepareSegmentWake(
         };
     }
     const prepared = applyWakeToSnapshot(base, wakeToApply, {
+        tenantId,
+        taskId,
         agentId,
         hydrateChildResult: wakeToApply.trigger === 'child' ? hydrateChildWakeOutput(sessionManager, tenantId) : undefined,
     });

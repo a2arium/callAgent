@@ -5,6 +5,7 @@ import type { StopPolicyFanoutTrace } from '../public-types/conversation/schemas
 import type { TopicPostBackpressureSample } from '../internal/conversation/BackpressureManager.js';
 import type { TurnUsage, ManifestProvenance, JsonValue } from '../types/turnTrace.js';
 import type { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
+import type { ManifestHitlConfig } from './manifestConsent.js';
 
 export type OperatorTurnTraceCapture = {
     enabled?: boolean;
@@ -156,6 +157,8 @@ export type InternalTaskContext = TaskContext & {
     __operatorMemoryEvent?: (event: OperatorMemoryEvent) => Promise<void> | void;
     /** True when the context has a real configured LLM and not only a fallback stub. */
     __llmConfigured?: boolean;
+    /** Resolved runtime-manifest HITL obligations; never copied into MentalState. */
+    __manifestHitl?: ManifestHitlConfig;
     /** Conversation delivery keys consumed by this run, persisted as an internal drain cursor. */
     __conversationConsumedDeliveryKeys?: Set<string>;
 };

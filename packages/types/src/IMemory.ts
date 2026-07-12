@@ -133,6 +133,36 @@ export type MemorySetOptions = {
     backend?: string;                   // Backend selection
 };
 
+/** A semantic value paired with an opaque backend-issued generation token. */
+export type SemanticVersionedValue<T> = {
+    value: T;
+    version: string;
+};
+
+/** Input for a single-key semantic compare-and-set operation. */
+export type SemanticCompareAndSetInput<T> = {
+    key: string;
+    expectedVersion: string | null;
+    value: T;
+};
+
+/** Result of semantic compare-and-set. Contention is a result, not an error. */
+export type SemanticCompareAndSetResult =
+    | { status: 'updated'; version: string }
+    | { status: 'conflict'; currentVersion: string | null };
+
+/** Options supported by semantic CAS v1. */
+export type SemanticCompareAndSetOptions = Pick<MemorySetOptions, 'tags'>;
+
+/** Optional backend-bound semantic atomic operations. */
+export type SemanticAtomicCapability = {
+    getVersioned<T>(key: string): Promise<SemanticVersionedValue<T> | null>;
+    compareAndSet<T>(
+        input: SemanticCompareAndSetInput<T>,
+        opts?: SemanticCompareAndSetOptions
+    ): Promise<SemanticCompareAndSetResult>;
+};
+
 /**
  * Options for getMany method
  */
@@ -231,6 +261,9 @@ export type SemanticMemoryBackend = {
     delete(key: string, opts?: { backend?: string }): Promise<void>;
     remove(input: GetManyInput, options?: GetManyOptions): Promise<number>;
 
+    /** Optional real atomic operations. Registries must never emulate these. */
+    atomic?: SemanticAtomicCapability;
+
 
     // ── Advanced Operations ──
     recognize<T>(candidateData: T, options?: RecognitionOptions): Promise<RecognitionResult<T>>;
@@ -294,6 +327,7 @@ export type MemoryRegistry<T> = {
  */
 export type IMemory = {
     semantic: MemoryRegistry<SemanticMemoryBackend> & {
+        getAtomic(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
         add(item: SemanticAddInput): Promise<void>;
         readItems(filter?: SemanticReadFilter): Promise<SemanticItem[]>;
         removeItem(idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter): Promise<void>;
@@ -301,4 +335,4 @@ export type IMemory = {
     episodic: MemoryRegistry<EpisodicMemoryBackend>;
     embed: MemoryRegistry<EmbedMemoryBackend>;
     working?: MemoryRegistry<import('./workingMemory.js').WorkingMemoryBackend>;
-}; 
+};

@@ -17,6 +17,7 @@ model AgentMemoryStore {
     tenantId  String                       @default("default") @map("tenant_id")
     createdAt DateTime                     @default(now()) @map("created_at")
     updatedAt DateTime                     @updatedAt @map("updated_at")
+    version   BigInt                       @default(autoincrement())
 
     // Binary data storage fields
     blobData     Bytes? @map("blob_data") // BYTEA field for binary content (images, files, etc.)

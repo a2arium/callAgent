@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { MemorySQLAdapter } from '../src/MemorySQLAdapter.js';
+import { SemanticAtomicError } from '@a2arium/callagent-types';
 
 const DB_URL = process.env.MEMORY_DATABASE_URL;
 const describeIfDb = DB_URL ? describe : describe.skip;
@@ -32,6 +33,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
                 await adapter.delete(entry.key);
             }
         } catch { /* best effort */ }
+        await adapter.disconnect();
     });
 
     // ── Helpers ──────────────────────────────────────────────────────
@@ -411,6 +413,7 @@ describeIfDb('MemorySQLAdapter integration', () => {
 
             // Clean up other tenant
             await otherAdapter.delete('isolated:key');
+            await otherAdapter.disconnect();
         });
     });
 
@@ -497,6 +500,124 @@ describeIfDb('MemorySQLAdapter integration', () => {
             expect(results).toHaveLength(2);
             const sortedKeys = results.map(r => r.key).sort();
             expect(sortedKeys).toEqual(['event:conf-2024', 'user:alice']);
+        });
+    });
+
+    describe('Semantic atomic capability', () => {
+        it('creates only once and reports the current generation on conflict', async () => {
+            const key = `cas:create:${Date.now()}`;
+            await expect(adapter.atomic.compareAndSet({ key, expectedVersion: null, value: { active: 1 } }))
+                .resolves.toMatchObject({ status: 'updated' });
+            const conflict = await adapter.atomic.compareAndSet({ key, expectedVersion: null, value: { active: 2 } });
+            expect(conflict).toMatchObject({ status: 'conflict' });
+            expect(conflict.status === 'conflict' && conflict.currentVersion).toMatch(/^[1-9][0-9]*$/);
+        });
+
+        it('updates only a matching version and leaves the winner unchanged after a stale attempt', async () => {
+            const key = `cas:stale:${Date.now()}`;
+            await adapter.set(key, { active: 1 });
+            const initial = await adapter.atomic.getVersioned<{ active: number }>(key);
+            const updated = await adapter.atomic.compareAndSet({ key, expectedVersion: initial!.version, value: { active: 2 } });
+            expect(updated.status).toBe('updated');
+            const stale = await adapter.atomic.compareAndSet({ key, expectedVersion: initial!.version, value: { active: 3 } });
+            expect(stale.status).toBe('conflict');
+            await expect(adapter.get(key)).resolves.toEqual({ active: 2 });
+        });
+
+        it('allows exactly one concurrent writer across independent adapters', async () => {
+            const key = `cas:race:${Date.now()}`;
+            await adapter.set(key, { winner: null });
+            const initial = await adapter.atomic.getVersioned(key);
+            const other = new MemorySQLAdapter({ databaseUrl: DB_URL!, defaultTenantId: TENANT });
+            try {
+                const results = await Promise.all([
+                    adapter.atomic.compareAndSet({ key, expectedVersion: initial!.version, value: { winner: 'a' } }),
+                    other.atomic.compareAndSet({ key, expectedVersion: initial!.version, value: { winner: 'b' } }),
+                ]);
+                expect(results.filter((result) => result.status === 'updated')).toHaveLength(1);
+                expect(results.filter((result) => result.status === 'conflict')).toHaveLength(1);
+                expect(['a', 'b']).toContain((await adapter.get<{ winner: string }>(key))!.winner);
+            } finally {
+                await other.disconnect();
+            }
+        });
+
+        it('allows exactly one concurrent creator', async () => {
+            const key = `cas:create-race:${Date.now()}`;
+            const other = new MemorySQLAdapter({ databaseUrl: DB_URL!, defaultTenantId: TENANT });
+            try {
+                const results = await Promise.all([
+                    adapter.atomic.compareAndSet({ key, expectedVersion: null, value: { creator: 'a' } }),
+                    other.atomic.compareAndSet({ key, expectedVersion: null, value: { creator: 'b' } }),
+                ]);
+                expect(results.filter((result) => result.status === 'updated')).toHaveLength(1);
+                expect(results.filter((result) => result.status === 'conflict')).toHaveLength(1);
+            } finally {
+                await other.disconnect();
+            }
+        });
+
+        it('invalidates tokens on ordinary writes and delete/recreate', async () => {
+            const key = `cas:aba:${Date.now()}`;
+            await adapter.set(key, { generation: 1 });
+            const beforeSet = await adapter.atomic.getVersioned(key);
+            await adapter.set(key, { generation: 2 });
+            await expect(adapter.atomic.compareAndSet({ key, expectedVersion: beforeSet!.version, value: { generation: 3 } }))
+                .resolves.toMatchObject({ status: 'conflict' });
+
+            const beforeDelete = await adapter.atomic.getVersioned(key);
+            await adapter.delete(key);
+            await adapter.set(key, { generation: 4 });
+            const recreated = await adapter.atomic.getVersioned(key);
+            expect(recreated!.version).not.toBe(beforeDelete!.version);
+            await expect(adapter.atomic.compareAndSet({ key, expectedVersion: beforeDelete!.version, value: { generation: 5 } }))
+                .resolves.toMatchObject({ status: 'conflict' });
+        });
+
+        it('does not reveal or mutate another tenant with a foreign token', async () => {
+            const key = `cas:tenant:${Date.now()}`;
+            const other = new MemorySQLAdapter({ databaseUrl: DB_URL!, defaultTenantId: `${TENANT}:other` });
+            try {
+                await other.set(key, { secret: true });
+                const foreign = await other.atomic.getVersioned(key);
+                const result = await adapter.atomic.compareAndSet({ key, expectedVersion: foreign!.version, value: { secret: false } });
+                expect(result).toEqual({ status: 'conflict', currentVersion: null });
+                await expect(other.get(key)).resolves.toEqual({ secret: true });
+            } finally {
+                await other.delete(key);
+                await other.disconnect();
+            }
+        });
+
+        it('validates tokens and rejects binary or entity-aligned CAS before writing', async () => {
+            const key = `cas:invalid:${Date.now()}`;
+            await expect(adapter.atomic.compareAndSet({ key, expectedVersion: '01', value: { ok: true } }))
+                .rejects.toMatchObject({ code: 'SEMANTIC_ATOMIC_INVALID_VERSION' });
+            await expect(adapter.atomic.compareAndSet({ key, expectedVersion: '9223372036854775808', value: { ok: true } }))
+                .rejects.toMatchObject({ code: 'SEMANTIC_ATOMIC_INVALID_VERSION' });
+            await expect(adapter.atomic.compareAndSet({ key, expectedVersion: null, value: { data: Buffer.from('binary') } }))
+                .rejects.toBeInstanceOf(SemanticAtomicError);
+            await expect(adapter.atomic.compareAndSet(
+                { key, expectedVersion: null, value: { ok: true } },
+                { entities: { site: 'site' } } as any
+            )).rejects.toMatchObject({ code: 'SEMANTIC_ATOMIC_OPTION_UNSUPPORTED' });
+            await expect(adapter.get(key)).resolves.toBeNull();
+        });
+
+        it('invalidates a version when blob metadata is removed', async () => {
+            const key = `cas:blob:${Date.now()}`;
+            await adapter.setBlob(key, Buffer.from('large-enough-binary'), { filename: 'x.bin' });
+            await expect(adapter.atomic.getVersioned(key))
+                .rejects.toMatchObject({ code: 'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED' });
+            const prisma = (adapter as any).prisma;
+            const rowsBefore = await prisma.$queryRawUnsafe(
+                'SELECT version FROM agent_memory_store WHERE tenant_id = $1 AND key = $2', TENANT, key
+            );
+            await adapter.deleteBlob(key);
+            const rowsAfter = await prisma.$queryRawUnsafe(
+                'SELECT version FROM agent_memory_store WHERE tenant_id = $1 AND key = $2', TENANT, key
+            );
+            expect(String(rowsAfter[0].version)).not.toBe(String(rowsBefore[0].version));
         });
     });
 });
