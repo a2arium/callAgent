@@ -604,6 +604,35 @@ describeIfDb('MemorySQLAdapter integration', () => {
             await expect(adapter.get(key)).resolves.toBeNull();
         });
 
+        it('rejects lossy JavaScript values without changing the stored value or version', async () => {
+            const key = `cas:json-domain:${Date.now()}`;
+            await adapter.set(key, { stable: true });
+            const before = await adapter.atomic.getVersioned(key);
+            const sparse = new Array(2);
+            sparse[1] = 'present';
+            const circular: Record<string, unknown> = {};
+            circular.self = circular;
+            const invalidValues: unknown[] = [
+                { value: undefined },
+                { value: Number.NaN },
+                { value: Number.POSITIVE_INFINITY },
+                { value: new Date('2026-01-01T00:00:00.000Z') },
+                { value: () => true },
+                sparse,
+                circular,
+            ];
+
+            for (const value of invalidValues) {
+                await expect(adapter.atomic.compareAndSet({
+                    key,
+                    expectedVersion: before!.version,
+                    value,
+                })).rejects.toMatchObject({ code: 'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED' });
+            }
+
+            await expect(adapter.atomic.getVersioned(key)).resolves.toEqual(before);
+        });
+
         it('invalidates a version when blob metadata is removed', async () => {
             const key = `cas:blob:${Date.now()}`;
             await adapter.setBlob(key, Buffer.from('large-enough-binary'), { filename: 'x.bin' });

@@ -366,7 +366,7 @@ Do not assume the default semantic backend is SQL. Use `backend: 'sql'` on low-l
 Use compare-and-set (CAS) when multiple workers may replace the same durable semantic pointer. Discover the capability on the exact backend you intend to use:
 
 ```ts
-const atomic = ctx.memory.semantic.getAtomic({ backend: 'sql' });
+const atomic = ctx.memory.semantic.getAtomic?.({ backend: 'sql' });
 if (!atomic) {
     throw new Error('The SQL semantic backend does not support atomic writes');
 }
@@ -392,8 +392,8 @@ Rules:
 - Versions are opaque, non-contiguous decimal strings. Compare or return them; never parse, increment, or order them.
 - `currentVersion` on a conflict is diagnostic and may already be stale by the time the caller receives it.
 - Never fall back to `get` followed by `set`; that sequence is not atomic.
-- CAS v1 supports JSON values and tags. Blob-backed values and entity-alignment options throw typed `SemanticAtomicError` codes.
-- An unsupported selected backend returns `undefined` from `getAtomic()`. Existing semantic APIs remain unconditional and unchanged.
+- CAS v1 supports exact JSON-domain values and tags: plain objects, dense arrays, finite numbers, strings, booleans, and `null`. Values such as `undefined`, `NaN`, functions, dates, class instances, and sparse arrays are rejected rather than silently transformed. Blob-backed values and entity-alignment options throw typed `SemanticAtomicError` codes.
+- A pre-CAS facade may omit `getAtomic`; an unsupported selected backend returns `undefined` from it. Existing semantic APIs remain unconditional and unchanged.
 - Direct async memory access remains forbidden in Policy. Use CAS from Execution or handlers/tools outside the loop when performing the durable side effect.
 
 **Saving after an MCP or async tool**
@@ -535,7 +535,7 @@ READ for decisions:     m.goalState, m.plans, m.worldModel, m.memory.*
 WRITE cognition:        Learning module only
 Durable semantic write: writer.semantic → flush → ctx.memory.semantic
 Durable semantic read:  mem.semantic (Learning)
-Atomic durable update:  ctx.memory.semantic.getAtomic({ backend: 'sql' })
+Atomic durable update:  ctx.memory.semantic.getAtomic?.({ backend: 'sql' })
 Policy:                 sync, M only, no ctx, no DB
 Large payloads:         artifacts → Learning derives facts → M
 Deprecated:             ctx.semantic, ctx.vars, ctx.world.patch

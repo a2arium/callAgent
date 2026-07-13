@@ -72,7 +72,7 @@ export type SemanticMemoryBackend = ExistingSemanticMemoryBackend & {
 };
 
 export type SemanticMemoryFacade = ExistingSemanticMemoryFacade & {
-    getAtomic(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
+    getAtomic?(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
 };
 ```
 
@@ -81,14 +81,14 @@ export type SemanticMemoryFacade = ExistingSemanticMemoryFacade & {
 Expose a capability bound to exactly one selected backend:
 
 ```ts
-const atomic = ctx.memory.semantic.getAtomic({ backend: 'sql' });
+const atomic = ctx.memory.semantic.getAtomic?.({ backend: 'sql' });
 
 if (!atomic) {
     // The selected backend does not provide atomic semantic writes.
 }
 ```
 
-`getAtomic()` uses the explicit backend override or the registry default and returns that backend's capability. It returns `undefined` when the selected backend does not support CAS. The returned capability is backend-bound, so its methods do not accept another backend override.
+When present, `getAtomic()` uses the explicit backend override or the registry default and returns that backend's capability. The method is optional on the broad `IMemory` facade so pre-CAS facades and test doubles remain source-compatible. It returns `undefined` when the selected backend does not support CAS. The returned capability is backend-bound, so its methods do not accept another backend override.
 
 This shape is required because CallAgent can use an MLO default backend while also registering a CAS-capable SQL backend. A single optional `semantic.atomic` property cannot truthfully describe both the default backend and named backend overrides.
 
@@ -122,7 +122,7 @@ Requirements:
 3. Sequence gaps are expected. A rolled-back statement may consume a sequence value, but it must not change the stored value or stored version.
 4. Delete-and-recreate must never reuse a previously issued token. A per-row `default(1)` plus `version + 1` is explicitly forbidden because it permits the ABA stale-token bug.
 5. Ordinary JSON, base64, blob, entity-aligned, and blob-metadata mutations must all invalidate previously issued tokens.
-6. CAS v1 accepts JSON semantic values and tags. It must reject blob values with a typed `SEMANTIC_ATOMIC_VALUE_UNSUPPORTED` error.
+6. CAS v1 accepts exact JSON-domain semantic values and tags. Values must contain only plain objects, dense arrays, finite numbers, strings, booleans, and `null`; lossy JavaScript values and blobs fail with typed `SEMANTIC_ATOMIC_VALUE_UNSUPPORTED` errors.
 7. CAS v1 must reject entity-alignment options with a typed `SEMANTIC_ATOMIC_OPTION_UNSUPPORTED` error before producing alignment side effects.
 8. `getVersioned` selects `value` and `version` in one tenant-scoped read.
 9. Create-if-absent uses one atomic insert scoped by the `(tenant_id, key)` primary key with `ON CONFLICT DO NOTHING` and `RETURNING version`, or an equivalent single-statement operation.
@@ -173,6 +173,7 @@ A decimal token contains no key or tenant identity, so a well-formed token from 
 ### Type and compatibility tests
 
 - A custom backend implementing only the pre-existing required methods still type-checks.
+- A manually constructed pre-CAS `IMemory` facade without `getAtomic` still type-checks.
 - Existing registry construction works when `atomic` is absent.
 - `getAtomic()` returns `undefined` for an unsupported selected/default backend.
 - `getAtomic({ backend: 'sql' })` returns a SQL-bound capability even when the default backend is unsupported MLO.
@@ -229,7 +230,7 @@ Use the real PostgreSQL integration harness. An in-memory fake alone cannot prov
 3. SQL version tokens are opaque strings; every stored-row mutation assigns a fresh generation, including delete-and-recreate and blob-related mutations.
 4. CAS is tenant-scoped and atomic under real concurrent PostgreSQL writers.
 5. Unsupported selected backends return no atomic capability and never emulate it.
-6. JSON values and tags support CAS; blobs and entity alignment fail with typed unsupported errors before side effects.
+6. Exact JSON-domain values and tags support CAS; lossy JavaScript values, blobs, and entity alignment fail with typed unsupported errors before side effects.
 7. Type, unit, integration, migration, and full CallAgent suites pass, with the PostgreSQL concurrency suite required in CI.
 
 ## Downstream Handoff

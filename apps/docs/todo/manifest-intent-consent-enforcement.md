@@ -29,7 +29,7 @@ This is a contract gap: a validated safety declaration must either be enforced o
 2. Keep the behavior fully opt-in and transparent to existing agents.
 3. Compose with custom Shields instead of replacing or bypassing them.
 4. Bind consent to one exact normalized intent and task.
-5. Resume an approved intent at most once.
+5. Resume only the exact approved intent and reuse one deterministic effect idempotency key across any delivery retry.
 6. Ensure rejection, cancellation, stale consent, and mismatched consent never execute the intent.
 7. Expose enough TurnTrace information to test and debug the gate without leaking sensitive intent data.
 
@@ -116,7 +116,7 @@ type IntentConsentPending = {
 2. The pending record must survive the normal durable task/session persistence path.
 3. Resume only through a token-matched `input.provided` observation.
 4. Normalize approval as a closed structured value such as `{ decision: 'approve' | 'reject' }`; transport adapters may render human-friendly controls but must produce this shape.
-5. Approval makes an exact post-Shield re-proposal eligible for Execution. The runtime does not persist a raw intent solely to replay it.
+5. Approval makes an exact post-Shield re-proposal eligible for Execution. The runtime does not persist a raw intent solely to replay it. A restored `dispatching` receipt may call Execution again with the same effect idempotency key.
 6. Rejection returns a structured non-executing outcome that the agent can observe and handle.
 7. Cancellation/expiry removes or terminally marks the pending receipt and never falls through to Execution.
 
@@ -150,7 +150,7 @@ Do not emit raw intent payloads, secret values, full memory, or the unredacted d
 | Condition | Required behavior |
 |---|---|
 | Listed intent, no receipt | Defer with `await_input`; no Execution |
-| Valid approval | Execute exact intent once |
+| Valid approval | Execute only the exact intent; a delivery retry reuses the same effect idempotency key |
 | Explicit rejection | Structured rejection; no Execution |
 | Wrong token/task/tenant/agent | Ignore or reject as mismatch; no Execution |
 | Same identifier, changed payload | Digest mismatch; request new consent |
@@ -165,7 +165,7 @@ Do not emit raw intent payloads, secret values, full memory, or the unredacted d
 - Loop orchestration around Shield and Execution; enforcement must wrap custom Shields rather than live only in the default Shield implementation.
 - Durable control/pending types and task snapshot persistence.
 - Input-resume normalization for structured consent decisions.
-- TurnTrace schemas/projections and test-harness helpers needed to assert defer, token, and one-shot resume behavior.
+- TurnTrace schemas/projections and test-harness helpers needed to assert defer, token, exact re-proposal, and retry behavior.
 
 Use existing APLRET boundaries: Policy proposes; Shield checks agent policy; runtime obligations enforce the manifest; Execution performs effects; Transition carries await/terminal outcomes. Do not write consent decisions into Policy or use raw inbox parsing in Execution.
 
@@ -207,7 +207,7 @@ Use existing APLRET boundaries: Policy proposes; Shield checks agent policy; run
 ## Acceptance Criteria
 
 1. A listed domain intent cannot reach Execution without a matching unconsumed consent receipt.
-2. Approval executes the exact intent at most once; rejection and replay never execute it.
+2. Approval authorizes only the exact intent. Execution may be retried with the same idempotency key; the effect store must guarantee one logical effect. Rejection and replayed input never authorize Execution.
 3. Custom Shield behavior composes in the documented order.
 4. Agents without configured intent consent retain existing behavior.
 5. Consent state survives durable task restore.

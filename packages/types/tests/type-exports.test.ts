@@ -65,4 +65,15 @@ describe('Type exports', () => {
 
         expect('atomic' in backend).toBe(false);
     });
+
+    it('keeps pre-CAS memory facades source-compatible', () => {
+        const legacySemantic = null as unknown as Omit<IMemory['semantic'], 'getAtomic'>;
+        const memory = {
+            semantic: legacySemantic,
+            episodic: null as unknown as IMemory['episodic'],
+            embed: null as unknown as IMemory['embed'],
+        } satisfies IMemory;
+
+        expect(memory.semantic).toBe(legacySemantic);
+    });
 });

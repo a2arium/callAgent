@@ -3,6 +3,7 @@ import { runLoop } from '../src/loop/loopRunner.js';
 import { initialM } from '../src/loop/init.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
 import { deriveConsentEffectKey, digestIntent } from '../src/loop/manifestConsent.js';
+import { applyInputProvided } from '../src/orchestration/DurableHandlerRegistry.js';
 
 describe('runLoop shield safety branches', () => {
     const baseEnv = () => ({
@@ -84,6 +85,24 @@ describe('runLoop manifest consent obligation', () => {
         pending: { inputs: {}, children: {}, tools: {}, groups: {}, manifestConsents: {} },
         inbox: normalizeObservationInbox(undefined), lastExec: undefined,
     });
+    const receipt = (status: 'pending' | 'approved' | 'dispatching' | 'consumed' | 'rejected' = 'pending') => {
+        const value: any = {
+            token: 'consent-token', taskId: 'consent-task', agentId: 'agent-a', tenantId: 'tenant-a',
+            intentId: 'activate_bundle', intentDigest: digestIntent(intent as any), requestedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(), effectIdempotencyKey: '', status,
+        };
+        value.effectIdempotencyKey = deriveConsentEffectKey(value);
+        return value;
+    };
+    const context = (overrides: Record<string, unknown> = {}) => ({
+        task: { id: 'consent-task', input: {} }, tenantId: 'tenant-a', agentId: 'agent-a',
+        reply: jest.fn(), flushSnapshot: jest.fn(async () => undefined),
+        ...overrides,
+    });
+    const options = {
+        maxTurns: 1, collectTraces: true,
+        hitl: { requireConsentFor: { intents: ['activate_bundle'] } },
+    };
 
     it('defers a listed post-Shield intent without calling agent Execution', async () => {
         const execution = jest.fn(async () => ({ action: { kind: 'internal', done: true }, result: { status: 'ok' } }));
@@ -110,15 +129,9 @@ describe('runLoop manifest consent obligation', () => {
     });
 
     it('reserves an approved exact intent and exposes a stable effect key only during Execution', async () => {
-        const digest = digestIntent(intent as any);
-        const receipt: any = {
-            token: 'consent-token', taskId: 'consent-task', agentId: 'agent-a', tenantId: 'tenant-a',
-            intentId: 'activate_bundle', intentDigest: digest, requestedAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 60_000).toISOString(), effectIdempotencyKey: '', status: 'approved',
-        };
-        receipt.effectIdempotencyKey = deriveConsentEffectKey(receipt);
+        const approvedReceipt = receipt('approved');
         const state = env() as any;
-        state.pending.manifestConsents[receipt.token] = receipt;
+        state.pending.manifestConsents[approvedReceipt.token] = approvedReceipt;
         const seenKeys: string[] = [];
         const ctx: any = {
             task: { id: 'consent-task', input: {} }, tenantId: 'tenant-a', agentId: 'agent-a',
@@ -136,10 +149,120 @@ describe('runLoop manifest consent obligation', () => {
             maxTurns: 1, collectTraces: true,
             hitl: { requireConsentFor: { intents: ['activate_bundle'] } },
         });
-        expect(seenKeys).toEqual([receipt.effectIdempotencyKey]);
-        expect(receipt.status).toBe('consumed');
+        expect(seenKeys).toEqual([approvedReceipt.effectIdempotencyKey]);
+        expect(approvedReceipt.status).toBe('consumed');
         expect(ctx.effect).toBeUndefined();
         expect(result.traces?.[0]?.manifestConsent).toMatchObject({ action: 'consume', receiptStatus: 'consumed' });
+    });
+
+    it('restores a persisted pending receipt, approves it, and executes the exact re-proposal', async () => {
+        const state = env() as any;
+        const firstCtx: any = context({ requestInput: jest.fn(async () => ({ token: 'consent-token' })) });
+        const execution = jest.fn(async () => ({ action: { kind: 'internal', done: true }, result: { status: 'ok' } }));
+        await runLoop(firstCtx, initialM(firstCtx), state, { policy: () => intent, execution } as any, options);
+        state.pending.inputs['consent-token'] = { expiresAt: state.pending.manifestConsents['consent-token'].expiresAt };
+
+        const persisted = JSON.parse(JSON.stringify({
+            meta: { turn: 1, agentId: 'agent-a' },
+            pending: state.pending,
+            inbox: state.inbox,
+        }));
+        const { next } = applyInputProvided(persisted, 'consent-token', { decision: 'approve' }, {
+            tenantId: 'tenant-a', taskId: 'consent-task', agentId: 'agent-a',
+        });
+        const resumed = { ...env(), pending: (next as any).pending, inbox: (next as any).inbox } as any;
+        const resumeCtx: any = context();
+
+        await runLoop(resumeCtx, initialM(resumeCtx), resumed, {
+            policy: () => intent,
+            execution,
+            transition: () => ({ kind: 'complete', result: { ok: true } }),
+        } as any, options);
+
+        expect(execution).toHaveBeenCalledTimes(1);
+        expect(resumed.pending.manifestConsents['consent-token'].status).toBe('consumed');
+    });
+
+    it('keeps rejection non-executing through structured resume and re-proposal', async () => {
+        const pendingReceipt = receipt('pending');
+        const snapshot: any = {
+            meta: { turn: 1, agentId: 'agent-a' },
+            pending: { inputs: { [pendingReceipt.token]: {} }, manifestConsents: { [pendingReceipt.token]: pendingReceipt } },
+            inbox: normalizeObservationInbox(undefined),
+        };
+        const { next } = applyInputProvided(snapshot, pendingReceipt.token, { decision: 'reject' }, {
+            tenantId: 'tenant-a', taskId: 'consent-task', agentId: 'agent-a',
+        });
+        const state = { ...env(), pending: (next as any).pending, inbox: (next as any).inbox } as any;
+        const execution = jest.fn();
+        const ctx: any = context({ requestInput: jest.fn(async () => ({ token: 'replacement-token' })) });
+
+        const result = await runLoop(ctx, initialM(ctx), state, { policy: () => intent, execution } as any, options);
+
+        expect(execution).not.toHaveBeenCalled();
+        expect(state.pending.manifestConsents[pendingReceipt.token].status).toBe('rejected');
+        expect(result.outcome).toEqual({ kind: 'await_input', token: 'replacement-token' });
+    });
+
+    it('retries a restored dispatching receipt with the same effect key and one logical effect', async () => {
+        const dispatchingReceipt = receipt('dispatching');
+        const state = env() as any;
+        state.pending.manifestConsents[dispatchingReceipt.token] = dispatchingReceipt;
+        const committedKeys = new Set<string>();
+        const seenKeys: string[] = [];
+        let logicalEffects = 0;
+        let crashAfterEffect = true;
+        const ctx: any = context();
+        const execution = jest.fn(async () => {
+            const key = ctx.effect.idempotencyKey;
+            seenKeys.push(key);
+            if (!committedKeys.has(key)) {
+                committedKeys.add(key);
+                logicalEffects++;
+            }
+            if (crashAfterEffect) {
+                crashAfterEffect = false;
+                throw new Error('worker crashed after effect');
+            }
+            return { action: { kind: 'internal', done: true }, result: { status: 'ok' } };
+        });
+        const modules = {
+            policy: () => intent,
+            execution,
+            transition: () => ({ kind: 'complete', result: { ok: true } }),
+        } as any;
+
+        const failed = await runLoop(ctx, initialM(ctx), state, modules, options);
+        expect(failed.outcome).toMatchObject({ kind: 'fail' });
+        expect((failed.outcome as any).error).toMatchObject({ message: expect.stringContaining('worker crashed after effect') });
+        expect(state.pending.manifestConsents[dispatchingReceipt.token].status).toBe('dispatching');
+
+        const persisted = JSON.parse(JSON.stringify(state));
+        const resumed = { ...env(), pending: persisted.pending, inbox: persisted.inbox } as any;
+        await runLoop(ctx, initialM(ctx), resumed, modules, options);
+
+        expect(seenKeys).toEqual([dispatchingReceipt.effectIdempotencyKey, dispatchingReceipt.effectIdempotencyKey]);
+        expect(logicalEffects).toBe(1);
+        expect(resumed.pending.manifestConsents[dispatchingReceipt.token].status).toBe('consumed');
+    });
+
+    it('rejects consumed receipt replay and never executes from the stale authorization', async () => {
+        const consumedReceipt = receipt('consumed');
+        const snapshot: any = {
+            pending: { inputs: { [consumedReceipt.token]: {} }, manifestConsents: { [consumedReceipt.token]: consumedReceipt } },
+            inbox: normalizeObservationInbox(undefined),
+        };
+        expect(() => applyInputProvided(snapshot, consumedReceipt.token, { decision: 'approve' }, {
+            tenantId: 'tenant-a', taskId: 'consent-task', agentId: 'agent-a',
+        })).toThrow('MANIFEST_CONSENT_ALREADY_DECIDED');
+
+        const state = { ...env(), pending: snapshot.pending, inbox: snapshot.inbox } as any;
+        const execution = jest.fn();
+        const ctx: any = context({ requestInput: jest.fn(async () => ({ token: 'replacement-token' })) });
+        await runLoop(ctx, initialM(ctx), state, { policy: () => intent, execution } as any, options);
+
+        expect(execution).not.toHaveBeenCalled();
+        expect(state.pending.manifestConsents[consumedReceipt.token].status).toBe('consumed');
     });
 
     it('does not add a manifest prompt when the default level-based Shield already defers a tool', async () => {

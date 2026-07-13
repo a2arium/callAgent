@@ -327,7 +327,8 @@ export type MemoryRegistry<T> = {
  */
 export type IMemory = {
     semantic: MemoryRegistry<SemanticMemoryBackend> & {
-        getAtomic(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
+        /** Optional capability discovery for runtimes created before semantic CAS existed. */
+        getAtomic?(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
         add(item: SemanticAddInput): Promise<void>;
         readItems(filter?: SemanticReadFilter): Promise<SemanticItem[]>;
         removeItem(idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter): Promise<void>;

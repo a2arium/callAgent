@@ -20,13 +20,13 @@ No change is required. Backends that provide real atomic single-key writes may e
 Callers detect support for the selected backend:
 
 ```ts
-const atomic = ctx.memory.semantic.getAtomic({ backend: 'sql' });
+const atomic = ctx.memory.semantic.getAtomic?.({ backend: 'sql' });
 if (!atomic) {
     // Disable the dependent feature or fail configuration explicitly.
 }
 ```
 
-CAS v1 supports JSON values and tags. Blob-backed values and entity-alignment options are rejected with public `SemanticAtomicError` codes.
+CAS v1 supports exact JSON-domain values and tags. Lossy JavaScript values, blob-backed values, and entity-alignment options are rejected with public `SemanticAtomicError` codes.
 
 ## Deployment order
 

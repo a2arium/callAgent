@@ -54,6 +54,45 @@ const DEFAULT_ENTITY_ALIGNMENT_THRESHOLD = 0.7;
 const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 const isSystemTenant = (tenantId: string): boolean => tenantId === SYSTEM_TENANT;
 
+function assertExactJsonValue(value: unknown, seen = new WeakSet<object>()): void {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+    if (typeof value === 'number' && Number.isFinite(value)) return;
+    if (typeof value !== 'object' || seen.has(value)) throw new Error('Value is outside the JSON domain');
+
+    seen.add(value);
+    try {
+        if (Array.isArray(value)) {
+            const ownKeys = Reflect.ownKeys(value);
+            if (ownKeys.length !== value.length + 1 || !ownKeys.includes('length')) {
+                throw new Error('JSON arrays must not be sparse or have extra properties');
+            }
+            for (let index = 0; index < value.length; index++) {
+                const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+                if (!descriptor?.enumerable || !('value' in descriptor)) {
+                    throw new Error('JSON arrays must contain plain indexed values');
+                }
+                assertExactJsonValue(descriptor.value, seen);
+            }
+            return;
+        }
+
+        const prototype = Object.getPrototypeOf(value);
+        if (prototype !== Object.prototype && prototype !== null) {
+            throw new Error('JSON objects must be plain objects');
+        }
+        for (const key of Reflect.ownKeys(value)) {
+            if (typeof key !== 'string') throw new Error('JSON objects cannot contain symbol keys');
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (!descriptor?.enumerable || !('value' in descriptor)) {
+                throw new Error('JSON objects must contain enumerable data properties');
+            }
+            assertExactJsonValue(descriptor.value, seen);
+        }
+    } finally {
+        seen.delete(value);
+    }
+}
+
 export class MemorySQLAdapter implements SemanticMemoryBackend {
     private prisma: PrismaClientType;
     private ownsPrisma: boolean = false;
@@ -453,23 +492,20 @@ new MemorySQLAdapter({
     }
 
     private serializeAtomicValue(value: unknown): string {
-        if (value && typeof value === 'object' && 'data' in value) {
-            const dataType = detectDataType((value as { data?: unknown }).data);
-            if (dataType !== 'unknown') {
-                throw new SemanticAtomicError(
-                    'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED',
-                    'Semantic CAS v1 does not support binary-backed values'
-                );
-            }
-        }
         try {
+            assertExactJsonValue(value);
+            if (value && typeof value === 'object' && 'data' in value) {
+                const dataType = detectDataType((value as { data?: unknown }).data);
+                if (dataType !== 'unknown') {
+                    throw new Error('Semantic CAS v1 does not support binary-backed values');
+                }
+            }
             const serialized = JSON.stringify(value);
-            if (serialized === undefined) throw new Error('Value is not JSON serializable');
             return serialized;
         } catch {
             throw new SemanticAtomicError(
                 'SEMANTIC_ATOMIC_VALUE_UNSUPPORTED',
-                'Semantic CAS v1 requires a JSON-serializable value'
+                'Semantic CAS v1 requires an exact JSON value'
             );
         }
     }
