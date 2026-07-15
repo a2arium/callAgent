@@ -185,6 +185,115 @@ describe('InProcessRuntimeDriver', () => {
         expect(calls[0].idempotencyKey).toBe(`timer:t1:task-1:tok-timer:${timerId}`);
     });
 
+    it('reconciles a persisted child timeout after runtime recreation', async () => {
+        const fireAt = new Date(1_000).toISOString();
+        const timer = {
+            id: 'row-child-timeout', tenantId: 't1', taskId: 'task-1', agentId: 'agent-1',
+            rootTaskId: 'task-1', token: 'child-token', timerId: 'timer-child-timeout',
+            dueAt: new Date(fireAt), kind: 'child_timeout', status: 'scheduled',
+            idempotencyKey: 'timer:t1:task-1:child-token:timer-child-timeout',
+            fireLeaseId: null, fireLeaseUntil: null,
+            payload: { timeoutMs: 1_000, childTaskId: 'child-1', agentId: 'child-agent' },
+            providerRunId: null, providerTaskRunId: null, error: null, firedAt: null, canceledAt: null,
+            createdAt: new Date(0), updatedAt: new Date(0),
+        };
+        const runtimeTimers = {
+            schedule: async () => timer,
+            listScheduled: async () => [timer],
+            acquireFireLease: async () => ({ timer, fireLeaseId: 'lease-1' }),
+            markFired: async () => undefined,
+            markFailed: async () => undefined,
+            cancelTaskTimers: async () => 0,
+        };
+        const firstScheduler = makeManualScheduler();
+        const first = new InProcessRuntimeDriver({
+            turnExecutor: makeFakeExecutor().executor,
+            scheduler: firstScheduler,
+            now: () => 0,
+            runtimeTimers: runtimeTimers as never,
+            timerReconcileIntervalMs: 60_000,
+        });
+        await first.scheduleTimer({
+            ...ids, token: 'child-token', fireAt, kind: 'child_timeout',
+            payload: timer.payload,
+        });
+        first.clearAllTimers();
+
+        const secondScheduler = makeManualScheduler();
+        const { executor, calls } = makeFakeExecutor();
+        const second = new InProcessRuntimeDriver({
+            turnExecutor: executor,
+            scheduler: secondScheduler,
+            now: () => 2_000,
+            runtimeTimers: runtimeTimers as never,
+            timerReconcileIntervalMs: 60_000,
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(secondScheduler.pending()).toBe(1);
+
+        secondScheduler.fireAll();
+        await second.waitForIdle();
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.wake).toEqual({
+            trigger: 'timer',
+            event: expect.objectContaining({
+                kind: 'timer', token: 'child-token', reason: 'child_timeout',
+            }),
+        });
+        second.clearAllTimers();
+    });
+
+    it('marks a persisted timer fired only after the timeout segment commits', async () => {
+        let releaseSegment!: (result: SegmentResult) => void;
+        const segment = new Promise<SegmentResult>((resolve) => {
+            releaseSegment = resolve;
+        });
+        const { executor, calls } = makeFakeExecutor(async () => segment);
+        const marks: string[] = [];
+        const timer = {
+            id: 'row-1', tenantId: 't1', taskId: 'task-1', agentId: 'agent-1',
+            rootTaskId: 'task-1', token: 'child-token', timerId: 'timer-child-timeout',
+            dueAt: new Date(1_000), kind: 'child_timeout', status: 'scheduled',
+            idempotencyKey: 'timer:t1:task-1:child-token:timer-child-timeout',
+            fireLeaseId: null, fireLeaseUntil: null, payload: null,
+            providerRunId: null, providerTaskRunId: null, error: null,
+            firedAt: null, canceledAt: null, createdAt: new Date(0), updatedAt: new Date(0),
+        };
+        const runtimeTimers = {
+            schedule: async () => timer,
+            listScheduled: async () => [],
+            acquireFireLease: async () => ({ timer, fireLeaseId: 'lease-1' }),
+            markFired: async () => { marks.push('fired'); },
+            markFailed: async () => undefined,
+            cancelTaskTimers: async () => 0,
+        };
+        const driver = new InProcessRuntimeDriver({
+            turnExecutor: executor,
+            scheduler,
+            now: () => 2_000,
+            runtimeTimers: runtimeTimers as never,
+            timerReconcileIntervalMs: 60_000,
+        });
+        await driver.scheduleTimer({
+            ...ids, token: 'child-token', fireAt: new Date(1_000).toISOString(), kind: 'child_timeout',
+        });
+
+        scheduler.fireAll();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(calls).toHaveLength(1);
+        expect(marks).toEqual([]);
+
+        releaseSegment({
+            tenantId: 't1', taskId: 'task-1', agentId: 'agent-1',
+            boundary: { kind: 'complete' }, taskStatus: 'completed',
+        });
+        await driver.waitForIdle();
+        expect(marks).toEqual(['fired']);
+        driver.clearAllTimers();
+    });
+
     it('cancel clears scheduled timers so they never fire', async () => {
         const { executor, calls } = makeFakeExecutor();
         const driver = new InProcessRuntimeDriver({ turnExecutor: executor, scheduler });

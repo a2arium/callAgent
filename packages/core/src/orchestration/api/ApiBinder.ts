@@ -53,9 +53,10 @@ import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 import { segmentEffectIdempotencyKey } from '../../runtime/segmentProcessedKeys.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
 import type { TaskState } from '../../shared/types/StreamingEvents.js';
-import type { EnqueueStartParams } from '../../runtime/runtimeDriver.js';
+import type { EnqueueStartParams, ScheduleTimerParams } from '../../runtime/runtimeDriver.js';
 import { makeSafeEventPreview } from '../safeEventPreview.js';
 import { prepareChildResultForPersistence } from '../childResultPersistence.js';
+import { coordinateChildTerminal } from '../ChildTerminalCoordinator.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -98,11 +99,12 @@ export interface ApiBinderDependencies {
         childTaskId?: string;
         source?: string;
     }) => Promise<T>;
-    handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }) => Promise<void>;
+    handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; suppressResume?: boolean }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
     conversationService: InternalConversationApi;
     eventBus?: IEventBus;
     enqueueChildStart?: (params: EnqueueStartParams) => Promise<void>;
+    scheduleChildTimeout?: (params: ScheduleTimerParams) => Promise<{ timerId: string }>;
 }
 
 export class ApiBinder {
@@ -133,6 +135,16 @@ export class ApiBinder {
         options?: A2ACallOptions
     ): Promise<{ handle: unknown; token: string }> {
         const { tenantId, sessionId, agentId, flushMentalState } = bind;
+        const callStartedAt = Date.now();
+        const configuredTimeout = options?.timeout;
+        const timeoutMs =
+            typeof configuredTimeout === 'number' && Number.isFinite(configuredTimeout) && configuredTimeout > 0
+                ? configuredTimeout
+                : undefined;
+        const expiresAt = timeoutMs === undefined
+            ? undefined
+            : new Date(callStartedAt + timeoutMs).toISOString();
+        const childTaskId = options?.childTaskId ?? buildA2AChildTaskId(sessionId, agent);
         const conversationService = deps.conversationService;
         log.debug('[sendTaskToAgent] START', { agent, taskId: sessionId });
         if (!deps.sessionManager) throw new Error('Session manager not configured');
@@ -149,7 +161,7 @@ export class ApiBinder {
         const { handle, token: generatedToken } = await deps.taskCreationMutex.runExclusive(
             `${tenantId}:${sessionId}`,
             async () => {
-                return await createTaskHandle(deps.sessionManager!, tenantId, sessionId, agent, childInput);
+                return await createTaskHandle(deps.sessionManager!, tenantId, sessionId, agent, childInput, token);
             }
         );
         if (!token) token = generatedToken;
@@ -195,6 +207,12 @@ export class ApiBinder {
                     autoClearToken: options?.autoClearToken !== false,
                     setStage: options?.setStage,
                 };
+                tasks[token].agentId = agent;
+                tasks[token].childTaskId = childTaskId;
+                if (timeoutMs !== undefined && expiresAt !== undefined) {
+                    tasks[token].timeoutMs = timeoutMs;
+                    tasks[token].expiresAt = expiresAt;
+                }
                 let next = setPendingTasks(baseSnap, tasks);
                 if (controlUpdates.length > 0) {
                     for (const [path, value] of controlUpdates) {
@@ -298,7 +316,6 @@ export class ApiBinder {
         };
 
         const a2aOpts = options;
-        const childTaskId = a2aOpts?.childTaskId ?? buildA2AChildTaskId(sessionId, agent);
         const idempotencyKey =
             childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
 
@@ -334,6 +351,19 @@ export class ApiBinder {
                     },
                 }));
             }
+        }
+
+        if (awaitCompletion === false && expiresAt !== undefined && deps.scheduleChildTimeout) {
+            await deps.scheduleChildTimeout({
+                tenantId,
+                taskId: sessionId,
+                agentId,
+                token,
+                fireAt: expiresAt,
+                kind: 'child_timeout',
+                payload: { token, timeoutMs, expiresAt, childTaskId, agentId: agent },
+                idempotencyKey: `${sessionId}:child-timeout:${token}`,
+            });
         }
 
         if (
@@ -430,19 +460,115 @@ export class ApiBinder {
             });
 
         let result: unknown;
+        const dispatchPromise = runA2a();
+        let dispatchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
         try {
-            const timeoutMs = a2aOpts?.timeout;
             if (timeoutMs != null && timeoutMs > 0) {
                 result = await Promise.race([
-                    runA2a(),
+                    dispatchPromise,
                     new Promise<never>((_, reject) =>
-                        setTimeout(() => reject(new Error('ConversationTimeout')), timeoutMs)
+                        dispatchTimeoutHandle = setTimeout(() => {
+                            const timeoutError = new Error('ConversationTimeout');
+                            timeoutError.name = 'ConversationTimeout';
+                            reject(timeoutError);
+                        }, Math.max(0, Date.parse(expiresAt!) - Date.now()))
                     ),
                 ]);
             } else {
-                result = await runA2a();
+                result = await dispatchPromise;
             }
         } catch (error) {
+            if (awaitCompletion === false && (error as Error)?.name === 'ConversationTimeout') {
+                const failedAt = new Date().toISOString();
+                const claim = await coordinateChildTerminal({
+                    session: deps.sessionManager,
+                    tenantId,
+                    parentTaskId: sessionId,
+                    request: {
+                        kind: 'failed',
+                        token,
+                        failedAt,
+                        childTaskId,
+                        agentId: agent,
+                        error: {
+                            code: 'CHILD_TIMEOUT',
+                            message: `Child call timed out after ${timeoutMs}ms for token ${token}.`,
+                            timeoutMs,
+                        },
+                    },
+                });
+                const activeLoop = ctx as {
+                    __activeLoopInbox?: { current: EngineObservation[]; all: EngineObservation[] };
+                    __activeLoopEnv?: { pending?: { children?: Record<string, unknown> } };
+                };
+                let timeoutObservation = claim.observation;
+                if (timeoutObservation === undefined) {
+                    const terminalSnapshot = await deps.sessionManager.load(tenantId, sessionId);
+                    timeoutObservation = ((terminalSnapshot?.snapshot as any)?.inbox?.all ?? []).find(
+                        (candidate: EngineObservation) =>
+                            candidate.kind === 'child.failed' &&
+                            (candidate.payload as { token?: unknown } | undefined)?.token === token
+                    ) as EngineObservation | undefined;
+                }
+                if (timeoutObservation !== undefined && activeLoop.__activeLoopInbox !== undefined) {
+                    const terminalPredicate = (candidate: EngineObservation) =>
+                        (candidate.kind === 'child.completed' || candidate.kind === 'child.failed') &&
+                        (candidate.payload as { token?: unknown } | undefined)?.token === token;
+                    activeLoop.__activeLoopInbox.current = activeLoop.__activeLoopInbox.current
+                        .filter((candidate) => !terminalPredicate(candidate));
+                    activeLoop.__activeLoopInbox.all = activeLoop.__activeLoopInbox.all
+                        .filter((candidate) => !terminalPredicate(candidate));
+                    activeLoop.__activeLoopInbox.current.push(timeoutObservation);
+                    activeLoop.__activeLoopInbox.all.push(timeoutObservation);
+                    if (activeLoop.__activeLoopEnv?.pending?.children) {
+                        delete activeLoop.__activeLoopEnv.pending.children[token];
+                    }
+                }
+                const tracked = dispatchPromise.then(
+                    async (lateResult) => {
+                        const lateClean = TaskStateUtils.extractCleanChildResult(lateResult);
+                        if (!isTerminalChildState(lateClean.executionMetadata?.state)) {
+                            await deps.sessionManager.appendEvent(
+                                tenantId,
+                                sessionId,
+                                'task.child_late_completion',
+                                {
+                                    token,
+                                    agentId: agent,
+                                    childTaskId: lateClean.childTaskId ?? childTaskId,
+                                    reason: 'dispatch_resolved_after_timeout',
+                                    state: lateClean.executionMetadata?.state,
+                                    resultPreview: makeSafeEventPreview(lateResult),
+                                }
+                            );
+                        }
+                    },
+                    async (lateError) => {
+                        await deps.sessionManager.appendEvent(tenantId, sessionId, 'task.child_late_completion', {
+                            token,
+                            agentId: agent,
+                            childTaskId,
+                            error: lateError instanceof Error ? lateError.message : String(lateError),
+                            reason: 'dispatch_rejected_after_timeout',
+                        });
+                    }
+                );
+                if (deps.trackBackgroundTask) {
+                    void deps.trackBackgroundTask(tracked, {
+                        kind: 'child-dispatch-after-timeout',
+                        tenantId,
+                        taskId: sessionId,
+                        agentId,
+                        token,
+                        childAgent: agent,
+                        childTaskId,
+                    });
+                } else {
+                    deps.backgroundTaskPromises.add(tracked);
+                    void tracked.finally(() => deps.backgroundTaskPromises.delete(tracked));
+                }
+                return { handle, token };
+            }
             const er = error instanceof Error ? error : new Error(String(error));
             childCallNode.fail(er);
             telemetry.failNode(childCallNode, er);
@@ -462,6 +588,8 @@ export class ApiBinder {
                 error: error instanceof Error ? error.message : String(error),
             });
             throw error;
+        } finally {
+            if (dispatchTimeoutHandle !== undefined) clearTimeout(dispatchTimeoutHandle);
         }
 
         const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
@@ -487,24 +615,6 @@ export class ApiBinder {
                 tenantId
             );
 
-            const childCompletedPayload = {
-                token,
-                agentId: agent,
-                childAgentId: agent,
-                childTaskId: cleanChildResult.childTaskId,
-                result: childResultForParent,
-                executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined,
-                resultPreview:
-                    childResultForParent != null
-                        ? makeSafeEventPreview({ result: childResultForParent })
-                        : undefined,
-            };
-            await deps.sessionManager.appendEvent(
-                tenantId,
-                sessionId,
-                'task.child_completed',
-                childCompletedPayload
-            );
         }
 
         if (iCtx.__turnChildCalls && childIsTerminal) {
@@ -576,8 +686,24 @@ export class ApiBinder {
                     },
                 };
 
-                inbox.current.push(obs);
-                inbox.all.push(obs);
+                await deps.handleChildCompleted({
+                    tenantId,
+                    parentTaskId: sessionId,
+                    childToken: token,
+                    childTaskId: cleanChildResult.childTaskId,
+                    childAgentId: agent,
+                    result,
+                    suppressResume: true,
+                });
+                const terminalSnapshot = await deps.sessionManager.load(tenantId, sessionId);
+                const durableTerminal = ((terminalSnapshot?.snapshot as any)?.inbox?.all ?? []).find(
+                    (candidate: EngineObservation) =>
+                        (candidate.kind === 'child.completed' || candidate.kind === 'child.failed') &&
+                        (candidate.payload as { token?: unknown } | undefined)?.token === token
+                ) as EngineObservation | undefined;
+                const deliveredObservation = durableTerminal ?? obs;
+                inbox.current.push(deliveredObservation);
+                inbox.all.push(deliveredObservation);
 
                 log.debug('✅ SYNC CHILD: Injected completion into active loop inbox', { token, awaitCompletion });
             } else {

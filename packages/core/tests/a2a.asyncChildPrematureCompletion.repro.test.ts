@@ -18,7 +18,7 @@ type TestSensory = {
 };
 
 type ParentSensory = {
-    status?: 'idle' | 'fetching' | 'completed';
+    status?: 'idle' | 'fetching' | 'completed' | 'failed';
     childToken?: string;
     content?: string;
 };
@@ -31,6 +31,7 @@ type TestObservation =
 type ParentObservation =
     | { kind: 'input' }
     | { kind: 'child_content'; content: string }
+    | { kind: 'child_failed' }
     | { kind: 'none' };
 
 type ToolHandle = {
@@ -68,6 +69,11 @@ type EngineAccess = {
             expectedWmVersion: bigint;
             snapshot: Record<string, unknown>;
         }) => Promise<unknown>;
+        listEventsSince: (params: {
+            tenantId: string;
+            sessionId: string;
+            sinceSeq: number;
+        }) => Promise<Array<{ type: string; payload: unknown }>>;
         snapshots?: Map<string, { agentId?: string; snapshot?: Record<string, unknown> }>;
     };
 };
@@ -164,7 +170,11 @@ const createParentSnapshot = (agentId: string): Record<string, unknown> => ({
     },
 });
 
-const createSuspendingChildPlugin = (name: string, tenantId: string): AgentPlugin => ({
+const createSuspendingChildPlugin = (
+    name: string,
+    tenantId: string,
+    dispatchDelayMs: number = 0
+): AgentPlugin => ({
     resolved: createResolved(name),
     tenantId,
     loop: {
@@ -214,6 +224,10 @@ const createSuspendingChildPlugin = (name: string, tenantId: string): AgentPlugi
                     };
                 }
 
+                if (dispatchDelayMs > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, dispatchDelayMs));
+                }
+
                 // Keep this repro focused on the first child segment: the child should
                 // suspend on await_tool, not complete via a background tool resume.
                 const toolCtx = ctx as TaskContext & { __autoExecuteTool?: unknown };
@@ -245,7 +259,12 @@ const createSuspendingChildPlugin = (name: string, tenantId: string): AgentPlugi
     },
 } as unknown as AgentPlugin);
 
-const createAwaitingParentPlugin = (name: string, childAgentId: string, tenantId: string): AgentPlugin => ({
+const createAwaitingParentPlugin = (
+    name: string,
+    childAgentId: string,
+    tenantId: string,
+    childTimeoutMs: number = 30_000
+): AgentPlugin => ({
     resolved: createResolved(name),
     tenantId,
     loop: {
@@ -265,6 +284,9 @@ const createAwaitingParentPlugin = (name: string, childAgentId: string, tenantId
                             return { kind: 'child_content', content };
                         }
                     }
+                    if (entry.source === 'child' && entry.kind === 'child.failed') {
+                        return { kind: 'child_failed' };
+                    }
                 }
                 return { kind: 'none' };
             },
@@ -273,6 +295,15 @@ const createAwaitingParentPlugin = (name: string, childAgentId: string, tenantId
                 _prevAction: Intent | undefined,
                 observation: ParentObservation
             ): MentalState<ParentSensory> => {
+                if (observation.kind === 'child_failed') {
+                    return {
+                        ...prev,
+                        memory: {
+                            ...prev.memory,
+                            sensory: { ...prev.memory.sensory, status: 'failed', childToken: undefined },
+                        },
+                    };
+                }
                 if (observation.kind !== 'child_content') {
                     return prev;
                 }
@@ -291,7 +322,7 @@ const createAwaitingParentPlugin = (name: string, childAgentId: string, tenantId
             },
             policy: (m: MentalState<ParentSensory>, _mem: MemoryReader): Intent => {
                 const sensory = m.memory.sensory;
-                if (sensory.status === 'completed') {
+                if (sensory.status === 'completed' || sensory.status === 'failed') {
                     return { kind: 'internal', intent: 'complete' };
                 }
                 if (sensory.status === 'fetching' && sensory.childToken) {
@@ -316,7 +347,7 @@ const createAwaitingParentPlugin = (name: string, childAgentId: string, tenantId
                 const dispatch = await ctx.sendTaskToAgent?.(
                     childAgentId,
                     { q: 1 },
-                    { awaitCompletion: false, timeout: 30_000 }
+                    { awaitCompletion: false, timeout: childTimeoutMs }
                 );
                 if (!isSendTaskDispatch(dispatch)) {
                     throw new Error('Expected sendTaskToAgent to return a child token');
@@ -387,7 +418,7 @@ describe('A2A async child lifecycle', () => {
         const dispatch = await ctx.sendTaskToAgent?.(
             childAgentId,
             { q: 1 },
-            { awaitCompletion: false, timeout: 30_000 }
+            { awaitCompletion: false }
         );
         expect(isSendTaskDispatch(dispatch)).toBe(true);
 
@@ -427,6 +458,208 @@ describe('A2A async child lifecycle', () => {
             result: { status: 'done', html: '<html>ok</html>' },
             executionMetadata: { state: 'completed' },
         });
+    });
+
+    it('expires an async child suspended on a tool and ignores its late completion', async () => {
+        const tenantId = 't-a2a-async-child-timeout';
+        const parentAgentId = `parent-timeout-${Date.now()}`;
+        const childAgentId = `child-timeout-${Date.now()}`;
+        const parentTaskId = `parent-timeout-task-${Date.now()}`;
+        const engine = new TaskEngine({});
+        EngineLocator.setEngine(engine);
+        PluginManager.registerAgent(createSuspendingChildPlugin(childAgentId, tenantId));
+
+        const engineAccess = engine as unknown as EngineAccess;
+        await engineAccess.sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: parentAgentId,
+            expectedWmVersion: BigInt(0),
+            snapshot: createParentSnapshot(parentAgentId),
+        });
+        const ctx = engineAccess.createContext({ id: parentTaskId, input: {} });
+        ctx.tenantId = tenantId;
+        ctx.agentId = parentAgentId;
+        await engineAccess.apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: parentAgentId,
+            flushMentalState: async () => {},
+        });
+        const dispatch = await ctx.sendTaskToAgent?.(
+            childAgentId,
+            { q: 1 },
+            { awaitCompletion: false, timeout: 50 }
+        );
+        expect(isSendTaskDispatch(dispatch)).toBe(true);
+        if (!isSendTaskDispatch(dispatch)) throw new Error('Expected child dispatch');
+
+        const pendingSnap = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        expect((pendingSnap?.snapshot as any)?.pending?.tasks?.[dispatch.token]).toMatchObject({
+            agentId: childAgentId,
+            timeoutMs: 50,
+        });
+        expect(typeof (pendingSnap?.snapshot as any)?.pending?.tasks?.[dispatch.token]?.expiresAt).toBe('string');
+
+        const timeoutDeadline = Date.now() + 2_000;
+        for (;;) {
+            const current = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+            const delivered = ((current?.snapshot as any)?.inbox?.all ?? []).some(
+                (entry: Observation) => entry.kind === 'child.failed' && (entry.payload as any)?.token === dispatch.token
+            );
+            if (delivered || Date.now() >= timeoutDeadline) break;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await engine.waitForBackgroundTasks(2_000);
+
+        const expiredSnap = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        const expiredSnapshot = expiredSnap?.snapshot as any;
+        const failures = (expiredSnapshot?.inbox?.all ?? []).filter(
+            (entry: Observation) => entry.kind === 'child.failed' && (entry.payload as any)?.token === dispatch.token
+        );
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.payload).toMatchObject({
+            token: dispatch.token,
+            agentId: childAgentId,
+            error: { code: 'CHILD_TIMEOUT', timeoutMs: 50 },
+        });
+        expect(expiredSnapshot?.pending?.tasks?.[dispatch.token]).toBeUndefined();
+        expect(expiredSnapshot?.pending?.children?.[dispatch.token]).toBeUndefined();
+
+        const childTaskId = dispatch.handle?.id;
+        if (typeof childTaskId !== 'string') throw new Error('Expected child task id');
+        const childSnap = await engineAccess.sessionManager.load(tenantId, childTaskId);
+        const [toolToken] = Object.keys((childSnap?.snapshot as SnapshotWithPending)?.pending?.tools ?? {});
+        if (!toolToken) throw new Error('Expected child tool token');
+        await engine.handleToolCompleted({
+            tenantId,
+            taskId: childTaskId,
+            token: toolToken,
+            result: { status: 'ok', html: '<html>late</html>' },
+        });
+        await engine.waitForBackgroundTasks(1_000);
+
+        const lateSnap = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        const terminal = ((lateSnap?.snapshot as any)?.inbox?.all ?? []).filter(
+            (entry: Observation) =>
+                (entry.kind === 'child.completed' || entry.kind === 'child.failed') &&
+                (entry.payload as any)?.token === dispatch.token
+        );
+        expect(terminal).toHaveLength(1);
+        expect(terminal[0]?.kind).toBe('child.failed');
+    });
+
+    it('stages child.failed before returning when initial async dispatch reaches its deadline', async () => {
+        const tenantId = 't-a2a-async-dispatch-timeout';
+        const parentAgentId = `parent-dispatch-timeout-${Date.now()}`;
+        const childAgentId = `child-dispatch-timeout-${Date.now()}`;
+        const parentTaskId = `parent-dispatch-timeout-task-${Date.now()}`;
+        const engine = new TaskEngine({});
+        EngineLocator.setEngine(engine);
+        PluginManager.registerAgent(createSuspendingChildPlugin(childAgentId, tenantId, 100));
+
+        const engineAccess = engine as unknown as EngineAccess;
+        await engineAccess.sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: parentAgentId,
+            expectedWmVersion: BigInt(0),
+            snapshot: createParentSnapshot(parentAgentId),
+        });
+        const ctx = engineAccess.createContext({ id: parentTaskId, input: {} });
+        ctx.tenantId = tenantId;
+        ctx.agentId = parentAgentId;
+        await engineAccess.apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: parentAgentId,
+            flushMentalState: async () => {},
+        });
+        const activeInbox = { current: [] as Observation[], all: [] as Observation[] };
+        const iCtx = ctx as InternalTaskContext;
+        iCtx.__activeLoopInbox = activeInbox;
+        iCtx.__activeLoopEnv = { turn: 1, pending: { children: {} } };
+
+        const dispatch = await ctx.sendTaskToAgent?.(
+            childAgentId,
+            { q: 1 },
+            { awaitCompletion: false, timeout: 20 }
+        );
+        if (!isSendTaskDispatch(dispatch)) throw new Error('Expected child dispatch');
+
+        expect(activeInbox.current).toEqual([
+            expect.objectContaining({
+                kind: 'child.failed',
+                payload: expect.objectContaining({
+                    token: dispatch.token,
+                    error: expect.objectContaining({ code: 'CHILD_TIMEOUT' }),
+                }),
+            }),
+        ]);
+        expect((activeInbox.current[0]?.payload as any)?.error).toMatchObject({
+            code: 'CHILD_TIMEOUT',
+            timeoutMs: 20,
+        });
+        const parent = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        expect((parent?.snapshot as any)?.pending?.tasks?.[dispatch.token]).toBeUndefined();
+
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        await engine.waitForBackgroundTasks(2_000);
+        const lateParent = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        const terminals = ((lateParent?.snapshot as any)?.inbox?.all ?? []).filter(
+            (entry: Observation) =>
+                (entry.kind === 'child.completed' || entry.kind === 'child.failed') &&
+                (entry.payload as any)?.token === dispatch.token
+        );
+        expect(terminals).toHaveLength(1);
+        expect(terminals[0]?.kind).toBe('child.failed');
+    });
+
+    it('resumes the awaiting parent once with empty pendingAfter after timeout', async () => {
+        const tenantId = 't-a2a-parent-timeout-resume';
+        const parentAgentId = `parent-timeout-resume-${Date.now()}`;
+        const childAgentId = `child-timeout-resume-${Date.now()}`;
+        const parentTaskId = `parent-timeout-resume-task-${Date.now()}`;
+        const engine = new TaskEngine({});
+        EngineLocator.setEngine(engine);
+        PluginManager.registerAgent(createSuspendingChildPlugin(childAgentId, tenantId));
+        PluginManager.registerAgent(createAwaitingParentPlugin(parentAgentId, childAgentId, tenantId, 50));
+
+        const engineAccess = engine as unknown as EngineAccess;
+        const initial = await engineAccess.startTask({
+            task: { id: parentTaskId, input: { q: 1 } },
+            isStreaming: false,
+            agentId: parentAgentId,
+            tenantId,
+        });
+        expect(asRecord(asRecord(initial)?.status)?.state).toBe('working');
+
+        let terminalTurn: { type: string; payload: unknown } | undefined;
+        const deadline = Date.now() + 3_000;
+        while (Date.now() < deadline) {
+            const events = await engineAccess.sessionManager.listEventsSince({
+                tenantId,
+                sessionId: parentTaskId,
+                sinceSeq: -1,
+            });
+            terminalTurn = events.find((event) =>
+                event.type === 'turn.completed' &&
+                asRecord(asRecord(event.payload)?.transition)?.kind === 'complete'
+            );
+            if (terminalTurn) break;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await engine.waitForBackgroundTasks(2_000);
+        expect(terminalTurn).toBeDefined();
+        expect(asRecord(terminalTurn?.payload)?.pendingAfter).toMatchObject({ childTokens: [] });
+
+        const parent = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        const snapshot = parent?.snapshot as any;
+        expect(Object.keys(snapshot?.pending?.children ?? {})).toHaveLength(0);
+        expect(Object.keys(snapshot?.pending?.tasks ?? {})).toHaveLength(0);
+        expect((snapshot?.inbox?.all ?? []).filter(
+            (entry: Observation) => entry.kind === 'child.failed'
+        )).toHaveLength(1);
     });
 
     it('resumes an awaiting parent to terminal state after the async child completes', async () => {

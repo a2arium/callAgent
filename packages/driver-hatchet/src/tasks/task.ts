@@ -5,7 +5,7 @@ import type {
     RuntimeTimerRepository,
 } from '@a2arium/callagent-core/unstable';
 import {
-    makeSafeEventPreview,
+    coordinateChildTerminal,
     prepareChildResultForPersistence,
     readSegmentCancellation,
     timerKindToReason,
@@ -63,6 +63,17 @@ export type TaskTaskDeps = {
     agentResultCache?: TaskResultCache;
     resolveCacheConfig?: (agentId: string | undefined) => RuntimeResultCachePolicy | undefined;
     sessionManager?: {
+        load: (
+            tenantId: string,
+            sessionId: string
+        ) => Promise<{ snapshot?: unknown; wmVersion?: bigint; agentId?: string } | null>;
+        saveSnapshot: (params: {
+            tenantId: string;
+            sessionId: string;
+            agentId: string;
+            expectedWmVersion: bigint;
+            snapshot: Record<string, unknown>;
+        }) => Promise<unknown>;
         appendEvent: (
             tenantId: string,
             sessionId: string,
@@ -134,7 +145,7 @@ type AwaitableBoundary = Extract<
     { kind: 'await_input' | 'await_tool' | 'await_child' | 'await_event' }
 >;
 type SegmentEventWake = Exclude<SegmentTaskWake, { trigger: 'start' }>;
-type TimerBoundary = Extract<SegmentTaskBoundary, { kind: 'await_input' | 'sleep' }>;
+type TimerBoundary = Extract<SegmentTaskBoundary, { kind: 'await_input' | 'await_child' | 'sleep' }>;
 
 export async function executeTaskTask(
     input: TaskTaskInput,
@@ -555,23 +566,49 @@ async function notifyPersistedA2AParentIfTerminal(
     }
 
     const idempotencyKey = `${parentTaskId}:child:${parentChildToken}`;
+    const completedAt = new Date().toISOString();
     const output = outputFromTerminalBoundary(segment.boundary);
     const childResultForParent = await prepareChildResultForPersistence(
         output,
         deps.prisma ? new AgentResultCache(deps.prisma as never) : undefined,
         parentTenantId
     );
-    await persistParentChildCompletedEvent({
+    if (deps.sessionManager === undefined) return;
+    const failure = segment.boundary.kind === 'complete'
+        ? undefined
+        : (childResultForParent as { error?: unknown })?.error ?? childResultForParent;
+    const normalizedFailure =
+        failure !== null && typeof failure === 'object' && !Array.isArray(failure)
+            ? {
+                  code: typeof (failure as any).code === 'string' ? (failure as any).code : 'CHILD_FAILED',
+                  message: typeof (failure as any).message === 'string'
+                      ? (failure as any).message
+                      : String(failure),
+              }
+            : { code: 'CHILD_FAILED', message: String(failure ?? 'Child failed.') };
+    const claim = await coordinateChildTerminal({
+        session: deps.sessionManager,
+        tenantId: parentTenantId,
+        parentTaskId,
+        request: segment.boundary.kind === 'complete'
+            ? {
+                  kind: 'completed', token: parentChildToken, completedAt,
+                  childTaskId: input.taskId, agentId: input.agentId,
+                  result: childResultForParent,
+                  executionMetadata: segment.executionMetadata,
+              }
+            : {
+                  kind: 'failed', token: parentChildToken, failedAt: completedAt,
+                  childTaskId: input.taskId, agentId: input.agentId,
+                  error: normalizedFailure,
+              },
+    });
+    if (!claim.won || claim.observation === undefined) return;
+    await deps.runtimeTimers?.cancelTaskTimers({
         tenantId: parentTenantId,
         taskId: parentTaskId,
         token: parentChildToken,
-        childTaskId: input.taskId,
-        agentId: input.agentId,
-        result: childResultForParent,
-        executionMetadata: segment.executionMetadata,
-        deps,
     });
-
     if (deps.events === undefined || shouldSuppressChildWakeForDrill(parentTaskId)) {
         return;
     }
@@ -586,53 +623,16 @@ async function notifyPersistedA2AParentIfTerminal(
             kind: 'child',
             token: parentChildToken,
             childTaskId: input.taskId,
-            output: childResultForParent,
+            outcome: claim.kind,
+            ...(claim.kind === 'completed'
+                ? { output: (claim.observation.payload as { result?: unknown }).result }
+                : { error: (claim.observation.payload as { error?: unknown }).error }),
+            completedAt,
+            terminalClaimed: true,
             ...(segment.executionMetadata !== undefined ? { executionMetadata: segment.executionMetadata } : {}),
         },
         { key: `${parentTenantId}:${parentTaskId}:${parentChildToken}` }
     );
-}
-
-async function persistParentChildCompletedEvent(params: {
-    tenantId: string;
-    taskId: string;
-    token: string;
-    childTaskId: string;
-    agentId?: string;
-    result: unknown;
-    executionMetadata?: SegmentTaskOutput['executionMetadata'];
-    deps?: TaskTaskDeps;
-}): Promise<void> {
-    if (params.deps?.sessionManager === undefined) {
-        return;
-    }
-
-    try {
-        await params.deps.sessionManager.appendEvent(
-            params.tenantId,
-            params.taskId,
-            'task.child_completed',
-            {
-                token: params.token,
-                childTaskId: params.childTaskId,
-                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
-                ...(params.agentId !== undefined ? { childAgentId: params.agentId } : {}),
-                result: params.result,
-                ...(params.executionMetadata !== undefined
-                    ? { executionMetadata: params.executionMetadata }
-                    : {}),
-                resultPreview: makeSafeEventPreview(params.result),
-            }
-        );
-    } catch (error) {
-        log.warn('Failed to persist durable child completion event', {
-            tenantId: params.tenantId,
-            parentTaskId: params.taskId,
-            childTaskId: params.childTaskId,
-            token: params.token,
-            error: error instanceof Error ? error.message : String(error),
-        });
-    }
 }
 
 function shouldSuppressChildWakeForDrill(parentTaskId: string): boolean {
@@ -803,6 +803,9 @@ async function waitForBoundaryEvent(
     }
 
     if (boundary.kind === 'await_child') {
+        if (boundary.expiresAt !== undefined && deps?.runtimeTimers !== undefined) {
+            return waitForChildOrTimer(ctx, input, boundary, deps.runtimeTimers);
+        }
         return waitForChildBoundaryEvent(ctx, input, boundary, deps);
     }
 
@@ -821,6 +824,56 @@ async function waitForBoundaryEvent(
         `wait:${eventKind}:${boundary.token}`
     );
     return normalizeWakeEvent(eventKind, boundary.token, payload);
+}
+
+async function waitForChildOrTimer(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
+    runtimeTimers: RuntimeTimerRepository
+): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    if (boundary.expiresAt === undefined) throw new Error('CHILD_TIMER_EXPIRES_AT_MISSING');
+    const timer = await scheduleBoundaryTimer(input, boundary, runtimeTimers, 'child_timeout');
+    const winner = await waitForBoundaryRace(ctx, {
+        eventKey: `aplret.child.${boundary.token}`,
+        timerKey: `aplret.timer.${boundary.token}`,
+        expression: `input.tenantId == "${input.tenantId}" && input.taskId == "${input.taskId}"`,
+        fireAt: boundary.expiresAt,
+        inputReadableKey: 'child',
+        timerReadableKey: 'timer',
+        label: `wait:child-or-timer:${boundary.token}`,
+    });
+    if (winner.kind === 'timer') {
+        const firedAt = new Date().toISOString();
+        await runtimeTimers.markFiredByTimerId({
+            tenantId: input.tenantId,
+            taskId: input.taskId,
+            token: boundary.token,
+            timerId: timer.timerId,
+            firedAt: new Date(firedAt),
+        });
+        return {
+            kind: 'timer',
+            token: boundary.token,
+            timerId: timer.timerId,
+            dueAt: timer.dueAt.toISOString(),
+            firedAt,
+            reason: 'child_timeout',
+            payload: timer.payload ?? {
+                token: boundary.token,
+                timeoutMs: boundary.timeoutMs,
+                childTaskId: boundary.childTaskId,
+                agentId: boundary.agentId,
+            },
+            idempotencyKey: timer.idempotencyKey,
+        };
+    }
+    await runtimeTimers.cancelTaskTimers({
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        token: boundary.token,
+    });
+    return normalizeWakeEvent('child', boundary.token, winner.payload);
 }
 
 async function waitForChildBoundaryEvent(
@@ -979,7 +1032,7 @@ async function scheduleBoundaryTimer(
     input: TaskTaskInput,
     boundary: TimerBoundary,
     runtimeTimers: RuntimeTimerRepository,
-    kind: 'token_expiry' | 'sleep'
+    kind: 'token_expiry' | 'sleep' | 'child_timeout'
 ): Promise<RuntimeTimerRecord> {
     const fireAt = boundary.kind === 'sleep' ? boundary.fireAt : boundary.expiresAt;
     if (fireAt === undefined) {
@@ -993,7 +1046,18 @@ async function scheduleBoundaryTimer(
         idempotencyKey: input.idempotencyKey,
         fireAt,
         kind,
-        ...(boundary.kind === 'sleep' && boundary.payload !== undefined ? { payload: boundary.payload } : {}),
+        ...(boundary.kind === 'sleep' && boundary.payload !== undefined
+            ? { payload: boundary.payload }
+            : boundary.kind === 'await_child'
+              ? {
+                    payload: {
+                        token: boundary.token,
+                        timeoutMs: boundary.timeoutMs,
+                        childTaskId: boundary.childTaskId,
+                        agentId: boundary.agentId,
+                    },
+                }
+              : {}),
     });
 }
 
@@ -1109,10 +1173,8 @@ async function findPersistedParentChildEvent(
             kind: 'child',
             token: boundary.token,
             childTaskId: typeof payload.childTaskId === 'string' ? payload.childTaskId : boundary.token,
-            output: {
-                ok: false,
-                error: payload.error,
-            },
+            outcome: 'failed',
+            error: payload.error as never,
             idempotencyKey: `${input.taskId}:child:${boundary.token}`,
         };
     }
@@ -1121,6 +1183,7 @@ async function findPersistedParentChildEvent(
         kind: 'child',
         token: boundary.token,
         childTaskId: typeof payload.childTaskId === 'string' ? payload.childTaskId : boundary.token,
+        outcome: 'completed',
         output: 'result' in payload ? payload.result : payload.resultPreview,
         idempotencyKey: `${input.taskId}:child:${boundary.token}`,
     };
@@ -1237,11 +1300,19 @@ function childWake(
     childTaskId: string,
     output: unknown
 ): RuntimeWakeEvent & { idempotencyKey?: string } {
+    const failed =
+        output !== null &&
+        typeof output === 'object' &&
+        !Array.isArray(output) &&
+        (output as { ok?: unknown }).ok === false;
     return {
         kind: 'child',
         token,
         childTaskId,
-        output,
+        outcome: failed ? 'failed' : 'completed',
+        ...(failed
+            ? { error: (output as { error?: unknown }).error as never }
+            : { output: output as never }),
         idempotencyKey: `${input.taskId}:child:${token}`,
     };
 }
@@ -1273,9 +1344,26 @@ async function findPersistedAwaitBoundary(
         }
 
         const payload = jsonObjectOrEmpty(row.payload);
-        const boundary = awaitableBoundaryFromTransition(payload.transition);
+        let boundary = awaitableBoundaryFromTransition(payload.transition);
         if (boundary === undefined) {
             return undefined;
+        }
+        if (boundary.kind === 'await_child' && boundary.expiresAt === undefined && deps.prisma?.wMSession) {
+            const session = await deps.prisma.wMSession.findUnique({
+                where: { tenantId_sessionId: { tenantId: input.tenantId, sessionId: input.taskId } },
+                select: { snapshot: true },
+            });
+            const snapshot = jsonObjectOrEmpty(session?.snapshot ?? null);
+            const pending = jsonObjectOrEmpty(snapshot.pending as JsonValue);
+            const tasks = jsonObjectOrEmpty(pending.tasks as JsonValue);
+            const entry = jsonObjectOrEmpty(tasks[boundary.token] as JsonValue);
+            boundary = {
+                ...boundary,
+                ...(typeof entry.expiresAt === 'string' ? { expiresAt: entry.expiresAt } : {}),
+                ...(typeof entry.timeoutMs === 'number' ? { timeoutMs: entry.timeoutMs } : {}),
+                ...(typeof entry.childTaskId === 'string' ? { childTaskId: entry.childTaskId } : {}),
+                ...(typeof entry.agentId === 'string' ? { agentId: entry.agentId } : {}),
+            };
         }
         return {
             boundary,
@@ -1307,7 +1395,14 @@ function awaitableBoundaryFromTransition(value: unknown): AwaitableBoundary | un
         return { kind: 'await_tool', token };
     }
     if (record.kind === 'await_child') {
-        return { kind: 'await_child', token };
+        return {
+            kind: 'await_child',
+            token,
+            ...(typeof record.expiresAt === 'string' ? { expiresAt: record.expiresAt } : {}),
+            ...(typeof record.timeoutMs === 'number' ? { timeoutMs: record.timeoutMs } : {}),
+            ...(typeof record.childTaskId === 'string' ? { childTaskId: record.childTaskId } : {}),
+            ...(typeof record.agentId === 'string' ? { agentId: record.agentId } : {}),
+        };
     }
     if (record.kind === 'await_event') {
         return { kind: 'await_event', token };
@@ -1333,11 +1428,17 @@ function normalizeWakeEvent(
     }
 
     if (eventKind === 'child') {
+        const output = 'output' in payload ? payload.output : payload.result;
+        const failed = payload.outcome === 'failed' || (output as { ok?: unknown } | undefined)?.ok === false;
         return {
             kind: 'child',
             token,
             childTaskId: typeof payload.childTaskId === 'string' ? payload.childTaskId : token,
-            output: 'output' in payload ? payload.output : payload.result,
+            outcome: failed ? 'failed' : 'completed',
+            ...(failed
+                ? { error: ('error' in payload ? payload.error : (output as { error?: unknown } | undefined)?.error) as never }
+                : { output: output as never }),
+            ...(typeof payload.completedAt === 'string' ? { completedAt: payload.completedAt } : {}),
             ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
         };
     }
@@ -1373,7 +1474,12 @@ function normalizeTimerWake(
         timerId: typeof payload.timerId === 'string' ? payload.timerId : fallback.timerId,
         dueAt: typeof payload.dueAt === 'string' ? payload.dueAt : fallback.dueAt.toISOString(),
         firedAt: typeof payload.firedAt === 'string' ? payload.firedAt : new Date().toISOString(),
-        reason: payload.reason === 'sleep_due' ? 'sleep_due' : 'input_timeout',
+        reason:
+            payload.reason === 'sleep_due'
+                ? 'sleep_due'
+                : payload.reason === 'child_timeout'
+                  ? 'child_timeout'
+                  : 'input_timeout',
         ...('payload' in payload ? { payload: payload.payload } : {}),
         idempotencyKey,
     };

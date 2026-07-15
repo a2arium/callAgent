@@ -241,22 +241,62 @@ export class TurnRunner {
 
                     if (tokensToCheck.size > 0) {
                         const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: -1 });
-                        const childCompletedEvents = events.filter((e: any) => e.type === 'task.child_completed');
+                        const childTerminalEvents = events.filter(
+                            (e: any) => e.type === 'task.child_completed' || e.type === 'task.child_failed'
+                        );
 
                         for (const token of tokensToCheck) {
-                            const completionEvent = childCompletedEvents.find((e: any) =>
+                            const terminalEvent = childTerminalEvents.find((e: any) =>
                                 (e.payload as any)?.token === token
                             );
 
-                            if (completionEvent) {
+                            if (terminalEvent) {
                                 const observationPredicate = (obs: EngineObservation) =>
-                                    obs?.kind === 'child.completed' &&
+                                    (obs?.kind === 'child.completed' || obs?.kind === 'child.failed') &&
                                     typeof obs === 'object' &&
                                     obs !== null &&
                                     (obs as any)?.payload &&
                                     (obs as any).payload.token === token;
 
-                                const completionResult = (completionEvent.payload as any)?.result;
+                                const terminalPayload = (terminalEvent.payload as any) ?? {};
+                                if (terminalEvent.type === 'task.child_failed') {
+                                    const rawError = terminalPayload.error;
+                                    const errorRecord = rawError !== null && typeof rawError === 'object'
+                                        ? rawError as Record<string, unknown>
+                                        : {};
+                                    const error = {
+                                        code: typeof errorRecord.code === 'string' ? errorRecord.code : 'CHILD_FAILED',
+                                        message: typeof errorRecord.message === 'string'
+                                            ? errorRecord.message
+                                            : String(rawError ?? 'Child failed.'),
+                                        ...(typeof errorRecord.timeoutMs === 'number'
+                                            ? { timeoutMs: errorRecord.timeoutMs }
+                                            : {}),
+                                    };
+                                    const childObservation: EngineObservation = {
+                                        source: 'child',
+                                        kind: 'child.failed',
+                                        payload: {
+                                            token,
+                                            childTaskId: terminalPayload.childTaskId,
+                                            agentId: terminalPayload.agentId,
+                                            error,
+                                        },
+                                        provenance: {
+                                            ts: new Date(terminalEvent.createdAt).getTime(),
+                                            turn: startTurnTotal,
+                                            id: token,
+                                            correlationId: token,
+                                        },
+                                    };
+                                    envInbox = InboxManager.addObservationToInboxIfMissing(
+                                        envInbox,
+                                        childObservation,
+                                        observationPredicate
+                                    );
+                                    continue;
+                                }
+                                const completionResult = terminalPayload.result;
                                 const cleanChildResult = TaskStateUtils.extractCleanChildResult(completionResult);
                                 const childPrisma = this.getSessionStorePrisma();
                                 const cache = childPrisma ? new AgentResultCache(childPrisma) : undefined;
@@ -270,13 +310,13 @@ export class TurnRunner {
                                     kind: 'child.completed',
                                     payload: {
                                         token,
-                                        childTaskId: cleanChildResult.childTaskId || (completionEvent.payload as any)?.childTaskId,
+                                        childTaskId: cleanChildResult.childTaskId || terminalPayload.childTaskId,
                                         result: childResultForParent,
-                                        agentId: (completionEvent.payload as any)?.agentId,
+                                        agentId: terminalPayload.agentId,
                                         executionMetadata: cleanChildResult.executionMetadata
                                     },
                                     provenance: {
-                                        ts: new Date(completionEvent.createdAt).getTime(),
+                                        ts: new Date(terminalEvent.createdAt).getTime(),
                                         turn: startTurnTotal, // Bug 1 Fix: Let loopRunner increment
                                         id: token,
                                         correlationId: token

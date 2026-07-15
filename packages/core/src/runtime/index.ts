@@ -17,6 +17,7 @@ export type {
     EnqueueResumeParams,
     EnqueueChildDispatchParams,
     ScheduleTimerParams,
+    CancelTimerParams,
     CancelParams,
     DispatchOutboxParams,
 } from './runtimeDriver.js';

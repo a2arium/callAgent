@@ -47,14 +47,23 @@ export type RuntimeResultCachePolicy = {
 export type RuntimeWakeEvent =
     | { kind: 'input'; token: string; value: unknown }
     | { kind: 'tool'; token: string; result: unknown }
-    | { kind: 'child'; token: string; childTaskId: string; output: unknown }
+    | {
+          kind: 'child';
+          token: string;
+          childTaskId: string;
+          outcome?: 'completed' | 'failed';
+          output?: unknown;
+          error?: { code: string; message: string; timeoutMs?: number };
+          completedAt?: string;
+          terminalClaimed?: boolean;
+      }
     | {
           kind: 'timer';
           token: string;
           timerId: string;
           dueAt: string;
           firedAt: string;
-          reason: 'input_timeout' | 'sleep_due';
+          reason: 'input_timeout' | 'sleep_due' | 'child_timeout';
           payload?: unknown;
       }
     | { kind: 'external'; token: string; type: string; data: unknown }
@@ -74,10 +83,11 @@ export type EnqueueChildDispatchParams = RuntimeDriverIds & {
 export type ScheduleTimerParams = RuntimeDriverIds & {
     token: string;
     fireAt: string;
-    kind: 'token_expiry' | 'sleep';
+    kind: 'token_expiry' | 'sleep' | 'child_timeout';
     payload?: unknown;
 };
 export type CancelParams = RuntimeDriverIds & { reason: string };
+export type CancelTimerParams = Pick<RuntimeDriverIds, 'tenantId' | 'taskId'> & { token: string };
 export type DispatchOutboxParams = {
     outboxRowId: string;
     eventType: string;
@@ -98,6 +108,7 @@ export type RuntimeDriver = {
     enqueueResume(params: EnqueueResumeParams): Promise<void>;
     enqueueChildDispatch(params: EnqueueChildDispatchParams): Promise<void>;
     scheduleTimer(params: ScheduleTimerParams): Promise<{ timerId: string }>;
+    cancelTimer?(params: CancelTimerParams): Promise<void>;
     cancel(params: CancelParams): Promise<void>;
     dispatchOutbox(params: DispatchOutboxParams): Promise<void>;
 };

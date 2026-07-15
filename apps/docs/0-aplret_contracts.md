@@ -1168,6 +1168,13 @@ Child-agent dispatch is an effect. It belongs in Execution.
 10. Learning writes a summarized child outcome into `MentalState`
 11. Policy decides the next intent
 
+When an asynchronous call configures `A2ACallOptions.timeout`, the deadline starts when
+`sendTaskToAgent` is invoked and is stored with the pending child. The deadline survives
+SQL-backed runtime restart. Completion and expiry atomically consume the same token, so
+exactly one terminal observation resumes the parent. Expiry emits `child.failed` with
+`error.code = 'CHILD_TIMEOUT'` and `error.timeoutMs`; a later child result is diagnostic
+only. The Hatchet missing-wake watchdog is separate and uses `CHILD_WAKE_TIMEOUT`.
+
 ### Inline child call (blocking)
 
 If the framework supports `awaitCompletion: true`, it MAY be used for tool-like child calls.

@@ -12,6 +12,7 @@ import { InProcessRuntimeDriver } from './inProcessRuntimeDriver.js';
 import type { RuntimeDriver } from './runtimeDriver.js';
 import { TurnRunnerSegmentExecutor } from './turnRunnerSegmentExecutor.js';
 import type { TurnExecutor } from './turnExecutor.js';
+import { RuntimeTimerRepository } from './runtimeTimer.js';
 
 export type InProcessRuntimeStack = {
     turnExecutor: TurnExecutor;
@@ -35,6 +36,11 @@ export function buildInProcessRuntimeStack(
         createContext: params.createContext,
         isStreaming: params.isStreaming,
     });
-    const runtimeDriver = new InProcessRuntimeDriver({ turnExecutor });
+    const prisma = (params.sessionManager as unknown as { store?: { prisma?: { runtimeTimer?: unknown } } })
+        .store?.prisma;
+    const runtimeTimers = prisma?.runtimeTimer
+        ? new RuntimeTimerRepository(prisma as never)
+        : undefined;
+    const runtimeDriver = new InProcessRuntimeDriver({ turnExecutor, runtimeTimers });
     return { turnExecutor, runtimeDriver };
 }

@@ -25,14 +25,23 @@ export type SegmentTaskWake =
 export type SegmentWakeEvent =
     | { kind: 'input'; token: string; value: JsonValue }
     | { kind: 'tool'; token: string; result: JsonValue }
-    | { kind: 'child'; token: string; childTaskId: string; output: JsonValue }
+    | {
+          kind: 'child';
+          token: string;
+          childTaskId: string;
+          outcome?: 'completed' | 'failed';
+          output?: JsonValue;
+          error?: JsonValue;
+          completedAt?: string;
+          terminalClaimed?: boolean;
+      }
     | {
           kind: 'timer';
           token: string;
           timerId: string;
           dueAt: string;
           firedAt: string;
-          reason: 'input_timeout' | 'sleep_due';
+          reason: 'input_timeout' | 'sleep_due' | 'child_timeout';
           payload?: JsonValue;
       }
     | { kind: 'external'; token: string; type: string; data: JsonValue }
@@ -50,7 +59,14 @@ export type SegmentTaskInput = JsonObject & {
 export type SegmentTaskBoundary =
     | { kind: 'await_input'; token: string; expiresAt?: string }
     | { kind: 'await_tool'; token: string }
-    | { kind: 'await_child'; token: string }
+    | {
+          kind: 'await_child';
+          token: string;
+          expiresAt?: string;
+          timeoutMs?: number;
+          childTaskId?: string;
+          agentId?: string;
+      }
     | { kind: 'await_event'; token: string }
     | { kind: 'sleep'; token: string; fireAt: string; timerId?: string; payload?: JsonValue }
     | { kind: 'paused'; reason: string }

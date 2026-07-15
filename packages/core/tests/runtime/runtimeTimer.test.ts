@@ -35,6 +35,7 @@ describe('runtime timer helpers', () => {
     it('maps timer kinds to timer expired reasons', () => {
         expect(timerKindToReason('token_expiry')).toBe('input_timeout');
         expect(timerKindToReason('sleep')).toBe('sleep_due');
+        expect(timerKindToReason('child_timeout')).toBe('child_timeout');
     });
 
     it('does not reopen fired timers when schedule is replayed', async () => {
@@ -95,5 +96,30 @@ describe('runtime timer helpers', () => {
 
         expect(scheduled.status).toBe('fired');
         expect(upsert).not.toHaveBeenCalled();
+    });
+
+    it('reconciles scheduled timers and expired firing leases', async () => {
+        const findMany = jest.fn(async () => []);
+        const repository = new RuntimeTimerRepository({
+            runtimeTimer: {
+                findFirst: jest.fn(),
+                upsert: jest.fn(),
+                updateMany: jest.fn(),
+                update: jest.fn(),
+                findMany,
+            },
+        } as never);
+
+        await repository.listScheduled({ take: 25 });
+
+        expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: {
+                OR: [
+                    { status: 'scheduled' },
+                    { status: 'firing', fireLeaseUntil: { lt: expect.any(Date) } },
+                ],
+            },
+            take: 25,
+        }));
     });
 });

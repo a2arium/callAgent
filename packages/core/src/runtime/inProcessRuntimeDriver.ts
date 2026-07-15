@@ -12,6 +12,7 @@
 import { logger } from '@a2arium/callagent-utils';
 import type {
     CancelParams,
+    CancelTimerParams,
     DispatchOutboxParams,
     EnqueueChildDispatchParams,
     EnqueueResumeParams,
@@ -31,6 +32,8 @@ import {
     deriveRuntimeTimerId,
     deriveRuntimeTimerIdempotencyKey,
     timerKindToReason,
+    RuntimeTimerRepository,
+    type RuntimeTimerKind,
 } from './runtimeTimer.js';
 
 const log = logger.createLogger({ prefix: 'InProcessRuntimeDriver' });
@@ -67,6 +70,9 @@ export type InProcessRuntimeDriverDeps = {
     now?: () => number;
     /** Timer scheduler; injectable for tests. */
     scheduler?: TimerScheduler;
+    /** SQL timer repository used to survive runtime recreation. */
+    runtimeTimers?: RuntimeTimerRepository;
+    timerReconcileIntervalMs?: number;
 };
 
 /** Maps a driver wake event to the kernel's {@link TurnWake}. */
@@ -95,12 +101,14 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private readonly onSegmentError: (error: unknown, params: RunSegmentParams) => void;
     private readonly now: () => number;
     private readonly scheduler: TimerScheduler;
+    private readonly runtimeTimers?: RuntimeTimerRepository;
 
     /** In-flight background work, so tests and shutdown can await quiescence. */
     private readonly inFlight = new Set<Promise<unknown>>();
     /** Scheduled timers keyed by timerId, plus a reverse index per task. */
     private readonly timers = new Map<string, unknown>();
     private readonly timersByTask = new Map<string, Set<string>>();
+    private readonly timerMeta = new Map<string, { tenantId: string; taskId: string; token: string }>();
 
     constructor(deps: InProcessRuntimeDriverDeps) {
         this.turnExecutor = deps.turnExecutor;
@@ -117,6 +125,23 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 }));
         this.now = deps.now ?? (() => Date.now());
         this.scheduler = deps.scheduler ?? defaultScheduler;
+        this.runtimeTimers = deps.runtimeTimers;
+        if (this.runtimeTimers !== undefined) {
+            void this.reconcilePersistedTimers().catch((error) =>
+                log.warn('Persisted timer reconciliation failed', {
+                    error: error instanceof Error ? error.message : String(error),
+                })
+            );
+            const interval = setInterval(
+                () => void this.reconcilePersistedTimers().catch((error) =>
+                    log.warn('Periodic timer reconciliation failed', {
+                        error: error instanceof Error ? error.message : String(error),
+                    })
+                ),
+                deps.timerReconcileIntervalMs ?? 1_000
+            );
+            interval.unref?.();
+        }
     }
 
     /** Composition-root access for worker bootstrap (Phase 0.4). */
@@ -203,13 +228,22 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     }
 
     async scheduleTimer(params: ScheduleTimerParams): Promise<{ timerId: string }> {
-        const timerId = deriveRuntimeTimerId({
+        const persisted = await this.runtimeTimers?.schedule({ ...params, rootTaskId: params.taskId });
+        const timerId = persisted?.timerId ?? deriveRuntimeTimerId({
             tenantId: params.tenantId,
             taskId: params.taskId,
             token: params.token,
             fireAt: params.fireAt,
             kind: params.kind,
         });
+        if (persisted === undefined || (persisted.status !== 'fired' && persisted.status !== 'canceled')) {
+            this.scheduleLocalTimer(params, timerId);
+        }
+        return { timerId };
+    }
+
+    private scheduleLocalTimer(params: ScheduleTimerParams, timerId: string): void {
+        if (this.timers.has(timerId)) return;
         const delayMs = Math.max(0, Date.parse(params.fireAt) - this.now());
 
         const handle = this.scheduler.set(() => {
@@ -224,21 +258,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 reason: timerKindToReason(params.kind),
                 payload: params.payload,
             };
-            void this.enqueueResume({
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                agentId: params.agentId,
-                traceId: params.traceId,
-                spanId: params.spanId,
-                token: params.token,
-                idempotencyKey: deriveRuntimeTimerIdempotencyKey({
-                    tenantId: params.tenantId,
-                    taskId: params.taskId,
-                    token: params.token,
-                    timerId,
-                }),
-                event,
-            });
+            this.trackTimerFire(params, timerId, event);
         }, delayMs);
 
         this.timers.set(timerId, handle);
@@ -248,7 +268,109 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             this.timersByTask.set(params.taskId, perTask);
         }
         perTask.add(timerId);
-        return { timerId };
+        this.timerMeta.set(timerId, {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            token: params.token,
+        });
+    }
+
+    private async fireTimer(
+        params: ScheduleTimerParams,
+        timerId: string,
+        event: Extract<RuntimeWakeEvent, { kind: 'timer' }>
+    ): Promise<void> {
+        const lease = await this.runtimeTimers?.acquireFireLease({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            token: params.token,
+            timerId,
+            leaseTtlMs: 60_000,
+        });
+        if (this.runtimeTimers !== undefined && lease === null) return;
+        try {
+            await this.runSegmentAwait({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId,
+                idempotencyKey: deriveRuntimeTimerIdempotencyKey({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    token: params.token,
+                    timerId,
+                }),
+                wake: wakeEventToTurnWake(event),
+            });
+            if (lease !== undefined && lease !== null) {
+                await this.runtimeTimers?.markFired({
+                    id: lease.timer.id,
+                    fireLeaseId: lease.fireLeaseId,
+                    firedAt: new Date(event.firedAt),
+                });
+            }
+        } catch (error) {
+            if (lease !== undefined && lease !== null) {
+                await this.runtimeTimers?.markFailed({
+                    id: lease.timer.id,
+                    fireLeaseId: lease.fireLeaseId,
+                    error,
+                });
+            }
+            throw error;
+        }
+    }
+
+    private trackTimerFire(
+        params: ScheduleTimerParams,
+        timerId: string,
+        event: Extract<RuntimeWakeEvent, { kind: 'timer' }>
+    ): void {
+        const tracked = this.fireTimer(params, timerId, event)
+            .catch((error) => {
+                log.warn('Timer fire failed', {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    token: params.token,
+                    timerId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            })
+            .finally(() => this.inFlight.delete(tracked));
+        this.inFlight.add(tracked);
+    }
+
+    private async reconcilePersistedTimers(): Promise<void> {
+        const scheduled = await this.runtimeTimers?.listScheduled({ take: 1_000 });
+        for (const timer of scheduled ?? []) {
+            this.scheduleLocalTimer(
+                {
+                    tenantId: timer.tenantId,
+                    taskId: timer.taskId,
+                    agentId: timer.agentId ?? undefined,
+                    token: timer.token,
+                    fireAt: timer.dueAt.toISOString(),
+                    kind: timer.kind as RuntimeTimerKind,
+                    payload: timer.payload ?? undefined,
+                    idempotencyKey: timer.idempotencyKey,
+                },
+                timer.timerId
+            );
+        }
+    }
+
+    async cancelTimer(params: CancelTimerParams): Promise<void> {
+        for (const [timerId, meta] of this.timerMeta.entries()) {
+            if (
+                meta.tenantId === params.tenantId &&
+                meta.taskId === params.taskId &&
+                meta.token === params.token
+            ) {
+                const handle = this.timers.get(timerId);
+                if (handle !== undefined) this.scheduler.clear(handle);
+                this.forgetTimer(meta.taskId, timerId);
+            }
+        }
+        await this.runtimeTimers?.cancelTaskTimers(params);
     }
 
     async cancel(params: CancelParams): Promise<void> {
@@ -279,6 +401,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
         }
         this.timers.clear();
         this.timersByTask.clear();
+        this.timerMeta.clear();
     }
 
     private runSegmentInBackground(params: RunSegmentParams): void {
@@ -307,12 +430,14 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 this.scheduler.clear(handle);
                 this.timers.delete(timerId);
             }
+            this.timerMeta.delete(timerId);
         }
         this.timersByTask.delete(taskId);
     }
 
     private forgetTimer(taskId: string, timerId: string): void {
         this.timers.delete(timerId);
+        this.timerMeta.delete(timerId);
         const perTask = this.timersByTask.get(taskId);
         if (perTask !== undefined) {
             perTask.delete(timerId);

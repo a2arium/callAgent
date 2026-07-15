@@ -494,16 +494,7 @@ describe('TaskEngine orchestration coverage', () => {
         });
 
         const parentEvents = store.getEvents('t', 'parent-task');
-        expect(parentEvents).toEqual(expect.arrayContaining([
-            expect.objectContaining({
-                type: 'task.child_failed',
-                payload: expect.objectContaining({
-                    token: 'child-token',
-                    childTaskId: 'child-task',
-                    error: 'Child task canceled: operator child stop',
-                }),
-            }),
-        ]));
+        expect(parentEvents).toEqual([]);
         expect(enqueueResume).toHaveBeenCalledWith({
             tenantId: 't',
             taskId: 'parent-task',
@@ -514,10 +505,12 @@ describe('TaskEngine orchestration coverage', () => {
                 kind: 'child',
                 token: 'child-token',
                 childTaskId: 'child-task',
-                output: {
-                    ok: false,
-                    error: 'Child task canceled: operator child stop',
+                outcome: 'failed',
+                error: {
+                    code: 'CHILD_CANCELED',
+                    message: 'Child task canceled: operator child stop',
                 },
+                completedAt: expect.any(String),
             },
         });
         expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
@@ -1161,7 +1154,7 @@ describe('TaskEngine orchestration coverage', () => {
         expect((savedMeta as any)?.awaiting).toBeUndefined();
     });
 
-    test('await_child resumes when pending entry removed before metadata saved', async () => {
+    test('await_child ignores completion when pending entry was already removed', async () => {
         class EntryClearingStore extends FakeSessionStore {
             private loadCount = 0;
             async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -1217,13 +1210,13 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
-        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
-        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect(executeTurnSpy).toHaveBeenCalledTimes(0);
+        expect(afterTurn).toBe(initialTurn);
         expect((afterSnap?.snapshot as any)?.pending?.tasks?.['child-early']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
     });
 
-    test('await_child resumes even when awaiting metadata and pending entry removed', async () => {
+    test('await_child does not resume from awaiting metadata after its pending entry is removed', async () => {
         class AwaitingDroppingStore extends FakeSessionStore {
             private loadCount = 0;
             async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -1276,8 +1269,8 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
-        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
-        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect(executeTurnSpy).toHaveBeenCalledTimes(0);
+        expect(afterTurn).toBe(initialTurn);
     });
 
     test('offloadArtifacts deduplicates repeated LocalArtifacts', async () => {
@@ -1618,7 +1611,10 @@ describe('TaskEngine orchestration coverage', () => {
             expect.objectContaining({ input: 1 }),
             expect.objectContaining({ parentTenantId: 't', parentTaskId: 'session', skipParentNotification: true })
         );
-        expect(handleChildSpy).not.toHaveBeenCalled();
+        expect(handleChildSpy).toHaveBeenCalledWith(expect.objectContaining({
+            parentTaskId: 'session',
+            suppressResume: true,
+        }));
         const saved = store.getSnapshot('t', 'session')?.snapshot as any;
         const token = Object.keys((saved?.pending as any)?.tasks || {})[0];
         expect(ctx.__activeLoopInbox.current.some((o: any) => o?.payload?.token === token)).toBe(true);

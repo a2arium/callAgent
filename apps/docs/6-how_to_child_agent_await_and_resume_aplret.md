@@ -18,7 +18,7 @@ Use this guide when an agent needs to delegate work to a child agent and correct
 
 ## Phase 3: `sendTaskToAgent` and threads
 
-`sendTaskToAgent` is implemented over **`ctx.conversation.startThread` / `send`** (plus A2A). That means a **durable thread message** and inbox observations align with direct conversation usage. **`A2ACallOptions.timeout` is enforced** (maps to conversation-level timeouts / races).
+`sendTaskToAgent` is implemented over **`ctx.conversation.startThread` / `send`** (plus A2A). That means a **durable thread message** and inbox observations align with direct conversation usage. **`A2ACallOptions.timeout` is enforced across the complete asynchronous child lifecycle**, including a child suspended on an asynchronous tool.
 
 To continue an existing thread across multiple child calls, pass **`A2ACallOptions.conversation: ThreadRef`** (thread-only). The child can read the `ThreadRef` from its inbox and answer with **`ctx.conversation.send(threadRef, ...)`**.
 
@@ -237,10 +237,16 @@ Policy will now see `profileStatus` and branch correctly, without touching contr
 
 ### Pattern C: timeout
 
-If the runtime supports child timeouts:
+When `sendTaskToAgent(..., { awaitCompletion: false, timeout })` sets a positive timeout:
 
-- runtime injects `source:'child', kind:'child.failed'` with timeout metadata
+- runtime injects `source:'child', kind:'child.failed'` with correlated `token`, `agentId`, and `childTaskId`
+- `payload.error` is `{ code: 'CHILD_TIMEOUT', message, timeoutMs }`
+- completion and expiry race atomically; only one terminal observation resumes the parent
+- a result arriving after expiry is retained as `task.child_late_completion` diagnostics and never resumes the parent again
 - Perception normalizes and Learning writes a failure fact
+
+`CHILD_WAKE_TIMEOUT` is different: it is the Hatchet operational watchdog for a missing
+wake after child execution, not the configured per-call lifecycle deadline.
 
 ## Common bugs and how to spot them with TurnTrace
 
@@ -319,4 +325,3 @@ Topic invites are conversation effects, not child-await primitives:
 - receive invite as `conversation/topic.invite.received` observation on a later turn
 - optionally auto-join when runtime manifest sets `communication.autoJoinInvitedTopics = true`
 - use `ctx.conversation.join(...)` or `ctx.conversation.decline(...)` in Execution; never from Policy directly
-

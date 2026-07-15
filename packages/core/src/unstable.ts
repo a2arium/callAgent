@@ -40,6 +40,16 @@ export {
 export { makeSafeEventPreview } from './orchestration/safeEventPreview.js';
 export { prepareChildResultForPersistence } from './orchestration/childResultPersistence.js';
 export {
+    claimChildTerminalInSnapshot,
+    coordinateChildTerminal,
+    childTerminalEventPayload,
+    getChildTerminal,
+    type ChildTerminalClaim,
+    type ChildTerminalError,
+    type ChildTerminalRequest,
+    type ChildTerminalSession,
+} from './orchestration/ChildTerminalCoordinator.js';
+export {
     dispatchOutboxRow,
     deleteOutboxRow,
     handleOutboxDispatchFailure,

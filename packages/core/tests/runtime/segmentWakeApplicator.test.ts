@@ -31,6 +31,15 @@ describe('applyWakeToSnapshot', () => {
         pending: {
             inputs: { 'tok-in': { schema: { type: 'string' } } },
             tools: { 'tok-tool': { name: 'search', args: {} } },
+            tasks: {
+                'child-tok': {
+                    target: 'child-agent',
+                    agentId: 'child-agent',
+                    childTaskId: 'child-1',
+                    handlers: {},
+                },
+            },
+            children: { 'child-tok': { agent: 'child-agent' } },
         },
         inbox: InboxManager.normalizeInbox(undefined),
     };
@@ -107,6 +116,225 @@ describe('applyWakeToSnapshot', () => {
         expect(prepared.trigger).toBe('resume');
         const inbox = prepared.snapshot.inbox as { current: Array<{ kind: string }> };
         expect(inbox.current[0]?.kind).toBe('child.completed');
+        expect((prepared.snapshot as any).pending.children['child-tok']).toBeUndefined();
+    });
+
+    it('child failure stays child.failed instead of child.completed with ok:false', () => {
+        const prepared = applyWakeToSnapshot(base, {
+            trigger: 'child',
+            event: {
+                kind: 'child',
+                token: 'child-tok',
+                childTaskId: 'child-1',
+                outcome: 'failed',
+                error: { code: 'CHILD_FAILED', message: 'boom' },
+            },
+        });
+        expect((prepared.snapshot as any).inbox.current).toEqual([
+            expect.objectContaining({
+                kind: 'child.failed',
+                payload: expect.objectContaining({
+                    token: 'child-tok',
+                    error: { code: 'CHILD_FAILED', message: 'boom' },
+                }),
+            }),
+        ]);
+        expect((prepared.snapshot as any).pending.tasks['child-tok']).toBeUndefined();
+        expect((prepared.snapshot as any).pending.children['child-tok']).toBeUndefined();
+    });
+
+    it('preserves an autoClearToken:false control task as terminal', () => {
+        const retained = {
+            ...base,
+            pending: {
+                ...base.pending,
+                tasks: {
+                    'child-tok': {
+                        target: 'child-agent', childTaskId: 'child-1', handlers: {},
+                        options: { autoClearToken: false, setToken: true, tokenPath: 'child.token' },
+                    },
+                },
+            },
+        };
+        const prepared = applyWakeToSnapshot(retained, {
+            trigger: 'child',
+            event: {
+                kind: 'child', token: 'child-tok', childTaskId: 'child-1',
+                completedAt: '2026-01-01T00:00:00.000Z', output: { ok: true },
+            },
+        });
+        expect((prepared.snapshot as any).pending.tasks['child-tok']).toMatchObject({
+            terminal: { kind: 'completed' },
+            options: { autoClearToken: false },
+        });
+    });
+
+    it('child timeout atomically wins once and removes durable pending state', () => {
+        const timedBase = {
+            ...base,
+            pending: {
+                ...base.pending,
+                tasks: {
+                    'child-tok': {
+                        target: 'child-agent',
+                        agentId: 'child-agent',
+                        childTaskId: 'child-1',
+                        timeoutMs: 50,
+                        expiresAt: '2026-01-01T00:00:00.050Z',
+                        handlers: {},
+                    },
+                },
+            },
+        };
+        const wake = {
+            trigger: 'timer' as const,
+            event: {
+                kind: 'timer' as const,
+                token: 'child-tok',
+                timerId: 'timer-child',
+                dueAt: '2026-01-01T00:00:00.050Z',
+                firedAt: '2026-01-01T00:00:00.051Z',
+                reason: 'child_timeout' as const,
+                payload: { timeoutMs: 50, childTaskId: 'child-1', agentId: 'child-agent' },
+            },
+        };
+        const winner = applyWakeToSnapshot(timedBase, wake);
+        const loser = applyWakeToSnapshot(winner.snapshot, wake);
+        expect(winner.skipTurn).toBe(false);
+        expect((winner.snapshot as any).inbox.current[0]).toMatchObject({
+            kind: 'child.failed',
+            payload: {
+                token: 'child-tok',
+                agentId: 'child-agent',
+                childTaskId: 'child-1',
+                error: { code: 'CHILD_TIMEOUT', timeoutMs: 50 },
+            },
+        });
+        expect((winner.snapshot as any).pending.tasks['child-tok']).toBeUndefined();
+        expect((winner.snapshot as any).pending.children['child-tok']).toBeUndefined();
+        expect(loser.skipTurn).toBe(true);
+    });
+
+    it('replaces a stale terminal inbox item with the authoritative claim winner', () => {
+        const staleCompletion = {
+            source: 'child' as const,
+            kind: 'child.completed' as const,
+            payload: { token: 'child-tok', result: { stale: true } },
+            provenance: { ts: 0, turn: 1, id: 'child-tok', correlationId: 'child-tok' },
+        };
+        const timedBase = {
+            ...base,
+            pending: {
+                ...base.pending,
+                tasks: {
+                    'child-tok': {
+                        target: 'child-agent', timeoutMs: 50,
+                        expiresAt: '2026-01-01T00:00:00.050Z', handlers: {},
+                    },
+                },
+            },
+            inbox: { current: [staleCompletion], all: [staleCompletion] },
+        };
+
+        const prepared = applyWakeToSnapshot(timedBase, {
+            trigger: 'timer',
+            event: {
+                kind: 'timer', token: 'child-tok', timerId: 'timer-child',
+                dueAt: '2026-01-01T00:00:00.050Z', firedAt: '2026-01-01T00:00:00.051Z',
+                reason: 'child_timeout', payload: { timeoutMs: 50 },
+            },
+        });
+
+        expect((prepared.snapshot as any).inbox.current).toHaveLength(1);
+        expect((prepared.snapshot as any).inbox.all).toHaveLength(1);
+        expect((prepared.snapshot as any).inbox.current[0]).toMatchObject({
+            kind: 'child.failed',
+            payload: { token: 'child-tok', error: { code: 'CHILD_TIMEOUT' } },
+        });
+    });
+
+    it('uses completion time to decide the deadline race', () => {
+        const timedBase = {
+            ...base,
+            pending: {
+                ...base.pending,
+                tasks: {
+                    'child-tok': {
+                        target: 'child-agent',
+                        timeoutMs: 50,
+                        expiresAt: '2026-01-01T00:00:00.050Z',
+                        handlers: {},
+                    },
+                },
+            },
+        };
+        const before = applyWakeToSnapshot(timedBase, {
+            trigger: 'child',
+            event: {
+                kind: 'child', token: 'child-tok', childTaskId: 'child-1',
+                completedAt: '2026-01-01T00:00:00.049Z', output: { ok: true },
+            },
+        });
+        const atDeadline = applyWakeToSnapshot(timedBase, {
+            trigger: 'child',
+            event: {
+                kind: 'child', token: 'child-tok', childTaskId: 'child-1',
+                completedAt: '2026-01-01T00:00:00.050Z', output: { ok: true },
+            },
+        });
+        expect((before.snapshot as any).inbox.current[0].kind).toBe('child.completed');
+        expect((atDeadline.snapshot as any).inbox.current[0]).toMatchObject({
+            kind: 'child.failed',
+            payload: { error: { code: 'CHILD_TIMEOUT', timeoutMs: 50 } },
+        });
+    });
+
+    it('makes concurrent timeout workers idempotent across CAS retries', async () => {
+        let version = BigInt(1);
+        let snapshot: Record<string, unknown> = {
+            meta: { turn: 1, agentId: 'agent-a' },
+            pending: {
+                tasks: {
+                    child: {
+                        target: 'child-agent', childTaskId: 'child-1', timeoutMs: 50,
+                        expiresAt: '2026-01-01T00:00:00.050Z', handlers: {},
+                    },
+                },
+                children: { child: { agent: 'child-agent' } },
+            },
+            inbox: InboxManager.normalizeInbox(undefined),
+        };
+        const appended: string[] = [];
+        const sessionManager = {
+            load: async () => ({ snapshot, wmVersion: version, agentId: 'agent-a' }),
+            saveSnapshot: async (params: { expectedWmVersion: bigint; snapshot: Record<string, unknown> }) => {
+                await Promise.resolve();
+                if (params.expectedWmVersion !== version) throw new Error('CAS_MISMATCH');
+                snapshot = params.snapshot;
+                version += BigInt(1);
+                return { wmVersion: version };
+            },
+            appendEvent: async (_tenantId: string, _taskId: string, type: string) => {
+                appended.push(type);
+            },
+        };
+        const wake = {
+            trigger: 'timer' as const,
+            event: {
+                kind: 'timer' as const, token: 'child', timerId: 'timer-child',
+                dueAt: '2026-01-01T00:00:00.050Z', firedAt: '2026-01-01T00:00:00.060Z',
+                reason: 'child_timeout' as const,
+                payload: { timeoutMs: 50, childTaskId: 'child-1', agentId: 'child-agent' },
+            },
+        };
+        const results = await Promise.all([
+            prepareSegmentWake(sessionManager as never, { tenantId: 't', taskId: 'p', wake }),
+            prepareSegmentWake(sessionManager as never, { tenantId: 't', taskId: 'p', wake }),
+        ]);
+        expect(results.filter((result) => result.skipTurn !== true)).toHaveLength(1);
+        expect(results.filter((result) => result.skipTurn === true)).toHaveLength(1);
+        expect(appended).toEqual(['task.child_failed']);
+        expect((snapshot as any).inbox.all.filter((entry: any) => entry.kind === 'child.failed')).toHaveLength(1);
     });
 
     it('child wake hydrates artifact markers before staging child.completed', () => {

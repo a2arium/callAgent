@@ -383,7 +383,19 @@ export class A2AService implements IA2AService {
                 awaitCompletion: (options as any).awaitCompletion,
                 skipParentNotification: skipNotification
             });
-            if (options.parentTenantId && options.parentTaskId && options.parentChildToken && !skipNotification) {
+            const taskState = isTaskEntityLike(result) ? result.status?.state : undefined;
+            const childIsTerminal =
+                taskState === undefined ||
+                taskState === 'completed' ||
+                taskState === 'failed' ||
+                taskState === 'canceled';
+            if (
+                childIsTerminal &&
+                options.parentTenantId &&
+                options.parentTaskId &&
+                options.parentChildToken &&
+                !skipNotification
+            ) {
                 const deliverCompletion = async () => {
                     await eng.handleChildCompleted({
                         tenantId: options.parentTenantId!,
@@ -417,33 +429,7 @@ export class A2AService implements IA2AService {
                         });
                         // Do nothing - ApiBinder logic took care of it
                     } else {
-                        // Original behavior: Stage synchronously + defer notification
-                        // ✅ FIX: Stage observation synchronously BEFORE deferring resume
-                        // This ensures the observation is available when the parent resumes, even for synchronous completions
-                        a2aLogger.debug('Staging child completion observation synchronously', {
-                            parentTaskId: options.parentTaskId,
-                            childToken: options.parentChildToken
-                        });
-                        try {
-                            await eng.stageChildCompletionObservation({
-                                tenantId: options.parentTenantId!,
-                                parentTaskId: options.parentTaskId!,
-                                childToken: options.parentChildToken!,
-                                result,
-                                childAgentId: targetPlugin.resolved.agentCard.name
-                            });
-                            a2aLogger.debug('Successfully staged child completion observation', {
-                                parentTaskId: options.parentTaskId,
-                                childToken: options.parentChildToken
-                            });
-                        } catch (stageError) {
-                            a2aLogger.warn('Failed to stage child completion observation synchronously', {
-                                error: stageError instanceof Error ? stageError.message : String(stageError),
-                                parentTaskId: options.parentTaskId
-                            });
-                        }
-
-                        // Defer the resume to next turn to ensure observation is available
+                        // The terminal coordinator stages and consumes the token atomically.
                         queueMicrotask(() => {
                             const notifyPromise = deliverCompletion().catch(notifyError => {
                                 a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {

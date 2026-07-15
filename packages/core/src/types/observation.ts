@@ -30,7 +30,8 @@ export type ObservationProvenance = z.infer<typeof ObservationProvenanceSchema>;
 
 export const ExecErrorPayloadSchema = z.object({
     code: z.string(),
-    message: z.string()
+    message: z.string(),
+    timeoutMs: z.number().nonnegative().optional()
 });
 
 export type ExecErrorPayload = z.infer<typeof ExecErrorPayloadSchema>;
@@ -62,7 +63,7 @@ export const ChildEnvelopeSchema = z.object({
         rewards: z.unknown().optional(),
         state: z.string().optional(),
         timestamp: z.string().optional(),
-        origin: z.enum(['cache']).optional()
+        origin: z.enum(['cache', 'runtime']).optional()
     }).optional()
 });
 

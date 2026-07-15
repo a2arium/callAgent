@@ -114,6 +114,8 @@ import {
     prepareChildResultsInInboxForPersistence,
 } from './childResultPersistence.js';
 import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
+import { claimChildTerminalInSnapshot, getChildTerminal } from './ChildTerminalCoordinator.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 export type {
     TaskEntity,
@@ -1026,6 +1028,7 @@ export class TaskEngine {
             conversationService: this.conversationService,
             eventBus: this.eventBus,
             enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),
+            scheduleChildTimeout: (p) => this.runtimeDriver.scheduleTimer(p),
         });
 
         this.turnRunner = new TurnRunner(
@@ -2285,7 +2288,10 @@ export class TaskEngine {
             parentTaskId,
             childToken: parentChildToken,
             childTaskId: params.taskId,
-            error: new Error(`Child task canceled: ${params.reason}`),
+            error: {
+                code: 'CHILD_CANCELED',
+                message: `Child task canceled: ${params.reason}`,
+            },
         });
     }
 
@@ -3574,8 +3580,9 @@ export class TaskEngine {
      * Route child completion to parent's durable handler using pending task mappings.
      * Provide either childToken (preferred correlation) or childTaskId.
      */
-    async handleChildCompleted(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }): Promise<void> {
+    async handleChildCompleted(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; suppressResume?: boolean }): Promise<void> {
         const { tenantId, parentTaskId, childToken, childTaskId, result, childAgentId } = params;
+        const completionReceivedAt = new Date().toISOString();
         const inflightKey = `${parentTaskId}:${childToken ?? childTaskId ?? 'n/a'}`;
         const callCount = (this.childCompletionInFlight.get(inflightKey) ?? 0) + 1;
         this.childCompletionInFlight.set(inflightKey, callCount);
@@ -3602,20 +3609,80 @@ export class TaskEngine {
             const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
             if (!token) return;
             const entry = tasks[token] as any;
+            const priorTerminal = getChildTerminal(base, token);
+            if (priorTerminal !== undefined) {
+                if (priorTerminal.error?.code === 'CHILD_TIMEOUT') {
+                    defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine' });
+                    await this.sessionManager?.appendEvent(
+                        tenantId,
+                        parentTaskId,
+                        'task.child_late_completion',
+                        {
+                            token,
+                            childTaskId: childTaskId ?? priorTerminal.childTaskId,
+                            agentId: childAgentId ?? priorTerminal.agentId,
+                            completedAt: new Date().toISOString(),
+                            resultPreview: makeSafeEventPreview(result),
+                        }
+                    );
+                }
+                return;
+            }
+            const expiresAtMs = typeof entry?.expiresAt === 'string' ? Date.parse(entry.expiresAt) : Number.NaN;
+            if (entry && Number.isFinite(expiresAtMs) && Date.now() >= expiresAtMs) {
+                const firedAt = new Date().toISOString();
+                const timeoutWake = {
+                    tenantId,
+                    taskId: parentTaskId,
+                    agentId: (base as { meta?: { agentId?: string } }).meta?.agentId ?? (snap as any).agentId,
+                    token,
+                    idempotencyKey: `${parentTaskId}:child-timeout:${token}`,
+                    event: {
+                        kind: 'timer' as const,
+                        token,
+                        timerId: `${parentTaskId}:child-timeout:${token}`,
+                        dueAt: entry.expiresAt,
+                        firedAt,
+                        reason: 'child_timeout' as const,
+                        payload: {
+                            token,
+                            timeoutMs: entry.timeoutMs,
+                            childTaskId: childTaskId ?? entry.childTaskId,
+                            agentId: childAgentId ?? entry.agentId ?? entry.target,
+                        },
+                    },
+                };
+                try {
+                    if (isSyncRuntimeDriver(this.runtimeDriver)) {
+                        await this.runtimeDriver.enqueueResumeSync(timeoutWake);
+                    } else {
+                        await this.runtimeDriver.enqueueResume(timeoutWake);
+                    }
+                } catch (timeoutResumeError) {
+                    log.warn('Child timeout was claimed but parent resume failed', {
+                        parentTaskId,
+                        token,
+                        error: timeoutResumeError instanceof Error
+                            ? timeoutResumeError.message
+                            : String(timeoutResumeError),
+                    });
+                }
+                defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine' });
+                await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_late_completion', {
+                    token,
+                    childTaskId: childTaskId ?? entry.childTaskId,
+                    agentId: childAgentId ?? entry.agentId ?? entry.target,
+                    completedAt: firedAt,
+                    resultPreview: makeSafeEventPreview(result),
+                });
+                return;
+            }
             const hadPendingEntry = Boolean(entry);
-            const opts = entry?.options ?? {};
-            const shouldSetToken = opts.setToken !== false;
-            const shouldAutoClear = opts.autoClearToken !== false;
-            const childTokenPath = opts.tokenPath ?? 'child.token';
-            const shouldClearControlVar = shouldSetToken && shouldAutoClear;
             // If this child was awaited synchronously by the parent, skip auto-resume (already handled in-turn)
             if (entry && entry.handlers && entry.handlers.completed === undefined && entry.handlers.failed === undefined && entry.handlers.inputRequired === undefined && (result as any)?.status?.state !== 'input-required') {
                 // Default await path: no handlers set and result is terminal -> no extra resume needed
                 // Fall through to cleanup mapping only
             }
-            const nextSnapshot = setPendingTasks(base, tasks) as Record<string, unknown> | undefined;
-            let next = nextSnapshot ?? ({ ...(base || {}) } as Record<string, unknown>);
-            (next as any).inbox = (next as any).inbox || { current: [], all: [] };
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
             const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
@@ -3635,52 +3702,48 @@ export class TaskEngine {
                 log.debug('hydrating child result in handleChildCompleted', { parentTaskId, token });
                 ArtifactHydrationService.tryHydrateChildResult(childResultForParent, parentArtifactCache, tenantId);
             }
-            const childObservation: EngineObservation = {
-                source: 'child',
-                kind: 'child.completed',
-                payload: {
-                    token,
-                    childTaskId: cleanChildResult.childTaskId || childTaskId || token,
-                    result: childResultForParent, // Persist bounded, artifact-backed result shape
-                    agentId: childAgentId,
-                    executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined
-                },
-                provenance: {
-                    ts: Date.now(),
-                    turn: Number((base as any)?.meta?.turn ?? 0) + 1,
-                    id: token,
-                    correlationId: token
-                }
+            const completionRequest = {
+                kind: 'completed' as const,
+                token,
+                completedAt: completionReceivedAt,
+                childTaskId: cleanChildResult.childTaskId || childTaskId || token,
+                agentId: childAgentId,
+                result: childResultForParent,
+                executionMetadata: Object.keys(childExecutionMetadata).length > 0
+                    ? childExecutionMetadata as any
+                    : undefined,
             };
+            const initialClaim = claimChildTerminalInSnapshot(base, completionRequest);
+            if (!initialClaim.won || initialClaim.observation === undefined) {
+                if (initialClaim.lateCompletion) {
+                    defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine_cas' });
+                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_late_completion', {
+                        token,
+                        childTaskId: completionRequest.childTaskId,
+                        agentId: childAgentId,
+                        completedAt: completionReceivedAt,
+                        resultPreview: makeSafeEventPreview(childResultForParent),
+                    });
+                }
+                return;
+            }
+            let next = initialClaim.snapshot;
+            const childObservation = initialClaim.observation;
             log.debug('Appending child completion event', {
                 parentTaskId,
                 token,
                 resultStatus: (result as any)?.status,
             });
-            const cleanupSnapshotForChild = (snapshot: Record<string, unknown>): Record<string, unknown> => {
-                let updatedSnapshot = snapshot;
-                if (hadPendingEntry && shouldAutoClear) {
-                    const tasksMap = getPendingTasks(updatedSnapshot);
-                    if (tasksMap[token]) {
-                        delete tasksMap[token];
-                        updatedSnapshot = setPendingTasks(updatedSnapshot, tasksMap);
-                    }
-                }
-                if (shouldClearControlVar) {
-                    updatedSnapshot = TaskStateUtils.removeControlVarFromSnapshot(updatedSnapshot, childTokenPath);
-                }
-                return updatedSnapshot;
-            };
-            next = cleanupSnapshotForChild(next);
             const observationPredicate = (obs: EngineObservation) =>
-                obs?.kind === 'child.completed' &&
+                (obs?.kind === 'child.completed' || obs?.kind === 'child.failed') &&
                 typeof obs === 'object' &&
                 obs !== null &&
                 (obs as any)?.payload &&
                 (obs as any).payload.token === token;
-            (next as any).inbox = InboxManager.addObservationToInboxIfMissing((next as any).inbox, childObservation, observationPredicate);
             const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
             let snapshotSaved = false;
+            let lostTerminalClaim = false;
+            let lostToTimeout = false;
 
             // ✅ FIX: Add CAS retry loop to handle race conditions with parent's concurrent save
             const maxSaveRetries = 5;
@@ -3719,7 +3782,11 @@ export class TaskEngine {
                                 childToken: token
                             });
                         }
-                    } else if ((snapshotError as Error).message === 'CAS_MISMATCH' && saveAttempt < maxSaveRetries) {
+                    } else if (
+                        ((snapshotError as Error).message === 'CAS_MISMATCH' ||
+                            (snapshotError as Error).message === 'WM_VERSION_CONFLICT') &&
+                        saveAttempt < maxSaveRetries
+                    ) {
                         // ✅ FIX: Reload snapshot and re-add observation on CAS conflict
                         log.debug('CAS_MISMATCH in handleChildCompleted, retrying', {
                             parentTaskId,
@@ -3737,23 +3804,13 @@ export class TaskEngine {
                         currentSnap = latestSnap;
                         const latestBase = (latestSnap.snapshot as Record<string, unknown>) || {};
 
-                        // Re-build next with the observation added to latest snapshot
-                        let latestNext = cleanupSnapshotForChild({ ...latestBase });
-                        const latestInbox = InboxManager.normalizeInbox((latestNext as any)?.inbox);
-
-                        // Check if observation already exists (maybe another path added it)
-                        if (latestInbox.all.some(observationPredicate)) {
-                            log.debug('Observation already exists in snapshot after CAS retry', { parentTaskId, token });
-                            snapshotSaved = true;
+                        const retryClaim = claimChildTerminalInSnapshot(latestBase, completionRequest);
+                        if (!retryClaim.won) {
+                            lostTerminalClaim = true;
+                            lostToTimeout = retryClaim.lateCompletion === true;
                             break;
                         }
-
-                        (latestNext as any).inbox = InboxManager.addObservationToInboxIfMissing(
-                            (latestNext as any).inbox,
-                            childObservation,
-                            observationPredicate
-                        );
-                        currentNext = latestNext;
+                        currentNext = retryClaim.snapshot;
                     } else {
                         log.warn('Failed to save snapshot during child completion', {
                             error: (snapshotError as Error).message,
@@ -3765,13 +3822,30 @@ export class TaskEngine {
                 }
             }
 
+            if (lostTerminalClaim) {
+                if (lostToTimeout) {
+                    defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine_cas' });
+                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_late_completion', {
+                        token,
+                        childTaskId: completionRequest.childTaskId,
+                        agentId: childAgentId,
+                        completedAt: completionReceivedAt,
+                        resultPreview: makeSafeEventPreview(childResultForParent),
+                    });
+                }
+                return;
+            }
+
             if (!snapshotSaved) {
                 log.error('Failed to save child completion observation after all retries', {
                     parentTaskId,
                     childToken: token,
                     attempts: saveAttempt
                 });
+                return;
             }
+            defaultMetricsRegistry.increment('child.terminal_race_winner_total', { kind: 'completed' });
+            await this.runtimeDriver.cancelTimer?.({ tenantId, taskId: parentTaskId, token });
 
             const childCompletedPayload = {
                 token,
@@ -3817,6 +3891,10 @@ export class TaskEngine {
                 });
             }
 
+            if (params.suppressResume === true) {
+                return;
+            }
+
             if (this.shouldScheduleAsyncThroughRuntimeDriver('resume')) {
                 await this.runtimeDriver.enqueueResume({
                     tenantId,
@@ -3828,7 +3906,10 @@ export class TaskEngine {
                         kind: 'child',
                         token,
                         childTaskId: childCompletedPayload.childTaskId,
+                        outcome: 'completed',
                         output: childResultForParent,
+                        completedAt: completionReceivedAt,
+                        terminalClaimed: true,
                     },
                 });
                 return;
@@ -4536,61 +4617,38 @@ export class TaskEngine {
         if (!token) return;
         const entry = tasks[token];
         const handlerName = entry?.handlers?.failed;
-        // Remove pending mapping for this token
-        delete tasks[token];
-        let next = setPendingTasks(base, tasks);
-        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
-        const childFailedPayload = {
+        const rawError = error instanceof Error
+            ? { code: error.name || 'CHILD_FAILED', message: error.message }
+            : error !== null && typeof error === 'object' && !Array.isArray(error)
+              ? {
+                    code: typeof (error as any).code === 'string' ? (error as any).code : 'CHILD_FAILED',
+                    message: typeof (error as any).message === 'string' ? (error as any).message : String(error),
+                    ...(typeof (error as any).timeoutMs === 'number'
+                        ? { timeoutMs: (error as any).timeoutMs }
+                        : {}),
+                }
+              : { code: 'CHILD_FAILED', message: String(error) };
+        const resume = {
+            tenantId,
+            taskId: parentTaskId,
+            agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId ?? (snap as { agentId?: string }).agentId,
             token,
-            childTaskId,
-            agentId: (entry as { target?: string } | undefined)?.target,
-            error: error instanceof Error ? error.message : String(error),
-        };
-        const childFailedEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_failed', childFailedPayload);
-        if (childFailedEvent) {
-            const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
-                eventId: childFailedEvent.eventId,
-                seq: childFailedEvent.seq,
-                type: 'task.child_failed',
-                payload: childFailedPayload,
-                createdAt: new Date().toISOString(),
-            }, {
-                taskId: parentTaskId,
-                tenantId,
-                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId,
-            });
-            if (runtimeEvent) {
-                void this.eventBus.publish(createBusEvent({
-                    channel: taskChannel(parentTaskId),
-                    cloud: {
-                        id: runtimeEvent.id,
-                        type: runtimeEvent.type,
-                        source: `/tasks/${parentTaskId}`,
-                        time: runtimeEvent.ts,
-                        datacontenttype: 'application/json',
-                        data: runtimeEvent,
-                    },
-                }));
-            }
-        }
-        if (this.shouldScheduleAsyncThroughRuntimeDriver('resume')) {
-            await this.runtimeDriver.enqueueResume({
-                tenantId,
-                taskId: parentTaskId,
-                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId ?? (snap as { agentId?: string }).agentId,
+            idempotencyKey: `${parentTaskId}:child:${token}`,
+            event: {
+                kind: 'child' as const,
                 token,
-                idempotencyKey: `${parentTaskId}:child:${token}`,
-                event: {
-                    kind: 'child',
-                    token,
-                    childTaskId: childTaskId ?? token,
-                    output: {
-                        ok: false,
-                        error: childFailedPayload.error,
-                    },
-                },
-            });
+                childTaskId: childTaskId ?? entry?.childTaskId ?? token,
+                outcome: 'failed' as const,
+                error: rawError,
+                completedAt: new Date().toISOString(),
+            },
+        };
+        if (isSyncRuntimeDriver(this.runtimeDriver)) {
+            await this.runtimeDriver.enqueueResumeSync(resume);
+        } else {
+            await this.runtimeDriver.enqueueResume(resume);
         }
+        await this.runtimeDriver.cancelTimer?.({ tenantId, taskId: parentTaskId, token });
         if (handlerName && this.handlerInvoker) {
             await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: error });
         }
@@ -5198,6 +5256,7 @@ export class TaskEngine {
                 handleToolCompleted: (p) => this.handleToolCompleted(p),
                 conversationService: this.conversationService,
                 enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),
+                scheduleChildTimeout: (p) => this.runtimeDriver.scheduleTimer(p),
             },
             ctx,
             {

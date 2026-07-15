@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { RuntimeDriverIds, RuntimeWakeEvent } from './runtimeDriver.js';
 
-export type RuntimeTimerKind = 'token_expiry' | 'sleep';
+export type RuntimeTimerKind = 'token_expiry' | 'sleep' | 'child_timeout';
 export type RuntimeTimerStatus = 'scheduled' | 'firing' | 'fired' | 'canceled';
-export type TimerExpiredReason = 'input_timeout' | 'sleep_due';
+export type TimerExpiredReason = 'input_timeout' | 'sleep_due' | 'child_timeout';
 
 export type RuntimeTimerRecord = {
     id: string;
@@ -77,7 +77,9 @@ export function deriveRuntimeTimerIdempotencyKey(params: {
 }
 
 export function timerKindToReason(kind: RuntimeTimerKind | string): TimerExpiredReason {
-    return kind === 'sleep' ? 'sleep_due' : 'input_timeout';
+    if (kind === 'sleep') return 'sleep_due';
+    if (kind === 'child_timeout') return 'child_timeout';
+    return 'input_timeout';
 }
 
 export function timerRecordToWake(timer: RuntimeTimerRecord, firedAt = new Date()): RuntimeWakeEvent {
@@ -292,6 +294,20 @@ export class RuntimeTimerRepository {
             where: {
                 dueAt: { lte: now },
                 status: { in: ['scheduled', 'firing'] },
+                OR: [
+                    { status: 'scheduled' },
+                    { status: 'firing', fireLeaseUntil: { lt: now } },
+                ],
+            },
+            orderBy: [{ dueAt: 'asc' }, { timerId: 'asc' }],
+            take: params.take,
+        });
+    }
+
+    async listScheduled(params: { take: number }): Promise<RuntimeTimerRecord[]> {
+        const now = new Date();
+        return this.prisma.runtimeTimer.findMany({
+            where: {
                 OR: [
                     { status: 'scheduled' },
                     { status: 'firing', fireLeaseUntil: { lt: now } },

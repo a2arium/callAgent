@@ -257,6 +257,7 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
         llmCalls: compactOperatorValue(trace.llmCalls ?? [], level),
         toolCalls: compactOperatorValue(trace.toolCalls ?? [], level),
         childCalls: compactOperatorValue(trace.childCalls ?? [], level),
+        pendingAfter: trace.pendingAfter,
         mentalStateBeforeHash: trace.mentalStateBeforeHash,
         mentalStateAfterHash: trace.mentalStateAfterHash,
         traceId: trace.traceId,
@@ -1889,9 +1890,9 @@ export async function runLoop<
 
                 // First check local inbox OR the current env.inbox (which might be fresh/replaced)
                 let childResultInInbox = inbox.all.some(
-                    (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                    (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                 ) || env.inbox.all.some(
-                    (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                    (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                 );
 
                 // If not in local inbox, reload from database
@@ -1906,7 +1907,7 @@ export async function runLoop<
                                 const freshInbox = (freshSnap.snapshot as any)?.inbox;
                                 if (freshInbox && Array.isArray(freshInbox.all)) {
                                     childResultInInbox = freshInbox.all.some(
-                                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                                        (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                                     );
                                     if (childResultInInbox) {
                                         log.debug('🔄 SYNC CHILD: Found child result in database inbox, continuing loop instead of yielding', {
@@ -1932,9 +1933,9 @@ export async function runLoop<
                     });
                     // Move child completion to current inbox for next turn
                     const childObs = inbox.all.find(
-                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                        (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                     ) || env.inbox.all.find(
-                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                        (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                     );
                     if (childObs) {
                         // ✅ FIX: Explicitly set inbox.current to ensure perception sees the result

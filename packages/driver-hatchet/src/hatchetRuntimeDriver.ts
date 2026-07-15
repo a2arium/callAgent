@@ -1,5 +1,6 @@
 import type {
     CancelParams,
+    CancelTimerParams,
     DispatchOutboxParams,
     EnqueueChildDispatchParams,
     EnqueueResumeParams,
@@ -300,6 +301,11 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                 errorCode: error instanceof Error ? error.name : 'Error',
             });
         }
+    }
+
+    async cancelTimer(params: CancelTimerParams): Promise<void> {
+        await this.runtimeTimers?.cancelTaskTimers(params);
+        await this.delegate.cancelTimer?.(params);
     }
 
     async dispatchOutbox(params: DispatchOutboxParams): Promise<void> {

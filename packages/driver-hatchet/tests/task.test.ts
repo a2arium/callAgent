@@ -333,6 +333,27 @@ describe('executeTaskTask', () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const events = { push: jest.fn(async () => undefined) };
         const appendEvent = jest.fn(async () => ({ eventId: 'event-1', seq: 1 }));
+        let parentSnapshot: Record<string, unknown> = {
+            meta: { agentId: 'parent-agent', turn: 1 },
+            pending: {
+                tasks: {
+                    'parent-token': {
+                        target: 'agent-1', agentId: 'agent-1', childTaskId: 'child-task-1', handlers: {},
+                    },
+                },
+                children: { 'parent-token': { agent: 'agent-1' } },
+            },
+        };
+        let parentVersion = BigInt(1);
+        const sessionManager = {
+            load: jest.fn(async () => ({ snapshot: parentSnapshot, wmVersion: parentVersion, agentId: 'parent-agent' })),
+            saveSnapshot: jest.fn(async (params: { snapshot: Record<string, unknown> }) => {
+                parentSnapshot = params.snapshot;
+                parentVersion += BigInt(1);
+                return { snapshot: parentSnapshot, wmVersion: parentVersion };
+            }),
+            appendEvent,
+        };
         const ctx = {
             runChild: jest.fn(async () => ({
                 tenantId: 'tenant-1',
@@ -361,7 +382,7 @@ describe('executeTaskTask', () => {
             ctx as never,
             {
                 driverRuns: { finalizeRootRun } as never,
-                sessionManager: { appendEvent },
+                sessionManager,
                 events,
                 prisma: {
                     outbox: { findMany: jest.fn(async () => []) },
@@ -386,20 +407,9 @@ describe('executeTaskTask', () => {
             'tenant-1',
             'parent-task-1',
             'task.child_completed',
-            {
-                token: 'parent-token',
-                childTaskId: 'child-task-1',
-                agentId: 'agent-1',
-                childAgentId: 'agent-1',
-                result: {
-                    ok: false,
-                    error: { code: 'ALL_MODES_FAILED', message: 'No content' },
-                },
-                resultPreview: {
-                    ok: false,
-                    error: { code: 'ALL_MODES_FAILED', message: 'No content' },
-                },
-            }
+            expect.objectContaining({
+                token: 'parent-token', childTaskId: 'child-task-1', agentId: 'agent-1',
+            })
         );
         expect(events.push).toHaveBeenCalledWith(
             'aplret.child.parent-token',
@@ -411,10 +421,13 @@ describe('executeTaskTask', () => {
                 kind: 'child',
                 token: 'parent-token',
                 childTaskId: 'child-task-1',
+                outcome: 'completed',
                 output: {
                     ok: false,
                     error: { code: 'ALL_MODES_FAILED', message: 'No content' },
                 },
+                completedAt: expect.any(String),
+                terminalClaimed: true,
             },
             { key: 'tenant-1:parent-task-1:parent-token' }
         );
@@ -449,6 +462,7 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
+                        outcome: 'completed',
                         output: { ok: true },
                         idempotencyKey: 'task-1:child:child-token',
                     },
@@ -479,6 +493,7 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
+                        outcome: 'completed',
                         output: { ok: true },
                         idempotencyKey: 'task-1:child:child-token',
                     },
@@ -672,6 +687,78 @@ describe('executeTaskTask', () => {
         );
     });
 
+    it('expires await_child with its durable per-call timer before the watchdog', async () => {
+        const dueAt = new Date(Date.now() + 60_000).toISOString();
+        const timer = {
+            id: 'timer-row-child', tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+            rootTaskId: 'task-1', token: 'child-token', timerId: 'timer-child', dueAt: new Date(dueAt),
+            kind: 'child_timeout', status: 'scheduled',
+            idempotencyKey: 'timer:tenant-1:task-1:child-token:timer-child',
+            fireLeaseId: null, fireLeaseUntil: null,
+            payload: { timeoutMs: 60_000, childTaskId: 'child-task-1', agentId: 'child-agent' },
+            providerRunId: null, providerTaskRunId: null, error: null, firedAt: null, canceledAt: null,
+            createdAt: new Date(), updatedAt: new Date(),
+        };
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                boundary: {
+                    kind: 'await_child', token: 'child-token', expiresAt: dueAt, timeoutMs: 60_000,
+                    childTaskId: 'child-task-1', agentId: 'child-agent',
+                },
+                taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:00.000Z' },
+            },
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { timedOut: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitFor: jest.fn(async () => ({ timer: {} })),
+        };
+        const runtimeTimers = {
+            schedule: jest.fn(async () => timer),
+            markFiredByTimerId: jest.fn(async () => true),
+            cancelTaskTimers: jest.fn(async () => 0),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                input: { value: 'hello' }, idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { runtimeTimers: runtimeTimers as never }
+        );
+
+        expect(runtimeTimers.schedule).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1', taskId: 'task-1', token: 'child-token',
+            fireAt: dueAt, kind: 'child_timeout',
+            payload: {
+                token: 'child-token', timeoutMs: 60_000,
+                childTaskId: 'child-task-1', agentId: 'child-agent',
+            },
+        }));
+        expect(ctx.waitFor).toHaveBeenCalledWith(expect.any(Object), 'wait:child-or-timer:child-token');
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            expect.any(String),
+            expect.objectContaining({
+                idempotencyKey: timer.idempotencyKey,
+                wake: {
+                    trigger: 'timer',
+                    event: expect.objectContaining({
+                        kind: 'timer', token: 'child-token', timerId: 'timer-child', reason: 'child_timeout',
+                    }),
+                },
+            }),
+            expect.any(Object)
+        );
+    });
+
     it('resumes await_child from an already persisted child completion before waiting for Hatchet events', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const segmentOutputs = [
@@ -765,6 +852,7 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
+                        outcome: 'completed',
                         output: {
                             ok: true,
                             data: {
@@ -808,6 +896,7 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
+                        outcome: 'completed',
                         output: { ok: true },
                         idempotencyKey: 'task-1:child:child-token',
                     },
@@ -863,6 +952,7 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
+                        outcome: 'completed',
                         output: { ok: true },
                         idempotencyKey: 'task-1:child:child-token',
                     },
@@ -988,6 +1078,7 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
+                        outcome: 'completed',
                         output: {
                             ok: true,
                             data: {
@@ -1123,12 +1214,10 @@ describe('executeTaskTask', () => {
                             kind: 'child',
                             token: 'child-token',
                             childTaskId: 'child-task-1',
-                            output: {
-                                ok: false,
-                                error: {
-                                    code: 'CHILD_WAKE_TIMEOUT',
-                                    message: 'Timed out waiting for child wake for token child-token.',
-                                },
+                            outcome: 'failed',
+                            error: {
+                                code: 'CHILD_WAKE_TIMEOUT',
+                                message: 'Timed out waiting for child wake for token child-token.',
                             },
                             idempotencyKey: 'task-1:child:child-token',
                         },
@@ -1244,12 +1333,10 @@ describe('executeTaskTask', () => {
                             kind: 'child',
                             token: 'child-token',
                             childTaskId: 'child-task-1',
-                            output: {
-                                ok: false,
-                                error: {
-                                    code: 'CHILD_WAKE_TIMEOUT',
-                                    message: 'Timed out waiting for child wake for token child-token.',
-                                },
+                            outcome: 'failed',
+                            error: {
+                                code: 'CHILD_WAKE_TIMEOUT',
+                                message: 'Timed out waiting for child wake for token child-token.',
                             },
                             idempotencyKey: 'task-1:child:child-token',
                         },
@@ -1359,10 +1446,8 @@ describe('executeTaskTask', () => {
                         kind: 'child',
                         token: 'child-token',
                         childTaskId: 'child-task-1',
-                        output: {
-                            ok: false,
-                            error: { code: 'ALL_MODES_FAILED', message: 'No HTML returned' },
-                        },
+                        outcome: 'failed',
+                        error: { code: 'ALL_MODES_FAILED', message: 'No HTML returned' },
                         idempotencyKey: 'task-1:child:child-token',
                     },
                 },

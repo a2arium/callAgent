@@ -7,8 +7,18 @@ import { logger } from '@a2arium/callagent-utils';
 const log = logger.createLogger({ prefix: 'Handles' });
 
 type PendingInputs = Record<string, { handlerName?: string; expiredHandlerName?: string; schema?: unknown; expiresAt?: string }>;
-type PendingTasks = Record<string, {
+export type PendingTaskTerminal = {
+    kind: 'completed' | 'failed';
+    claimedAt: string;
+    childTaskId?: string;
+    agentId?: string;
+    error?: { code: string; message: string; timeoutMs?: number };
+};
+
+export type PendingTask = {
     target?: string;
+    agentId?: string;
+    childTaskId?: string;
     input?: unknown;
     handlers?: { completed?: string; failed?: string; inputRequired?: string };
     pendingInput?: { prompt: string; schema?: unknown };
@@ -16,7 +26,12 @@ type PendingTasks = Record<string, {
     deliveredInput?: boolean;
     deliveredCompletion?: boolean;
     options?: { setToken?: boolean; tokenPath?: string; autoClearToken?: boolean; setStage?: string };
-}>;
+    timeoutMs?: number;
+    expiresAt?: string;
+    terminal?: PendingTaskTerminal;
+};
+
+export type PendingTasks = Record<string, PendingTask>;
 type PendingGroups = Record<string, { childTokens: string[]; results: Record<string, unknown>; handlers?: { allCompleted?: string; anyFailed?: string }; cancelRemaining?: boolean; timeoutMs?: number }>;
 
 function getPendingInputs(snapshot: Record<string, unknown>): PendingInputs {
@@ -203,9 +218,10 @@ export async function createTaskHandle(
     tenantId: string,
     sessionId: string,
     target?: string,
-    input?: unknown
+    input?: unknown,
+    childTokenOverride?: string
 ): Promise<{ handle: TaskHandle; token: string }> {
-    const childToken = uuidv7();
+    const childToken = childTokenOverride ?? uuidv7();
     let snap: any;
     let base: any;
     let attempts = 0;
@@ -315,5 +331,3 @@ export async function createGroupHandle(
     await session.saveSnapshot({ tenantId, sessionId, agentId: parentAgentId2, expectedWmVersion: expected, snapshot: next });
     return { handle: new GroupHandle(session, tenantId, sessionId, groupToken), groupToken };
 }
-
-

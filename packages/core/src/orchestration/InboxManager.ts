@@ -80,9 +80,9 @@ export class InboxManager {
             return !hasInAll;
         };
 
-        // Add child completion observations from remote that we don't have locally.
+        // Add terminal child observations from remote that we don't have locally.
         for (const obs of remoteAll) {
-            if (obs.kind === 'child.completed') {
+            if (obs.kind === 'child.completed' || obs.kind === 'child.failed') {
                 const token = (obs.payload as any)?.token;
                 log.debug('mergeInboxes: Found child.completed in remote', { token, hasToken: !!token });
                 // Only merge if this is a pending child AND not already in local
@@ -121,10 +121,10 @@ function observationMergeKey(obs: EngineObservation): string {
     if (conversationKey !== undefined) {
         return `conversation-delivery:${conversationKey}`;
     }
-    if (obs.kind === 'child.completed') {
+    if (obs.kind === 'child.completed' || obs.kind === 'child.failed') {
         const token = (obs.payload as { token?: unknown } | undefined)?.token;
         if (typeof token === 'string' && token.length > 0) {
-            return `child.completed:${token}`;
+            return `child.terminal:${token}`;
         }
     }
     return `observation:${JSON.stringify(obs)}`;

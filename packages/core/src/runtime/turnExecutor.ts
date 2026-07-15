@@ -64,7 +64,14 @@ export type TurnWake =
 export type SegmentBoundary =
     | { kind: 'await_input'; token: string; expiresAt?: string }
     | { kind: 'await_tool'; token: string }
-    | { kind: 'await_child'; token: string }
+    | {
+          kind: 'await_child';
+          token: string;
+          expiresAt?: string;
+          timeoutMs?: number;
+          childTaskId?: string;
+          agentId?: string;
+      }
     | { kind: 'await_event'; token: string }
     | { kind: 'sleep'; token: string; fireAt: string; timerId?: string; payload?: unknown }
     | { kind: 'paused'; reason: string }

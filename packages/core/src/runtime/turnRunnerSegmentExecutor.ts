@@ -126,6 +126,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             wake,
         });
 
+        if (preparedWake.skipTurn) {
+            await this.ensureProcessedKeyRecorded(tenantId, taskId, preparedWake.agentId, idempotencyKey);
+            this.dedupe.record(idempotencyKey);
+            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId);
+        }
+
         const ctx = this.createContext({
             id: taskId,
             input: wake.trigger === 'start' ? wake.input : {},
@@ -220,7 +226,15 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             return { kind: 'await_tool', token: awaiting.token };
         }
         if (awaiting?.kind === 'await_child') {
-            return { kind: 'await_child', token: awaiting.token };
+            const pendingTask = (snapAfter?.snapshot as any)?.pending?.tasks?.[awaiting.token];
+            return {
+                kind: 'await_child',
+                token: awaiting.token,
+                ...(typeof pendingTask?.expiresAt === 'string' ? { expiresAt: pendingTask.expiresAt } : {}),
+                ...(typeof pendingTask?.timeoutMs === 'number' ? { timeoutMs: pendingTask.timeoutMs } : {}),
+                ...(typeof pendingTask?.childTaskId === 'string' ? { childTaskId: pendingTask.childTaskId } : {}),
+                ...(typeof pendingTask?.agentId === 'string' ? { agentId: pendingTask.agentId } : {}),
+            };
         }
         if (awaiting?.kind === 'await_event') {
             return { kind: 'await_event', token: awaiting.token };
