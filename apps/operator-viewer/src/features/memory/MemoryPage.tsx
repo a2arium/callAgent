@@ -3,6 +3,7 @@ import { Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useDeleteSemanticMemory, useMemoryActivity, useMemoryEntities, useProbeSemanticMemory, useRetagSemanticMemory, useSemanticMemory, useSemanticMemoryAudit, useSemanticMemoryDetail, useUpdateSemanticMemory } from '../../api/hooks';
 import type { SemanticEntityItem, SemanticMemoryActivityItem, SemanticMemoryAuditItem, SemanticMemoryItem, SemanticProbeResult } from '../../api/client';
+import { parseProbeFilterValue, probeSelectionSearchPatch } from '../../domain/probe';
 import { parseMemorySearch, type MemorySearch } from '../../app/state';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
@@ -45,6 +46,8 @@ export function MemoryPage(): React.ReactElement {
   });
   const selectedKey = search.selectedKey || memoryQuery.data?.items[0]?.key;
   const selectedDetail = useSemanticMemoryDetail(search.tenantId, selectedKey);
+  const constrainsMemoryPane = search.tab === 'inventory' || search.tab === 'probe';
+  const showsInspector = search.tab === 'inventory' || (search.tab === 'probe' && search.selectedKey.length > 0);
   const refreshAll = () => {
     void memoryQuery.refetch();
     void activityQuery.refetch();
@@ -78,9 +81,10 @@ export function MemoryPage(): React.ReactElement {
       <div
         className={cn(
           'grid gap-4',
-          search.tab === 'inventory'
-            ? 'min-h-0 xl:h-[calc(100vh-285px)] xl:min-h-[520px] xl:grid-cols-[minmax(0,1fr)_420px]'
-            : 'min-h-[620px] xl:grid-cols-1'
+          constrainsMemoryPane
+            ? 'min-h-0 xl:h-[calc(100vh-285px)] xl:min-h-[520px]'
+            : 'min-h-[620px]',
+          showsInspector ? 'xl:grid-cols-[minmax(0,1fr)_420px]' : 'xl:grid-cols-1'
         )}
       >
         <section className="flex min-w-0 min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
@@ -103,8 +107,8 @@ export function MemoryPage(): React.ReactElement {
                 onFilter={updateSearch}
               />
             </TabsContent>
-            <TabsContent value="probe" className="m-0 p-4">
-              <ProbeTab tenantId={search.tenantId} onSelectKey={(key) => updateSearch({ selectedKey: key, key })} />
+            <TabsContent value="probe" className="m-0 min-h-0 flex-1 overflow-hidden p-4">
+              <ProbeTab tenantId={search.tenantId} selectedKey={search.selectedKey} onSelectKey={(key) => updateSearch(probeSelectionSearchPatch(key))} />
             </TabsContent>
             <TabsContent value="inventory" className="m-0 min-h-0 flex-1 overflow-hidden p-0">
               <InventoryTable
@@ -123,7 +127,7 @@ export function MemoryPage(): React.ReactElement {
           </Tabs>
         </section>
 
-        {search.tab === 'inventory' ? (
+        {showsInspector ? (
           <MemoryInspector
             tenantId={search.tenantId}
             item={selectedDetail.data}
@@ -222,7 +226,7 @@ function OverviewTab(props: {
   );
 }
 
-function ProbeTab(props: { tenantId: string; onSelectKey: (key: string) => void }): React.ReactElement {
+function ProbeTab(props: { tenantId: string; selectedKey?: string; onSelectKey: (key: string) => void }): React.ReactElement {
   const probe = useProbeSemanticMemory();
   const [pattern, setPattern] = useState('');
   const [tag, setTag] = useState('');
@@ -238,13 +242,13 @@ function ProbeTab(props: { tenantId: string; onSelectKey: (key: string) => void 
       tag: tag || undefined,
       expectedKey: expectedKey || undefined,
       limit,
-      filters: filterPath ? [{ path: filterPath, operator: filterOperator, value: filterValue }] : undefined,
+      filters: filterPath ? [{ path: filterPath, operator: filterOperator, value: parseProbeFilterValue(filterValue) }] : undefined,
     });
   };
   const result = probe.data;
   return (
-    <div className="grid gap-4">
-      <section className="grid gap-3 rounded-lg border border-border bg-background p-3 md:grid-cols-5">
+    <div className="flex min-h-0 h-full flex-col gap-4">
+      <section className="grid shrink-0 gap-3 rounded-lg border border-border bg-background p-3 md:grid-cols-5">
         <Field label="Key pattern">
           <input className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="user:" value={pattern} onChange={(event) => setPattern(event.target.value)} />
         </Field>
@@ -276,21 +280,21 @@ function ProbeTab(props: { tenantId: string; onSelectKey: (key: string) => void 
         </Field>
       </section>
       {probe.error instanceof Error ? <Notice kind="error" title="Probe failed">{probe.error.message}</Notice> : null}
-      {result ? <ProbeResults result={result} onSelectKey={props.onSelectKey} /> : <Notice title="No probe has run">Enter a key pattern, tag, or expected key, then run the probe.</Notice>}
+      {result ? <ProbeResults result={result} selectedKey={props.selectedKey} onSelectKey={props.onSelectKey} /> : <Notice title="No probe has run">Enter a key pattern, tag, or expected key, then run the probe.</Notice>}
     </div>
   );
 }
 
-function ProbeResults(props: { result: SemanticProbeResult; onSelectKey: (key: string) => void }): React.ReactElement {
+function ProbeResults(props: { result: SemanticProbeResult; selectedKey?: string; onSelectKey: (key: string) => void }): React.ReactElement {
   return (
-    <div className="grid gap-3">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       {props.result.expected ? (
         <Notice kind={props.result.expected.present ? 'info' : 'warning'} title={props.result.expected.present ? 'Expected key returned' : 'Expected key missing'}>
           {props.result.expected.key}{props.result.expected.rank ? ` at rank ${props.result.expected.rank}` : ''}
         </Notice>
       ) : null}
       {props.result.notes.map((note) => <Notice key={note} kind="info" title="Probe note">{note}</Notice>)}
-      <InventoryTable items={props.result.items} isLoading={false} onSelect={props.onSelectKey} />
+      <InventoryTable items={props.result.items} isLoading={false} selectedKey={props.selectedKey} onSelect={props.onSelectKey} />
     </div>
   );
 }
@@ -299,9 +303,9 @@ function InventoryTable(props: { items: SemanticMemoryItem[]; isLoading: boolean
   if (props.isLoading) return <div className="h-full overflow-auto p-4 text-sm text-muted-foreground">Loading memory...</div>;
   if (props.items.length === 0) return <div className="h-full overflow-auto p-4"><Notice title="No memories match the current filters" /></div>;
   return (
-    <div className="h-full overflow-auto">
+    <div className="min-h-0 flex-1 overflow-auto">
       <table className="min-w-[1120px] w-full text-sm">
-        <thead className="bg-muted text-xs uppercase text-muted-foreground">
+        <thead className="sticky top-0 z-10 bg-muted text-xs uppercase text-muted-foreground shadow-[0_1px_0_hsl(var(--border))]">
           <tr>
             <th className="px-3 py-2 text-left">Key</th>
             <th className="px-3 py-2 text-left">Preview</th>
@@ -315,7 +319,23 @@ function InventoryTable(props: { items: SemanticMemoryItem[]; isLoading: boolean
         </thead>
         <tbody>
           {props.items.map((item) => (
-            <tr key={item.key} role="button" tabIndex={0} className={cn('cursor-pointer border-t border-border hover:bg-accent', props.selectedKey === item.key ? 'bg-accent' : '')} onClick={() => props.onSelect(item.key)}>
+            <tr
+              key={item.key}
+              role="button"
+              tabIndex={0}
+              aria-selected={props.selectedKey === item.key}
+              className={cn(
+                'cursor-pointer border-t border-border hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+                props.selectedKey === item.key ? 'bg-info-bg shadow-[inset_3px_0_0_hsl(var(--info))]' : ''
+              )}
+              onClick={() => props.onSelect(item.key)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  props.onSelect(item.key);
+                }
+              }}
+            >
               <td className="max-w-[220px] px-3 py-2 font-mono text-xs"><CopyableId value={item.key} label="memory key" max={28} /></td>
               <td className="max-w-[280px] truncate px-3 py-2">{shortValue(item.valuePreview)}</td>
               <td className="px-3 py-2"><ChipList values={item.tags} empty="none" /></td>

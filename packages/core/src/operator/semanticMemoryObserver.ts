@@ -329,15 +329,18 @@ export class SemanticMemoryObserverRepository {
     async probe(params: SemanticProbeParams): Promise<SemanticProbeResult> {
         this.assertMemoryAvailable();
         const limit = clampLimit(params.limit);
+        const where = this.buildMemoryWhere({ tenantId: params.tenantId, key: params.pattern, tag: params.tag, limit }, undefined);
+        const filterConditions = params.filters?.map(buildProbeFilterCondition) ?? [];
+        if (filterConditions.length > 0) {
+            const existingAnd = Array.isArray(where.AND) ? where.AND as Array<Record<string, unknown>> : [];
+            where.AND = [...existingAnd, ...filterConditions];
+        }
         const rows = await this.prisma!.agentMemoryStore!.findMany!({
-            where: this.buildMemoryWhere({ tenantId: params.tenantId, key: params.pattern, tag: params.tag, limit }, undefined),
+            where,
             orderBy: [{ updatedAt: 'desc' }, { key: 'asc' }],
             take: limit,
         });
         let selectedRows = rows;
-        if (params.filters && params.filters.length > 0) {
-            selectedRows = selectedRows.filter((row) => params.filters!.every((filter) => evaluateSimpleFilter(row.value, filter)));
-        }
         if (params.random) {
             selectedRows = [...selectedRows].sort(() => Math.random() - 0.5);
         }
@@ -629,24 +632,21 @@ function summarizeItems(items: SemanticMemoryItem[]): SemanticMemoryPage['summar
     };
 }
 
-function evaluateSimpleFilter(value: unknown, filter: { path: string; operator: string; value: unknown }): boolean {
-    const actual = filter.path.split('.').reduce<unknown>((current, part) => {
-        if (current && typeof current === 'object' && !Array.isArray(current)) return (current as Record<string, unknown>)[part];
-        return undefined;
-    }, value);
+function buildProbeFilterCondition(filter: { path: string; operator: string; value: unknown }): Record<string, unknown> {
+    const path = filter.path.split('.');
     switch (filter.operator) {
         case '=':
-            return actual === filter.value;
+            return { value: { path, equals: filter.value } };
         case '!=':
-            return actual !== filter.value;
+            return { NOT: { value: { path, equals: filter.value } } };
         case 'CONTAINS':
-            return String(actual ?? '').toLowerCase().includes(String(filter.value ?? '').toLowerCase());
+            return { value: { path, string_contains: String(filter.value ?? ''), mode: 'insensitive' } };
         case 'STARTS_WITH':
-            return String(actual ?? '').toLowerCase().startsWith(String(filter.value ?? '').toLowerCase());
+            return { value: { path, string_starts_with: String(filter.value ?? ''), mode: 'insensitive' } };
         case 'ENDS_WITH':
-            return String(actual ?? '').toLowerCase().endsWith(String(filter.value ?? '').toLowerCase());
+            return { value: { path, string_ends_with: String(filter.value ?? ''), mode: 'insensitive' } };
         default:
-            return false;
+            throw new Error(`Unsupported probe filter operator: ${filter.operator}`);
     }
 }
 
