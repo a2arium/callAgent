@@ -9,7 +9,7 @@ import path from 'node:path';
 const srcDir = path.resolve(process.cwd(), 'packages/core/src');
 import type { WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
-import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
+import { TaskHandle, setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
 import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
 import { setPendingExternalEvents, getPendingExternalEvents } from '../src/orchestration/ExternalEventsRegistry.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
@@ -21,6 +21,7 @@ import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { LocalArtifactImpl } from '../src/orchestration/LocalArtifactImpl.js';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
 import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
+import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { globalA2AService } from '../src/orchestration/A2AService.js';
 import { InvariantError } from '../src/utils/errors.js';
 
@@ -494,7 +495,15 @@ describe('TaskEngine orchestration coverage', () => {
         });
 
         const parentEvents = store.getEvents('t', 'parent-task');
-        expect(parentEvents).toEqual([]);
+        expect(parentEvents).toEqual([
+            expect.objectContaining({
+                type: 'task.child_failed',
+                payload: expect.objectContaining({
+                    token: 'child-token',
+                    error: expect.objectContaining({ code: 'CHILD_CANCELED' }),
+                }),
+            }),
+        ]);
         expect(enqueueResume).toHaveBeenCalledWith({
             tenantId: 't',
             taskId: 'parent-task',
@@ -511,6 +520,7 @@ describe('TaskEngine orchestration coverage', () => {
                     message: 'Child task canceled: operator child stop',
                 },
                 completedAt: expect.any(String),
+                terminalClaimed: true,
             },
         });
         expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
@@ -626,7 +636,10 @@ describe('TaskEngine orchestration coverage', () => {
         const matchingAll = inbox.all.filter(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'tok-1');
         expect(matchingAll).toHaveLength(1);
         expect(inbox.current.some(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'tok-1')).toBe(true);
-        expect((snap?.snapshot as any).pending?.tasks?.['tok-1']).toBeDefined();
+        expect((snap?.snapshot as any).pending?.tasks?.['tok-1']).toBeUndefined();
+        expect((snap?.snapshot as any).pending?.childTerminals?.['tok-1']).toEqual(
+            expect.objectContaining({ kind: 'completed' })
+        );
     });
 
     test('stageChildCompletionObservation stores large child HTML as artifact-backed snapshot data', async () => {
@@ -1578,6 +1591,32 @@ describe('TaskEngine orchestration coverage', () => {
         const snap = store.getSnapshot('t', 'parent');
         const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>((snap?.snapshot as any)?.inbox);
         expect(inbox.all.filter(o => (o as any)?.payload?.token === 'child-dup')).toHaveLength(1);
+        expect((snap?.snapshot as any).pending?.childTerminals?.['child-dup']).toEqual(
+            expect.objectContaining({ kind: 'completed' })
+        );
+        expect(store.writeCount).toBe(1);
+    });
+
+    test('late handler registration cannot resurrect a terminal child token', async () => {
+        const store = new FakeSessionStore();
+        store.seed('t', 'parent', {
+            pending: {
+                tasks: {},
+                childTerminals: {
+                    'child-terminal': {
+                        kind: 'completed',
+                        claimedAt: '2026-07-15T00:00:00.000Z',
+                    },
+                },
+            },
+        }, BigInt(1), 'agent-a');
+
+        const handle = new TaskHandle(new SessionManager(store), 't', 'parent', 'child-terminal');
+        await handle.onCompleted('afterTerminal');
+
+        const snap = store.getSnapshot('t', 'parent');
+        expect((snap?.snapshot as any).pending.tasks).not.toHaveProperty('child-terminal');
+        expect((snap?.snapshot as any).pending.childTerminals).toHaveProperty('child-terminal');
         expect(store.writeCount).toBe(0);
     });
 
@@ -1618,7 +1657,7 @@ describe('TaskEngine orchestration coverage', () => {
         const saved = store.getSnapshot('t', 'session')?.snapshot as any;
         const token = Object.keys((saved?.pending as any)?.tasks || {})[0];
         expect(ctx.__activeLoopInbox.current.some((o: any) => o?.payload?.token === token)).toBe(true);
-        expect(ctx.__activeLoopEnv.pending.children[token]).toBeDefined();
+        expect(ctx.__activeLoopEnv.pending.children[token]).toBeUndefined();
     });
 
     test('restoreCtx durable sendTaskToAgent does not complete a still-working child', async () => {

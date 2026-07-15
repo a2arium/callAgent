@@ -603,7 +603,7 @@ async function notifyPersistedA2AParentIfTerminal(
                   error: normalizedFailure,
               },
     });
-    if (!claim.won || claim.observation === undefined) return;
+    if (claim.resumeEligible !== true || claim.observation === undefined) return;
     await deps.runtimeTimers?.cancelTaskTimers({
         tenantId: parentTenantId,
         taskId: parentTaskId,
@@ -1132,12 +1132,66 @@ async function findPersistedBoundaryEvent(
     boundary: AwaitableBoundary,
     deps?: TaskTaskDeps
 ): Promise<(RuntimeWakeEvent & { idempotencyKey?: string }) | undefined> {
-    if (boundary.kind !== 'await_child' || deps?.prisma?.wMEvent === undefined) {
+    if (boundary.kind !== 'await_child') {
         return undefined;
     }
 
-    return await findPersistedParentChildEvent(input, boundary, deps)
+    return await findPersistedParentChildSnapshot(input, boundary, deps)
+        ?? await findPersistedParentChildEvent(input, boundary, deps ?? {})
         ?? await findPersistedChildTerminalEvent(input, boundary, deps);
+}
+
+async function findPersistedParentChildSnapshot(
+    input: TaskTaskInput,
+    boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
+    deps?: TaskTaskDeps
+): Promise<(RuntimeWakeEvent & { idempotencyKey?: string }) | undefined> {
+    if (deps?.prisma?.wMSession === undefined || shouldSuppressChildTerminalRecoveryForDrill(input.taskId)) {
+        return undefined;
+    }
+    const row = await deps.prisma.wMSession.findUnique({
+        where: {
+            tenantId_sessionId: { tenantId: input.tenantId, sessionId: input.taskId },
+        },
+        select: { snapshot: true },
+    });
+    const snapshot = jsonObjectOrEmpty(row?.snapshot ?? null);
+    const pending = jsonObjectOrEmpty(snapshot.pending as JsonValue);
+    const terminals = jsonObjectOrEmpty(pending.childTerminals as JsonValue);
+    const terminal = jsonObjectOrEmpty(terminals[boundary.token] as JsonValue);
+    if (terminal.kind !== 'completed' && terminal.kind !== 'failed') return undefined;
+
+    const inbox = jsonObjectOrEmpty(snapshot.inbox as JsonValue);
+    const observations = [
+        ...(Array.isArray(inbox.current) ? inbox.current : []),
+        ...(Array.isArray(inbox.all) ? inbox.all : []),
+    ];
+    const observation = observations.find((candidate) => {
+        const record = jsonObjectOrEmpty(candidate as JsonValue);
+        const payload = jsonObjectOrEmpty(record.payload as JsonValue);
+        return payload.token === boundary.token &&
+            (record.kind === 'child.completed' || record.kind === 'child.failed');
+    });
+    if (observation === undefined) return undefined;
+    const payload = jsonObjectOrEmpty(
+        jsonObjectOrEmpty(observation as JsonValue).payload as JsonValue
+    );
+    const childTaskId = typeof payload.childTaskId === 'string'
+        ? payload.childTaskId
+        : typeof terminal.childTaskId === 'string'
+          ? terminal.childTaskId
+          : boundary.childTaskId ?? boundary.token;
+    return {
+        kind: 'child',
+        token: boundary.token,
+        childTaskId,
+        outcome: terminal.kind,
+        ...(terminal.kind === 'completed'
+            ? { output: payload.result as never }
+            : { error: payload.error as never }),
+        terminalClaimed: true,
+        idempotencyKey: `${input.taskId}:child:${boundary.token}`,
+    };
 }
 
 async function findPersistedParentChildEvent(
@@ -1321,19 +1375,17 @@ async function findPersistedAwaitBoundary(
     input: TaskTaskInput,
     deps?: TaskTaskDeps
 ): Promise<{ boundary: AwaitableBoundary; turnSeq: number } | undefined> {
-    if (deps?.prisma?.wMEvent === undefined) {
-        return undefined;
-    }
-
-    const rows = await deps.prisma.wMEvent.findMany({
-        where: {
-            tenantId: input.tenantId,
-            sessionId: input.taskId,
-            type: { in: ['turn.completed', 'task.completed', 'task.failed', 'task.canceled'] },
-        },
-        orderBy: { seq: 'desc' },
-        take: 50,
-    });
+    const rows = deps?.prisma?.wMEvent === undefined
+        ? []
+        : await deps.prisma.wMEvent.findMany({
+              where: {
+                  tenantId: input.tenantId,
+                  sessionId: input.taskId,
+                  type: { in: ['turn.completed', 'task.completed', 'task.failed', 'task.canceled'] },
+              },
+              orderBy: { seq: 'desc' },
+              take: 50,
+          });
 
     for (const row of rows) {
         if (row.type === 'task.completed' || row.type === 'task.failed' || row.type === 'task.canceled') {
@@ -1348,7 +1400,7 @@ async function findPersistedAwaitBoundary(
         if (boundary === undefined) {
             return undefined;
         }
-        if (boundary.kind === 'await_child' && boundary.expiresAt === undefined && deps.prisma?.wMSession) {
+        if (boundary.kind === 'await_child' && boundary.expiresAt === undefined && deps?.prisma?.wMSession) {
             const session = await deps.prisma.wMSession.findUnique({
                 where: { tenantId_sessionId: { tenantId: input.tenantId, sessionId: input.taskId } },
                 select: { snapshot: true },
@@ -1373,7 +1425,31 @@ async function findPersistedAwaitBoundary(
         };
     }
 
-    return undefined;
+    if (deps?.prisma?.wMSession === undefined) return undefined;
+    const row = await deps.prisma.wMSession.findUnique({
+        where: {
+            tenantId_sessionId: { tenantId: input.tenantId, sessionId: input.taskId },
+        },
+        select: { snapshot: true },
+    });
+    const snapshot = jsonObjectOrEmpty(row?.snapshot ?? null);
+    const meta = jsonObjectOrEmpty(snapshot.meta as JsonValue);
+    const awaiting = jsonObjectOrEmpty(meta.awaiting as JsonValue);
+    if (awaiting.kind !== 'await_child' || typeof awaiting.token !== 'string') return undefined;
+    const pending = jsonObjectOrEmpty(snapshot.pending as JsonValue);
+    const tasks = jsonObjectOrEmpty(pending.tasks as JsonValue);
+    const entry = jsonObjectOrEmpty(tasks[awaiting.token] as JsonValue);
+    return {
+        boundary: {
+            kind: 'await_child',
+            token: awaiting.token,
+            ...(typeof entry.expiresAt === 'string' ? { expiresAt: entry.expiresAt } : {}),
+            ...(typeof entry.timeoutMs === 'number' ? { timeoutMs: entry.timeoutMs } : {}),
+            ...(typeof entry.childTaskId === 'string' ? { childTaskId: entry.childTaskId } : {}),
+            ...(typeof entry.agentId === 'string' ? { agentId: entry.agentId } : {}),
+        },
+        turnSeq: typeof meta.turn === 'number' && Number.isFinite(meta.turn) ? meta.turn : 0,
+    };
 }
 
 function awaitableBoundaryFromTransition(value: unknown): AwaitableBoundary | undefined {

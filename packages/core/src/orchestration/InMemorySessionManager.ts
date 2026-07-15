@@ -12,6 +12,7 @@ import type {
     UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
 } from '@a2arium/callagent-memory-engine';
+import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/working-memory-version-conflict';
 
 /**
  * In-memory implementation of IWorkingMemorySessionStore for testing and CLI usage.
@@ -69,9 +70,19 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
 
         const current = this.snapshots.get(key);
 
-        // Simple CAS check - in production this would be atomic at database level
-        if (current && current.wmVersion !== params.expectedWmVersion) {
-            throw new Error('WM_VERSION_CONFLICT');
+        if (
+            (current === undefined && params.expectedWmVersion !== BigInt(0)) ||
+            (current !== undefined && current.wmVersion !== params.expectedWmVersion)
+        ) {
+            throw new WorkingMemoryVersionConflictError(
+                {
+                    tenantId: params.tenantId,
+                    sessionId: params.sessionId,
+                    expectedWmVersion: params.expectedWmVersion.toString(),
+                    actualWmVersion: current?.wmVersion.toString() ?? '0',
+                },
+                'WM_VERSION_CONFLICT'
+            );
         }
 
         const newVersion = (current?.wmVersion ?? BigInt(0)) + BigInt(1);
@@ -79,7 +90,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         this.snapshots.set(key, {
             wmVersion: newVersion,
             snapshot: params.snapshot,
-            agentId: params.agentId,
+            agentId: current?.agentId ?? params.agentId,
             updatedAt: new Date().toISOString()
         });
 

@@ -172,6 +172,17 @@ describe('ApiBinder.requestTool unified API', () => {
 
     it('redacts and bounds sync child completion result previews', async () => {
         const html = `<html>${'x'.repeat(80 * 1024)}</html>`;
+        let durableSnapshot: Record<string, unknown> = { pending: { tools: {} } };
+        mockSessionManager.load.mockImplementation(async () => ({
+            snapshot: durableSnapshot,
+            wmVersion: BigInt(1),
+            agentId: 'parent-agent',
+            updatedAt: new Date().toISOString(),
+        }));
+        mockSessionManager.saveSnapshot.mockImplementation(async (params: any) => {
+            durableSnapshot = params.snapshot;
+            return { newVersion: params.expectedWmVersion + BigInt(1) };
+        });
         const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
             id: 'child-task-1',
             status: {
@@ -219,13 +230,73 @@ describe('ApiBinder.requestTool unified API', () => {
                 mimeType: 'text/html',
             }));
             expect(payload.result.data.content).toBe(`[html/text truncated, ${html.length} chars]`);
-            expect(payload.resultPreview.result.data.html).toEqual(expect.objectContaining({
+            expect(payload.resultPreview.data.html).toEqual(expect.objectContaining({
                 state: 'artifact_only',
                 artifactId: 'local',
                 mimeType: 'text/html',
             }));
-            expect(payload.resultPreview.result.data.content).toBe(`[html/text truncated, ${html.length} chars]`);
+            expect(payload.resultPreview.data.content).toBe(`[html/text truncated, ${html.length} chars]`);
             expect(JSON.stringify(payload)).not.toContain(html);
+        } finally {
+            sendSpy.mockRestore();
+        }
+    });
+
+    it('persists a terminal child execution failure as child.failed', async () => {
+        let durableSnapshot: Record<string, unknown> = { pending: { tools: {} } };
+        let durableVersion = BigInt(1);
+        mockSessionManager.load.mockImplementation(async () => ({
+            snapshot: durableSnapshot,
+            wmVersion: durableVersion,
+            agentId: 'parent-agent',
+            updatedAt: new Date().toISOString(),
+        }));
+        mockSessionManager.saveSnapshot.mockImplementation(async (params: any) => {
+            durableSnapshot = params.snapshot;
+            durableVersion = params.expectedWmVersion + BigInt(1);
+            return { newVersion: durableVersion };
+        });
+        const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
+            id: 'child-task-failed',
+            status: {
+                state: 'failed',
+                timestamp: new Date().toISOString(),
+                metadata: {
+                    error: { code: 'BROWSER_FAILED', message: 'browser unavailable' },
+                },
+            },
+        } as any);
+        const ctx: any = {
+            task: { id: 's1', input: {} },
+            tenantId: 't1',
+            agentId: 'parent-agent',
+        };
+
+        try {
+            await apiBinder.attachOrchestrationAPIs(ctx, {
+                tenantId: 't1',
+                sessionId: 's1',
+                agentId: 'parent-agent',
+                flushMentalState: jest.fn(),
+            });
+
+            const { token } = await ctx.sendTaskToAgent('child-agent', { url: 'https://example.test' });
+
+            const failedEvent = mockSessionManager.appendEvent.mock.calls.find(
+                (call) => call[2] === 'task.child_failed'
+            );
+            expect(failedEvent?.[3]).toEqual(expect.objectContaining({
+                token,
+                childTaskId: 'child-task-failed',
+                error: { code: 'BROWSER_FAILED', message: 'browser unavailable' },
+            }));
+            expect((durableSnapshot as any).pending.tasks).not.toHaveProperty(token);
+            expect((durableSnapshot as any).pending.childTerminals[token]).toEqual(
+                expect.objectContaining({
+                    kind: 'failed',
+                    error: { code: 'BROWSER_FAILED', message: 'browser unavailable' },
+                })
+            );
         } finally {
             sendSpy.mockRestore();
         }

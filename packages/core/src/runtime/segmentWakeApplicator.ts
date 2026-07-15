@@ -31,6 +31,10 @@ import type { ConversationPayload } from '../types/observation.js';
 import type { TurnWake } from './turnExecutor.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { makeSafeEventPreview } from '../orchestration/safeEventPreview.js';
+import { reconcileSnapshotMutation } from '../orchestration/persistence/SnapshotRepository.js';
+import { logger } from '@a2arium/callagent-utils';
+
+const log = logger.createLogger({ prefix: 'SegmentWakeApplicator' });
 
 export type PreparedSegmentWake = {
     snapshot: Record<string, unknown>;
@@ -370,32 +374,37 @@ export async function prepareSegmentWake(
     const { tenantId, taskId, agentId, wake } = params;
 
     if (wake.trigger === 'start') {
-        const existing = await sessionManager.load(tenantId, taskId);
-        const base = (existing?.snapshot as Record<string, unknown> | undefined) ?? {
-            meta: { agentId: agentId ?? 'default', turn: 0 },
-        };
-        const prepared = applyWakeToSnapshot(base, wake, { tenantId, taskId, agentId });
-        if (existing === null || existing === undefined) {
-            await sessionManager.saveSnapshot({
-                tenantId,
-                sessionId: taskId,
-                agentId: prepared.agentId,
-                expectedWmVersion: BigInt(0),
-                snapshot: prepared.snapshot,
-            });
-        }
-        return { ...prepared, wmVersion: existing?.wmVersion ?? BigInt(0) };
+        const reconciled = await reconcileSnapshotMutation({
+            session: sessionManager,
+            tenantId,
+            sessionId: taskId,
+            operation: 'segment.start.prepare',
+            agentId,
+            mutate: ({ snapshot, wmVersion }) => {
+                const exists = wmVersion > BigInt(0) || Object.keys(snapshot).length > 0;
+                const base = exists ? snapshot : { meta: { agentId: agentId ?? 'default', turn: 0 } };
+                const prepared = applyWakeToSnapshot(base, wake, { tenantId, taskId, agentId });
+                return exists
+                    ? { kind: 'noop', value: prepared }
+                    : { kind: 'write', snapshot: prepared.snapshot, value: prepared };
+            },
+        });
+        return { ...reconciled.value, wmVersion: reconciled.wmVersion };
     }
 
     const completedAt = wake.trigger === 'child' && wake.event.kind === 'child'
         ? wake.event.completedAt ?? new Date().toISOString()
         : undefined;
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
-        const snap = await sessionManager.load(tenantId, taskId);
-        if (snap === null || snap === undefined) {
-            throw new Error(`Session not found for ${taskId}`);
-        }
-        const base = (snap.snapshot as Record<string, unknown>) || {};
+    const reconciled = await reconcileSnapshotMutation({
+        session: sessionManager,
+        tenantId,
+        sessionId: taskId,
+        operation: `segment.${wake.trigger}.apply`,
+        agentId,
+        mutate: async ({ snapshot: base, wmVersion }) => {
+            if (wmVersion === BigInt(0) && Object.keys(base).length === 0) {
+                throw new Error(`Session not found for ${taskId}`);
+            }
         let wakeToApply = wake;
         if (wake.trigger === 'child' && wake.event.kind === 'child') {
             const failed = wake.event.outcome === 'failed' || (wake.event.output as any)?.ok === false;
@@ -415,60 +424,68 @@ export async function prepareSegmentWake(
             agentId,
             hydrateChildResult: wakeToApply.trigger === 'child' ? hydrateChildWakeOutput(sessionManager, tenantId) : undefined,
         });
-        if (prepared.skipTurn) {
-            if (
-                prepared.childTerminalClaim?.lateCompletion === true &&
-                wakeToApply.trigger === 'child' &&
+            const terminalAlreadyClaimed = wakeToApply.trigger === 'child' &&
                 wakeToApply.event.kind === 'child' &&
-                wakeToApply.event.outcome !== 'failed'
-            ) {
-                defaultMetricsRegistry.increment('child.late_completion_total', {
-                    source: 'segment_wake',
-                });
-                await sessionManager.appendEvent(
-                    tenantId,
-                    taskId,
-                    'task.child_late_completion',
-                    {
-                        token: wakeToApply.event.token,
-                        childTaskId: wakeToApply.event.childTaskId,
-                        completedAt: wakeToApply.event.completedAt ?? completedAt,
-                        resultPreview: makeSafeEventPreview(wakeToApply.event.output),
-                    }
-                );
-            }
-            return { ...prepared, wmVersion: snap.wmVersion ?? BigInt(0) };
-        }
+                wakeToApply.event.terminalClaimed === true;
+            const value = { prepared, wakeToApply };
+            return prepared.skipTurn || terminalAlreadyClaimed
+                ? { kind: 'noop', value }
+                : { kind: 'write', snapshot: prepared.snapshot, value };
+        },
+    });
+
+    const { prepared, wakeToApply } = reconciled.value;
+    if (
+        prepared.childTerminalClaim?.lateCompletion === true &&
+        wakeToApply.trigger === 'child' &&
+        wakeToApply.event.kind === 'child' &&
+        wakeToApply.event.outcome !== 'failed'
+    ) {
+        defaultMetricsRegistry.increment('child.late_completion_total', {
+            source: 'segment_wake',
+        });
         try {
-            const saveResult = await sessionManager.saveSnapshot({
-                tenantId,
-                sessionId: taskId,
-                agentId: prepared.agentId,
-                expectedWmVersion: snap.wmVersion ?? BigInt(0),
-                snapshot: prepared.snapshot,
+            await sessionManager.appendEvent(tenantId, taskId, 'task.child_late_completion', {
+                token: wakeToApply.event.token,
+                childTaskId: wakeToApply.event.childTaskId,
+                completedAt: wakeToApply.event.completedAt ?? completedAt,
+                resultPreview: makeSafeEventPreview(wakeToApply.event.output),
             });
-            if (saveResult === null) throw new Error('CAS_MISMATCH');
-            const eventPayload = childTerminalEventPayload(prepared.childTerminalClaim ?? { snapshot: prepared.snapshot, won: false });
-            if (eventPayload !== undefined && typeof (sessionManager as any).appendEvent === 'function') {
-                const eventType = prepared.childTerminalClaim?.kind === 'failed'
-                    ? 'task.child_failed'
-                    : 'task.child_completed';
-                await sessionManager.appendEvent(tenantId, taskId, eventType, eventPayload);
-                defaultMetricsRegistry.increment('child.terminal_race_winner_total', {
-                    kind: prepared.childTerminalClaim?.kind ?? 'unknown',
-                });
-                if (prepared.childTerminalClaim?.terminal?.error?.code === 'CHILD_TIMEOUT') {
-                    defaultMetricsRegistry.increment('child.timeout_total', {
-                        source: wakeToApply.trigger === 'timer' ? 'timer' : 'completion',
-                    });
-                }
-            }
-            return { ...prepared, wmVersion: snap.wmVersion ?? BigInt(0) };
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if ((message === 'CAS_MISMATCH' || message === 'WM_VERSION_CONFLICT') && attempt < 5) continue;
-            throw error;
+            log.warn('Failed to append late child completion diagnostic', {
+                tenantId,
+                taskId,
+                error: error instanceof Error ? error.message : String(error),
+            });
         }
     }
-    throw new Error('CAS_MISMATCH');
+
+    if (reconciled.status === 'committed') {
+        const eventPayload = childTerminalEventPayload(
+            prepared.childTerminalClaim ?? { snapshot: prepared.snapshot, won: false }
+        );
+        if (eventPayload !== undefined && typeof (sessionManager as any).appendEvent === 'function') {
+            const eventType = prepared.childTerminalClaim?.kind === 'failed'
+                ? 'task.child_failed'
+                : 'task.child_completed';
+            try {
+                await sessionManager.appendEvent(tenantId, taskId, eventType, eventPayload);
+            } catch (error) {
+                log.warn('Terminal wake committed but diagnostic event append failed', {
+                    tenantId,
+                    taskId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+            defaultMetricsRegistry.increment('child.terminal_race_winner_total', {
+                kind: prepared.childTerminalClaim?.kind ?? 'unknown',
+            });
+            if (prepared.childTerminalClaim?.terminal?.error?.code === 'CHILD_TIMEOUT') {
+                defaultMetricsRegistry.increment('child.timeout_total', {
+                    source: wakeToApply.trigger === 'timer' ? 'timer' : 'completion',
+                });
+            }
+        }
+    }
+    return { ...prepared, wmVersion: reconciled.wmVersion };
 }

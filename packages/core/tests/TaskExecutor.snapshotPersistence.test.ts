@@ -1,5 +1,6 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
+import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types';
 
 const createFakeArtifactPrisma = () => {
     const artifacts = new Map<string, unknown>();
@@ -94,5 +95,96 @@ describe('TaskExecutor snapshot persistence', () => {
             kind: 'artifact',
             mimeType: 'text/html',
         }));
+    });
+
+    it('does not resurrect a child terminal that commits while the parent turn is persisting', async () => {
+        const token = 'child-race';
+        const terminalObservation = {
+            source: 'child',
+            kind: 'child.completed',
+            payload: { token, childTaskId: 'child-task', result: { ok: true } },
+            provenance: { ts: 10, turn: 2, id: token, correlationId: token },
+        };
+        let current: any = {
+            wmVersion: BigInt(1),
+            agentId: 'parent-agent',
+            snapshot: {
+                meta: { turn: 1, agentId: 'parent-agent' },
+                pending: {
+                    children: { [token]: { agentId: 'child-agent' } },
+                    tasks: { [token]: { agentId: 'child-agent', childTaskId: 'child-task' } },
+                },
+                inbox: { current: [], all: [] },
+            },
+        };
+        let attempt = 0;
+        const sessionManager = {
+            load: jest.fn(async () => current),
+            saveSnapshot: jest.fn(async (params: any) => {
+                attempt += 1;
+                if (attempt === 1) {
+                    current = {
+                        wmVersion: BigInt(2),
+                        agentId: 'parent-agent',
+                        snapshot: {
+                            ...current.snapshot,
+                            pending: {
+                                children: {},
+                                tasks: {},
+                                childTerminals: {
+                                    [token]: {
+                                        kind: 'completed',
+                                        claimedAt: '2026-01-01T00:00:00.000Z',
+                                        childTaskId: 'child-task',
+                                        agentId: 'child-agent',
+                                    },
+                                },
+                            },
+                            inbox: { current: [terminalObservation], all: [terminalObservation] },
+                        },
+                    };
+                    throw new WorkingMemoryVersionConflictError({
+                        tenantId: 'tenant-a',
+                        sessionId: 'parent-race',
+                        expectedWmVersion: '1',
+                        actualWmVersion: '2',
+                    }, 'CAS_MISMATCH');
+                }
+                current = {
+                    wmVersion: params.expectedWmVersion + BigInt(1),
+                    agentId: 'parent-agent',
+                    snapshot: params.snapshot,
+                };
+                return { newVersion: current.wmVersion };
+            }),
+        };
+
+        await (TaskExecutor as any).saveSnapshot({
+            sessionManager,
+            tenantId: 'tenant-a',
+            sessionId: 'parent-race',
+            agentId: 'parent-agent',
+            env: {
+                turn: 2,
+                pending: {
+                    children: { [token]: { agentId: 'child-agent' } },
+                    tasks: { [token]: { agentId: 'child-agent', childTaskId: 'child-task' } },
+                },
+                inbox: { current: [], all: [] },
+            },
+            M: {},
+            mNext: {},
+            outcome: { kind: 'await_child', token },
+            loopOpts: {},
+            ctx: {},
+            getSessionStorePrisma: () => undefined,
+        });
+
+        expect(current.snapshot.pending.children).toEqual({});
+        expect(current.snapshot.pending.tasks).toEqual({});
+        expect(current.snapshot.pending.childTerminals[token]).toBeDefined();
+        expect(current.snapshot.inbox.all).toEqual([
+            expect.objectContaining({ kind: 'child.completed', payload: expect.objectContaining({ token }) }),
+        ]);
     });
 });

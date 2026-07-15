@@ -24,6 +24,7 @@ import {
     snapshotHasProcessedSegmentKey,
 } from './segmentProcessedKeys.js';
 import { readSegmentCancellation } from './segmentCancellation.js';
+import { reconcileSnapshotMutation } from '../orchestration/persistence/SnapshotRepository.js';
 
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
@@ -265,20 +266,22 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         agentId: string | undefined,
         idempotencyKey: string
     ): Promise<void> {
-        const snap = await this.sessionManager.load(tenantId, taskId);
-        if (
-            snap === null ||
-            snap === undefined ||
-            snapshotHasProcessedSegmentKey(snap.snapshot, idempotencyKey)
-        ) {
-            return;
-        }
-        await this.sessionManager.saveSnapshot({
+        await reconcileSnapshotMutation({
+            session: this.sessionManager,
             tenantId,
             sessionId: taskId,
-            agentId: agentId ?? snap.agentId,
-            expectedWmVersion: snap.wmVersion ?? BigInt(0),
-            snapshot: addProcessedSegmentKey(snap.snapshot, idempotencyKey),
+            agentId,
+            operation: 'segment.processed.record',
+            mutate: ({ snapshot, wmVersion }) => {
+                if (wmVersion === BigInt(0) || snapshotHasProcessedSegmentKey(snapshot, idempotencyKey)) {
+                    return { kind: 'noop', value: undefined };
+                }
+                return {
+                    kind: 'write',
+                    snapshot: addProcessedSegmentKey(snapshot, idempotencyKey),
+                    value: undefined,
+                };
+            },
         });
     }
 

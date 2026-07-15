@@ -14,7 +14,7 @@ import { getPendingTasks, setPendingTasks, getPendingGroups, setPendingGroups } 
 import { InputHandle, createTaskHandle, createGroupHandle, type GroupHandle } from '../Handles.js';
 import { globalA2AService } from '../A2AService.js';
 import type { SessionManager } from '../SessionManager.js';
-import type { SnapshotRepository } from '../persistence/SnapshotRepository.js';
+import { reconcileSnapshotMutation, type SnapshotRepository } from '../persistence/SnapshotRepository.js';
 import { TaskStateUtils } from '../utils/TaskStateUtils.js';
 import { writeControlVar } from '../../loop/controlVarAccessors.js';
 import { throwInvariantError } from '../../utils/invariantError.js';
@@ -64,6 +64,28 @@ const TERMINAL_CHILD_STATES: ReadonlySet<TaskState> = new Set(['completed', 'fai
 
 function isTerminalChildState(state: string | undefined): boolean {
     return state === undefined || TERMINAL_CHILD_STATES.has(state as TaskState);
+}
+
+function childExecutionFailure(result: unknown, state: string): { code: string; message: string } {
+    const status = result !== null && typeof result === 'object'
+        ? (result as { status?: { metadata?: Record<string, unknown>; message?: unknown } }).status
+        : undefined;
+    const rawError = status?.metadata?.error ?? status?.metadata?.reason ?? status?.message;
+    if (rawError !== null && typeof rawError === 'object' && !Array.isArray(rawError)) {
+        const record = rawError as Record<string, unknown>;
+        return {
+            code: typeof record.code === 'string'
+                ? record.code
+                : state === 'canceled' ? 'CHILD_CANCELED' : 'CHILD_FAILED',
+            message: typeof record.message === 'string'
+                ? record.message
+                : `Child task ${state}.`,
+        };
+    }
+    return {
+        code: state === 'canceled' ? 'CHILD_CANCELED' : 'CHILD_FAILED',
+        message: typeof rawError === 'string' ? rawError : `Child task ${state}.`,
+    };
 }
 
 function shouldScheduleChildStartThroughRuntimeDriver(): boolean {
@@ -156,15 +178,49 @@ export class ApiBinder {
             }
         }
 
+        const token = (options as { customToken?: string } | undefined)?.customToken ?? uuidv7();
+        const tokenPath = options?.tokenPath ?? 'child.token';
+        const shouldSetToken = options?.setToken !== false;
+        const controlUpdates: Array<[string, unknown]> = [];
+        if (shouldSetToken) controlUpdates.push([tokenPath, token]);
+        if (options?.setStage) controlUpdates.push(['stage', options.setStage]);
+
         log.debug(`[sendTaskToAgent] Requesting mutex for ${tenantId}:${sessionId}`);
-        let token = (options as { customToken?: string } | undefined)?.customToken;
         const { handle, token: generatedToken } = await deps.taskCreationMutex.runExclusive(
             `${tenantId}:${sessionId}`,
             async () => {
-                return await createTaskHandle(deps.sessionManager!, tenantId, sessionId, agent, childInput, token);
+                return await createTaskHandle(
+                    deps.sessionManager!,
+                    tenantId,
+                    sessionId,
+                    agent,
+                    childInput,
+                    token,
+                    {
+                        entry: {
+                            options: {
+                                setToken: shouldSetToken,
+                                tokenPath,
+                                autoClearToken: options?.autoClearToken !== false,
+                                setStage: options?.setStage,
+                            },
+                            agentId: agent,
+                            childTaskId,
+                            ...(timeoutMs !== undefined && expiresAt !== undefined
+                                ? { timeoutMs, expiresAt }
+                                : {}),
+                        },
+                        controlUpdates,
+                    }
+                );
             }
         );
-        if (!token) token = generatedToken;
+        if (generatedToken !== token) {
+            throw new Error('CHILD_TOKEN_REGISTRATION_MISMATCH');
+        }
+
+        if (shouldSetToken) writeControlVar(ctx, tokenPath, token);
+        if (options?.setStage) writeControlVar(ctx, 'stage', options.setStage);
 
         const parentId = ctx.telemetry?.nodeId ?? 'root';
         const parentNode = telemetry.getNode(parentId);
@@ -183,88 +239,6 @@ export class ApiBinder {
                 awaitCompletion: options?.awaitCompletion !== false,
                 childAgentNodeId: childCallNode.id,
             });
-        }
-
-        const tokenPath = options?.tokenPath ?? 'child.token';
-        const shouldSetToken = options?.setToken !== false;
-        const controlUpdates: Array<[string, unknown]> = [];
-
-        if (shouldSetToken) {
-            controlUpdates.push([tokenPath, token]);
-            writeControlVar(ctx, tokenPath, token);
-        }
-        if (options?.setStage) {
-            controlUpdates.push(['stage', options.setStage]);
-            writeControlVar(ctx, 'stage', options.setStage);
-        }
-
-        const writeOnce = async (baseSnap: Record<string, unknown>, expectedVer: bigint) => {
-            const tasks = getPendingTasks(baseSnap);
-            if (tasks[token]) {
-                tasks[token].options = {
-                    setToken: shouldSetToken,
-                    tokenPath,
-                    autoClearToken: options?.autoClearToken !== false,
-                    setStage: options?.setStage,
-                };
-                tasks[token].agentId = agent;
-                tasks[token].childTaskId = childTaskId;
-                if (timeoutMs !== undefined && expiresAt !== undefined) {
-                    tasks[token].timeoutMs = timeoutMs;
-                    tasks[token].expiresAt = expiresAt;
-                }
-                let next = setPendingTasks(baseSnap, tasks);
-                if (controlUpdates.length > 0) {
-                    for (const [path, value] of controlUpdates) {
-                        next = TaskStateUtils.applyControlVarToSnapshot(next, path, value);
-                    }
-                }
-                await deps.sessionManager.saveSnapshot({
-                    tenantId,
-                    sessionId,
-                    agentId: (baseSnap as { meta?: { agentId?: string } })?.meta?.agentId || 'default',
-                    expectedWmVersion: expectedVer,
-                    snapshot: next,
-                });
-            }
-        };
-
-        try {
-            let attempts = 0;
-            const maxAttempts = 3;
-            let saved = false;
-
-            while (attempts < maxAttempts) {
-                attempts++;
-                const snapOptions = await deps.sessionManager.load(tenantId, sessionId);
-                const baseOptions = (snapOptions?.snapshot as Record<string, unknown>) || {};
-                const expected = snapOptions?.wmVersion ?? BigInt(0);
-
-                const hasMeta = !!(baseOptions as { meta?: unknown }).meta;
-                const hasM = !!(baseOptions as { M?: unknown }).M;
-                const isVersionZero = expected === BigInt(0);
-
-                if (hasMeta || hasM || isVersionZero) {
-                    await writeOnce(baseOptions, expected);
-                    saved = true;
-                    break;
-                }
-                if (attempts < maxAttempts) await new Promise((r) => setTimeout(r, 200 * attempts));
-            }
-
-            if (!saved) {
-                const snapFinal = await deps.sessionManager.load(tenantId, sessionId);
-                await writeOnce((snapFinal?.snapshot as Record<string, unknown>) || {}, snapFinal?.wmVersion ?? BigInt(0));
-            }
-        } catch (e) {
-            if ((e as Error).message === 'CAS_MISMATCH') {
-                try {
-                    const snapRetry = await deps.sessionManager.load(tenantId, sessionId);
-                    await writeOnce((snapRetry?.snapshot as Record<string, unknown>) || {}, snapRetry?.wmVersion ?? BigInt(0));
-                } catch {
-                    /* noop */
-                }
-            } else throw e;
         }
 
         const optAny = (options ?? {}) as {
@@ -319,6 +293,55 @@ export class ApiBinder {
         const idempotencyKey =
             childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
 
+        const useRuntimeChildStart = awaitCompletion === false &&
+            deps.enqueueChildStart !== undefined &&
+            shouldScheduleChildStartThroughRuntimeDriver();
+        if (useRuntimeChildStart) {
+            try {
+                Object.defineProperty(handle as object, 'id', {
+                    value: childTaskId,
+                    configurable: true,
+                    enumerable: true,
+                });
+            } catch {
+                (handle as unknown as Record<string, unknown>).id = childTaskId;
+            }
+            await reconcileSnapshotMutation({
+                session: deps.sessionManager,
+                tenantId,
+                sessionId: childTaskId,
+                operation: 'child.dispatch.link_parent',
+                agentId: agent,
+                mutate: ({ snapshot }) => {
+                    const childMeta = (snapshot.meta as Record<string, unknown>) || {};
+                    return {
+                        kind: 'write',
+                        value: undefined,
+                        snapshot: {
+                            ...snapshot,
+                            meta: {
+                                ...childMeta,
+                                agentId: agent,
+                                a2aParent: {
+                                    parentTenantId: tenantId,
+                                    parentTaskId: sessionId,
+                                    parentChildToken: token,
+                                },
+                                ...(ctx.telemetry?.traceId || ctx.telemetry?.nodeId
+                                    ? {
+                                          telemetry: {
+                                              ...(ctx.telemetry?.traceId ? { traceId: ctx.telemetry.traceId } : {}),
+                                              ...(ctx.telemetry?.nodeId ? { parentNodeId: ctx.telemetry.nodeId } : {}),
+                                          },
+                                      }
+                                    : {}),
+                            },
+                        },
+                    };
+                },
+            });
+        }
+
         const childStartedPayload = {
             token,
             agentId: agent,
@@ -366,51 +389,8 @@ export class ApiBinder {
             });
         }
 
-        if (
-            awaitCompletion === false &&
-            deps.enqueueChildStart &&
-            shouldScheduleChildStartThroughRuntimeDriver()
-        ) {
-            try {
-                Object.defineProperty(handle as object, 'id', {
-                    value: childTaskId,
-                    configurable: true,
-                    enumerable: true,
-                });
-            } catch {
-                (handle as unknown as Record<string, unknown>).id = childTaskId;
-            }
-            const childSnap = await deps.sessionManager.load(tenantId, childTaskId);
-            const childBase = (childSnap?.snapshot as Record<string, unknown>) || {};
-            const childMeta = (childBase.meta as Record<string, unknown>) || {};
-            const childNext = {
-                ...childBase,
-                meta: {
-                    ...childMeta,
-                    agentId: agent,
-                    a2aParent: {
-                        parentTenantId: tenantId,
-                        parentTaskId: sessionId,
-                        parentChildToken: token,
-                    },
-                    ...(ctx.telemetry?.traceId || ctx.telemetry?.nodeId
-                        ? {
-                              telemetry: {
-                                  ...(ctx.telemetry?.traceId ? { traceId: ctx.telemetry.traceId } : {}),
-                                  ...(ctx.telemetry?.nodeId ? { parentNodeId: ctx.telemetry.nodeId } : {}),
-                              },
-                          }
-                        : {}),
-                },
-            };
-            await deps.sessionManager.saveSnapshot({
-                tenantId,
-                sessionId: childTaskId,
-                agentId: agent,
-                expectedWmVersion: childSnap?.wmVersion ?? BigInt(0),
-                snapshot: childNext,
-            });
-            await deps.enqueueChildStart({
+        if (useRuntimeChildStart) {
+            await deps.enqueueChildStart!({
                 tenantId,
                 taskId: childTaskId,
                 agentId: agent,
@@ -595,6 +575,8 @@ export class ApiBinder {
         const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
         const childState = cleanChildResult.executionMetadata?.state;
         const childIsTerminal = isTerminalChildState(childState);
+        const childFailed = childState === 'failed' || childState === 'canceled';
+        const terminalFailure = childFailed ? childExecutionFailure(result, childState) : undefined;
         childCallNode.childTaskId = cleanChildResult.childTaskId;
         const a2aTel = readA2aResultTelemetry(result);
         const childExecutionMetadata = {
@@ -605,19 +587,52 @@ export class ApiBinder {
 
         if (childIsTerminal) {
             childCallNode.endTime = Date.now();
-            childCallNode.end(cleanChildResult.result, 'success');
+            if (childFailed) {
+                const childError = new Error(terminalFailure!.message);
+                childError.name = terminalFailure!.code;
+                childCallNode.fail(childError);
+                telemetry.failNode(childCallNode, childError);
+            } else {
+                childCallNode.end(cleanChildResult.result, 'success');
+            }
             telemetry.endNode(childCallNode);
-            const prisma = deps.getSessionStorePrisma();
-            const cache = prisma ? new AgentResultCache(prisma) : undefined;
-            childResultForParent = await prepareChildResultForPersistence(
-                cleanChildResult.result,
-                cache,
-                tenantId
-            );
-
+            if (!childFailed) {
+                const prisma = deps.getSessionStorePrisma();
+                const cache = prisma ? new AgentResultCache(prisma) : undefined;
+                childResultForParent = await prepareChildResultForPersistence(
+                    cleanChildResult.result,
+                    cache,
+                    tenantId
+                );
+            }
+            await coordinateChildTerminal({
+                session: deps.sessionManager,
+                tenantId,
+                parentTaskId: sessionId,
+                request: childFailed
+                    ? {
+                          kind: 'failed',
+                          token,
+                          failedAt: new Date().toISOString(),
+                          childTaskId: cleanChildResult.childTaskId ?? childTaskId,
+                          agentId: agent,
+                          error: terminalFailure!,
+                      }
+                    : {
+                          kind: 'completed',
+                          token,
+                          completedAt: new Date().toISOString(),
+                          childTaskId: cleanChildResult.childTaskId ?? childTaskId,
+                          agentId: agent,
+                          result: childResultForParent,
+                          executionMetadata: Object.keys(childExecutionMetadata).length > 0
+                              ? childExecutionMetadata as any
+                              : undefined,
+                      },
+            });
         }
 
-        if (iCtx.__turnChildCalls && childIsTerminal) {
+        if (iCtx.__turnChildCalls && childIsTerminal && !childFailed) {
             iCtx.__turnChildCalls.push({
                 token,
                 agentId: agent,
@@ -630,6 +645,17 @@ export class ApiBinder {
                     cleanChildResult.result != null
                         ? compactModuleOutput({ result: cleanChildResult.result })
                         : undefined,
+            });
+        } else if (iCtx.__turnChildCalls && childFailed) {
+            iCtx.__turnChildCalls.push({
+                token,
+                agentId: agent,
+                childTaskId: cleanChildResult.childTaskId,
+                status: 'failed',
+                module: iCtx.__currentModule,
+                childAgentNodeId: childCallNode.id,
+                childTraceId: a2aTel?.childTraceId,
+                error: terminalFailure,
             });
         } else if (iCtx.__turnChildCalls) {
             iCtx.__turnChildCalls.push({
@@ -662,22 +688,36 @@ export class ApiBinder {
         if (inbox) {
             const loopEnv = minimalCtx.__activeLoopEnv;
             if (loopEnv?.pending?.children) {
-                loopEnv.pending.children[token] = {
-                    agent,
-                    input: childInput,
-                };
+                if (childIsTerminal) {
+                    delete loopEnv.pending.children[token];
+                } else {
+                    loopEnv.pending.children[token] = {
+                        agent,
+                        input: childInput,
+                    };
+                }
             }
 
             if (childIsTerminal) {
                 const obs: EngineObservation = {
                     source: 'child',
-                    kind: 'child.completed',
-                    payload: {
-                        token,
-                        childTaskId: cleanChildResult.childTaskId,
-                        result: childResultForParent,
-                        executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined,
-                    },
+                    kind: childFailed ? 'child.failed' : 'child.completed',
+                    payload: childFailed
+                        ? {
+                              token,
+                              agentId: agent,
+                              childTaskId: cleanChildResult.childTaskId ?? childTaskId,
+                              error: terminalFailure!,
+                          }
+                        : {
+                              token,
+                              agentId: agent,
+                              childTaskId: cleanChildResult.childTaskId ?? childTaskId,
+                              result: childResultForParent,
+                              executionMetadata: Object.keys(childExecutionMetadata).length > 0
+                                  ? childExecutionMetadata
+                                  : undefined,
+                          },
                     provenance: {
                         ts: Date.now(),
                         turn: minimalCtx.__activeLoopEnv?.turn ?? 0,
@@ -686,15 +726,17 @@ export class ApiBinder {
                     },
                 };
 
-                await deps.handleChildCompleted({
-                    tenantId,
-                    parentTaskId: sessionId,
-                    childToken: token,
-                    childTaskId: cleanChildResult.childTaskId,
-                    childAgentId: agent,
-                    result,
-                    suppressResume: true,
-                });
+                if (!childFailed) {
+                    await deps.handleChildCompleted({
+                        tenantId,
+                        parentTaskId: sessionId,
+                        childToken: token,
+                        childTaskId: cleanChildResult.childTaskId,
+                        childAgentId: agent,
+                        result,
+                        suppressResume: true,
+                    });
+                }
                 const terminalSnapshot = await deps.sessionManager.load(tenantId, sessionId);
                 const durableTerminal = ((terminalSnapshot?.snapshot as any)?.inbox?.all ?? []).find(
                     (candidate: EngineObservation) =>
@@ -713,7 +755,7 @@ export class ApiBinder {
                     state: childState,
                 });
             }
-        } else if (awaitCompletion && childIsTerminal) {
+        } else if (awaitCompletion && childIsTerminal && !childFailed) {
             await deps.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
         }
 
@@ -1152,7 +1194,22 @@ export class ApiBinder {
             }
 
             for (const child of children) {
-                const { handle, token } = await createTaskHandle(this.deps.sessionManager, tenantId, sessionId, child.agent);
+                const childTaskId = buildA2AChildTaskId(sessionId, child.agent);
+                const { handle, token } = await createTaskHandle(
+                    this.deps.sessionManager,
+                    tenantId,
+                    sessionId,
+                    child.agent,
+                    child.input,
+                    undefined,
+                    {
+                        entry: {
+                            agentId: child.agent,
+                            childTaskId,
+                            options: { setToken: false, autoClearToken: true },
+                        },
+                    }
+                );
                 childTokens.push(token);
 
                 const parentId = ctx.telemetry?.nodeId ?? 'root';
@@ -1168,6 +1225,7 @@ export class ApiBinder {
                         parentTenantId: tenantId,
                         parentTaskId: sessionId,
                         parentChildToken: token,
+                        childTaskId,
                         awaitCompletion: false,
                         skipFlush: true,
                         parentTelemetryNodeId: childCallNode.id,
@@ -1210,17 +1268,26 @@ export class ApiBinder {
                 }
             }
             const { handle: groupHandle, groupToken } = await createGroupHandle(this.deps.sessionManager, tenantId, sessionId, childTokens);
-            const snap = await this.deps.sessionManager.load(tenantId, sessionId);
-            const base = (snap?.snapshot as Record<string, unknown>) || {};
-            const groups = getPendingGroups(base);
-            const g = groups[groupToken] || { childTokens: childTokens, results: {}, handlers: {} };
-            if (opts?.withTimeoutMs) g.timeoutMs = opts.withTimeoutMs;
-            if (opts?.cancelRemaining !== undefined) g.cancelRemaining = opts.cancelRemaining;
-            if (opts?.onAllCompleted) { g.handlers = g.handlers || {}; (g.handlers as any).allCompleted = opts.onAllCompleted; }
-            if (opts?.onAnyFailed) { g.handlers = g.handlers || {}; (g.handlers as any).anyFailed = opts.onAnyFailed; }
-            groups[groupToken] = g;
-            const next = setPendingGroups(base, groups);
-            await this.deps.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap?.wmVersion ?? BigInt(0), snapshot: next });
+            await reconcileSnapshotMutation({
+                session: this.deps.sessionManager,
+                tenantId,
+                sessionId,
+                operation: 'child.group.configure',
+                mutate: ({ snapshot }) => {
+                    const groups = getPendingGroups(snapshot);
+                    const g = groups[groupToken] || { childTokens, results: {}, handlers: {} };
+                    if (opts?.withTimeoutMs) g.timeoutMs = opts.withTimeoutMs;
+                    if (opts?.cancelRemaining !== undefined) g.cancelRemaining = opts.cancelRemaining;
+                    if (opts?.onAllCompleted) { g.handlers = g.handlers || {}; (g.handlers as any).allCompleted = opts.onAllCompleted; }
+                    if (opts?.onAnyFailed) { g.handlers = g.handlers || {}; (g.handlers as any).anyFailed = opts.onAnyFailed; }
+                    groups[groupToken] = g;
+                    return {
+                        kind: 'write',
+                        snapshot: setPendingGroups(snapshot, groups),
+                        value: undefined,
+                    };
+                },
+            });
             return groupHandle as GroupHandle;
         };
     }

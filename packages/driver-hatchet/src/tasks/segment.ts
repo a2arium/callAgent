@@ -3,6 +3,8 @@ import type {
     TurnExecutor,
     TurnWake,
 } from '@a2arium/callagent-core/unstable';
+import { isSnapshotReconciliationError } from '@a2arium/callagent-core/unstable';
+import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
 import type { JsonObject, JsonValue } from '@hatchet-dev/typescript-sdk/v1/types.js';
@@ -184,6 +186,14 @@ async function executeSegmentTaskInner(
                 operation: 'turn.segment',
                 status: 'failed',
             });
+        }
+        if (
+            isSnapshotReconciliationError(error) &&
+            ['turn.persist', 'turn.flush', 'segment.processed.record'].includes(
+                error.reconciliation.operation
+            )
+        ) {
+            throw new NonRetryableError(error.message);
         }
         throw error;
     }

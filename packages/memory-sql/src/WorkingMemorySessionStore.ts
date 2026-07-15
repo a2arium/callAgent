@@ -10,6 +10,7 @@ import type {
     ConversationThreadSweepRow,
     UpdateConversationThreadStatusInput,
 } from '@a2arium/callagent-types';
+import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/working-memory-version-conflict';
 
 export type SessionSnapshot = {
     wmVersion: bigint;
@@ -115,6 +116,13 @@ type ConversationMessageDeliveryRecord = {
     error: Record<string, unknown> | null;
     queuePosition: number | null;
 };
+
+function isPrismaErrorCode(error: unknown, code: string): boolean {
+    return error !== null &&
+        typeof error === 'object' &&
+        'code' in error &&
+        (error as { code?: unknown }).code === code;
+}
 
 function mapConversationTopicInviteRow(row: Record<string, unknown>): ConversationTopicInviteRecord {
     const inviteeMemberId = row.invitee_member_id == null ? String(row.invitee_agent_id) : String(row.invitee_member_id);
@@ -262,10 +270,7 @@ export class WorkingMemorySessionStore {
         };
     }
 
-    /**
-     * Atomic compare-and-set snapshot.
-     * Throws Error('CAS_MISMATCH') if expected != current.
-     */
+    /** Atomic compare-and-set snapshot. */
     async writeSnapshotCAS(params: {
         tenantId: string;
         sessionId: string;
@@ -276,32 +281,60 @@ export class WorkingMemorySessionStore {
         const { tenantId, sessionId, agentId, expectedWmVersion, snapshot } = params;
 
         await this.ensureConnected();
-        return await this.runWithReconnect(() => this.prisma.$transaction(async (tx: any) => {
-            const existing = await tx.wMSession.findUnique({
-                where: { tenantId_sessionId: { tenantId, sessionId } },
-                select: { wmVersion: true }
+        return await this.runWithReconnect(async () => {
+            const newVersion = expectedWmVersion + BigInt(1);
+            const updated = await this.prisma.wMSession.updateMany({
+                where: { tenantId, sessionId, wmVersion: expectedWmVersion },
+                data: {
+                    snapshot: snapshot as unknown as any,
+                    wmVersion: { increment: BigInt(1) },
+                },
             });
+            if (updated.count === 1) {
+                return { newVersion };
+            }
+            if (updated.count > 1) {
+                throw new Error('WM_SESSION_CAS_UPDATED_MULTIPLE_ROWS');
+            }
 
-            const currentVersion = existing?.wmVersion ?? BigInt(0);
-            if (currentVersion !== expectedWmVersion) {
-                this.log.debug?.('CAS mismatch on writeSnapshotCAS (will retry upstream)', {
+            if (expectedWmVersion === BigInt(0)) {
+                try {
+                    await this.prisma.wMSession.create({
+                        data: {
+                            tenantId,
+                            sessionId,
+                            agentId,
+                            snapshot: snapshot as unknown as any,
+                            wmVersion: newVersion,
+                        },
+                    });
+                    return { newVersion };
+                } catch (error) {
+                    if (!isPrismaErrorCode(error, 'P2002')) throw error;
+                }
+            }
+
+            const latest = await this.prisma.wMSession.findUnique({
+                where: { tenantId_sessionId: { tenantId, sessionId } },
+                select: { wmVersion: true },
+            });
+            const actualWmVersion = latest?.wmVersion?.toString();
+            this.log.debug?.('CAS mismatch on writeSnapshotCAS (will retry upstream)', {
+                tenantId,
+                sessionId,
+                expectedWmVersion: expectedWmVersion.toString(),
+                actualWmVersion,
+            });
+            throw new WorkingMemoryVersionConflictError(
+                {
                     tenantId,
                     sessionId,
                     expectedWmVersion: expectedWmVersion.toString(),
-                    currentVersion: currentVersion.toString()
-                });
-                throw new Error('CAS_MISMATCH');
-            }
-
-            const newVersion = currentVersion + BigInt(1);
-            await tx.wMSession.upsert({
-                where: { tenantId_sessionId: { tenantId, sessionId } },
-                update: { snapshot: snapshot as unknown as any, wmVersion: newVersion },
-                create: { tenantId, sessionId, agentId, snapshot: snapshot as unknown as any, wmVersion: newVersion }
-            });
-
-            return { newVersion };
-        }));
+                    ...(actualWmVersion !== undefined ? { actualWmVersion } : {}),
+                },
+                'CAS_MISMATCH'
+            );
+        });
     }
 
     /**

@@ -3,6 +3,8 @@ const uuidv7 = uuid.v7;
 import { EngineLocator } from './EngineLocator.js';
 import type { SessionManager } from './SessionManager.js';
 import { logger } from '@a2arium/callagent-utils';
+import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
+import { TaskStateUtils } from './utils/TaskStateUtils.js';
 
 const log = logger.createLogger({ prefix: 'Handles' });
 
@@ -79,26 +81,32 @@ export class InputHandle {
     ) { }
 
     async onProvided(handlerName: string): Promise<this> {
-        const snap = await this.session.load(this.tenantId, this.sessionId);
-        const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const inputs = getPendingInputs(base);
-        inputs[this.token] = { ...(inputs[this.token] || {}), handlerName };
-        const next = setPendingInputs(base, inputs);
-        const expected = snap?.wmVersion ?? BigInt(0);
-        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
+        await reconcileSnapshotMutation({
+            session: this.session,
+            tenantId: this.tenantId,
+            sessionId: this.sessionId,
+            operation: 'input.handler.provided',
+            mutate: ({ snapshot }) => {
+                const inputs = getPendingInputs(snapshot);
+                inputs[this.token] = { ...(inputs[this.token] || {}), handlerName };
+                return { kind: 'write', snapshot: setPendingInputs(snapshot, inputs), value: undefined };
+            },
+        });
         return this;
     }
 
     async onExpired(handlerName: string): Promise<this> {
-        const snap = await this.session.load(this.tenantId, this.sessionId);
-        const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const inputs = getPendingInputs(base);
-        inputs[this.token] = { ...(inputs[this.token] || {}), expiredHandlerName: handlerName };
-        const next = setPendingInputs(base, inputs);
-        const expected = snap?.wmVersion ?? BigInt(0);
-        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
+        await reconcileSnapshotMutation({
+            session: this.session,
+            tenantId: this.tenantId,
+            sessionId: this.sessionId,
+            operation: 'input.handler.expired',
+            mutate: ({ snapshot }) => {
+                const inputs = getPendingInputs(snapshot);
+                inputs[this.token] = { ...(inputs[this.token] || {}), expiredHandlerName: handlerName };
+                return { kind: 'write', snapshot: setPendingInputs(snapshot, inputs), value: undefined };
+            },
+        });
         return this;
     }
 }
@@ -127,19 +135,41 @@ export class TaskHandle {
     }
 
     private async setHandler(kind: 'completed' | 'failed' | 'inputRequired', handlerName: string): Promise<this> {
-        const snap = await this.session.load(this.tenantId, this.sessionId);
-        const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const tasks = getPendingTasks(base);
-        const existing = tasks[this.childToken] || { handlers: {} } as any;
-        const pendingInput = (existing as any).pendingInput as { prompt: string; schema?: unknown } | undefined;
-        const pendingCompletion = (existing as any).pendingCompletion as unknown;
-        existing.handlers = existing.handlers || {};
-        (existing.handlers as any)[kind] = handlerName;
-        tasks[this.childToken] = existing;
-        const next = setPendingTasks(base, tasks);
-        const expected = snap?.wmVersion ?? BigInt(0);
-        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
+        const reconciled = await reconcileSnapshotMutation({
+            session: this.session,
+            tenantId: this.tenantId,
+            sessionId: this.sessionId,
+            operation: `child.handler.${kind}`,
+            mutate: ({ snapshot }) => {
+                const terminal = (snapshot as {
+                    pending?: { childTerminals?: Record<string, PendingTaskTerminal> };
+                }).pending?.childTerminals?.[this.childToken];
+                if (terminal !== undefined) {
+                    return {
+                        kind: 'noop',
+                        value: {
+                            pendingInput: undefined,
+                            pendingCompletion: undefined,
+                        },
+                    };
+                }
+                const tasks = getPendingTasks(snapshot);
+                const existing = tasks[this.childToken] || { handlers: {} } as PendingTask;
+                const value = {
+                    pendingInput: existing.pendingInput,
+                    pendingCompletion: existing.pendingCompletion,
+                };
+                existing.handlers = existing.handlers || {};
+                existing.handlers[kind] = handlerName;
+                tasks[this.childToken] = existing;
+                return {
+                    kind: 'write',
+                    snapshot: setPendingTasks(snapshot, tasks),
+                    value,
+                };
+            },
+        });
+        const { pendingInput, pendingCompletion } = reconciled.value;
         // If an inputRequired handler is being set after a pending input was recorded, trigger routing now
         if (kind === 'inputRequired' && pendingInput) {
             try { log.debug('Routing pending input to newly registered handler', { handlerName, token: this.childToken }); } catch { }
@@ -219,7 +249,11 @@ export async function createTaskHandle(
     sessionId: string,
     target?: string,
     input?: unknown,
-    childTokenOverride?: string
+    childTokenOverride?: string,
+    initialization?: {
+        entry?: Partial<PendingTask>;
+        controlUpdates?: Array<[string, unknown]>;
+    }
 ): Promise<{ handle: TaskHandle; token: string }> {
     const childToken = childTokenOverride ?? uuidv7();
     let snap: any;
@@ -264,12 +298,39 @@ export async function createTaskHandle(
         throw new Error('SNAPSHOT_INTEGRITY_CHECK_FAILED: Parent snapshot corrupt or missing.');
     }
 
-    const tasks = getPendingTasks(base);
-    tasks[childToken] = { target, input, handlers: {} } as any;
-    const next = setPendingTasks(base, tasks);
-    const expected = snap?.wmVersion ?? BigInt(0);
-    const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-    await session.saveSnapshot({ tenantId, sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
+    await reconcileSnapshotMutation({
+        session,
+        tenantId,
+        sessionId,
+        operation: 'child.dispatch.register',
+        mutate: ({ snapshot, wmVersion }) => {
+            const snapshotHasMeta = !!(snapshot as any).meta;
+            const snapshotHasM = !!(snapshot as any).M;
+            if (!snapshotHasMeta && !snapshotHasM && wmVersion >= BigInt(3)) {
+                throw new Error('SNAPSHOT_INTEGRITY_CHECK_FAILED: Parent snapshot corrupt or missing.');
+            }
+            const priorTerminal = (snapshot as {
+                pending?: { childTerminals?: Record<string, PendingTaskTerminal> };
+            }).pending?.childTerminals?.[childToken];
+            if (priorTerminal !== undefined) {
+                throw new Error(`CHILD_TOKEN_ALREADY_TERMINAL: ${childToken}`);
+            }
+            const tasks = getPendingTasks(snapshot);
+            tasks[childToken] = {
+                target,
+                input,
+                ...(initialization?.entry ?? {}),
+                handlers: {
+                    ...(initialization?.entry?.handlers ?? {}),
+                },
+            };
+            let next = setPendingTasks(snapshot, tasks);
+            for (const [path, value] of initialization?.controlUpdates ?? []) {
+                next = TaskStateUtils.applyControlVarToSnapshot(next, path, value);
+            }
+            return { kind: 'write', snapshot: next, value: undefined };
+        },
+    });
     return { handle: new TaskHandle(session, tenantId, sessionId, childToken), token: childToken };
 }
 
@@ -283,17 +344,24 @@ export class GroupHandle {
     ) { }
 
     private async setHandler(kind: 'allCompleted' | 'anyFailed', handlerName: string): Promise<this> {
-        const snap = await this.session.load(this.tenantId, this.sessionId);
-        const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const groups = getPendingGroups(base);
-        const existing = groups[this.groupToken] || { childTokens: [], results: {}, handlers: {} };
-        existing.handlers = existing.handlers || {};
-        (existing.handlers as any)[kind] = handlerName;
-        groups[this.groupToken] = existing;
-        const next = setPendingGroups(base, groups);
-        const expected = snap?.wmVersion ?? BigInt(0);
-        const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: parentAgentId, expectedWmVersion: expected, snapshot: next });
+        await reconcileSnapshotMutation({
+            session: this.session,
+            tenantId: this.tenantId,
+            sessionId: this.sessionId,
+            operation: `child.group.handler.${kind}`,
+            mutate: ({ snapshot }) => {
+                const groups = getPendingGroups(snapshot);
+                const existing = groups[this.groupToken] || { childTokens: [], results: {}, handlers: {} };
+                existing.handlers = existing.handlers || {};
+                (existing.handlers as any)[kind] = handlerName;
+                groups[this.groupToken] = existing;
+                return {
+                    kind: 'write',
+                    snapshot: setPendingGroups(snapshot, groups),
+                    value: undefined,
+                };
+            },
+        });
         return this;
     }
 
@@ -301,15 +369,23 @@ export class GroupHandle {
     async onAnyFailed(handlerName: string): Promise<this> { return this.setHandler('anyFailed', handlerName); }
 
     async cancelRemaining(cancel: boolean = true): Promise<this> {
-        const snap = await this.session.load(this.tenantId, this.sessionId);
-        const base = (snap?.snapshot as Record<string, unknown>) || {};
-        const groups = getPendingGroups(base);
-        const existing = groups[this.groupToken] || { childTokens: [], results: {}, handlers: {} };
-        existing.cancelRemaining = cancel;
-        groups[this.groupToken] = existing;
-        const next = setPendingGroups(base, groups);
-        const expected = snap?.wmVersion ?? BigInt(0);
-        await this.session.saveSnapshot({ tenantId: this.tenantId, sessionId: this.sessionId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: expected, snapshot: next });
+        await reconcileSnapshotMutation({
+            session: this.session,
+            tenantId: this.tenantId,
+            sessionId: this.sessionId,
+            operation: 'child.group.cancel_remaining',
+            mutate: ({ snapshot }) => {
+                const groups = getPendingGroups(snapshot);
+                const existing = groups[this.groupToken] || { childTokens: [], results: {}, handlers: {} };
+                existing.cancelRemaining = cancel;
+                groups[this.groupToken] = existing;
+                return {
+                    kind: 'write',
+                    snapshot: setPendingGroups(snapshot, groups),
+                    value: undefined,
+                };
+            },
+        });
         return this;
     }
 }
@@ -321,13 +397,20 @@ export async function createGroupHandle(
     childTokens: string[]
 ): Promise<{ handle: GroupHandle; groupToken: string }> {
     const groupToken = uuidv7();
-    const snap = await session.load(tenantId, sessionId);
-    const base = (snap?.snapshot as Record<string, unknown>) || {};
-    const groups = getPendingGroups(base);
-    groups[groupToken] = { childTokens, results: {}, handlers: {} };
-    const next = setPendingGroups(base, groups);
-    const expected = snap?.wmVersion ?? BigInt(0);
-    const parentAgentId2 = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-    await session.saveSnapshot({ tenantId, sessionId, agentId: parentAgentId2, expectedWmVersion: expected, snapshot: next });
+    await reconcileSnapshotMutation({
+        session,
+        tenantId,
+        sessionId,
+        operation: 'child.group.register',
+        mutate: ({ snapshot }) => {
+            const groups = getPendingGroups(snapshot);
+            groups[groupToken] = { childTokens, results: {}, handlers: {} };
+            return {
+                kind: 'write',
+                snapshot: setPendingGroups(snapshot, groups),
+                value: undefined,
+            };
+        },
+    });
     return { handle: new GroupHandle(session, tenantId, sessionId, groupToken), groupToken };
 }

@@ -4,6 +4,10 @@ import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import type { ChildEnvelope } from '../types/observation.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { makeSafeEventPreview } from './safeEventPreview.js';
+import { logger } from '@a2arium/callagent-utils';
+import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
+
+const log = logger.createLogger({ prefix: 'ChildTerminalCoordinator' });
 
 export type ChildTerminalError = {
     code: string;
@@ -38,6 +42,10 @@ export type ChildTerminalClaim = {
     terminal?: PendingTaskTerminal;
     entry?: PendingTask;
     lateCompletion?: boolean;
+    disposition?: 'committed' | 'matching_replay' | 'competing_terminal' | 'missing';
+    /** A matching replay may safely republish the deterministic runtime wake. */
+    resumeEligible?: boolean;
+    attempts?: number;
 };
 
 function timeoutError(token: string, timeoutMs: number): ChildTerminalError {
@@ -75,12 +83,35 @@ export function claimChildTerminalInSnapshot(
     const entry = tasks[request.token];
     const priorTerminal = getChildTerminal(base, request.token) ?? entry?.terminal;
     if (entry === undefined || priorTerminal !== undefined) {
+        const lateCompletion = request.kind === 'completed' && priorTerminal?.error?.code === 'CHILD_TIMEOUT';
+        const requestedKind = request.kind;
+        const sameFailure = requestedKind === 'failed' &&
+            priorTerminal?.kind === 'failed' &&
+            priorTerminal.error?.code === request.error.code;
+        const matchingReplay = !lateCompletion && (
+            (requestedKind === 'completed' && priorTerminal?.kind === 'completed') || sameFailure
+        );
+        const inbox = InboxManager.normalizeInbox((base as { inbox?: unknown }).inbox);
+        const observation = inbox.all.find((candidate) =>
+            (candidate.kind === 'child.completed' || candidate.kind === 'child.failed') &&
+            (candidate.payload as { token?: unknown } | undefined)?.token === request.token &&
+            (priorTerminal?.kind === 'completed'
+                ? candidate.kind === 'child.completed'
+                : candidate.kind === 'child.failed')
+        );
         return {
             snapshot: base,
             won: false,
             terminal: priorTerminal,
             entry,
-            lateCompletion: request.kind === 'completed' && priorTerminal?.error?.code === 'CHILD_TIMEOUT',
+            ...(observation !== undefined ? { observation } : {}),
+            lateCompletion,
+            disposition: priorTerminal === undefined
+                ? 'missing'
+                : matchingReplay
+                  ? 'matching_replay'
+                  : 'competing_terminal',
+            resumeEligible: matchingReplay && observation !== undefined,
         };
     }
 
@@ -172,6 +203,8 @@ export function claimChildTerminalInSnapshot(
         terminal,
         entry,
         lateCompletion: timedOut,
+        disposition: 'committed',
+        resumeEligible: true,
     };
 }
 
@@ -209,66 +242,73 @@ export async function coordinateChildTerminal(params: {
     request: ChildTerminalRequest;
     maxAttempts?: number;
 }): Promise<ChildTerminalClaim> {
-    const maxAttempts = params.maxAttempts ?? 5;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        const row = await params.session.load(params.tenantId, params.parentTaskId);
-        if (row === null) {
-            return { snapshot: {}, won: false };
-        }
-        const base = (row.snapshot as Record<string, unknown> | undefined) ?? {};
-        const claim = claimChildTerminalInSnapshot(base, params.request);
-        if (!claim.won) {
-            if (claim.lateCompletion && params.request.kind === 'completed') {
-                defaultMetricsRegistry.increment('child.late_completion_total', { source: 'terminal_coordinator' });
-                await params.session.appendEvent(
-                    params.tenantId,
-                    params.parentTaskId,
-                    'task.child_late_completion',
-                    {
-                        token: params.request.token,
-                        childTaskId: params.request.childTaskId ?? claim.terminal?.childTaskId,
-                        agentId: params.request.agentId ?? claim.terminal?.agentId,
-                        completedAt: params.request.completedAt,
-                        resultPreview: makeSafeEventPreview(params.request.result),
-                    }
-                );
-            }
-            return claim;
-        }
-        try {
-            await params.session.saveSnapshot({
-                tenantId: params.tenantId,
-                sessionId: params.parentTaskId,
-                agentId:
-                    row.agentId ??
-                    (base as { meta?: { agentId?: string } }).meta?.agentId ??
-                    'default',
-                expectedWmVersion: row.wmVersion ?? BigInt(0),
-                snapshot: claim.snapshot,
-            });
-            const payload = childTerminalEventPayload(claim);
-            if (payload !== undefined) {
+    const result = await reconcileSnapshotMutation({
+        session: params.session,
+        tenantId: params.tenantId,
+        sessionId: params.parentTaskId,
+        operation: 'child.terminal.claim',
+        maxAttempts: params.maxAttempts,
+        mutate: ({ snapshot }) => {
+            const claim = claimChildTerminalInSnapshot(snapshot, params.request);
+            return claim.won
+                ? { kind: 'write' as const, snapshot: claim.snapshot, value: claim }
+                : { kind: 'noop' as const, value: claim };
+        },
+    });
+    const claim: ChildTerminalClaim = { ...result.value, attempts: result.attempts };
+
+    if (result.status === 'committed') {
+        const payload = childTerminalEventPayload(claim);
+        if (payload !== undefined) {
+            const eventPayload = claim.kind === 'completed' && params.request.kind === 'completed'
+                ? { ...payload, resultPreview: makeSafeEventPreview(params.request.result) }
+                : payload;
+            try {
                 await params.session.appendEvent(
                     params.tenantId,
                     params.parentTaskId,
                     claim.kind === 'failed' ? 'task.child_failed' : 'task.child_completed',
-                    payload
+                    eventPayload
                 );
+            } catch (error) {
+                log.warn('Terminal snapshot committed but diagnostic event append failed', {
+                    tenantId: params.tenantId,
+                    parentTaskId: params.parentTaskId,
+                    token: params.request.token,
+                    kind: claim.kind,
+                    error: error instanceof Error ? error.message : String(error),
+                });
             }
-            defaultMetricsRegistry.increment('child.terminal_race_winner_total', {
-                kind: claim.kind ?? 'unknown',
-            });
-            if (claim.terminal?.error?.code === 'CHILD_TIMEOUT') {
-                defaultMetricsRegistry.increment('child.timeout_total', { source: params.request.kind });
-            }
-            return claim;
+        }
+        defaultMetricsRegistry.increment('child.terminal_race_winner_total', {
+            kind: claim.kind ?? 'unknown',
+        });
+        if (claim.terminal?.error?.code === 'CHILD_TIMEOUT') {
+            defaultMetricsRegistry.increment('child.timeout_total', { source: params.request.kind });
+        }
+    } else if (claim.lateCompletion && params.request.kind === 'completed') {
+        defaultMetricsRegistry.increment('child.late_completion_total', { source: 'terminal_coordinator' });
+        try {
+            await params.session.appendEvent(
+                params.tenantId,
+                params.parentTaskId,
+                'task.child_late_completion',
+                {
+                    token: params.request.token,
+                    childTaskId: params.request.childTaskId ?? claim.terminal?.childTaskId,
+                    agentId: params.request.agentId ?? claim.terminal?.agentId,
+                    completedAt: params.request.completedAt,
+                    resultPreview: makeSafeEventPreview(params.request.result),
+                }
+            );
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if ((message === 'CAS_MISMATCH' || message === 'WM_VERSION_CONFLICT') && attempt < maxAttempts) {
-                continue;
-            }
-            throw error;
+            log.warn('Failed to append late child completion diagnostic', {
+                tenantId: params.tenantId,
+                parentTaskId: params.parentTaskId,
+                token: params.request.token,
+                error: error instanceof Error ? error.message : String(error),
+            });
         }
     }
-    throw new Error('CAS_MISMATCH');
+    return claim;
 }

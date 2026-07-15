@@ -7,6 +7,7 @@ import {
 } from '../../loop/conversationInboxIdentity.js';
 import { normalizeObservationInbox } from '../../loop/types.js';
 import { ObservationSchema, type Observation } from '../../types/observation.js';
+import { isWorkingMemoryVersionConflict } from '@a2arium/callagent-types/working-memory-version-conflict';
 
 type RouteObservationParams = {
     tenantId: string;
@@ -105,10 +106,7 @@ export class ConversationRouter {
     }
 }
 
-const isCasMismatch = (err: unknown): boolean => {
-    const message = err instanceof Error ? err.message : String(err);
-    return message === 'CAS_MISMATCH' || message === 'WM_VERSION_CONFLICT';
-};
+const isCasMismatch = isWorkingMemoryVersionConflict;
 
 const backoff = (attempt: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, attempt * 10));

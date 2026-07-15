@@ -10,6 +10,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./working-memory-version-conflict": {
+      "import": "./dist/working-memory-version-conflict.js",
+      "types": "./dist/working-memory-version-conflict.d.ts"
     }
   },
   "scripts": {

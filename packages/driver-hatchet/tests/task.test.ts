@@ -877,6 +877,93 @@ describe('executeTaskTask', () => {
         }));
     });
 
+    it('recovers await_child from the parent terminal snapshot when event publication was interrupted', async () => {
+        const segmentOutputs = [{
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            boundary: { kind: 'complete', result: { ok: true } },
+            taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+        }];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitFor: jest.fn(async () => { throw new Error('should not wait'); }),
+        };
+        const wMEvent = {
+            findMany: jest.fn(async (args: { where: { type: { in: string[] } } }) =>
+                args.where.type.in.includes('turn.completed')
+                    ? [{
+                          eventId: 'turn-1', tenantId: 'tenant-1', sessionId: 'task-1', seq: 1,
+                          type: 'turn.completed',
+                          payload: { turnSeq: 1, transition: { kind: 'await_child', token: 'child-token' } },
+                          createdAt: new Date('2026-06-19T00:00:00.000Z'),
+                      }]
+                    : []),
+        };
+        const wMSession = {
+            findUnique: jest.fn(async () => ({
+                snapshot: {
+                    meta: { turn: 1, awaiting: { kind: 'await_child', token: 'child-token' } },
+                    pending: {
+                        children: {},
+                        tasks: {},
+                        childTerminals: {
+                            'child-token': {
+                                kind: 'completed',
+                                claimedAt: '2026-06-19T00:00:00.500Z',
+                                childTaskId: 'child-task-1',
+                            },
+                        },
+                    },
+                    inbox: {
+                        current: [{
+                            source: 'child', kind: 'child.completed',
+                            payload: { token: 'child-token', childTaskId: 'child-task-1', result: { durable: true } },
+                        }],
+                        all: [{
+                            source: 'child', kind: 'child.completed',
+                            payload: { token: 'child-token', childTaskId: 'child-task-1', result: { durable: true } },
+                        }],
+                    },
+                },
+            })),
+        };
+
+        await executeTaskTask(
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                input: {}, idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            {
+                prisma: {
+                    outbox: { findMany: jest.fn(async () => []) },
+                    wMEvent,
+                    wMSession,
+                } as never,
+            }
+        );
+
+        expect(ctx.waitFor).not.toHaveBeenCalled();
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({
+                idempotencyKey: 'task-1:child:child-token',
+                wake: {
+                    trigger: 'child',
+                    event: expect.objectContaining({
+                        token: 'child-token',
+                        outcome: 'completed',
+                        output: { durable: true },
+                        terminalClaimed: true,
+                    }),
+                },
+            }),
+            expect.any(Object)
+        );
+    });
+
     it('continues waiting from a persisted await_child when a durable parent re-enters after interruption', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const ctx = {

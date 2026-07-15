@@ -1173,7 +1173,11 @@ When an asynchronous call configures `A2ACallOptions.timeout`, the deadline star
 SQL-backed runtime restart. Completion and expiry atomically consume the same token, so
 exactly one terminal observation resumes the parent. Expiry emits `child.failed` with
 `error.code = 'CHILD_TIMEOUT'` and `error.timeoutMs`; a later child result is diagnostic
-only. The Hatchet missing-wake watchdog is separate and uses `CHILD_WAKE_TIMEOUT`.
+only. Pending-child removal, the terminal tombstone, and the correlated inbox observation
+are one atomic snapshot mutation. Concurrent parent-turn persistence must reconcile against
+that snapshot and cannot resurrect a terminal child. If wake publication is interrupted,
+durable runtimes recover the same deterministic wake from the parent snapshot. The Hatchet
+missing-wake watchdog is separate and uses `CHILD_WAKE_TIMEOUT`.
 
 ### Inline child call (blocking)
 

@@ -23,6 +23,7 @@ import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
+import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
@@ -123,12 +124,17 @@ export class TurnRunner {
                     return { ...baseSnap, M };
                 };
 
-                await this.sessionManager.saveSnapshot({
+                await reconcileSnapshotMutation({
+                    session: this.sessionManager,
                     tenantId,
                     sessionId,
                     agentId: (ctx as any).agentId || 'default',
-                    expectedWmVersion: snap?.wmVersion ?? BigInt(0),
-                    snapshot: await mutateFn(base)
+                    operation: 'turn.flush',
+                    mutate: async ({ snapshot }) => ({
+                        kind: 'write',
+                        snapshot: await mutateFn(snapshot),
+                        value: undefined,
+                    }),
                 });
             };
 

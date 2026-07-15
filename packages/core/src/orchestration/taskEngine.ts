@@ -114,8 +114,13 @@ import {
     prepareChildResultsInInboxForPersistence,
 } from './childResultPersistence.js';
 import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
-import { claimChildTerminalInSnapshot, getChildTerminal } from './ChildTerminalCoordinator.js';
+import { coordinateChildTerminal } from './ChildTerminalCoordinator.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
+import { isWorkingMemoryVersionConflict } from '@a2arium/callagent-types/working-memory-version-conflict';
+import {
+    isSnapshotReconciliationError,
+    reconcileSnapshotMutation,
+} from './persistence/SnapshotRepository.js';
 
 export type {
     TaskEntity,
@@ -2120,7 +2125,7 @@ export class TaskEngine {
                     log.error('Failed to save snapshot even after pruning', { error: err });
                     throw e;
                 }
-            } else if ((e as Error).message === 'CAS_MISMATCH') {
+            } else if (isWorkingMemoryVersionConflict(e)) {
                 try {
                     const snap2 = await this.sessionManager.load(tenantId, sessionId);
                     const expected2 = snap2?.wmVersion ?? BigInt(0);
@@ -3077,7 +3082,7 @@ export class TaskEngine {
                         const expected = snap?.wmVersion ?? BigInt(0);
                         await writeOnce(base, expected);
                     } catch (e) {
-                        if ((e as Error).message === 'CAS_MISMATCH') {
+                        if (isWorkingMemoryVersionConflict(e)) {
                             try {
                                 const snap2 = await this.sessionManager.load(tenantId, sessionId);
                                 const base2 = (snap2?.snapshot as Record<string, unknown>) || {};
@@ -3214,28 +3219,45 @@ export class TaskEngine {
     async handleToolCompleted(params: { tenantId: string; taskId: string; token: string; result: unknown }): Promise<void> {
         const { tenantId, taskId, token, result } = params;
         await this.runTaskSessionExclusive(tenantId, taskId, async () => {
-        const snap = await this.sessionManager?.load(tenantId, taskId);
-        if (!snap) return;
-        const base = (snap.snapshot as Record<string, unknown>) || {};
-        const tools = getPendingTools(base) as any;
-        const entry = tools[token];
-        if (!entry) return;
-        delete tools[token];
-        const next = setPendingTools(base, tools) as Record<string, unknown>;
-        const toolObservation: EngineObservation = {
-            source: 'tool',
-            kind: 'tool.completed',
-            payload: { token, result, tool: entry?.name },
-            provenance: {
-                ts: Date.now(),
-                turn: Number((base as any)?.meta?.turn ?? 0) + 1,
-                id: token,
-                toolId: entry?.name,
-                correlationId: token
-            }
-        };
-        (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, toolObservation);
-        const saveResult = await this.sessionManager?.saveSnapshot({ tenantId, sessionId: taskId, agentId: (base as any)?.meta?.agentId || 'default', expectedWmVersion: snap.wmVersion ?? BigInt(0), snapshot: next });
+        const observedAt = Date.now();
+        const wakeMutation = await reconcileSnapshotMutation({
+            session: this.sessionManager!,
+            tenantId,
+            sessionId: taskId,
+            operation: 'tool.wake.apply',
+            mutate: ({ snapshot, agentId: snapshotAgentId }) => {
+                const tools = getPendingTools(snapshot) as any;
+                const entry = tools[token];
+                if (!entry) return { kind: 'noop', value: undefined };
+                delete tools[token];
+                const next = setPendingTools(snapshot, tools) as Record<string, unknown>;
+                const toolObservation: EngineObservation = {
+                    source: 'tool',
+                    kind: 'tool.completed',
+                    payload: { token, result, tool: entry?.name },
+                    provenance: {
+                        ts: observedAt,
+                        turn: Number((snapshot as any)?.meta?.turn ?? 0) + 1,
+                        id: token,
+                        toolId: entry?.name,
+                        correlationId: token
+                    }
+                };
+                (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, toolObservation);
+                return {
+                    kind: 'write',
+                    snapshot: next,
+                    value: {
+                        entry,
+                        agentId: snapshotAgentId ?? (snapshot as any)?.meta?.agentId,
+                    },
+                };
+            },
+        });
+        if (wakeMutation.status === 'noop' || wakeMutation.value === undefined) return;
+        const entry = (wakeMutation.value as any).entry;
+        const next = wakeMutation.snapshot;
+        const agentName = (wakeMutation.value as any).agentId;
         const toolCompletedPayload = { token, toolName: entry?.name, resultPreview: makeSafeEventPreview(result) };
         const toolCompletedEvent = await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', toolCompletedPayload);
         if (toolCompletedEvent) {
@@ -3248,7 +3270,7 @@ export class TaskEngine {
             }, {
                 taskId,
                 tenantId,
-                agentId: (base as { meta?: { agentId?: string } })?.meta?.agentId,
+                agentId: agentName,
             });
             if (runtimeEvent) {
                 void this.eventBus.publish(createBusEvent({
@@ -3273,7 +3295,6 @@ export class TaskEngine {
         }
 
         try {
-            const agentName = (snap as any)?.agentId;
             const ctx = this.createContext({ id: taskId, input: {} });
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
 
@@ -3435,145 +3456,40 @@ export class TaskEngine {
      */
     async stageChildCompletionObservation(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string }): Promise<void> {
         const { tenantId, parentTaskId, childToken, childTaskId, result, childAgentId } = params;
-        try {
-            const snap = await this.sessionManager?.load(tenantId, parentTaskId);
-            if (!snap) {
-                log.warn('Cannot stage observation: snapshot not found', { parentTaskId });
-                return;
-            }
-            const base = (snap.snapshot as Record<string, unknown>) || {};
-            const tasks = getPendingTasks(base);
-            const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
-            if (!token || (childToken && !tasks[childToken])) {
-                log.warn('Cannot stage observation: token not found', {
-                    parentTaskId,
-                    childToken,
-                    childTaskId,
-                    pendingTaskKeys: Object.keys(tasks)
-                });
-                return;
-            }
-
-            log.debug('🔍 STAGING: Staging child completion observation', {
-                parentTaskId,
+        const snap = await this.sessionManager?.load(tenantId, parentTaskId);
+        if (!snap || !this.sessionManager) return;
+        const base = (snap.snapshot as Record<string, unknown>) || {};
+        const tasks = getPendingTasks(base);
+        const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
+        if (!token) return;
+        const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
+        const a2aTelemetry = readA2aResultTelemetry(result);
+        const childExecutionMetadata = {
+            ...(cleanChildResult.executionMetadata ?? {}),
+            ...(a2aTelemetry?.executionOrigin ? { origin: a2aTelemetry.executionOrigin } : {}),
+        };
+        const stagingPrisma = this.getSessionStorePrisma();
+        const childResultForParent = await prepareChildResultForPersistence(
+            cleanChildResult.result,
+            stagingPrisma ? new AgentResultCache(stagingPrisma) : undefined,
+            tenantId
+        );
+        await coordinateChildTerminal({
+            session: this.sessionManager,
+            tenantId,
+            parentTaskId,
+            request: {
+                kind: 'completed',
                 token,
-                hasResult: !!result,
-                pendingTaskKeys: Object.keys(tasks),
-                tokenFound: !!token
-            });
-
-            // Extract clean result from potentially wrapped TaskEntity
-            // This fixes the confusing nested structure where result might be a TaskEntity wrapper
-            const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
-            const a2aTelemetry = readA2aResultTelemetry(result);
-            const childExecutionMetadata = {
-                ...(cleanChildResult.executionMetadata ?? {}),
-                ...(a2aTelemetry?.executionOrigin ? { origin: a2aTelemetry.executionOrigin } : {}),
-            };
-            const stagingPrisma = this.getSessionStorePrisma();
-            const stagingCache = stagingPrisma ? new AgentResultCache(stagingPrisma) : undefined;
-            const childResultForParent = await prepareChildResultForPersistence(
-                cleanChildResult.result,
-                stagingCache,
-                tenantId
-            );
-            const childObservation: EngineObservation = {
-                source: 'child',
-                kind: 'child.completed',
-                payload: {
-                    token,
-                    childTaskId: cleanChildResult.childTaskId || childTaskId || token,
-                    result: childResultForParent,
-                    agentId: childAgentId,
-                    executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined
-                },
-                provenance: {
-                    ts: Date.now(),
-                    turn: Number((base as any)?.meta?.turn ?? 0) + 1,
-                    id: token,
-                    correlationId: token
-                }
-            };
-
-            const next = { ...base };
-            (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, childObservation);
-            const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-
-            // ✅ FIX: Handle CAS version conflicts by retrying with latest version
-            // This is critical because the parent may save the snapshot after returning await_child
-            let retryCount = 0;
-            const maxRetries = 3;
-            let saved = false;
-
-            while (!saved && retryCount < maxRetries) {
-                try {
-                    const latestSnap = await this.sessionManager?.load(tenantId, parentTaskId);
-                    if (!latestSnap) {
-                        log.warn('Cannot stage observation: snapshot not found on retry', { parentTaskId, retryCount });
-                        return;
-                    }
-
-                    // Merge observation into latest snapshot
-                    const latestBase = (latestSnap.snapshot as Record<string, unknown>) || {};
-                    const latestNext = { ...latestBase };
-                    const latestInbox = InboxManager.normalizeInbox((latestNext as any)?.inbox);
-                    const observationPredicate = (obs: EngineObservation) =>
-                        obs?.kind === 'child.completed' &&
-                        typeof obs === 'object' &&
-                        obs !== null &&
-                        (obs as any)?.payload &&
-                        (obs as any).payload.token === token;
-
-                    if (!latestInbox.all.some(observationPredicate)) {
-                        (latestNext as any).inbox = InboxManager.addObservationToInbox((latestNext as any).inbox, childObservation);
-                    } else {
-                        // Observation already exists, no need to save
-                        saved = true;
-                        break;
-                    }
-
-                    await this.sessionManager?.saveSnapshot({
-                        tenantId,
-                        sessionId: parentTaskId,
-                        agentId: parentAgentId,
-                        expectedWmVersion: latestSnap.wmVersion ?? BigInt(0),
-                        snapshot: latestNext
-                    });
-
-                    saved = true;
-                    log.debug('✅ STAGING SUCCESS: Staged child completion observation synchronously', {
-                        parentTaskId,
-                        token,
-                        resultStatus: (result as any)?.status,
-                        retryCount,
-                        inboxAllCount: latestInbox.all.length,
-                        inboxCurrentCount: latestInbox.current.length,
-                        hasObservation: latestInbox.all.some(observationPredicate)
-                    });
-                } catch (saveError) {
-                    if ((saveError as Error).message === 'CAS_MISMATCH' && retryCount < maxRetries - 1) {
-                        retryCount++;
-                        await new Promise(resolve => setTimeout(resolve, 10 * retryCount)); // Exponential backoff
-                    } else {
-                        throw saveError;
-                    }
-                }
-            }
-
-            if (!saved) {
-                log.error('❌ STAGING FAILED: Failed to stage child completion observation after retries', {
-                    parentTaskId,
-                    childToken,
-                    retryCount
-                });
-            }
-        } catch (error) {
-            log.warn('Failed to stage child completion observation synchronously', {
-                error: error instanceof Error ? error.message : String(error),
-                parentTaskId,
-                childToken
-            });
-        }
+                completedAt: new Date().toISOString(),
+                childTaskId: cleanChildResult.childTaskId || childTaskId || token,
+                agentId: childAgentId,
+                result: childResultForParent,
+                executionMetadata: Object.keys(childExecutionMetadata).length > 0
+                    ? childExecutionMetadata as any
+                    : undefined,
+            },
+        });
     }
 
     /**
@@ -3609,74 +3525,6 @@ export class TaskEngine {
             const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
             if (!token) return;
             const entry = tasks[token] as any;
-            const priorTerminal = getChildTerminal(base, token);
-            if (priorTerminal !== undefined) {
-                if (priorTerminal.error?.code === 'CHILD_TIMEOUT') {
-                    defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine' });
-                    await this.sessionManager?.appendEvent(
-                        tenantId,
-                        parentTaskId,
-                        'task.child_late_completion',
-                        {
-                            token,
-                            childTaskId: childTaskId ?? priorTerminal.childTaskId,
-                            agentId: childAgentId ?? priorTerminal.agentId,
-                            completedAt: new Date().toISOString(),
-                            resultPreview: makeSafeEventPreview(result),
-                        }
-                    );
-                }
-                return;
-            }
-            const expiresAtMs = typeof entry?.expiresAt === 'string' ? Date.parse(entry.expiresAt) : Number.NaN;
-            if (entry && Number.isFinite(expiresAtMs) && Date.now() >= expiresAtMs) {
-                const firedAt = new Date().toISOString();
-                const timeoutWake = {
-                    tenantId,
-                    taskId: parentTaskId,
-                    agentId: (base as { meta?: { agentId?: string } }).meta?.agentId ?? (snap as any).agentId,
-                    token,
-                    idempotencyKey: `${parentTaskId}:child-timeout:${token}`,
-                    event: {
-                        kind: 'timer' as const,
-                        token,
-                        timerId: `${parentTaskId}:child-timeout:${token}`,
-                        dueAt: entry.expiresAt,
-                        firedAt,
-                        reason: 'child_timeout' as const,
-                        payload: {
-                            token,
-                            timeoutMs: entry.timeoutMs,
-                            childTaskId: childTaskId ?? entry.childTaskId,
-                            agentId: childAgentId ?? entry.agentId ?? entry.target,
-                        },
-                    },
-                };
-                try {
-                    if (isSyncRuntimeDriver(this.runtimeDriver)) {
-                        await this.runtimeDriver.enqueueResumeSync(timeoutWake);
-                    } else {
-                        await this.runtimeDriver.enqueueResume(timeoutWake);
-                    }
-                } catch (timeoutResumeError) {
-                    log.warn('Child timeout was claimed but parent resume failed', {
-                        parentTaskId,
-                        token,
-                        error: timeoutResumeError instanceof Error
-                            ? timeoutResumeError.message
-                            : String(timeoutResumeError),
-                    });
-                }
-                defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine' });
-                await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_late_completion', {
-                    token,
-                    childTaskId: childTaskId ?? entry.childTaskId,
-                    agentId: childAgentId ?? entry.agentId ?? entry.target,
-                    completedAt: firedAt,
-                    resultPreview: makeSafeEventPreview(result),
-                });
-                return;
-            }
             const hadPendingEntry = Boolean(entry);
             // If this child was awaited synchronously by the parent, skip auto-resume (already handled in-turn)
             if (entry && entry.handlers && entry.handlers.completed === undefined && entry.handlers.failed === undefined && entry.handlers.inputRequired === undefined && (result as any)?.status?.state !== 'input-required') {
@@ -3713,185 +3561,69 @@ export class TaskEngine {
                     ? childExecutionMetadata as any
                     : undefined,
             };
-            const initialClaim = claimChildTerminalInSnapshot(base, completionRequest);
-            if (!initialClaim.won || initialClaim.observation === undefined) {
-                if (initialClaim.lateCompletion) {
-                    defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine_cas' });
-                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_late_completion', {
-                        token,
-                        childTaskId: completionRequest.childTaskId,
-                        agentId: childAgentId,
-                        completedAt: completionReceivedAt,
-                        resultPreview: makeSafeEventPreview(childResultForParent),
-                    });
-                }
+            const terminalClaim = await coordinateChildTerminal({
+                session: this.sessionManager!,
+                tenantId,
+                parentTaskId,
+                request: completionRequest,
+            });
+            if (terminalClaim.resumeEligible !== true || terminalClaim.observation === undefined) {
                 return;
             }
-            let next = initialClaim.snapshot;
-            const childObservation = initialClaim.observation;
+            const childObservation = terminalClaim.observation;
             log.debug('Appending child completion event', {
                 parentTaskId,
                 token,
                 resultStatus: (result as any)?.status,
             });
-            const observationPredicate = (obs: EngineObservation) =>
-                (obs?.kind === 'child.completed' || obs?.kind === 'child.failed') &&
-                typeof obs === 'object' &&
-                obs !== null &&
-                (obs as any)?.payload &&
-                (obs as any).payload.token === token;
             const parentAgentId = (snap as any)?.agentId || (base as any)?.meta?.agentId || 'default';
-            let snapshotSaved = false;
-            let lostTerminalClaim = false;
-            let lostToTimeout = false;
-
-            // ✅ FIX: Add CAS retry loop to handle race conditions with parent's concurrent save
-            const maxSaveRetries = 5;
-            let saveAttempt = 0;
-            let currentSnap = snap;
-            let currentNext = next;
-
-            while (!snapshotSaved && saveAttempt < maxSaveRetries) {
-                saveAttempt++;
-                try {
-                    await this.sessionManager?.saveSnapshot({
-                        tenantId,
-                        sessionId: parentTaskId,
-                        agentId: parentAgentId,
-                        expectedWmVersion: currentSnap.wmVersion ?? BigInt(0),
-                        snapshot: currentNext
-                    });
-                    snapshotSaved = true;
-                } catch (snapshotError) {
-                    if ((snapshotError as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        try {
-                            const { pruneMentalState } = await import('../loop/hygiene.js');
-                            pruneMentalState((currentNext as any).M);
-                            await this.sessionManager?.saveSnapshot({
-                                tenantId,
-                                sessionId: parentTaskId,
-                                agentId: parentAgentId,
-                                expectedWmVersion: currentSnap.wmVersion ?? BigInt(0),
-                                snapshot: currentNext
-                            });
-                            snapshotSaved = true;
-                        } catch (retryError) {
-                            log.warn('Failed to save snapshot with child completion observation even after pruning', {
-                                error: (retryError as Error).message,
-                                parentTaskId,
-                                childToken: token
-                            });
-                        }
-                    } else if (
-                        ((snapshotError as Error).message === 'CAS_MISMATCH' ||
-                            (snapshotError as Error).message === 'WM_VERSION_CONFLICT') &&
-                        saveAttempt < maxSaveRetries
-                    ) {
-                        // ✅ FIX: Reload snapshot and re-add observation on CAS conflict
-                        log.debug('CAS_MISMATCH in handleChildCompleted, retrying', {
-                            parentTaskId,
-                            childToken: token,
-                            attempt: saveAttempt
-                        });
-                        await new Promise(resolve => setTimeout(resolve, 20 * saveAttempt)); // Backoff
-
-                        // Reload latest snapshot
-                        const latestSnap = await this.sessionManager?.load(tenantId, parentTaskId);
-                        if (!latestSnap) {
-                            log.warn('Snapshot not found on CAS retry in handleChildCompleted', { parentTaskId });
-                            break;
-                        }
-                        currentSnap = latestSnap;
-                        const latestBase = (latestSnap.snapshot as Record<string, unknown>) || {};
-
-                        const retryClaim = claimChildTerminalInSnapshot(latestBase, completionRequest);
-                        if (!retryClaim.won) {
-                            lostTerminalClaim = true;
-                            lostToTimeout = retryClaim.lateCompletion === true;
-                            break;
-                        }
-                        currentNext = retryClaim.snapshot;
-                    } else {
-                        log.warn('Failed to save snapshot during child completion', {
-                            error: (snapshotError as Error).message,
-                            parentTaskId,
-                            childToken: token
-                        });
-                        break;
-                    }
-                }
-            }
-
-            if (lostTerminalClaim) {
-                if (lostToTimeout) {
-                    defaultMetricsRegistry.increment('child.late_completion_total', { source: 'task_engine_cas' });
-                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_late_completion', {
-                        token,
-                        childTaskId: completionRequest.childTaskId,
-                        agentId: childAgentId,
-                        completedAt: completionReceivedAt,
-                        resultPreview: makeSafeEventPreview(childResultForParent),
-                    });
-                }
-                return;
-            }
-
-            if (!snapshotSaved) {
-                log.error('Failed to save child completion observation after all retries', {
-                    parentTaskId,
-                    childToken: token,
-                    attempts: saveAttempt
-                });
-                return;
-            }
-            defaultMetricsRegistry.increment('child.terminal_race_winner_total', { kind: 'completed' });
             await this.runtimeDriver.cancelTimer?.({ tenantId, taskId: parentTaskId, token });
 
+            const durableChildPayload = childObservation.payload as {
+                childTaskId?: string;
+                agentId?: string;
+                result?: unknown;
+                executionMetadata?: unknown;
+            };
+            const durableChildResult = durableChildPayload.result;
             const childCompletedPayload = {
                 token,
-                childTaskId: cleanChildResult.childTaskId || childTaskId || token,
-                agentId: childAgentId,
-                result: childResultForParent,
-                executionMetadata: Object.keys(childExecutionMetadata).length > 0 ? childExecutionMetadata : undefined,
-                resultPreview: makeSafeEventPreview(childResultForParent),
+                childTaskId: durableChildPayload.childTaskId || cleanChildResult.childTaskId || childTaskId || token,
+                agentId: durableChildPayload.agentId ?? childAgentId,
+                result: durableChildResult,
+                executionMetadata: durableChildPayload.executionMetadata,
+                resultPreview: makeSafeEventPreview(durableChildResult),
             };
-            try {
-                const childCompletedEvent = await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.child_completed', childCompletedPayload);
-                if (childCompletedEvent) {
-                    const [runtimeEvent] = mapWorkingMemoryEventToRuntimeStream({
-                        eventId: childCompletedEvent.eventId,
-                        seq: childCompletedEvent.seq,
-                        type: 'task.child_completed',
-                        payload: childCompletedPayload,
-                        createdAt: new Date().toISOString(),
-                    }, {
-                        taskId: parentTaskId,
-                        tenantId,
-                        agentId: parentAgentId,
-                    });
-                    if (runtimeEvent) {
-                        void this.eventBus.publish(createBusEvent({
-                            channel: taskChannel(parentTaskId),
-                            cloud: {
-                                id: runtimeEvent.id,
-                                type: runtimeEvent.type,
-                                source: `/tasks/${parentTaskId}`,
-                                time: runtimeEvent.ts,
-                                datacontenttype: 'application/json',
-                                data: runtimeEvent,
-                            },
-                        }));
-                    }
-                }
-            } catch (eventError) {
-                log.warn('Failed to append child completion event, likely due to closed connection', {
-                    error: (eventError as Error).message,
-                    parentTaskId,
-                    childToken: token
-                });
+            if (params.suppressResume === true) {
+                return;
             }
 
-            if (params.suppressResume === true) {
+            if (terminalClaim.kind === 'failed') {
+                const terminalError = terminalClaim.terminal?.error ?? {
+                    code: 'CHILD_FAILED',
+                    message: 'Child failed while completing.',
+                };
+                const failedResume = {
+                    tenantId,
+                    taskId: parentTaskId,
+                    agentId: parentAgentId,
+                    token,
+                    idempotencyKey: `${parentTaskId}:child:${token}`,
+                    event: {
+                        kind: 'child' as const,
+                        token,
+                        childTaskId: childCompletedPayload.childTaskId,
+                        outcome: 'failed' as const,
+                        error: terminalError,
+                        completedAt: completionReceivedAt,
+                        terminalClaimed: true,
+                    },
+                };
+                if (isSyncRuntimeDriver(this.runtimeDriver)) {
+                    await this.runtimeDriver.enqueueResumeSync(failedResume);
+                } else {
+                    await this.runtimeDriver.enqueueResume(failedResume);
+                }
                 return;
             }
 
@@ -3907,7 +3639,7 @@ export class TaskEngine {
                         token,
                         childTaskId: childCompletedPayload.childTaskId,
                         outcome: 'completed',
-                        output: childResultForParent,
+                        output: durableChildResult,
                         completedAt: completionReceivedAt,
                         terminalClaimed: true,
                     },
@@ -3996,13 +3728,12 @@ export class TaskEngine {
                             (obs as any).payload.token === token;
                         const hasObservation = finalInbox.all.some(observationPredicateForCheck);
 
-                        if (!snapshotSaved || !hasObservation) {
-                            // Merge next (which has the observation) with baseNow to ensure observation is present
-                            baseNow = {
-                                ...baseNow,
-                                pending: (next as any).pending,
-                                inbox: (next as any).inbox
-                            } as Record<string, unknown>;
+                        if (!hasObservation) {
+                            log.warn('Durable child terminal observation missing after terminal claim', {
+                                parentTaskId,
+                                childToken: token,
+                            });
+                            return;
                         }
 
                         const prevMetaCheck = (baseNow as any).meta || {};
@@ -4341,33 +4072,18 @@ export class TaskEngine {
 
                             resumeSuccess = true;
                         } catch (e) {
-                            if ((e as Error).message === 'CAS_MISMATCH') {
-                                // Allow outer retry loop to handle it
-                                throw e;
-                            }
+                            if (isSnapshotReconciliationError(e) || isWorkingMemoryVersionConflict(e)) throw e;
                             // Log but convert other save errors to success (we don't retry non-CAS errors here usually)
                             try { (ctx as any).logger?.warn?.('Failed to save in handleChildCompleted', { error: e }); } catch { }
                             resumeSuccess = true; // Exit loop on non-CAS error
                         }
                     } catch (e) {
-                        if ((e as Error).message === 'CAS_MISMATCH') {
-                            resumeRetryCount++;
-                            log.warn('handleChildCompleted: CAS Mismatch during parent resume, retrying with FRESH state...', {
-                                parentTaskId,
-                                retry: resumeRetryCount,
-                                note: 'Will reload snapshot and recalculate turn on next iteration'
-                            });
-                            // Backoff before retry - the retry will reload fresh snapshot at line 3614
-                            await new Promise(r => setTimeout(r, 50 * resumeRetryCount));
-                            // IMPORTANT: The `continue` here goes back to the top of the while loop
-                            // which reloads `finalSnap` and recalculates `recordedTurn` from fresh data
-                            continue;
-                        }
                         throw e; // Re-throw other errors
                     }
                 }
                 // --- END RETRY LOOP ---
             } catch (resumeError) {
+                if (isSnapshotReconciliationError(resumeError)) throw resumeError;
                 // If resume fails (e.g., database connection closed), log the error
                 // This is expected when deferred notifications run after parent task completes
                 log.warn('Failed to resume parent after child completion', {
@@ -4379,50 +4095,54 @@ export class TaskEngine {
             }
 
             // Update any pending group aggregations that include this child token
-            const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);
-            if (snap2) {
-                const base2 = (snap2.snapshot as Record<string, unknown>) || {};
-                const groups = getPendingGroups(base2) || {};
-                if (process.env.DEBUG_BACKGROUND_TASKS) {
-                    console.log(`[TaskEngine.handleChildCompleted] Checking groups, token=${token}, groups=${Object.keys(groups).length}`);
-                }
-                let mutated = false;
-                for (const [gToken, gEntry] of Object.entries(groups || {})) {
+            const groupUpdate = await reconcileSnapshotMutation({
+                session: this.sessionManager!,
+                tenantId,
+                sessionId: parentTaskId,
+                operation: 'child.group.completed',
+                mutate: ({ snapshot }) => {
+                    const groups = getPendingGroups(snapshot) || {};
+                    const completed: Array<{ groupToken: string; handler?: string; results: unknown }> = [];
+                    let mutated = false;
+                    for (const [gToken, gEntry] of Object.entries(groups || {})) {
                     const g = gEntry as any;
-                    if (g.childTokens?.includes(token)) {
-                        if (process.env.DEBUG_BACKGROUND_TASKS) {
-                            console.log(`[TaskEngine.handleChildCompleted] Found group ${gToken} with token ${token}, childTokens=${g.childTokens.length}`);
-                        }
+                    if (g.childTokens?.includes(token) && g.results?.[token] === undefined) {
                         g.results = g.results || {} as any;
-                        (g.results as any)[token] = { ok: true, value: childResultForParent };
+                        (g.results as any)[token] = { ok: true, value: durableChildResult };
                         mutated = true;
-                        // Check if all children have results recorded
                         const allDone = g.childTokens.every((ct: string) => (g.results as any)[ct] !== undefined);
-                        if (process.env.DEBUG_BACKGROUND_TASKS) {
-                            console.log(`[TaskEngine.handleChildCompleted] Group ${gToken} allDone=${allDone}, results=${Object.keys((g.results as any) || {}).length}/${g.childTokens.length}`);
-                        }
                         if (allDone) {
-                            // invoke group allCompleted handler if set
-                            const handler = g.handlers?.allCompleted;
-                            // remove group from snapshot
+                            completed.push({
+                                groupToken: gToken,
+                                handler: g.handlers?.allCompleted,
+                                results: g.results,
+                            });
                             delete groups[gToken];
-                            const next2 = setPendingGroups(base2, groups);
-                            await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
-                            if (process.env.DEBUG_BACKGROUND_TASKS) {
-                                console.log(`[TaskEngine.handleChildCompleted] Firing group_completed event for group ${gToken}`);
-                            }
-                            await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_completed', { groupToken: gToken });
-                            if (handler && this.handlerInvoker) {
-                                await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName: handler, input: g.results });
-                            }
                         }
                     }
-                }
-                if (mutated) {
-                    // If not all done, persist interim results
-                    const next2 = setPendingGroups(base2, groups);
-                    const parentAgentId2 = (snap2 as any)?.agentId || (base2 as any)?.meta?.agentId || 'default';
-                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: parentAgentId2, expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
+                    }
+                    return mutated
+                        ? {
+                              kind: 'write',
+                              snapshot: setPendingGroups(snapshot, groups),
+                              value: completed,
+                          }
+                        : { kind: 'noop', value: completed };
+                },
+            });
+            if (groupUpdate.status === 'committed') {
+                for (const completed of groupUpdate.value) {
+                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_completed', {
+                        groupToken: completed.groupToken,
+                    });
+                    if (completed.handler && this.handlerInvoker) {
+                        await this.handlerInvoker.invoke({
+                            tenantId,
+                            taskId: parentTaskId,
+                            handlerName: completed.handler,
+                            input: completed.results,
+                        });
+                    }
                 }
             }
 
@@ -4448,33 +4168,23 @@ export class TaskEngine {
 
         // Handle automatic token and stage management if options are set
         if (entry?.options) {
-            try {
-                const parentSnap = await this.sessionManager?.load(tenantId, parentTaskId);
-                if (parentSnap) {
-                    let parentBase = (parentSnap.snapshot as Record<string, unknown>) || {};
+            await reconcileSnapshotMutation({
+                session: this.sessionManager!,
+                tenantId,
+                sessionId: parentTaskId,
+                operation: 'child.input_required.control',
+                mutate: ({ snapshot }) => {
+                    let parentBase = snapshot;
                     const childTokenPath = entry.options.tokenPath ?? 'child.token';
-
                     if (entry.options.setToken && token) {
                         parentBase = TaskStateUtils.applyControlVarToSnapshot(parentBase, childTokenPath, token);
                     }
-
                     if (entry.options.setStage) {
                         parentBase = TaskStateUtils.applyControlVarToSnapshot(parentBase, 'stage', entry.options.setStage);
                     }
-
-                    // Save the updated parent state
-                    const expectedWmVersion = parentSnap?.wmVersion ?? BigInt(0);
-                    await this.sessionManager?.saveSnapshot({
-                        tenantId,
-                        sessionId: parentTaskId,
-                        agentId: (parentSnap as any)?.agentId || 'default',
-                        expectedWmVersion,
-                        snapshot: parentBase
-                    });
-                }
-            } catch (error) {
-                try { console.warn(`[TaskEngine] Failed to apply auto token/stage options:`, error); } catch { }
-            }
+                    return { kind: 'write', snapshot: parentBase, value: undefined };
+                },
+            });
         }
 
         const childInputRequiredPayload = {
@@ -4552,55 +4262,41 @@ export class TaskEngine {
                 await this.handleChildCompleted({ tenantId, parentTaskId, childToken: token, result: finalChildResult });
             }
             // mark delivered
-            const snap3 = await this.sessionManager?.load(tenantId, parentTaskId);
-            if (snap3) {
-                const base3 = (snap3.snapshot as Record<string, unknown>) || {};
-                const tasks3 = getPendingTasks(base3) as any;
-                if (tasks3[token]) {
+            await reconcileSnapshotMutation({
+                session: this.sessionManager!,
+                tenantId,
+                sessionId: parentTaskId,
+                operation: 'child.input_required.delivered',
+                mutate: ({ snapshot }) => {
+                    const tasks3 = getPendingTasks(snapshot) as any;
+                    if (!tasks3[token]) return { kind: 'noop', value: undefined };
                     tasks3[token].deliveredInput = true;
-                    const next3 = setPendingTasks(base3, tasks3);
-                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base3 as any)?.meta?.agentId || 'default', expectedWmVersion: snap3.wmVersion ?? BigInt(0), snapshot: next3 });
-                }
-            }
+                    return {
+                        kind: 'write',
+                        snapshot: setPendingTasks(snapshot, tasks3),
+                        value: undefined,
+                    };
+                },
+            });
         }
         // If handler is not yet registered, persist pending input so it can be routed once handler is added
         if (!handlerName && !alreadyDelivered) {
-            const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);
-            if (snap2) {
-                const base2 = (snap2.snapshot as Record<string, unknown>) || {};
-                const tasks2 = getPendingTasks(base2) as any;
-                if (tasks2[token]) {
+            await reconcileSnapshotMutation({
+                session: this.sessionManager!,
+                tenantId,
+                sessionId: parentTaskId,
+                operation: 'child.input_required.pending',
+                mutate: ({ snapshot }) => {
+                    const tasks2 = getPendingTasks(snapshot) as any;
+                    if (!tasks2[token]) return { kind: 'noop', value: undefined };
                     tasks2[token].pendingInput = { prompt, schema, childTaskId, childOnProvided };
-                    const next2 = setPendingTasks(base2, tasks2);
-                    try {
-                        await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
-                    } catch (e) {
-                        if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                            try {
-                                const prunedNext2 = pruneSnapshot(next2 as any);
-                                await this.sessionManager?.saveSnapshot({
-                                    tenantId,
-                                    sessionId: parentTaskId,
-                                    agentId: (base2 as any)?.meta?.agentId || 'default',
-                                    expectedWmVersion: snap2.wmVersion ?? BigInt(0),
-                                    snapshot: prunedNext2
-                                });
-                            } catch { /* swallow */ }
-                        } else if ((e as Error).message === 'CAS_MISMATCH') {
-                            try {
-                                const snap3 = await this.sessionManager?.load(tenantId, parentTaskId);
-                                const base3 = (snap3?.snapshot as Record<string, unknown>) || {};
-                                const tasks3 = getPendingTasks(base3) as any;
-                                if (tasks3[token]) {
-                                    tasks3[token].pendingInput = { prompt, schema };
-                                    const next3 = setPendingTasks(base3, tasks3);
-                                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base3 as any)?.meta?.agentId || 'default', expectedWmVersion: snap3?.wmVersion ?? BigInt(0), snapshot: next3 });
-                                }
-                            } catch { /* swallow second failure */ }
-                        }
-                    }
-                }
-            }
+                    return {
+                        kind: 'write',
+                        snapshot: setPendingTasks(snapshot, tasks2),
+                        value: undefined,
+                    };
+                },
+            });
         }
     }
 
@@ -4628,6 +4324,22 @@ export class TaskEngine {
                         : {}),
                 }
               : { code: 'CHILD_FAILED', message: String(error) };
+        const failedAt = new Date().toISOString();
+        const terminalClaim = await coordinateChildTerminal({
+            session: this.sessionManager!,
+            tenantId,
+            parentTaskId,
+            request: {
+                kind: 'failed',
+                token,
+                failedAt,
+                childTaskId: childTaskId ?? entry?.childTaskId ?? token,
+                agentId: entry?.agentId ?? entry?.target,
+                error: rawError,
+            },
+        });
+        if (terminalClaim.resumeEligible !== true) return;
+        const terminalError = terminalClaim.terminal?.error ?? rawError;
         const resume = {
             tenantId,
             taskId: parentTaskId,
@@ -4637,10 +4349,11 @@ export class TaskEngine {
             event: {
                 kind: 'child' as const,
                 token,
-                childTaskId: childTaskId ?? entry?.childTaskId ?? token,
+                childTaskId: terminalClaim.terminal?.childTaskId ?? childTaskId ?? entry?.childTaskId ?? token,
                 outcome: 'failed' as const,
-                error: rawError,
-                completedAt: new Date().toISOString(),
+                error: terminalError,
+                completedAt: failedAt,
+                terminalClaimed: true,
             },
         };
         if (isSyncRuntimeDriver(this.runtimeDriver)) {
@@ -4649,37 +4362,56 @@ export class TaskEngine {
             await this.runtimeDriver.enqueueResume(resume);
         }
         await this.runtimeDriver.cancelTimer?.({ tenantId, taskId: parentTaskId, token });
+        if (terminalClaim.disposition !== 'committed') return;
         if (handlerName && this.handlerInvoker) {
             await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: error });
         }
 
         // Update group aggregations
-        const snap2 = await this.sessionManager?.load(tenantId, parentTaskId);
-        if (!snap2) return;
-        const base2 = (snap2.snapshot as Record<string, unknown>) || {};
-        const groups = getPendingGroups(base2);
-        let mutated = false;
-        for (const [gToken, gEntry] of Object.entries(groups)) {
-            const g = gEntry as any;
-            if (g.childTokens?.includes(token)) {
-                g.results = g.results || {} as any;
-                (g.results as any)[token] = { ok: false, error: error instanceof Error ? error.message : String(error) };
-                mutated = true;
-                // If anyFailed handler exists, invoke it once and optionally cancel remaining
-                if (g.handlers?.anyFailed) {
-                    const handler = g.handlers.anyFailed;
-                    // remove group before invoking
-                    delete groups[gToken];
-                    const next2 = setPendingGroups(base2, groups);
-                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
-                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_failed', { groupToken: gToken });
-                    if (this.handlerInvoker) {
-                        await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName: handler, input: g.results });
+        const groupUpdate = await reconcileSnapshotMutation({
+            session: this.sessionManager!,
+            tenantId,
+            sessionId: parentTaskId,
+            operation: 'child.group.failed',
+            mutate: ({ snapshot }) => {
+                const groups = getPendingGroups(snapshot);
+                const failed: Array<{ groupToken: string; handler: string; results: unknown }> = [];
+                let mutated = false;
+                for (const [gToken, gEntry] of Object.entries(groups)) {
+                    const g = gEntry as any;
+                    if (!g.childTokens?.includes(token) || g.results?.[token] !== undefined) continue;
+                    g.results = g.results || {} as any;
+                    (g.results as any)[token] = {
+                        ok: false,
+                        error: error instanceof Error ? error.message : String(error),
+                    };
+                    mutated = true;
+                    if (g.handlers?.anyFailed) {
+                        failed.push({ groupToken: gToken, handler: g.handlers.anyFailed, results: g.results });
+                        delete groups[gToken];
                     }
-                } else {
-                    // Persist interim state
-                    const next2 = setPendingGroups(base2, groups);
-                    await this.sessionManager?.saveSnapshot({ tenantId, sessionId: parentTaskId, agentId: (base2 as any)?.meta?.agentId || 'default', expectedWmVersion: snap2.wmVersion ?? BigInt(0), snapshot: next2 });
+                }
+                return mutated
+                    ? {
+                          kind: 'write',
+                          snapshot: setPendingGroups(snapshot, groups),
+                          value: failed,
+                      }
+                    : { kind: 'noop', value: failed };
+            },
+        });
+        if (groupUpdate.status === 'committed') {
+            for (const failed of groupUpdate.value) {
+                await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_failed', {
+                    groupToken: failed.groupToken,
+                });
+                if (this.handlerInvoker) {
+                    await this.handlerInvoker.invoke({
+                        tenantId,
+                        taskId: parentTaskId,
+                        handlerName: failed.handler,
+                        input: failed.results,
+                    });
                 }
             }
         }

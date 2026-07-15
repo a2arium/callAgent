@@ -243,6 +243,8 @@ When `sendTaskToAgent(..., { awaitCompletion: false, timeout })` sets a positive
 - `payload.error` is `{ code: 'CHILD_TIMEOUT', message, timeoutMs }`
 - completion and expiry race atomically; only one terminal observation resumes the parent
 - a result arriving after expiry is retained as `task.child_late_completion` diagnostics and never resumes the parent again
+- the pending-child removal, terminal tombstone, and inbox observation commit in one snapshot update; a concurrent parent save reloads and merges that terminal state instead of resurrecting the child
+- after a crash between snapshot commit and wake publication, SQL-backed runtimes recover the terminal observation from the parent snapshot and republish the same deterministic wake
 - Perception normalizes and Learning writes a failure fact
 
 `CHILD_WAKE_TIMEOUT` is different: it is the Hatchet operational watchdog for a missing

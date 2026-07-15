@@ -302,6 +302,10 @@ export { LLMNode } from './telemetry/nodes/LLMNode.js';
 export { ToolNode } from './telemetry/nodes/ToolNode.js';
 // Error system exports
 export { FrameworkError, PluginError, ManifestError, TaskExecutionError, AgentError, ConfigurationError, InvariantError, ModuleExecutionError, FrameworkModule, isErrorType } from './utils/errors.js';
+export {
+    SnapshotReconciliationError,
+    isSnapshotReconciliationError,
+} from './orchestration/persistence/SnapshotRepository.js';
 export { throwInvariantError } from './utils/invariantError.js';
 export type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail, InvariantErrorPayload } from './types/invariantError.js';
 

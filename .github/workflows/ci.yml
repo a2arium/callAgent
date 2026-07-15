@@ -88,3 +88,5 @@ jobs:
         run: yarn build
       - name: Run real PostgreSQL memory tests
         run: yarn workspace @a2arium/callagent-memory-sql test --runInBand
+      - name: Run real PostgreSQL orchestration CAS race
+        run: yarn test packages/core/tests/workingMemoryCas.postgres.integration.test.ts --runInBand

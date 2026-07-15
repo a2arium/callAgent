@@ -20,6 +20,10 @@ import {
     currentSegmentIdempotencyKey,
 } from '../runtime/segmentProcessedKeys.js';
 import { prepareChildResultsInInboxForPersistence } from './childResultPersistence.js';
+import {
+    isSnapshotReconciliationError,
+    reconcileSnapshotMutation,
+} from './persistence/SnapshotRepository.js';
 
 import type {
     EnvironmentState,
@@ -325,10 +329,12 @@ export class TaskExecutor {
                         });
                         (ctx as any).__wmSavedThisTurn = true;
                     } catch (err) {
+                        if (isSnapshotReconciliationError(err)) throw err;
                         if (throwOnSaveFailure) throw err;
                         log.error('Snapshot save failed after prune (end of turn)', { error: err });
                     }
                 } else {
+                    if (isSnapshotReconciliationError(e)) throw e;
                     if (throwOnSaveFailure) throw e;
                     log.warn('TaskExecutor saveSnapshot block caught exception', {
                         error: (e as Error).message,
@@ -393,64 +399,15 @@ export class TaskExecutor {
             } catch { /* noop */ }
         }
 
-        // Load fresh snapshot to minimize CAS conflicts
-        const snapNow = await sessionManager.load(tenantId, sessionId);
-        const expected = snapNow?.wmVersion ?? BigInt(0);
-        const baseNow = (snapNow?.snapshot as Record<string, unknown>) || {};
-        const prevMeta = (baseNow as any).meta || {};
-        const consumedKeysFromSnapshot = readConsumedConversationDeliveryKeysFromMeta(prevMeta);
         const consumedKeysFromRun =
             (ctx as InternalTaskContext).__conversationConsumedDeliveryKeys ?? new Set<string>();
-        const consumedKeys = new Set<string>([
-            ...consumedKeysFromSnapshot,
-            ...consumedKeysFromRun,
-        ]);
         const a2aParent = (ctx as A2AParentContext).__a2aParent;
-        const nextMeta = {
-            ...prevMeta,
-            turn: env.turn,
-            budgets: loopOpts,
-            ...(a2aParent ? { a2aParent } : {}),
-            ...(ctx.telemetry ? { telemetry: ctx.telemetry } : {})
-        };
-        if (consumedKeysFromRun.size > 0) {
-            Object.assign(
-                nextMeta,
-                writeConsumedConversationDeliveryKeysToMeta(nextMeta, consumedKeysFromRun)
-            );
-        }
-
-        // FIX: Add/Clear awaiting
-        if (outcome.kind === 'await_child' || outcome.kind === 'await_tool' || outcome.kind === 'await_event') {
-            (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
-        } else {
-            delete (nextMeta as any).awaiting;
-        }
-
-        // Prepare M next
         let mNextEffective = mNext;
         if (prune) {
             mNextEffective = pruneSnapshot(mNext);
         }
         const snapshotPrisma = getSessionStorePrisma() || (sessionManager as any).prisma;
         const childResultCache = snapshotPrisma ? new AgentResultCache(snapshotPrisma) : undefined;
-
-        // Merge Inbox (Lost Update Fix)
-        const remoteInbox = filterInboxCurrentByConversationDeliveryKeys(
-            InboxManager.normalizeInbox((baseNow as any)?.inbox),
-            consumedKeys
-        );
-        const pendingChildren = env.pending?.children ?? {};
-        const localInbox = filterInboxCurrentByConversationDeliveryKeys(
-            InboxManager.normalizeInbox(env.inbox),
-            consumedKeys
-        );
-        let nextInbox = InboxManager.mergeInboxes(localInbox, remoteInbox, pendingChildren);
-        nextInbox = await prepareChildResultsInInboxForPersistence(nextInbox, childResultCache, tenantId);
-
-        if (prune) {
-            nextInbox = InboxManager.normalizeInbox(pruneSnapshot(nextInbox as any) as any);
-        }
 
         // Inject LLM history into snapshot base
         let attachedLlmState: unknown = undefined;
@@ -469,49 +426,122 @@ export class TaskExecutor {
         } catch (err) {
             log.warn('Failed to fetch LLM state during saveSnapshot', { error: (err as Error).message });
         }
-
-        let next = {
-            ...baseNow,
-            M: mNextEffective,
-            meta: nextMeta,
-            inbox: nextInbox,
-            pending: {
-                ...((baseNow as any).pending ?? {}),
-                ...(env.pending ?? {}),
-                inputs: { ...((baseNow as any).pending?.inputs ?? {}), ...(env.pending?.inputs ?? {}) },
-                children: { ...((baseNow as any).pending?.children ?? {}), ...(env.pending?.children ?? {}) },
-                tools: { ...((baseNow as any).pending?.tools ?? {}), ...(env.pending?.tools ?? {}) },
-                events: { ...((baseNow as any).pending?.events ?? {}), ...(env.pending?.events ?? {}) },
-                groups: { ...((baseNow as any).pending?.groups ?? {}), ...(env.pending?.groups ?? {}) },
-                controlVars: { ...((baseNow as any).pending?.controlVars ?? {}), ...(env.pending?.controlVars ?? {}) },
-                manifestConsents: { ...((baseNow as any).pending?.manifestConsents ?? {}), ...(env.pending?.manifestConsents ?? {}) },
-            },
-            ...(attachedLlmState ? { llmState: attachedLlmState } : {})
-        } as Record<string, unknown>;
-
         const activeIdempotencyKey = currentSegmentIdempotencyKey();
-        if (activeIdempotencyKey !== undefined) {
-            next = addProcessedSegmentKey(next, activeIdempotencyKey);
-        }
-
-        // Offload Artifacts
-        try {
-            if (snapshotPrisma) {
-                const cache = new AgentResultCache(snapshotPrisma);
-                await offloadArtifacts(next, cache, tenantId);
-            }
-        } catch (offloadErr) {
-            if (!prune) { // log only on first attempt to avoid noise?
-                log.error('Failed to offload artifacts at end-of-turn', { error: offloadErr instanceof Error ? offloadErr.message : String(offloadErr) });
-            }
-        }
-
-        await sessionManager.saveSnapshot({
+        await reconcileSnapshotMutation({
+            session: sessionManager,
             tenantId,
             sessionId,
             agentId: agentId || 'default',
-            expectedWmVersion: expected,
-            snapshot: next
+            operation: 'turn.persist',
+            mutate: async ({ snapshot: baseNow }) => {
+                const prevMeta = (baseNow as any).meta || {};
+                const consumedKeysFromSnapshot = readConsumedConversationDeliveryKeysFromMeta(prevMeta);
+                const consumedKeys = new Set<string>([
+                    ...consumedKeysFromSnapshot,
+                    ...consumedKeysFromRun,
+                ]);
+                const nextMeta = {
+                    ...prevMeta,
+                    turn: env.turn,
+                    budgets: loopOpts,
+                    ...(a2aParent ? { a2aParent } : {}),
+                    ...(ctx.telemetry ? { telemetry: ctx.telemetry } : {})
+                };
+                if (consumedKeysFromRun.size > 0) {
+                    Object.assign(
+                        nextMeta,
+                        writeConsumedConversationDeliveryKeysToMeta(nextMeta, consumedKeysFromRun)
+                    );
+                }
+
+                if (outcome.kind === 'await_child' || outcome.kind === 'await_tool' || outcome.kind === 'await_event') {
+                    (nextMeta as any).awaiting = { kind: outcome.kind, token: (outcome as any).token };
+                } else {
+                    delete (nextMeta as any).awaiting;
+                }
+
+                const remotePending = ((baseNow as any).pending ?? {}) as Record<string, any>;
+                const localPending = (env.pending ?? {}) as Record<string, any>;
+                const childTerminals = {
+                    ...(localPending.childTerminals ?? {}),
+                    ...(remotePending.childTerminals ?? {}),
+                } as Record<string, unknown>;
+                const children = {
+                    ...(remotePending.children ?? {}),
+                    ...(localPending.children ?? {}),
+                } as Record<string, unknown>;
+                const tasks = {
+                    ...(localPending.tasks ?? {}),
+                    ...(remotePending.tasks ?? {}),
+                } as Record<string, any>;
+                for (const token of Object.keys(childTerminals)) {
+                    delete children[token];
+                    if (remotePending.tasks?.[token]?.terminal === undefined) {
+                        delete tasks[token];
+                    }
+                }
+
+                const remoteInbox = filterInboxCurrentByConversationDeliveryKeys(
+                    InboxManager.normalizeInbox((baseNow as any)?.inbox),
+                    consumedKeys
+                );
+                const localInbox = filterInboxCurrentByConversationDeliveryKeys(
+                    InboxManager.normalizeInbox(env.inbox),
+                    consumedKeys
+                );
+                const terminalOrActiveChildren = { ...children, ...childTerminals };
+                let nextInbox = InboxManager.mergeInboxes(
+                    localInbox,
+                    remoteInbox,
+                    terminalOrActiveChildren
+                );
+                nextInbox = await prepareChildResultsInInboxForPersistence(
+                    nextInbox,
+                    childResultCache,
+                    tenantId
+                );
+                if (prune) {
+                    nextInbox = InboxManager.normalizeInbox(pruneSnapshot(nextInbox as any) as any);
+                }
+
+                const nextPending = {
+                    ...remotePending,
+                    ...localPending,
+                    inputs: { ...(remotePending.inputs ?? {}), ...(localPending.inputs ?? {}) },
+                    children,
+                    tasks,
+                    childTerminals,
+                    tools: { ...(remotePending.tools ?? {}), ...(localPending.tools ?? {}) },
+                    events: { ...(remotePending.events ?? {}), ...(localPending.events ?? {}) },
+                    groups: { ...(remotePending.groups ?? {}), ...(localPending.groups ?? {}) },
+                    controlVars: { ...(remotePending.controlVars ?? {}), ...(localPending.controlVars ?? {}) },
+                    manifestConsents: { ...(remotePending.manifestConsents ?? {}), ...(localPending.manifestConsents ?? {}) },
+                };
+                let next = {
+                    ...baseNow,
+                    M: mNextEffective,
+                    meta: nextMeta,
+                    inbox: nextInbox,
+                    pending: nextPending,
+                    ...(attachedLlmState ? { llmState: attachedLlmState } : {})
+                } as Record<string, unknown>;
+                if (activeIdempotencyKey !== undefined) {
+                    next = addProcessedSegmentKey(next, activeIdempotencyKey);
+                }
+
+                try {
+                    if (snapshotPrisma) {
+                        await offloadArtifacts(next, childResultCache!, tenantId);
+                    }
+                } catch (offloadErr) {
+                    if (!prune) {
+                        log.error('Failed to offload artifacts at end-of-turn', {
+                            error: offloadErr instanceof Error ? offloadErr.message : String(offloadErr)
+                        });
+                    }
+                }
+                return { kind: 'write', snapshot: next, value: undefined };
+            },
         });
     }
 

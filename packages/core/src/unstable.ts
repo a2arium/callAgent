@@ -40,6 +40,16 @@ export {
 export { makeSafeEventPreview } from './orchestration/safeEventPreview.js';
 export { prepareChildResultForPersistence } from './orchestration/childResultPersistence.js';
 export {
+    reconcileSnapshotMutation,
+    SnapshotReconciliationError,
+    isSnapshotReconciliationError,
+    type ReconcileSnapshotMutationOptions,
+    type SnapshotMutationCurrent,
+    type SnapshotMutationDecision,
+    type SnapshotMutationResult,
+    type SnapshotMutationSession,
+} from './orchestration/persistence/SnapshotRepository.js';
+export {
     claimChildTerminalInSnapshot,
     coordinateChildTerminal,
     childTerminalEventPayload,
