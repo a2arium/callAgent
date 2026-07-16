@@ -12,6 +12,9 @@ import type { ILLMCaller, LLMConfig, LLMMessage } from '../shared/types/LLMTypes
 import type { LLMCallOptions, LLMSettings } from '../types/llmContracts.js';
 import type { UsageRecord } from '../shared/types/index.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
+import { mapLLMCallError } from '../types/llmErrors.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
+import { randomUUID } from 'node:crypto';
 
 // Type for the recordUsage function that accepts our detailed record
 type RecordUsageFunction = (cost: number | UsageRecord) => void;
@@ -128,6 +131,8 @@ export class LLMCallerAdapter implements ILLMCaller {
         message: LLMMessage,
         options?: LLMCallOptions
     ): Promise<UniversalChatResponse<T>[]> {
+        const callId = randomUUID();
+        const startedAt = Date.now();
         // Set the parent node ID and context for telemetry - bridge will create LLMNode as child and accumulate turn summaries
         try {
             const parentId = options?.telemetryNodeId || this.ctx?.telemetry?.nodeId;
@@ -190,21 +195,41 @@ export class LLMCallerAdapter implements ILLMCaller {
                 }
             }
 
+            const usageSummary = this.summarizeResponseUsage(responses);
+            this.recordCallTrace(callId, startedAt, options, 'completed', undefined, {
+                ...usageSummary,
+                outputContractStatus: options?.jsonSchema
+                    ? (typedResponses.every((response) => response.contentObject != null) ? 'matched' : 'failed')
+                    : 'not_applicable',
+            });
+
             return typedResponses;
         } catch (error) {
-            // Handle errors according to framework standards
-            console.error('LLM call error:', error);
-            throw error; // In a full implementation, map to framework error types
+            const mapped = mapLLMCallError(error, options?.signal);
+            this.recordCallTrace(callId, startedAt, options, this.terminalReason(mapped), mapped);
+            if (this.isExpectedTerminalError(mapped)) {
+                console.warn('LLM call terminated', {
+                    callId,
+                    code: (mapped as { code: string }).code,
+                    provider: this.provider,
+                    model: this.modelName,
+                });
+            } else {
+                console.error('LLM call error:', mapped);
+            }
+            throw mapped;
         }
     }
 
     /**
      * Make a streaming LLM call
      */
-    async *stream<T = unknown>(
+    stream<T = unknown>(
         message: LLMMessage,
         options?: LLMCallOptions
     ): AsyncIterable<UniversalStreamResponse<T>> {
+        const callId = randomUUID();
+        const startedAt = Date.now();
         // Set the parent node ID and context for telemetry - bridge will create LLMNode as child and accumulate turn summaries
         try {
             const parentId = options?.telemetryNodeId || this.ctx?.telemetry?.nodeId;
@@ -213,32 +238,71 @@ export class LLMCallerAdapter implements ILLMCaller {
             }
         } catch (e) { /* ignore */ }
 
-        try {
-            // Call the underlying library's stream method
-            const callMessage = this.toCallLLMMessage(message, options);
-            for await (const chunk of this.caller.stream(callMessage)) {
-                // If this is the final chunk and we're not using callbacks, record the usage
-                if (chunk.isComplete && !options?.usageCallback && this.recordUsage &&
-                    (chunk.metadata?.usage?.costs?.total)) {
-                    const usage = (chunk.metadata as { usage?: Usage }).usage;
-                    const record: UsageRecord = {
-                        cost: chunk.metadata.usage.costs.total,
-                        kind: 'llm',
-                        op: 'stream',
-                        provider: this.provider,
-                        model: this.modelName,
-                        tokens: usage ? { input: usageTokensInput(usage), output: usageTokensOutput(usage) } : undefined
-                    };
-                    this.recordUsage(record);
-                }
+        // callllm starts the deadline when stream() is invoked, not on first iteration.
+        const callMessage = this.toCallLLMMessage(message, options);
+        const source = this.caller.stream(callMessage);
+        const self = this;
+        return (async function* (): AsyncGenerator<UniversalStreamResponse<T>> {
+            let traceRecorded = false;
+            try {
+                for await (const chunk of source) {
+                    // If this is the final chunk and we're not using callbacks, record the usage
+                    if (chunk.isComplete && !options?.usageCallback && self.recordUsage &&
+                        (chunk.metadata?.usage?.costs?.total)) {
+                        const usage = (chunk.metadata as { usage?: Usage }).usage;
+                        const record: UsageRecord = {
+                            cost: chunk.metadata.usage.costs.total,
+                            kind: 'llm',
+                            op: 'stream',
+                            provider: self.provider,
+                            model: self.modelName,
+                            tokens: usage ? { input: usageTokensInput(usage), output: usageTokensOutput(usage) } : undefined
+                        };
+                        self.recordUsage(record);
+                    }
 
-                // We need to verify that callllm's StreamResponse matches our expected type
-                yield chunk as UniversalStreamResponse<T>;
+                    if (chunk.isComplete && !traceRecorded) {
+                        traceRecorded = true;
+                        const usage = (chunk.metadata as { usage?: Usage } | undefined)?.usage;
+                        self.recordCallTrace(callId, startedAt, options, 'completed', undefined, {
+                            inputTokens: usageTokensInput(usage),
+                            outputTokens: usageTokensOutput(usage),
+                            cost: usage?.costs?.total,
+                            outputContractStatus: options?.jsonSchema
+                                ? (chunk.contentObject != null ? 'matched' : 'failed')
+                                : 'not_applicable',
+                        });
+                    }
+
+                    yield chunk as UniversalStreamResponse<T>;
+                }
+                if (!traceRecorded) {
+                    traceRecorded = true;
+                    self.recordCallTrace(callId, startedAt, options, 'completed');
+                }
+            } catch (error) {
+                const mapped = mapLLMCallError(error, options?.signal);
+                traceRecorded = true;
+                self.recordCallTrace(callId, startedAt, options, self.terminalReason(mapped), mapped);
+                if (self.isExpectedTerminalError(mapped)) {
+                    console.warn('LLM stream terminated', {
+                        callId,
+                        code: (mapped as { code: string }).code,
+                        provider: self.provider,
+                        model: self.modelName,
+                    });
+                } else {
+                    console.error('LLM stream error:', mapped);
+                }
+                throw mapped;
+            } finally {
+                if (!traceRecorded) {
+                    self.recordCallTrace(callId, startedAt, options, 'cancelled', {
+                        code: 'LLM_CANCELLED',
+                    });
+                }
             }
-        } catch (error) {
-            console.error('LLM stream error:', error);
-            throw error; // In a full implementation, map to framework error types
-        }
+        })();
     }
 
     /**
@@ -368,6 +432,88 @@ export class LLMCallerAdapter implements ILLMCaller {
         if (typeof message === 'string') {
             return options != null ? { ...options, text: message } : message;
         }
-        return options != null ? { ...options, ...message } : message;
+        // Call-site execution controls are authoritative. A data object must not be
+        // able to shadow the AbortSignal or timeout supplied as the second argument.
+        return options != null ? { ...message, ...options } : message;
+    }
+
+    private isExpectedTerminalError(error: unknown): error is { code: 'LLM_TIMEOUT' | 'LLM_CANCELLED' } {
+        if (error === null || typeof error !== 'object') return false;
+        const code = (error as { code?: unknown }).code;
+        return code === 'LLM_TIMEOUT' || code === 'LLM_CANCELLED';
+    }
+
+    private terminalReason(error: unknown): 'provider_error' | 'timeout' | 'cancelled' {
+        if (error !== null && typeof error === 'object') {
+            const code = (error as { code?: unknown }).code;
+            if (code === 'LLM_TIMEOUT') return 'timeout';
+            if (code === 'LLM_CANCELLED') return 'cancelled';
+        }
+        return 'provider_error';
+    }
+
+    private summarizeResponseUsage(responses: UniversalChatResponse<unknown>[]): {
+        inputTokens?: number;
+        outputTokens?: number;
+        cost?: number;
+    } {
+        let inputTokens = 0;
+        let outputTokens = 0;
+        let cost = 0;
+        for (const response of responses) {
+            const usage = (response.metadata as { usage?: Usage } | undefined)?.usage;
+            inputTokens += usageTokensInput(usage) ?? 0;
+            outputTokens += usageTokensOutput(usage) ?? 0;
+            cost += usage?.costs?.total ?? 0;
+        }
+        return {
+            ...(inputTokens > 0 ? { inputTokens } : {}),
+            ...(outputTokens > 0 ? { outputTokens } : {}),
+            ...(cost > 0 ? { cost } : {}),
+        };
+    }
+
+    private recordCallTrace(
+        callId: string,
+        startedAt: number,
+        options: LLMCallOptions | undefined,
+        terminalReason: 'completed' | 'provider_error' | 'timeout' | 'cancelled',
+        error?: unknown,
+        summary: {
+            inputTokens?: number;
+            outputTokens?: number;
+            cost?: number;
+            outputContractStatus?: 'matched' | 'failed' | 'not_applicable';
+        } = {},
+    ): void {
+        const terminalAt = Date.now();
+        const code = error !== null && typeof error === 'object'
+            ? (error as { code?: unknown }).code
+            : undefined;
+
+        defaultMetricsRegistry.increment('llm.terminal_total', { reason: terminalReason });
+        const internalCtx = this.ctx as InternalTaskContext | undefined;
+        if (!internalCtx?.__turnLlmCalls) return;
+        internalCtx.__turnLlmCalls.push({
+            callId,
+            model: this.modelName ?? 'unknown',
+            provider: this.provider,
+            startedAt: new Date(startedAt).toISOString(),
+            ...(typeof options?.timeoutMs === 'number'
+                ? { deadlineAt: new Date(startedAt + options.timeoutMs).toISOString() }
+                : {}),
+            terminalAt: new Date(terminalAt).toISOString(),
+            terminalReason,
+            errorCode: typeof code === 'string' ? code : undefined,
+            durationMs: terminalAt - startedAt,
+            inputTokens: summary.inputTokens,
+            outputTokens: summary.outputTokens,
+            cost: summary.cost,
+            module: internalCtx.__currentModule,
+            hasOutputContract: options?.jsonSchema !== undefined,
+            outputContractName: options?.jsonSchema?.name,
+            outputContractStatus: summary.outputContractStatus
+                ?? (options?.jsonSchema ? 'failed' : 'not_applicable'),
+        });
     }
 }

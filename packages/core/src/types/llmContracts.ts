@@ -1,5 +1,15 @@
 import { z, type ZodType } from 'zod';
 
+export const MAX_LLM_TIMEOUT_MS = 2_147_483_647;
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+    if (value === null || typeof value !== 'object') return false;
+    const candidate = value as Partial<AbortSignal>;
+    return typeof candidate.aborted === 'boolean'
+        && typeof candidate.addEventListener === 'function'
+        && typeof candidate.removeEventListener === 'function';
+}
+
 export const LLMOutputContractSchema = z.object({
     name: z.string().min(1),
     schema: z.union([
@@ -27,6 +37,10 @@ export const LLMCallOptionsSchema = LLMSettingsSchema.pick({
     temperature: true,
     seed: true,
 }).extend({
+    signal: z.custom<AbortSignal>(isAbortSignal, {
+        message: 'signal must be an AbortSignal',
+    }).optional(),
+    timeoutMs: z.number().int().min(1).max(MAX_LLM_TIMEOUT_MS).optional(),
     data: z.unknown().optional(),
     jsonSchema: LLMOutputContractSchema.optional(),
     schema: z.union([

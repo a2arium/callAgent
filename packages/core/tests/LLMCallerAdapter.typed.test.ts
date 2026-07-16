@@ -16,12 +16,17 @@ describe('LLMCallerAdapter typing surface', () => {
     });
 
     it('typed options shape is assignable', () => {
+        const controller = new AbortController();
         const options: LLMCallOptions = {
             temperature: 0,
             seed: 1,
+            signal: controller.signal,
+            timeoutMs: 100,
             telemetryNodeId: 'node',
             jsonSchema: { name: 'shape', schema: { type: 'object' } },
         };
         expect(options.telemetryNodeId).toBe('node');
+        expect(options.signal).toBe(controller.signal);
+        expect(options.timeoutMs).toBe(100);
     });
 });

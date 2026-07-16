@@ -59,36 +59,6 @@ function tokensTotal(u: UsageLike | undefined, inVal: number, outVal: number): n
     return inVal + outVal;
 }
 
-function extractOutputContractMeta(responseFormat: unknown): {
-    hasOutputContract: boolean;
-    outputContractName?: string;
-} {
-    if (responseFormat == null || typeof responseFormat !== 'object') {
-        return { hasOutputContract: false };
-    }
-
-    const format = responseFormat as {
-        type?: string;
-        json_schema?: { name?: string };
-        jsonSchema?: { name?: string };
-        name?: string;
-    };
-
-    const hasContract =
-        format.type === 'json_schema'
-        || typeof format.json_schema === 'object'
-        || typeof format.jsonSchema === 'object';
-
-    const outputContractName = format.json_schema?.name
-        ?? format.jsonSchema?.name
-        ?? format.name;
-
-    return {
-        hasOutputContract: hasContract,
-        ...(typeof outputContractName === 'string' ? { outputContractName } : {}),
-    };
-}
-
 /** Follow parent chain until a node carries traceId (callllm children often only get parent id). */
 function resolveTraceIdFromParentId(parentId: string): string | undefined {
     let pid: string | undefined = parentId;
@@ -197,10 +167,27 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
         const node = this.conversationNodes.get(ctx.conversationId);
 
         if (node) {
-            node.endTime = Date.now();
-            node.status = 'success';
-            node.output = { summary, ...inputOutput };
-            telemetry.endNode(node);
+            const terminalReason = summary?.terminalReason ?? (summary?.success === false ? 'provider_error' : 'completed');
+            Object.assign(node.providerData, {
+                callId: summary?.callId,
+                terminalReason,
+                terminalAt: summary?.terminalAt,
+            });
+            if (terminalReason === 'completed') {
+                node.endTime = summary?.terminalAt ?? Date.now();
+                node.status = 'success';
+                node.output = { summary, ...inputOutput };
+                telemetry.endNode(node);
+            } else {
+                const terminalError = Object.assign(
+                    new Error(`LLM operation terminated: ${terminalReason}`),
+                    { code: terminalReason === 'timeout' ? 'LLM_TIMEOUT' : terminalReason === 'cancelled' ? 'LLM_CANCELLED' : 'LLM_PROVIDER_ERROR' },
+                );
+                node.output = { summary };
+                node.fail(terminalError);
+                node.endTime = summary?.terminalAt ?? node.endTime;
+                telemetry.failNode(node, terminalError);
+            }
             this.popNode(ctx.conversationId, node.id);
             this.conversationNodes.delete(ctx.conversationId);
         }
@@ -309,26 +296,6 @@ export class CallagentBridgeProvider implements CallLLMTelemetryProvider {
             if (cost) {
                 node.pricing = { cost, currency: u.costs?.currency ?? 'USD' };
             }
-        }
-
-        // Accumulate into turn trace
-        const ictx = this.contextRef;
-        if (ictx?.__turnLlmCalls) {
-            const start = node.startTime ?? 0;
-            const durationMs = typeof node.endTime === 'number' ? node.endTime - start : undefined;
-            const contractMeta = extractOutputContractMeta(ctx.responseFormat);
-            ictx.__turnLlmCalls.push({
-                model: node.model,
-                provider: (node.providerData as { provider?: string })?.provider,
-                durationMs,
-                inputTokens: node.usage?.inputTokens,
-                outputTokens: node.usage?.outputTokens,
-                cost: node.pricing?.cost,
-                module: node.module,
-                hasOutputContract: contractMeta.hasOutputContract,
-                outputContractName: contractMeta.outputContractName,
-                outputContractStatus: contractMeta.hasOutputContract ? 'matched' : 'not_applicable',
-            });
         }
 
         if (responseModel) {

@@ -89,7 +89,15 @@ export {
     LLMCallOptionsSchema,
     LLMSettingsSchema,
     LLMOutputContractSchema,
+    MAX_LLM_TIMEOUT_MS,
 } from './types/llmContracts.js';
+export {
+    LLMTimeoutError,
+    LLMCancelledError,
+    isLLMTimeoutError,
+    isLLMCancelledError,
+} from './types/llmErrors.js';
+export type { LLMTerminalErrorCode } from './types/llmErrors.js';
 export type {
     ChildCompletedPayload,
     ChildCompletedObservation,

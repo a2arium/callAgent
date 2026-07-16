@@ -136,6 +136,47 @@ const responses = await ctx.llm.call('Summarize this document:', {
 });
 ```
 
+### Bound or cancel the complete LLM operation
+
+Use `timeoutMs` for one total deadline across provider dispatch, retries, structured-output validation, tools, chunking, usage callbacks, and final bookkeeping. Use `signal` when an external owner must be able to cancel the operation. If both are supplied, the first terminal outcome wins.
+
+```ts
+import {
+  LLMCancelledError,
+  LLMTimeoutError,
+} from '@a2arium/callagent-core';
+
+const controller = new AbortController();
+
+try {
+  const responses = await ctx.llm.call('Assess this evidence:', {
+    data: evidence,
+    jsonSchema: { name: 'Assessment', schema: AssessmentSchema },
+    timeoutMs: 60_000,
+    signal: controller.signal,
+  });
+  // handle responses
+} catch (error) {
+  if (error instanceof LLMTimeoutError) {
+    return {
+      action: intent,
+      result: { status: 'error', error: { code: error.code, timeoutMs: error.timeoutMs } },
+    };
+  }
+  if (error instanceof LLMCancelledError) {
+    return {
+      action: intent,
+      result: { status: 'error', error: { code: error.code } },
+    };
+  }
+  throw error;
+}
+```
+
+`timeoutMs` must be an integer from `1` through `2_147_483_647`. Omitting both controls preserves existing behavior. Do not use a caller-side `Promise.race()` as a substitute: it stops awaiting but cannot revoke provider work or quarantine late bookkeeping. A timed-out call rejects with `LLMTimeoutError` (`code: 'LLM_TIMEOUT'`); an explicit abort rejects with `LLMCancelledError` (`code: 'LLM_CANCELLED'`).
+
+Streaming accepts the same controls. Its deadline starts when `ctx.llm.stream()` is called, even if iteration begins later. Breaking iteration delegates cancellation and iterator cleanup to `callllm`.
+
 ---
 
 ## Step 3: Structured output with contracts
@@ -751,6 +792,8 @@ Use these when debugging or testing to assert that the expected LLM calls were m
 | With data payload | `ctx.llm.call(prompt, { data })` | Data appended to context, auto-chunked |
 | Structured output (Zod) | `ctx.llm.call(prompt, { jsonSchema: { name, schema: ZodObject } })` | Use `response.contentObject` — auto-validated |
 | Structured output (JSON) | `ctx.llm.call(prompt, { jsonSchema: { name, schema: jsonObj } })` | Same features, Zod preferred |
+| Deadline | `ctx.llm.call(prompt, { timeoutMs: 60_000 })` | One deadline across retries, tools, and chunks; throws `LLMTimeoutError` |
+| External cancellation | `ctx.llm.call(prompt, { signal })` | Throws `LLMCancelledError`; provider abort is best effort |
 | Streaming | `ctx.llm.stream(prompt)` | `AsyncIterable<UniversalStreamResponse>` |
 | Change settings | `ctx.llm.updateSettings({ temperature: 0 })` | Affects subsequent calls |
 | Tool result | `ctx.llm.addToolResult(id, result, name)` | For manual tool loops |

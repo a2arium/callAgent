@@ -1043,12 +1043,22 @@ If the LLM output does not conform to the contract:
 - Transition MUST emit an observation that represents the failure.
 - Learning MUST write a durable fact that Policy can reason about (retry, repair, or ask user).
 
+#### Rule: bounded LLM operations use native execution controls
+
+`ctx.llm.call()` and `ctx.llm.stream()` accept optional `timeoutMs` and `signal` controls. `timeoutMs` starts once at public invocation and covers the complete logical operation, including provider dispatch, retry delays, structured-output validation, tool execution, chunk processing, usage callbacks, and final bookkeeping. Nested work MUST NOT reset the deadline.
+
+Completion, provider failure, timeout, and external abort race for exactly one caller-visible terminal outcome. Timeout is represented by `LLMTimeoutError` with `code = 'LLM_TIMEOUT'` and `timeoutMs`; external cancellation is represented by `LLMCancelledError` with `code = 'LLM_CANCELLED'`. Late provider outcomes are diagnostic only and MUST NOT mutate history, usage, telemetry, memory, or task state after timeout/cancellation wins.
+
+Execution SHOULD catch expected timeout/cancellation errors and return a structured `ExecResult` so Transition can emit a normal observation. A local `Promise.race()` is not a valid cancellation boundary because it does not revoke the underlying operation's delivery rights.
+
 #### Example (contracted output)
 
 ```ts
 const response = await ctx.llm.call(prompt, {
   data: simplifiedHtml,
-  jsonSchema: { name: 'ListingStructure', schema: listingContract }
+  jsonSchema: { name: 'ListingStructure', schema: listingContract },
+  timeoutMs: 60_000,
+  signal: cancellation.signal,
 });
 ```
 

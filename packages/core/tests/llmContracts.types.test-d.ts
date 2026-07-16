@@ -7,6 +7,8 @@ import type { ExecutableAction } from '../src/types/intent.js';
 declare const options: LLMCallOptions;
 expectType<number | undefined>(options.temperature);
 expectType<number | undefined>(options.seed);
+expectType<number | undefined>(options.timeoutMs);
+expectType<AbortSignal | undefined>(options.signal);
 
 declare const message: LLMMessage;
 expectType<string | Record<string, unknown>>(message);

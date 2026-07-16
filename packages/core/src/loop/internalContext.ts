@@ -50,8 +50,15 @@ export type InternalTaskContext = TaskContext & {
     __currentModule?: string;
     /** LLM call summaries for current turn */
     __turnLlmCalls?: Array<{
+        callId?: string;
         model: string;
         provider?: string;
+        startedAt?: string;
+        deadlineAt?: string;
+        terminalAt?: string;
+        terminalReason?: 'completed' | 'provider_error' | 'timeout' | 'cancelled';
+        errorCode?: string;
+        lateCompletion?: boolean;
         durationMs?: number;
         inputTokens?: number;
         outputTokens?: number;

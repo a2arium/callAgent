@@ -132,8 +132,15 @@ export const StageInvariantCheckResultSchema = z.object({
 });
 
 export const LLMCallTraceSchema = z.object({
+    callId: z.string().optional(),
     model: z.string(),
     provider: z.string().optional(),
+    startedAt: z.string().datetime().optional(),
+    deadlineAt: z.string().datetime().optional(),
+    terminalAt: z.string().datetime().optional(),
+    terminalReason: z.enum(['completed', 'provider_error', 'timeout', 'cancelled']).optional(),
+    errorCode: z.string().optional(),
+    lateCompletion: z.boolean().optional(),
     durationMs: z.number().optional(),
     inputTokens: z.number().optional(),
     outputTokens: z.number().optional(),
