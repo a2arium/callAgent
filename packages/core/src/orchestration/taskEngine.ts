@@ -2996,6 +2996,41 @@ export class TaskEngine {
                         final: true,
                         traceparent
                     });
+                } else if (task.status?.state === 'failed') {
+                    const failureMessage = this.taskFailureMessage(task);
+                    const failureReason =
+                        typeof task.status.metadata?.reason === 'string'
+                            ? task.status.metadata.reason
+                            : failureMessage;
+                    await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.failed', {
+                        taskId: sessionId,
+                        error: failureMessage,
+                        reason: failureReason,
+                        traceparent,
+                    });
+                    await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
+                        taskId: sessionId,
+                        status: task.status,
+                        final: true,
+                        traceparent,
+                    });
+                } else if (task.status?.state === 'canceled') {
+                    const cancelReason =
+                        typeof task.status.metadata?.reason === 'string'
+                            ? task.status.metadata.reason
+                            : 'canceled';
+                    await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.canceled', {
+                        taskId: sessionId,
+                        reason: cancelReason,
+                        canceledAt: task.status.timestamp ?? new Date().toISOString(),
+                        traceparent,
+                    });
+                    await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
+                        taskId: sessionId,
+                        status: task.status,
+                        final: true,
+                        traceparent,
+                    });
                 }
 
                 this.finalizeAgentNodeTelemetry(agentNode, task);

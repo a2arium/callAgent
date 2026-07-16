@@ -8,6 +8,7 @@ import { isSyncRuntimeDriver } from '../../src/runtime/inProcessRuntimeDriver.js
 import type { RuntimeDriver } from '../../src/runtime/runtimeDriver.js';
 import { initialM } from '../../src/loop/init.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
+import { StreamTransport } from '../../src/runner/StreamTransport.js';
 
 const loopAgentPlugin = {
     resolved: {
@@ -114,6 +115,91 @@ describe('TaskEngine runtime driver routing', () => {
         expect(startSpy).toHaveBeenCalledTimes(1);
         executeTurnSpy.mockRestore();
         startSpy.mockRestore();
+    });
+
+    it('persists and publishes a failed terminal result returned by the sync driver', async () => {
+        const failedStatus = {
+            state: 'failed' as const,
+            timestamp: new Date().toISOString(),
+            message: {
+                role: 'agent' as const,
+                parts: [{ type: 'text' as const, text: 'Loop failed: budget_turns_exceeded' }],
+            },
+            metadata: { reason: 'budget_turns_exceeded' },
+        };
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn').mockResolvedValue({
+            M: initialM({ task: { id: 't-budget-fail', input: {} } } as TaskContext),
+            outcome: { kind: 'fail', reason: 'budget_turns_exceeded' },
+            metrics: {},
+            taskStatus: failedStatus,
+        });
+
+        const store = new InMemorySessionManager();
+        const engine = new TaskEngine({ sessionStore: store });
+        const detachSpy = jest
+            .spyOn(engine as unknown as { detachTaskBranch: (...args: any[]) => Promise<unknown> }, 'detachTaskBranch')
+            .mockResolvedValue([]);
+        const result = await engine.startTask({
+            tenantId: 't',
+            agentId: 'driver-test-agent',
+            isStreaming: false,
+            task: {
+                id: 't-budget-fail',
+                input: {},
+                status: { state: 'submitted', timestamp: new Date().toISOString() },
+            },
+        });
+
+        expect(result?.status?.state).toBe('failed');
+        const events = await store.listEventsSince({
+            tenantId: 't',
+            sessionId: 't-budget-fail',
+            sinceSeq: -1,
+        });
+        expect(events.map((event) => event.type)).toContain('task.failed');
+        expect(events.find((event) => event.type === 'task.failed')?.payload).toEqual(
+            expect.objectContaining({
+                taskId: 't-budget-fail',
+                reason: 'budget_turns_exceeded',
+                error: 'Loop failed: budget_turns_exceeded',
+            })
+        );
+
+        const outbox = (store as unknown as {
+            outbox: Array<{ topic: string; key: string; payload: Record<string, unknown> }>;
+        }).outbox;
+        expect(outbox).toContainEqual(expect.objectContaining({
+            topic: 'task.status',
+            key: 't-budget-fail',
+            payload: expect.objectContaining({
+                final: true,
+                status: failedStatus,
+            }),
+        }));
+
+        executeTurnSpy.mockRestore();
+        detachSpy.mockRestore();
+    });
+
+    it('keeps budget exhaustion visible in the console transport', () => {
+        const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const transport = new StreamTransport({ outputType: 'console' });
+        const status = {
+            state: 'failed' as const,
+            timestamp: '2023-01-01',
+            metadata: { reason: 'budget_turns_exceeded' },
+            message: {
+                role: 'agent' as const,
+                parts: [{ type: 'text' as const, text: 'Loop failed: budget_turns_exceeded' }],
+            },
+        };
+
+        transport.handleStatus(status, true);
+
+        expect(consoleSpy).toHaveBeenCalledWith('Status: failed (FINAL)');
+        expect(consoleSpy).toHaveBeenCalledWith('Loop outcome: kind: fail');
+        expect(consoleSpy).toHaveBeenCalledWith('Message: Loop failed: budget_turns_exceeded');
+        consoleSpy.mockRestore();
     });
 
     it('persists task.failed when async start scheduling fails before a turn runs', async () => {

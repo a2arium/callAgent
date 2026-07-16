@@ -84,10 +84,6 @@ export class StreamTransport {
             if (token) console.log(`Token: ${token}`);
             console.log(`Session: (see earlier log: Starting TaskEngine.startTask { taskId: ... })`);
         } else if (isFinal) {
-            const reason = (status as any)?.metadata?.reason;
-            if (status.state === 'failed' && reason === 'budget_turns_exceeded') {
-                return;
-            }
             console.log(`Status: ${status.state} (FINAL)`);
             if (status.state === 'completed') {
                 console.log('Loop outcome: kind: complete');
@@ -178,9 +174,6 @@ export class StreamTransport {
 
     private logMessage(status: TaskStatus): void {
         if (!status.message?.parts?.length) return;
-
-        const reason = (status as any)?.metadata?.reason;
-        if (status.state === 'failed' && reason === 'budget_turns_exceeded') return;
 
         const textParts = this.extractTextParts(status);
         if (textParts.length > 0) {

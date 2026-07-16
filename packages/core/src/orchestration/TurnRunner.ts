@@ -495,7 +495,20 @@ export class TurnRunner {
                     /* noop */
                 }
             } else if (outcome.kind === 'fail') {
-                taskResult.status = { state: 'failed', timestamp: new Date().toISOString() };
+                const failureReason = outcome.reason ?? outcome.error ?? 'failed';
+                taskResult.status = {
+                    ...taskResult.status,
+                    state: 'failed',
+                    timestamp: taskResult.status?.timestamp ?? new Date().toISOString(),
+                    message: taskResult.status?.message ?? {
+                        role: 'agent',
+                        parts: [{ type: 'text', text: `Loop failed: ${String(failureReason)}` }],
+                    },
+                    metadata: {
+                        ...(taskResult.status?.metadata ?? {}),
+                        reason: taskResult.status?.metadata?.reason ?? failureReason,
+                    },
+                };
             }
 
             return taskResult;

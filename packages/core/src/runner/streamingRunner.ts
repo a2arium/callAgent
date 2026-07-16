@@ -578,7 +578,7 @@ export async function runAgentWithStreaming(
 
                 const sessionStore = new WorkingMemorySessionStore();
                 await sessionStore.connect();
-                const engine = new TaskEngine({ sessionStore });
+                const engine = new TaskEngine({ sessionStore, eventBus: runnerEventBus });
                 try { EngineLocator.setEngine(engine as any); } catch { }
                 const entity: TaskEntity = { id: taskCtx.task.id, input };
                 runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
@@ -588,11 +588,16 @@ export async function runAgentWithStreaming(
                 }
                 const returnedTask = await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
                 if (returnedTask && returnedTask.status?.state === 'failed') {
-                    // ✅ BUG FIX: Explicitly throw to ensure CLI process exits with non-zero code on unhandled runLoop errors
+                    // Preserve the authoritative terminal status before exiting non-zero.
+                    // The scenario/file consumer must not have to infer task failure from process exit.
+                    transport.handleStatus(returnedTask.status, true);
                     const failMsg = returnedTask.status.metadata?.reason ||
                         (returnedTask.status.message?.parts?.find(p => p.type === 'text') as any)?.text ||
                         'Task execution failed';
-                    throw new AgentError(failMsg, agentName, { taskId: taskCtx.task.id });
+                    throw new AgentError(failMsg, agentName, {
+                        taskId: taskCtx.task.id,
+                        terminalStatusPreserved: true,
+                    });
                 }
                 // Wait for any background tool executions or nonblocking conversation wakeups to complete.
                 // CLI runs must not validate/exit while the active task graph still has background turns in flight.
@@ -650,13 +655,17 @@ export async function runAgentWithStreaming(
                     taskId: taskCtx.task.id
                 });
 
-                try {
-                    if (taskCtx.fail) {
-                        await taskCtx.fail(new Error('Unhandled exception during task execution'));
-                    } else {
-                        taskCtx.complete(100, 'failed_unhandled');
-                    }
-                } catch { /* ignore double failure */ }
+                const terminalStatusPreserved =
+                    error instanceof AgentError && error.details?.terminalStatusPreserved === true;
+                if (!terminalStatusPreserved) {
+                    try {
+                        if (taskCtx.fail) {
+                            await taskCtx.fail(new Error('Unhandled exception during task execution'));
+                        } else {
+                            taskCtx.complete(100, 'failed_unhandled');
+                        }
+                    } catch { /* ignore double failure */ }
+                }
 
                 if (error instanceof InvariantError || error instanceof ModuleExecutionError) {
                     throw error;
