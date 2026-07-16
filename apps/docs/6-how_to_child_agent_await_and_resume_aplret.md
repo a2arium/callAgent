@@ -243,12 +243,22 @@ When `sendTaskToAgent(..., { awaitCompletion: false, timeout })` sets a positive
 - `payload.error` is `{ code: 'CHILD_TIMEOUT', message, timeoutMs }`
 - completion and expiry race atomically; only one terminal observation resumes the parent
 - a result arriving after expiry is retained as `task.child_late_completion` diagnostics and never resumes the parent again
+- timeout detaches the child branch from parent-result delivery. Any nested async tool tokens are terminalized as `detached`; their late results produce diagnostics but no child or parent wake
+- in-process auto-executed tools receive a best-effort abort request when their owner branch detaches. Providers that cannot honor cancellation may continue physically, but their promises no longer block terminal runner drain
 - the pending-child removal, terminal tombstone, and inbox observation commit in one snapshot update; a concurrent parent save reloads and merges that terminal state instead of resurrecting the child
 - after a crash between snapshot commit and wake publication, SQL-backed runtimes recover the terminal observation from the parent snapshot and republish the same deterministic wake
 - Perception normalizes and Learning writes a failure fact
 
 `CHILD_WAKE_TIMEOUT` is different: it is the Hatchet operational watchdog for a missing
 wake after child execution, not the configured per-call lifecycle deadline.
+
+### Terminal runner drain ownership
+
+Background drain waits only for operations that can still affect the active task graph.
+Once a completed, failed, canceled, or timed-out owner revokes delivery, its nested tool
+operations are retained as detached diagnostics and cannot replace the task's terminal
+result. Unowned legacy work and genuine non-terminal background operations remain strict
+drain blockers.
 
 ## Common bugs and how to spot them with TurnTrace
 

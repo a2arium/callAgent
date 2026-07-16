@@ -52,7 +52,7 @@ import { logger } from '@a2arium/callagent-utils';
 import { normalizeObservationInbox, type EnvironmentState, type ObservationInbox, type Snapshot } from '../loop/types.js';
 import { writeControlVar } from '../loop/controlVarAccessors.js';
 import type { Observation } from '../loop/oneTurn.js';
-import { getPendingTools, setPendingTools } from './ToolsRegistry.js';
+import { getPendingTools, setPendingTools, type PendingToolTerminal } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import type { AgentPlugin } from '../plugin/types.js';
@@ -115,6 +115,9 @@ import {
 } from './childResultPersistence.js';
 import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
 import { coordinateChildTerminal } from './ChildTerminalCoordinator.js';
+import { coordinateToolTerminal } from './ToolTerminalCoordinator.js';
+import { detachPendingToolsInSnapshot } from './ToolTerminalCoordinator.js';
+import { isTaskLifecycleTerminal, markTaskLifecycle, readTaskLifecycle } from './TaskLifecycle.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { isWorkingMemoryVersionConflict } from '@a2arium/callagent-types/working-memory-version-conflict';
 import {
@@ -168,6 +171,13 @@ type BackgroundTaskMetadata = {
     childAgent?: string;
     childTaskId?: string;
     source?: string;
+    rootTaskId?: string;
+    ancestorTaskIds?: string[];
+    abort?: () => void | Promise<void>;
+    state: 'active' | 'detached';
+    detachedAt?: number;
+    detachReason?: string;
+    abortStatus?: 'requested' | 'completed' | 'failed' | 'unsupported';
     startedAt: number;
 };
 
@@ -184,6 +194,11 @@ type BackgroundTaskSummary = {
     childAgent?: string;
     childTaskId?: string;
     source?: string;
+    rootTaskId?: string;
+    ancestorTaskIds?: string[];
+    state?: 'active' | 'detached';
+    detachReason?: string;
+    abortStatus?: 'requested' | 'completed' | 'failed' | 'unsupported';
 };
 
 type A2AChildContext = TaskContext & {
@@ -679,6 +694,14 @@ type PendingConversationActivation = {
 
 type WaitForBackgroundTasksOptions = {
     throwOnTimeout?: boolean;
+    rootTaskId?: string;
+};
+
+export type BackgroundTaskDrainReport = {
+    elapsedMs: number;
+    activeCount: number;
+    detachedCount: number;
+    remainingTasks: BackgroundTaskSummary[];
 };
 
 export type AgentRunListItem = {
@@ -1034,6 +1057,7 @@ export class TaskEngine {
             eventBus: this.eventBus,
             enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),
             scheduleChildTimeout: (p) => this.runtimeDriver.scheduleTimer(p),
+            detachTaskBranch: (p) => this.detachTaskBranch(p),
         });
 
         this.turnRunner = new TurnRunner(
@@ -1048,6 +1072,20 @@ export class TaskEngine {
             sessionManager: this.sessionManager!,
             createContext: (task) =>
                 this.createContext({ id: task.id, input: task.input as TaskInput }),
+            onChildTimeout: async (params) => {
+                await this.detachTaskBranch({
+                    tenantId: params.tenantId,
+                    taskId: params.childTaskId,
+                    reason: 'child_timeout',
+                });
+            },
+            onTaskTerminal: async (params) => {
+                await this.detachTaskBranch({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    reason: `task_${params.state}`,
+                });
+            },
         });
         this.compositionTurnExecutor = inProcessStack.turnExecutor;
         this.runtimeDriver =
@@ -1236,10 +1274,18 @@ export class TaskEngine {
             } as TaskEntity;
         }
 
-        return this.turnRunner.runTurn(params.ctx, params.turnParams, {
+        const task = await this.turnRunner.runTurn(params.ctx, params.turnParams, {
             initialM: params.initialM,
             snapshot: params.snapshot,
         });
+        if (isA2ATerminalTaskState(task.status?.state)) {
+            await this.detachTaskBranch({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                reason: `task_${task.status!.state}`,
+            });
+        }
+        return task;
     }
 
     private shouldScheduleAsyncThroughRuntimeDriver(operation: 'start' | 'resume'): boolean {
@@ -1349,7 +1395,7 @@ export class TaskEngine {
 
     private trackBackgroundTask<T>(
         promise: Promise<T>,
-        metadata: Omit<BackgroundTaskMetadata, 'startedAt'> = {
+        metadata: Omit<BackgroundTaskMetadata, 'startedAt' | 'state'> = {
             kind: 'unknown',
             label: 'background task',
         }
@@ -1365,13 +1411,25 @@ export class TaskEngine {
         this.backgroundTaskMetadata.set(tracked, {
             ...metadata,
             label: metadata.label ?? metadata.kind,
+            state: 'active',
             startedAt: Date.now(),
         });
         return promise;
     }
 
-    private describeBackgroundTasks(now = Date.now()): BackgroundTaskSummary[] {
-        return Array.from(this.backgroundTaskPromises).map((promise, index) => {
+    private backgroundTasksInScope(rootTaskId?: string, includeDetached = false): Promise<void>[] {
+        return Array.from(this.backgroundTaskPromises).filter((promise) => {
+            const metadata = this.backgroundTaskMetadata.get(promise);
+            if (!includeDetached && metadata?.state === 'detached') return false;
+            if (rootTaskId === undefined) return true;
+            // Missing ownership is intentionally conservative for legacy callers.
+            if (metadata?.rootTaskId === undefined) return true;
+            return metadata.rootTaskId === rootTaskId;
+        });
+    }
+
+    private describeBackgroundTasks(now = Date.now(), promises?: Promise<void>[]): BackgroundTaskSummary[] {
+        return (promises ?? Array.from(this.backgroundTaskPromises)).map((promise, index) => {
             const metadata = this.backgroundTaskMetadata.get(promise);
             return {
                 index,
@@ -1386,8 +1444,139 @@ export class TaskEngine {
                 childAgent: metadata?.childAgent,
                 childTaskId: metadata?.childTaskId,
                 source: metadata?.source,
+                rootTaskId: metadata?.rootTaskId,
+                ancestorTaskIds: metadata?.ancestorTaskIds,
+                state: metadata?.state,
+                detachReason: metadata?.detachReason,
+                abortStatus: metadata?.abortStatus,
             };
         });
+    }
+
+    private detachBackgroundTasks(params: { taskId: string; reason: string }): number {
+        let detached = 0;
+        for (const promise of this.backgroundTaskPromises) {
+            const metadata = this.backgroundTaskMetadata.get(promise);
+            if (metadata === undefined || metadata.state === 'detached') continue;
+            const ownedByBranch = metadata.taskId === params.taskId ||
+                metadata.rootTaskId === params.taskId ||
+                metadata.ancestorTaskIds?.includes(params.taskId) === true;
+            if (!ownedByBranch) continue;
+            metadata.state = 'detached';
+            metadata.detachedAt = Date.now();
+            metadata.detachReason = params.reason;
+            detached += 1;
+            defaultMetricsRegistry.increment('background_task_detached_total', {
+                kind: metadata.kind,
+                reason: params.reason,
+            });
+            if (metadata.abort === undefined) {
+                metadata.abortStatus = 'unsupported';
+                defaultMetricsRegistry.increment('background_task_abort_total', { status: 'unsupported' });
+                continue;
+            }
+            metadata.abortStatus = 'requested';
+            void Promise.resolve()
+                .then(() => metadata.abort?.())
+                .then(() => {
+                    metadata.abortStatus = 'completed';
+                    defaultMetricsRegistry.increment('background_task_abort_total', { status: 'completed' });
+                })
+                .catch((error) => {
+                    metadata.abortStatus = 'failed';
+                    defaultMetricsRegistry.increment('background_task_abort_total', { status: 'failed' });
+                    log.warn('Background task abort failed after durable detachment', {
+                        taskId: metadata.taskId,
+                        token: metadata.token,
+                        kind: metadata.kind,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                });
+        }
+        return detached;
+    }
+
+    async detachTaskBranch(params: {
+        tenantId: string;
+        taskId: string;
+        reason: string;
+        detachedAt?: string;
+    }): Promise<{ detachedTools: number; detachedTasks: number }> {
+        const detachedAt = params.detachedAt ?? new Date().toISOString();
+        const visited = new Set<string>();
+        let detachedTools = 0;
+        let detachedTasks = 0;
+
+        const detach = async (taskId: string): Promise<void> => {
+            if (visited.has(taskId)) return;
+            visited.add(taskId);
+            this.detachBackgroundTasks({ taskId, reason: params.reason });
+            const reconciled = await reconcileSnapshotMutation({
+                session: this.sessionManager!,
+                tenantId: params.tenantId,
+                sessionId: taskId,
+                operation: 'task.branch.detach',
+                mutate: ({ snapshot, wmVersion }) => {
+                    if (wmVersion === BigInt(0) && Object.keys(snapshot).length === 0) {
+                        return {
+                            kind: 'noop',
+                            value: {
+                                childTaskIds: [] as string[],
+                                toolTerminals: [] as Array<PendingToolTerminal & { token: string }>,
+                            },
+                        };
+                    }
+                    const lifecycle = readTaskLifecycle(snapshot, taskId);
+                    const lifecycleSnapshot = markTaskLifecycle(snapshot, {
+                        taskId,
+                        state: 'detached',
+                        changedAt: detachedAt,
+                        reason: params.reason,
+                        rootTaskId: lifecycle?.rootTaskId,
+                        parentTaskId: lifecycle?.parentTaskId,
+                        ancestorTaskIds: lifecycle?.ancestorTaskIds,
+                    });
+                    const tools = detachPendingToolsInSnapshot(lifecycleSnapshot, {
+                        taskId,
+                        reason: params.reason,
+                        detachedAt,
+                    });
+                    const pending = (tools.snapshot as any).pending ?? {};
+                    const childEntries = [
+                        ...Object.values((pending.tasks ?? {}) as Record<string, any>),
+                        ...Object.values((pending.childTerminals ?? {}) as Record<string, any>),
+                    ];
+                    const childTaskIds = [...new Set(childEntries
+                        .map((entry) => entry?.childTaskId)
+                        .filter((value): value is string => typeof value === 'string' && value.length > 0))];
+                    const changed = tools.detached.length > 0 || lifecycle?.state === 'active' || lifecycle === undefined;
+                    return changed
+                        ? {
+                              kind: 'write',
+                              snapshot: tools.snapshot,
+                              value: { childTaskIds, toolTerminals: tools.detached },
+                          }
+                        : { kind: 'noop', value: { childTaskIds, toolTerminals: tools.detached } };
+                },
+            });
+            if (reconciled.status === 'committed') detachedTasks += 1;
+            detachedTools += reconciled.value.toolTerminals.length;
+            for (const terminal of reconciled.value.toolTerminals) {
+                defaultMetricsRegistry.increment('tool.terminal_winner_total', { kind: 'detached' });
+                try {
+                    await this.sessionManager?.appendEvent(params.tenantId, taskId, 'task.tool_detached', {
+                        token: terminal.token,
+                        toolName: terminal.toolName,
+                        reason: params.reason,
+                        detachedAt,
+                    });
+                } catch { /* diagnostic only */ }
+            }
+            await Promise.all(reconciled.value.childTaskIds.map((childTaskId) => detach(childTaskId)));
+        };
+
+        await detach(params.taskId);
+        return { detachedTools, detachedTasks };
     }
 
     private rememberConversationActivationTarget(params: ConversationActivateParams): void {
@@ -2216,6 +2405,7 @@ export class TaskEngine {
             const snapshot = (loaded.snapshot as Record<string, unknown> | undefined) ?? {};
             if (
                 readSegmentCancellation(snapshot) !== undefined ||
+                isTaskLifecycleTerminal(readTaskLifecycle(snapshot, params.taskId)) ||
                 await this.hasTerminalTaskEvent(params.tenantId, params.taskId)
             ) {
                 return { acknowledged: true };
@@ -2228,13 +2418,57 @@ export class TaskEngine {
                     manifestConsents[token] = { ...receipt, status: 'cancelled', decidedAt: cancelledAt };
                 }
             }
-            const cancelledSnapshot = { ...snapshot, pending: { ...pending, manifestConsents } };
-            await this.sessionManager!.saveSnapshot({
+            const cancellationClaim = await reconcileSnapshotMutation({
+                session: this.sessionManager!,
                 tenantId: params.tenantId,
                 sessionId: params.taskId,
                 agentId: params.agentId ?? loaded.agentId,
-                expectedWmVersion: loaded.wmVersion ?? BigInt(0),
-                snapshot: markSegmentCancellationRequested(cancelledSnapshot, reason),
+                operation: 'task.cancel.claim',
+                mutate: ({ snapshot: current }) => {
+                    const currentPending = { ...((current as any).pending ?? {}) };
+                    const currentConsents = { ...(currentPending.manifestConsents ?? {}), ...manifestConsents };
+                    const canceled = markSegmentCancellationRequested({
+                        ...current,
+                        pending: { ...currentPending, manifestConsents: currentConsents },
+                    }, reason);
+                    const lifecycle = readTaskLifecycle(canceled, params.taskId);
+                    const marked = markTaskLifecycle(canceled, {
+                        taskId: params.taskId,
+                        state: 'canceled',
+                        changedAt: cancelledAt,
+                        reason,
+                        rootTaskId: lifecycle?.rootTaskId,
+                        parentTaskId: lifecycle?.parentTaskId,
+                        ancestorTaskIds: lifecycle?.ancestorTaskIds,
+                    });
+                    const tools = detachPendingToolsInSnapshot(marked, {
+                        taskId: params.taskId,
+                        reason: 'task_canceled',
+                        detachedAt: cancelledAt,
+                    });
+                    return {
+                        kind: 'write',
+                        snapshot: tools.snapshot,
+                        value: tools.detached,
+                    };
+                },
+            });
+            this.detachBackgroundTasks({ taskId: params.taskId, reason: 'task_canceled' });
+            for (const terminal of cancellationClaim.value) {
+                try {
+                    await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.tool_detached', {
+                        token: terminal.token,
+                        toolName: terminal.toolName,
+                        reason: 'task_canceled',
+                        detachedAt: cancelledAt,
+                    });
+                } catch { /* diagnostic only */ }
+            }
+            await this.detachTaskBranch({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                reason: 'task_canceled',
+                detachedAt: cancelledAt,
             });
             await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.canceled', {
                 taskId: params.taskId,
@@ -3219,45 +3453,45 @@ export class TaskEngine {
     async handleToolCompleted(params: { tenantId: string; taskId: string; token: string; result: unknown }): Promise<void> {
         const { tenantId, taskId, token, result } = params;
         await this.runTaskSessionExclusive(tenantId, taskId, async () => {
-        const observedAt = Date.now();
-        const wakeMutation = await reconcileSnapshotMutation({
-            session: this.sessionManager!,
-            tenantId,
-            sessionId: taskId,
-            operation: 'tool.wake.apply',
-            mutate: ({ snapshot, agentId: snapshotAgentId }) => {
-                const tools = getPendingTools(snapshot) as any;
-                const entry = tools[token];
-                if (!entry) return { kind: 'noop', value: undefined };
-                delete tools[token];
-                const next = setPendingTools(snapshot, tools) as Record<string, unknown>;
-                const toolObservation: EngineObservation = {
-                    source: 'tool',
-                    kind: 'tool.completed',
-                    payload: { token, result, tool: entry?.name },
-                    provenance: {
-                        ts: observedAt,
-                        turn: Number((snapshot as any)?.meta?.turn ?? 0) + 1,
-                        id: token,
-                        toolId: entry?.name,
-                        correlationId: token
-                    }
-                };
-                (next as any).inbox = InboxManager.addObservationToInbox((next as any).inbox, toolObservation);
-                return {
-                    kind: 'write',
-                    snapshot: next,
-                    value: {
-                        entry,
-                        agentId: snapshotAgentId ?? (snapshot as any)?.meta?.agentId,
-                    },
-                };
+        const completedAt = new Date().toISOString();
+        const terminalClaim = await coordinateToolTerminal({
+            session: {
+                load: (loadTenantId, sessionId) => this.sessionManager!.load(loadTenantId, sessionId),
+                saveSnapshot: (saveParams) => this.sessionManager!.saveSnapshot(saveParams),
             },
+            tenantId,
+            taskId,
+            token,
+            result,
+            completedAt,
         });
-        if (wakeMutation.status === 'noop' || wakeMutation.value === undefined) return;
-        const entry = (wakeMutation.value as any).entry;
-        const next = wakeMutation.snapshot;
-        const agentName = (wakeMutation.value as any).agentId;
+        if (terminalClaim.resumeEligible !== true || terminalClaim.observation === undefined) {
+            if (terminalClaim.disposition === 'committed_detached') {
+                try {
+                    await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_detached', {
+                        token,
+                        toolName: terminalClaim.entry?.name ?? terminalClaim.terminal?.toolName,
+                        reason: terminalClaim.terminal?.reason,
+                        detachedAt: terminalClaim.terminal?.claimedAt,
+                    });
+                } catch { /* diagnostic only */ }
+            }
+            if (terminalClaim.lateCompletion) {
+                try {
+                    await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_late_completion', {
+                        token,
+                        toolName: terminalClaim.entry?.name ?? terminalClaim.terminal?.toolName,
+                        completedAt,
+                        resultPreview: makeSafeEventPreview(result),
+                    });
+                } catch { /* diagnostic only */ }
+            }
+            return;
+        }
+        const entry = terminalClaim.entry;
+        const next = terminalClaim.snapshot;
+        const terminalSnapshot = await this.sessionManager?.load(tenantId, taskId);
+        const agentName = terminalSnapshot?.agentId ?? (next as any)?.meta?.agentId;
         const toolCompletedPayload = { token, toolName: entry?.name, resultPreview: makeSafeEventPreview(result) };
         const toolCompletedEvent = await this.sessionManager?.appendEvent(tenantId, taskId, 'task.tool_completed', toolCompletedPayload);
         if (toolCompletedEvent) {
@@ -4340,6 +4574,16 @@ export class TaskEngine {
         });
         if (terminalClaim.resumeEligible !== true) return;
         const terminalError = terminalClaim.terminal?.error ?? rawError;
+        if (terminalError.code === 'CHILD_TIMEOUT') {
+            const timedOutChildTaskId = terminalClaim.terminal?.childTaskId ?? childTaskId ?? entry?.childTaskId;
+            if (timedOutChildTaskId !== undefined) {
+                await this.detachTaskBranch({
+                    tenantId,
+                    taskId: timedOutChildTaskId,
+                    reason: 'child_timeout',
+                });
+            }
+        }
         const resume = {
             tenantId,
             taskId: parentTaskId,
@@ -4620,7 +4864,14 @@ export class TaskEngine {
         };
 
         // Attach auto-executor for requestTool({ awaitCompletion: false })
-        (ctx as any).__autoExecuteTool = async (tId: string, sId: string, token: string, toolName: string, args: unknown) => {
+        (ctx as any).__autoExecuteTool = async (
+            tId: string,
+            sId: string,
+            token: string,
+            toolName: string,
+            args: unknown,
+            control?: { signal?: AbortSignal }
+        ) => {
             try {
                 let result: unknown;
                 // Check if it's an MCP tool call (format: mcp:serverName.toolName)
@@ -4630,7 +4881,12 @@ export class TaskEngine {
                         const serverName = parts[0];
                         const mcpToolName = parts.slice(1).join('.');
                         if (typeof (ctx as any).llm?.callMcpTool === 'function') {
-                            result = await (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any);
+                            result = await (ctx as any).llm.callMcpTool(
+                                serverName,
+                                mcpToolName,
+                                args as any,
+                                { signal: control?.signal }
+                            );
                         } else {
                             throw new Error(`MCP execution not supported by current LLM adapter for tool: ${toolName}`);
                         }
@@ -4639,7 +4895,7 @@ export class TaskEngine {
                     }
                 } else {
                     // Regular tool execution
-                    result = await ctx.tools.invoke(toolName, args);
+                    result = await ctx.tools.invoke(toolName, args, { signal: control?.signal } as any);
                 }
 
                 // Feed result back into the engine using handleToolCompleted
@@ -4861,7 +5117,7 @@ export class TaskEngine {
         timeoutMs: number = 5000,
         options: WaitForBackgroundTasksOptions = {}
     ): Promise<void> {
-        const initialCount = this.backgroundTaskPromises.size;
+        const initialCount = this.backgroundTasksInScope(options.rootTaskId).length;
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             if (initialCount === 0) {
                 console.log('[TaskEngine] No background tasks to wait for');
@@ -4879,7 +5135,7 @@ export class TaskEngine {
             if (remainingMs <= 0) {
                 break;
             }
-            if (this.backgroundTaskPromises.size === 0) {
+            if (this.backgroundTasksInScope(options.rootTaskId).length === 0) {
                 const reconciled = await this.reconcileCurrentConversationDeliveries();
                 if (reconciled > 0) {
                     continue;
@@ -4889,12 +5145,12 @@ export class TaskEngine {
                 if (reconciledAfterGrace > 0) {
                     continue;
                 }
-                if (this.backgroundTaskPromises.size === 0) {
+                if (this.backgroundTasksInScope(options.rootTaskId).length === 0) {
                     break;
                 }
                 continue;
             }
-            const promises = Array.from(this.backgroundTaskPromises);
+            const promises = this.backgroundTasksInScope(options.rootTaskId);
             let timeout: ReturnType<typeof setTimeout> | undefined;
             try {
                 await Promise.race([
@@ -4921,10 +5177,11 @@ export class TaskEngine {
         }
         const elapsed = Date.now() - startTime;
 
-        const remainingCount = this.backgroundTaskPromises.size;
+        const remainingPromises = this.backgroundTasksInScope(options.rootTaskId);
+        const remainingCount = remainingPromises.length;
         const activeConversationActivations = Array.from(this.activeConversationActivations);
         const pendingConversationActivations = Array.from(this.pendingConversationActivations.keys());
-        const remainingTasks = this.describeBackgroundTasks();
+        const remainingTasks = this.describeBackgroundTasks(Date.now(), remainingPromises);
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Wait completed after ${elapsed}ms, remaining promises=${remainingCount}`);
             if (remainingTasks.length > 0) {
@@ -4961,6 +5218,30 @@ export class TaskEngine {
                 `remainingTasks=${JSON.stringify(remainingTasks)}`
             );
         }
+        defaultMetricsRegistry.increment('background_drain_total', {
+            status: remainingCount > 0 ? 'incomplete' : 'drained',
+        });
+    }
+
+    async drainBackgroundTasks(params: {
+        rootTaskId: string;
+        timeoutMs?: number;
+        throwOnTimeout?: boolean;
+    }): Promise<BackgroundTaskDrainReport> {
+        const startedAt = Date.now();
+        await this.waitForBackgroundTasks(params.timeoutMs ?? 5000, {
+            rootTaskId: params.rootTaskId,
+            throwOnTimeout: params.throwOnTimeout,
+        });
+        const active = this.backgroundTasksInScope(params.rootTaskId);
+        const detached = this.backgroundTasksInScope(params.rootTaskId, true)
+            .filter((promise) => this.backgroundTaskMetadata.get(promise)?.state === 'detached');
+        return {
+            elapsedMs: Date.now() - startedAt,
+            activeCount: active.length,
+            detachedCount: detached.length,
+            remainingTasks: this.describeBackgroundTasks(Date.now(), active),
+        };
     }
 
     async triggerExpiredInviteSweep(params: {
@@ -4984,11 +5265,13 @@ export class TaskEngine {
                 getSessionStorePrisma: () => this.getSessionStorePrisma(),
                 taskCreationMutex: this.taskCreationMutex,
                 backgroundTaskPromises: this.backgroundTaskPromises,
+                trackBackgroundTask: (promise, metadata) => this.trackBackgroundTask(promise, metadata),
                 handleChildCompleted: (p) => this.handleChildCompleted(p),
                 handleToolCompleted: (p) => this.handleToolCompleted(p),
                 conversationService: this.conversationService,
                 enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),
                 scheduleChildTimeout: (p) => this.runtimeDriver.scheduleTimer(p),
+                detachTaskBranch: (p) => this.detachTaskBranch(p),
             },
             ctx,
             {

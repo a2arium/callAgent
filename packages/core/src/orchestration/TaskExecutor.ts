@@ -24,6 +24,12 @@ import {
     isSnapshotReconciliationError,
     reconcileSnapshotMutation,
 } from './persistence/SnapshotRepository.js';
+import {
+    ensureTaskLifecycle,
+    markTaskLifecycle,
+    readTaskLifecycle,
+} from './TaskLifecycle.js';
+import { boundPendingToolTerminals, type PendingToolTerminals } from './ToolsRegistry.js';
 
 import type {
     EnvironmentState,
@@ -440,10 +446,24 @@ export class TaskExecutor {
                     ...consumedKeysFromSnapshot,
                     ...consumedKeysFromRun,
                 ]);
+                const lifecycleBase = ensureTaskLifecycle(baseNow, {
+                    taskId: sessionId,
+                    ...(a2aParent?.parentTaskId ? { parentTaskId: a2aParent.parentTaskId } : {}),
+                });
+                const lifecycleSnapshot = outcome.kind === 'complete' || outcome.kind === 'fail'
+                    ? markTaskLifecycle(lifecycleBase, {
+                          taskId: sessionId,
+                          state: outcome.kind === 'complete' ? 'completed' : 'failed',
+                          changedAt: new Date().toISOString(),
+                          ...(outcome.kind === 'fail' ? { reason: outcome.reason } : {}),
+                      })
+                    : lifecycleBase;
+                const taskLifecycle = readTaskLifecycle(lifecycleSnapshot, sessionId);
                 const nextMeta = {
                     ...prevMeta,
                     turn: env.turn,
                     budgets: loopOpts,
+                    ...(taskLifecycle !== undefined ? { taskLifecycle } : {}),
                     ...(a2aParent ? { a2aParent } : {}),
                     ...(ctx.telemetry ? { telemetry: ctx.telemetry } : {})
                 };
@@ -466,6 +486,10 @@ export class TaskExecutor {
                     ...(localPending.childTerminals ?? {}),
                     ...(remotePending.childTerminals ?? {}),
                 } as Record<string, unknown>;
+                const toolTerminals = boundPendingToolTerminals({
+                    ...(localPending.toolTerminals ?? {}),
+                    ...(remotePending.toolTerminals ?? {}),
+                } as PendingToolTerminals);
                 const children = {
                     ...(remotePending.children ?? {}),
                     ...(localPending.children ?? {}),
@@ -479,6 +503,13 @@ export class TaskExecutor {
                     if (remotePending.tasks?.[token]?.terminal === undefined) {
                         delete tasks[token];
                     }
+                }
+                const tools = {
+                    ...(remotePending.tools ?? {}),
+                    ...(localPending.tools ?? {}),
+                } as Record<string, unknown>;
+                for (const token of Object.keys(toolTerminals)) {
+                    delete tools[token];
                 }
 
                 const remoteInbox = filterInboxCurrentByConversationDeliveryKeys(
@@ -511,7 +542,8 @@ export class TaskExecutor {
                     children,
                     tasks,
                     childTerminals,
-                    tools: { ...(remotePending.tools ?? {}), ...(localPending.tools ?? {}) },
+                    tools,
+                    toolTerminals,
                     events: { ...(remotePending.events ?? {}), ...(localPending.events ?? {}) },
                     groups: { ...(remotePending.groups ?? {}), ...(localPending.groups ?? {}) },
                     controlVars: { ...(remotePending.controlVars ?? {}), ...(localPending.controlVars ?? {}) },

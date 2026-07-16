@@ -36,7 +36,9 @@ cancel(taskId, reason):
   3. queued/not-yet-started Hatchet runs for the task are cancelled where
      possible (best-effort).
   4. a currently-running segment is allowed to finish its current effect
-     boundary; it is not force-killed.
+     boundary. Auto-executed tools are detached from result delivery immediately
+     and receive a cooperative abort signal where the provider supports one; this
+     is best-effort and is not treated as guaranteed hard preemption.
   5. at the next boundary/wake, the durable loop observes cancellation intent and
      stops instead of scheduling the next segment; the task ends 'canceled'.
 ```
@@ -48,6 +50,8 @@ cancel(taskId, reason):
 | cancellation intent (source of truth) | callAgent snapshot |
 | ignoring pending-token wakes after cancel | callAgent (dedupe/guard) |
 | cancelling queued Hatchet runs | `HatchetRuntimeDriver` (best-effort) |
+| detaching nested tool-result delivery | callAgent snapshot + tool tombstone |
+| requesting physical tool abort | in-process execution adapter (best-effort) |
 | stopping the durable loop at next boundary | durable task, reading the result |
 | terminal `canceled` status + stream event | callAgent (canonical contract) |
 
@@ -68,11 +72,12 @@ no-op. The cancel itself carries `idempotencyKey = taskId:cancel`.
 
 ## Consequences
 
-- No need to make the APLRET loop, LLM calls, or tools cancellation-aware in v1.
+- No requirement that every LLM or tool provider implement cancellation in v1;
+  durable result-delivery detachment is the correctness boundary.
 - Cancellation latency is bounded by the current segment's remaining effect
   boundary, which is acceptable for v1 (documented, not interactive-real-time).
-- Mid-segment hard preemption (abort an in-flight LLM/tool) is explicitly a
-  **future** option, requiring cooperative cancellation in the loop/tools.
+- Guaranteed mid-segment hard preemption remains a **future** option. Current
+  AbortSignal propagation is cooperative and may be ignored by a provider.
 
 ## Open Validation
 

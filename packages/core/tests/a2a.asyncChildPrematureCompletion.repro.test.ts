@@ -86,6 +86,7 @@ type SendTaskDispatch = {
 type SnapshotWithPending = Record<string, unknown> & {
     pending?: {
         tools?: Record<string, unknown>;
+        toolTerminals?: Record<string, { kind?: string }>;
     };
 };
 
@@ -173,7 +174,11 @@ const createParentSnapshot = (agentId: string): Record<string, unknown> => ({
 const createSuspendingChildPlugin = (
     name: string,
     tenantId: string,
-    dispatchDelayMs: number = 0
+    dispatchDelayMs: number = 0,
+    options: {
+        autoExecute?: 'disabled' | 'pending';
+        onAbort?: () => void;
+    } = {}
 ): AgentPlugin => ({
     resolved: createResolved(name),
     tenantId,
@@ -228,10 +233,30 @@ const createSuspendingChildPlugin = (
                     await new Promise((resolve) => setTimeout(resolve, dispatchDelayMs));
                 }
 
-                // Keep this repro focused on the first child segment: the child should
-                // suspend on await_tool, not complete via a background tool resume.
                 const toolCtx = ctx as TaskContext & { __autoExecuteTool?: unknown };
-                toolCtx.__autoExecuteTool = undefined;
+                if (options.autoExecute === 'pending') {
+                    toolCtx.__autoExecuteTool = (
+                        _tenantId: string,
+                        _taskId: string,
+                        _token: string,
+                        _toolName: string,
+                        _args: unknown,
+                        control?: { signal?: AbortSignal }
+                    ) => new Promise<void>((_resolve, reject) => {
+                        const abort = () => {
+                            options.onAbort?.();
+                            const error = new Error('tool aborted');
+                            error.name = 'AbortError';
+                            reject(error);
+                        };
+                        if (control?.signal?.aborted) abort();
+                        else control?.signal?.addEventListener('abort', abort, { once: true });
+                    });
+                } else {
+                    // Most tests drive the completion explicitly so they can assert
+                    // the durable boundary before and after delivery.
+                    toolCtx.__autoExecuteTool = undefined;
+                }
                 const handle = await ctx.requestTool?.('slow-tool', { q: 1 }, { awaitCompletion: false });
                 if (!isToolHandle(handle)) {
                     throw new Error('Expected requestTool to return a tool token');
@@ -529,8 +554,13 @@ describe('A2A async child lifecycle', () => {
         const childTaskId = dispatch.handle?.id;
         if (typeof childTaskId !== 'string') throw new Error('Expected child task id');
         const childSnap = await engineAccess.sessionManager.load(tenantId, childTaskId);
-        const [toolToken] = Object.keys((childSnap?.snapshot as SnapshotWithPending)?.pending?.tools ?? {});
+        const childPending = (childSnap?.snapshot as SnapshotWithPending)?.pending;
+        const [toolToken] = [
+            ...Object.keys(childPending?.tools ?? {}),
+            ...Object.keys(childPending?.toolTerminals ?? {}),
+        ];
         if (!toolToken) throw new Error('Expected child tool token');
+        expect(childPending?.toolTerminals?.[toolToken]).toMatchObject({ kind: 'detached' });
         await engine.handleToolCompleted({
             tenantId,
             taskId: childTaskId,
@@ -622,7 +652,11 @@ describe('A2A async child lifecycle', () => {
         const parentTaskId = `parent-timeout-resume-task-${Date.now()}`;
         const engine = new TaskEngine({});
         EngineLocator.setEngine(engine);
-        PluginManager.registerAgent(createSuspendingChildPlugin(childAgentId, tenantId));
+        let abortCount = 0;
+        PluginManager.registerAgent(createSuspendingChildPlugin(childAgentId, tenantId, 0, {
+            autoExecute: 'pending',
+            onAbort: () => { abortCount += 1; },
+        }));
         PluginManager.registerAgent(createAwaitingParentPlugin(parentAgentId, childAgentId, tenantId, 50));
 
         const engineAccess = engine as unknown as EngineAccess;
@@ -649,8 +683,9 @@ describe('A2A async child lifecycle', () => {
             if (terminalTurn) break;
             await new Promise((resolve) => setTimeout(resolve, 20));
         }
-        await engine.waitForBackgroundTasks(2_000);
+        await engine.waitForBackgroundTasks(500, { throwOnTimeout: true });
         expect(terminalTurn).toBeDefined();
+        expect(abortCount).toBe(1);
         expect(asRecord(terminalTurn?.payload)?.pendingAfter).toMatchObject({ childTokens: [] });
 
         const parent = await engineAccess.sessionManager.load(tenantId, parentTaskId);
@@ -660,6 +695,15 @@ describe('A2A async child lifecycle', () => {
         expect((snapshot?.inbox?.all ?? []).filter(
             (entry: Observation) => entry.kind === 'child.failed'
         )).toHaveLength(1);
+
+        const sessionInternals = engineAccess.sessionManager as unknown as TestSessionManagerInternals;
+        const childSnapshot = [...(sessionInternals.store?.snapshots?.entries() ?? [])]
+            .map(([, value]) => value)
+            .find((value) => value.agentId === childAgentId)?.snapshot as SnapshotWithPending | undefined;
+        expect(Object.keys(childSnapshot?.pending?.tools ?? {})).toHaveLength(0);
+        expect(Object.values(childSnapshot?.pending?.toolTerminals ?? {})).toEqual([
+            expect.objectContaining({ kind: 'detached' }),
+        ]);
     });
 
     it('resumes an awaiting parent to terminal state after the async child completes', async () => {

@@ -1537,6 +1537,53 @@ describe('TaskEngine orchestration coverage', () => {
                 warnSpy.mockRestore();
             }
         });
+
+        test('root drain ignores durably detached nested tools and requests abort', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const pending = new Promise<void>(() => undefined);
+            const abort = jest.fn();
+
+            (engine as any).trackBackgroundTask(pending, {
+                kind: 'tool.auto_execute',
+                tenantId: 'default',
+                taskId: 'child-1',
+                rootTaskId: 'root-1',
+                ancestorTaskIds: ['root-1'],
+                token: 'tool-token-1',
+                toolName: 'mcp:browser-use.navigate_and_extract',
+                abort,
+            });
+
+            expect((engine as any).detachBackgroundTasks({
+                taskId: 'child-1',
+                reason: 'child_timeout',
+            })).toBe(1);
+            await Promise.resolve();
+
+            const report = await engine.drainBackgroundTasks({
+                rootTaskId: 'root-1',
+                timeoutMs: 10,
+                throwOnTimeout: true,
+            });
+            expect(report).toMatchObject({ activeCount: 0, detachedCount: 1 });
+            expect(abort).toHaveBeenCalledTimes(1);
+        });
+
+        test('root drain does not wait for active work owned by a different root', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            (engine as any).trackBackgroundTask(new Promise<void>(() => undefined), {
+                kind: 'tool.auto_execute',
+                taskId: 'other-child',
+                rootTaskId: 'other-root',
+                token: 'other-tool',
+            });
+
+            await expect(engine.drainBackgroundTasks({
+                rootTaskId: 'current-root',
+                timeoutMs: 10,
+                throwOnTimeout: true,
+            })).resolves.toMatchObject({ activeCount: 0 });
+        });
     });
 
     test('handles tool completion, persists observation, and resumes once', async () => {

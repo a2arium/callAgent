@@ -33,7 +33,12 @@ export type ILLMCaller = {
     /** Optional: clear conversation history */
     clearHistory?: () => void;
     /** Direct MCP tool execution bypasses LLM inference */
-    callMcpTool?(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown>;
+    callMcpTool?(
+        serverName: string,
+        toolName: string,
+        args: Record<string, unknown>,
+        options?: { signal?: AbortSignal }
+    ): Promise<unknown>;
     /** Get available schemas from an MCP server */
     getMcpServerToolSchemas?(serverName: string): Promise<Record<string, unknown>>;
 };
@@ -89,4 +94,4 @@ export type LLMConfig = {
             env?: Record<string, string>;
         } | undefined;
     };
-}; 
+};

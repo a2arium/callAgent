@@ -32,6 +32,8 @@ export type TurnRunnerSegmentExecutorDeps = {
     createContext: (task: { id: string; input: unknown }) => TaskContext;
     isStreaming?: boolean;
     dedupe?: SegmentDedupe;
+    onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
+    onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
 };
 
 export class TurnRunnerSegmentExecutor implements TurnExecutor {
@@ -40,6 +42,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     private readonly createContext: (task: { id: string; input: unknown }) => TaskContext;
     private readonly isStreaming: boolean;
     private readonly dedupe: SegmentDedupe;
+    private readonly onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
+    private readonly onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
 
     constructor(deps: TurnRunnerSegmentExecutorDeps) {
         this.turnRunner = deps.turnRunner;
@@ -47,6 +51,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         this.createContext = deps.createContext;
         this.isStreaming = deps.isStreaming ?? false;
         this.dedupe = deps.dedupe ?? createInMemorySegmentDedupe();
+        this.onChildTimeout = deps.onChildTimeout;
+        this.onTaskTerminal = deps.onTaskTerminal;
     }
 
     async runSegment(params: RunSegmentParams): Promise<SegmentResult> {
@@ -90,6 +96,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 undefined
             );
             const taskStatus = mapTaskEntityStatus(taskEntity.status?.state, boundary);
+            await this.finalizeIfTerminal(tenantId, taskId, taskStatus);
 
             const snapAfter = await this.sessionManager.load(tenantId, taskId);
             const telemetry = (snapAfter?.snapshot as { meta?: { telemetry?: { traceId?: string } } } | undefined)
@@ -126,6 +133,17 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             agentId,
             wake,
         });
+
+        if (
+            preparedWake.childTerminalClaim?.terminal?.error?.code === 'CHILD_TIMEOUT' &&
+            (preparedWake.childTerminalClaim.won === true ||
+                preparedWake.childTerminalClaim.disposition === 'matching_replay')
+        ) {
+            const childTaskId = preparedWake.childTerminalClaim.terminal.childTaskId;
+            if (childTaskId !== undefined && this.onChildTimeout !== undefined) {
+                await this.onChildTimeout({ tenantId, childTaskId });
+            }
+        }
 
         if (preparedWake.skipTurn) {
             await this.ensureProcessedKeyRecorded(tenantId, taskId, preparedWake.agentId, idempotencyKey);
@@ -170,6 +188,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             preparedWake.inputExpiresAt
         );
         const taskStatus = mapTaskEntityStatus(taskEntity.status?.state, boundary);
+        await this.finalizeIfTerminal(tenantId, taskId, taskStatus);
 
         const snapAfter = await this.sessionManager.load(tenantId, taskId);
         const telemetry = (snapAfter?.snapshot as { meta?: { telemetry?: { traceId?: string } } } | undefined)
@@ -336,6 +355,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         const boundary = reason !== undefined
             ? { kind: 'canceled' as const, reason }
             : { kind: 'canceled' as const };
+        await this.finalizeIfTerminal(tenantId, taskId, 'canceled');
 
         return {
             tenantId,
@@ -345,6 +365,19 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             taskStatus: 'canceled',
             traceId: telemetry?.traceId ?? ctx?.telemetry?.traceId,
         };
+    }
+
+    private async finalizeIfTerminal(
+        tenantId: string,
+        taskId: string,
+        state: SegmentResult['taskStatus']
+    ): Promise<void> {
+        if (
+            this.onTaskTerminal !== undefined &&
+            (state === 'completed' || state === 'failed' || state === 'canceled')
+        ) {
+            await this.onTaskTerminal({ tenantId, taskId, state });
+        }
     }
 }
 

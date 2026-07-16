@@ -57,6 +57,7 @@ import type { EnqueueStartParams, ScheduleTimerParams } from '../../runtime/runt
 import { makeSafeEventPreview } from '../safeEventPreview.js';
 import { prepareChildResultForPersistence } from '../childResultPersistence.js';
 import { coordinateChildTerminal } from '../ChildTerminalCoordinator.js';
+import { ensureTaskLifecycle, readTaskLifecycle } from '../TaskLifecycle.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -120,6 +121,9 @@ export interface ApiBinderDependencies {
         childAgent?: string;
         childTaskId?: string;
         source?: string;
+        rootTaskId?: string;
+        ancestorTaskIds?: string[];
+        abort?: () => void | Promise<void>;
     }) => Promise<T>;
     handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; suppressResume?: boolean }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
@@ -127,6 +131,7 @@ export interface ApiBinderDependencies {
     eventBus?: IEventBus;
     enqueueChildStart?: (params: EnqueueStartParams) => Promise<void>;
     scheduleChildTimeout?: (params: ScheduleTimerParams) => Promise<{ timerId: string }>;
+    detachTaskBranch?: (params: { tenantId: string; taskId: string; reason: string }) => Promise<unknown>;
 }
 
 export class ApiBinder {
@@ -296,6 +301,53 @@ export class ApiBinder {
         const useRuntimeChildStart = awaitCompletion === false &&
             deps.enqueueChildStart !== undefined &&
             shouldScheduleChildStartThroughRuntimeDriver();
+        const parentSnapshotForLifecycle = await deps.sessionManager.load(tenantId, sessionId);
+        const parentLifecycle = readTaskLifecycle(parentSnapshotForLifecycle?.snapshot, sessionId);
+        const childRootTaskId = parentLifecycle?.rootTaskId ?? sessionId;
+        const childAncestorTaskIds = [
+            ...(parentLifecycle?.ancestorTaskIds ?? []),
+            sessionId,
+        ];
+        await reconcileSnapshotMutation({
+            session: deps.sessionManager,
+            tenantId,
+            sessionId: childTaskId,
+            operation: 'child.dispatch.link_parent',
+            agentId: agent,
+            mutate: ({ snapshot }) => {
+                const childMeta = (snapshot.meta as Record<string, unknown>) || {};
+                const linked = {
+                    ...snapshot,
+                    meta: {
+                        ...childMeta,
+                        agentId: agent,
+                        a2aParent: {
+                            parentTenantId: tenantId,
+                            parentTaskId: sessionId,
+                            parentChildToken: token,
+                        },
+                        ...(ctx.telemetry?.traceId || ctx.telemetry?.nodeId
+                            ? {
+                                  telemetry: {
+                                      ...(ctx.telemetry?.traceId ? { traceId: ctx.telemetry.traceId } : {}),
+                                      ...(ctx.telemetry?.nodeId ? { parentNodeId: ctx.telemetry.nodeId } : {}),
+                                  },
+                              }
+                            : {}),
+                    },
+                } as Record<string, unknown>;
+                return {
+                    kind: 'write',
+                    value: undefined,
+                    snapshot: ensureTaskLifecycle(linked, {
+                        taskId: childTaskId,
+                        rootTaskId: childRootTaskId,
+                        parentTaskId: sessionId,
+                        ancestorTaskIds: childAncestorTaskIds,
+                    }),
+                };
+            },
+        });
         if (useRuntimeChildStart) {
             try {
                 Object.defineProperty(handle as object, 'id', {
@@ -306,40 +358,6 @@ export class ApiBinder {
             } catch {
                 (handle as unknown as Record<string, unknown>).id = childTaskId;
             }
-            await reconcileSnapshotMutation({
-                session: deps.sessionManager,
-                tenantId,
-                sessionId: childTaskId,
-                operation: 'child.dispatch.link_parent',
-                agentId: agent,
-                mutate: ({ snapshot }) => {
-                    const childMeta = (snapshot.meta as Record<string, unknown>) || {};
-                    return {
-                        kind: 'write',
-                        value: undefined,
-                        snapshot: {
-                            ...snapshot,
-                            meta: {
-                                ...childMeta,
-                                agentId: agent,
-                                a2aParent: {
-                                    parentTenantId: tenantId,
-                                    parentTaskId: sessionId,
-                                    parentChildToken: token,
-                                },
-                                ...(ctx.telemetry?.traceId || ctx.telemetry?.nodeId
-                                    ? {
-                                          telemetry: {
-                                              ...(ctx.telemetry?.traceId ? { traceId: ctx.telemetry.traceId } : {}),
-                                              ...(ctx.telemetry?.nodeId ? { parentNodeId: ctx.telemetry.nodeId } : {}),
-                                          },
-                                      }
-                                    : {}),
-                            },
-                        },
-                    };
-                },
-            });
         }
 
         const childStartedPayload = {
@@ -477,6 +495,13 @@ export class ApiBinder {
                         },
                     },
                 });
+                if (claim.terminal?.error?.code === 'CHILD_TIMEOUT') {
+                    await deps.detachTaskBranch?.({
+                        tenantId,
+                        taskId: claim.terminal.childTaskId ?? childTaskId,
+                        reason: 'child_timeout',
+                    });
+                }
                 const activeLoop = ctx as {
                     __activeLoopInbox?: { current: EngineObservation[]; all: EngineObservation[] };
                     __activeLoopEnv?: { pending?: { children?: Record<string, unknown> } };
@@ -889,7 +914,14 @@ export class ApiBinder {
         // This is needed because startTask uses an external initialContext that doesn't have it
         if (typeof (ctx as any).__autoExecuteTool !== 'function' && this.deps.handleToolCompleted) {
             const handleToolCompleted = this.deps.handleToolCompleted;
-            (ctx as any).__autoExecuteTool = async (tId: string, sId: string, token: string, toolName: string, args: unknown) => {
+            (ctx as any).__autoExecuteTool = async (
+                tId: string,
+                sId: string,
+                token: string,
+                toolName: string,
+                args: unknown,
+                control?: { signal?: AbortSignal }
+            ) => {
                 try {
                     let result: unknown;
                     if (toolName.startsWith('mcp:')) {
@@ -898,7 +930,12 @@ export class ApiBinder {
                             const serverName = parts[0];
                             const mcpToolName = parts.slice(1).join('.');
                             if (typeof (ctx as any).llm?.callMcpTool === 'function') {
-                                result = await (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any);
+                                result = await (ctx as any).llm.callMcpTool(
+                                    serverName,
+                                    mcpToolName,
+                                    args as any,
+                                    { signal: control?.signal }
+                                );
                             } else {
                                 throw new Error(`MCP execution not supported by current LLM adapter for tool: ${toolName}`);
                             }
@@ -906,7 +943,7 @@ export class ApiBinder {
                             throw new Error(`Invalid MCP tool name format: ${toolName}. Expected mcp:server.tool`);
                         }
                     } else {
-                        result = await ctx.tools.invoke(toolName, args);
+                        result = await ctx.tools.invoke(toolName, args, { signal: control?.signal } as any);
                     }
                     await handleToolCompleted({ tenantId: tId, taskId: sId, token, result });
                 } catch (error) {
@@ -1085,21 +1122,33 @@ export class ApiBinder {
             try { await flushMentalState(); } catch { /* best-effort */ }
 
             // Use saveWithRetry to avoid CAS_MISMATCH after flushMentalState bumps version
-            await this.deps.snapshotRepo.saveWithRetry({
-                tenantId, sessionId,
+            const registration = await reconcileSnapshotMutation({
+                session: this.deps.sessionManager,
+                tenantId,
+                sessionId,
                 agentId: (ctx as any).agentId || 'default',
-                mutate: (baseSnap) => {
-                    const toolsNow = { ...getPendingTools(baseSnap) } as any;
+                operation: 'tool.dispatch.register',
+                mutate: ({ snapshot: baseSnap }) => {
+                    const lifecycleBase = ensureTaskLifecycle(baseSnap, { taskId: sessionId });
+                    const lifecycle = readTaskLifecycle(lifecycleBase, sessionId)!;
+                    const toolsNow = { ...getPendingTools(lifecycleBase) } as any;
                     toolsNow[toolToken] = {
                         name: toolName,
                         args,
                         handlers: { completed: opts?.onCompleted },
+                        ownerTaskId: sessionId,
+                        rootTaskId: lifecycle.rootTaskId,
+                        ancestorTaskIds: lifecycle.ancestorTaskIds,
                         ...(effectIdempotencyKey !== undefined ? { idempotencyKey: effectIdempotencyKey } : {}),
                     };
                     if (opts?.setToken || opts?.setStage) {
                         toolsNow[toolToken].options = { setToken: opts.setToken, setStage: opts.setStage };
                     }
-                    return setPendingTools(baseSnap, toolsNow);
+                    return {
+                        kind: 'write',
+                        snapshot: setPendingTools(lifecycleBase, toolsNow),
+                        value: lifecycle,
+                    };
                 }
             });
             const toolRequestedPayload = {
@@ -1140,9 +1189,24 @@ export class ApiBinder {
 
             // Trigger async auto-execution in the background
             if (typeof (ctx as any).__autoExecuteTool === 'function') {
+                const abortController = new AbortController();
                 // Don't await - let it run in the background, but track the promise
-                const toolPromise = (ctx as any).__autoExecuteTool(tenantId, sessionId, toolToken, toolName, args).catch((e: Error) => {
-                    log.error('[ApiBinder] Background tool execution failed', { token: toolToken, toolName, error: e.message });
+                const toolPromise = (ctx as any).__autoExecuteTool(
+                    tenantId,
+                    sessionId,
+                    toolToken,
+                    toolName,
+                    args,
+                    { signal: abortController.signal }
+                ).catch((e: Error) => {
+                    if (abortController.signal.aborted || e.name === 'AbortError') {
+                        log.debug('[ApiBinder] Detached background tool execution aborted', {
+                            token: toolToken,
+                            toolName,
+                        });
+                    } else {
+                        log.error('[ApiBinder] Background tool execution failed', { token: toolToken, toolName, error: e.message });
+                    }
                 });
                 if (this.deps.trackBackgroundTask) {
                     this.deps.trackBackgroundTask(toolPromise, {
@@ -1154,6 +1218,9 @@ export class ApiBinder {
                         token: toolToken,
                         toolName,
                         source: 'ApiBinder.requestTool',
+                        rootTaskId: registration.value.rootTaskId,
+                        ancestorTaskIds: registration.value.ancestorTaskIds,
+                        abort: () => abortController.abort('task lifecycle detached'),
                     });
                 } else {
                     const trackedToolPromise = toolPromise.finally(() => {

@@ -29,7 +29,12 @@ function usageTokensOutput(usage: Usage | undefined): number | undefined {
 
 /** callllm LLMCaller may expose optional MCP/history methods. */
 type LLMCallerExtended = LLMCaller & {
-    callMcpTool?: (server: string, tool: string, args: Record<string, unknown>) => Promise<unknown>;
+    callMcpTool?: (
+        server: string,
+        tool: string,
+        args: Record<string, unknown>,
+        options?: { signal?: AbortSignal }
+    ) => Promise<unknown>;
     getMcpServerToolSchemas?: (server: string) => Promise<Record<string, unknown>>;
     getMessages?: (includeSystem?: boolean) => unknown;
     getHistoryMode?: () => 'stateless' | 'dynamic' | 'full';
@@ -253,10 +258,15 @@ export class LLMCallerAdapter implements ILLMCaller {
     /**
      * Execute an MCP tool directly, bypassing the LLM
      */
-    async callMcpTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    async callMcpTool(
+        serverName: string,
+        toolName: string,
+        args: Record<string, unknown>,
+        options?: { signal?: AbortSignal }
+    ): Promise<unknown> {
         const ext = this.caller as LLMCallerExtended;
         if (typeof ext.callMcpTool === 'function') {
-            return ext.callMcpTool(serverName, toolName, args);
+            return ext.callMcpTool(serverName, toolName, args, options);
         }
         throw new Error('Underlying LLMCaller does not support callMcpTool');
     }

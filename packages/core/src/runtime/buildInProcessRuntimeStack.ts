@@ -24,6 +24,8 @@ export type BuildInProcessRuntimeStackParams = {
     sessionManager: SessionManager;
     createContext: (task: { id: string; input: unknown }) => TaskContext;
     isStreaming?: boolean;
+    onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
+    onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
 };
 
 /** Default Phase 0 stack: real segment kernel behind the in-process driver. */
@@ -35,6 +37,8 @@ export function buildInProcessRuntimeStack(
         sessionManager: params.sessionManager,
         createContext: params.createContext,
         isStreaming: params.isStreaming,
+        onChildTimeout: params.onChildTimeout,
+        onTaskTerminal: params.onTaskTerminal,
     });
     const prisma = (params.sessionManager as unknown as { store?: { prisma?: { runtimeTimer?: unknown } } })
         .store?.prisma;

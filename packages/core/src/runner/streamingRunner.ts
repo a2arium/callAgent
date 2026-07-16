@@ -611,7 +611,18 @@ export async function runAgentWithStreaming(
                     source: backgroundDrain.source,
                     taskState: returnedTask?.status?.state ?? 'unknown',
                 });
-                await engine.waitForBackgroundTasks(backgroundDrain.timeoutMs, { throwOnTimeout: true });
+                const drainReport = await engine.drainBackgroundTasks({
+                    rootTaskId: taskCtx.task.id,
+                    timeoutMs: backgroundDrain.timeoutMs,
+                    throwOnTimeout: true,
+                });
+                if (drainReport.detachedCount > 0) {
+                    runnerLogger.warn('Terminal result preserved with detached background operations', {
+                        taskId: taskCtx.task.id,
+                        detachedCount: drainReport.detachedCount,
+                        activeCount: drainReport.activeCount,
+                    });
+                }
                 logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
                 if (!options.isStreaming) {
                     logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);

@@ -187,4 +187,98 @@ describe('TaskExecutor snapshot persistence', () => {
             expect.objectContaining({ kind: 'child.completed', payload: expect.objectContaining({ token }) }),
         ]);
     });
+
+    it('does not resurrect a detached tool or overwrite terminal lifecycle during a stale turn save', async () => {
+        const token = 'tool-race';
+        let current: any = {
+            wmVersion: BigInt(1),
+            agentId: 'agent-a',
+            snapshot: {
+                meta: {
+                    turn: 1,
+                    agentId: 'agent-a',
+                    taskLifecycle: {
+                        taskId: 'task-a',
+                        rootTaskId: 'task-a',
+                        ancestorTaskIds: [],
+                        state: 'active',
+                    },
+                },
+                pending: { tools: { [token]: { name: 'slow-tool', args: {} } } },
+                inbox: { current: [], all: [] },
+            },
+        };
+        let attempt = 0;
+        const sessionManager = {
+            load: jest.fn(async () => current),
+            saveSnapshot: jest.fn(async (params: any) => {
+                attempt += 1;
+                if (attempt === 1) {
+                    current = {
+                        wmVersion: BigInt(2),
+                        agentId: 'agent-a',
+                        snapshot: {
+                            ...current.snapshot,
+                            meta: {
+                                ...current.snapshot.meta,
+                                taskLifecycle: {
+                                    ...current.snapshot.meta.taskLifecycle,
+                                    state: 'detached',
+                                    reason: 'child_timeout',
+                                    changedAt: '2026-07-16T12:00:00.000Z',
+                                },
+                            },
+                            pending: {
+                                tools: {},
+                                toolTerminals: {
+                                    [token]: {
+                                        kind: 'detached',
+                                        claimedAt: '2026-07-16T12:00:00.000Z',
+                                        reason: 'child_timeout',
+                                    },
+                                },
+                            },
+                        },
+                    };
+                    throw new WorkingMemoryVersionConflictError({
+                        tenantId: 'tenant-a',
+                        sessionId: 'task-a',
+                        expectedWmVersion: '1',
+                        actualWmVersion: '2',
+                    }, 'CAS_MISMATCH');
+                }
+                current = {
+                    wmVersion: params.expectedWmVersion + BigInt(1),
+                    agentId: 'agent-a',
+                    snapshot: params.snapshot,
+                };
+                return { newVersion: current.wmVersion };
+            }),
+        };
+
+        await (TaskExecutor as any).saveSnapshot({
+            sessionManager,
+            tenantId: 'tenant-a',
+            sessionId: 'task-a',
+            agentId: 'agent-a',
+            env: {
+                turn: 2,
+                pending: { tools: { [token]: { name: 'slow-tool', args: {} } } },
+                inbox: { current: [], all: [] },
+            },
+            M: {},
+            mNext: {},
+            outcome: { kind: 'await_tool', token },
+            loopOpts: {},
+            ctx: {},
+            getSessionStorePrisma: () => undefined,
+        });
+
+        expect(current.snapshot.meta.taskLifecycle).toMatchObject({
+            state: 'detached',
+            reason: 'child_timeout',
+        });
+        expect(current.snapshot.pending.tools).toEqual({});
+        expect(current.snapshot.pending.toolTerminals[token]).toMatchObject({ kind: 'detached' });
+    });
 });

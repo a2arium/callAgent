@@ -96,6 +96,15 @@ export class InboxManager {
             }
         }
 
+        // Tool terminal claims are snapshot-authoritative just like child claims.
+        // Preserve a completion staged concurrently while the agent turn was saving;
+        // tool tombstones in TaskExecutor prevent stale pending entries from returning.
+        for (const obs of remoteAll) {
+            if (obs.kind === 'tool.completed') {
+                appendIfMissing(obs, true);
+            }
+        }
+
         // Add conversation observations routed while this turn was active. These are
         // already filtered by consumed delivery keys by the caller, so current entries
         // here are unconsumed and must remain visible on the next turn.
@@ -125,6 +134,12 @@ function observationMergeKey(obs: EngineObservation): string {
         const token = (obs.payload as { token?: unknown } | undefined)?.token;
         if (typeof token === 'string' && token.length > 0) {
             return `child.terminal:${token}`;
+        }
+    }
+    if (obs.kind === 'tool.completed') {
+        const token = (obs.payload as { token?: unknown } | undefined)?.token;
+        if (typeof token === 'string' && token.length > 0) {
+            return `tool.terminal:${token}`;
         }
     }
     return `observation:${JSON.stringify(obs)}`;

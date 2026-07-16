@@ -15,7 +15,11 @@ import {
 } from '../orchestration/ExternalEventsRegistry.js';
 import { InboxManager, type EngineObservation } from '../orchestration/InboxManager.js';
 import type { SessionManager } from '../orchestration/SessionManager.js';
-import { getPendingTools, setPendingTools } from '../orchestration/ToolsRegistry.js';
+import {
+    claimToolTerminalInSnapshot,
+    detachPendingToolsInSnapshot,
+    type ToolTerminalClaim,
+} from '../orchestration/ToolTerminalCoordinator.js';
 import { TaskStateUtils } from '../orchestration/utils/TaskStateUtils.js';
 import type { TurnExecutionParams, TurnTrigger as TurnRunnerTrigger } from '../orchestration/TurnRunner.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
@@ -33,6 +37,11 @@ import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { makeSafeEventPreview } from '../orchestration/safeEventPreview.js';
 import { reconcileSnapshotMutation } from '../orchestration/persistence/SnapshotRepository.js';
 import { logger } from '@a2arium/callagent-utils';
+import {
+    isTaskLifecycleTerminal,
+    markTaskLifecycle,
+    readTaskLifecycle,
+} from '../orchestration/TaskLifecycle.js';
 
 const log = logger.createLogger({ prefix: 'SegmentWakeApplicator' });
 
@@ -48,6 +57,7 @@ export type PreparedSegmentWake = {
     /** Losing terminal workers persist nothing and must not run another parent turn. */
     skipTurn?: boolean;
     childTerminalClaim?: ChildTerminalClaim;
+    toolTerminalClaim?: ToolTerminalClaim;
 };
 
 function agentIdFromSnapshot(snapshot: Record<string, unknown>, fallback?: string): string {
@@ -112,28 +122,20 @@ export function applyWakeToSnapshot(
             if (event.kind !== 'tool') {
                 throw new Error(`tool wake expects tool event, got ${event.kind}`);
             }
-            const tools = { ...getPendingTools(base) };
-            const entry = tools[event.token];
-            if (entry !== undefined) {
-                delete tools[event.token];
-            }
-            let next = setPendingTools(base, tools);
-            const observation: EngineObservation = {
-                source: 'tool',
-                kind: 'tool.completed',
-                payload: { token: event.token, result: event.result, tool: entry?.name },
-                provenance: observationProvenance(event.token, turnFromSnapshot(base), entry?.name),
-            };
-            next = {
-                ...next,
-                inbox: InboxManager.addObservationToInbox((next as { inbox?: unknown }).inbox, observation),
-            };
+            const claim = claimToolTerminalInSnapshot(base, {
+                token: event.token,
+                completedAt: new Date().toISOString(),
+                result: event.result,
+                taskId: opts?.taskId ?? 'unknown',
+            });
             return {
-                snapshot: next,
+                snapshot: claim.snapshot,
                 wmVersion: BigInt(0),
-                agentId: agentIdFromSnapshot(next, opts?.agentId),
+                agentId: agentIdFromSnapshot(claim.snapshot, opts?.agentId),
                 trigger: 'tool',
                 turnParams: { toolToken: event.token, toolResult: event.result },
+                skipTurn: !claim.resumeEligible,
+                toolTerminalClaim: claim,
             };
         }
 
@@ -359,6 +361,69 @@ function hydrateChildWakeOutput(
     };
 }
 
+async function reconcileTerminalAncestor(
+    sessionManager: SessionManager,
+    tenantId: string,
+    taskId: string
+): Promise<void> {
+    const owner = await sessionManager.load(tenantId, taskId);
+    const ownerSnapshot = (owner?.snapshot as Record<string, unknown> | undefined) ?? {};
+    const ownerLifecycle = readTaskLifecycle(ownerSnapshot, taskId);
+    if (ownerLifecycle === undefined || isTaskLifecycleTerminal(ownerLifecycle)) return;
+    const ancestorIds = [...new Set([
+        ...ownerLifecycle.ancestorTaskIds,
+        ownerLifecycle.parentTaskId,
+        ownerLifecycle.rootTaskId,
+    ].filter((value): value is string => typeof value === 'string' && value !== taskId))];
+    let terminalAncestor: ReturnType<typeof readTaskLifecycle>;
+    for (const ancestorTaskId of ancestorIds) {
+        const ancestor = await sessionManager.load(tenantId, ancestorTaskId);
+        const lifecycle = readTaskLifecycle(ancestor?.snapshot, ancestorTaskId);
+        if (isTaskLifecycleTerminal(lifecycle)) {
+            terminalAncestor = lifecycle;
+            break;
+        }
+    }
+    if (terminalAncestor === undefined) return;
+    const detachedAt = new Date().toISOString();
+    const reason = `ancestor_${terminalAncestor.state}`;
+    const reconciled = await reconcileSnapshotMutation({
+        session: sessionManager,
+        tenantId,
+        sessionId: taskId,
+        operation: 'task.lineage.detach',
+        mutate: ({ snapshot }) => {
+            const lifecycle = readTaskLifecycle(snapshot, taskId);
+            if (isTaskLifecycleTerminal(lifecycle)) {
+                return { kind: 'noop', value: [] as ReturnType<typeof detachPendingToolsInSnapshot>['detached'] };
+            }
+            const marked = markTaskLifecycle(snapshot, {
+                taskId,
+                state: 'detached',
+                changedAt: detachedAt,
+                reason,
+                rootTaskId: lifecycle?.rootTaskId,
+                parentTaskId: lifecycle?.parentTaskId,
+                ancestorTaskIds: lifecycle?.ancestorTaskIds,
+            });
+            const tools = detachPendingToolsInSnapshot(marked, { taskId, reason, detachedAt });
+            return { kind: 'write', snapshot: tools.snapshot, value: tools.detached };
+        },
+    });
+    if (reconciled.status !== 'committed') return;
+    for (const terminal of reconciled.value) {
+        defaultMetricsRegistry.increment('tool.terminal_winner_total', { kind: 'detached' });
+        try {
+            await sessionManager.appendEvent(tenantId, taskId, 'task.tool_detached', {
+                token: terminal.token,
+                toolName: terminal.toolName,
+                reason,
+                detachedAt,
+            });
+        } catch { /* diagnostic only */ }
+    }
+}
+
 /**
  * Load snapshot, apply wake, persist when needed, return prepared state for runTurn.
  */
@@ -383,6 +448,19 @@ export async function prepareSegmentWake(
             mutate: ({ snapshot, wmVersion }) => {
                 const exists = wmVersion > BigInt(0) || Object.keys(snapshot).length > 0;
                 const base = exists ? snapshot : { meta: { agentId: agentId ?? 'default', turn: 0 } };
+                if (exists && isTaskLifecycleTerminal(readTaskLifecycle(base, taskId))) {
+                    return {
+                        kind: 'noop',
+                        value: {
+                            snapshot: base,
+                            wmVersion,
+                            agentId: agentIdFromSnapshot(base, agentId),
+                            trigger: 'start' as const,
+                            turnParams: {},
+                            skipTurn: true,
+                        },
+                    };
+                }
                 const prepared = applyWakeToSnapshot(base, wake, { tenantId, taskId, agentId });
                 return exists
                     ? { kind: 'noop', value: prepared }
@@ -391,6 +469,8 @@ export async function prepareSegmentWake(
         });
         return { ...reconciled.value, wmVersion: reconciled.wmVersion };
     }
+
+    await reconcileTerminalAncestor(sessionManager, tenantId, taskId);
 
     const completedAt = wake.trigger === 'child' && wake.event.kind === 'child'
         ? wake.event.completedAt ?? new Date().toISOString()
@@ -405,6 +485,17 @@ export async function prepareSegmentWake(
             if (wmVersion === BigInt(0) && Object.keys(base).length === 0) {
                 throw new Error(`Session not found for ${taskId}`);
             }
+        if (wake.trigger !== 'tool' && isTaskLifecycleTerminal(readTaskLifecycle(base, taskId))) {
+            const prepared: PreparedSegmentWake = {
+                snapshot: base,
+                wmVersion,
+                agentId: agentIdFromSnapshot(base, agentId),
+                trigger: 'resume',
+                turnParams: {},
+                skipTurn: true,
+            };
+            return { kind: 'noop', value: { prepared, wakeToApply: wake } };
+        }
         let wakeToApply = wake;
         if (wake.trigger === 'child' && wake.event.kind === 'child') {
             const failed = wake.event.outcome === 'failed' || (wake.event.output as any)?.ok === false;
@@ -427,8 +518,10 @@ export async function prepareSegmentWake(
             const terminalAlreadyClaimed = wakeToApply.trigger === 'child' &&
                 wakeToApply.event.kind === 'child' &&
                 wakeToApply.event.terminalClaimed === true;
+            const toolClaimMustPersist = wakeToApply.trigger === 'tool' &&
+                prepared.toolTerminalClaim?.won === true;
             const value = { prepared, wakeToApply };
-            return prepared.skipTurn || terminalAlreadyClaimed
+            return (prepared.skipTurn && !toolClaimMustPersist) || terminalAlreadyClaimed
                 ? { kind: 'noop', value }
                 : { kind: 'write', snapshot: prepared.snapshot, value };
         },
@@ -486,6 +579,55 @@ export async function prepareSegmentWake(
                 });
             }
         }
+        if (prepared.toolTerminalClaim?.won === true && wakeToApply.trigger === 'tool') {
+            const toolClaim = prepared.toolTerminalClaim;
+            const eventType = toolClaim.terminal?.kind === 'detached'
+                ? 'task.tool_detached'
+                : 'task.tool_completed';
+            try {
+                await sessionManager.appendEvent(tenantId, taskId, eventType, {
+                    token: wakeToApply.event.token,
+                    toolName: toolClaim.entry?.name ?? toolClaim.terminal?.toolName,
+                    ...(toolClaim.terminal?.reason !== undefined
+                        ? { reason: toolClaim.terminal.reason }
+                        : {}),
+                    ...(eventType === 'task.tool_completed'
+                        ? { resultPreview: makeSafeEventPreview((wakeToApply.event as { result?: unknown }).result) }
+                        : {}),
+                });
+                if (toolClaim.terminal?.kind === 'detached') {
+                    await sessionManager.appendEvent(tenantId, taskId, 'task.tool_late_completion', {
+                        token: wakeToApply.event.token,
+                        toolName: toolClaim.entry?.name ?? toolClaim.terminal?.toolName,
+                        resultPreview: makeSafeEventPreview((wakeToApply.event as { result?: unknown }).result),
+                    });
+                }
+            } catch (error) {
+                log.warn('Tool terminal wake committed but diagnostic event append failed', {
+                    tenantId,
+                    taskId,
+                    token: wakeToApply.event.token,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+            defaultMetricsRegistry.increment('tool.terminal_winner_total', {
+                kind: toolClaim.terminal?.kind ?? 'unknown',
+            });
+        }
+    }
+    if (
+        reconciled.status === 'noop' &&
+        prepared.toolTerminalClaim?.lateCompletion === true &&
+        wakeToApply.trigger === 'tool'
+    ) {
+        defaultMetricsRegistry.increment('tool.late_completion_total', { source: 'segment_wake' });
+        try {
+            await sessionManager.appendEvent(tenantId, taskId, 'task.tool_late_completion', {
+                token: wakeToApply.event.token,
+                toolName: prepared.toolTerminalClaim.entry?.name ?? prepared.toolTerminalClaim.terminal?.toolName,
+                resultPreview: makeSafeEventPreview((wakeToApply.event as { result?: unknown }).result),
+            });
+        } catch { /* diagnostic only */ }
     }
     return { ...prepared, wmVersion: reconciled.wmVersion };
 }

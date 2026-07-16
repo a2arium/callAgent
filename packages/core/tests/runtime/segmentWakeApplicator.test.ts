@@ -103,6 +103,38 @@ describe('applyWakeToSnapshot', () => {
         ).toBeUndefined();
     });
 
+    it('tool wake against a detached owner is durable no-op delivery', () => {
+        const detachedOwner = {
+            ...base,
+            meta: {
+                ...base.meta,
+                taskLifecycle: {
+                    taskId: 'task-a',
+                    rootTaskId: 'root-a',
+                    ancestorTaskIds: ['root-a'],
+                    state: 'detached',
+                    reason: 'child_timeout',
+                },
+            },
+        };
+        const prepared = applyWakeToSnapshot(detachedOwner, {
+            trigger: 'tool',
+            event: { kind: 'tool', token: 'tok-tool', result: { hits: 1 } },
+        }, { taskId: 'task-a' });
+
+        expect(prepared.skipTurn).toBe(true);
+        expect(prepared.toolTerminalClaim).toMatchObject({
+            won: true,
+            disposition: 'committed_detached',
+            resumeEligible: false,
+        });
+        expect((prepared.snapshot as any).pending.tools['tok-tool']).toBeUndefined();
+        expect((prepared.snapshot as any).pending.toolTerminals['tok-tool']).toMatchObject({
+            kind: 'detached',
+        });
+        expect((prepared.snapshot as any).inbox.current).toEqual([]);
+    });
+
     it('child wake adds child.completed observation', () => {
         const prepared = applyWakeToSnapshot(base, {
             trigger: 'child',
@@ -335,6 +367,63 @@ describe('applyWakeToSnapshot', () => {
         expect(results.filter((result) => result.skipTurn === true)).toHaveLength(1);
         expect(appended).toEqual(['task.child_failed']);
         expect((snapshot as any).inbox.all.filter((entry: any) => entry.kind === 'child.failed')).toHaveLength(1);
+    });
+
+    it('recovers terminal ancestry and suppresses a late tool wake after restart', async () => {
+        let version = BigInt(4);
+        let snapshot: Record<string, unknown> = {
+            ...base,
+            meta: {
+                ...base.meta,
+                taskLifecycle: {
+                    taskId: 'task-a', rootTaskId: 'root-a', ancestorTaskIds: ['root-a'],
+                    state: 'active',
+                },
+            },
+        };
+        const rootSnapshot = {
+            meta: {
+                agentId: 'root-agent',
+                taskLifecycle: {
+                    taskId: 'root-a', rootTaskId: 'root-a', ancestorTaskIds: [],
+                    state: 'completed', changedAt: '2026-07-16T12:00:00.000Z',
+                },
+            },
+        };
+        const appended: string[] = [];
+        const restartedSession = {
+            load: async (_tenantId: string, taskId: string) => taskId === 'root-a'
+                ? { snapshot: rootSnapshot, wmVersion: BigInt(2), agentId: 'root-agent' }
+                : { snapshot, wmVersion: version, agentId: 'agent-a' },
+            saveSnapshot: async (params: { expectedWmVersion: bigint; snapshot: Record<string, unknown> }) => {
+                expect(params.expectedWmVersion).toBe(version);
+                snapshot = params.snapshot;
+                version += BigInt(1);
+                return { newVersion: version };
+            },
+            appendEvent: async (_tenantId: string, _taskId: string, type: string) => {
+                appended.push(type);
+            },
+        };
+
+        const prepared = await prepareSegmentWake(restartedSession as never, {
+            tenantId: 'tenant-a',
+            taskId: 'task-a',
+            wake: {
+                trigger: 'tool',
+                event: { kind: 'tool', token: 'tok-tool', result: { late: true } },
+            },
+        });
+
+        expect(prepared.skipTurn).toBe(true);
+        expect((snapshot as any).pending.tools['tok-tool']).toBeUndefined();
+        expect((snapshot as any).pending.toolTerminals['tok-tool']).toMatchObject({ kind: 'detached' });
+        expect((snapshot as any).inbox.all).toEqual([]);
+        expect((snapshot as any).meta.taskLifecycle).toMatchObject({
+            state: 'detached',
+            reason: 'ancestor_completed',
+        });
+        expect(appended).toEqual(['task.tool_detached', 'task.tool_late_completion']);
     });
 
     it('child wake hydrates artifact markers before staging child.completed', () => {
