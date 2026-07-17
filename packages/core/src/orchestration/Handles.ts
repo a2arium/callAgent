@@ -5,6 +5,7 @@ import type { SessionManager } from './SessionManager.js';
 import { logger } from '@a2arium/callagent-utils';
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
+import { registerTaskEffect } from './TaskEffectRegistration.js';
 
 const log = logger.createLogger({ prefix: 'Handles' });
 
@@ -298,17 +299,15 @@ export async function createTaskHandle(
         throw new Error('SNAPSHOT_INTEGRITY_CHECK_FAILED: Parent snapshot corrupt or missing.');
     }
 
-    await reconcileSnapshotMutation({
+    await registerTaskEffect({
         session,
         tenantId,
-        sessionId,
+        taskId: sessionId,
+        effectKind: 'child',
         operation: 'child.dispatch.register',
-        mutate: ({ snapshot, wmVersion }) => {
+        mutate: ({ snapshot }) => {
             const snapshotHasMeta = !!(snapshot as any).meta;
             const snapshotHasM = !!(snapshot as any).M;
-            if (!snapshotHasMeta && !snapshotHasM && wmVersion >= BigInt(3)) {
-                throw new Error('SNAPSHOT_INTEGRITY_CHECK_FAILED: Parent snapshot corrupt or missing.');
-            }
             const priorTerminal = (snapshot as {
                 pending?: { childTerminals?: Record<string, PendingTaskTerminal> };
             }).pending?.childTerminals?.[childToken];
@@ -328,7 +327,7 @@ export async function createTaskHandle(
             for (const [path, value] of initialization?.controlUpdates ?? []) {
                 next = TaskStateUtils.applyControlVarToSnapshot(next, path, value);
             }
-            return { kind: 'write', snapshot: next, value: undefined };
+            return { snapshot: next, value: undefined };
         },
     });
     return { handle: new TaskHandle(session, tenantId, sessionId, childToken), token: childToken };
@@ -397,16 +396,16 @@ export async function createGroupHandle(
     childTokens: string[]
 ): Promise<{ handle: GroupHandle; groupToken: string }> {
     const groupToken = uuidv7();
-    await reconcileSnapshotMutation({
+    await registerTaskEffect({
         session,
         tenantId,
-        sessionId,
+        taskId: sessionId,
+        effectKind: 'child.group',
         operation: 'child.group.register',
         mutate: ({ snapshot }) => {
             const groups = getPendingGroups(snapshot);
             groups[groupToken] = { childTokens, results: {}, handlers: {} };
             return {
-                kind: 'write',
                 snapshot: setPendingGroups(snapshot, groups),
                 value: undefined,
             };

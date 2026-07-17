@@ -5,7 +5,10 @@ import {
     resolveSharedSegmentHatchetExecutionTimeout,
 } from '../src/taskTimeouts.js';
 import { createSegmentTask } from '../src/tasks/segment.js';
+import { executeSegmentTask } from '../src/tasks/segment.js';
 import { createTaskTask, executeTaskTask } from '../src/tasks/task.js';
+import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
 
 describe('executeTaskTask', () => {
     it('derives Hatchet execution timeout from latency budget plus grace', () => {
@@ -57,6 +60,34 @@ describe('executeTaskTask', () => {
             executionTimeout: '6m',
             retries: 3,
         }));
+    });
+
+    it('classifies terminal lifecycle registration stops as non-retryable', async () => {
+        const lifecycleError = new TaskLifecycleTerminalError({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            state: 'detached',
+            reason: 'child_timeout',
+            effectKind: 'tool',
+        });
+        const turnExecutor = {
+            runSegment: jest.fn(async () => { throw lifecycleError; }),
+        };
+        const ctx = {
+            workflowRunId: () => 'workflow-1',
+            taskRunExternalId: () => 'task-run-1',
+            retryCount: () => 0,
+        };
+
+        await expect(executeSegmentTask({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            wake: { trigger: 'start', input: {} },
+            idempotencyKey: 'task-1:start',
+        }, ctx as never, { turnExecutor: turnExecutor as never }))
+            .rejects.toBeInstanceOf(NonRetryableError);
+        expect(turnExecutor.runSegment).toHaveBeenCalledTimes(1);
     });
 
     it('declares durable parent tasks with an explicit execution timeout', () => {

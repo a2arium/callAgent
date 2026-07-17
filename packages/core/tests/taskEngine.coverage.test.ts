@@ -1584,6 +1584,141 @@ describe('TaskEngine orchestration coverage', () => {
                 throwOnTimeout: true,
             })).resolves.toMatchObject({ activeCount: 0 });
         });
+
+        test('root drain ignores conversation activation bookkeeping for another task', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            (engine as any).activeConversationActivations.add('default:completed-child');
+
+            await expect(engine.drainBackgroundTasks({
+                rootTaskId: 'completed-root',
+                timeoutMs: 10,
+                throwOnTimeout: true,
+            })).resolves.toMatchObject({
+                activeCount: 0,
+                activeConversationActivations: [],
+            });
+        });
+
+        test('owned effects are registered before their provider factory can start', async () => {
+            const store = new FakeSessionStore();
+            store.seed('t', 'task-1', {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1',
+                        rootTaskId: 'task-1',
+                        ancestorTaskIds: [],
+                        state: 'active',
+                    },
+                },
+                pending: { tools: { 'tool-1': { name: 'slow-tool' } } },
+            }, BigInt(1));
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const provider = jest.fn(async () => 'done');
+
+            const result = (engine as any).runOwnedEffect(provider, {
+                kind: 'tool.auto_execute',
+                tenantId: 't',
+                taskId: 'task-1',
+                rootTaskId: 'task-1',
+                token: 'tool-1',
+                pendingKind: 'tools',
+            });
+
+            expect(provider).not.toHaveBeenCalled();
+            expect(Array.from((engine as any).backgroundTaskMetadata.values()))
+                .toEqual([expect.objectContaining({ state: 'registering', token: 'tool-1' })]);
+            await expect(result).resolves.toBe('done');
+            expect(provider).toHaveBeenCalledTimes(1);
+        });
+
+        test('owned effects suppress provider start under an already detached owner', async () => {
+            const store = new FakeSessionStore();
+            store.seed('t', 'task-1', {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1',
+                        rootTaskId: 'task-1',
+                        ancestorTaskIds: [],
+                        state: 'detached',
+                        reason: 'child_timeout',
+                    },
+                },
+                pending: { tools: { 'tool-1': { name: 'slow-tool' } } },
+            }, BigInt(1));
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const provider = jest.fn(async () => 'must-not-run');
+
+            await expect((engine as any).runOwnedEffect(provider, {
+                kind: 'tool.auto_execute',
+                tenantId: 't',
+                taskId: 'task-1',
+                rootTaskId: 'task-1',
+                token: 'tool-1',
+                pendingKind: 'tools',
+            })).rejects.toMatchObject({ code: 'TASK_LIFECYCLE_TERMINAL' });
+            expect(provider).not.toHaveBeenCalled();
+            expect((store.getSnapshot('t', 'task-1')?.snapshot as any).pending.tools['tool-1']).toBeUndefined();
+        });
+
+        test('drain reconciliation detaches work after a remote lifecycle claim', async () => {
+            const store = new FakeSessionStore();
+            const active = {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1',
+                        rootTaskId: 'root-1',
+                        ancestorTaskIds: ['root-1'],
+                        state: 'active',
+                    },
+                },
+                pending: { tools: { 'tool-1': { name: 'slow-tool' } } },
+            };
+            store.seed('t', 'task-1', active, BigInt(1));
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const provider = jest.fn(({ signal }: { signal: AbortSignal }) => new Promise<void>((_resolve, reject) => {
+                signal.addEventListener('abort', () => {
+                    const error = new Error('aborted');
+                    error.name = 'AbortError';
+                    reject(error);
+                }, { once: true });
+            }));
+            const running = (engine as any).runOwnedEffect(provider, {
+                kind: 'tool.auto_execute',
+                tenantId: 't',
+                taskId: 'task-1',
+                rootTaskId: 'root-1',
+                ancestorTaskIds: ['root-1'],
+                token: 'tool-1',
+                pendingKind: 'tools',
+            });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const current = store.getSnapshot('t', 'task-1')!;
+            await store.writeSnapshotCAS({
+                tenantId: 't',
+                sessionId: 'task-1',
+                agentId: 'agent',
+                expectedWmVersion: current.wmVersion,
+                snapshot: {
+                    ...(current.snapshot as any),
+                    meta: {
+                        ...(current.snapshot as any).meta,
+                        taskLifecycle: {
+                            ...(current.snapshot as any).meta.taskLifecycle,
+                            state: 'detached',
+                            reason: 'remote_timeout',
+                        },
+                    },
+                },
+            });
+
+            await expect(engine.drainBackgroundTasks({
+                rootTaskId: 'root-1',
+                timeoutMs: 500,
+                throwOnTimeout: true,
+            })).resolves.toMatchObject({ activeCount: 0 });
+            await expect(running).rejects.toThrow('aborted');
+            expect(provider).toHaveBeenCalledTimes(1);
+        });
     });
 
     test('handles tool completion, persists observation, and resumes once', async () => {

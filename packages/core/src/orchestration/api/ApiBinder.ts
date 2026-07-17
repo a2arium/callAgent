@@ -11,7 +11,7 @@ import { compactModuleOutput } from '../../telemetry/turnTraceHelpers.js';
 import { getPendingTools, setPendingTools } from '../ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from '../ExternalEventsRegistry.js';
 import { getPendingTasks, setPendingTasks, getPendingGroups, setPendingGroups } from '../Handles.js';
-import { InputHandle, createTaskHandle, createGroupHandle, type GroupHandle } from '../Handles.js';
+import { InputHandle, createTaskHandle, GroupHandle } from '../Handles.js';
 import { globalA2AService } from '../A2AService.js';
 import type { SessionManager } from '../SessionManager.js';
 import { reconcileSnapshotMutation, type SnapshotRepository } from '../persistence/SnapshotRepository.js';
@@ -58,6 +58,8 @@ import { makeSafeEventPreview } from '../safeEventPreview.js';
 import { prepareChildResultForPersistence } from '../childResultPersistence.js';
 import { coordinateChildTerminal } from '../ChildTerminalCoordinator.js';
 import { ensureTaskLifecycle, readTaskLifecycle } from '../TaskLifecycle.js';
+import { assertTaskEffectActive, registerTaskEffect } from '../TaskEffectRegistration.js';
+import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -125,17 +127,57 @@ export interface ApiBinderDependencies {
         ancestorTaskIds?: string[];
         abort?: () => void | Promise<void>;
     }) => Promise<T>;
+    runOwnedEffect?: <T>(
+        factory: (control: { signal: AbortSignal }) => Promise<T>,
+        metadata: {
+            kind: string;
+            label?: string;
+            tenantId: string;
+            taskId: string;
+            agentId?: string;
+            token?: string;
+            toolName?: string;
+            childAgent?: string;
+            childTaskId?: string;
+            source?: string;
+            rootTaskId?: string;
+            ancestorTaskIds?: string[];
+            pendingKind?: 'tools' | 'tasks';
+        }
+    ) => Promise<T>;
     handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; suppressResume?: boolean }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
     conversationService: InternalConversationApi;
     eventBus?: IEventBus;
     enqueueChildStart?: (params: EnqueueStartParams) => Promise<void>;
     scheduleChildTimeout?: (params: ScheduleTimerParams) => Promise<{ timerId: string }>;
+    cancelTimer?: (params: { tenantId: string; taskId: string; token: string }) => Promise<void>;
     detachTaskBranch?: (params: { tenantId: string; taskId: string; reason: string }) => Promise<unknown>;
 }
 
 export class ApiBinder {
     constructor(private deps: ApiBinderDependencies) { }
+
+    private static async assertEffectActive(
+        deps: ApiBinderDependencies,
+        params: Parameters<typeof assertTaskEffectActive>[0]
+    ): Promise<void> {
+        try {
+            await assertTaskEffectActive(params);
+        } catch (error) {
+            if (
+                isTaskLifecycleTerminalError(error) &&
+                error.details.reason !== 'effect_token_not_pending'
+            ) {
+                await deps.detachTaskBranch?.({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    reason: error.details.reason ?? `owner_${error.details.state}`,
+                });
+            }
+            throw error;
+        }
+    }
 
     /**
      * Shared implementation for `ctx.sendTaskToAgent` (TaskEngine and streaming runner).
@@ -175,6 +217,12 @@ export class ApiBinder {
         const conversationService = deps.conversationService;
         log.debug('[sendTaskToAgent] START', { agent, taskId: sessionId });
         if (!deps.sessionManager) throw new Error('Session manager not configured');
+        await ApiBinder.assertEffectActive(deps, {
+            session: deps.sessionManager,
+            tenantId,
+            taskId: sessionId,
+            effectKind: 'child',
+        });
         if ((options as { skipFlush?: boolean } | undefined)?.skipFlush !== true) {
             try {
                 await flushMentalState();
@@ -348,6 +396,23 @@ export class ApiBinder {
                 };
             },
         });
+        try {
+            await ApiBinder.assertEffectActive(deps, {
+                session: deps.sessionManager,
+                tenantId,
+                taskId: sessionId,
+                effectKind: 'child',
+                token,
+                pendingKind: 'tasks',
+            });
+        } catch (error) {
+            await deps.detachTaskBranch?.({
+                tenantId,
+                taskId: childTaskId,
+                reason: 'parent_terminal_before_child_dispatch',
+            });
+            throw error;
+        }
         if (useRuntimeChildStart) {
             try {
                 Object.defineProperty(handle as object, 'id', {
@@ -395,16 +460,42 @@ export class ApiBinder {
         }
 
         if (awaitCompletion === false && expiresAt !== undefined && deps.scheduleChildTimeout) {
-            await deps.scheduleChildTimeout({
-                tenantId,
-                taskId: sessionId,
-                agentId,
-                token,
-                fireAt: expiresAt,
-                kind: 'child_timeout',
-                payload: { token, timeoutMs, expiresAt, childTaskId, agentId: agent },
-                idempotencyKey: `${sessionId}:child-timeout:${token}`,
-            });
+            const schedule = () => deps.scheduleChildTimeout!({
+                    tenantId,
+                    taskId: sessionId,
+                    agentId,
+                    token,
+                    fireAt: expiresAt,
+                    kind: 'child_timeout',
+                    payload: { token, timeoutMs, expiresAt, childTaskId, agentId: agent },
+                    idempotencyKey: `${sessionId}:child-timeout:${token}`,
+                });
+            await (deps.runOwnedEffect
+                ? deps.runOwnedEffect(() => schedule(), {
+                      kind: 'timer.child_timeout',
+                      tenantId,
+                      taskId: sessionId,
+                      agentId,
+                      token,
+                      childTaskId,
+                      rootTaskId: childRootTaskId,
+                      ancestorTaskIds: parentLifecycle?.ancestorTaskIds ?? [],
+                      pendingKind: 'tasks',
+                  })
+                : schedule());
+            try {
+                await ApiBinder.assertEffectActive(deps, {
+                    session: deps.sessionManager,
+                    tenantId,
+                    taskId: sessionId,
+                    effectKind: 'timer',
+                    token,
+                    pendingKind: 'tasks',
+                });
+            } catch (error) {
+                await deps.cancelTimer?.({ tenantId, taskId: sessionId, token });
+                throw error;
+            }
         }
 
         if (useRuntimeChildStart) {
@@ -458,7 +549,21 @@ export class ApiBinder {
             });
 
         let result: unknown;
-        const dispatchPromise = runA2a();
+        const dispatchPromise = deps.runOwnedEffect
+            ? deps.runOwnedEffect(() => runA2a(), {
+                  kind: 'agent.child_dispatch',
+                  label: `agent.child_dispatch ${agent}`,
+                  tenantId,
+                  taskId: childTaskId,
+                  agentId: agent,
+                  token,
+                  childAgent: agent,
+                  childTaskId,
+                  source: 'ApiBinder.sendTaskToAgent',
+                  rootTaskId: childRootTaskId,
+                  ancestorTaskIds: childAncestorTaskIds,
+              })
+            : runA2a();
         let dispatchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
         try {
             if (timeoutMs != null && timeoutMs > 0) {
@@ -992,12 +1097,9 @@ export class ApiBinder {
         ) => {
             const promptOrPartsStrict = promptOrParts as string | string[] | any | any[];
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
-            const snapL = await this.deps.sessionManager.load(tenantId, sessionId);
-            const baseL = (snapL?.snapshot as Record<string, unknown>) || {};
             const token = opts?.__existingToken || uuidv7();
             const controlUpdates: Array<[string, unknown]> = [];
             const expiresAt = opts?.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : undefined;
-            const pending = { ...getPendingInputs(baseL) };
 
             const normalizeParts = (p: any): any[] => {
                 if (typeof p === 'string') return [{ type: 'text', text: p, format: 'markdown' }];
@@ -1014,53 +1116,62 @@ export class ApiBinder {
             const parts = normalizeParts(promptOrPartsStrict);
             const prompt = (parts.find((x: any) => x?.type === 'text') as any)?.text as string | undefined;
 
-            try { await ctx.reply(parts as any); } catch { /* best-effort */ }
-
             const maxPrompts = 100;
-            if (Object.keys(pending).length >= maxPrompts) {
-                throwInvariantError(
-                    'LIMIT_MAX_PROMPTS_EXCEEDED',
-                    `Maximum outstanding prompts reached (${maxPrompts})`,
-                    { type: 'session_config', reason: 'limit_max_prompts_exceeded', limit: maxPrompts, actual: Object.keys(pending).length }
-                );
-            }
-
-            if (!opts?.__existingToken) {
-                pending[token] = {
-                    schema: opts?.schema,
-                    expiresAt,
-                    handlerName: opts?.onProvided,
-                    expiredHandlerName: opts?.onExpired
-                } as any;
-            }
 
             if (opts?.setToken !== false) {
                 controlUpdates.push(['token', token]);
-                writeControlVar(ctx, 'token', token);
             }
 
             if (opts?.setStage) {
                 const stagePath = 'stage';
                 controlUpdates.push([stagePath, opts.setStage]);
-                writeControlVar(ctx, stagePath, opts.setStage);
             }
 
             if (!this.deps.snapshotRepo) throw new Error('SnapshotRepo not initialized');
-            try { await flushMentalState(); } catch { /* best-effort */ }
-            await this.deps.snapshotRepo.saveWithRetry({
+            await ApiBinder.assertEffectActive(this.deps, {
+                session: this.deps.sessionManager,
                 tenantId,
-                sessionId,
+                taskId: sessionId,
+                effectKind: expiresAt !== undefined ? 'timer' : 'input',
+            });
+            try { await flushMentalState(); } catch { /* best-effort */ }
+            await registerTaskEffect({
+                session: this.deps.sessionManager,
+                tenantId,
+                taskId: sessionId,
                 agentId: (ctx as any).agentId || 'default',
-                mutate: async (baseSnap) => {
-                    let nextSnapshot = setPendingInputs(baseSnap, pending);
+                effectKind: expiresAt !== undefined ? 'timer' : 'input',
+                operation: 'input.register',
+                mutate: ({ snapshot }) => {
+                    const pending = { ...getPendingInputs(snapshot) };
+                    if (!opts?.__existingToken && Object.keys(pending).length >= maxPrompts) {
+                        throwInvariantError(
+                            'LIMIT_MAX_PROMPTS_EXCEEDED',
+                            `Maximum outstanding prompts reached (${maxPrompts})`,
+                            { type: 'session_config', reason: 'limit_max_prompts_exceeded', limit: maxPrompts, actual: Object.keys(pending).length }
+                        );
+                    }
+                    if (!opts?.__existingToken) {
+                        pending[token] = {
+                            schema: opts?.schema,
+                            expiresAt,
+                            handlerName: opts?.onProvided,
+                            expiredHandlerName: opts?.onExpired
+                        } as any;
+                    }
+                    let nextSnapshot = setPendingInputs(snapshot, pending);
                     if (controlUpdates.length > 0) {
                         for (const [path, value] of controlUpdates) {
                             nextSnapshot = TaskStateUtils.applyControlVarToSnapshot(nextSnapshot, path, value);
                         }
                     }
-                    return nextSnapshot;
+                    return { snapshot: nextSnapshot, value: undefined };
                 }
             });
+
+            if (opts?.setToken !== false) writeControlVar(ctx, 'token', token);
+            if (opts?.setStage) writeControlVar(ctx, 'stage', opts.setStage);
+            try { await ctx.reply(parts as any); } catch { /* best-effort */ }
 
             await this.deps.sessionManager!.appendEvent(tenantId, sessionId, 'task.input_required', { token, prompt, parts, schema: opts?.schema, expiresAt });
             await this.deps.sessionManager!.enqueueOutbox(tenantId, 'task.input_required', sessionId, { taskId: sessionId, prompt, parts, token, schema: opts?.schema, expiresAt });
@@ -1098,39 +1209,69 @@ export class ApiBinder {
             }
 
             if (opts?.awaitCompletion === true) {
-                // Check if it's an MCP tool call (format: mcp:serverName.toolName)
-                if (typeof toolName === 'string' && toolName.startsWith('mcp:')) {
-                    const parts = toolName.slice(4).split('.');
-                    if (parts.length >= 2) {
+                const registration = await registerTaskEffect({
+                    session: this.deps.sessionManager,
+                    tenantId,
+                    taskId: sessionId,
+                    agentId: (ctx as any).agentId || 'default',
+                    effectKind: 'tool.inline',
+                    operation: 'tool.inline.register',
+                    mutate: ({ snapshot }) => ({ snapshot, value: undefined }),
+                });
+                const invoke = async (signal?: AbortSignal) => {
+                    if (typeof toolName === 'string' && toolName.startsWith('mcp:')) {
+                        const parts = toolName.slice(4).split('.');
+                        if (parts.length < 2) {
+                            throw new Error(`Invalid MCP tool name format: ${toolName}. Expected mcp:server.tool`);
+                        }
                         const serverName = parts[0];
                         const mcpToolName = parts.slice(1).join('.');
-                        if (typeof (ctx as any).llm?.callMcpTool === 'function') {
-                            return (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any);
-                        } else {
+                        if (typeof (ctx as any).llm?.callMcpTool !== 'function') {
                             throw new Error(`MCP execution not supported by current LLM adapter for tool: ${toolName}`);
                         }
-                    } else {
-                        throw new Error(`Invalid MCP tool name format: ${toolName}. Expected mcp:server.tool`);
+                        return signal === undefined
+                            ? (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any)
+                            : (ctx as any).llm.callMcpTool(serverName, mcpToolName, args as any, { signal });
                     }
-                }
-                return (ctx as any).tools.invoke(toolName, args);
+                    return signal === undefined
+                        ? (ctx as any).tools.invoke(toolName, args)
+                        : (ctx as any).tools.invoke(toolName, args, { signal } as any);
+                };
+                return this.deps.runOwnedEffect
+                    ? this.deps.runOwnedEffect(({ signal }) => invoke(signal), {
+                          kind: 'tool.inline',
+                          label: `tool.inline ${toolName}`,
+                          tenantId,
+                          taskId: sessionId,
+                          agentId,
+                          toolName,
+                          source: 'ApiBinder.requestTool',
+                          rootTaskId: registration.lifecycle.rootTaskId,
+                          ancestorTaskIds: registration.lifecycle.ancestorTaskIds,
+                      })
+                    : invoke();
             }
             // Async tool request path: enqueue and let background handler execute
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
             let toolToken = opts?.setToken && typeof opts.setToken === 'string' ? opts.setToken : `tool-${uuidv7()}`;
             const effectIdempotencyKey = segmentEffectIdempotencyKey('tool', toolToken);
+            await ApiBinder.assertEffectActive(this.deps, {
+                session: this.deps.sessionManager,
+                tenantId,
+                taskId: sessionId,
+                effectKind: 'tool',
+            });
             try { await flushMentalState(); } catch { /* best-effort */ }
 
             // Use saveWithRetry to avoid CAS_MISMATCH after flushMentalState bumps version
-            const registration = await reconcileSnapshotMutation({
+            const registration = await registerTaskEffect({
                 session: this.deps.sessionManager,
                 tenantId,
-                sessionId,
+                taskId: sessionId,
                 agentId: (ctx as any).agentId || 'default',
+                effectKind: 'tool',
                 operation: 'tool.dispatch.register',
-                mutate: ({ snapshot: baseSnap }) => {
-                    const lifecycleBase = ensureTaskLifecycle(baseSnap, { taskId: sessionId });
-                    const lifecycle = readTaskLifecycle(lifecycleBase, sessionId)!;
+                mutate: ({ snapshot: lifecycleBase, lifecycle }) => {
                     const toolsNow = { ...getPendingTools(lifecycleBase) } as any;
                     toolsNow[toolToken] = {
                         name: toolName,
@@ -1145,9 +1286,8 @@ export class ApiBinder {
                         toolsNow[toolToken].options = { setToken: opts.setToken, setStage: opts.setStage };
                     }
                     return {
-                        kind: 'write',
                         snapshot: setPendingTools(lifecycleBase, toolsNow),
-                        value: lifecycle,
+                        value: undefined,
                     };
                 }
             });
@@ -1189,17 +1329,39 @@ export class ApiBinder {
 
             // Trigger async auto-execution in the background
             if (typeof (ctx as any).__autoExecuteTool === 'function') {
-                const abortController = new AbortController();
-                // Don't await - let it run in the background, but track the promise
-                const toolPromise = (ctx as any).__autoExecuteTool(
-                    tenantId,
-                    sessionId,
-                    toolToken,
-                    toolName,
-                    args,
-                    { signal: abortController.signal }
-                ).catch((e: Error) => {
-                    if (abortController.signal.aborted || e.name === 'AbortError') {
+                const toolPromise = this.deps.runOwnedEffect
+                    ? this.deps.runOwnedEffect(
+                          ({ signal }) => (ctx as any).__autoExecuteTool(
+                              tenantId,
+                              sessionId,
+                              toolToken,
+                              toolName,
+                              args,
+                              { signal }
+                          ),
+                          {
+                              kind: 'tool.auto_execute',
+                              label: `tool.auto_execute ${toolName}`,
+                              tenantId,
+                              taskId: sessionId,
+                              agentId,
+                              token: toolToken,
+                              toolName,
+                              source: 'ApiBinder.requestTool',
+                              rootTaskId: registration.lifecycle.rootTaskId,
+                              ancestorTaskIds: registration.lifecycle.ancestorTaskIds,
+                              pendingKind: 'tools',
+                          }
+                      )
+                    : (ctx as any).__autoExecuteTool(
+                          tenantId,
+                          sessionId,
+                          toolToken,
+                          toolName,
+                          args
+                      );
+                void toolPromise.catch((e: Error) => {
+                    if (e.name === 'AbortError' || (e as { code?: string }).code === 'TASK_LIFECYCLE_TERMINAL') {
                         log.debug('[ApiBinder] Detached background tool execution aborted', {
                             token: toolToken,
                             toolName,
@@ -1208,7 +1370,7 @@ export class ApiBinder {
                         log.error('[ApiBinder] Background tool execution failed', { token: toolToken, toolName, error: e.message });
                     }
                 });
-                if (this.deps.trackBackgroundTask) {
+                if (!this.deps.runOwnedEffect && this.deps.trackBackgroundTask) {
                     this.deps.trackBackgroundTask(toolPromise, {
                         kind: 'tool.auto_execute',
                         label: `tool.auto_execute ${toolName}`,
@@ -1218,11 +1380,10 @@ export class ApiBinder {
                         token: toolToken,
                         toolName,
                         source: 'ApiBinder.requestTool',
-                        rootTaskId: registration.value.rootTaskId,
-                        ancestorTaskIds: registration.value.ancestorTaskIds,
-                        abort: () => abortController.abort('task lifecycle detached'),
+                        rootTaskId: registration.lifecycle.rootTaskId,
+                        ancestorTaskIds: registration.lifecycle.ancestorTaskIds,
                     });
-                } else {
+                } else if (!this.deps.runOwnedEffect) {
                     const trackedToolPromise = toolPromise.finally(() => {
                         this.deps.backgroundTaskPromises.delete(trackedToolPromise);
                     });
@@ -1253,6 +1414,13 @@ export class ApiBinder {
             if (children.length > maxGroup) throw new Error('LIMIT_MAX_GROUP_CHILDREN_EXCEEDED');
             const childTokens: string[] = [];
 
+            await ApiBinder.assertEffectActive(this.deps, {
+                session: this.deps.sessionManager,
+                tenantId,
+                taskId: sessionId,
+                effectKind: 'child.group',
+            });
+
             if (typeof (ctx as any).flushSnapshot === 'function') {
                 try {
                     log.debug('allTasks pre-flushing snapshot');
@@ -1260,24 +1428,93 @@ export class ApiBinder {
                 } catch (e) { log.warn('allTasks pre-flush failed', { error: e }); }
             }
 
-            for (const child of children) {
-                const childTaskId = buildA2AChildTaskId(sessionId, child.agent);
-                const { handle, token } = await createTaskHandle(
-                    this.deps.sessionManager,
-                    tenantId,
-                    sessionId,
-                    child.agent,
-                    child.input,
-                    undefined,
-                    {
-                        entry: {
+            const groupToken = uuidv7();
+            const descriptors = children.map((child) => ({
+                ...child,
+                token: uuidv7(),
+                childTaskId: buildA2AChildTaskId(sessionId, child.agent),
+            }));
+            childTokens.push(...descriptors.map(({ token }) => token));
+            const registration = await registerTaskEffect({
+                session: this.deps.sessionManager,
+                tenantId,
+                taskId: sessionId,
+                agentId,
+                effectKind: 'child.group',
+                operation: 'child.group.register',
+                mutate: ({ snapshot, lifecycle }) => {
+                    const tasks = getPendingTasks(snapshot);
+                    for (const child of descriptors) {
+                        tasks[child.token] = {
+                            target: child.agent,
+                            input: child.input,
                             agentId: child.agent,
-                            childTaskId,
+                            childTaskId: child.childTaskId,
+                            handlers: {},
                             options: { setToken: false, autoClearToken: true },
-                        },
+                        };
                     }
-                );
-                childTokens.push(token);
+                    const groups = getPendingGroups(snapshot);
+                    groups[groupToken] = {
+                        childTokens,
+                        results: {},
+                        handlers: {
+                            ...(opts?.onAllCompleted ? { allCompleted: opts.onAllCompleted } : {}),
+                            ...(opts?.onAnyFailed ? { anyFailed: opts.onAnyFailed } : {}),
+                        },
+                        ...(opts?.withTimeoutMs ? { timeoutMs: opts.withTimeoutMs } : {}),
+                        ...(opts?.cancelRemaining !== undefined ? { cancelRemaining: opts.cancelRemaining } : {}),
+                    };
+                    return {
+                        snapshot: setPendingGroups(setPendingTasks(snapshot, tasks), groups),
+                        value: lifecycle,
+                    };
+                },
+            });
+
+            for (const child of descriptors) {
+                await reconcileSnapshotMutation({
+                    session: this.deps.sessionManager,
+                    tenantId,
+                    sessionId: child.childTaskId,
+                    agentId: child.agent,
+                    operation: 'child.group.link_parent',
+                    mutate: ({ snapshot }) => ({
+                        kind: 'write',
+                        value: undefined,
+                        snapshot: ensureTaskLifecycle({
+                            ...snapshot,
+                            meta: {
+                                ...((snapshot.meta as Record<string, unknown> | undefined) ?? {}),
+                                agentId: child.agent,
+                                a2aParent: {
+                                    parentTenantId: tenantId,
+                                    parentTaskId: sessionId,
+                                    parentChildToken: child.token,
+                                },
+                            },
+                        }, {
+                            taskId: child.childTaskId,
+                            rootTaskId: registration.lifecycle.rootTaskId,
+                            parentTaskId: sessionId,
+                            ancestorTaskIds: [...registration.lifecycle.ancestorTaskIds, sessionId],
+                        }),
+                    }),
+                });
+            }
+            for (const child of descriptors) {
+                await ApiBinder.assertEffectActive(this.deps, {
+                    session: this.deps.sessionManager,
+                    tenantId,
+                    taskId: sessionId,
+                    effectKind: 'child.group',
+                    token: child.token,
+                    pendingKind: 'tasks',
+                });
+            }
+
+            for (const child of descriptors) {
+                const { token, childTaskId } = child;
 
                 const parentId = ctx.telemetry?.nodeId ?? 'root';
                 const parentNode = telemetry.getNode(parentId);
@@ -1286,8 +1523,7 @@ export class ApiBinder {
                 childCallNode.start({ token, agentId: child.agent });
                 telemetry.registerNode(childCallNode);
 
-                const taskPromise = globalA2AService
-                    .sendTaskToAgent(ctx as any, child.agent, child.input as any, {
+                const runChild = () => globalA2AService.sendTaskToAgent(ctx as any, child.agent, child.input as any, {
                         tenantId,
                         parentTenantId: tenantId,
                         parentTaskId: sessionId,
@@ -1296,7 +1532,22 @@ export class ApiBinder {
                         awaitCompletion: false,
                         skipFlush: true,
                         parentTelemetryNodeId: childCallNode.id,
-                    } as any)
+                    } as any);
+                const taskPromise = (this.deps.runOwnedEffect
+                    ? this.deps.runOwnedEffect(() => runChild(), {
+                          kind: 'agent.child_dispatch',
+                          label: `agent.child_dispatch ${child.agent}`,
+                          tenantId,
+                          taskId: childTaskId,
+                          agentId: child.agent,
+                          token,
+                          childAgent: child.agent,
+                          childTaskId,
+                          source: 'ApiBinder.allTasks',
+                          rootTaskId: registration.lifecycle.rootTaskId,
+                          ancestorTaskIds: [...registration.lifecycle.ancestorTaskIds, sessionId],
+                      })
+                    : runChild())
                     .then((result) => {
                         const cleanChildResult = TaskStateUtils.extractCleanChildResult(result as Record<string, unknown>);
                         childCallNode.childTaskId = cleanChildResult.childTaskId;
@@ -1316,46 +1567,25 @@ export class ApiBinder {
                             error: er.message,
                         });
                     });
-                if (this.deps.trackBackgroundTask) {
+                if (!this.deps.runOwnedEffect && this.deps.trackBackgroundTask) {
                     this.deps.trackBackgroundTask(taskPromise, {
                         kind: 'agent.child_dispatch',
                         label: `agent.child_dispatch ${child.agent}`,
                         tenantId,
-                        taskId: sessionId,
-                        agentId,
+                        taskId: childTaskId,
+                        agentId: child.agent,
                         token,
                         childAgent: child.agent,
                         source: 'ApiBinder.allTasks',
                     });
-                } else {
+                } else if (!this.deps.runOwnedEffect) {
                     const trackedTaskPromise = taskPromise.finally(() => {
                         this.deps.backgroundTaskPromises.delete(trackedTaskPromise as Promise<void>);
                     });
                     this.deps.backgroundTaskPromises.add(trackedTaskPromise as Promise<void>);
                 }
             }
-            const { handle: groupHandle, groupToken } = await createGroupHandle(this.deps.sessionManager, tenantId, sessionId, childTokens);
-            await reconcileSnapshotMutation({
-                session: this.deps.sessionManager,
-                tenantId,
-                sessionId,
-                operation: 'child.group.configure',
-                mutate: ({ snapshot }) => {
-                    const groups = getPendingGroups(snapshot);
-                    const g = groups[groupToken] || { childTokens, results: {}, handlers: {} };
-                    if (opts?.withTimeoutMs) g.timeoutMs = opts.withTimeoutMs;
-                    if (opts?.cancelRemaining !== undefined) g.cancelRemaining = opts.cancelRemaining;
-                    if (opts?.onAllCompleted) { g.handlers = g.handlers || {}; (g.handlers as any).allCompleted = opts.onAllCompleted; }
-                    if (opts?.onAnyFailed) { g.handlers = g.handlers || {}; (g.handlers as any).anyFailed = opts.onAnyFailed; }
-                    groups[groupToken] = g;
-                    return {
-                        kind: 'write',
-                        snapshot: setPendingGroups(snapshot, groups),
-                        value: undefined,
-                    };
-                },
-            });
-            return groupHandle as GroupHandle;
+            return new GroupHandle(this.deps.sessionManager, tenantId, sessionId, groupToken);
         };
     }
 }

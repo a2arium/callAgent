@@ -4,6 +4,7 @@ export * from './BaseError.js';
 export * from './MemoryError.js';
 export * from './SemanticAtomicError.js';
 export * from './working-memory-version-conflict.js';
+export * from './task-lifecycle-terminal.js';
 export * from './workingMemory.js';
 export * from './agent/agentCard.js';
 export * from './agent/agentRuntimeManifest.js';

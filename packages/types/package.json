@@ -14,6 +14,10 @@
     "./working-memory-version-conflict": {
       "import": "./dist/working-memory-version-conflict.js",
       "types": "./dist/working-memory-version-conflict.d.ts"
+    },
+    "./task-lifecycle-terminal": {
+      "import": "./dist/task-lifecycle-terminal.js",
+      "types": "./dist/task-lifecycle-terminal.d.ts"
     }
   },
   "scripts": {

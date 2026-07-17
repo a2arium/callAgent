@@ -69,6 +69,14 @@ no-op. The cancel itself carries `idempotencyKey = taskId:cancel`.
   completion wins; cancel becomes a no-op.
 - **cancel vs child tasks:** parent cancellation requests child cancellation
   (best-effort) but parent fan-in logic (callAgent) stops scheduling regardless.
+- **cancel vs new effect registration:** both reconcile against the owner snapshot.
+  Registration that commits first may start, after which cancellation detaches it;
+  cancellation that commits first causes registration to stop with
+  `TASK_LIFECYCLE_TERMINAL` before events, timers, child links, or provider calls.
+- **cancel vs provider start:** accepted effects enter the local registry before their
+  lazy provider factory runs. The factory reloads owner/ancestor lifecycle and its pending
+  token; a terminal owner suppresses provider start. Drain repeats this reconciliation so
+  cancellation performed by another process revokes local delivery and blocking rights.
 
 ## Consequences
 

@@ -65,6 +65,20 @@ describe('ApiBinder.requestTool unified API', () => {
     });
 
     it('schedules non-blocking child starts through the runtime driver when start surface is enabled', async () => {
+        const snapshots = new Map<string, { snapshot: Record<string, unknown>; wmVersion: bigint; agentId: string }>([
+            ['s1', { snapshot: { pending: { tools: {} } }, wmVersion: BigInt(1), agentId: 'parent-agent' }],
+        ]);
+        mockSessionManager.load.mockImplementation(async (_tenantId, sessionId) => snapshots.get(sessionId) as any ?? null);
+        mockSessionManager.saveSnapshot.mockImplementation(async (params: any) => {
+            const current = snapshots.get(params.sessionId);
+            const nextVersion = (current?.wmVersion ?? BigInt(0)) + BigInt(1);
+            snapshots.set(params.sessionId, {
+                snapshot: params.snapshot,
+                wmVersion: nextVersion,
+                agentId: current?.agentId ?? params.agentId,
+            });
+            return { newVersion: nextVersion };
+        });
         process.env.CALLAGENT_DRIVER_SURFACES = 'start,resume';
         const enqueueChildStart = jest.fn().mockResolvedValue(undefined);
         const localA2ASpy = jest
@@ -316,8 +330,9 @@ describe('ApiBinder.requestTool unified API', () => {
 
         expect(mockTools.invoke).toHaveBeenCalledWith('my_tool', { arg: 1 });
         expect(result).toBe('inline-result');
-        // Should not save snapshot or emit event for inline execution
-        expect(mockSessionManager.saveSnapshot).not.toHaveBeenCalled();
+        // Inline execution now claims the active owner lifecycle before invoking the provider.
+        expect(mockSessionManager.saveSnapshot).toHaveBeenCalledTimes(1);
+        expect(mockSessionManager.appendEvent).not.toHaveBeenCalled();
     });
 
     it('should auto-execute regular tool when awaitCompletion is false', async () => {
@@ -429,7 +444,131 @@ describe('ApiBinder.requestTool unified API', () => {
         const result = await ctx.requestTool('my_tool', { arg: 1 }, { awaitCompletion: true, onCompleted: 'myHandler' });
 
         expect(result).toBe('inline');
-        expect(mockSessionManager.saveSnapshot).not.toHaveBeenCalled(); // Handler is not persisted
+        expect(mockSessionManager.saveSnapshot).toHaveBeenCalledTimes(1); // lifecycle gate only; handler is not persisted
+    });
+
+    it('rejects tools under a detached owner before events or provider invocation', async () => {
+        mockSessionManager.load.mockResolvedValue({
+            snapshot: {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 's1',
+                        rootTaskId: 's1',
+                        ancestorTaskIds: [],
+                        state: 'detached',
+                        reason: 'child_timeout',
+                    },
+                },
+                pending: { tools: {} },
+            },
+            wmVersion: BigInt(2),
+            agentId: 'a1',
+        } as any);
+        const provider = jest.fn().mockResolvedValue('must-not-run');
+        const ctx: any = {
+            tools: { invoke: provider },
+            __autoExecuteTool: provider,
+        };
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'a1',
+            flushMentalState: jest.fn(),
+        });
+
+        await expect(ctx.requestTool('slow_tool', {}, { awaitCompletion: false }))
+            .rejects.toMatchObject({ code: 'TASK_LIFECYCLE_TERMINAL' });
+        expect(provider).not.toHaveBeenCalled();
+        expect(mockSessionManager.saveSnapshot).not.toHaveBeenCalled();
+        expect(mockSessionManager.appendEvent).not.toHaveBeenCalled();
+    });
+
+    it('rejects single and grouped children under a detached owner before dispatch', async () => {
+        mockSessionManager.load.mockResolvedValue({
+            snapshot: {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 's1',
+                        rootTaskId: 's1',
+                        ancestorTaskIds: [],
+                        state: 'completed',
+                        reason: 'task_completed',
+                    },
+                },
+                pending: { tasks: {}, groups: {} },
+            },
+            wmVersion: BigInt(2),
+            agentId: 'a1',
+        } as any);
+        const dispatch = jest.spyOn(globalA2AService, 'sendTaskToAgent');
+        const ctx: any = { task: { id: 's1', input: {} }, tenantId: 't1', agentId: 'a1' };
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'a1',
+            flushMentalState: jest.fn(),
+        });
+
+        try {
+            await expect(ctx.sendTaskToAgent('child-a', {}, { awaitCompletion: false }))
+                .rejects.toMatchObject({ code: 'TASK_LIFECYCLE_TERMINAL' });
+            await expect(ctx.allTasks([{ agent: 'child-a', input: {} }]))
+                .rejects.toMatchObject({ code: 'TASK_LIFECYCLE_TERMINAL' });
+            expect(dispatch).not.toHaveBeenCalled();
+            expect(mockSessionManager.saveSnapshot).not.toHaveBeenCalled();
+            expect(mockSessionManager.appendEvent).not.toHaveBeenCalled();
+        } finally {
+            dispatch.mockRestore();
+        }
+    });
+
+    it('commits grouped children and group metadata before dispatching any child', async () => {
+        const snapshots = new Map<string, { snapshot: Record<string, unknown>; wmVersion: bigint; agentId: string }>([
+            ['s1', { snapshot: { meta: { agentId: 'a1' }, pending: {} }, wmVersion: BigInt(1), agentId: 'a1' }],
+        ]);
+        mockSessionManager.load.mockImplementation(async (_tenantId, sessionId) => snapshots.get(sessionId) as any ?? null);
+        mockSessionManager.saveSnapshot.mockImplementation(async (params: any) => {
+            const current = snapshots.get(params.sessionId);
+            const nextVersion = (current?.wmVersion ?? BigInt(0)) + BigInt(1);
+            snapshots.set(params.sessionId, {
+                snapshot: params.snapshot,
+                wmVersion: nextVersion,
+                agentId: current?.agentId ?? params.agentId,
+            });
+            return { newVersion: nextVersion };
+        });
+        const dispatch = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockImplementation(async () => {
+            const parent = snapshots.get('s1')!.snapshot as any;
+            expect(Object.keys(parent.pending.tasks)).toHaveLength(2);
+            expect(Object.values(parent.pending.groups)[0]).toEqual(expect.objectContaining({
+                childTokens: expect.arrayContaining(Object.keys(parent.pending.tasks)),
+            }));
+            return { status: { state: 'working' } } as any;
+        });
+        const ctx: any = { task: { id: 's1', input: {} }, tenantId: 't1', agentId: 'a1' };
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'a1',
+            flushMentalState: jest.fn(),
+        });
+
+        try {
+            const handle = await ctx.allTasks([
+                { agent: 'child-a', input: { n: 1 } },
+                { agent: 'child-b', input: { n: 2 } },
+            ], { onAllCompleted: 'done' });
+            expect(handle).toBeDefined();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            expect(dispatch).toHaveBeenCalledTimes(2);
+            const linkedChildren = [...snapshots.entries()].filter(([taskId]) => taskId !== 's1');
+            expect(linkedChildren).toHaveLength(2);
+            for (const [, child] of linkedChildren) {
+                expect((child.snapshot as any).meta.a2aParent.parentTaskId).toBe('s1');
+            }
+        } finally {
+            dispatch.mockRestore();
+        }
     });
 
     it('should handle onCompleted binding correctly during async execution', async () => {

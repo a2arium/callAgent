@@ -260,6 +260,20 @@ operations are retained as detached diagnostics and cannot replace the task's te
 result. Unowned legacy work and genuine non-terminal background operations remain strict
 drain blockers.
 
+Effect registration uses the same lifecycle boundary. Tools, child calls, child groups,
+and their timers are written to the active owner's snapshot before any event, timer, or
+provider dispatch occurs. Registration racing detachment has one winner:
+
+- if registration commits first, later branch detachment sees and terminalizes the effect;
+- if detachment commits first, registration throws `TASK_LIFECYCLE_TERMINAL` and starts nothing;
+- provider factories are registered locally in a lazy `registering` state and revalidate the
+  durable owner before invocation, closing the post-commit/process-local tracking gap;
+- drain periodically reloads active owners, so detachment committed by another process
+  removes local provider work from the blocking set and requests cooperative abort.
+
+`TASK_LIFECYCLE_TERMINAL` is an expected terminal stop. Runtime drivers must not retry the
+stale segment or replace the task result that already won the lifecycle claim.
+
 ## Common bugs and how to spot them with TurnTrace
 
 ### Bug: token mismatch

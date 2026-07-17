@@ -54,6 +54,7 @@ __metadata:
     "@a2arium/callagent-eventbus-nats": "workspace:*"
     "@a2arium/callagent-memory-engine": "workspace:*"
     "@a2arium/callagent-memory-sql": "workspace:*"
+    "@a2arium/callagent-types": "workspace:*"
     "@a2arium/callagent-utils": "workspace:*"
     "@hatchet-dev/typescript-sdk": "npm:^1.24.2"
     "@prisma/client": "npm:^7.4.0"

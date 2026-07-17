@@ -38,6 +38,12 @@ export {
     type MetricsSnapshot,
 } from './observability/metrics.js';
 export { makeSafeEventPreview } from './orchestration/safeEventPreview.js';
+export {
+    assertTaskEffectActive,
+    registerTaskEffect,
+    type TaskEffectKind,
+    type TaskEffectRegistrationResult,
+} from './orchestration/TaskEffectRegistration.js';
 export { prepareChildResultForPersistence } from './orchestration/childResultPersistence.js';
 export {
     reconcileSnapshotMutation,

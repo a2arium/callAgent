@@ -42,6 +42,7 @@ import {
     markTaskLifecycle,
     readTaskLifecycle,
 } from '../orchestration/TaskLifecycle.js';
+import { getPendingTasks, setPendingTasks } from '../orchestration/Handles.js';
 
 const log = logger.createLogger({ prefix: 'SegmentWakeApplicator' });
 
@@ -424,6 +425,66 @@ async function reconcileTerminalAncestor(
     }
 }
 
+async function reconcileTerminalOwnerEffects(
+    sessionManager: SessionManager,
+    tenantId: string,
+    taskId: string
+): Promise<void> {
+    const detachedAt = new Date().toISOString();
+    await reconcileSnapshotMutation({
+        session: sessionManager,
+        tenantId,
+        sessionId: taskId,
+        operation: 'task.terminal_effects.recover',
+        mutate: ({ snapshot, wmVersion }) => {
+            if (wmVersion === BigInt(0) && Object.keys(snapshot).length === 0) {
+                return { kind: 'noop', value: undefined };
+            }
+            const lifecycle = readTaskLifecycle(snapshot, taskId);
+            if (!isTaskLifecycleTerminal(lifecycle)) {
+                return { kind: 'noop', value: undefined };
+            }
+            const tools = detachPendingToolsInSnapshot(snapshot, {
+                taskId,
+                reason: lifecycle!.reason ?? `task_${lifecycle!.state}`,
+                detachedAt,
+            });
+            const tasks = getPendingTasks(tools.snapshot);
+            const pending = (tools.snapshot as any).pending ?? {};
+            const childTerminals = {
+                ...((pending.childTerminals ?? {}) as Record<string, unknown>),
+            } as Record<string, any>;
+            for (const [token, entry] of Object.entries(tasks)) {
+                childTerminals[token] ??= {
+                    kind: 'failed',
+                    claimedAt: detachedAt,
+                    ...(entry.childTaskId !== undefined ? { childTaskId: entry.childTaskId } : {}),
+                    ...(entry.agentId !== undefined ? { agentId: entry.agentId } : {}),
+                    error: {
+                        code: 'CHILD_OWNER_TERMINAL',
+                        message: `Child result delivery detached because owner task ${taskId} is terminal.`,
+                    },
+                };
+            }
+            if (tools.detached.length === 0 && Object.keys(tasks).length === 0) {
+                return { kind: 'noop', value: undefined };
+            }
+            const withoutTasks = setPendingTasks(tools.snapshot, {});
+            return {
+                kind: 'write',
+                value: undefined,
+                snapshot: {
+                    ...withoutTasks,
+                    pending: {
+                        ...((withoutTasks as any).pending ?? {}),
+                        childTerminals,
+                    },
+                },
+            };
+        },
+    });
+}
+
 /**
  * Load snapshot, apply wake, persist when needed, return prepared state for runTurn.
  */
@@ -439,6 +500,7 @@ export async function prepareSegmentWake(
     const { tenantId, taskId, agentId, wake } = params;
 
     if (wake.trigger === 'start') {
+        await reconcileTerminalOwnerEffects(sessionManager, tenantId, taskId);
         const reconciled = await reconcileSnapshotMutation({
             session: sessionManager,
             tenantId,
@@ -471,6 +533,7 @@ export async function prepareSegmentWake(
     }
 
     await reconcileTerminalAncestor(sessionManager, tenantId, taskId);
+    await reconcileTerminalOwnerEffects(sessionManager, tenantId, taskId);
 
     const completedAt = wake.trigger === 'child' && wake.event.kind === 'child'
         ? wake.event.completedAt ?? new Date().toISOString()

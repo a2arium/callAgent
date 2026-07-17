@@ -426,6 +426,45 @@ describe('applyWakeToSnapshot', () => {
         expect(appended).toEqual(['task.tool_detached', 'task.tool_late_completion']);
     });
 
+    it('cleans legacy pending tools and children before acknowledging a terminal start wake', async () => {
+        let version = BigInt(3);
+        let snapshot: Record<string, unknown> = {
+            ...base,
+            meta: {
+                ...base.meta,
+                taskLifecycle: {
+                    taskId: 'task-a', rootTaskId: 'task-a', ancestorTaskIds: [],
+                    state: 'completed', reason: 'task_completed',
+                },
+            },
+        };
+        const session = {
+            load: async () => ({ snapshot, wmVersion: version, agentId: 'agent-a' }),
+            saveSnapshot: async (params: { expectedWmVersion: bigint; snapshot: Record<string, unknown> }) => {
+                expect(params.expectedWmVersion).toBe(version);
+                snapshot = params.snapshot;
+                version += BigInt(1);
+                return { newVersion: version };
+            },
+            appendEvent: async () => ({ eventId: 'event', seq: 1 }),
+        };
+
+        const prepared = await prepareSegmentWake(session as never, {
+            tenantId: 'tenant-a',
+            taskId: 'task-a',
+            wake: { trigger: 'start', input: { stale: true } },
+        });
+
+        expect(prepared.skipTurn).toBe(true);
+        expect((snapshot as any).pending.tools).toEqual({});
+        expect((snapshot as any).pending.tasks).toEqual({});
+        expect((snapshot as any).pending.toolTerminals['tok-tool']).toMatchObject({ kind: 'detached' });
+        expect((snapshot as any).pending.childTerminals['child-tok']).toMatchObject({
+            kind: 'failed',
+            error: { code: 'CHILD_OWNER_TERMINAL' },
+        });
+    });
+
     it('child wake hydrates artifact markers before staging child.completed', () => {
         const artifactMarker = {
             kind: 'artifact',

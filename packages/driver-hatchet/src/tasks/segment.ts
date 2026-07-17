@@ -4,6 +4,7 @@ import type {
     TurnWake,
 } from '@a2arium/callagent-core/unstable';
 import { isSnapshotReconciliationError } from '@a2arium/callagent-core/unstable';
+import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
@@ -186,6 +187,9 @@ async function executeSegmentTaskInner(
                 operation: 'turn.segment',
                 status: 'failed',
             });
+        }
+        if (isTaskLifecycleTerminalError(error)) {
+            throw new NonRetryableError(error.message);
         }
         if (
             isSnapshotReconciliationError(error) &&
