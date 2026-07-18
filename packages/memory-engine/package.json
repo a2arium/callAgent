@@ -14,7 +14,7 @@
     },
     "scripts": {
         "build": "tsc -p tsconfig.json",
-        "test": "jest"
+        "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
     },
     "publishConfig": {
         "access": "public"
@@ -38,8 +38,8 @@
         "@a2arium/callagent-memory-sql": "^0.2.0",
         "@a2arium/callagent-types": "^0.2.0",
         "@a2arium/callagent-utils": "^0.2.0",
-        "@prisma/adapter-pg": "^7.4.0",
-        "@prisma/client": "^7.4.0",
+        "@prisma/adapter-pg": "7.4.0",
+        "@prisma/client": "7.4.0",
         "callllm": "^0.3.0",
         "dotenv": "^16.4.5",
         "pg": "^8.13.3",

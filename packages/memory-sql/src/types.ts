@@ -28,13 +28,8 @@ export type EntityFieldSpec = {
     [fieldName: string]: EntityType;
 };
 
-export type MemorySetOptions = {
-    tags?: string[];
-    entities?: EntityFieldSpec;   // e.g., { venue: 'location', speaker: 'person' }
-    alignmentThreshold?: number;  // Override default threshold
-    autoCreateEntities?: boolean; // Default: true
-    backend?: string;             // Backend selection
-    tenantId?: string;            // Tenant context for memory operations
+export type MemorySetOptions = import('@a2arium/callagent-types').MemorySetOptions & {
+    tenantId?: string;
 };
 
 export type ParsedEntityField = {
@@ -60,31 +55,13 @@ export type EntityAlignmentOptions = {
 // Type for handling pgvector embeddings (Prisma Unsupported type)
 export type VectorEmbedding = number[] | null;
 
-export type GetManyOptions = {
-    limit?: number;
-    orderBy?: {
-        path: string;
-        direction: 'asc' | 'desc';
-    };
-    backend?: string;
-    tenantId?: string;            // Tenant context for query operations
-    /** Return results in random order */
-    random?: boolean;
+export type GetManyOptions = import('@a2arium/callagent-types').GetManyOptions & {
+    tenantId?: string;
 };
 
-export type GetManyQuery = {
-    tag?: string;
-    filters?: import('@a2arium/callagent-types').MemoryFilter[];  // Use core MemoryFilter type
-    limit?: number;
-    orderBy?: {
-        path: string;
-        direction: 'asc' | 'desc';
-    };
-    backend?: string;
-    tenantId?: string;            // Tenant context for query operations
-    /** Return results in random order */
-    random?: boolean;
+export type GetManyQuery = import('@a2arium/callagent-types').GetManyQuery & {
+    tenantId?: string;
 };
 
 // Union type for getMany parameter
-export type GetManyInput = string | GetManyQuery; 
+export type GetManyInput = string | GetManyQuery;

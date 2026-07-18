@@ -3,6 +3,7 @@ export * from './IMemory.js';
 export * from './BaseError.js';
 export * from './MemoryError.js';
 export * from './SemanticAtomicError.js';
+export * from './SemanticQueryError.js';
 export * from './working-memory-version-conflict.js';
 export * from './task-lifecycle-terminal.js';
 export * from './workingMemory.js';
@@ -19,12 +20,17 @@ export type {
     SemanticItem,
     SemanticReadFilter,
     SemanticRemoveFilter,
+    SemanticRemoveResult,
     SemanticPredicateFilter,
     SemanticVersionedValue,
     SemanticCompareAndSetInput,
     SemanticCompareAndSetResult,
     SemanticCompareAndSetOptions,
     SemanticAtomicCapability,
+    SemanticMemoryCapabilities,
+    SemanticTagQueryCapability,
+    SemanticPredicateRemovalCapability,
+    SemanticQueryTelemetry,
 } from './IMemory.js';
 
 export type {

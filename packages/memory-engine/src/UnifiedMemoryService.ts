@@ -15,8 +15,10 @@ import {
     MemoryQueryResult,
     MemorySetOptions,
     GetManyInput,
-    GetManyOptions
+    GetManyOptions,
+    SemanticQueryError
 } from '@a2arium/callagent-types';
+import { isDeepStrictEqual } from 'node:util';
 
 /**
  * Semantic Memory Adapter Interface
@@ -104,6 +106,84 @@ export class UnifiedMemoryService {
     private episodicMemoryAdapter?: EpisodicMemoryAdapter;
     private embedMemoryAdapter?: EmbedMemoryAdapter;
     private defaultAgentId: string;
+
+    private cloneQueryOptions(options?: GetManyOptions): GetManyOptions | undefined {
+        if (!options) return undefined;
+        const clone: Record<PropertyKey, unknown> = {};
+        for (const key of Reflect.ownKeys(options)) {
+            const descriptor = Object.getOwnPropertyDescriptor(options, key);
+            if (!descriptor?.enumerable || !('value' in descriptor)) continue;
+            clone[key] = key === 'orderBy' && descriptor.value !== undefined
+                ? structuredClone(descriptor.value)
+                : descriptor.value;
+        }
+        return clone as GetManyOptions;
+    }
+
+    private cloneQueryEnvelope(input: GetManyInput, options?: GetManyOptions): {
+        input: GetManyInput;
+        options?: GetManyOptions;
+    } {
+        return {
+            input: structuredClone(input),
+            options: this.cloneQueryOptions(options),
+        };
+    }
+
+    private freezeQueryEnvelope<T>(value: T, seen = new WeakSet<object>()): T {
+        if (!value || typeof value !== 'object' || seen.has(value as object)) return value;
+        seen.add(value as object);
+        for (const key of Reflect.ownKeys(value as object)) {
+            const descriptor = Object.getOwnPropertyDescriptor(value as object, key);
+            if (descriptor && 'value' in descriptor) this.freezeQueryEnvelope(descriptor.value, seen);
+        }
+        return Object.freeze(value);
+    }
+
+    private assertMloPreservedQuery(
+        prepared: { input: GetManyInput; options?: GetManyOptions },
+        observed: { input: GetManyInput; options?: GetManyOptions },
+        processedData?: unknown
+    ): void {
+        const preparedSnapshot = this.cloneQueryEnvelope(prepared.input, prepared.options);
+        if (!isDeepStrictEqual(preparedSnapshot, this.cloneQueryEnvelope(observed.input, observed.options))) {
+            throw new SemanticQueryError(
+                'SEMANTIC_QUERY_ENVELOPE_MUTATED',
+                'MLO processing attempted to mutate protected semantic-memory query fields'
+            );
+        }
+        if (!processedData || typeof processedData !== 'object') {
+            throw new SemanticQueryError(
+                'SEMANTIC_QUERY_ENVELOPE_MUTATED',
+                'MLO processing removed the protected semantic-memory query envelope'
+            );
+        }
+        const outer = processedData as {
+            input?: GetManyInput;
+            options?: GetManyOptions;
+            structured?: { input?: GetManyInput; options?: GetManyOptions };
+        };
+        const processed = outer.structured && typeof outer.structured === 'object'
+            ? outer.structured
+            : outer;
+        if (!Object.prototype.hasOwnProperty.call(processed, 'input') || !Object.prototype.hasOwnProperty.call(processed, 'options')) {
+            throw new SemanticQueryError(
+                'SEMANTIC_QUERY_ENVELOPE_MUTATED',
+                'MLO processing removed protected semantic-memory query fields'
+            );
+        }
+        const candidateInput = processed.input;
+        const candidateOptions = processed.options;
+        if (candidateInput === undefined || !isDeepStrictEqual(
+            preparedSnapshot,
+            this.cloneQueryEnvelope(candidateInput, candidateOptions)
+        )) {
+            throw new SemanticQueryError(
+                'SEMANTIC_QUERY_ENVELOPE_MUTATED',
+                'MLO processing attempted to change protected semantic-memory query fields'
+            );
+        }
+    }
 
     constructor(
         private tenantId: string,
@@ -774,8 +854,10 @@ export class UnifiedMemoryService {
             tenantId: this.tenantId
         });
 
+        const prepared = this.freezeQueryEnvelope(this.cloneQueryEnvelope(input, options));
+        const observed = this.cloneQueryEnvelope(prepared.input, prepared.options);
         const item = createMemoryItem(
-            { input, options },
+            observed,
             'retrieval',
             'semantic.getMany',
             this.tenantId
@@ -786,13 +868,16 @@ export class UnifiedMemoryService {
             throw new Error('No semantic memory adapter configured or read not supported');
         }
 
-        // Use existing adapter for actual query execution
-        // The MLO processing above may have enhanced/processed the query
-        const processedInput = result.success && result.processedItems.length > 0
-            ? (result.processedItems[0].data as { input: GetManyInput }).input
-            : input;
+        this.assertMloPreservedQuery(
+            prepared,
+            observed,
+            result.success ? result.processedItems[0]?.data : observed
+        );
+        if (!result.success) {
+            throw new Error(`Failed to process semantic memory query: ${result.metadata?.error || 'Unknown error'}`);
+        }
 
-        return this.semanticMemoryAdapter.read(processedInput, options, this.tenantId) as Promise<Array<MemoryQueryResult<T>>>;
+        return this.semanticMemoryAdapter.read(prepared.input, prepared.options, this.tenantId) as Promise<Array<MemoryQueryResult<T>>>;
     }
 
     /**
@@ -867,33 +952,26 @@ export class UnifiedMemoryService {
             this.logger.debug('Using adapter remove for bulk deletion');
 
             // Process the query through MLO pipeline for potential transformation
+            const prepared = this.freezeQueryEnvelope(this.cloneQueryEnvelope(input, options));
+            const observed = this.cloneQueryEnvelope(prepared.input, prepared.options);
             const item = createMemoryItem(
-                { input, options },
+                observed,
                 'semanticLTM',
                 'semantic.deleteMany',
                 this.tenantId
             );
             const result = await this.mlo.processMemoryItem(item, 'semanticLTM');
 
-            let processedInput: GetManyInput;
-            let processedOptions: GetManyOptions | undefined;
-
-            if (result.success && result.processedItems.length > 0) {
-                const processedData = result.processedItems[0].data;
-                if (processedData && typeof processedData === 'object' && 'input' in processedData) {
-                    const data = processedData as { input: GetManyInput; options?: GetManyOptions };
-                    processedInput = data.input;
-                    processedOptions = data.options;
-                } else {
-                    processedInput = input;
-                    processedOptions = options;
-                }
-            } else {
-                processedInput = input;
-                processedOptions = options;
+            this.assertMloPreservedQuery(
+                prepared,
+                observed,
+                result.success ? result.processedItems[0]?.data : observed
+            );
+            if (!result.success) {
+                throw new Error(`Failed to process semantic memory removal: ${result.metadata?.error || 'Unknown error'}`);
             }
 
-            const deletedCount = await this.semanticMemoryAdapter.remove(processedInput, processedOptions, this.tenantId);
+            const deletedCount = await this.semanticMemoryAdapter.remove(prepared.input, prepared.options, this.tenantId);
 
             this.logger.debug(`Bulk deleted ${deletedCount} entries via adapter`);
             return deletedCount;
@@ -1525,4 +1603,4 @@ export class UnifiedMemoryService {
         // Final fallback: stringify the whole object
         return JSON.stringify(obj);
     }
-} 
+}

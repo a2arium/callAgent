@@ -2,7 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "isolatedModules": true
   },
   "include": [
     "src/**/*"
@@ -12,4 +13,4 @@
     "node_modules",
     "**/*.test.ts"
   ]
-} 
+}

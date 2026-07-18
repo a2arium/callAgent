@@ -8,8 +8,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_memory_tenant_updated_at
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_memory_tenant_created_at 
     ON agent_memory_store (tenant_id, created_at DESC);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_memory_tenant_tags 
-    ON agent_memory_store USING GIN (tenant_id, tags);
+-- The Prisma migration is authoritative. This statement is only a manual repair aid;
+-- verify the definition with `yarn db:tags:doctor` before using it.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_memory_store_tags_gin_idx
+    ON agent_memory_store USING GIN (tags array_ops);
 
 -- Partial index for system tenant operations (if used frequently)
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_memory_system_tenant 
@@ -158,4 +160,4 @@ FROM get_all_tenants_stats() t;
 -- GRANT EXECUTE ON FUNCTION get_tenant_memory_stats(TEXT) TO your_app_user;
 -- GRANT EXECUTE ON FUNCTION get_all_tenants_stats() TO your_app_user;
 -- GRANT EXECUTE ON FUNCTION cleanup_orphaned_alignments(TEXT) TO your_app_user;
--- GRANT SELECT ON tenant_health_view TO your_app_user; 
+-- GRANT SELECT ON tenant_health_view TO your_app_user;

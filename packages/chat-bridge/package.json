@@ -54,12 +54,12 @@
     "@a2arium/callagent-memory-sql": "^0.2.0",
     "@a2arium/callagent-types": "^0.2.0",
     "@a2arium/callagent-utils": "^0.2.0",
-    "@prisma/adapter-pg": "^7.4.0",
-    "@prisma/client": "^7.4.0",
+    "@prisma/adapter-pg": "7.4.0",
+    "@prisma/client": "7.4.0",
     "pg": "^8.13.3"
   },
   "devDependencies": {
-    "prisma": "^7.4.0",
+    "prisma": "7.4.0",
     "typescript": "^5.8.3"
   }
 }

@@ -2,6 +2,17 @@ import { describe, expect, it, jest } from '@jest/globals';
 import { SemanticMemoryRegistry, type SemanticMemoryEvent } from '../src/types/semantic/SemanticMemoryRegistry.js';
 
 describe('SemanticMemoryRegistry', () => {
+    const backendWith = (overrides: Record<string, unknown> = {}) => ({
+        get: jest.fn(async () => null),
+        read: jest.fn(async () => []),
+        set: jest.fn(async () => undefined),
+        delete: jest.fn(async () => undefined),
+        remove: jest.fn(async () => 0),
+        recognize: jest.fn(async () => ({ isMatch: false, confidence: 0, usedLLM: false })),
+        enrich: jest.fn(async () => ({ enrichedData: {}, changes: [], usedLLM: false, saved: false })),
+        ...overrides,
+    }) as any;
+
     it('supports high-level add() and emits an operator write event', async () => {
         const set = jest.fn(async () => undefined);
         const events: SemanticMemoryEvent[] = [];
@@ -16,7 +27,7 @@ describe('SemanticMemoryRegistry', () => {
                 } as any,
             },
             'sql',
-            (event) => events.push(event)
+            (event) => { events.push(event); }
         );
 
         await registry.add({
@@ -64,7 +75,7 @@ describe('SemanticMemoryRegistry', () => {
                 } as any,
             },
             'mlo',
-            (event) => events.push(event)
+            (event) => { events.push(event); }
         );
 
         const atomic = registry.getAtomic({ backend: 'sql' });
@@ -84,5 +95,176 @@ describe('SemanticMemoryRegistry', () => {
     it('throws the registry error for an unknown atomic backend', () => {
         const registry = new SemanticMemoryRegistry({ sql: {} as any }, 'sql');
         expect(() => registry.getAtomic({ backend: 'missing' })).toThrow('No such backend: missing');
+    });
+
+    it('normalizes tag plus tags into one all-of backend predicate before limit and returns stored tags', async () => {
+        const read = jest.fn(async () => [{ key: 'proposal:1', value: { state: 'ready' }, tags: ['ready', 'site:42', 'proposal'] }]);
+        const registry = new SemanticMemoryRegistry({
+            sql: backendWith({
+                capabilities: { tagQuery: { allOf: true, returnsStoredTags: true } },
+                read,
+            }),
+        }, 'sql');
+
+        await expect(registry.readItems({
+            tag: ' READY ',
+            tags: ['ready', ' Site:42 '],
+            limit: 1,
+        })).resolves.toEqual([{
+            id: 'proposal:1',
+            value: { state: 'ready' },
+            tags: ['ready', 'site:42', 'proposal'],
+            entities: undefined,
+        }]);
+        expect(read).toHaveBeenCalledTimes(1);
+        expect((read.mock.calls as unknown[][])[0]?.[0]).toEqual({ tags: ['ready', 'site:42'], limit: 1 });
+    });
+
+    it('fails closed when a custom backend cannot execute a plural all-of query', async () => {
+        const read = jest.fn(async () => []);
+        const registry = new SemanticMemoryRegistry({ custom: backendWith({ read }) }, 'custom');
+
+        await expect(registry.readItems({ tags: ['one', 'two'], limit: 5 }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_TAG_QUERY_UNSUPPORTED' });
+        expect(read).not.toHaveBeenCalled();
+    });
+
+    it('keeps one-tag source compatibility for an undeclared custom backend', async () => {
+        const read = jest.fn(async () => []);
+        const registry = new SemanticMemoryRegistry({ custom: backendWith({ read }) }, 'custom');
+
+        await registry.readItems({ tags: [' One '] });
+        expect((read.mock.calls as unknown[][])[0]?.[0]).toEqual({ tag: 'one', limit: 1000 });
+    });
+
+    it('rejects exact-id predicates and honors caller order while skipping missing ids', async () => {
+        const get = jest.fn(async (key: string) => key === 'b' ? { found: key } : null);
+        const events: SemanticMemoryEvent[] = [];
+        const registry = new SemanticMemoryRegistry(
+            { primary: backendWith({ capabilities: { backendKind: 'sql' }, get }) },
+            'primary',
+            (event) => { events.push(event); }
+        );
+
+        await expect(registry.readItems({ id: 'a', tags: ['x'] }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_QUERY_INVALID_COMBINATION' });
+        await expect(registry.readItems({ id: ['a', 'b', 'c'], limit: 1 }))
+            .resolves.toEqual([{ id: 'b', value: { found: 'b' } }]);
+        expect(get.mock.calls.map((call) => call[0])).toEqual(['a', 'b']);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+            op: 'read',
+            resultKeys: ['b'],
+            resultCount: 1,
+            query: { queryMode: 'id', backendKind: 'sql', outcome: 'ok' },
+        });
+    });
+
+    it('uses the strict counted removal capability and sends the full normalized predicate', async () => {
+        const remove = jest.fn(async () => 2);
+        const events: SemanticMemoryEvent[] = [];
+        const registry = new SemanticMemoryRegistry({
+            sql: backendWith({
+                capabilities: {
+                    tagQuery: { allOf: true, returnsStoredTags: true },
+                    predicateRemoval: { allOfTags: true, predicateRechecked: true, returnsCount: true },
+                },
+                remove,
+            }),
+        }, 'sql', (event) => { events.push(event); });
+
+        await expect(registry.removeItems({ tag: ' Ready ', tags: ['site:42'], limit: 2 }))
+            .resolves.toEqual({ removedCount: 2 });
+        expect((remove.mock.calls as unknown[][])[0]?.[0]).toEqual({ tags: ['ready', 'site:42'], limit: 2 });
+        expect(events.at(-1)).toMatchObject({
+            op: 'delete',
+            resultCount: 2,
+            status: 'success',
+            query: { operation: 'remove', requiredTagCount: 2, outcome: 'ok' },
+        });
+    });
+
+    it('rejects empty and incapable strict removal without invoking the backend', async () => {
+        const remove = jest.fn(async () => 1);
+        const registry = new SemanticMemoryRegistry({ custom: backendWith({ remove }) }, 'custom');
+
+        await expect(registry.removeItems({ tags: [] }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_QUERY_INVALID_COMBINATION' });
+        await expect(registry.removeItems({ tag: 'ready' }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_PREDICATE_REMOVE_UNSUPPORTED' });
+        expect(remove).not.toHaveBeenCalled();
+    });
+
+    it('rejects strict entity removal during capability preflight', async () => {
+        const remove = jest.fn(async () => 1);
+        const registry = new SemanticMemoryRegistry({
+            primary: backendWith({
+                capabilities: {
+                    backendKind: 'sql',
+                    predicateRemoval: {
+                        allOfTags: true,
+                        predicateRechecked: true,
+                        returnsCount: true,
+                        entityFilters: false,
+                    },
+                },
+                remove,
+            }),
+        }, 'primary');
+
+        await expect(registry.removeItems({
+            filters: [{ path: 'venue', operator: 'ENTITY_EXACT', value: 'Arena' }],
+        })).rejects.toMatchObject({
+            code: 'SEMANTIC_PREDICATE_REMOVE_UNSUPPORTED',
+            details: { backendKind: 'sql' },
+        });
+        expect(remove).not.toHaveBeenCalled();
+    });
+
+    it('emits sanitized compatibility usage and swallowed-failure events on every deprecated use', async () => {
+        const events: SemanticMemoryEvent[] = [];
+        const remove = jest.fn(async () => { throw new Error('contains-sensitive-data'); });
+        const backend = backendWith({ remove });
+        const registry = new SemanticMemoryRegistry(
+            { legacy: backend },
+            'legacy',
+            (event) => { events.push(event); }
+        );
+
+        await registry.removeItem({ tag: 'secret-tag', backend: 'legacy' });
+        await registry.removeItem({ tag: 'another-secret-tag', backend: 'legacy' });
+
+        const compatibility = events.filter((event) => event.query?.compatibilityPath === 'legacy-object-remove');
+        expect(compatibility).toHaveLength(4);
+        expect(compatibility.map((event) => event.query?.outcome)).toEqual(['ok', 'error', 'ok', 'error']);
+        expect(JSON.stringify(compatibility)).not.toContain('secret-tag');
+        expect(JSON.stringify(compatibility)).not.toContain('contains-sensitive-data');
+    });
+
+    it('normalizes replacement tags on ordinary writes and successful CAS transitions', async () => {
+        const set = jest.fn(async () => undefined);
+        const compareAndSet = jest.fn(async () => ({ status: 'updated' as const, version: '2' }));
+        const registry = new SemanticMemoryRegistry({
+            sql: backendWith({
+                set,
+                atomic: { getVersioned: jest.fn(), compareAndSet },
+            }),
+        }, 'sql');
+
+        await registry.set('record:1', {}, { tags: [' Ready ', 'ready', ' SITE:42 '] });
+        await registry.getAtomic()!.compareAndSet(
+            { key: 'record:1', expectedVersion: '1', value: { state: 'claimed' } },
+            { tags: [' Claimed ', 'SITE:42'] }
+        );
+        expect((set.mock.calls as unknown[][])[0]?.[2]).toMatchObject({ tags: ['ready', 'site:42'] });
+        expect((compareAndSet.mock.calls as unknown[][])[0]?.[1]).toEqual({ tags: ['claimed', 'site:42'] });
+    });
+
+    it('throws typed low-level errors for missing backends instead of returning empty results', async () => {
+        const registry = new SemanticMemoryRegistry({ sql: backendWith() }, 'sql');
+        await expect(registry.read({}, { backend: 'missing' }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_BACKEND_NOT_FOUND' });
+        await expect(registry.remove({}, { backend: 'missing' }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_BACKEND_NOT_FOUND' });
     });
 });

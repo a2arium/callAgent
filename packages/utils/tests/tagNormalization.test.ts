@@ -1,4 +1,9 @@
-import { TagNormalizer } from '../src/tagNormalization.js';
+import {
+    normalizeRequiredTags,
+    normalizeStoredTags,
+    SEMANTIC_TAG_LIMITS,
+    TagNormalizer,
+} from '../src/tagNormalization.js';
 
 describe('TagNormalizer', () => {
     describe('normalize', () => {
@@ -73,4 +78,42 @@ describe('TagNormalizer', () => {
             expect(result).toEqual(['riga', 'conference', 'tech-meetup']);
         });
     });
-}); 
+});
+
+describe('strict semantic tag normalization', () => {
+    test('combines singular and plural inputs in first-occurrence order', () => {
+        expect(normalizeRequiredTags({ tag: ' READY ', tags: ['ready', ' SITE:42 ', 'proposal'] }))
+            .toEqual({ requiredTags: ['ready', 'site:42', 'proposal'], suppliedTagCount: 4 });
+    });
+
+    test('treats an empty plural array as unrestricted but rejects empty-only input', () => {
+        expect(normalizeRequiredTags({ tags: [] }).requiredTags).toEqual([]);
+        expect(normalizeRequiredTags({ tag: undefined, tags: undefined }).requiredTags).toEqual([]);
+        expect(() => normalizeRequiredTags({ tag: '  ' })).toThrow(expect.objectContaining({ code: 'SEMANTIC_TAG_EMPTY' }));
+        expect(() => normalizeRequiredTags({ tags: [' ', '\t'] })).toThrow(expect.objectContaining({ code: 'SEMANTIC_TAG_EMPTY' }));
+    });
+
+    test('rejects runtime non-strings and bounds raw input before normalization', () => {
+        expect(() => normalizeRequiredTags({ tags: ['valid', 1] })).toThrow(expect.objectContaining({ code: 'SEMANTIC_TAG_INVALID_TYPE' }));
+        expect(() => normalizeRequiredTags({ tags: Array(SEMANTIC_TAG_LIMITS.maxRawQueryTagInputs + 1).fill('x') }))
+            .toThrow(expect.objectContaining({ code: 'SEMANTIC_TAG_COUNT_EXCEEDED' }));
+    });
+
+    test('enforces normalized UTF-8 byte length exactly', () => {
+        const atBoundary = 'é'.repeat(SEMANTIC_TAG_LIMITS.maxNormalizedTagBytes / 2);
+        expect(normalizeStoredTags([atBoundary])).toEqual([atBoundary]);
+        expect(() => normalizeStoredTags([`${atBoundary}é`]))
+            .toThrow(expect.objectContaining({ code: 'SEMANTIC_TAG_TOO_LONG' }));
+    });
+
+    test('is idempotent and does not leak tag values in error metadata', () => {
+        const once = normalizeStoredTags([' Alpha ', 'BETA', 'alpha']);
+        expect(normalizeStoredTags(once)).toEqual(once);
+        try {
+            normalizeStoredTags(['secret-tag'.repeat(40)]);
+            throw new Error('expected validation to fail');
+        } catch (error) {
+            expect(JSON.stringify(error)).not.toContain('secret-tag');
+        }
+    });
+});

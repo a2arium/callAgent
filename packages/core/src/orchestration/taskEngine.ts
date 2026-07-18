@@ -5099,6 +5099,7 @@ export class TaskEngine {
                     add: async () => { },
                     readItems: async () => [],
                     removeItem: async () => { },
+                    removeItems: async () => ({ removedCount: 0 }),
                 },
                 episodic: {
                     getDefaultBackend: () => 'none',

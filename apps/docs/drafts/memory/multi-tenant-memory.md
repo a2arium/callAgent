@@ -663,8 +663,8 @@ CREATE INDEX CONCURRENTLY idx_memory_tenant_key
 CREATE INDEX CONCURRENTLY idx_memory_tenant_updated_at
     ON agent_memory_store(tenant_id, updated_at DESC);
 
-CREATE INDEX CONCURRENTLY idx_memory_tenant_tags 
-    ON agent_memory_store USING GIN (tenant_id, tags);
+CREATE INDEX CONCURRENTLY agent_memory_store_tags_gin_idx
+    ON agent_memory_store USING GIN (tags array_ops);
 
 -- System tenant optimizations
 CREATE INDEX CONCURRENTLY idx_memory_system_tenant 
@@ -746,5 +746,5 @@ yarn demo               # Multi-tenant comparison demo
 ## Related Documentation
 
 - [Memory System](./memory-system.md) - Core memory concepts
-- [Memory SQL Adapter](./memory-sql-adapter.md) - Database implementation details  
-- [Runner Documentation](./runner.md) - Task execution and CLI usage 
+- [Memory SQL Adapter](./memory-sql-adapter.md) - Database implementation details
+- [Runner Documentation](./runner.md) - Task execution and CLI usage

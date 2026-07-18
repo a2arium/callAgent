@@ -19,7 +19,10 @@ import {
     RecognitionOptions,
     RecognitionResult,
     EnrichmentOptions,
-    EnrichmentResult
+    EnrichmentResult,
+    SemanticQueryError,
+    SEMANTIC_QUERY_EXECUTION_OBSERVER,
+    SemanticQueryExecutionObserver,
 } from '@a2arium/callagent-types';
 import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetManyOptions, GetManyQuery } from './types.js';
 import { EntityFieldParser } from './EntityFieldParser.js';
@@ -28,7 +31,11 @@ import { addAlignedProxies } from './AlignedValueProxy.js';
 import { FilterParser, ParsedFilter, AtomicParsedFilter, FilterGroup } from './FilterParser.js';
 import { RecognitionService, EnrichmentService } from './recognition/index.js';
 import { processDataForStorage, detectDataType, BinaryProcessorConfig } from './BinaryDataProcessor.js';
-import { TagNormalizer } from '@a2arium/callagent-utils';
+import {
+    normalizeRequiredTags,
+    normalizeStoredTags,
+    SEMANTIC_TAG_LIMITS,
+} from '@a2arium/callagent-utils';
 import { validatePgEnvironment } from './pgEnvValidator.js';
 import { createSafePool } from './safePool.js';
 
@@ -46,6 +53,8 @@ export interface MemorySQLConfig {
     embedFunction?: (text: string) => Promise<number[]>;
     /** Default query result limit */
     defaultQueryLimit?: number;
+    /** Maximum candidates inspected by a compatibility residual scan. */
+    maxResidualScanRows?: number;
 }
 
 // Define system tenant constants locally for this adapter
@@ -101,7 +110,19 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     private recognitionService?: RecognitionService;
     private enrichmentService?: EnrichmentService;
     private defaultTenantId: string;
-    private readonly DEFAULT_QUERY_LIMIT = 1000;
+    private defaultQueryLimit: number = SEMANTIC_TAG_LIMITS.defaultQueryLimit;
+    private maxResidualScanRows = 50_000;
+
+    public readonly capabilities = {
+        backendKind: 'sql',
+        tagQuery: { allOf: true, returnsStoredTags: true },
+        predicateRemoval: {
+            allOfTags: true,
+            predicateRechecked: true,
+            returnsCount: true,
+            entityFilters: false,
+        },
+    } as const;
 
     public readonly atomic: SemanticAtomicCapability = {
         getVersioned: <T>(key: string) => this.getVersioned<T>(key),
@@ -113,7 +134,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     constructor(
         configOrPrisma?: MemorySQLConfig | PrismaClientType,
         embedFunction?: (text: string) => Promise<number[]>,
-        options: { defaultTenantId?: string; defaultQueryLimit?: number } = {}
+        options: { defaultTenantId?: string; defaultQueryLimit?: number; maxResidualScanRows?: number } = {}
     ) {
         let config: MemorySQLConfig;
 
@@ -124,7 +145,8 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 prismaClient: configOrPrisma as PrismaClientType,
                 embedFunction,
                 defaultTenantId: options.defaultTenantId,
-                defaultQueryLimit: options.defaultQueryLimit
+                defaultQueryLimit: options.defaultQueryLimit,
+                maxResidualScanRows: options.maxResidualScanRows,
             };
         } else {
             // New signature: constructor(config?)
@@ -176,8 +198,12 @@ new MemorySQLAdapter({
         // Set configuration options
         this.defaultTenantId = config.defaultTenantId || 'default';
         this.embedFunction = config.embedFunction;
-        if (config.defaultQueryLimit) {
-            (this as any).DEFAULT_QUERY_LIMIT = config.defaultQueryLimit;
+        if (config.defaultQueryLimit !== undefined) this.defaultQueryLimit = this.validateQueryLimit(config.defaultQueryLimit);
+        if (config.maxResidualScanRows !== undefined) {
+            if (!Number.isInteger(config.maxResidualScanRows) || config.maxResidualScanRows <= 0 || config.maxResidualScanRows > 1_000_000) {
+                throw new SemanticQueryError('SEMANTIC_QUERY_LIMIT_INVALID', 'maxResidualScanRows must be an integer from 1 through 1000000');
+            }
+            this.maxResidualScanRows = config.maxResidualScanRows;
         }
 
         // Initialize embedding-dependent services if embedFunction provided
@@ -190,6 +216,20 @@ new MemorySQLAdapter({
             this.recognitionService = new RecognitionService(this.prisma, this.entityService);
             this.enrichmentService = new EnrichmentService();
         }
+    }
+
+    private validateQueryLimit(value: unknown): number {
+        const limit = value === undefined ? this.defaultQueryLimit : value;
+        if (!Number.isFinite(limit) || !Number.isInteger(limit) || (limit as number) < 0 || (limit as number) > SEMANTIC_TAG_LIMITS.maxQueryLimit) {
+            throw new SemanticQueryError('SEMANTIC_QUERY_LIMIT_INVALID', 'Semantic-memory query limit is invalid', {
+                details: { maxQueryLimit: SEMANTIC_TAG_LIMITS.maxQueryLimit },
+            });
+        }
+        return limit as number;
+    }
+
+    private executionObserver(options?: GetManyOptions): SemanticQueryExecutionObserver | undefined {
+        return options?.[SEMANTIC_QUERY_EXECUTION_OBSERVER];
     }
 
     /**
@@ -240,7 +280,7 @@ new MemorySQLAdapter({
         const { originalValue, processedData, shouldUseBlob } = processedBinary;
 
         // Normalize tags before storage
-        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+        const normalizedTags = normalizeStoredTags(options.tags || []);
 
         if (shouldUseBlob) {
             // Store large binary data in BYTEA fields
@@ -305,7 +345,7 @@ new MemorySQLAdapter({
         const tenantId = options.tenantId || this.defaultTenantId;
 
         // Normalize tags before storage
-        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+        const normalizedTags = normalizeStoredTags(options.tags || []);
         // Debug log
         // upsert
 
@@ -356,7 +396,7 @@ new MemorySQLAdapter({
         const tenantId = options.tenantId || this.defaultTenantId;
 
         // Normalize tags before storage
-        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+        const normalizedTags = normalizeStoredTags(options.tags || []);
 
         // Check if the value contains binary data that needs processing
         const processedBinary = await this.processBinaryDataIfNeeded(value, options);
@@ -574,7 +614,7 @@ new MemorySQLAdapter({
             ? null
             : this.validateSemanticVersion(input.expectedVersion);
         const serializedValue = this.serializeAtomicValue(input.value);
-        const normalizedTags = TagNormalizer.normalizeTags(options?.tags || []);
+        const normalizedTags = normalizeStoredTags(options?.tags || []);
         const tenantId = this.defaultTenantId;
 
         let updated: Array<{ version: bigint | string }>;
@@ -689,6 +729,68 @@ new MemorySQLAdapter({
         return alignments;
     }
 
+    private async getAlignmentsForMemories(
+        memoryKeys: readonly string[],
+        tenantId: string
+    ): Promise<Map<string, Record<string, EntityAlignment>>> {
+        const result = new Map<string, Record<string, EntityAlignment>>();
+        if (memoryKeys.length === 0) return result;
+        const rows = await this.prisma.$queryRaw<Array<{
+            memory_key: string;
+            field_path: string;
+            entity_id: string;
+            original_value: string;
+            confidence: string;
+            aligned_at: Date;
+            canonical_name: string;
+        }>>`
+            SELECT ea.memory_key,
+                   ea.field_path,
+                   ea.entity_id,
+                   ea.original_value,
+                   ea.confidence,
+                   ea.aligned_at,
+                   es.canonical_name
+            FROM entity_alignment ea
+            JOIN entity_store es ON ea.entity_id = es.id AND ea.tenant_id = es.tenant_id
+            WHERE ea.tenant_id = ${tenantId}
+              AND ea.memory_key = ANY(${[...memoryKeys]}::text[])
+        `;
+        for (const row of rows) {
+            const memory = result.get(row.memory_key) ?? {};
+            memory[row.field_path] = {
+                entityId: row.entity_id,
+                canonicalName: row.canonical_name,
+                originalValue: row.original_value,
+                confidence: row.confidence as 'high' | 'medium' | 'low',
+                alignedAt: row.aligned_at,
+            };
+            result.set(row.memory_key, memory);
+        }
+        return result;
+    }
+
+    private async mapQueryRows<T>(
+        rows: Array<{ key: string; value: unknown; tags: string[] | null }>,
+        tenantId: string,
+        observer?: SemanticQueryExecutionObserver
+    ): Promise<MemoryQueryResult<T>[]> {
+        const alignments = this.entityService && rows.length > 0
+            ? await this.getAlignmentsForMemories(rows.map((row) => row.key), tenantId)
+            : new Map<string, Record<string, EntityAlignment>>();
+        observer?.({ alignmentBatchQueries: this.entityService && rows.length > 0 ? 1 : 0 });
+        return rows.map((row) => {
+            const aligned = alignments.get(row.key);
+            return {
+                key: row.key,
+                value: aligned && Object.keys(aligned).length > 0
+                    ? addAlignedProxies(row.value, aligned) as T
+                    : row.value as T,
+                tags: row.tags ?? [],
+            };
+        });
+    }
+
 
 
     /**
@@ -764,21 +866,11 @@ new MemorySQLAdapter({
         this.validateArrayFilter(filter);
         const { arrayPathInfo, operator, value } = filter;
 
-        // Entity operators on array paths are handled in-memory, so we return a pass-through condition in SQL
-        if (['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(operator)) {
-            return { sql: '1=1', params: [] };
-        }
-
         if (!arrayPathInfo) {
             throw new MemoryError('Array path info missing for array filter', { code: 'INVALID_ARRAY_FILTER' });
         }
 
         const { arrayField, nestedPath } = arrayPathInfo;
-
-        // Build the JSONB path for the array field and nested property
-        const jsonPath = nestedPath.includes('.')
-            ? `{${arrayField},"*",${nestedPath.split('.').join(',')}}`
-            : `{${arrayField},"*","${nestedPath}"}`;
 
         let sqlOperator: string;
         let paramValue = value;
@@ -835,6 +927,19 @@ new MemorySQLAdapter({
                 sqlOperator = 'ILIKE';
                 paramValue = `%${value}`;
                 break;
+            case 'ENTITY_FUZZY':
+            case 'ENTITY_EXACT':
+            case 'ENTITY_ALIAS':
+                if (typeof value !== 'string') {
+                    throw new MemoryError(`${operator} requires a string value`, {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value,
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                paramValue = `%${value}%`;
+                break;
             default:
                 throw new MemoryError(`Operator "${operator}" is not supported for array filtering`, {
                     code: 'UNSUPPORTED_OPERATOR',
@@ -842,18 +947,7 @@ new MemorySQLAdapter({
                 });
         }
 
-        // Build SQL with properly escaped field names and type casting
-        // For nested paths like 'speakers[].expertise', we use elem->>'expertise' 
-        // For deeper nested paths like 'events[].person.name', we use elem->'person'->>'name'
-        let fieldAccessor: string;
-        if (nestedPath.includes('.')) {
-            const pathParts = nestedPath.split('.');
-            const intermediateParts = pathParts.slice(0, -1).map(part => `'${part}'`).join('->');
-            const finalPart = pathParts[pathParts.length - 1];
-            fieldAccessor = `elem->${intermediateParts}->>'${finalPart}'`;
-        } else {
-            fieldAccessor = `elem->>'${nestedPath}'`;
-        }
+        let fieldAccessor = 'elem #>> $2::text[]';
 
         // PostgreSQL JSONB extraction always returns text, so we need to cast for numeric/boolean operators
         const needsNumericCast = typeof value === 'number';
@@ -865,13 +959,12 @@ new MemorySQLAdapter({
             fieldAccessor = `(${fieldAccessor})::boolean`;
         }
 
-        // Use JSONB array elements extraction with proper field access
         const sql = `EXISTS (
-            SELECT 1 FROM jsonb_array_elements(value->'${arrayField}') AS elem 
-            WHERE ${fieldAccessor} ${sqlOperator} $1
+            SELECT 1 FROM jsonb_array_elements(COALESCE(value -> $1, '[]'::jsonb)) AS elem
+            WHERE ${fieldAccessor} ${sqlOperator} $3
         )`;
 
-        const params = [paramValue];
+        const params = [arrayField, nestedPath.split('.'), paramValue];
 
         return { sql, params };
     }
@@ -1006,40 +1099,172 @@ new MemorySQLAdapter({
 
     async deleteMany(input: GetManyInput, options?: GetManyOptions): Promise<number> {
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
-
-        // Use getMany with unlimited results to find all matching entries
-        const unlimitedOptions = {
-            ...options,
-            limit: Number.MAX_SAFE_INTEGER  // Remove any limit for deletion
-        };
-        const entriesToDelete = await this.getMany(input, unlimitedOptions);
-
-        if (entriesToDelete.length === 0) {
-            return 0;
+        if (typeof input === 'string') {
+            // Pattern removal is a legacy low-level API. Keep it bounded; strict callers use
+            // SemanticMemoryRegistry.removeItems(), which always supplies a structured predicate.
+            let targetTenant = tenantId;
+            let pattern = input;
+            if (isSystemTenant(tenantId) && input.includes(':')) {
+                const [candidateTenant, candidatePattern] = input.split(':', 2);
+                if (candidateTenant && candidatePattern) {
+                    targetTenant = candidateTenant;
+                    pattern = candidatePattern;
+                }
+            }
+            const requestedLimit = options?.limit === undefined
+                ? Number.POSITIVE_INFINITY
+                : this.validateQueryLimit(options.limit);
+            if (requestedLimit === 0) return 0;
+            let removedTotal = 0;
+            while (removedTotal < requestedLimit) {
+                const batchLimit = Math.min(
+                    SEMANTIC_TAG_LIMITS.maxQueryLimit,
+                    requestedLimit - removedTotal
+                );
+                const entries = await this.getMany(pattern, { ...options, tenantId: targetTenant, limit: batchLimit });
+                if (entries.length === 0) break;
+                const keys = entries.map((entry) => entry.key);
+                const removed = await this.prisma.$transaction(async (tx: any) => {
+                    await tx.$executeRaw`
+                        DELETE FROM entity_alignment
+                        WHERE memory_key = ANY(${keys}::text[]) AND tenant_id = ${targetTenant}
+                    `;
+                    return Number(await tx.$executeRaw`
+                        DELETE FROM agent_memory_store
+                        WHERE key = ANY(${keys}::text[]) AND tenant_id = ${targetTenant}
+                    `);
+                });
+                removedTotal += removed;
+                if (entries.length < batchLimit || removed === 0) break;
+            }
+            return removedTotal;
         }
 
-        // Extract keys for deletion
-        const keysToDelete = entriesToDelete.map(entry => entry.key);
+        const query: GetManyQuery = {
+            ...input,
+            limit: options?.limit ?? input.limit,
+            orderBy: options?.orderBy ?? input.orderBy,
+            backend: options?.backend ?? input.backend,
+            tenantId: (options as any)?.tenantId ?? input.tenantId,
+            [SEMANTIC_QUERY_EXECUTION_OBSERVER]: options?.[SEMANTIC_QUERY_EXECUTION_OBSERVER],
+        } as GetManyQuery;
+        const limit = this.validateQueryLimit(query.limit);
+        const { requiredTags } = normalizeRequiredTags(query);
+        const filters = FilterParser.parseFilters(query.filters ?? []);
+        if (requiredTags.length === 0 && filters.length === 0) {
+            throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Structured semantic-memory removal requires a selector');
+        }
+        if (filters.some((filter) => this.hasEntityOperators(filter))) {
+            throw new SemanticQueryError(
+                'SEMANTIC_PREDICATE_REMOVE_UNSUPPORTED',
+                'Atomic removal does not support entity predicates'
+            );
+        }
+        if (limit === 0) return 0;
 
-        // Delete in transaction to ensure consistency
-        const deletedCount = await this.prisma.$transaction(async (tx: any) => {
-            // Delete entity alignments for all keys
-            await tx.$executeRaw`
-                DELETE FROM entity_alignment 
-                WHERE memory_key = ANY(${keysToDelete}::text[]) AND tenant_id = ${tenantId}
-            `;
+        const selectedParams: unknown[] = [tenantId];
+        let selectedPredicate = 'tenant_id = $1';
+        if (requiredTags.length > 0) {
+            selectedParams.push(requiredTags);
+            selectedPredicate += ` AND tags @> $${selectedParams.length}::text[]`;
+        }
+        if (filters.length > 0) {
+            const compiled = this.buildFilterRecursiveRawSQL(
+                { type: 'group', logic: 'AND', filters },
+                selectedParams.length + 1
+            );
+            selectedPredicate += ` AND (${compiled.sql})`;
+            selectedParams.push(...compiled.params);
+        }
+        selectedParams.push(limit);
+        const limitParameter = selectedParams.length;
 
-            // Delete memory entries
-            const memoryDeleteResult = await tx.$executeRaw`
-                DELETE FROM agent_memory_store 
-                WHERE key = ANY(${keysToDelete}::text[]) AND tenant_id = ${tenantId}
-            `;
+        const recheckParams: unknown[] = [tenantId];
+        let recheckPredicate = `memory.tenant_id = $${selectedParams.length + 1}`;
+        if (requiredTags.length > 0) {
+            recheckParams.push(requiredTags);
+            recheckPredicate += ` AND memory.tags @> $${selectedParams.length + recheckParams.length}::text[]`;
+        }
+        if (filters.length > 0) {
+            const compiled = this.buildFilterRecursiveRawSQL(
+                { type: 'group', logic: 'AND', filters },
+                selectedParams.length + recheckParams.length + 1
+            );
+            recheckPredicate += ` AND (${this.qualifyMemoryPredicate(compiled.sql)})`;
+            recheckParams.push(...compiled.params);
+        }
 
-            // Return the number of deleted memory entries
-            return Number(memoryDeleteResult);
-        });
+        const sql = `
+            WITH selected AS MATERIALIZED (
+                SELECT key
+                FROM agent_memory_store
+                WHERE ${selectedPredicate}
+                ORDER BY ${this.orderSql(query)}
+                LIMIT $${limitParameter}
+            ),
+            locked AS MATERIALIZED (
+                SELECT memory.key
+                FROM agent_memory_store AS memory
+                JOIN selected ON selected.key = memory.key
+                WHERE ${recheckPredicate}
+                ORDER BY memory.key ASC
+                FOR UPDATE OF memory
+            )
+            DELETE FROM agent_memory_store AS memory
+            USING locked
+            WHERE memory.tenant_id = $${selectedParams.length + 1}
+              AND memory.key = locked.key
+            RETURNING memory.key
+        `;
+        const params = [...selectedParams, ...recheckParams];
+        const observer = this.executionObserver(query as GetManyOptions);
+        const startedAt = Date.now();
 
-        return deletedCount;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const removed = await this.prisma.$transaction(async (tx: any) => {
+                    const rows = await tx.$queryRawUnsafe(sql, ...params) as Array<{ key: string }>;
+                    if (rows.length > 0) {
+                        await tx.$executeRaw`
+                            DELETE FROM entity_alignment
+                            WHERE tenant_id = ${tenantId}
+                              AND memory_key = ANY(${rows.map((row) => row.key)}::text[])
+                        `;
+                    }
+                    return rows.length;
+                });
+                observer?.({ databaseDurationMs: Date.now() - startedAt });
+                return removed;
+            } catch (error) {
+                const sqlState = this.sqlState(error);
+                if ((sqlState !== '40P01' && sqlState !== '40001') || attempt === 3) {
+                    if ((sqlState === '40P01' || sqlState === '40001') && attempt === 3) {
+                        throw new SemanticQueryError('SEMANTIC_REMOVE_CONTENTION', 'Semantic-memory removal contention retries were exhausted', {
+                            retryable: true,
+                            details: { attempts: attempt, sqlState },
+                            cause: error,
+                        });
+                    }
+                    throw error;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 41)));
+            }
+        }
+        throw new SemanticQueryError('SEMANTIC_REMOVE_CONTENTION', 'Semantic-memory removal did not complete', { retryable: true });
+    }
+
+    private qualifyMemoryPredicate(sql: string): string {
+        return sql
+            .replace(/\bvalue\b/g, 'memory.value')
+            .replace(/\btags\b/g, 'memory.tags');
+    }
+
+    private sqlState(error: unknown): string | undefined {
+        const candidate = error as { code?: unknown; cause?: { code?: unknown }; meta?: { code?: unknown } };
+        for (const value of [candidate?.code, candidate?.cause?.code, candidate?.meta?.code]) {
+            if (typeof value === 'string' && /^[0-9A-Z]{5}$/.test(value)) return value;
+        }
+        return undefined;
     }
 
     // Facade-compatible method names
@@ -1095,10 +1320,25 @@ new MemorySQLAdapter({
                 orderBy: options?.orderBy ?? input.orderBy,
                 random: options?.random ?? input.random,
                 backend: options?.backend ?? input.backend,
-                tenantId: (options as any)?.tenantId ?? (input as any)?.tenantId
+                tenantId: (options as any)?.tenantId ?? (input as any)?.tenantId,
+                [SEMANTIC_QUERY_EXECUTION_OBSERVER]: options?.[SEMANTIC_QUERY_EXECUTION_OBSERVER],
             };
             return await this.queryByObject<T>(mergedQuery);
         }
+    }
+
+    private orderSql(options: Pick<GetManyQuery, 'orderBy' | 'random'>): string {
+        if (options.orderBy && options.random) {
+            throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Semantic-memory orderBy and random cannot be combined');
+        }
+        if (options.random) return 'RANDOM()';
+        const path = options.orderBy?.path ?? 'updatedAt';
+        if (path !== 'createdAt' && path !== 'updatedAt') {
+            throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Semantic-memory order path is unsupported');
+        }
+        const column = path === 'createdAt' ? 'created_at' : 'updated_at';
+        const direction = options.orderBy?.direction === 'asc' ? 'ASC' : 'DESC';
+        return `${column} ${direction}, key ASC`;
     }
 
     /**
@@ -1106,7 +1346,8 @@ new MemorySQLAdapter({
      */
     private async queryByPattern<T>(pattern: string, options?: GetManyOptions): Promise<MemoryQueryResult<T>[]> {
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
-        const limit = options?.limit ?? this.DEFAULT_QUERY_LIMIT;
+        const limit = this.validateQueryLimit(options?.limit);
+        if (limit === 0) return [];
         // pattern query
 
         // System tenant can query across all tenants by prefixing pattern with tenant:
@@ -1121,51 +1362,21 @@ new MemorySQLAdapter({
         const sqlPattern = this.convertPatternToSQL(pattern);
 
         let query = `
-            SELECT key, value, tags
+            SELECT key, value, COALESCE(tags, ARRAY[]::text[]) AS tags
             FROM agent_memory_store 
             WHERE key LIKE $1 AND tenant_id = $2
         `;
+        query += ` ORDER BY ${this.orderSql(options ?? {})} LIMIT $3`;
 
-        // Add ordering if specified
-        if (options?.random) {
-            query += ` ORDER BY RANDOM()`;
-        } else if (options?.orderBy) {
-            // For now, only support ordering by created_at/updated_at since JSON path ordering is complex
-            if (options.orderBy.path === 'createdAt') {
-                query += ` ORDER BY created_at ${options.orderBy.direction.toUpperCase()}`;
-            } else if (options.orderBy.path === 'updatedAt') {
-                query += ` ORDER BY updated_at ${options.orderBy.direction.toUpperCase()}`;
-            } else {
-                // For JSON path ordering, we'd need more complex SQL
-                console.warn(`Ordering by JSON path '${options.orderBy.path}' not yet implemented for pattern queries`);
-                query += ` ORDER BY updated_at DESC`;
-            }
-        } else {
-            query += ` ORDER BY updated_at DESC`;
-        }
-
-        query += ` LIMIT ${limit}`;
-
-        const results = await this.prisma.$queryRawUnsafe(query, sqlPattern, tenantId) as Array<{
+        const observer = this.executionObserver(options);
+        const startedAt = Date.now();
+        const results = await this.prisma.$queryRawUnsafe(query, sqlPattern, tenantId, limit) as Array<{
             key: string;
             value: unknown;
-            tags: string[];
+            tags: string[] | null;
         }>;
-
-        // Add aligned proxies to results if entity service is available
-        if (this.entityService) {
-            for (const result of results) {
-                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
-                if (Object.keys(alignments).length > 0) {
-                    result.value = addAlignedProxies(result.value, alignments);
-                }
-            }
-        }
-
-        return results.map((r: { key: string; value: any }) => ({
-            key: r.key,
-            value: r.value as T
-        }));
+        observer?.({ databaseDurationMs: Date.now() - startedAt });
+        return this.mapQueryRows<T>(results, tenantId, observer);
     }
 
     /**
@@ -1192,23 +1403,29 @@ new MemorySQLAdapter({
                 { code: 'NOT_IMPLEMENTED' });
         }
 
-        if (queryObj.orderBy && !queryObj.random) {
-            throw new MemoryError('Sorting by JSON paths not implemented yet.',
-                { code: 'NOT_IMPLEMENTED' });
-        }
+        const limit = this.validateQueryLimit(queryObj.limit);
+        this.orderSql(queryObj);
+        const { requiredTags } = normalizeRequiredTags(queryObj);
+        const prepared: GetManyQuery = {
+            ...queryObj,
+            tag: undefined,
+            tags: requiredTags,
+            limit,
+        };
+        if (limit === 0) return [];
 
         try {
             // For simple queries without filters, use querySimple
-            if (!queryObj.filters || queryObj.filters.length === 0) {
-                return await this.querySimple<T>(queryObj);
+            if (!prepared.filters || prepared.filters.length === 0) {
+                return await this.querySimple<T>(prepared);
             } else {
                 // For complex queries with filters, use the specialized filter handler
-                return await this.queryWithFilters<T>(queryObj);
+                return await this.queryWithFilters<T>(prepared);
             }
         } catch (error: any) {
-            if (error instanceof MemoryError) throw error;
+            if (error instanceof MemoryError || error instanceof SemanticQueryError) throw error;
             throw new MemoryError(`Failed to query memory: ${error.message}`,
-                { originalError: error, queryOptions: queryObj });
+                { originalError: error, queryShape: { hasTags: requiredTags.length > 0, hasFilters: Boolean(prepared.filters?.length) } });
         }
     }
 
@@ -1224,51 +1441,41 @@ new MemorySQLAdapter({
     }
 
     private async querySimple<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
-        const { tag, limit = this.DEFAULT_QUERY_LIMIT } = options;
+        const limit = this.validateQueryLimit(options.limit);
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
-        // simple query
+        const { requiredTags } = normalizeRequiredTags(options);
 
         let query = `
-            SELECT key, value, tags
+            SELECT key, value, COALESCE(tags, ARRAY[]::text[]) AS tags
             FROM agent_memory_store 
             WHERE tenant_id = $1
         `;
         const queryParams: any[] = [tenantId];
 
-        if (tag) {
-            // Normalize tag for lookup
-            const normalizedTag = TagNormalizer.normalize(tag);
-            query += ' AND $2 = ANY(tags)';
-            queryParams.push(normalizedTag);
+        if (requiredTags.length > 0) {
+            query += ` AND tags @> $${queryParams.length + 1}::text[]`;
+            queryParams.push(requiredTags);
         }
 
-        query += ` ORDER BY ${options.random ? 'RANDOM()' : 'updated_at DESC'} LIMIT ${limit}`;
+        query += ` ORDER BY ${this.orderSql(options)} LIMIT $${queryParams.length + 1}`;
+        queryParams.push(limit);
 
+        const observer = this.executionObserver(options as GetManyOptions);
+        const startedAt = Date.now();
         const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;
             value: unknown;
-            tags: string[];
+            tags: string[] | null;
         }>;
-
-        // Add aligned proxies to results if entity service is available
-        if (this.entityService) {
-            for (const result of results) {
-                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
-                if (Object.keys(alignments).length > 0) {
-                    result.value = addAlignedProxies(result.value, alignments);
-                }
-            }
-        }
-
-        return results.map((r: { key: string; value: any }) => ({
-            key: r.key,
-            value: r.value as T
-        }));
+        observer?.({ databaseDurationMs: Date.now() - startedAt });
+        return this.mapQueryRows<T>(results, tenantId, observer);
     }
 
     private async queryWithFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
-        const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
+        const { filters } = options;
+        const limit = this.validateQueryLimit(options.limit);
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+        const { requiredTags } = normalizeRequiredTags(options);
         // filter query
 
         // Check if we have entity-aware filters that require special handling
@@ -1280,7 +1487,7 @@ new MemorySQLAdapter({
             return this.hasEntityOperators(parsed);
         });
 
-        if ((hasEntityFilters || options.random) && this.entityService) {
+        if (hasEntityFilters || options.random) {
             return await this.queryWithEntityFilters<T>(options);
         }
 
@@ -1311,10 +1518,7 @@ new MemorySQLAdapter({
         };
 
         // Handle tag filtering with normalization
-        if (tag) {
-            const normalizedTag = TagNormalizer.normalize(tag);
-            whereConditions.tags = { has: normalizedTag };
-        }
+        if (requiredTags.length > 0) whereConditions.tags = { hasEvery: requiredTags };
 
         // Handle advanced JSON filtering
         if (filters && filters.length > 0) {
@@ -1339,7 +1543,10 @@ new MemorySQLAdapter({
         // Execute Prisma query
         const findOptions: any = {
             take: limit,
-            orderBy: options.random ? undefined : { updatedAt: 'desc' }
+            orderBy: options.random ? undefined : [
+                { [options.orderBy?.path === 'createdAt' ? 'createdAt' : 'updatedAt']: options.orderBy?.direction ?? 'desc' },
+                { key: 'asc' },
+            ]
         };
 
         // Note: Prisma does not support ORDER BY RANDOM() natively. 
@@ -1350,53 +1557,41 @@ new MemorySQLAdapter({
             findOptions.where = whereConditions;
         }
 
+        const observer = this.executionObserver(options as GetManyOptions);
+        const startedAt = Date.now();
         const results = await this.prisma.agentMemoryStore.findMany(findOptions);
-
-        // Add aligned proxies to results if entity service is available
-        const processedResults: MemoryQueryResult<T>[] = [];
-        for (const result of results) {
-            let value = result.value;
-
-            if (this.entityService) {
-                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
-                if (Object.keys(alignments).length > 0) {
-                    value = addAlignedProxies(value, alignments);
-                }
-            }
-
-            processedResults.push({
-                key: result.key,
-                value: value as T
-            });
-        }
-
-        return processedResults;
+        observer?.({ databaseDurationMs: Date.now() - startedAt });
+        return this.mapQueryRows<T>(results.map((result) => ({
+            key: result.key,
+            value: result.value,
+            tags: result.tags,
+        })), tenantId, observer);
     }
 
     /**
      * Handle queries with array filters using raw SQL
      */
     private async queryWithRawArrayFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
-        const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
+        const { filters } = options;
+        const limit = this.validateQueryLimit(options.limit);
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+        const { requiredTags } = normalizeRequiredTags(options);
 
         // Parse all filters
         const parsedFilters = FilterParser.parseFilters(filters || []);
 
         // Build base query
         let query = `
-            SELECT key, value, tags
+            SELECT key, value, COALESCE(tags, ARRAY[]::text[]) AS tags
             FROM agent_memory_store 
             WHERE tenant_id = $1
         `;
         let queryParams: any[] = [tenantId];
         let paramIndex = 2;
 
-        // Add tag filter if specified
-        if (tag) {
-            const normalizedTag = TagNormalizer.normalize(tag);
-            query += ` AND $${paramIndex} = ANY(tags)`;
-            queryParams.push(normalizedTag);
+        if (requiredTags.length > 0) {
+            query += ` AND tags @> $${paramIndex}::text[]`;
+            queryParams.push(requiredTags);
             paramIndex++;
         }
 
@@ -1408,41 +1603,22 @@ new MemorySQLAdapter({
             );
             query += ` AND (${filterSql})`;
             queryParams.push(...filterParams);
+            paramIndex += filterParams.length;
         }
 
         // Add ordering and limit
-        query += ` ORDER BY ${options.random ? 'RANDOM()' : 'updated_at DESC'} LIMIT ${limit}`;
+        query += ` ORDER BY ${this.orderSql(options)} LIMIT $${paramIndex}`;
+        queryParams.push(limit);
 
-        // Execute raw SQL query
+        const observer = this.executionObserver(options as GetManyOptions);
+        const startedAt = Date.now();
         const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
             key: string;
             value: unknown;
-            tags: string[];
+            tags: string[] | null;
         }>;
-
-        // Add aligned proxies to results if entity service is available
-        const processedResults: MemoryQueryResult<T>[] = [];
-        for (const result of results) {
-            let value = result.value;
-
-            if (this.entityService) {
-                const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
-                if (Object.keys(alignments).length > 0) {
-                    value = addAlignedProxies(value, alignments);
-                }
-            }
-
-            processedResults.push({
-                key: result.key,
-                value: value as T
-            });
-        }
-
-        // Filter in memory to ensure logical consistency and handle entity operators accurately
-        // Since the top-level filters array is implicitly an AND group, we use 'every'
-        return processedResults.filter(result => {
-            return parsedFilters.every(filter => this.evaluateFilterInMemory(result.value, filter));
-        });
+        observer?.({ databaseDurationMs: Date.now() - startedAt });
+        return this.mapQueryRows<T>(results, tenantId, observer);
     }
 
     /**
@@ -1475,10 +1651,10 @@ new MemorySQLAdapter({
 
             const arrayCondition = this.buildArrayFilterCondition(filter);
             // Replace parameter placeholders with actual parameter numbers
-            let adjustedSql = arrayCondition.sql;
-            for (let i = 0; i < arrayCondition.params.length; i++) {
-                adjustedSql = adjustedSql.replace(`$${i + 1}`, `$${paramIndex + i}`);
-            }
+            const adjustedSql = arrayCondition.sql.replace(
+                /\$(\d+)/g,
+                (_match, index: string) => `$${paramIndex + Number(index) - 1}`
+            );
             return { sql: adjustedSql, params: arrayCondition.params };
         } else {
             return this.buildRegularFilterRawSQL(filter, paramIndex);
@@ -1496,38 +1672,33 @@ new MemorySQLAdapter({
         const { path, operator, value } = filter;
         const pathParts = path.split('.');
 
-        // Build JSONB path for the field
-        const jsonPath = pathParts.length === 1
-            ? `value->>'${pathParts[0]}'`
-            : `value->${pathParts.slice(0, -1).map(part => `'${part}'`).join('->')}->>'${pathParts[pathParts.length - 1]}'`;
-
         let sqlOperator: string;
         let params: any[];
 
         switch (operator) {
             case '=':
                 sqlOperator = '=';
-                params = [value];
+                params = [pathParts, value];
                 break;
             case '!=':
                 sqlOperator = '!=';
-                params = [value];
+                params = [pathParts, value];
                 break;
             case '>':
                 sqlOperator = '>';
-                params = [value];
+                params = [pathParts, value];
                 break;
             case '>=':
                 sqlOperator = '>=';
-                params = [value];
+                params = [pathParts, value];
                 break;
             case '<':
                 sqlOperator = '<';
-                params = [value];
+                params = [pathParts, value];
                 break;
             case '<=':
                 sqlOperator = '<=';
-                params = [value];
+                params = [pathParts, value];
                 break;
             case 'CONTAINS':
                 if (typeof value !== 'string') {
@@ -1538,7 +1709,7 @@ new MemorySQLAdapter({
                     });
                 }
                 sqlOperator = 'ILIKE';
-                params = [`%${value}%`];
+                params = [pathParts, `%${value}%`];
                 break;
             case 'STARTS_WITH':
                 if (typeof value !== 'string') {
@@ -1549,7 +1720,7 @@ new MemorySQLAdapter({
                     });
                 }
                 sqlOperator = 'ILIKE';
-                params = [`${value}%`];
+                params = [pathParts, `${value}%`];
                 break;
             case 'ENDS_WITH':
                 if (typeof value !== 'string') {
@@ -1560,7 +1731,20 @@ new MemorySQLAdapter({
                     });
                 }
                 sqlOperator = 'ILIKE';
-                params = [`%${value}`];
+                params = [pathParts, `%${value}`];
+                break;
+            case 'ENTITY_FUZZY':
+            case 'ENTITY_EXACT':
+            case 'ENTITY_ALIAS':
+                if (typeof value !== 'string') {
+                    throw new MemoryError(`${operator} requires a string value`, {
+                        code: 'INVALID_VALUE_TYPE',
+                        operator,
+                        value,
+                    });
+                }
+                sqlOperator = 'ILIKE';
+                params = [pathParts, `%${value}%`];
                 break;
             default:
                 throw new MemoryError(`Operator "${operator}" is not supported`, {
@@ -1573,14 +1757,14 @@ new MemorySQLAdapter({
         const needsNumericCast = typeof value === 'number';
         const needsBooleanCast = typeof value === 'boolean';
 
-        let finalPath = jsonPath;
+        let finalPath = `value #>> $${startParamIndex}::text[]`;
         if (needsNumericCast) {
-            finalPath = `(${jsonPath})::numeric`;
+            finalPath = `(${finalPath})::numeric`;
         } else if (needsBooleanCast) {
-            finalPath = `(${jsonPath})::boolean`;
+            finalPath = `(${finalPath})::boolean`;
         }
 
-        const sql = `${finalPath} ${sqlOperator} $${startParamIndex}`;
+        const sql = `${finalPath} ${sqlOperator} $${startParamIndex + 1}`;
         return { sql, params };
     }
 
@@ -1588,124 +1772,116 @@ new MemorySQLAdapter({
      * Handle queries with entity-aware filters
      */
     private async queryWithEntityFilters<T>(options: GetManyQuery): Promise<MemoryQueryResult<T>[]> {
-        const { tag, filters, limit = this.DEFAULT_QUERY_LIMIT } = options;
+        const { filters } = options;
+        const limit = this.validateQueryLimit(options.limit);
         const tenantId = (options as any)?.tenantId || this.defaultTenantId;
+        const { requiredTags } = normalizeRequiredTags(options);
 
-        if (!this.entityService) {
-            throw new MemoryError('Entity service not available for entity-aware queries', {
-                code: 'ENTITY_SERVICE_UNAVAILABLE'
+        const parsedFilters = FilterParser.parseFilters(filters || []);
+        let query = `
+            SELECT key, value, COALESCE(tags, ARRAY[]::text[]) AS tags
+            FROM agent_memory_store
+            WHERE tenant_id = $1
+        `;
+        const queryParams: any[] = [tenantId];
+        let paramIndex = 2;
+
+        if (requiredTags.length > 0) {
+            query += ` AND tags @> $${paramIndex}::text[]`;
+            queryParams.push(requiredTags);
+            paramIndex++;
+        }
+
+        if (parsedFilters.length > 0) {
+            const { sql, params, entityCandidateCount } = await this.buildEntityAwareFilterSQL(
+                { type: 'group', logic: 'AND', filters: parsedFilters },
+                paramIndex,
+                tenantId
+            );
+            query += ` AND (${sql})`;
+            queryParams.push(...params);
+            paramIndex += params.length;
+            this.executionObserver(options as GetManyOptions)?.({
+                residualFilter: false,
+                scannedRows: entityCandidateCount,
             });
         }
 
-        // Parse all filters
-        const parsedFilters = FilterParser.parseFilters(filters || []);
+        query += ` ORDER BY ${this.orderSql(options)} LIMIT $${paramIndex}`;
+        queryParams.push(limit);
 
-        // Separate entity filters from regular filters
-        const entityFilters: AtomicParsedFilter[] = [];
-        const regularFilters: ParsedFilter[] = [];
+        const observer = this.executionObserver(options as GetManyOptions);
+        const startedAt = Date.now();
+        const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
+            key: string;
+            value: unknown;
+            tags: string[] | null;
+        }>;
+        observer?.({ databaseDurationMs: Date.now() - startedAt });
+        return this.mapQueryRows<T>(results, tenantId, observer);
+    }
 
-        parsedFilters.forEach(filter => {
-            if (filter.type === 'atomic' && ['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator)) {
-                entityFilters.push(filter);
-            } else {
-                regularFilters.push(filter);
+    private async buildEntityAwareFilterSQL(
+        filter: ParsedFilter,
+        paramIndex: number,
+        tenantId: string
+    ): Promise<{ sql: string; params: unknown[]; entityCandidateCount: number }> {
+        if (filter.type === 'group') {
+            const parts: string[] = [];
+            const params: unknown[] = [];
+            let entityCandidateCount = 0;
+            for (const child of filter.filters) {
+                const compiled = await this.buildEntityAwareFilterSQL(
+                    child,
+                    paramIndex + params.length,
+                    tenantId
+                );
+                parts.push(`(${compiled.sql})`);
+                params.push(...compiled.params);
+                entityCandidateCount += compiled.entityCandidateCount;
+                if (entityCandidateCount > this.maxResidualScanRows) {
+                    throw new SemanticQueryError(
+                        'SEMANTIC_QUERY_SCAN_BUDGET_EXCEEDED',
+                        'Semantic-memory entity candidate expansion exceeded its configured budget',
+                        { details: { maxResidualScanRows: this.maxResidualScanRows } }
+                    );
+                }
             }
-        });
+            return { sql: parts.join(` ${filter.logic} `), params, entityCandidateCount };
+        }
 
-        // Find memory keys that match entity filters
-        const entityMatchedKeys = new Set<string>();
-
-        for (const filter of entityFilters) {
-            const matchedKeys = await this.findMemoryKeysByEntityFilter(
+        if (['ENTITY_FUZZY', 'ENTITY_EXACT', 'ENTITY_ALIAS'].includes(filter.operator)) {
+            if (typeof filter.value !== 'string') {
+                throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Entity filter values must be strings');
+            }
+            const keys = [...await this.findMemoryKeysByEntityFilter(
                 filter.path,
                 filter.operator as 'ENTITY_FUZZY' | 'ENTITY_EXACT' | 'ENTITY_ALIAS',
                 filter.value,
                 tenantId
-            );
-
-            // If this is the first entity filter, add all matches
-            // Otherwise, intersect with existing matches (AND logic)
-            if (entityMatchedKeys.size === 0) {
-                matchedKeys.forEach(key => entityMatchedKeys.add(key));
-            } else {
-                // Keep only keys that match both this filter and previous filters
-                const intersection = new Set<string>();
-                for (const key of entityMatchedKeys) {
-                    if (matchedKeys.has(key)) {
-                        intersection.add(key);
-                    }
-                }
-                entityMatchedKeys.clear();
-                intersection.forEach(key => entityMatchedKeys.add(key));
+            )];
+            if (keys.length > this.maxResidualScanRows) {
+                throw new SemanticQueryError(
+                    'SEMANTIC_QUERY_SCAN_BUDGET_EXCEEDED',
+                    'Semantic-memory entity candidate expansion exceeded its configured budget',
+                    { details: { maxResidualScanRows: this.maxResidualScanRows } }
+                );
             }
+            // Preserve legacy JSON-resident entity matching for records that have not yet been
+            // aligned. Alignment candidates and the bounded JSON compatibility predicate are
+            // combined before ordering/limit, so hybrid OR expressions cannot under-return.
+            const fallback = this.buildFilterRecursiveRawSQL(filter, paramIndex + (keys.length > 0 ? 1 : 0));
+            return keys.length === 0
+                ? { ...fallback, entityCandidateCount: 0 }
+                : {
+                    sql: `(key = ANY($${paramIndex}::text[]) OR (${fallback.sql}))`,
+                    params: [keys, ...fallback.params],
+                    entityCandidateCount: keys.length,
+                };
         }
 
-        // If no entity matches found, return empty results
-        if (entityMatchedKeys.size === 0) {
-            return [];
-        }
-
-        // Build query for memory records that match entity filters
-        let query = `
-            SELECT key, value, tags
-            FROM agent_memory_store 
-            WHERE tenant_id = $1 AND key = ANY($2)
-        `;
-        const queryParams: any[] = [tenantId, Array.from(entityMatchedKeys)];
-
-        // Add tag filter if specified
-        if (tag) {
-            const normalizedTag = TagNormalizer.normalize(tag);
-            query += ' AND $3 = ANY(tags)';
-            queryParams.push(normalizedTag);
-        }
-
-        // Add regular JSON filters if any
-        if (regularFilters.length > 0) {
-            // For now, we'll use a simple approach and filter in memory
-            // A more sophisticated approach would build complex SQL
-            console.warn('Regular filters combined with entity filters will be applied in memory - may be slower');
-        }
-
-        query += ` ORDER BY ${options.random ? 'RANDOM()' : 'updated_at DESC'} LIMIT ${limit}`;
-
-        const results = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
-            key: string;
-            value: unknown;
-            tags: string[];
-        }>;
-
-        // Apply regular filters in memory if needed
-        let filteredResults: Array<{ key: string; value: unknown; tags: string[] }> = results;
-        if (regularFilters.length > 0) {
-            filteredResults = results.filter((result: { key: string; value: unknown; tags: string[] }) => {
-                return regularFilters.every((filter: ParsedFilter) => {
-                    try {
-                        return this.evaluateFilterInMemory(result.value, filter);
-                    } catch {
-                        return false; // Skip records that can't be evaluated
-                    }
-                });
-            });
-        }
-
-        // Add aligned proxies to results
-        const processedResults: MemoryQueryResult<T>[] = [];
-        for (const result of filteredResults) {
-            let value: unknown = result.value;
-
-            const alignments = await this.getAlignmentsForMemory(result.key, tenantId);
-            if (Object.keys(alignments).length > 0) {
-                value = addAlignedProxies(value, alignments);
-            }
-
-            processedResults.push({
-                key: result.key,
-                value: value as T
-            });
-        }
-
-        return processedResults;
+        const compiled = this.buildFilterRecursiveRawSQL(filter, paramIndex);
+        return { ...compiled, entityCandidateCount: 0 };
     }
 
     /**
@@ -1717,205 +1893,129 @@ new MemorySQLAdapter({
         searchValue: string,
         tenantId: string
     ): Promise<Set<string>> {
-        const matchedKeys = new Set<string>();
-
-        // NEW: Handle array patterns
         const isArrayPattern = fieldPath.includes('[]');
         const sqlFieldPattern = isArrayPattern ?
             fieldPath.replace('[]', '[%]') :
             fieldPath;
+        const expansionLimit = this.maxResidualScanRows + 1;
 
-        if (operator === 'ENTITY_FUZZY') {
-            // Multi-strategy fuzzy search for better venue name matching
-
-            // Strategy 1: Exact match (case-insensitive)
-            const exactEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
-                SELECT id
-                FROM entity_store
-                WHERE LOWER(canonical_name) = LOWER(${searchValue}) AND tenant_id = ${tenantId}
-            `;
-
-            for (const entity of exactEntities) {
-                const alignedMemories = isArrayPattern ?
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                    ` :
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                    `;
-                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
+        if (operator === 'ENTITY_EXACT' || operator === 'ENTITY_ALIAS') {
+            let rows: Array<{ memory_key: string }>;
+            if (operator === 'ENTITY_EXACT' && isArrayPattern) {
+                rows = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT alignment.memory_key
+                    FROM entity_alignment AS alignment
+                    JOIN entity_store AS entity
+                      ON entity.id = alignment.entity_id AND entity.tenant_id = alignment.tenant_id
+                    WHERE alignment.tenant_id = ${tenantId}
+                      AND alignment.field_path LIKE ${sqlFieldPattern}
+                      AND entity.canonical_name = ${searchValue}
+                    ORDER BY alignment.memory_key ASC
+                    LIMIT ${expansionLimit}
+                `;
+            } else if (operator === 'ENTITY_EXACT') {
+                rows = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT alignment.memory_key
+                    FROM entity_alignment AS alignment
+                    JOIN entity_store AS entity
+                      ON entity.id = alignment.entity_id AND entity.tenant_id = alignment.tenant_id
+                    WHERE alignment.tenant_id = ${tenantId}
+                      AND alignment.field_path = ${fieldPath}
+                      AND entity.canonical_name = ${searchValue}
+                    ORDER BY alignment.memory_key ASC
+                    LIMIT ${expansionLimit}
+                `;
+            } else if (isArrayPattern) {
+                rows = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT alignment.memory_key
+                    FROM entity_alignment AS alignment
+                    JOIN entity_store AS entity
+                      ON entity.id = alignment.entity_id AND entity.tenant_id = alignment.tenant_id
+                    WHERE alignment.tenant_id = ${tenantId}
+                      AND alignment.field_path LIKE ${sqlFieldPattern}
+                      AND ${searchValue} = ANY(entity.aliases)
+                    ORDER BY alignment.memory_key ASC
+                    LIMIT ${expansionLimit}
+                `;
+            } else {
+                rows = await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                    SELECT DISTINCT alignment.memory_key
+                    FROM entity_alignment AS alignment
+                    JOIN entity_store AS entity
+                      ON entity.id = alignment.entity_id AND entity.tenant_id = alignment.tenant_id
+                    WHERE alignment.tenant_id = ${tenantId}
+                      AND alignment.field_path = ${fieldPath}
+                      AND ${searchValue} = ANY(entity.aliases)
+                    ORDER BY alignment.memory_key ASC
+                    LIMIT ${expansionLimit}
+                `;
             }
-
-            // Strategy 2: Alias match
-            const aliasEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
-                SELECT id
-                FROM entity_store
-                WHERE ${searchValue} = ANY(aliases) AND tenant_id = ${tenantId}
-            `;
-
-            for (const entity of aliasEntities) {
-                const alignedMemories = isArrayPattern ?
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                    ` :
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                    `;
-                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
-            }
-
-            // Strategy 3: Text similarity (normalized comparison)
-            const normalizedSearch = this.normalizeForSearch(searchValue);
-            const allEntities = await this.prisma.entityStore.findMany({
-                where: { tenantId },
-                select: { id: true, canonicalName: true, aliases: true }
-            });
-
-            for (const entity of allEntities) {
-                const normalizedCanonical = this.normalizeForSearch(entity.canonicalName);
-
-                // Check if normalized search matches canonical name or aliases
-                if (this.areTextsSimilar(normalizedSearch, normalizedCanonical)) {
-                    const alignedMemories = isArrayPattern ?
-                        await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                            SELECT DISTINCT memory_key
-                            FROM entity_alignment
-                            WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                        ` :
-                        await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                            SELECT DISTINCT memory_key
-                            FROM entity_alignment
-                            WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                        `;
-                    alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
-                }
-
-                // Check aliases
-                for (const alias of entity.aliases) {
-                    const normalizedAlias = this.normalizeForSearch(alias);
-                    if (this.areTextsSimilar(normalizedSearch, normalizedAlias)) {
-                        const alignedMemories = isArrayPattern ?
-                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                                SELECT DISTINCT memory_key
-                                FROM entity_alignment
-                                WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                            ` :
-                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                                SELECT DISTINCT memory_key
-                                FROM entity_alignment
-                                WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                            `;
-                        alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
-                        break; // Avoid duplicates
-                    }
-                }
-            }
-
-            // Strategy 4: Embedding similarity (fallback for cases not covered by text similarity)
-            if (this.embedFunction && matchedKeys.size === 0) {
-                try {
-                    const searchEmbedding = await this.embedFunction(searchValue);
-
-                    const similarEntities = await this.prisma.$queryRaw<Array<{
-                        id: string;
-                        canonical_name: string;
-                        entity_type: string;
-                        similarity: number;
-                    }>>`
-                        SELECT 
-                            id,
-                            canonical_name,
-                            entity_type,
-                            1 - (embedding <=> ${searchEmbedding}::vector) as similarity
-                        FROM entity_store 
-                        WHERE tenant_id = ${tenantId}
-                        ORDER BY embedding <=> ${searchEmbedding}::vector
-                        LIMIT 20
-                    `;
-
-                    // Use a lower threshold for embedding similarity as a fallback
-                    const threshold = 0.4;
-                    const matchingEntities = similarEntities.filter((e: { similarity: number }) => e.similarity > threshold);
-
-                    for (const entity of matchingEntities) {
-                        const alignedMemories = isArrayPattern ?
-                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                                SELECT DISTINCT memory_key
-                                FROM entity_alignment
-                                WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                            ` :
-                            await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                                SELECT DISTINCT memory_key
-                                FROM entity_alignment
-                                WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                            `;
-                        alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
-                    }
-                } catch (error) {
-                    console.warn('Embedding similarity search failed:', error);
-                }
-            }
-
-        } else if (operator === 'ENTITY_EXACT') {
-            // Find entities with exact canonical name match
-            const exactEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
-                SELECT id
-                FROM entity_store
-                WHERE canonical_name = ${searchValue} AND tenant_id = ${tenantId}
-            `;
-
-            // Find memory records aligned to these entities
-            for (const entity of exactEntities) {
-                const alignedMemories = isArrayPattern ?
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                    ` :
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                    `;
-
-                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
-            }
-
-        } else if (operator === 'ENTITY_ALIAS') {
-            // Find entities where search value is in aliases array
-            const aliasEntities = await this.prisma.$queryRaw<Array<{ id: string }>>`
-                SELECT id
-                FROM entity_store
-                WHERE ${searchValue} = ANY(aliases) AND tenant_id = ${tenantId}
-            `;
-
-            // Find memory records aligned to these entities
-            for (const entity of aliasEntities) {
-                const alignedMemories = isArrayPattern ?
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path LIKE ${sqlFieldPattern} AND tenant_id = ${tenantId}
-                    ` :
-                    await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
-                        SELECT DISTINCT memory_key
-                        FROM entity_alignment
-                        WHERE entity_id = ${entity.id} AND field_path = ${fieldPath} AND tenant_id = ${tenantId}
-                    `;
-
-                alignedMemories.forEach((record: { memory_key: string }) => matchedKeys.add(record.memory_key));
-            }
+            this.assertEntityExpansionWithinBudget(rows.length);
+            return new Set(rows.map((row) => row.memory_key));
         }
 
-        return matchedKeys;
+        const entities = await this.prisma.entityStore.findMany({
+            where: { tenantId },
+            select: { id: true, canonicalName: true, aliases: true },
+            orderBy: { id: 'asc' },
+            take: expansionLimit,
+        });
+        this.assertEntityExpansionWithinBudget(entities.length);
+        const normalizedSearch = this.normalizeForSearch(searchValue);
+        const entityIds = entities
+            .filter((entity: { canonicalName: string; aliases: string[] }) =>
+                this.areTextsSimilar(normalizedSearch, this.normalizeForSearch(entity.canonicalName))
+                || entity.aliases.some((alias) => this.areTextsSimilar(normalizedSearch, this.normalizeForSearch(alias)))
+            )
+            .map((entity: { id: string }) => entity.id);
+
+        if (entityIds.length === 0 && this.embedFunction) {
+            try {
+                const searchEmbedding = await this.embedFunction(searchValue);
+                const similarEntities = await this.prisma.$queryRaw<Array<{ id: string; similarity: number }>>`
+                    SELECT id, 1 - (embedding <=> ${searchEmbedding}::vector) AS similarity
+                    FROM entity_store
+                    WHERE tenant_id = ${tenantId}
+                    ORDER BY embedding <=> ${searchEmbedding}::vector
+                    LIMIT 20
+                `;
+                entityIds.push(...similarEntities.filter((entity) => entity.similarity > 0.4).map((entity) => entity.id));
+            } catch (error) {
+                console.warn('Embedding similarity search failed:', error);
+            }
+        }
+        if (entityIds.length === 0) return new Set();
+
+        const rows = isArrayPattern
+            ? await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                SELECT DISTINCT memory_key
+                FROM entity_alignment
+                WHERE tenant_id = ${tenantId}
+                  AND entity_id = ANY(${entityIds}::text[])
+                  AND field_path LIKE ${sqlFieldPattern}
+                ORDER BY memory_key ASC
+                LIMIT ${expansionLimit}
+            `
+            : await this.prisma.$queryRaw<Array<{ memory_key: string }>>`
+                SELECT DISTINCT memory_key
+                FROM entity_alignment
+                WHERE tenant_id = ${tenantId}
+                  AND entity_id = ANY(${entityIds}::text[])
+                  AND field_path = ${fieldPath}
+                ORDER BY memory_key ASC
+                LIMIT ${expansionLimit}
+            `;
+        this.assertEntityExpansionWithinBudget(rows.length);
+        return new Set(rows.map((row) => row.memory_key));
+    }
+
+    private assertEntityExpansionWithinBudget(count: number): void {
+        if (count <= this.maxResidualScanRows) return;
+        throw new SemanticQueryError(
+            'SEMANTIC_QUERY_SCAN_BUDGET_EXCEEDED',
+            'Semantic-memory entity candidate expansion exceeded its configured budget',
+            { details: { maxResidualScanRows: this.maxResidualScanRows } }
+        );
     }
 
     /**
@@ -2222,7 +2322,7 @@ new MemorySQLAdapter({
         if (!dryRun) {
             // Normalize existing tags when preserving them
             const existingTags = originalMetadata?.tags || [];
-            const normalizedTags = TagNormalizer.normalizeTags(existingTags);
+            const normalizedTags = normalizeStoredTags(existingTags);
 
             await this.set(key, enrichmentResult.enrichedData, {
                 tenantId: taskContext.tenantId,
@@ -2253,7 +2353,7 @@ new MemorySQLAdapter({
         const tenantId = options.tenantId || this.defaultTenantId;
 
         // Normalize tags before storage
-        const normalizedTags = TagNormalizer.normalizeTags(options.tags || []);
+        const normalizedTags = normalizeStoredTags(options.tags || []);
 
         // Prepare blob metadata with standard fields
         const blobMetadata = {

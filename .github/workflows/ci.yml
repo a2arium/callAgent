@@ -52,7 +52,7 @@ jobs:
         env:
           CI: true
 
-  semantic-cas-postgres:
+  semantic-memory-postgres:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -84,6 +84,8 @@ jobs:
         run: yarn install --immutable
       - name: Apply memory SQL migrations
         run: yarn workspace @a2arium/callagent-memory-sql db:migrate
+      - name: Verify semantic tag index
+        run: yarn workspace @a2arium/callagent-memory-sql db:tags:doctor
       - name: Build packages
         run: yarn build
       - name: Run real PostgreSQL memory tests

@@ -12,7 +12,7 @@ generator client {
 model AgentMemoryStore {
   key       String
   value     Json
-  tags      String[]
+  tags      String[]                     @default([])
   embedding Unsupported("vector(1536)")? // pgvector type for embeddings
   tenantId  String                       @default("default") @map("tenant_id")
   createdAt DateTime                     @default(now()) @map("created_at")
@@ -25,6 +25,7 @@ model AgentMemoryStore {
 
   @@id([tenantId, key]) // Compound primary key for tenant isolation
   @@index([tenantId]) // Index for fast tenant-scoped queries
+  @@index([tags(ops: ArrayOps)], type: Gin, map: "agent_memory_store_tags_gin_idx")
   @@map("agent_memory_store")
 }
 

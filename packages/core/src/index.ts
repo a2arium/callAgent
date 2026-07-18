@@ -203,6 +203,16 @@ export { createEmbeddingFunction, createEmbeddingFunctionWithTracking, isEmbeddi
 // Memory system exports
 export { createMemoryRegistry } from '@a2arium/callagent-memory-engine';
 export type { ExtendedIMemory } from '@a2arium/callagent-memory-engine';
+export { SemanticQueryError } from '@a2arium/callagent-types';
+export type {
+    SemanticQueryErrorCode,
+    SemanticQueryErrorDetails,
+    SemanticMemoryCapabilities,
+    SemanticTagQueryCapability,
+    SemanticPredicateRemovalCapability,
+    SemanticRemoveResult,
+    SemanticQueryTelemetry,
+} from '@a2arium/callagent-types';
 
 // Tenant management exports
 export {

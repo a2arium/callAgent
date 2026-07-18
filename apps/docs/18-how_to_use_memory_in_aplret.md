@@ -319,12 +319,19 @@ Use **`ctx.memory.semantic`** — not `ctx.semantic`:
 | Operation | API |
 | --- | --- |
 | Add / upsert | `await ctx.memory.semantic.add({ id, value, tags?, entities? })` |
-| Read by id / filter | `await ctx.memory.semantic.readItems({ id?, tag?, tags?, limit? })` |
-| Remove | `await ctx.memory.semantic.removeItem(id \| filter \| predicate)` |
+| Read by id / filter | `await ctx.memory.semantic.readItems({ id?, tag?, tags?, filters?, limit? })` |
+| Remove one key | `await ctx.memory.semantic.removeItem(id)` |
+| Remove a query safely | `await ctx.memory.semantic.removeItems({ tag?, tags?, filters?, limit? })` |
 | Low-level get/set | `get` / `set` / `delete` / `read` (adapter-level; prefer high-level API in agents) |
 | Optional atomic update | `getAtomic({ backend })` → `getVersioned` / `compareAndSet` |
 
 Advanced: `recognize`, `enrich`, entity alignment — optional SQL adapter features.
+
+Tag queries use all-of semantics: every normalized value from `tag` and `tags` must be stored on the row. `tag` is compatibility sugar for one requirement, so `{ tag: 'ready', tags: ['site:42'] }` requires both tags. Tags are trimmed, lowercased, de-duplicated, and evaluated in the backend before ordering and limit. SQL collection results include the complete stored tag set.
+
+Limits are finite integers from 0 through 10,000 and default to 1,000. A query accepts at most 64 raw tag inputs, 32 distinct normalized requirements, and 256 UTF-8 bytes per normalized tag. Deterministic reads default to `updatedAt DESC, key ASC`; use `random` only for sampling, never worker sweeps.
+
+Use tag queries for candidate discovery, then parse and validate the stored value and CAS-claim it before an external action. Tags are secondary indexes, not authoritative workflow state. `removeItems` is the only predicate-rechecked, counted removal API for tag and JSON predicates. Entity-alignment predicates remain discovery-only and fail strict-removal capability preflight. The object and JavaScript-predicate overloads of `removeItem` remain deprecated compatibility paths and are not safe for claims, leases, or lifecycle transitions.
 
 ### Who may call `ctx.memory` directly
 

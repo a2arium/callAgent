@@ -83,7 +83,7 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "prisma": "^7.4.0",
+    "prisma": "7.4.0",
     "ts-jest": "^29.3.2",
     "tsd": "^0.33.0",
     "typescript": "^5.8.3"
