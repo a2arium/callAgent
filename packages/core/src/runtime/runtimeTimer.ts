@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { RuntimeDriverIds, RuntimeWakeEvent } from './runtimeDriver.js';
 
-export type RuntimeTimerKind = 'token_expiry' | 'sleep' | 'child_timeout';
+export type RuntimeTimerKind = 'token_expiry' | 'sleep' | 'child_timeout' | 'task_run_timeout';
 export type RuntimeTimerStatus = 'scheduled' | 'firing' | 'fired' | 'canceled';
-export type TimerExpiredReason = 'input_timeout' | 'sleep_due' | 'child_timeout';
+export type TimerExpiredReason = 'input_timeout' | 'sleep_due' | 'child_timeout' | 'task_run_timeout';
 
 export type RuntimeTimerRecord = {
     id: string;
@@ -79,6 +79,7 @@ export function deriveRuntimeTimerIdempotencyKey(params: {
 export function timerKindToReason(kind: RuntimeTimerKind | string): TimerExpiredReason {
     if (kind === 'sleep') return 'sleep_due';
     if (kind === 'child_timeout') return 'child_timeout';
+    if (kind === 'task_run_timeout') return 'task_run_timeout';
     return 'input_timeout';
 }
 

@@ -41,7 +41,7 @@ import { PrismaClient } from '../generated/prisma-client/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
-import { resolveBackgroundTaskDrainTimeout } from './backgroundTaskTimeout.js';
+import { resolveActiveRunTimeout, resolveTerminalDrainTimeout } from './backgroundTaskTimeout.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -586,46 +586,73 @@ export async function runAgentWithStreaming(
                 if (wmCap) {
                     runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
                 }
-                const returnedTask = await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
-                if (returnedTask && returnedTask.status?.state === 'failed') {
-                    // Preserve the authoritative terminal status before exiting non-zero.
-                    // The scenario/file consumer must not have to infer task failure from process exit.
-                    transport.handleStatus(returnedTask.status, true);
-                    const failMsg = returnedTask.status.metadata?.reason ||
-                        (returnedTask.status.message?.parts?.find(p => p.type === 'text') as any)?.text ||
-                        'Task execution failed';
-                    throw new AgentError(failMsg, agentName, {
-                        taskId: taskCtx.task.id,
-                        terminalStatusPreserved: true,
-                    });
-                }
-                // Wait for any background tool executions or nonblocking conversation wakeups to complete.
-                // CLI runs must not validate/exit while the active task graph still has background turns in flight.
-                // If startTask returned an await_* status, this is active graph execution, not cleanup; use
-                // a run-sized wait budget instead of the short terminal cleanup budget.
-                const backgroundDrain = resolveBackgroundTaskDrainTimeout({
-                    explicitTimeoutMs: process.env.CALLAGENT_BACKGROUND_TASK_TIMEOUT_MS,
+                const runStartedAtMs = Date.now();
+                const activeRun = resolveActiveRunTimeout({
+                    explicitTimeoutMs: process.env.CALLAGENT_ACTIVE_RUN_TIMEOUT_MS,
                     realRunTimeoutMs: process.env.REAL_RUN_TIMEOUT_MS,
                     latencyBudgetMs: plugin.resolved.runtimeManifest.budgets?.latencyMs,
-                    taskState: returnedTask?.status?.state,
                 });
-                runnerLogger.info('Waiting for background task drain', {
-                    taskId: taskCtx.task.id,
-                    activeGraph: backgroundDrain.activeGraph,
-                    timeoutMs: backgroundDrain.timeoutMs,
-                    source: backgroundDrain.source,
-                    taskState: returnedTask?.status?.state ?? 'unknown',
-                });
-                const drainReport = await engine.drainBackgroundTasks({
-                    rootTaskId: taskCtx.task.id,
-                    timeoutMs: backgroundDrain.timeoutMs,
-                    throwOnTimeout: true,
-                });
-                if (drainReport.detachedCount > 0) {
-                    runnerLogger.warn('Terminal result preserved with detached background operations', {
+                const terminalDrain = resolveTerminalDrainTimeout(
+                    process.env.CALLAGENT_BACKGROUND_TASK_TIMEOUT_MS
+                );
+                const returnedTask = await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
+                let authoritativeStatus = returnedTask?.status;
+                if (
+                    authoritativeStatus === undefined ||
+                    authoritativeStatus.state === 'submitted' ||
+                    authoritativeStatus.state === 'working'
+                ) {
+                    runnerLogger.info('Waiting for durable root terminality', {
                         taskId: taskCtx.task.id,
-                        detachedCount: drainReport.detachedCount,
-                        activeCount: drainReport.activeCount,
+                        timeoutMs: activeRun.timeoutMs,
+                        source: activeRun.source,
+                    });
+                    const observed = await engine.awaitTaskTerminal({
+                        tenantId: finalTenantId,
+                        taskId: taskCtx.task.id,
+                        agentId: agentName,
+                        timeoutMs: activeRun.timeoutMs,
+                        timeoutSource: activeRun.source,
+                        startedAtMs: runStartedAtMs,
+                    });
+                    authoritativeStatus = observed.status;
+                    if (returnedTask !== undefined) returnedTask.status = authoritativeStatus;
+                }
+
+                const isTerminal = authoritativeStatus?.state === 'completed' ||
+                    authoritativeStatus?.state === 'failed' ||
+                    authoritativeStatus?.state === 'canceled';
+                if (isTerminal) {
+                    runnerLogger.info('Draining terminal root cleanup', {
+                        taskId: taskCtx.task.id,
+                        timeoutMs: terminalDrain.timeoutMs,
+                        source: terminalDrain.source,
+                        taskState: authoritativeStatus?.state,
+                    });
+                    const drainReport = await engine.drainBackgroundTasks({
+                        rootTaskId: taskCtx.task.id,
+                        timeoutMs: terminalDrain.timeoutMs,
+                        throwOnTimeout: false,
+                    });
+                    if (drainReport.detachedCount > 0 || drainReport.activeCount > 0) {
+                        runnerLogger.warn('Terminal result preserved with background cleanup diagnostics', {
+                            taskId: taskCtx.task.id,
+                            detachedCount: drainReport.detachedCount,
+                            activeCount: drainReport.activeCount,
+                            remainingTasks: drainReport.remainingTasks,
+                        });
+                    }
+                }
+
+                if (authoritativeStatus?.state === 'failed' || authoritativeStatus?.state === 'canceled') {
+                    transport.handleStatus(authoritativeStatus, true);
+                    const reason = typeof authoritativeStatus.metadata?.reason === 'string'
+                        ? authoritativeStatus.metadata.reason
+                        : (authoritativeStatus.message?.parts?.find(p => p.type === 'text') as any)?.text ||
+                          (authoritativeStatus.state === 'failed' ? 'Task execution failed' : 'Task canceled');
+                    throw new AgentError(reason, agentName, {
+                        taskId: taskCtx.task.id,
+                        terminalStatusPreserved: true,
                     });
                 }
                 logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);

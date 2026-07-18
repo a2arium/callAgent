@@ -75,6 +75,7 @@ export async function startHatchetRuntimeWorkerApp(
                     prisma: sessionStore.getPrismaClient(),
                     turnExecutor: stack.turnExecutor,
                     budgetEvents,
+                    onTaskRunTimeout: stack.onTaskRunTimeout,
                 }).runtimeDriver,
         },
     });
@@ -84,6 +85,7 @@ export async function startHatchetRuntimeWorkerApp(
         prisma: sessionStore.getPrismaClient(),
         sessionManager: budgetEvents,
         turnExecutor: composition.turnExecutor,
+        onTaskRunTimeout: (params) => composition.engine.handleTaskRunTimeout(params),
         workerName:
             options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker',
     });

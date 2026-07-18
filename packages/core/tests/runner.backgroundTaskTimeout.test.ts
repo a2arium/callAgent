@@ -1,6 +1,8 @@
 import {
     BACKGROUND_TASK_DRAIN_TIMEOUT_DEFAULTS,
+    resolveActiveRunTimeout,
     resolveBackgroundTaskDrainTimeout,
+    resolveTerminalDrainTimeout,
 } from '../src/runner/backgroundTaskTimeout.js';
 
 describe('runner background task drain timeout policy', () => {
@@ -68,5 +70,13 @@ describe('runner background task drain timeout policy', () => {
             source: 'terminal-default',
             activeGraph: false,
         });
+    });
+
+    it('separates active-run and terminal-cleanup overrides', () => {
+        expect(resolveActiveRunTimeout({
+            explicitTimeoutMs: '4321',
+            realRunTimeoutMs: '9999',
+        })).toEqual({ timeoutMs: 4321, source: 'active-run-env' });
+        expect(resolveTerminalDrainTimeout('1234')).toEqual({ timeoutMs: 1234, source: 'env' });
     });
 });

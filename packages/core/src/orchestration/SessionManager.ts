@@ -330,7 +330,8 @@ export class SessionManager {
         topic: string,
         key: string,
         payload: Record<string, unknown>,
-        dispatchContext?: OutboxDispatchContext
+        dispatchContext?: OutboxDispatchContext,
+        idempotencyKey?: string
     ): Promise<{ id: string } | void> {
         if (!this.store) return;
         const enrichedPayload = await this.enrichOutboxPayload(tenantId, key, payload, dispatchContext);
@@ -339,7 +340,7 @@ export class SessionManager {
             topic,
             key,
             payload: enrichedPayload,
-            idempotencyKey: nextSegmentOutboxIdempotencyKey(topic),
+            idempotencyKey: idempotencyKey ?? nextSegmentOutboxIdempotencyKey(topic),
         });
         if (result?.id && this.onOutboxEnqueued) {
             const ctx = resolveOutboxDispatchContext(enrichedPayload, dispatchContext);

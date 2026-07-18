@@ -244,6 +244,51 @@ describe('InProcessRuntimeDriver', () => {
         second.clearAllTimers();
     });
 
+    it('reconciles a persisted root deadline through the terminal handler without running a segment', async () => {
+        const timer = {
+            id: 'row-root-timeout', tenantId: 't1', taskId: 'task-1', agentId: 'agent-1',
+            rootTaskId: 'task-1', token: 'root-run-timeout', timerId: 'timer-root-timeout',
+            dueAt: new Date(1_000), kind: 'task_run_timeout', status: 'scheduled',
+            idempotencyKey: 'timer:t1:task-1:root-run-timeout:timer-root-timeout',
+            fireLeaseId: null, fireLeaseUntil: null,
+            payload: { code: 'TASK_RUN_TIMEOUT', timeoutMs: 1_000 },
+            providerRunId: null, providerTaskRunId: null, error: null, firedAt: null, canceledAt: null,
+            createdAt: new Date(0), updatedAt: new Date(0),
+        };
+        const marks: string[] = [];
+        const runtimeTimers = {
+            listScheduled: async () => [timer],
+            acquireFireLease: async () => ({ timer, fireLeaseId: 'lease-root' }),
+            markFired: async () => { marks.push('fired'); },
+            markFailed: async () => undefined,
+            cancelTaskTimers: async () => 0,
+        };
+        const { executor, calls } = makeFakeExecutor();
+        const rootTimeouts: unknown[] = [];
+        const restoredScheduler = makeManualScheduler();
+        const restored = new InProcessRuntimeDriver({
+            turnExecutor: executor,
+            scheduler: restoredScheduler,
+            now: () => 2_000,
+            runtimeTimers: runtimeTimers as never,
+            timerReconcileIntervalMs: 60_000,
+            onTaskRunTimeout: async (params) => { rootTimeouts.push(params); },
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(restoredScheduler.pending()).toBe(1);
+        restoredScheduler.fireAll();
+        await restored.waitForIdle();
+
+        expect(calls).toHaveLength(0);
+        expect(rootTimeouts).toEqual([expect.objectContaining({
+            tenantId: 't1', taskId: 'task-1', token: 'root-run-timeout',
+        })]);
+        expect(marks).toEqual(['fired']);
+        restored.clearAllTimers();
+    });
+
     it('marks a persisted timer fired only after the timeout segment commits', async () => {
         let releaseSegment!: (result: SegmentResult) => void;
         const segment = new Promise<SegmentResult>((resolve) => {

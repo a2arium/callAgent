@@ -94,4 +94,45 @@ describe('executeTimerFireTask', () => {
             status: 'completed',
         }));
     });
+
+    it('claims a root-run timeout directly instead of publishing a segment wake', async () => {
+        const dueAt = new Date('2026-06-23T00:00:00.000Z');
+        const timer = {
+            id: 'row-root', tenantId: 'tenant-1', taskId: 'root-1', agentId: 'agent-1',
+            rootTaskId: 'root-1', token: 'root-run-timeout', timerId: 'timer-root', dueAt,
+            kind: 'task_run_timeout', status: 'firing', idempotencyKey: 'root-key',
+            fireLeaseId: 'lease-root', fireLeaseUntil: new Date(dueAt.getTime() + 60_000),
+            payload: { code: 'TASK_RUN_TIMEOUT', timeoutMs: 1_000 },
+            providerRunId: null, providerTaskRunId: null, error: null, firedAt: null,
+            canceledAt: null, createdAt: dueAt, updatedAt: dueAt,
+        };
+        const runtimeTimers = {
+            acquireFireLease: jest.fn(async () => ({ timer, fireLeaseId: 'lease-root' })),
+            markFired: jest.fn(async () => true),
+        };
+        const events = { push: jest.fn(async () => undefined) };
+        const onTaskRunTimeout = jest.fn(async () => undefined);
+        const ctx = {
+            workflowRunId: () => 'run-root',
+            taskRunExternalId: () => 'task-run-root',
+        };
+
+        await executeTimerFireTask(
+            {
+                tenantId: 'tenant-1', taskId: 'root-1', agentId: 'agent-1',
+                token: 'root-run-timeout', timerId: 'timer-root', idempotencyKey: 'root-key',
+            },
+            ctx as never,
+            { runtimeTimers: runtimeTimers as never, events, onTaskRunTimeout }
+        );
+
+        expect(onTaskRunTimeout).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'tenant-1', taskId: 'root-1', token: 'root-run-timeout',
+            dueAt: dueAt.toISOString(),
+        }));
+        expect(events.push).not.toHaveBeenCalled();
+        expect(runtimeTimers.markFired).toHaveBeenCalledWith(expect.objectContaining({
+            id: 'row-root', fireLeaseId: 'lease-root',
+        }));
+    });
 });

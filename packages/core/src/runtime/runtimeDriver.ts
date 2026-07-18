@@ -63,7 +63,7 @@ export type RuntimeWakeEvent =
           timerId: string;
           dueAt: string;
           firedAt: string;
-          reason: 'input_timeout' | 'sleep_due' | 'child_timeout';
+          reason: 'input_timeout' | 'sleep_due' | 'child_timeout' | 'task_run_timeout';
           payload?: unknown;
       }
     | { kind: 'external'; token: string; type: string; data: unknown }
@@ -83,7 +83,7 @@ export type EnqueueChildDispatchParams = RuntimeDriverIds & {
 export type ScheduleTimerParams = RuntimeDriverIds & {
     token: string;
     fireAt: string;
-    kind: 'token_expiry' | 'sleep' | 'child_timeout';
+    kind: 'token_expiry' | 'sleep' | 'child_timeout' | 'task_run_timeout';
     payload?: unknown;
 };
 export type CancelParams = RuntimeDriverIds & { reason: string };

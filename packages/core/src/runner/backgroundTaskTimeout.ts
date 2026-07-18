@@ -8,6 +8,16 @@ export type BackgroundTaskDrainTimeoutDecision = {
     activeGraph: boolean;
 };
 
+export type ActiveRunTimeoutDecision = {
+    timeoutMs: number;
+    source: 'active-run-env' | 'real-run-env' | 'manifest-latency' | 'active-default';
+};
+
+export type TerminalDrainTimeoutDecision = {
+    timeoutMs: number;
+    source: 'env' | 'terminal-default';
+};
+
 export const BACKGROUND_TASK_DRAIN_TIMEOUT_DEFAULTS = {
     terminalMs: DEFAULT_TERMINAL_BACKGROUND_TASK_TIMEOUT_MS,
     activeMs: DEFAULT_ACTIVE_BACKGROUND_TASK_TIMEOUT_MS,
@@ -38,42 +48,67 @@ function normalizePositiveNumber(value: unknown): number | undefined {
         : undefined;
 }
 
+export function resolveActiveRunTimeout(params: {
+    explicitTimeoutMs?: string;
+    realRunTimeoutMs?: string;
+    latencyBudgetMs?: unknown;
+}): ActiveRunTimeoutDecision {
+    const explicitTimeoutMs = parseOptionalPositiveInt(params.explicitTimeoutMs);
+    if (explicitTimeoutMs !== undefined) {
+        return { timeoutMs: explicitTimeoutMs, source: 'active-run-env' };
+    }
+    const realRunTimeoutMs = parseOptionalPositiveInt(params.realRunTimeoutMs);
+    if (realRunTimeoutMs !== undefined) {
+        return { timeoutMs: realRunTimeoutMs, source: 'real-run-env' };
+    }
+    const latencyBudgetMs = normalizePositiveNumber(params.latencyBudgetMs);
+    if (latencyBudgetMs !== undefined) {
+        return {
+            timeoutMs: latencyBudgetMs + ACTIVE_BACKGROUND_TASK_GRACE_MS,
+            source: 'manifest-latency',
+        };
+    }
+    return { timeoutMs: DEFAULT_ACTIVE_BACKGROUND_TASK_TIMEOUT_MS, source: 'active-default' };
+}
+
+export function resolveTerminalDrainTimeout(explicitTimeoutMs?: string): TerminalDrainTimeoutDecision {
+    const parsed = parseOptionalPositiveInt(explicitTimeoutMs);
+    return parsed !== undefined
+        ? { timeoutMs: parsed, source: 'env' }
+        : { timeoutMs: DEFAULT_TERMINAL_BACKGROUND_TASK_TIMEOUT_MS, source: 'terminal-default' };
+}
+
 export function resolveBackgroundTaskDrainTimeout(params: {
     explicitTimeoutMs?: string;
     realRunTimeoutMs?: string;
     latencyBudgetMs?: unknown;
     taskState?: string;
 }): BackgroundTaskDrainTimeoutDecision {
-    const explicitTimeoutMs = parseOptionalPositiveInt(params.explicitTimeoutMs);
     const activeGraph = !TERMINAL_STATES.has((params.taskState ?? '').toLowerCase());
+    const explicitTimeoutMs = parseOptionalPositiveInt(params.explicitTimeoutMs);
     if (explicitTimeoutMs !== undefined) {
         return { timeoutMs: explicitTimeoutMs, source: 'env', activeGraph };
     }
-
     const realRunTimeoutMs = parseOptionalPositiveInt(params.realRunTimeoutMs);
     if (realRunTimeoutMs !== undefined) {
         return { timeoutMs: realRunTimeoutMs, source: 'real-run-env', activeGraph };
     }
-
     if (activeGraph) {
-        const latencyBudgetMs = normalizePositiveNumber(params.latencyBudgetMs);
-        if (latencyBudgetMs !== undefined) {
-            return {
-                timeoutMs: latencyBudgetMs + ACTIVE_BACKGROUND_TASK_GRACE_MS,
-                source: 'manifest-latency',
-                activeGraph,
-            };
-        }
+        // Compatibility wrapper: historically the background override also
+        // controlled active execution. New callers should use the split helpers.
+        const active = resolveActiveRunTimeout({
+            latencyBudgetMs: params.latencyBudgetMs,
+        });
         return {
-            timeoutMs: DEFAULT_ACTIVE_BACKGROUND_TASK_TIMEOUT_MS,
-            source: 'active-default',
+            timeoutMs: active.timeoutMs,
+            source: active.source === 'active-run-env' ? 'env' : active.source,
             activeGraph,
         };
     }
-
+    const terminal = resolveTerminalDrainTimeout(params.explicitTimeoutMs);
     return {
-        timeoutMs: DEFAULT_TERMINAL_BACKGROUND_TASK_TIMEOUT_MS,
-        source: 'terminal-default',
+        timeoutMs: terminal.timeoutMs,
+        source: terminal.source,
         activeGraph,
     };
 }

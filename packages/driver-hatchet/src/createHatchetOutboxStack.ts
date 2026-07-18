@@ -11,7 +11,7 @@ import type { HatchetEventPusher, PayloadBudgetEventRecorder } from './hatchetRu
 import { createOutboxDispatchTask } from './tasks/outboxDispatch.js';
 import { createSegmentTask } from './tasks/segment.js';
 import { agentTaskName, createTaskTask } from './tasks/task.js';
-import { createTimerFireTask } from './tasks/timerFire.js';
+import { createTimerFireTask, type TimerFireDeps } from './tasks/timerFire.js';
 import { isTimerSurfaceEnabled, TimerReconciler } from './timerReconciler.js';
 import {
     resolveAgentHatchetExecutionTimeout,
@@ -33,6 +33,7 @@ export type CreateHatchetOutboxStackParams = {
     hatchet?: HatchetClient;
     turnExecutor?: TurnExecutor;
     budgetEvents?: PayloadBudgetEventRecorder;
+    onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
 };
 
 export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams): HatchetOutboxStack {
@@ -49,6 +50,7 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
         runtimeTimers,
         driverRuns,
         events: resolveEventPusher(hatchet),
+        onTaskRunTimeout: params.onTaskRunTimeout,
     });
     const registeredAgents = globalAgentRegistry.listAgents();
     const agentTaskTasks =
@@ -95,6 +97,7 @@ export async function startOutboxWorker(params: {
     workerName?: string;
     hatchet?: HatchetClient;
     turnExecutor?: TurnExecutor;
+    onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
 }): Promise<{ worker: { start: () => Promise<void>; stop: () => Promise<void> } }> {
     const hatchet = params.hatchet ?? createHatchetClient();
     const driverRuns = new DriverRunsRepository(params.prisma);
@@ -108,6 +111,7 @@ export async function startOutboxWorker(params: {
         runtimeTimers,
         driverRuns,
         events: resolveEventPusher(hatchet),
+        onTaskRunTimeout: params.onTaskRunTimeout,
     });
     if (params.turnExecutor !== undefined) {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker', {

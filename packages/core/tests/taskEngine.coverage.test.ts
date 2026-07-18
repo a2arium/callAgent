@@ -97,6 +97,10 @@ class FakeSessionStore extends InMemorySessionManager {
         return eventList.map((e) => ({ tenantId, sessionId, type: e.type, payload: e.payload }));
     }
 
+    getOutbox() {
+        return [...this.outboxArr()];
+    }
+
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
         const snap = this.snapshotsMap().get(`${tenantId}:${sessionId}`) ?? null;
         if (!snap) return null;
@@ -441,6 +445,164 @@ describe('TaskEngine orchestration coverage', () => {
         });
         expect(store.getEvents('t', 'task-cancel-provider-fails').map((event) => event.type)).toEqual(['task.canceled']);
         expect(cancel).toHaveBeenCalled();
+    });
+
+    test('awaitTaskTerminal durably cancels an active root at its deadline', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel,
+                dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        store.seed('t', 'active-root', {
+            meta: {
+                agentId: 'agent-a',
+                taskLifecycle: {
+                    taskId: 'active-root',
+                    rootTaskId: 'active-root',
+                    ancestorTaskIds: [],
+                    state: 'active',
+                },
+                awaiting: { kind: 'await_child', token: 'child-1' },
+            },
+        }, BigInt(0), 'agent-a');
+        let clock = 1_000;
+
+        const result = await engine.awaitTaskTerminal({
+            tenantId: 't',
+            taskId: 'active-root',
+            agentId: 'agent-a',
+            timeoutMs: 50,
+            timeoutSource: 'test',
+            startedAtMs: clock,
+            pollIntervalMs: 10,
+            now: () => clock,
+            sleep: async (ms) => { clock += ms; },
+        });
+
+        expect(result.status).toMatchObject({
+            state: 'canceled',
+            metadata: {
+                reason: 'active_run_timeout',
+                code: 'TASK_RUN_TIMEOUT',
+                timeoutMs: 50,
+            },
+        });
+        expect((store.getSnapshot('t', 'active-root')?.snapshot as any).meta.taskLifecycle.state)
+            .toBe('canceled');
+        expect((store.getSnapshot('t', 'active-root')?.snapshot as any).meta.taskTerminal)
+            .toMatchObject({
+                state: 'canceled',
+                deliveryKey: 'active-root:terminal:canceled',
+                enqueuedAt: expect.any(String),
+            });
+        expect(store.getOutbox()).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                topic: 'task.status',
+                key: 'active-root',
+                payload: expect.objectContaining({
+                    final: true,
+                    deliveryKey: 'active-root:terminal:canceled',
+                }),
+            }),
+        ]));
+        expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
+            taskId: 'active-root',
+            reason: 'active_run_timeout',
+        }));
+    });
+
+    test('awaitTaskTerminal returns input-required without installing a run deadline', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel,
+                dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        store.seed('t', 'input-root', {
+            meta: {
+                agentId: 'agent-a',
+                taskLifecycle: {
+                    taskId: 'input-root',
+                    rootTaskId: 'input-root',
+                    ancestorTaskIds: [],
+                    state: 'active',
+                },
+            },
+            pending: { inputs: { 'input-1': { status: 'pending' } } },
+        }, BigInt(0), 'agent-a');
+
+        const result = await engine.awaitTaskTerminal({
+            tenantId: 't',
+            taskId: 'input-root',
+            agentId: 'agent-a',
+            timeoutMs: 50,
+            timeoutSource: 'test',
+        });
+
+        expect(result).toMatchObject({
+            lifecycle: 'input-required',
+            status: { state: 'input-required', metadata: { token: 'input-1' } },
+        });
+        expect((store.getSnapshot('t', 'input-root')?.snapshot as any).meta.rootRunDeadline)
+            .toBeUndefined();
+        expect(cancel).not.toHaveBeenCalled();
+    });
+
+    test('cancelTask cannot replace an already completed durable lifecycle', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel,
+                dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        store.seed('t', 'completed-root', {
+            meta: {
+                taskLifecycle: {
+                    taskId: 'completed-root',
+                    rootTaskId: 'completed-root',
+                    ancestorTaskIds: [],
+                    state: 'completed',
+                    changedAt: '2026-07-18T00:00:00.000Z',
+                },
+            },
+        }, BigInt(0), 'agent-a');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'completed-root',
+            reason: 'active_run_timeout',
+            metadata: { code: 'TASK_RUN_TIMEOUT', timeoutMs: 50 },
+        });
+
+        expect((store.getSnapshot('t', 'completed-root')?.snapshot as any).meta.taskLifecycle.state)
+            .toBe('completed');
+        expect(store.getEvents('t', 'completed-root')).toEqual([]);
+        expect(cancel).not.toHaveBeenCalled();
     });
 
     test('cancelTask notifies an A2A parent and schedules async resume for child cancellation', async () => {

@@ -30,6 +30,14 @@ export type TimerFireTaskOutput = JsonObject & {
 
 export type TimerFireDeps = {
     runtimeTimers: RuntimeTimerRepository;
+    onTaskRunTimeout?: (params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        token: string;
+        dueAt: string;
+        payload?: unknown;
+    }) => Promise<void>;
     driverRuns?: DriverRunsRepository;
     events?: {
         push: (
@@ -96,22 +104,38 @@ async function executeTimerFireTaskInner(
     }
 
     try {
-        if (deps.events === undefined) {
-            throw new Error('TIMER_EVENT_PUSHER_MISSING');
-        }
         const firedAt = new Date();
-        const wake = timerRecordToWake(lease.timer, firedAt);
-        await deps.events.push(
-            `aplret.timer.${input.token}`,
-            {
+        if (lease.timer.kind === 'task_run_timeout') {
+            if (deps.onTaskRunTimeout === undefined) {
+                throw new Error('TASK_RUN_TIMEOUT_HANDLER_MISSING');
+            }
+            await deps.onTaskRunTimeout({
                 tenantId: input.tenantId,
                 taskId: input.taskId,
-                agentId: input.agentId,
-                idempotencyKey: input.idempotencyKey,
-                ...wake,
-            },
-            { key: `${input.tenantId}:${input.taskId}:timer:${input.timerId}` }
-        );
+                ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
+                token: input.token,
+                dueAt: lease.timer.dueAt.toISOString(),
+                ...(lease.timer.payload !== null && lease.timer.payload !== undefined
+                    ? { payload: lease.timer.payload }
+                    : {}),
+            });
+        } else {
+            if (deps.events === undefined) {
+                throw new Error('TIMER_EVENT_PUSHER_MISSING');
+            }
+            const wake = timerRecordToWake(lease.timer, firedAt);
+            await deps.events.push(
+                `aplret.timer.${input.token}`,
+                {
+                    tenantId: input.tenantId,
+                    taskId: input.taskId,
+                    agentId: input.agentId,
+                    idempotencyKey: input.idempotencyKey,
+                    ...wake,
+                },
+                { key: `${input.tenantId}:${input.taskId}:timer:${input.timerId}` }
+            );
+        }
         await deps.runtimeTimers.markFired({
             id: lease.timer.id,
             fireLeaseId: lease.fireLeaseId,

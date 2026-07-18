@@ -25,8 +25,8 @@ import {
     reconcileSnapshotMutation,
 } from './persistence/SnapshotRepository.js';
 import {
+    claimTaskTerminalInSnapshot,
     ensureTaskLifecycle,
-    markTaskLifecycle,
     readTaskLifecycle,
 } from './TaskLifecycle.js';
 import { boundPendingToolTerminals, type PendingToolTerminals } from './ToolsRegistry.js';
@@ -433,6 +433,7 @@ export class TaskExecutor {
             log.warn('Failed to fetch LLM state during saveSnapshot', { error: (err as Error).message });
         }
         const activeIdempotencyKey = currentSegmentIdempotencyKey();
+        const terminalClaimedAt = new Date().toISOString();
         await reconcileSnapshotMutation({
             session: sessionManager,
             tenantId,
@@ -451,16 +452,29 @@ export class TaskExecutor {
                     ...(a2aParent?.parentTaskId ? { parentTaskId: a2aParent.parentTaskId } : {}),
                 });
                 const lifecycleSnapshot = outcome.kind === 'complete' || outcome.kind === 'fail'
-                    ? markTaskLifecycle(lifecycleBase, {
+                    ? claimTaskTerminalInSnapshot(lifecycleBase, {
                           taskId: sessionId,
                           state: outcome.kind === 'complete' ? 'completed' : 'failed',
-                          changedAt: new Date().toISOString(),
+                          claimedAt: terminalClaimedAt,
                           ...(outcome.kind === 'fail' ? { reason: outcome.reason } : {}),
-                      })
+                          status: outcome.kind === 'complete'
+                              ? { state: 'completed', timestamp: terminalClaimedAt }
+                              : {
+                                    state: 'failed',
+                                    timestamp: terminalClaimedAt,
+                                    message: {
+                                        role: 'agent',
+                                        parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }],
+                                    },
+                                    metadata: { reason: outcome.reason },
+                                },
+                      }).snapshot
                     : lifecycleBase;
                 const taskLifecycle = readTaskLifecycle(lifecycleSnapshot, sessionId);
+                const lifecycleMeta = (lifecycleSnapshot as { meta?: Record<string, unknown> }).meta ?? {};
                 const nextMeta = {
                     ...prevMeta,
+                    ...lifecycleMeta,
                     turn: env.turn,
                     budgets: loopOpts,
                     ...(taskLifecycle !== undefined ? { taskLifecycle } : {}),

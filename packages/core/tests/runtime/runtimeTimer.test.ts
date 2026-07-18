@@ -36,6 +36,7 @@ describe('runtime timer helpers', () => {
         expect(timerKindToReason('token_expiry')).toBe('input_timeout');
         expect(timerKindToReason('sleep')).toBe('sleep_due');
         expect(timerKindToReason('child_timeout')).toBe('child_timeout');
+        expect(timerKindToReason('task_run_timeout')).toBe('task_run_timeout');
     });
 
     it('does not reopen fired timers when schedule is replayed', async () => {

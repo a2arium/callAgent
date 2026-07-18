@@ -72,6 +72,15 @@ export type InProcessRuntimeDriverDeps = {
     scheduler?: TimerScheduler;
     /** SQL timer repository used to survive runtime recreation. */
     runtimeTimers?: RuntimeTimerRepository;
+    /** Root-run expiry bypasses segment execution and claims task terminality directly. */
+    onTaskRunTimeout?: (params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        token: string;
+        dueAt: string;
+        payload?: unknown;
+    }) => Promise<void>;
     timerReconcileIntervalMs?: number;
 };
 
@@ -102,6 +111,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private readonly now: () => number;
     private readonly scheduler: TimerScheduler;
     private readonly runtimeTimers?: RuntimeTimerRepository;
+    private readonly onTaskRunTimeout?: InProcessRuntimeDriverDeps['onTaskRunTimeout'];
 
     /** In-flight background work, so tests and shutdown can await quiescence. */
     private readonly inFlight = new Set<Promise<unknown>>();
@@ -126,6 +136,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
         this.now = deps.now ?? (() => Date.now());
         this.scheduler = deps.scheduler ?? defaultScheduler;
         this.runtimeTimers = deps.runtimeTimers;
+        this.onTaskRunTimeout = deps.onTaskRunTimeout;
         if (this.runtimeTimers !== undefined) {
             void this.reconcilePersistedTimers().catch((error) =>
                 log.warn('Persisted timer reconciliation failed', {
@@ -289,18 +300,32 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
         });
         if (this.runtimeTimers !== undefined && lease === null) return;
         try {
-            await this.runSegmentAwait({
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                agentId: params.agentId,
-                idempotencyKey: deriveRuntimeTimerIdempotencyKey({
+            if (params.kind === 'task_run_timeout') {
+                if (this.onTaskRunTimeout === undefined) {
+                    throw new Error('TASK_RUN_TIMEOUT_HANDLER_MISSING');
+                }
+                await this.onTaskRunTimeout({
                     tenantId: params.tenantId,
                     taskId: params.taskId,
+                    ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
                     token: params.token,
-                    timerId,
-                }),
-                wake: wakeEventToTurnWake(event),
-            });
+                    dueAt: params.fireAt,
+                    ...(params.payload !== undefined ? { payload: params.payload } : {}),
+                });
+            } else {
+                await this.runSegmentAwait({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    idempotencyKey: deriveRuntimeTimerIdempotencyKey({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        token: params.token,
+                        timerId,
+                    }),
+                    wake: wakeEventToTurnWake(event),
+                });
+            }
             if (lease !== undefined && lease !== null) {
                 await this.runtimeTimers?.markFired({
                     id: lease.timer.id,

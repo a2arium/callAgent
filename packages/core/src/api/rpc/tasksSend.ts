@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { normalizeRpcTaskParams } from './taskParams.js';
+import { resolveActiveRunTimeout } from '../../runner/backgroundTaskTimeout.js';
 
 type RequestWithTenant = Request & { tenantId?: string };
 
@@ -29,6 +30,7 @@ export async function handleTasksSend(req: Request, res: Response): Promise<void
         if (!engine) return;
 
         // Process in buffered mode (not streaming)
+        const startedAtMs = Date.now();
         const resultTask = await engine.startTask({
             task,
             isStreaming: false,
@@ -37,6 +39,29 @@ export async function handleTasksSend(req: Request, res: Response): Promise<void
                 ? params.tenantId
                 : ((req as RequestWithTenant).tenantId || req.header('x-tenant-id') || undefined),
         });
+        if (
+            resultTask !== undefined &&
+            typeof engine.awaitTaskTerminal === 'function' &&
+            (resultTask.status === undefined ||
+                resultTask.status.state === 'submitted' ||
+                resultTask.status.state === 'working')
+        ) {
+            const timeout = resolveActiveRunTimeout({
+                explicitTimeoutMs: process.env.CALLAGENT_ACTIVE_RUN_TIMEOUT_MS,
+                realRunTimeoutMs: process.env.REAL_RUN_TIMEOUT_MS,
+            });
+            const observed = await engine.awaitTaskTerminal({
+                tenantId: typeof params.tenantId === 'string'
+                    ? params.tenantId
+                    : ((req as RequestWithTenant).tenantId || req.header('x-tenant-id') || 'default'),
+                taskId: task.id,
+                agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
+                timeoutMs: timeout.timeoutMs,
+                timeoutSource: timeout.source,
+                startedAtMs,
+            });
+            resultTask.status = observed.status;
+        }
 
         // Send the JSON-RPC response with the complete task results
         res.json({

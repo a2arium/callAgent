@@ -30,6 +30,7 @@ export function resolveHatchetOutboxBootstrap(params: {
                 prisma,
                 turnExecutor: stack.turnExecutor,
                 budgetEvents,
+                onTaskRunTimeout: stack.onTaskRunTimeout,
             }).runtimeDriver,
     };
 }

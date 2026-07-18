@@ -117,7 +117,18 @@ import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
 import { coordinateChildTerminal } from './ChildTerminalCoordinator.js';
 import { coordinateToolTerminal } from './ToolTerminalCoordinator.js';
 import { detachPendingToolsInSnapshot } from './ToolTerminalCoordinator.js';
-import { isTaskLifecycleTerminal, markTaskLifecycle, readTaskLifecycle } from './TaskLifecycle.js';
+import {
+    claimTaskTerminalInSnapshot,
+    isTaskLifecycleTerminal,
+    markDurableTaskTerminalEnqueued,
+    markTaskLifecycle,
+    readDurableTaskTerminal,
+    readRootRunDeadline,
+    readTaskLifecycle,
+    writeRootRunDeadline,
+    type RootRunDeadline,
+    type TaskTerminalDisposition,
+} from './TaskLifecycle.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { isWorkingMemoryVersionConflict } from '@a2arium/callagent-types/working-memory-version-conflict';
 import {
@@ -141,6 +152,25 @@ export type CancelTaskParams = {
     taskId: string;
     agentId?: string;
     reason?: string;
+    metadata?: Record<string, unknown>;
+};
+
+export type AwaitTaskTerminalParams = {
+    tenantId: string;
+    taskId: string;
+    agentId?: string;
+    timeoutMs: number;
+    timeoutSource: string;
+    startedAtMs?: number;
+    pollIntervalMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+};
+
+export type AwaitTaskTerminalResult = {
+    status: TaskStatus;
+    lifecycle: 'terminal' | 'input-required';
+    deadline?: RootRunDeadline;
 };
 
 
@@ -158,6 +188,35 @@ const log = logger.createLogger({ prefix: 'TaskEngine' });
 
 const delay = (ms: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+function awaitingFromSnapshot(snapshot: Record<string, unknown>): { kind?: string; token?: string } {
+    const meta = isRecordValue(snapshot.meta) ? snapshot.meta : undefined;
+    const awaiting = isRecordValue(meta?.awaiting) ? meta.awaiting : undefined;
+    const pending = isRecordValue(snapshot.pending) ? snapshot.pending : undefined;
+    const inputs = isRecordValue(pending?.inputs) ? pending.inputs : undefined;
+    const pendingInputToken = inputs !== undefined ? Object.keys(inputs)[0] : undefined;
+    if (pendingInputToken !== undefined && awaiting?.kind === undefined) {
+        return { kind: 'await_input', token: pendingInputToken };
+    }
+    return {
+        ...(typeof awaiting?.kind === 'string' ? { kind: awaiting.kind } : {}),
+        ...(typeof awaiting?.token === 'string' ? { token: awaiting.token } : {}),
+    };
+}
+
+function terminalStatusFromSnapshot(snapshot: Record<string, unknown>, taskId: string): TaskStatus | undefined {
+    const terminal = readDurableTaskTerminal(snapshot);
+    if (terminal !== undefined) return terminal.status as TaskStatus;
+    const lifecycle = readTaskLifecycle(snapshot, taskId);
+    if (!isTaskLifecycleTerminal(lifecycle)) return undefined;
+    const state = lifecycle?.state === 'detached' ? 'canceled' : lifecycle?.state;
+    if (state !== 'completed' && state !== 'failed' && state !== 'canceled') return undefined;
+    return {
+        state,
+        timestamp: lifecycle?.changedAt ?? new Date().toISOString(),
+        ...(lifecycle?.reason !== undefined ? { metadata: { reason: lifecycle.reason } } : {}),
+    };
+}
 
 type A2AParentLink = {
     parentTenantId: string;
@@ -1119,6 +1178,7 @@ export class TaskEngine {
                     reason: `task_${params.state}`,
                 });
             },
+            onTaskRunTimeout: (params) => this.handleTaskRunTimeout(params),
         });
         this.compositionTurnExecutor = inProcessStack.turnExecutor;
         this.runtimeDriver =
@@ -2669,30 +2729,46 @@ export class TaskEngine {
                     manifestConsents[token] = { ...receipt, status: 'cancelled', decidedAt: cancelledAt };
                 }
             }
-            const cancellationClaim = await reconcileSnapshotMutation({
+            const cancellationClaim = await reconcileSnapshotMutation<{
+                disposition: TaskTerminalDisposition;
+                detached: Array<{ token: string; toolName?: string }>;
+            }>({
                 session: this.sessionManager!,
                 tenantId: params.tenantId,
                 sessionId: params.taskId,
                 agentId: params.agentId ?? loaded.agentId,
                 operation: 'task.cancel.claim',
                 mutate: ({ snapshot: current }) => {
+                    const currentLifecycle = readTaskLifecycle(current, params.taskId);
+                    if (isTaskLifecycleTerminal(currentLifecycle)) {
+                        return {
+                            kind: 'noop' as const,
+                            value: {
+                                disposition: currentLifecycle?.state === 'canceled'
+                                    ? 'matching_replay' as const
+                                    : 'competing_terminal' as const,
+                                detached: [] as Array<{ token: string; toolName?: string }>,
+                            },
+                        };
+                    }
                     const currentPending = { ...((current as any).pending ?? {}) };
                     const currentConsents = { ...(currentPending.manifestConsents ?? {}), ...manifestConsents };
                     const canceled = markSegmentCancellationRequested({
                         ...current,
                         pending: { ...currentPending, manifestConsents: currentConsents },
                     }, reason);
-                    const lifecycle = readTaskLifecycle(canceled, params.taskId);
-                    const marked = markTaskLifecycle(canceled, {
+                    const terminalClaim = claimTaskTerminalInSnapshot(canceled, {
                         taskId: params.taskId,
                         state: 'canceled',
-                        changedAt: cancelledAt,
+                        claimedAt: cancelledAt,
                         reason,
-                        rootTaskId: lifecycle?.rootTaskId,
-                        parentTaskId: lifecycle?.parentTaskId,
-                        ancestorTaskIds: lifecycle?.ancestorTaskIds,
+                        status: {
+                            state: 'canceled',
+                            timestamp: cancelledAt,
+                            metadata: { reason, ...(params.metadata ?? {}) },
+                        },
                     });
-                    const tools = detachPendingToolsInSnapshot(marked, {
+                    const tools = detachPendingToolsInSnapshot(terminalClaim.snapshot, {
                         taskId: params.taskId,
                         reason: 'task_canceled',
                         detachedAt: cancelledAt,
@@ -2700,12 +2776,18 @@ export class TaskEngine {
                     return {
                         kind: 'write',
                         snapshot: tools.snapshot,
-                        value: tools.detached,
+                        value: {
+                            disposition: terminalClaim.disposition,
+                            detached: tools.detached,
+                        },
                     };
                 },
             });
+            if (cancellationClaim.value.disposition === 'competing_terminal') {
+                return { acknowledged: true };
+            }
             this.detachBackgroundTasks({ taskId: params.taskId, reason: 'task_canceled' });
-            for (const terminal of cancellationClaim.value) {
+            for (const terminal of cancellationClaim.value.detached) {
                 try {
                     await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.tool_detached', {
                         token: terminal.token,
@@ -2721,18 +2803,30 @@ export class TaskEngine {
                 reason: 'task_canceled',
                 detachedAt: cancelledAt,
             });
-            await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.canceled', {
-                taskId: params.taskId,
-                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
-                reason,
-                requestedAt: new Date().toISOString(),
-            });
-            await this.notifyA2AParentOfCancellation({
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                snapshot,
-                reason,
-            });
+            if (cancellationClaim.value.disposition === 'committed') {
+                const terminal = readDurableTaskTerminal(cancellationClaim.snapshot);
+                await this.sessionManager!.appendEvent(params.tenantId, params.taskId, 'task.canceled', {
+                    taskId: params.taskId,
+                    ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                    reason,
+                    ...(params.metadata ?? {}),
+                    requestedAt: cancelledAt,
+                });
+                if (terminal !== undefined) {
+                    await this.ensureTaskTerminalPublished({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        agentId: params.agentId,
+                        snapshot: cancellationClaim.snapshot,
+                    });
+                }
+                await this.notifyA2AParentOfCancellation({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    snapshot: cancellationClaim.snapshot,
+                    reason,
+                });
+            }
         }
 
         try {
@@ -3233,7 +3327,50 @@ export class TaskEngine {
                     task.input = taskResult.input;
                 }
 
-                if (task.status?.state === 'completed') {
+                // A timeout/manual cancellation may have won while this segment was
+                // executing. Snapshot lifecycle is authoritative; a stale local turn
+                // must not publish a contradictory terminal event afterward.
+                let terminalPublicationAllowed = true;
+                const publishDurableTerminal = async (): Promise<void> => {
+                    const latest = await this.sessionManager?.load(tenantId as string, sessionId as string);
+                    const latestSnapshot = (latest?.snapshot as Record<string, unknown> | undefined) ?? {};
+                    if (readDurableTaskTerminal(latestSnapshot) === undefined) {
+                        // Compatibility for injected/custom turn executors that
+                        // return a terminal result without persisting the standard
+                        // TaskExecutor terminal record.
+                        if (task.status !== undefined) {
+                            await this.sessionManager?.enqueueOutbox(
+                                tenantId as string,
+                                'task.status',
+                                sessionId as string,
+                                { taskId: sessionId, status: task.status, final: true, traceparent }
+                            );
+                        }
+                        return;
+                    }
+                    await this.ensureTaskTerminalPublished({
+                        tenantId: tenantId as string,
+                        taskId: sessionId as string,
+                        agentId: typeof agentId === 'string' ? agentId : undefined,
+                        snapshot: latestSnapshot,
+                    });
+                };
+                if (
+                    task.status?.state === 'completed' ||
+                    task.status?.state === 'failed' ||
+                    task.status?.state === 'canceled'
+                ) {
+                    const latest = await this.sessionManager?.load(tenantId as string, sessionId as string);
+                    const latestSnapshot = (latest?.snapshot as Record<string, unknown> | undefined) ?? {};
+                    const durableTerminal = readDurableTaskTerminal(latestSnapshot);
+                    const durableStatus = durableTerminal?.status as TaskStatus | undefined;
+                    if (durableStatus !== undefined && durableStatus.state !== task.status.state) {
+                        terminalPublicationAllowed = false;
+                        task.status = durableStatus;
+                    }
+                }
+
+                if (terminalPublicationAllowed && task.status?.state === 'completed') {
                     const artifacts = artifactMetadataForOperator(task.artifacts);
                     await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                         taskId: sessionId,
@@ -3241,13 +3378,8 @@ export class TaskEngine {
                         ...(artifacts.length > 0 ? { artifacts } : {}),
                         traceparent
                     });
-                    await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
-                        taskId: sessionId,
-                        status: { state: 'completed', timestamp: new Date().toISOString() },
-                        final: true,
-                        traceparent
-                    });
-                } else if (task.status?.state === 'failed') {
+                    await publishDurableTerminal();
+                } else if (terminalPublicationAllowed && task.status?.state === 'failed') {
                     const failureMessage = this.taskFailureMessage(task);
                     const failureReason =
                         typeof task.status.metadata?.reason === 'string'
@@ -3259,13 +3391,8 @@ export class TaskEngine {
                         reason: failureReason,
                         traceparent,
                     });
-                    await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
-                        taskId: sessionId,
-                        status: task.status,
-                        final: true,
-                        traceparent,
-                    });
-                } else if (task.status?.state === 'canceled') {
+                    await publishDurableTerminal();
+                } else if (terminalPublicationAllowed && task.status?.state === 'canceled') {
                     const cancelReason =
                         typeof task.status.metadata?.reason === 'string'
                             ? task.status.metadata.reason
@@ -3276,20 +3403,17 @@ export class TaskEngine {
                         canceledAt: task.status.timestamp ?? new Date().toISOString(),
                         traceparent,
                     });
-                    await this.sessionManager?.enqueueOutbox(tenantId as string, 'task.status', sessionId as string, {
-                        taskId: sessionId,
-                        status: task.status,
-                        final: true,
-                        traceparent,
-                    });
+                    await publishDurableTerminal();
                 }
 
                 this.finalizeAgentNodeTelemetry(agentNode, task);
-                await this.notifyA2AParentIfTerminal(
-                    ctx,
-                    task,
-                    typeof agentId === 'string' ? agentId : undefined
-                );
+                if (terminalPublicationAllowed) {
+                    await this.notifyA2AParentIfTerminal(
+                        ctx,
+                        task,
+                        typeof agentId === 'string' ? agentId : undefined
+                    );
+                }
 
                 if (isStreaming) {
                     // Even in streaming mode, we return the task entity so the caller has the ID and handle.
@@ -5395,6 +5519,265 @@ export class TaskEngine {
         return this.compositionTurnExecutor;
     }
 
+    /** Runtime-timer entrypoint for an autonomous, restart-safe root deadline. */
+    async handleTaskRunTimeout(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        token: string;
+        dueAt: string;
+        payload?: unknown;
+    }): Promise<void> {
+        const loaded = await this.sessionManager!.load(params.tenantId, params.taskId);
+        if (loaded === null) return;
+        const snapshot = (loaded.snapshot as Record<string, unknown> | undefined) ?? {};
+        const deadline = readRootRunDeadline(snapshot);
+        if (deadline === undefined || deadline.timerToken !== params.token) return;
+        if (terminalStatusFromSnapshot(snapshot, params.taskId) !== undefined) return;
+        await this.cancelTask({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+            reason: 'active_run_timeout',
+            metadata: {
+                code: 'TASK_RUN_TIMEOUT',
+                timeoutMs: deadline.timeoutMs,
+                expiresAt: deadline.expiresAt,
+            },
+        });
+        defaultMetricsRegistry.increment('task_run_timeout_total', { disposition: 'observed' });
+    }
+
+    private async ensureRootRunDeadlineTimer(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        deadline: RootRunDeadline;
+    }): Promise<boolean> {
+        try {
+            await this.runtimeDriver.scheduleTimer({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                token: params.deadline.timerToken,
+                fireAt: params.deadline.expiresAt,
+                kind: 'task_run_timeout',
+                payload: {
+                    code: 'TASK_RUN_TIMEOUT',
+                    timeoutMs: params.deadline.timeoutMs,
+                    expiresAt: params.deadline.expiresAt,
+                },
+                idempotencyKey: `${params.taskId}:task-run-timeout:${params.deadline.expiresAt}`,
+            });
+            return true;
+        } catch (error) {
+            log.warn('Root run deadline timer scheduling failed; lifecycle observer will retry', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return false;
+        }
+    }
+
+    private async ensureTaskTerminalPublished(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        snapshot: Record<string, unknown>;
+    }): Promise<void> {
+        const terminal = readDurableTaskTerminal(params.snapshot);
+        if (terminal === undefined || terminal.enqueuedAt !== undefined) return;
+        await this.sessionManager!.enqueueOutbox(
+            params.tenantId,
+            'task.status',
+            params.taskId,
+            {
+                taskId: params.taskId,
+                status: terminal.status,
+                final: true,
+                deliveryKey: terminal.deliveryKey,
+            },
+            undefined,
+            terminal.deliveryKey
+        );
+        const enqueuedAt = new Date().toISOString();
+        await reconcileSnapshotMutation({
+            session: this.sessionManager!,
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            agentId: params.agentId,
+            operation: 'task.terminal.mark_enqueued',
+            mutate: ({ snapshot }) => {
+                const next = markDurableTaskTerminalEnqueued(snapshot, terminal.deliveryKey, enqueuedAt);
+                return next === snapshot
+                    ? { kind: 'noop' as const, value: undefined }
+                    : { kind: 'write' as const, snapshot: next, value: undefined };
+            },
+        });
+        defaultMetricsRegistry.increment('task_terminal_publication_total', { status: 'enqueued' });
+    }
+
+    /** Observe a root until durable terminality; process-local idleness is not completion. */
+    async awaitTaskTerminal(params: AwaitTaskTerminalParams): Promise<AwaitTaskTerminalResult> {
+        const now = params.now ?? Date.now;
+        const sleep = params.sleep ?? delay;
+        const pollIntervalMs = Math.max(10, Math.trunc(params.pollIntervalMs ?? 1000));
+        const timeoutMs = Math.max(1, Math.trunc(params.timeoutMs));
+        const startedAtMs = params.startedAtMs ?? now();
+        const proposedDeadline: RootRunDeadline = {
+            timeoutMs,
+            startedAt: new Date(startedAtMs).toISOString(),
+            expiresAt: new Date(startedAtMs + timeoutMs).toISOString(),
+            source: params.timeoutSource,
+            timerToken: 'root-run-timeout',
+        };
+
+        const classify = (snapshot: Record<string, unknown>): AwaitTaskTerminalResult | undefined => {
+            const terminal = terminalStatusFromSnapshot(snapshot, params.taskId);
+            if (terminal !== undefined) {
+                const storedDeadline = readRootRunDeadline(snapshot);
+                return {
+                    status: terminal,
+                    lifecycle: 'terminal',
+                    ...(storedDeadline !== undefined ? { deadline: storedDeadline } : {}),
+                };
+            }
+            const awaiting = awaitingFromSnapshot(snapshot);
+            if (awaiting.kind === 'await_input') {
+                return {
+                    status: {
+                        state: 'input-required',
+                        timestamp: new Date(now()).toISOString(),
+                        metadata: {
+                            awaiting: 'await_input',
+                            ...(awaiting.token ? { token: awaiting.token } : {}),
+                        },
+                    },
+                    lifecycle: 'input-required',
+                };
+            }
+            return undefined;
+        };
+
+        const initial = await this.sessionManager!.load(params.tenantId, params.taskId);
+        const initialSnapshot = (initial?.snapshot as Record<string, unknown> | undefined) ?? {};
+        const initialResult = classify(initialSnapshot);
+        if (initialResult !== undefined) {
+            if (initialResult.lifecycle === 'terminal') {
+                const storedDeadline = readRootRunDeadline(initialSnapshot);
+                if (storedDeadline !== undefined) {
+                    await this.runtimeDriver.cancelTimer?.({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        token: storedDeadline.timerToken,
+                    });
+                }
+                await this.ensureTaskTerminalPublished({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    snapshot: initialSnapshot,
+                });
+            }
+            return initialResult;
+        }
+
+        const deadlineClaim = await reconcileSnapshotMutation({
+            session: this.sessionManager!,
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            agentId: params.agentId,
+            operation: 'task.run_deadline.register',
+            mutate: ({ snapshot }) => {
+                const existing = readRootRunDeadline(snapshot);
+                if (existing !== undefined) return { kind: 'noop' as const, value: existing };
+                if (terminalStatusFromSnapshot(snapshot, params.taskId) !== undefined) {
+                    return { kind: 'noop' as const, value: proposedDeadline };
+                }
+                return {
+                    kind: 'write' as const,
+                    snapshot: writeRootRunDeadline(snapshot, proposedDeadline),
+                    value: proposedDeadline,
+                };
+            },
+        });
+        const deadlineValue = deadlineClaim.value;
+        const expiresAtMs = Date.parse(deadlineValue.expiresAt);
+        let timerScheduled = await this.ensureRootRunDeadlineTimer({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+            deadline: deadlineValue,
+        });
+
+        for (;;) {
+            const loaded = await this.sessionManager!.load(params.tenantId, params.taskId);
+            const snapshot = (loaded?.snapshot as Record<string, unknown> | undefined) ?? {};
+            const result = classify(snapshot);
+            if (result !== undefined) {
+                if (result.lifecycle === 'terminal') {
+                    await this.runtimeDriver.cancelTimer?.({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        token: deadlineValue.timerToken,
+                    });
+                    await this.ensureTaskTerminalPublished({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        agentId: params.agentId,
+                        snapshot,
+                    });
+                }
+                defaultMetricsRegistry.increment('task_terminal_wait_total', {
+                    status: result.lifecycle === 'input-required' ? 'input_required' : result.status.state,
+                });
+                return { ...result, deadline: deadlineValue };
+            }
+
+            if (!timerScheduled) {
+                timerScheduled = await this.ensureRootRunDeadlineTimer({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                    deadline: deadlineValue,
+                });
+            }
+
+            const remainingMs = expiresAtMs - now();
+            if (remainingMs <= 0) {
+                await this.cancelTask({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                    reason: 'active_run_timeout',
+                    metadata: {
+                        code: 'TASK_RUN_TIMEOUT',
+                        timeoutMs: deadlineValue.timeoutMs,
+                        expiresAt: deadlineValue.expiresAt,
+                    },
+                });
+                const after = await this.sessionManager!.load(params.tenantId, params.taskId);
+                const afterSnapshot = (after?.snapshot as Record<string, unknown> | undefined) ?? {};
+                const authoritative = terminalStatusFromSnapshot(afterSnapshot, params.taskId);
+                if (authoritative === undefined) {
+                    throw new Error(`Task ${params.taskId} deadline expired without a durable terminal claim.`);
+                }
+                await this.ensureTaskTerminalPublished({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    snapshot: afterSnapshot,
+                });
+                defaultMetricsRegistry.increment('task_terminal_wait_total', {
+                    status: authoritative.state === 'canceled' ? 'timeout' : authoritative.state,
+                });
+                return { status: authoritative, lifecycle: 'terminal', deadline: deadlineValue };
+            }
+            await sleep(Math.min(pollIntervalMs, remainingMs));
+        }
+    }
+
     /**
      * Wait for all background task promises to complete
      * Useful for tests to ensure all background work finishes before test cleanup
@@ -5465,12 +5848,12 @@ export class TaskEngine {
         }
         const elapsed = Date.now() - startTime;
 
-        const remainingPromises = this.backgroundTasksInScope(options.rootTaskId);
-        const remainingCount = remainingPromises.length;
-        const conversationActivations = this.conversationActivationsInScope(options.rootTaskId);
-        const activeConversationActivations = conversationActivations.active;
-        const pendingConversationActivations = conversationActivations.pending;
-        const remainingTasks = this.describeBackgroundTasks(Date.now(), remainingPromises);
+        let remainingPromises = this.backgroundTasksInScope(options.rootTaskId);
+        let remainingCount = remainingPromises.length;
+        let conversationActivations = this.conversationActivationsInScope(options.rootTaskId);
+        let activeConversationActivations = conversationActivations.active;
+        let pendingConversationActivations = conversationActivations.pending;
+        let remainingTasks = this.describeBackgroundTasks(Date.now(), remainingPromises);
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Wait completed after ${elapsed}ms, remaining promises=${remainingCount}`);
             if (remainingTasks.length > 0) {
@@ -5483,6 +5866,17 @@ export class TaskEngine {
         // Give a bit more time for async cleanup after promises resolve
         // This ensures resources like Prisma connections are closed
         await delay(100);
+
+        // Work can settle or register nested cleanup while the grace interval is
+        // running. Reconcile and classify the final state instead of throwing from
+        // the point-in-time snapshot captured before the delay.
+        await this.reconcileBackgroundTaskOwnership(options.rootTaskId);
+        remainingPromises = this.backgroundTasksInScope(options.rootTaskId);
+        remainingCount = remainingPromises.length;
+        conversationActivations = this.conversationActivationsInScope(options.rootTaskId);
+        activeConversationActivations = conversationActivations.active;
+        pendingConversationActivations = conversationActivations.pending;
+        remainingTasks = this.describeBackgroundTasks(Date.now(), remainingPromises);
 
         if (process.env.DEBUG_BACKGROUND_TASKS) {
             console.log(`[TaskEngine] Active handles after cleanup delay: ${(process as any)._getActiveHandles?.()?.length ?? 'unknown'}`);

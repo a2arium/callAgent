@@ -17,6 +17,7 @@ import { RuntimeTimerRepository } from './runtimeTimer.js';
 export type InProcessRuntimeStack = {
     turnExecutor: TurnExecutor;
     runtimeDriver: RuntimeDriver;
+    onTaskRunTimeout?: BuildInProcessRuntimeStackParams['onTaskRunTimeout'];
 };
 
 export type BuildInProcessRuntimeStackParams = {
@@ -26,6 +27,14 @@ export type BuildInProcessRuntimeStackParams = {
     isStreaming?: boolean;
     onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
     onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
+    onTaskRunTimeout?: (params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        token: string;
+        dueAt: string;
+        payload?: unknown;
+    }) => Promise<void>;
 };
 
 /** Default Phase 0 stack: real segment kernel behind the in-process driver. */
@@ -45,6 +54,10 @@ export function buildInProcessRuntimeStack(
     const runtimeTimers = prisma?.runtimeTimer
         ? new RuntimeTimerRepository(prisma as never)
         : undefined;
-    const runtimeDriver = new InProcessRuntimeDriver({ turnExecutor, runtimeTimers });
-    return { turnExecutor, runtimeDriver };
+    const runtimeDriver = new InProcessRuntimeDriver({
+        turnExecutor,
+        runtimeTimers,
+        onTaskRunTimeout: params.onTaskRunTimeout,
+    });
+    return { turnExecutor, runtimeDriver, onTaskRunTimeout: params.onTaskRunTimeout };
 }
