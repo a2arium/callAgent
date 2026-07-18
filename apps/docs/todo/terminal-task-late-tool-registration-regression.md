@@ -1,9 +1,10 @@
 # Bug Report: Detached task branches can register new auto-executed tools
 
 > **Status:** Implemented in `0ef46ff fix: reject effects from terminal task
-> branches`; focused framework verification passed. Clean-database host acceptance
-> remains pending because the shared SQL worker queue contains active tasks created
-> before the fix.
+> branches`; focused framework verification passed. Clean-database host verification
+> no longer reproduces the late-registration, drain, or cross-run leakage defect.
+> Full three-scenario host acceptance remains pending because `FIX-S17` exceeded its
+> 20-minute outer deadline before publishing a terminal result.
 >
 > **Related fix:** `9226703 fix: detach terminal nested tool executions`.
 >
@@ -310,10 +311,10 @@ CallAgent development verification produced these useful results:
   `activeCount: 0`; the run was stopped after the external browser provider
   entered repeated schema-validation retries.
 
-An independent host rerun could not provide clean acceptance evidence. The shared
-PostgreSQL queue still contained active `default`-tenant roots created before
-`0ef46ff`. A new runner reconciled those old roots globally while running a new
-isolated tenant, so old `heterogeneous-b.html` browser work appeared alongside
+An initial independent host rerun could not provide clean acceptance evidence.
+The shared PostgreSQL queue still contained active `default`-tenant roots created
+before `0ef46ff`. A new runner reconciled those old roots globally while running a
+new isolated tenant, so old `heterogeneous-b.html` browser work appeared alongside
 the isolated `FIX-S05` modal work. A read-only database check confirmed concurrent
 updates under both the old `default` tenant and the new verification tenant.
 
@@ -322,14 +323,55 @@ durably active before the fix carry no information from which a new worker can
 infer operator abandonment. It does mean that changing tenant is insufficient for
 host acceptance because the worker reconciles runnable work across tenants.
 
+### Clean-database host verification (2026-07-18)
+
+The sequence was repeated against a newly created PostgreSQL database,
+`callagent_detached_verify_20260718_094412`, with all 32 CallAgent migrations
+applied and zero initial working-memory sessions, outbox rows, runtime timers, or
+driver runs. CallAgent and the host were rebuilt before the run.
+
+Results:
+
+- `FIX-S05` published an authoritative `complete` / `needs_review` result. The
+  runner reported `detachedCount: 1` and `activeCount: 0`, preserved the terminal
+  result, aborted the nested browser call with `LLM_ABORTED`, and rejected a stale
+  tool registration with `TASK_LIFECYCLE_TERMINAL`. No
+  `Background task drain incomplete` error occurred. The scenario command exited
+  non-zero only because the host validator expected `success` instead of the
+  bounded `CHILD_TIMEOUT` evidence in the result.
+- `FIX-S17` exercised only its `heterogeneous-a.html`,
+  `heterogeneous-b.html`, and `heterogeneous-c.html` fixtures; no `FIX-S05` modal
+  target appeared. Timed-out nested browser work was aborted and stale tool
+  registration was rejected. No runner-drain error occurred. However, the host's
+  1,200,000 ms outer deadline expired before the root published a final status.
+  The durable root lifecycle remained `active`; its last event was a
+  `turn.started` event 18 seconds before the outer deadline. At shutdown it owned
+  zero pending tools, zero pending children, and zero due timers. This is a
+  remaining host liveness/turn-duration acceptance failure, not a reproduction of
+  late effect registration or drain contamination.
+- `FIX-S19` then published an authoritative `complete` / `needs_review` result.
+  Its process used only the `static-agent-detail.html` and `reveal-all.html`
+  fixtures; no `FIX-S05` or `FIX-S17` target appeared. The runner again preserved
+  the terminal result with `detachedCount: 1` and `activeCount: 0`, and no drain
+  error occurred. Discovery passed; the wrapper exited non-zero only because the
+  validator expected `success` while replay correctly recorded a bounded
+  120,000 ms child timeout.
+
+After `FIX-S19`, no scenario runner or browser-provider process remained. The
+dedicated database contained zero pending tools, zero pending children, zero due
+timers, zero outbox rows, and zero driver runs. The only active lifecycle marker
+was the `FIX-S17` root described above.
+
+This clean run provides production-shaped evidence that `0ef46ff` fixes the
+reported registration/drain/leakage defect. It does not satisfy the report's full
+host acceptance rule because `FIX-S17` did not reach an authoritative terminal
+SiteConfig result within the configured outer deadline.
+
 ### Remaining acceptance gate
 
-Repeat the host acceptance sequence against either:
-
-1. a fresh PostgreSQL database/schema with no pre-fix runtime work; or
-2. the current database after all pre-fix roots are canceled through a supported
-   CallAgent lifecycle operation and the runtime queue is confirmed idle.
-
-Do not delete working-memory rows manually. After establishing the clean
-substrate, run `FIX-S05`, `FIX-S17`, and `FIX-S19` sequentially and confirm that
-no target from an earlier scenario appears in a later process.
+The clean-substrate gate is complete. The remaining acceptance work is to resolve
+or separately classify `FIX-S17`'s 20-minute active-turn timeout, then rerun
+`FIX-S17` on a clean database and confirm it publishes an authoritative terminal
+SiteConfig result without a runner-drain failure. `FIX-S05` and `FIX-S19` do not
+need another run for this defect unless the `FIX-S17` investigation changes the
+CallAgent lifecycle implementation.
