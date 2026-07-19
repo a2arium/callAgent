@@ -78,10 +78,6 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         private readonly driverRuns?: DriverRunsRepository,
         private readonly inlineFallback?: HatchetOutboxInlineFallback,
         private readonly taskTask?: TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput>,
-        private readonly agentTaskTasks?: Map<
-            string,
-            TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput>
-        >,
         private readonly events?: HatchetEventPusher,
         private readonly runs?: HatchetRunsCanceller,
         private readonly runtimeTimers?: RuntimeTimerRepository,
@@ -98,6 +94,9 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         const input: TaskTaskInput = {
             tenantId: params.tenantId,
             taskId: params.taskId,
+            rootTaskId: params.taskId,
+            tenantTaskKey: `${params.tenantId.length}:${params.tenantId}:${params.taskId.length}:${params.taskId}`,
+            rootRunKey: `${params.tenantId.length}:${params.tenantId}:${params.taskId.length}:${params.taskId}:root:1`,
             ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
             input: params.input as TaskTaskInput['input'],
             ...(params.cache !== undefined ? { cache: params.cache } : {}),
@@ -385,14 +384,8 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
     }
 
     private resolveTaskTask(
-        agentId: string | undefined
+        _agentId: string | undefined
     ): TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput> | undefined {
-        if (agentId !== undefined) {
-            const agentTask = this.agentTaskTasks?.get(agentId);
-            if (agentTask !== undefined) {
-                return agentTask;
-            }
-        }
         return this.taskTask;
     }
 

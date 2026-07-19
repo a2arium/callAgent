@@ -39,9 +39,14 @@ export {
     type SegmentTaskOutput,
 } from './tasks/segment.js';
 export {
+    TASK_STATE_TASK_NAME,
     TASK_TASK_NAME,
+    createTaskStateTask,
     createTaskTask,
+    executeTaskStateTask,
     executeTaskTask,
+    type TaskStateInput,
+    type TaskStateOutput,
     type TaskTaskInput,
     type TaskTaskOutput,
 } from './tasks/task.js';

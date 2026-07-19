@@ -51,6 +51,24 @@ cd packages/memory-sql && yarn db:migrate && yarn db:generate
 yarn hatchet:poc:up
 ```
 
+For acceptance testing, do not reuse a development Hatchet history. Create a
+fresh Hatchet database and launch a separate Compose project with the isolated
+port/volume profile:
+
+```bash
+export HATCHET_DATABASE_URL=postgres://hatchet:hatchet@host.docker.internal:5432/hatchet_acceptance?sslmode=disable
+docker compose \
+  -p callagent-hatchet-acceptance \
+  -f apps/hatchet-poc/docker-compose.yml \
+  -f apps/hatchet-poc/docker-compose.acceptance.yml \
+  up -d
+```
+
+This profile uses dashboard `18080`, engine `17077`, NATS `14222`, and its own
+project-scoped volumes. It does not stop, migrate, or delete the normal POC
+stack. Generate a token from the acceptance project's config volume and set
+`HATCHET_CLIENT_HOST_PORT=localhost:17077` before running real-engine tests.
+
 This does **not** start Postgres. Docker runs:
 
 | Service | Purpose | URL / port |

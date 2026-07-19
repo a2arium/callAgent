@@ -31,6 +31,12 @@ export type DriverRunRecord = {
     turnSeq?: number | null;
     boundaryKind?: string | null;
     turnTraceId?: string | null;
+    claimId?: string | null;
+    turnFence?: string | null;
+    claimedGeneration?: string | null;
+    turnDisposition?: string | null;
+    attemptSeq?: number | null;
+    rootRunKey?: string | null;
     error?: Prisma.InputJsonValue | typeof Prisma.JsonNull | null;
 };
 
@@ -80,6 +86,12 @@ export class DriverRunsRepository {
                 turnSeq: record.turnSeq ?? null,
                 boundaryKind: record.boundaryKind ?? null,
                 turnTraceId: record.turnTraceId ?? null,
+                claimId: record.claimId ?? null,
+                turnFence: record.turnFence ?? null,
+                claimedGeneration: record.claimedGeneration ?? null,
+                turnDisposition: record.turnDisposition ?? null,
+                attemptSeq: record.attemptSeq ?? null,
+                rootRunKey: record.rootRunKey ?? null,
                 error: record.error ?? Prisma.JsonNull,
             },
             update: {
@@ -102,6 +114,12 @@ export class DriverRunsRepository {
                 turnSeq: record.turnSeq ?? undefined,
                 boundaryKind: record.boundaryKind ?? undefined,
                 turnTraceId: record.turnTraceId ?? undefined,
+                claimId: record.claimId ?? undefined,
+                turnFence: record.turnFence ?? undefined,
+                claimedGeneration: record.claimedGeneration ?? undefined,
+                turnDisposition: record.turnDisposition ?? undefined,
+                attemptSeq: record.attemptSeq ?? undefined,
+                rootRunKey: record.rootRunKey ?? undefined,
                 error: driverRunErrorUpdate(record.status, record.error),
                 updatedAt: new Date(),
             },

@@ -5,6 +5,7 @@ import type {
 } from '@a2arium/callagent-core/unstable';
 import { isSnapshotReconciliationError } from '@a2arium/callagent-core/unstable';
 import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
 import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
@@ -56,7 +57,9 @@ export type SegmentTaskInput = JsonObject & {
     agentId?: string;
     wake: SegmentTaskWake;
     idempotencyKey: string;
-    turnSeq?: number;
+    attemptSeq?: number;
+    rootTaskId?: string;
+    rootRunKey?: string;
 };
 
 export type SegmentTaskBoundary =
@@ -86,6 +89,11 @@ export type SegmentTaskOutput = JsonObject & {
     traceId?: string;
     turnTraceId?: string;
     executionMetadata?: { origin?: 'cache' | 'runtime' };
+    turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+    claimId?: string;
+    turnFence?: string;
+    claimedGeneration?: string;
+    turnSeq?: number;
 };
 
 export type SegmentTaskDeps = {
@@ -99,8 +107,10 @@ function segmentDriverRunFields(input: SegmentTaskInput) {
         taskId: input.taskId,
         agentId: input.agentId ?? null,
         idempotencyKey: input.idempotencyKey,
-        rootTaskId: input.taskId,
-        turnSeq: input.turnSeq ?? null,
+        rootTaskId: input.rootTaskId ?? input.taskId,
+        rootRunKey: input.rootRunKey ?? null,
+        attemptSeq: input.attemptSeq ?? null,
+        turnSeq: null,
         token:
             input.wake.trigger === 'start'
                 ? null
@@ -137,6 +147,8 @@ async function executeSegmentTaskInner(
             idempotencyKey: fields.idempotencyKey,
             rootTaskId: fields.rootTaskId,
             turnSeq: fields.turnSeq,
+            attemptSeq: fields.attemptSeq,
+            rootRunKey: fields.rootRunKey,
             operation: 'turn.segment',
             status: 'running',
         });
@@ -146,6 +158,7 @@ async function executeSegmentTaskInner(
         const result = await deps.turnExecutor.runSegment({
             ...input,
             wake: input.wake as TurnWake,
+            runtimeSurface: 'hatchet',
         });
         const output = toSegmentTaskOutput(result);
         if (deps.driverRuns) {
@@ -159,7 +172,13 @@ async function executeSegmentTaskInner(
                 token: fields.token,
                 idempotencyKey: fields.idempotencyKey,
                 rootTaskId: fields.rootTaskId,
-                turnSeq: fields.turnSeq,
+                turnSeq: output.turnSeq ?? null,
+                attemptSeq: fields.attemptSeq,
+                claimId: output.claimId ?? null,
+                turnFence: output.turnFence ?? null,
+                claimedGeneration: output.claimedGeneration ?? null,
+                turnDisposition: output.turnDisposition ?? null,
+                rootRunKey: fields.rootRunKey,
                 boundaryKind: output.boundary.kind,
                 turnTraceId: output.turnTraceId ?? null,
                 error: isFailedBoundary(output.boundary)
@@ -182,6 +201,8 @@ async function executeSegmentTaskInner(
                 idempotencyKey: fields.idempotencyKey,
                 rootTaskId: fields.rootTaskId,
                 turnSeq: fields.turnSeq,
+                attemptSeq: fields.attemptSeq,
+                rootRunKey: fields.rootRunKey,
                 boundaryKind: 'fail',
                 error: serializeDriverRunError(error),
                 operation: 'turn.segment',
@@ -189,6 +210,9 @@ async function executeSegmentTaskInner(
             });
         }
         if (isTaskLifecycleTerminalError(error)) {
+            throw new NonRetryableError(error.message);
+        }
+        if (isTaskTurnSupersededError(error)) {
             throw new NonRetryableError(error.message);
         }
         if (
@@ -212,6 +236,13 @@ function toSegmentTaskOutput(result: SegmentResult): SegmentTaskOutput {
         taskStatus: result.taskStatus,
         ...(result.traceId !== undefined ? { traceId: result.traceId } : {}),
         ...(result.turnTraceId !== undefined ? { turnTraceId: result.turnTraceId } : {}),
+        ...(result.turnDisposition !== undefined ? { turnDisposition: result.turnDisposition } : {}),
+        ...(result.turnClaim !== undefined ? {
+            claimId: result.turnClaim.claimId,
+            turnFence: result.turnClaim.fence,
+            claimedGeneration: result.turnClaim.claimedGeneration,
+            turnSeq: result.turnClaim.turnSeq,
+        } : {}),
     };
 }
 
@@ -270,10 +301,10 @@ function errorFromBoundary(boundary: SegmentTaskBoundary) {
 export function createSegmentTask(
     hatchet: HatchetClient,
     deps: SegmentTaskDeps,
-    options?: { executionTimeout?: Duration }
+    options?: { executionTimeout?: Duration; name?: string }
 ) {
     return hatchet.task<SegmentTaskInput, SegmentTaskOutput>({
-        name: SEGMENT_TASK_NAME,
+        name: options?.name ?? SEGMENT_TASK_NAME,
         retries: 3,
         executionTimeout: options?.executionTimeout ?? SEGMENT_EXECUTION_TIMEOUT,
         fn: async (input: SegmentTaskInput, ctx: Context<SegmentTaskInput>) =>

@@ -8,6 +8,7 @@ describe('HatchetRuntimeDriver', () => {
     afterEach(() => {
         defaultMetricsRegistry.reset();
         delete process.env.CALLAGENT_DRIVER_SURFACES;
+        delete process.env.CALLAGENT_HATCHET_RUNTIME_PROTOCOL_VERSION;
         if (previousHatchetPayloadBudget === undefined) {
             delete process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES;
         } else {
@@ -98,7 +99,6 @@ describe('HatchetRuntimeDriver', () => {
             undefined,
             undefined,
             undefined,
-            undefined,
             runs
         );
 
@@ -144,7 +144,6 @@ describe('HatchetRuntimeDriver', () => {
             delegate,
             { runNoWait: jest.fn() } as never,
             driverRuns as never,
-            undefined,
             undefined,
             undefined,
             undefined,
@@ -199,6 +198,9 @@ describe('HatchetRuntimeDriver', () => {
                 taskId: 'task-1',
                 agentId: 'agent-1',
                 idempotencyKey: 'task-1:start',
+                rootTaskId: 'task-1',
+                tenantTaskKey: '8:tenant-1:6:task-1',
+                rootRunKey: '8:tenant-1:6:task-1:root:1',
             }),
             expect.objectContaining({
                 additionalMetadata: expect.objectContaining({
@@ -224,7 +226,6 @@ describe('HatchetRuntimeDriver', () => {
         const driver = new HatchetRuntimeDriver(
             delegate,
             { runNoWait: jest.fn() } as never,
-            undefined,
             undefined,
             undefined,
             undefined,
@@ -271,7 +272,6 @@ describe('HatchetRuntimeDriver', () => {
             undefined,
             undefined,
             undefined,
-            undefined,
             events
         );
 
@@ -313,7 +313,6 @@ describe('HatchetRuntimeDriver', () => {
         const driver = new HatchetRuntimeDriver(
             delegate,
             { runNoWait: jest.fn() } as never,
-            undefined,
             undefined,
             undefined,
             undefined,
@@ -383,7 +382,6 @@ describe('HatchetRuntimeDriver', () => {
             delegate,
             { runNoWait: jest.fn() } as never,
             driverRuns as never,
-            undefined,
             undefined,
             undefined,
             undefined,
@@ -461,7 +459,7 @@ describe('HatchetRuntimeDriver', () => {
         expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
     });
 
-    it('uses an agent-named parent workflow when registered', async () => {
+    it('uses only the shared aplret.task workflow regardless of agent identity', async () => {
         process.env.CALLAGENT_DRIVER_SURFACES = 'start';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
@@ -472,18 +470,17 @@ describe('HatchetRuntimeDriver', () => {
             dispatchOutbox: jest.fn(async () => undefined),
         };
         const fallbackTask = {
-            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('fallback-run') })),
+            runNoWait: jest.fn(async (_input: unknown) => ({ runId: Promise.resolve('fallback-run') })),
         };
         const agentTask = {
-            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('agent-run') })),
+            runNoWait: jest.fn(async (_input: unknown) => ({ runId: Promise.resolve('agent-run') })),
         };
         const driver = new HatchetRuntimeDriver(
             delegate,
             { runNoWait: jest.fn() } as never,
             undefined,
             undefined,
-            fallbackTask as never,
-            new Map([['agent-1', agentTask as never]])
+            fallbackTask as never
         );
 
         await driver.enqueueStart({
@@ -494,8 +491,11 @@ describe('HatchetRuntimeDriver', () => {
             input: { text: 'hello' },
         });
 
-        expect(agentTask.runNoWait).toHaveBeenCalled();
-        expect(fallbackTask.runNoWait).not.toHaveBeenCalled();
+        expect(fallbackTask.runNoWait).toHaveBeenCalled();
+        const submitted = fallbackTask.runNoWait.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(submitted).not.toHaveProperty('runtimeProtocolVersion');
+        expect(submitted.rootRunKey).toBe('8:tenant-1:6:task-1:root:1');
+        expect(agentTask.runNoWait).not.toHaveBeenCalled();
     });
 
     it('records a semantic budget event before throwing on oversized Hatchet start payloads', async () => {
@@ -521,7 +521,6 @@ describe('HatchetRuntimeDriver', () => {
             undefined,
             undefined,
             taskTask as never,
-            undefined,
             undefined,
             undefined,
             undefined,
@@ -583,7 +582,6 @@ describe('HatchetRuntimeDriver', () => {
             undefined,
             undefined,
             taskTask as never,
-            undefined,
             undefined,
             undefined,
             undefined,

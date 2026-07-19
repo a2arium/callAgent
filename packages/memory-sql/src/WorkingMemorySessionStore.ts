@@ -1,5 +1,5 @@
-import { PrismaClient } from './generated/prisma/index.js';
-import type { PrismaClient as PrismaClientType, Prisma } from './generated/prisma/index.js';
+import { PrismaClient, Prisma } from './generated/prisma/index.js';
+import type { PrismaClient as PrismaClientType } from './generated/prisma/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
@@ -17,6 +17,23 @@ export type SessionSnapshot = {
     snapshot: Record<string, unknown>;
     agentId: string;
     updatedAt: string;
+    storageNow?: string;
+};
+
+export type RunnableTurnRequest = {
+    tenantId: string;
+    sessionId: string;
+    agentId: string;
+    updatedAt: string;
+    generation: string;
+    deliveryKey: string;
+    runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+};
+
+export type RunnableTurnRequestCursor = {
+    updatedAt: string;
+    tenantId: string;
+    sessionId: string;
 };
 
 type ConversationKind = 'thread' | 'topic';
@@ -268,6 +285,107 @@ export class WorkingMemorySessionStore {
             agentId: rec.agentId,
             updatedAt: rec.updatedAt.toISOString()
         };
+    }
+
+    async getSessionSnapshotForMutation(
+        tenantId: string,
+        sessionId: string
+    ): Promise<SessionSnapshot | null> {
+        await this.ensureConnected();
+        return this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
+            const rows = await tx.$queryRaw<Array<{ storageNow: Date }>>`
+                SELECT clock_timestamp() AS "storageNow"
+            `;
+            const rec = await tx.wMSession.findUnique({
+                where: { tenantId_sessionId: { tenantId, sessionId } },
+            });
+            const storageNow = rows[0]?.storageNow;
+            const storageNowIso = (storageNow instanceof Date ? storageNow : new Date(storageNow)).toISOString();
+            if (!rec) {
+                return {
+                    wmVersion: 0n,
+                    snapshot: {},
+                    agentId: '',
+                    updatedAt: storageNowIso,
+                    storageNow: storageNowIso,
+                };
+            }
+            return {
+                wmVersion: rec.wmVersion,
+                snapshot: rec.snapshot as unknown as Record<string, unknown>,
+                agentId: rec.agentId,
+                updatedAt: rec.updatedAt.toISOString(),
+                storageNow: storageNowIso,
+            };
+        }));
+    }
+
+    async listRunnableTurnRequests(params: {
+        cursor?: RunnableTurnRequestCursor;
+        limit: number;
+    }): Promise<RunnableTurnRequest[]> {
+        await this.ensureConnected();
+        const limit = Math.max(1, Math.min(1000, params.limit));
+        const cursor = params.cursor;
+        const cursorClause = cursor
+            ? Prisma.sql`AND ("updated_at", "tenant_id", "session_id") >
+                (${new Date(cursor.updatedAt)}, ${cursor.tenantId}, ${cursor.sessionId})`
+            : Prisma.empty;
+        const rows = await this.runWithReconnect(() => this.prisma.$queryRaw<Array<{
+            tenantId: string;
+            sessionId: string;
+            agentId: string;
+            updatedAt: Date;
+            generation: string;
+            deliveryKey: string;
+            runtimeSurface: string;
+        }>>(Prisma.sql`
+            SELECT
+                "tenant_id" AS "tenantId",
+                "session_id" AS "sessionId",
+                "agent_id" AS "agentId",
+                "updated_at" AS "updatedAt",
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,generation}' AS generation,
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,deliveryKey}' AS "deliveryKey",
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,runtimeSurface}' AS "runtimeSurface"
+            FROM "wm_sessions"
+            WHERE snapshot #> '{meta,turnCoordinator,dispatchIntent}' IS NOT NULL
+              AND snapshot #> '{meta,turnCoordinator,active}' IS NULL
+              AND (
+                  snapshot #>> '{meta,turnCoordinator,dispatchIntent,enqueuedAt}' IS NULL
+                  OR (
+                      snapshot #>> '{meta,turnCoordinator,dispatchIntent,enqueuedAt}' ~
+                          '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
+                      AND (snapshot #>> '{meta,turnCoordinator,dispatchIntent,enqueuedAt}')::timestamptz
+                          <= clock_timestamp() - INTERVAL '15 seconds'
+                  )
+              )
+              AND snapshot #>> '{meta,turnCoordinator,requestedGeneration}' ~ '^[0-9]+$'
+              AND snapshot #>> '{meta,turnCoordinator,completedGeneration}' ~ '^[0-9]+$'
+              AND (snapshot #>> '{meta,turnCoordinator,requestedGeneration}')::numeric >
+                  (snapshot #>> '{meta,turnCoordinator,completedGeneration}')::numeric
+              ${cursorClause}
+            ORDER BY "updated_at", "tenant_id", "session_id"
+            LIMIT ${limit}
+        `));
+        return rows.flatMap((row) => {
+            if (row.runtimeSurface !== 'direct' && row.runtimeSurface !== 'in_process' && row.runtimeSurface !== 'hatchet') {
+                this.log.warn('Ignoring runnable turn request with invalid runtime surface', {
+                    tenantId: row.tenantId,
+                    sessionId: row.sessionId,
+                });
+                return [];
+            }
+            return [{
+                tenantId: row.tenantId,
+                sessionId: row.sessionId,
+                agentId: row.agentId,
+                updatedAt: row.updatedAt.toISOString(),
+                generation: row.generation,
+                deliveryKey: row.deliveryKey,
+                runtimeSurface: row.runtimeSurface,
+            }];
+        });
     }
 
     /** Atomic compare-and-set snapshot. */

@@ -16,6 +16,13 @@ const pendingToolSnapshot = () => ({
             ancestorTaskIds: ['root-a'],
             state: 'active',
         },
+        turnCoordinator: {
+            schemaVersion: 1,
+            nextFence: '0',
+            nextTurnSeq: 0,
+            requestedGeneration: '1',
+            completedGeneration: '1',
+        },
     },
     pending: {
         tools: {

@@ -18,6 +18,14 @@
     "./task-lifecycle-terminal": {
       "import": "./dist/task-lifecycle-terminal.js",
       "types": "./dist/task-lifecycle-terminal.d.ts"
+    },
+    "./task-turn-superseded": {
+      "import": "./dist/task-turn-superseded.js",
+      "types": "./dist/task-turn-superseded.d.ts"
+    },
+    "./task-turn-coordinator-state": {
+      "import": "./dist/task-turn-coordinator-state.js",
+      "types": "./dist/task-turn-coordinator-state.d.ts"
     }
   },
   "scripts": {

@@ -130,6 +130,27 @@ describe('InProcessRuntimeDriver', () => {
         });
     });
 
+    it('does not use process-local polling to retry a durably queued wake', async () => {
+        let attempt = 0;
+        const { executor, calls } = makeFakeExecutor(async (params) => {
+            attempt += 1;
+            return {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                boundary: attempt === 1 ? { kind: 'paused', reason: 'owned_elsewhere' } : { kind: 'complete' },
+                taskStatus: attempt === 1 ? 'working' : 'completed',
+                turnDisposition: attempt === 1 ? 'queued' : 'executed',
+            };
+        });
+        const driver = new InProcessRuntimeDriver({ turnExecutor: executor, scheduler });
+
+        await driver.enqueueStart({ ...ids, input: {} });
+        await driver.waitForIdle();
+
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.idempotencyKey).toBe(ids.idempotencyKey);
+    });
+
     it('routes a background segment rejection to onSegmentError', async () => {
         const { executor } = makeFakeExecutor(async () => {
             throw new Error('segment boom');

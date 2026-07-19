@@ -3,14 +3,17 @@ import { isWorkingMemoryVersionConflict } from '@a2arium/callagent-types';
 import { WorkingMemorySessionStore } from '../src/WorkingMemorySessionStore.js';
 
 function createPrisma() {
-    return {
+    const prisma: any = {
         $connect: jest.fn(async () => undefined),
+        $queryRaw: jest.fn(),
         wMSession: {
             updateMany: jest.fn(),
             create: jest.fn(),
             findUnique: jest.fn(),
         },
     };
+    prisma.$transaction = jest.fn(async (callback: (tx: typeof prisma) => unknown) => callback(prisma));
+    return prisma;
 }
 
 const params = {
@@ -22,6 +25,27 @@ const params = {
 };
 
 describe('WorkingMemorySessionStore.writeSnapshotCAS', () => {
+    test('loads an authoritative PostgreSQL timestamp with mutation snapshots', async () => {
+        const prisma = createPrisma();
+        prisma.$queryRaw.mockResolvedValue([{ storageNow: new Date('2026-07-19T10:00:00.000Z') }]);
+        prisma.wMSession.findUnique.mockResolvedValue({
+            wmVersion: 4n,
+            snapshot: { active: true },
+            agentId: 'agent',
+            updatedAt: new Date('2026-07-19T09:59:00.000Z'),
+        });
+        const store = new WorkingMemorySessionStore(prisma as never);
+
+        await expect(store.getSessionSnapshotForMutation('tenant', 'session')).resolves.toEqual({
+            wmVersion: 4n,
+            snapshot: { active: true },
+            agentId: 'agent',
+            updatedAt: '2026-07-19T09:59:00.000Z',
+            storageNow: '2026-07-19T10:00:00.000Z',
+        });
+        expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
     test('uses a version-qualified atomic update and increments the version', async () => {
         const prisma = createPrisma();
         prisma.wMSession.updateMany.mockResolvedValue({ count: 1 });

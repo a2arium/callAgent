@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { getPendingTasks, setPendingTasks } from '../src/orchestration/Handles.js';
@@ -26,7 +27,12 @@ describe('TaskEngine inbox coordination', () => {
 
     it('stages child completion observation once even when invoked repeatedly', async () => {
         const { engine, sessionManager } = buildEngine();
-        const initialSnap = setPendingTasks({}, { child123: { childTaskId: 'child-task' } });
+        const initialSnap = setPendingTasks({
+            meta: { turnCoordinator: {
+                schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                requestedGeneration: '0', completedGeneration: '0',
+            } },
+        }, { child123: { childTaskId: 'child-task' } });
         await sessionManager.saveSnapshot({
             tenantId,
             sessionId: parentTaskId,
@@ -50,10 +56,61 @@ describe('TaskEngine inbox coordination', () => {
         expect(allChildCompletions[0].payload).toMatchObject({ token: 'child123', childTaskId: 'child-task' });
     });
 
+    it('notifies the parent from the durable terminal when the local task status is stale', async () => {
+        const { engine, sessionManager } = buildEngine();
+        const childTaskId = 'child-durable-terminal';
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: childTaskId,
+            agentId: 'child-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: {
+                meta: {
+                    a2aParent: {
+                        parentTenantId: tenantId,
+                        parentTaskId,
+                        parentChildToken: 'child-token',
+                    },
+                    taskTerminal: {
+                        taskId: childTaskId,
+                        state: 'completed',
+                        claimedAt: '2026-07-19T12:00:00.000Z',
+                        deliveryKey: `${childTaskId}:terminal:completed`,
+                        status: {
+                            state: 'completed',
+                            timestamp: '2026-07-19T12:00:00.000Z',
+                            metadata: { result: { ok: true } },
+                        },
+                    },
+                },
+            },
+        });
+        const notify = jest.spyOn(engine, 'handleChildCompleted').mockResolvedValue(undefined);
+
+        await (engine as any).notifyPersistedA2AParentIfTerminal({ tenantId, taskId: childTaskId });
+
+        expect(notify).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId,
+            parentTaskId,
+            childToken: 'child-token',
+            childTaskId,
+            childAgentId: 'child-agent',
+            result: expect.objectContaining({
+                status: expect.objectContaining({ state: 'completed' }),
+            }),
+        }));
+    });
+
     it('removes pending child mapping and stages observation when parent is not awaiting the child', async () => {
         const { engine, sessionManager } = buildEngine();
         const baseWithPending = setPendingTasks(
-            { meta: { turn: 0, awaiting: { kind: 'await_child', token: 'different-child' } } } as Record<string, unknown>,
+            { meta: {
+                turn: 0, awaiting: { kind: 'await_child', token: 'different-child' },
+                turnCoordinator: {
+                    schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                    requestedGeneration: '0', completedGeneration: '0',
+                },
+            } } as Record<string, unknown>,
             { child999: { childTaskId: 'child-task' } }
         );
         await sessionManager.saveSnapshot({

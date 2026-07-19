@@ -10,6 +10,8 @@
  */
 
 import { logger } from '@a2arium/callagent-utils';
+import type { RunnableTurnRequest } from '@a2arium/callagent-memory-engine';
+import type { SessionManager } from '../orchestration/SessionManager.js';
 import type {
     CancelParams,
     CancelTimerParams,
@@ -82,6 +84,10 @@ export type InProcessRuntimeDriverDeps = {
         payload?: unknown;
     }) => Promise<void>;
     timerReconcileIntervalMs?: number;
+    /** Durable source for queued turn generations that need a scheduling nudge. */
+    sessionManager?: SessionManager;
+    turnReconcileIntervalMs?: number;
+    random?: () => number;
 };
 
 /** Maps a driver wake event to the kernel's {@link TurnWake}. */
@@ -112,6 +118,9 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private readonly scheduler: TimerScheduler;
     private readonly runtimeTimers?: RuntimeTimerRepository;
     private readonly onTaskRunTimeout?: InProcessRuntimeDriverDeps['onTaskRunTimeout'];
+    private readonly sessionManager?: SessionManager;
+    private readonly recoveryKeys = new Set<string>();
+    private recoveryScan?: Promise<void>;
 
     /** In-flight background work, so tests and shutdown can await quiescence. */
     private readonly inFlight = new Set<Promise<unknown>>();
@@ -137,6 +146,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
         this.scheduler = deps.scheduler ?? defaultScheduler;
         this.runtimeTimers = deps.runtimeTimers;
         this.onTaskRunTimeout = deps.onTaskRunTimeout;
+        this.sessionManager = deps.sessionManager;
         if (this.runtimeTimers !== undefined) {
             void this.reconcilePersistedTimers().catch((error) =>
                 log.warn('Persisted timer reconciliation failed', {
@@ -151,6 +161,24 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 ),
                 deps.timerReconcileIntervalMs ?? 1_000
             );
+            interval.unref?.();
+        }
+        if (this.sessionManager !== undefined) {
+            const random = deps.random ?? Math.random;
+            const baseIntervalMs = deps.turnReconcileIntervalMs ?? 5_000;
+            const reconcile = () => {
+                if (this.recoveryScan !== undefined) return;
+                const scan = this.reconcileRunnableTurnRequests()
+                    .catch((error) => log.warn('Runnable turn reconciliation failed', {
+                        error: error instanceof Error ? error.message : String(error),
+                    }))
+                    .finally(() => {
+                        if (this.recoveryScan === scan) this.recoveryScan = undefined;
+                    });
+                this.recoveryScan = scan;
+            };
+            reconcile();
+            const interval = setInterval(reconcile, Math.max(250, Math.round(baseIntervalMs * (0.75 + random() * 0.5))));
             interval.unref?.();
         }
     }
@@ -216,8 +244,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
 
     /** Runs one segment to completion (tracked for `waitForIdle`). */
     async runSegmentAwait(params: RunSegmentParams): Promise<SegmentResult> {
-        const tracked: Promise<unknown> = this.turnExecutor
-            .runSegment(params)
+        const tracked: Promise<unknown> = this.turnExecutor.runSegment(params)
             .catch((error: unknown) => {
                 this.onSegmentError(error, params);
                 throw error;
@@ -414,7 +441,8 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
 
     /** Awaits all in-flight background segments (re-checking until quiescent). */
     async waitForIdle(): Promise<void> {
-        while (this.inFlight.size > 0) {
+        while (this.inFlight.size > 0 || this.recoveryScan !== undefined || this.recoveryKeys.size > 0) {
+            if (this.recoveryScan !== undefined) await this.recoveryScan;
             await Promise.allSettled([...this.inFlight]);
         }
     }
@@ -430,8 +458,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     }
 
     private runSegmentInBackground(params: RunSegmentParams): void {
-        const tracked: Promise<unknown> = this.turnExecutor
-            .runSegment(params)
+        const tracked: Promise<unknown> = this.turnExecutor.runSegment(params)
             .then(
                 () => undefined,
                 (error: unknown) => {
@@ -442,6 +469,51 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 this.inFlight.delete(tracked);
             });
         this.inFlight.add(tracked);
+    }
+
+    private async reconcileRunnableTurnRequests(): Promise<void> {
+        if (!this.sessionManager) return;
+        let cursor: { updatedAt: string; tenantId: string; sessionId: string } | undefined;
+        do {
+            const rows = await this.sessionManager.listRunnableTurnRequests({
+                ...(cursor ? { cursor } : {}),
+                limit: 100,
+            });
+            await runWithConcurrency(rows, 4, (row) => this.scheduleRecoveredTurn(row));
+            const last = rows.at(-1);
+            cursor = last ? { updatedAt: last.updatedAt, tenantId: last.tenantId, sessionId: last.sessionId } : undefined;
+            if (rows.length < 100) break;
+        } while (cursor !== undefined);
+    }
+
+    private async scheduleRecoveredTurn(row: RunnableTurnRequest): Promise<void> {
+        if (row.runtimeSurface === 'hatchet') return;
+        const key = `${row.tenantId}:${row.sessionId}:${row.generation}:${row.deliveryKey}`;
+        if (this.recoveryKeys.has(key)) return;
+        this.recoveryKeys.add(key);
+        try {
+            const result = await this.runSegmentAwait({
+                tenantId: row.tenantId,
+                taskId: row.sessionId,
+                agentId: row.agentId,
+                idempotencyKey: row.deliveryKey,
+                runtimeSurface: 'in_process',
+                recoveryGeneration: row.generation,
+                wake: {
+                    trigger: 'resume',
+                    event: { kind: 'external', token: row.deliveryKey, type: 'task.turn.available', data: undefined },
+                },
+            });
+            if (result.turnDisposition === 'queued') {
+                log.debug('Recovered turn request remains owned by another worker', {
+                    tenantId: row.tenantId,
+                    taskId: row.sessionId,
+                    generation: row.generation,
+                });
+            }
+        } finally {
+            this.recoveryKeys.delete(key);
+        }
     }
 
     private clearTimersForTask(taskId: string): void {
@@ -471,6 +543,22 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             }
         }
     }
+}
+
+async function runWithConcurrency<T>(
+    rows: T[],
+    concurrency: number,
+    worker: (row: T) => Promise<void>
+): Promise<void> {
+    let index = 0;
+    const workers = Array.from({ length: Math.min(concurrency, rows.length) }, async () => {
+        for (;;) {
+            const current = index++;
+            if (current >= rows.length) return;
+            await worker(rows[current]!);
+        }
+    });
+    await Promise.all(workers);
 }
 
 /** Phase 0 sync extensions — not part of the async `RuntimeDriver` port (see driver-sync-api.md). */

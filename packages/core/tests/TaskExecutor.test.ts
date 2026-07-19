@@ -33,7 +33,8 @@ await jest.unstable_mockModule('@a2arium/callagent-memory-engine', () => ({
 }));
 
 await jest.unstable_mockModule(resolve(srcDir, 'loop/loopRunner.ts'), () => ({
-    runLoop: mockRunLoop
+    runLoop: mockRunLoop,
+    flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
 }));
 
 await jest.unstable_mockModule('@a2arium/callagent-utils', () => ({

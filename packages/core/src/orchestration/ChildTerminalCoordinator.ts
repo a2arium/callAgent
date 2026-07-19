@@ -6,6 +6,8 @@ import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { makeSafeEventPreview } from './safeEventPreview.js';
 import { logger } from '@a2arium/callagent-utils';
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
+import { advanceTaskTurnGenerationInSnapshot } from './TaskTurnCoordinator.js';
+import { addProcessedSegmentKey } from '../runtime/segmentProcessedKeys.js';
 
 const log = logger.createLogger({ prefix: 'ChildTerminalCoordinator' });
 
@@ -240,6 +242,7 @@ export async function coordinateChildTerminal(params: {
     tenantId: string;
     parentTaskId: string;
     request: ChildTerminalRequest;
+    runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
     maxAttempts?: number;
 }): Promise<ChildTerminalClaim> {
     const result = await reconcileSnapshotMutation({
@@ -248,11 +251,22 @@ export async function coordinateChildTerminal(params: {
         sessionId: params.parentTaskId,
         operation: 'child.terminal.claim',
         maxAttempts: params.maxAttempts,
-        mutate: ({ snapshot }) => {
+        mutate: ({ snapshot, storageNow }) => {
             const claim = claimChildTerminalInSnapshot(snapshot, params.request);
-            return claim.won
-                ? { kind: 'write' as const, snapshot: claim.snapshot, value: claim }
-                : { kind: 'noop' as const, value: claim };
+            if (!claim.won) return { kind: 'noop' as const, value: claim };
+            const advanced = advanceTaskTurnGenerationInSnapshot({
+                snapshot: claim.snapshot,
+                tenantId: params.tenantId,
+                taskId: params.parentTaskId,
+                runtimeSurface: params.runtimeSurface ?? 'in_process',
+                storageNow,
+            });
+            const stagedSnapshot = addProcessedSegmentKey(
+                advanced.snapshot,
+                `${params.parentTaskId}:child:${params.request.token}`
+            );
+            const stagedClaim = { ...claim, snapshot: stagedSnapshot };
+            return { kind: 'write' as const, snapshot: stagedClaim.snapshot, value: stagedClaim };
         },
     });
     const claim: ChildTerminalClaim = { ...result.value, attempts: result.attempts };

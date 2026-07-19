@@ -50,9 +50,14 @@ import { TaskEngine } from '../src/orchestration/taskEngine.js';
 class FakeSessionStore extends InMemorySessionManager {
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
+        const meta = { ...((snapshot.meta as Record<string, unknown> | undefined) ?? {}) };
+        meta.turnCoordinator ??= {
+            schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+            requestedGeneration: '0', completedGeneration: '0',
+        };
         (this as unknown as { snapshots: Map<string, WMSessionSnapshot> }).snapshots.set(key, {
             wmVersion,
-            snapshot,
+            snapshot: { ...snapshot, meta },
             agentId,
             updatedAt: new Date().toISOString(),
         });

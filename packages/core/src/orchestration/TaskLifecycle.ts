@@ -30,6 +30,12 @@ export type DurableTaskTerminal = {
         message?: { role: 'agent'; parts: Array<{ type: 'text'; text: string }> };
         metadata?: Record<string, unknown>;
     };
+    turnClaim?: {
+        claimId: string;
+        fence: string;
+        generation: string;
+        turnSeq: number;
+    };
 };
 
 export function markDurableTaskTerminalEnqueued(
@@ -232,6 +238,7 @@ export function claimTaskTerminalInSnapshot(
         claimedAt: string;
         reason?: string;
         status: DurableTaskTerminal['status'];
+        turnClaim?: DurableTaskTerminal['turnClaim'];
     }
 ): {
     snapshot: Record<string, unknown>;
@@ -289,6 +296,7 @@ export function claimTaskTerminalInSnapshot(
         claimedAt: params.claimedAt,
         deliveryKey: `${params.taskId}:terminal:${params.state}`,
         status: params.status,
+        ...(params.turnClaim ? { turnClaim: params.turnClaim } : {}),
     };
     return {
         snapshot: writeDurableTaskTerminal(lifecycleSnapshot, terminal),

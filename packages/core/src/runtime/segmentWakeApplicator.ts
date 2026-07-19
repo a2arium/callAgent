@@ -88,13 +88,26 @@ export function applyWakeToSnapshot(
 ): PreparedSegmentWake {
     switch (wake.trigger) {
         case 'start':
+            {
+            const meta = base.meta !== null && typeof base.meta === 'object' && !Array.isArray(base.meta)
+                ? base.meta as Record<string, unknown>
+                : {};
+            const next = {
+                ...base,
+                meta: {
+                    ...meta,
+                    agentId: opts?.agentId ?? meta.agentId ?? 'default',
+                    initialInput: wake.input,
+                },
+            };
             return {
-                snapshot: base,
+                snapshot: next,
                 wmVersion: BigInt(0),
-                agentId: agentIdFromSnapshot(base, opts?.agentId),
+                agentId: agentIdFromSnapshot(next, opts?.agentId),
                 trigger: 'start',
                 turnParams: { input: wake.input },
             };
+            }
 
         case 'resume': {
             if (wake.event.kind !== 'input') {

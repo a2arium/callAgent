@@ -7,7 +7,7 @@ callAgent.
 
 ## Tasks
 
-### `aplret.task` / `agent.<agentId>` — durable control loop
+### `aplret.task` — durable control loop
 
 Type: Hatchet durable task.
 
@@ -20,10 +20,9 @@ Responsibility:
 4. For `sleep`, use durable sleep, then spawn the next `aplret.segment`.
 5. Return on `complete` / `fail` / `canceled`.
 
-Known registered agents may use an `agent.<agentId>` parent workflow name for
-Hatchet dashboard readability. `aplret.task` remains the fallback for unknown or
-dynamic agents. Both names represent the same execution primitive and must map to
-the same callAgent `AgentRun` product model.
+`aplret.task` is the only durable root workflow. Agent identity is metadata, not a
+workflow-name routing mechanism. Development and test Hatchet histories created by
+older workflow names must be reset before these workers start.
 
 There is no `continue` case: internal `continue` turns are consumed inside the
 segment by `runLoop` and never reach the durable task (ADR 0002).
@@ -35,6 +34,10 @@ Allowed operations:
 - child spawning;
 - branching on prior checkpoint outputs (including tokens minted by a segment).
 
+All state reads, timer bookkeeping, outbox lookup, cancellation inspection, cache
+access, and terminal projection are keyed `aplret.task-state` children. Stateful
+dependencies are deliberately withheld from the durable root implementation.
+
 Forbidden operations:
 
 - direct database reads/writes;
@@ -42,6 +45,15 @@ Forbidden operations:
 - loading or mutating `MentalState`;
 - generating tokens/ids or reading wall-clock time for control flow;
 - calling `oneTurn` / `runLoop` directly.
+
+### `aplret.task-state` — idempotent state/projection child
+
+Type: regular Hatchet task.
+
+Responsibility: perform one deterministic-keyed database, cache, timer, recovery,
+or projection operation requested by the durable root. Retried executions must be
+idempotent. This child is the only bridge from root orchestration to application
+state.
 
 ### `aplret.segment` — non-deterministic child task
 
@@ -132,16 +144,16 @@ parent task with `ctx.runChild` / `ctx.runNoWaitChild` / `ctx.bulkRunChildren`
 (or durable `ctx.spawnChild` / `ctx.spawnChildren`). Metadata (the composite
 keys above) only powers search/filter; it does not nest runs.
 
-Requirement: `aplret.task` or `agent.<agentId>` is the single parent Hatchet run
+Requirement: `aplret.task` is the single parent Hatchet run
 per callAgent task, and all per-task work is spawned as its children:
 
 ```text
-agent.<agentId> / aplret.task (parent run; metadata: tenantId, taskId, rootTaskId, agentId, traceId)
-├─ aplret.segment            (runLoop to next boundary)
-├─ aplret.outbox.dispatch    (task.status)
-├─ aplret.outbox.dispatch    (task.status)
-├─ aplret.outbox.dispatch    (task.input_required)
-└─ aplret.child.dispatch     (when applicable)
+aplret.task                 (parent run; metadata: tenantId, taskId, rootTaskId, agentId, traceId)
+├─ aplret.task-state        (state/recovery/projection)
+├─ aplret.segment           (runLoop to next boundary)
+├─ aplret.outbox.dispatch   (task.status)
+├─ aplret.outbox.dispatch   (task.input_required)
+└─ aplret.child.dispatch    (when applicable)
 ```
 
 This is what keeps the top-level run list readable. The Phase 1 model — where the

@@ -131,6 +131,13 @@ export type TurnRun = {
   status: AgentRunStatus;
   operation: 'turn.segment';
   turnSeq?: number;
+  attemptKey?: string;
+  attemptSeq?: number;
+  disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+  claimId?: string;
+  turnFence?: string;
+  claimedGeneration?: string;
+  authoritativeTerminal?: boolean;
   boundaryKind?: string;
   token?: string;
   traceId?: string;
@@ -204,7 +211,7 @@ export type AgentRunEvent = {
 };
 
 export type AgentRunGraph = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   tenantId: string;
   taskId: string;
   root: AgentRunNode;
@@ -214,6 +221,7 @@ export type AgentRunGraph = {
   memoryOps: MemoryOperationRun[];
   effects: EffectRun[];
   events: AgentRunEvent[];
+  coordination: TaskCoordinationView;
   debug: {
     driverRuns: DriverRunView[];
   };
@@ -249,7 +257,47 @@ export type DriverRunView = {
   operation: string;
   status: string;
   rootTaskId?: string | null;
+  rootRunKey?: string | null;
+  attemptSeq?: number | null;
+  turnSeq?: number | null;
+  claimId?: string | null;
+  turnFence?: string | null;
+  claimedGeneration?: string | null;
+  turnDisposition?: string | null;
   error?: unknown;
+};
+
+export type TaskCoordinationView = {
+  taskId: string;
+  state: 'idle' | 'owned' | 'queued' | 'recovering' | 'terminal';
+  health: 'healthy' | 'attention' | 'stuck';
+  observedAt: string;
+  requestedGeneration: string;
+  completedGeneration: string;
+  active?: {
+    claimId: string;
+    fence: string;
+    ownerId: string;
+    turnSeq: number;
+    phase: 'claimed' | 'executing' | 'committing';
+    acquiredAt: string;
+    heartbeatAt: string;
+    expiresAt: string;
+    leaseState: 'live' | 'expiring' | 'expired';
+  };
+  dispatchIntent?: {
+    generation: string;
+    state: 'pending' | 'enqueued' | 'overdue';
+    createdAt: string;
+    enqueuedAt?: string;
+  };
+  issues: Array<
+    | 'claim_expired'
+    | 'runnable_without_owner'
+    | 'dispatch_overdue'
+    | 'terminal_projection_mismatch'
+    | 'projection_partial'
+  >;
 };
 
 export type AgentRunMemoryView = {

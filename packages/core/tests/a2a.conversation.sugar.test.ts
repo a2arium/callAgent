@@ -58,7 +58,13 @@ describe('sendTaskToAgent conversation sugar', () => {
             agentId: parentAgentId,
             expectedWmVersion: BigInt(0),
             snapshot: {
-                meta: { agentId: parentAgentId, turn: 0 },
+                meta: {
+                    agentId: parentAgentId, turn: 0,
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    },
+                },
                 M: {
                     memory: {
                         vars: {},

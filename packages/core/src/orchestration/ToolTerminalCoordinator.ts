@@ -4,6 +4,8 @@ import { InboxManager, type EngineObservation } from './InboxManager.js';
 import { makeSafeEventPreview } from './safeEventPreview.js';
 import { reconcileSnapshotMutation, type SnapshotMutationSession } from './persistence/SnapshotRepository.js';
 import { isTaskLifecycleTerminal, readTaskLifecycle } from './TaskLifecycle.js';
+import { advanceTaskTurnGenerationInSnapshot } from './TaskTurnCoordinator.js';
+import { addProcessedSegmentKey } from '../runtime/segmentProcessedKeys.js';
 import {
     getPendingTools,
     getPendingToolTerminals,
@@ -165,6 +167,7 @@ export async function coordinateToolTerminal(params: {
     result: unknown;
     completedAt?: string;
     detachReason?: string;
+    runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
 }): Promise<ToolTerminalClaim> {
     const completedAt = params.completedAt ?? new Date().toISOString();
     const result = await reconcileSnapshotMutation({
@@ -172,7 +175,7 @@ export async function coordinateToolTerminal(params: {
         tenantId: params.tenantId,
         sessionId: params.taskId,
         operation: params.detachReason === undefined ? 'tool.terminal.complete' : 'tool.terminal.detach',
-        mutate: ({ snapshot }) => {
+        mutate: ({ snapshot, storageNow }) => {
             const claim = claimToolTerminalInSnapshot(snapshot, {
                 token: params.token,
                 completedAt,
@@ -180,9 +183,23 @@ export async function coordinateToolTerminal(params: {
                 taskId: params.taskId,
                 detachReason: params.detachReason,
             });
-            return claim.won
-                ? { kind: 'write' as const, snapshot: claim.snapshot, value: claim }
-                : { kind: 'noop' as const, value: claim };
+            if (!claim.won) return { kind: 'noop' as const, value: claim };
+            if (!claim.resumeEligible) {
+                return { kind: 'write' as const, snapshot: claim.snapshot, value: claim };
+            }
+            const advanced = advanceTaskTurnGenerationInSnapshot({
+                snapshot: claim.snapshot,
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                runtimeSurface: params.runtimeSurface ?? 'in_process',
+                storageNow,
+            });
+            const stagedSnapshot = addProcessedSegmentKey(
+                advanced.snapshot,
+                `${params.taskId}:tool:${params.token}`
+            );
+            const stagedClaim = { ...claim, snapshot: stagedSnapshot };
+            return { kind: 'write' as const, snapshot: stagedClaim.snapshot, value: stagedClaim };
         },
     });
     const claim = { ...result.value, attempts: result.attempts };

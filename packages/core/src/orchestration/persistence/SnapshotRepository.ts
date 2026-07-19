@@ -12,6 +12,12 @@ export type SnapshotMutationSession = {
         wmVersion?: bigint;
         agentId?: string;
     } | null>;
+    loadForMutation?: (tenantId: string, sessionId: string) => Promise<{
+        snapshot?: unknown;
+        wmVersion?: bigint;
+        agentId?: string;
+        storageNow?: string;
+    } | null>;
     saveSnapshot: (params: {
         tenantId: string;
         sessionId: string;
@@ -25,6 +31,7 @@ export type SnapshotMutationCurrent = {
     snapshot: Record<string, unknown>;
     wmVersion: bigint;
     agentId?: string;
+    storageNow: string;
 };
 
 export type SnapshotMutationDecision<T> =
@@ -149,11 +156,17 @@ export async function reconcileSnapshotMutation<T>(
     let versions: { expectedWmVersion?: string; actualWmVersion?: string } = {};
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        const loaded = await options.session.load(options.tenantId, options.sessionId);
+        const loaded = options.session.loadForMutation !== undefined
+            ? await options.session.loadForMutation(options.tenantId, options.sessionId)
+            : await options.session.load(options.tenantId, options.sessionId);
+        const loadedStorageNow = (loaded as { storageNow?: unknown } | null)?.storageNow;
         const current: SnapshotMutationCurrent = {
             snapshot: (loaded?.snapshot as Record<string, unknown> | undefined) ?? {},
             wmVersion: loaded?.wmVersion ?? BigInt(0),
             agentId: loaded?.agentId,
+            storageNow: typeof loadedStorageNow === 'string'
+                ? loadedStorageNow
+                : new Date(now()).toISOString(),
         };
         const decision = await options.mutate(current);
         if (decision.kind === 'noop') {
@@ -179,7 +192,7 @@ export async function reconcileSnapshotMutation<T>(
             const saved = await options.session.saveSnapshot({
                 tenantId: options.tenantId,
                 sessionId: options.sessionId,
-                agentId: options.agentId ?? current.agentId ??
+                agentId: options.agentId ?? (current.wmVersion === 0n ? undefined : current.agentId) ??
                     (current.snapshot as { meta?: { agentId?: string } }).meta?.agentId ??
                     'default',
                 expectedWmVersion: current.wmVersion,

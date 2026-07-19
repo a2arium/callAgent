@@ -1,10 +1,12 @@
 import type { SessionManager } from '../orchestration/SessionManager.js';
 import { operatorPayloadEnvelope } from './payloadBudget.js';
+import { readTaskTurnCoordinator } from '../orchestration/TaskTurnCoordinator.js';
+import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 
 export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'unknown';
 
 export type AgentRunGraph = {
-    schemaVersion: 1;
+    schemaVersion: 2;
     tenantId: string;
     taskId: string;
     root: AgentRunNode;
@@ -14,12 +16,40 @@ export type AgentRunGraph = {
     memoryOps: MemoryOperationRun[];
     effects: EffectRun[];
     events: AgentRunEvent[];
+    coordination: TaskCoordinationView;
     debug: {
         driverRuns: DriverRunView[];
     };
     caps?: AgentRunGraphCaps;
     collapsedBranches?: CollapsedGraphBranch[];
     projection?: OperatorProjectionInfo;
+};
+
+export type TaskCoordinationView = {
+    taskId: string;
+    state: 'idle' | 'owned' | 'queued' | 'recovering' | 'terminal';
+    health: 'healthy' | 'attention' | 'stuck';
+    observedAt: string;
+    requestedGeneration: string;
+    completedGeneration: string;
+    active?: {
+        claimId: string;
+        fence: string;
+        ownerId: string;
+        turnSeq: number;
+        phase: 'claimed' | 'executing' | 'committing';
+        acquiredAt: string;
+        heartbeatAt: string;
+        expiresAt: string;
+        leaseState: 'live' | 'expiring' | 'expired';
+    };
+    dispatchIntent?: {
+        generation: string;
+        state: 'pending' | 'enqueued' | 'overdue';
+        createdAt: string;
+        enqueuedAt?: string;
+    };
+    issues: Array<'claim_expired' | 'runnable_without_owner' | 'dispatch_overdue' | 'terminal_projection_mismatch' | 'projection_partial'>;
 };
 
 export type AgentRunGraphCaps = {
@@ -96,6 +126,13 @@ export type TurnRun = {
     status: AgentRunStatus;
     operation: 'turn.segment';
     turnSeq?: number;
+    attemptKey?: string;
+    attemptSeq?: number;
+    disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+    claimId?: string;
+    turnFence?: string;
+    claimedGeneration?: string;
+    authoritativeTerminal?: boolean;
     boundaryKind?: string;
     token?: string;
     traceId?: string;
@@ -212,6 +249,12 @@ export type DriverRunView = {
     turnSeq?: number | null;
     boundaryKind?: string | null;
     turnTraceId?: string | null;
+    claimId?: string | null;
+    turnFence?: string | null;
+    claimedGeneration?: string | null;
+    turnDisposition?: string | null;
+    attemptSeq?: number | null;
+    rootRunKey?: string | null;
     error?: unknown;
     createdAt?: Date | string;
     updatedAt?: Date | string;
@@ -297,12 +340,18 @@ export async function buildAgentRunGraph(
         };
     });
     const memoryOps = buildMemoryOps(params.taskId, events);
-    const turns = buildTurnRuns(params.taskId, driverRuns, events, memoryOps);
+    const terminal = readDurableTaskTerminal(snapshot?.snapshot);
+    const turns = buildTurnRuns(params.taskId, driverRuns, events, memoryOps, terminal?.turnClaim);
     const effects = buildEffectRuns(params.taskId, driverRuns, events);
     const graphEvents = buildGraphEvents(params.taskId, agentId ?? undefined, events, driverRuns);
+    const coordination = buildTaskCoordinationView(params.taskId, snapshot?.snapshot);
+    if (terminal?.turnClaim && !turns.some((turn) => turn.authoritativeTerminal === true)) {
+        coordination.issues = [...coordination.issues, 'terminal_projection_mismatch'];
+        coordination.health = 'attention';
+    }
 
     return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         tenantId: params.tenantId,
         taskId: params.taskId,
         root,
@@ -312,6 +361,7 @@ export async function buildAgentRunGraph(
         memoryOps,
         effects,
         events: graphEvents,
+        coordination,
         debug: {
             driverRuns,
         },
@@ -321,6 +371,92 @@ export async function buildAgentRunGraph(
 function chooseRootRun(driverRuns: DriverRunView[]): DriverRunView | undefined {
     return driverRuns.find((run) => run.operation === 'agent.run') ??
         driverRuns.find((run) => run.operation === 'task.start');
+}
+
+export function buildTaskCoordinationView(
+    taskId: string,
+    snapshot: unknown,
+    nowMs = Date.now()
+): TaskCoordinationView {
+    const observedAt = new Date(nowMs).toISOString();
+    const terminal = readDurableTaskTerminal(snapshot);
+    let coordinator;
+    try {
+        coordinator = readTaskTurnCoordinator(snapshot, { taskId });
+    } catch {
+        return {
+            taskId,
+            state: terminal ? 'terminal' : 'idle',
+            health: terminal ? 'healthy' : 'attention',
+            observedAt,
+            requestedGeneration: '0',
+            completedGeneration: '0',
+            issues: terminal ? [] : ['projection_partial'],
+        };
+    }
+    const issues: TaskCoordinationView['issues'] = [];
+    const requested = BigInt(coordinator.requestedGeneration);
+    const completed = BigInt(coordinator.completedGeneration);
+    const activeExpiry = coordinator.active ? Date.parse(coordinator.active.expiresAt) : undefined;
+    const leaseState = activeExpiry === undefined
+        ? undefined
+        : activeExpiry <= nowMs
+            ? 'expired' as const
+            : activeExpiry - nowMs <= 40_000
+                ? 'expiring' as const
+                : 'live' as const;
+    if (leaseState === 'expired') issues.push('claim_expired');
+    if (!terminal && requested > completed && coordinator.active === undefined) issues.push('runnable_without_owner');
+    const intentAge = coordinator.dispatchIntent ? nowMs - Date.parse(coordinator.dispatchIntent.createdAt) : 0;
+    if (coordinator.dispatchIntent && coordinator.dispatchIntent.enqueuedAt === undefined && intentAge > 30_000) {
+        issues.push('dispatch_overdue');
+    }
+    const state: TaskCoordinationView['state'] = terminal
+        ? 'terminal'
+        : coordinator.active
+            ? requested > BigInt(coordinator.active.claimedGeneration) ? 'queued' : 'owned'
+            : coordinator.dispatchIntent ? 'recovering'
+            : requested > completed ? 'queued' : 'idle';
+    const health: TaskCoordinationView['health'] = issues.includes('claim_expired') || issues.includes('dispatch_overdue')
+        ? 'stuck'
+        : issues.length > 0 || leaseState === 'expiring' ? 'attention' : 'healthy';
+    return {
+        taskId,
+        state,
+        health,
+        observedAt,
+        requestedGeneration: coordinator.requestedGeneration,
+        completedGeneration: coordinator.completedGeneration,
+        ...(coordinator.active && leaseState ? {
+            active: {
+                claimId: coordinator.active.claimId,
+                fence: coordinator.active.fence,
+                ownerId: coordinator.active.ownerId,
+                turnSeq: coordinator.active.turnSeq,
+                phase: coordinator.active.phase,
+                acquiredAt: coordinator.active.acquiredAt,
+                heartbeatAt: coordinator.active.heartbeatAt,
+                expiresAt: coordinator.active.expiresAt,
+                leaseState,
+            },
+        } : {}),
+        ...(coordinator.dispatchIntent ? {
+            dispatchIntent: {
+                generation: coordinator.dispatchIntent.generation,
+                state: coordinator.dispatchIntent.enqueuedAt
+                    ? 'enqueued'
+                    : intentAge > 30_000 ? 'overdue' : 'pending',
+                createdAt: coordinator.dispatchIntent.createdAt,
+                ...(coordinator.dispatchIntent.enqueuedAt ? { enqueuedAt: coordinator.dispatchIntent.enqueuedAt } : {}),
+            },
+        } : {}),
+        issues,
+    };
+}
+
+function isTurnDisposition(value: unknown): value is NonNullable<TurnRun['disposition']> {
+    return value === 'executed' || value === 'queued' || value === 'matching_replay' ||
+        value === 'superseded' || value === 'terminal_replay';
 }
 
 function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunView[]): AgentRunStatus {
@@ -563,7 +699,8 @@ function buildTurnRuns(
     rootTaskId: string,
     driverRuns: DriverRunView[],
     events: AgentRunSourceEvent[],
-    memoryOps: MemoryOperationRun[]
+    memoryOps: MemoryOperationRun[],
+    terminalClaim?: { claimId: string; fence: string; generation: string; turnSeq: number }
 ): TurnRun[] {
     const turnEvents = events.filter((event) => event.type === 'turn.completed');
     const turnStartedEvents = events.filter((event) => event.type === 'turn.started');
@@ -585,10 +722,10 @@ function buildTurnRuns(
     const driverTurns = driverRuns
         .filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
         .map((run, index): TurnRun => {
-            const turnSeq = run.turnSeq ?? index + 1;
-            const key = turnKey(run.taskId ?? rootTaskId, turnSeq);
-            const turnEvent = cognitionByTurn.get(key);
-            const startedEvent = turnStartedByTurn.get(key);
+            const turnSeq = run.turnSeq ?? undefined;
+            const key = turnSeq === undefined ? undefined : turnKey(run.taskId ?? rootTaskId, turnSeq);
+            const turnEvent = key === undefined ? undefined : cognitionByTurn.get(key);
+            const startedEvent = key === undefined ? undefined : turnStartedByTurn.get(key);
             const status = deriveTurnStatus(run.status, turnEvent);
             const startedAt = run.createdAt ?? startedEvent?.createdAt;
             const terminalTimestamp = run.updatedAt ?? run.createdAt ?? turnEvent?.createdAt ?? startedEvent?.createdAt;
@@ -602,7 +739,16 @@ function buildTurnRuns(
                 ...(run.agentId ? { agentId: run.agentId } : {}),
                 status,
                 operation: 'turn.segment',
-                turnSeq,
+                ...(turnSeq !== undefined ? { turnSeq } : {}),
+                attemptKey: run.id ?? run.providerTaskRunId ?? run.providerRunId ?? `attempt-${index}`,
+                ...(run.attemptSeq !== null && run.attemptSeq !== undefined ? { attemptSeq: run.attemptSeq } : {}),
+                ...(isTurnDisposition(run.turnDisposition) ? { disposition: run.turnDisposition } : {}),
+                ...(run.claimId ? { claimId: run.claimId } : {}),
+                ...(run.turnFence ? { turnFence: run.turnFence } : {}),
+                ...(run.claimedGeneration ? { claimedGeneration: run.claimedGeneration } : {}),
+                ...(run.claimId && terminalClaim?.claimId === run.claimId && terminalClaim.fence === run.turnFence
+                    ? { authoritativeTerminal: true }
+                    : {}),
                 ...(run.boundaryKind ? { boundaryKind: run.boundaryKind } : {}),
                 ...(run.token ? { token: run.token } : {}),
                 ...(run.traceId ? { traceId: run.traceId } : {}),

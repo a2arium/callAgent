@@ -79,6 +79,7 @@ import {
     type RuntimeWakeEvent,
     type TurnExecutor,
 } from '../runtime/index.js';
+import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
 import {
     markSegmentCancellationRequested,
     readSegmentCancellation,
@@ -95,6 +96,7 @@ import {
 } from './types.js';
 import {
     buildAgentRunGraph,
+    buildTaskCoordinationView,
     type AgentRunGraph,
     type AgentRunSourceEvent,
     type DriverRunView,
@@ -140,6 +142,7 @@ import {
     reconcileSnapshotMutation,
 } from './persistence/SnapshotRepository.js';
 import { assertTaskEffectActive } from './TaskEffectRegistration.js';
+import { assertCurrentTaskTurn } from './TaskTurnCoordinator.js';
 
 export type {
     TaskEntity,
@@ -609,9 +612,25 @@ function withOperatorResponseBudget(graph: AgentRunGraph, source: 'bridge' | 'se
     if (measureJsonBytes(compacted) <= limitBytes || compacted.events.length === 0) {
         return compacted;
     }
-    return {
+    const withoutEvents: AgentRunGraph = {
         ...compacted,
         events: [],
+    };
+    if (measureJsonBytes(withoutEvents) <= limitBytes) return withoutEvents;
+    return {
+        schemaVersion: 2,
+        tenantId: withoutEvents.tenantId,
+        taskId: withoutEvents.taskId,
+        root: withoutEvents.root,
+        coordination: withoutEvents.coordination,
+        nodes: [],
+        edges: [],
+        turns: [],
+        memoryOps: [],
+        effects: [budgetEffect],
+        events: [],
+        debug: { driverRuns: [] },
+        projection: { source, partial: true },
     };
 }
 
@@ -1004,6 +1023,7 @@ export class TaskEngine {
     private topicLifecycleSweeper: TopicLifecycleSweeper;
     private readonly activeConversationActivations = new Set<string>();
     private readonly pendingConversationActivations = new Map<string, PendingConversationActivation>();
+    private readonly taskSessionTails = new Map<string, Promise<void>>();
     private readonly recentConversationActivationTargets = new Map<string, ConversationActivateParams>();
     private transportClose?: () => Promise<void>;
     /** When adapters are resolved via `resolveTransportAdapters`, wired here for projections / extensions. */
@@ -1172,6 +1192,10 @@ export class TaskEngine {
                 });
             },
             onTaskTerminal: async (params) => {
+                await this.notifyPersistedA2AParentIfTerminal({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                });
                 await this.detachTaskBranch({
                     tenantId: params.tenantId,
                     taskId: params.taskId,
@@ -1179,6 +1203,7 @@ export class TaskEngine {
                 });
             },
             onTaskRunTimeout: (params) => this.handleTaskRunTimeout(params),
+            enableTurnRecovery: opts?.runtimeDriver === undefined && opts?.runtimeDriverFactory === undefined,
         });
         this.compositionTurnExecutor = inProcessStack.turnExecutor;
         this.runtimeDriver =
@@ -1275,18 +1300,20 @@ export class TaskEngine {
         sessionId: string,
         body: () => Promise<T>
     ): Promise<T> {
-        const activationKey = `${tenantId}:${sessionId}`;
-        if (this.activeConversationActivations.has(activationKey)) {
-            return body();
-        }
-
-        this.activeConversationActivations.add(activationKey);
+        const taskKey = `${tenantId}:${sessionId}`;
+        const predecessor = this.taskSessionTails.get(taskKey) ?? Promise.resolve();
+        let release!: () => void;
+        const owned = new Promise<void>((resolve) => { release = resolve; });
+        const tail = predecessor.catch(() => undefined).then(() => owned);
+        this.taskSessionTails.set(taskKey, tail);
+        await predecessor.catch(() => undefined);
         try {
-            const result = await body();
-            await this.drainConversationActivations(activationKey);
-            return result;
+            return await body();
         } finally {
-            await this.releaseConversationActivation(activationKey);
+            release();
+            if (this.taskSessionTails.get(taskKey) === tail) {
+                this.taskSessionTails.delete(taskKey);
+            }
         }
     }
 
@@ -1395,25 +1422,82 @@ export class TaskEngine {
         task: TaskEntity,
         childAgentId?: string
     ): Promise<void> {
-        if (!isA2ATerminalTaskState(task.status?.state)) {
-            return;
-        }
-
         const childCtx = ctx as A2AChildContext;
         const parent = childCtx.__a2aParent;
         if (!parent || childCtx.__a2aParentNotified) {
             return;
         }
 
+        // A runtime surface may retain a stale process-local TaskEntity after the
+        // fenced turn has already committed its terminal snapshot. Parent delivery
+        // must follow the durable winner, never that local object.
+        const persisted = await this.sessionManager?.load(ctx.tenantId, task.id);
+        const durableTerminal = readDurableTaskTerminal(
+            persisted?.snapshot as Record<string, unknown> | undefined
+        );
+        const authoritativeStatus = durableTerminal?.status as TaskStatus | undefined ?? task.status;
+        if (authoritativeStatus === undefined || !isA2ATerminalTaskState(authoritativeStatus.state)) {
+            return;
+        }
+
         childCtx.__a2aParentNotified = true;
+        if (authoritativeStatus.state === 'failed' || authoritativeStatus.state === 'canceled') {
+            const metadata = authoritativeStatus.metadata as Record<string, unknown> | undefined;
+            const messagePart = authoritativeStatus.message?.parts?.find(
+                (part) => part.type === 'text'
+            ) as { text?: string } | undefined;
+            await this.handleChildFailed({
+                tenantId: parent.parentTenantId,
+                parentTaskId: parent.parentTaskId,
+                childToken: parent.parentChildToken,
+                childTaskId: task.id,
+                error: {
+                    code: typeof metadata?.code === 'string'
+                        ? metadata.code
+                        : authoritativeStatus.state === 'canceled' ? 'CHILD_CANCELED' : 'CHILD_FAILED',
+                    message: messagePart?.text ??
+                        (typeof metadata?.reason === 'string'
+                            ? metadata.reason
+                            : `Child task ${authoritativeStatus.state}`),
+                },
+            });
+            return;
+        }
         await this.handleChildCompleted({
             tenantId: parent.parentTenantId,
             parentTaskId: parent.parentTaskId,
             childToken: parent.parentChildToken,
             childTaskId: task.id,
-            result: task,
+            result: { ...task, status: authoritativeStatus },
             childAgentId,
         });
+    }
+
+    private async notifyPersistedA2AParentIfTerminal(params: {
+        tenantId: string;
+        taskId: string;
+    }): Promise<void> {
+        const persisted = await this.sessionManager?.load(params.tenantId, params.taskId);
+        const snapshot = persisted?.snapshot as Record<string, unknown> | undefined;
+        if (snapshot === undefined) return;
+        const parent = readA2AParentLink(
+            (snapshot as { meta?: { a2aParent?: unknown } }).meta?.a2aParent
+        );
+        const terminal = readDurableTaskTerminal(snapshot);
+        if (parent === undefined || terminal === undefined) return;
+
+        await this.notifyA2AParentIfTerminal(
+            {
+                tenantId: params.tenantId,
+                __a2aParent: parent,
+            } as unknown as TaskContext,
+            {
+                id: params.taskId,
+                input: {},
+                status: terminal.status as TaskStatus,
+            } as TaskEntity,
+            persisted?.agentId
+        );
     }
 
     private async drainConversationActivations(
@@ -1534,6 +1618,15 @@ export class TaskEngine {
         }
     ): Promise<T> {
         const abortController = new AbortController();
+        const turnClaim = currentTaskTurnClaim();
+        const abortForSupersededTurn = () => {
+            abortController.abort(turnClaim?.abortSignal?.reason ?? 'task turn superseded');
+        };
+        if (turnClaim?.abortSignal?.aborted) {
+            abortForSupersededTurn();
+        } else {
+            turnClaim?.abortSignal?.addEventListener('abort', abortForSupersededTurn, { once: true });
+        }
         let resolveResult!: (value: T | PromiseLike<T>) => void;
         let rejectResult!: (reason?: unknown) => void;
         const result = new Promise<T>((resolve, reject) => {
@@ -1544,6 +1637,7 @@ export class TaskEngine {
         tracked = result
             .then(() => undefined, () => undefined)
             .finally(() => {
+                turnClaim?.abortSignal?.removeEventListener('abort', abortForSupersededTurn);
                 this.backgroundTaskPromises.delete(tracked);
                 this.backgroundTaskMetadata.delete(tracked);
             });
@@ -2116,7 +2210,19 @@ export class TaskEngine {
         if (projectionMode === 'semantic') {
             const semanticGraph = await projection?.buildGraph(params);
             if (semanticGraph !== undefined && semanticGraph.projection?.partial !== true) {
-                return withGraphCaps(semanticGraph, 'semantic');
+                const current = await this.sessionManager.load(params.tenantId, params.taskId);
+                const coordination = buildTaskCoordinationView(params.taskId, current?.snapshot);
+                const terminalClaim = readDurableTaskTerminal(current?.snapshot)?.turnClaim;
+                if (terminalClaim && !semanticGraph.turns.some((turn) =>
+                    turn.claimId === terminalClaim.claimId && turn.turnFence === terminalClaim.fence
+                )) {
+                    coordination.issues = [...coordination.issues, 'terminal_projection_mismatch'];
+                    coordination.health = 'attention';
+                }
+                return withGraphCaps({
+                    ...semanticGraph,
+                    coordination,
+                }, 'semantic');
             }
         }
         const { events: sessionEvents, taskIds } = await this.collectRunGraphEvents({
@@ -2578,69 +2684,40 @@ export class TaskEngine {
                 log.debug('[TaskEngine] Skipping LLM history save (stateless mode)');
             }
         } catch { /* ignore */ }
-        const next = {
-            ...(baseSnap as any),
-            M,
-            ...(attachedLlmState ? { llmState: attachedLlmState } : {}),
-            meta: mergeSnapshotMetaWithCtxTelemetry(baseSnap as Record<string, unknown>, ctx),
-        } as Record<string, unknown>;
-        try {
-            const snap = await this.sessionManager.load(tenantId, sessionId);
-            const expected = snap?.wmVersion ?? BigInt(0);
-
-            // Offload any LocalArtifacts before saving
-            // We need access to prisma for the cache.
-            // Using getSessionStorePrisma() helper method if available or casting
-            const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
-
-            log.debug('DEBUG: Resolving prisma for offloading', {
-                hasPrisma: !!prisma,
-                hasSessionManager: !!this.sessionManager,
-                hasStore: !!(this.sessionManager as any)?.store,
-                storeHasPrisma: !!(this.sessionManager as any)?.store?.prisma
-            });
-
-            if (prisma) {
-                const cache = new AgentResultCache(prisma);
-                log.debug('DEBUG: Calling offloadArtifacts');
-                // We need to offload artifacts from M and inbox
-                // Note: offloadArtifacts modifies the object in place for arrays/objects
-                // We are working on 'next' which is a copy of baseSnap + M, so mutation is safe for 'next',
-                // but M might be shared. However, offloadArtifacts only replaces LocalArtifacts,
-                // and next.M is the one being saved.
-                await offloadArtifacts(next, cache, tenantId);
-            } else {
-                log.warn('DEBUG: Skipping offloadArtifacts - No Prisma');
-            }
-
-            await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected, snapshot: next });
-        } catch (e) {
-            if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                try {
-                    const prunedNext = pruneSnapshot(next);
-                    const snap3 = await this.sessionManager.load(tenantId, sessionId);
-                    const expected3 = snap3?.wmVersion ?? BigInt(0);
-                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || 'default', expectedWmVersion: expected3, snapshot: prunedNext });
-                } catch (err) {
-                    log.error('Failed to save snapshot even after pruning', { error: err });
-                    throw e;
-                }
-            } else if (isWorkingMemoryVersionConflict(e)) {
-                try {
-                    const snap2 = await this.sessionManager.load(tenantId, sessionId);
-                    const expected2 = snap2?.wmVersion ?? BigInt(0);
-                    const base2 = ((await this.sessionManager.load(tenantId, sessionId))?.snapshot as Record<string, unknown>) || {};
-                    const next2 = {
-                        ...base2,
-                        M,
-                        meta: mergeSnapshotMetaWithCtxTelemetry(base2, ctx),
-                    } as Record<string, unknown>;
-                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: (ctx as any).agentId || agentId, expectedWmVersion: expected2, snapshot: next2 });
-                } catch { /* ignore */ }
-            } else {
-                throw e;
-            }
+        const prisma = this.getSessionStorePrisma() || (this.sessionManager as any).prisma;
+        const preparedM = structuredClone(M) as MentalState;
+        if (prisma) {
+            await offloadArtifacts({ M: preparedM }, new AgentResultCache(prisma), tenantId);
         }
+        const turnClaim = currentTaskTurnClaim();
+        await reconcileSnapshotMutation({
+            session: this.sessionManager,
+            tenantId,
+            sessionId,
+            agentId: (ctx as any).agentId || agentId,
+            operation: 'turn.flush_context',
+            mutate: ({ snapshot, storageNow }) => {
+                if (turnClaim !== undefined) {
+                    assertCurrentTaskTurn(snapshot, {
+                        tenantId,
+                        taskId: sessionId,
+                        claim: turnClaim,
+                        operation: 'turn.flush_context',
+                        storageNow,
+                    });
+                }
+                return {
+                    kind: 'write',
+                    snapshot: {
+                        ...snapshot,
+                        M: preparedM,
+                        ...(attachedLlmState ? { llmState: attachedLlmState } : {}),
+                        meta: mergeSnapshotMetaWithCtxTelemetry(snapshot, ctx),
+                    },
+                    value: undefined,
+                };
+            },
+        });
     }
 
     /** Compact output for root agent traces (avoid huge payloads). */

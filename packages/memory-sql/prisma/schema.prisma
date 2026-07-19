@@ -213,12 +213,20 @@ model DriverRun {
     turnSeq           Int?     @map("turn_seq")
     boundaryKind      String?  @map("boundary_kind")
     turnTraceId       String?  @map("turn_trace_id")
+    claimId           String?  @map("claim_id")
+    turnFence         String?  @map("turn_fence")
+    claimedGeneration String?  @map("claimed_generation")
+    turnDisposition   String?  @map("turn_disposition")
+    attemptSeq        Int?     @map("attempt_seq")
+    rootRunKey        String?  @map("root_run_key")
     error             Json?
     createdAt         DateTime @default(now()) @map("created_at")
     updatedAt         DateTime @updatedAt @map("updated_at")
 
     @@index([tenantId, taskId])
     @@index([tenantId, rootTaskId])
+    @@index([tenantId, taskId, status])
+    @@index([tenantId, rootTaskId, status])
     @@index([tenantId, createdAt])
     @@index([tenantId, agentId, createdAt])
     @@index([tenantId, status, createdAt])
@@ -324,7 +332,14 @@ model TurnRun {
     taskId          String    @map("task_id")
     rootTaskId      String    @map("root_task_id")
     agentId         String?   @map("agent_id")
-    turnSeq         Int       @map("turn_seq")
+    turnSeq         Int?      @map("turn_seq")
+    attemptKey      String    @map("attempt_key")
+    attemptSeq      Int?      @map("attempt_seq")
+    disposition     String?
+    claimId         String?   @map("claim_id")
+    turnFence       String?   @map("turn_fence")
+    claimedGeneration String? @map("claimed_generation")
+    authoritativeTerminal Boolean @default(false) @map("authoritative_terminal")
     status          String
     startedAt       DateTime? @map("started_at")
     completedAt     DateTime? @map("completed_at")
@@ -345,7 +360,8 @@ model TurnRun {
     createdAt       DateTime  @default(now()) @map("created_at")
     updatedAt       DateTime  @updatedAt @map("updated_at")
 
-    @@unique([tenantId, taskId, turnSeq])
+    @@unique([tenantId, taskId, attemptKey])
+    @@index([tenantId, taskId, turnSeq])
     @@index([tenantId, rootTaskId, taskId, turnSeq])
     @@map("turn_runs")
 }

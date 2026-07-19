@@ -33,6 +33,7 @@ import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import { reduceConversationProjection } from './learning/conversationReducer.js';
 import { runDefaultAutoJoinInvitedTopics } from '../policy/defaultAutoJoinPolicy.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
+import { currentSegmentIdempotencyKey, currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
 import {
     conversationInboxDeliveryKey,
     conversationInboxDeliveryKeyFromTurnSummary,
@@ -236,8 +237,22 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
     if (!isOperatorCaptureEnabled(internal)) {
         return;
     }
+    if (currentTaskTurnClaim() !== undefined) {
+        internal.__pendingOperatorTurnTraces = [...(internal.__pendingOperatorTurnTraces ?? []), trace];
+        return;
+    }
+    await appendOperatorTurnTraceProjection(ctx, trace, 'turn.completed');
+}
+
+async function appendOperatorTurnTraceProjection(
+    ctx: TaskContext,
+    trace: TurnTrace,
+    type: 'turn.completed' | 'turn.superseded'
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
     const level = operatorCaptureLevel(internal);
-    await appendOperatorEvent(ctx, 'turn.completed', {
+    const claim = currentTaskTurnClaim();
+    await appendOperatorEvent(ctx, type, {
         taskId: ctx.task.id,
         agentId: ctx.agentId,
         turnSeq: trace.turn,
@@ -263,8 +278,38 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
         traceId: trace.traceId,
         spanId: trace.spanId,
         parentSpanId: trace.parentSpanId,
+        ...(claim ? {
+            claimId: claim.claimId,
+            fence: claim.fence,
+            claimedGeneration: claim.claimedGeneration,
+            logicalTurnSeq: claim.turnSeq,
+            attemptKey: currentSegmentIdempotencyKey(),
+        } : {}),
         level,
     });
+}
+
+export async function flushBufferedOperatorTurnEvents(
+    ctx: TaskContext,
+    disposition: 'committed' | 'superseded'
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    const traces = internal.__pendingOperatorTurnTraces ?? [];
+    internal.__pendingOperatorTurnTraces = undefined;
+    for (const trace of traces) {
+        try {
+            await appendOperatorTurnTraceProjection(
+                ctx,
+                trace,
+                disposition === 'committed' ? 'turn.completed' : 'turn.superseded'
+            );
+        } catch (error) {
+            log.debug('Failed to append post-arbitration operator turn event', {
+                disposition,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
 }
 
 async function appendOperatorTurnStartedEvent(
@@ -285,6 +330,13 @@ async function appendOperatorTurnStartedEvent(
         ...(turnId ? { turnId } : {}),
         ...(traceId ? { traceId } : {}),
         ...(spanId ? { spanId } : {}),
+        ...(currentTaskTurnClaim() ? {
+            claimId: currentTaskTurnClaim()!.claimId,
+            fence: currentTaskTurnClaim()!.fence,
+            claimedGeneration: currentTaskTurnClaim()!.claimedGeneration,
+            logicalTurnSeq: currentTaskTurnClaim()!.turnSeq,
+            attemptKey: currentSegmentIdempotencyKey(),
+        } : {}),
     });
 }
 

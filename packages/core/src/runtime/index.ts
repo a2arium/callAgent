@@ -72,6 +72,7 @@ export type { SegmentDedupe } from './inMemorySegmentDedupe.js';
 export {
     addProcessedSegmentKey,
     currentSegmentIdempotencyKey,
+    currentTaskTurnClaim,
     nextSegmentOutboxIdempotencyKey,
     readProcessedSegmentKeys,
     runWithSegmentIdempotencyKey,

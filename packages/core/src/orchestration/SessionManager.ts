@@ -11,6 +11,8 @@ import type {
     IWorkingMemorySessionStore,
     UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
+    RunnableTurnRequest,
+    RunnableTurnRequestCursor,
 } from '@a2arium/callagent-memory-engine';
 import { preserveConversationInboxForSnapshot } from '../loop/conversationInboxIdentity.js';
 import {
@@ -76,6 +78,23 @@ export class SessionManager {
         }
         const result = await this.store.getSessionSnapshot(tenantId, sessionId);
         return result;
+    }
+
+    async loadForMutation(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+        if (!this.store) return null;
+        return this.store.getSessionSnapshotForMutation?.(tenantId, sessionId)
+            ?? this.store.getSessionSnapshot(tenantId, sessionId);
+    }
+
+    async listRunnableTurnRequests(params: {
+        cursor?: RunnableTurnRequestCursor;
+        limit?: number;
+    }): Promise<RunnableTurnRequest[]> {
+        if (!this.store?.listRunnableTurnRequests) return [];
+        return this.store.listRunnableTurnRequests({
+            ...(params.cursor ? { cursor: params.cursor } : {}),
+            limit: params.limit ?? 100,
+        });
     }
 
     async appendEvent(tenantId: string, sessionId: string, type: string, payload: Record<string, unknown>) {

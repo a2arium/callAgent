@@ -194,7 +194,14 @@ type SemanticTurnRow = {
     taskId: string;
     rootTaskId: string;
     agentId?: string | null;
-    turnSeq: number;
+    turnSeq?: number | null;
+    attemptKey: string;
+    attemptSeq?: number | null;
+    disposition?: string | null;
+    claimId?: string | null;
+    turnFence?: string | null;
+    claimedGeneration?: string | null;
+    authoritativeTerminal: boolean;
     status: string;
     startedAt?: Date | string | null;
     completedAt?: Date | string | null;
@@ -477,15 +484,21 @@ export class OperatorProjectionRepository {
         if (event.type === 'turn.started') {
             const turnSeq = numberField(event.payload, 'turnSeq');
             if (turnSeq <= 0) return;
+            const turnTraceId = stringField(event.payload, 'turnId');
             await this.upsertEventTurn({
                 tenantId: event.tenantId,
                 taskId,
                 rootTaskId,
                 agentId,
-                turnSeq,
+                turnSeq: numberField(event.payload, 'logicalTurnSeq') || turnSeq,
+                attemptKey: eventAttemptKey(event, turnTraceId ?? String(turnSeq)),
+                disposition: 'executed',
+                claimId: stringField(event.payload, 'claimId'),
+                turnFence: stringField(event.payload, 'fence'),
+                claimedGeneration: stringField(event.payload, 'claimedGeneration'),
                 status: 'running',
                 startedAt: createdAt,
-                turnTraceId: stringField(event.payload, 'turnId'),
+                turnTraceId,
             });
             await this.upsertEventRun({
                 tenantId: event.tenantId,
@@ -497,9 +510,11 @@ export class OperatorProjectionRepository {
             return;
         }
 
-        if (event.type === 'turn.completed') {
+        if (event.type === 'turn.completed' || event.type === 'turn.superseded') {
             const turnSeq = numberField(event.payload, 'turnSeq');
             if (turnSeq <= 0) return;
+            const superseded = event.type === 'turn.superseded';
+            const turnTraceId = stringField(event.payload, 'turnId');
             const transition = event.payload.transition;
             const transitionKindValue = transitionKind(transition);
             const boundary = isAwaitBoundaryKind(transitionKindValue) ? transitionKindValue : undefined;
@@ -510,8 +525,13 @@ export class OperatorProjectionRepository {
                 taskId,
                 rootTaskId,
                 agentId,
-                turnSeq,
-                status: semanticError ? 'failed' : 'completed',
+                turnSeq: numberField(event.payload, 'logicalTurnSeq') || turnSeq,
+                attemptKey: eventAttemptKey(event, turnTraceId ?? String(turnSeq)),
+                disposition: superseded ? 'superseded' : 'executed',
+                claimId: stringField(event.payload, 'claimId'),
+                turnFence: stringField(event.payload, 'fence'),
+                claimedGeneration: stringField(event.payload, 'claimedGeneration'),
+                status: superseded ? 'completed' : semanticError ? 'failed' : 'completed',
                 completedAt: createdAt,
                 transitionKind: transitionKindValue,
                 boundaryKind: boundary,
@@ -521,8 +541,9 @@ export class OperatorProjectionRepository {
                 knownCostUsd: costFromUsage(event.payload.usage),
                 terminalCode: semanticError ? errorCode(transition) : undefined,
                 terminalMessage: semanticError ? errorMessage(transition) : undefined,
-                turnTraceId: stringField(event.payload, 'turnId'),
+                turnTraceId,
             });
+            if (superseded) return;
             const runStatus = semanticError ? 'failed' : boundary ? 'waiting' : transitionKindValue === 'complete' ? 'completed' : 'running';
             await this.upsertEventRun({
                 tenantId: event.tenantId,
@@ -751,7 +772,7 @@ export class OperatorProjectionRepository {
         const expectedEdgeCount = runs.reduce((sum, run) => sum + Math.max(0, run.childCount ?? 0), 0);
         const partial = turns.length < expectedTurnCount || edges.length < expectedEdgeCount;
         const graph: AgentRunGraph = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             tenantId: params.tenantId,
             taskId: params.taskId,
             root: rowToNode(root),
@@ -761,6 +782,15 @@ export class OperatorProjectionRepository {
             memoryOps: [],
             effects: effects.map(rowToEffect),
             events: [],
+            coordination: {
+                taskId: params.taskId,
+                state: 'idle',
+                health: 'attention',
+                observedAt: new Date().toISOString(),
+                requestedGeneration: '0',
+                completedGeneration: '0',
+                issues: ['projection_partial'],
+            },
             debug: { driverRuns: [] },
             projection: { source: 'semantic', partial },
         };
@@ -922,7 +952,12 @@ export class OperatorProjectionRepository {
         taskId: string;
         rootTaskId: string;
         agentId?: string;
-        turnSeq: number;
+        turnSeq?: number;
+        attemptKey: string;
+        disposition?: 'executed' | 'superseded';
+        claimId?: string;
+        turnFence?: string;
+        claimedGeneration?: string;
         status: string;
         startedAt?: Date;
         completedAt?: Date;
@@ -952,13 +987,18 @@ export class OperatorProjectionRepository {
             terminalCode: params.terminalCode,
             terminalMessage: params.terminalMessage,
             turnTraceId: params.turnTraceId,
+            turnSeq: params.turnSeq,
+            attemptKey: params.attemptKey,
+            disposition: params.disposition,
+            claimId: params.claimId,
+            turnFence: params.turnFence,
+            claimedGeneration: params.claimedGeneration,
         });
         await this.prisma.turnRun!.upsert!({
-            where: { tenantId_taskId_turnSeq: { tenantId: params.tenantId, taskId: params.taskId, turnSeq: params.turnSeq } },
+            where: { tenantId_taskId_attemptKey: { tenantId: params.tenantId, taskId: params.taskId, attemptKey: params.attemptKey } },
             create: {
                 tenantId: params.tenantId,
                 taskId: params.taskId,
-                turnSeq: params.turnSeq,
                 ...data,
             },
             update: data,
@@ -1098,8 +1138,8 @@ export class OperatorProjectionRepository {
     }
 
     private async upsertTurn(turn: TurnRun, nodesByTask: Map<string, AgentRunNode>, graph: AgentRunGraph): Promise<void> {
-        const turnSeq = turn.turnSeq ?? 0;
-        if (turnSeq <= 0) return;
+        const turnSeq = turn.turnSeq;
+        const attemptKey = turn.attemptKey ?? turn.id;
         const node = nodesByTask.get(turn.taskId);
         const transition = turn.cognition?.transition;
         const data = stripUndefined({
@@ -1117,13 +1157,20 @@ export class OperatorProjectionRepository {
             terminalCode: errorCode(turn.error),
             terminalMessage: errorMessage(turn.error),
             turnTraceId: turn.turnTraceRef?.turnTraceId,
+            turnSeq,
+            attemptKey,
+            attemptSeq: turn.attemptSeq,
+            disposition: turn.disposition,
+            claimId: turn.claimId,
+            turnFence: turn.turnFence,
+            claimedGeneration: turn.claimedGeneration,
+            authoritativeTerminal: turn.authoritativeTerminal ?? false,
         });
         await this.prisma.turnRun!.upsert!({
-            where: { tenantId_taskId_turnSeq: { tenantId: graph.tenantId, taskId: turn.taskId, turnSeq } },
+            where: { tenantId_taskId_attemptKey: { tenantId: graph.tenantId, taskId: turn.taskId, attemptKey } },
             create: {
                 tenantId: graph.tenantId,
                 taskId: turn.taskId,
-                turnSeq,
                 ...data,
             },
             update: data,
@@ -1294,13 +1341,31 @@ function rowToTurn(row: SemanticTurnRow): TurnRun {
         ...(row.agentId ? { agentId: row.agentId } : {}),
         status: normalizeStatus(row.status),
         operation: 'turn.segment',
-        turnSeq: row.turnSeq,
+        ...(row.turnSeq !== null && row.turnSeq !== undefined ? { turnSeq: row.turnSeq } : {}),
+        attemptKey: row.attemptKey,
+        ...(row.attemptSeq !== null && row.attemptSeq !== undefined ? { attemptSeq: row.attemptSeq } : {}),
+        ...(isDisposition(row.disposition) ? { disposition: row.disposition } : {}),
+        ...(row.claimId ? { claimId: row.claimId } : {}),
+        ...(row.turnFence ? { turnFence: row.turnFence } : {}),
+        ...(row.claimedGeneration ? { claimedGeneration: row.claimedGeneration } : {}),
+        ...(row.authoritativeTerminal ? { authoritativeTerminal: true } : {}),
         ...(row.boundaryKind ? { boundaryKind: row.boundaryKind } : {}),
         ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
         ...(row.completedAt ? { finishedAt: toIso(row.completedAt) } : {}),
         ...(row.terminalCode || row.terminalMessage ? { error: { code: row.terminalCode, message: row.terminalMessage } } : {}),
         ...(row.turnTraceId ? { turnTraceRef: { turnTraceId: row.turnTraceId } } : {}),
     };
+}
+
+function isDisposition(value: unknown): value is NonNullable<TurnRun['disposition']> {
+    return value === 'executed' || value === 'queued' || value === 'matching_replay' ||
+        value === 'superseded' || value === 'terminal_replay';
+}
+
+function eventAttemptKey(event: OperatorProjectionEvent, suffix: string): string {
+    const attempt = stringField(event.payload, 'attemptKey') ??
+        event.eventId ?? `${event.type}:${event.seq ?? 'unknown'}`;
+    return `${attempt}:${suffix}`;
 }
 
 function rowToEffect(row: SemanticEffectRow): EffectRun {

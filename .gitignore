@@ -66,3 +66,6 @@ a2a_specs/
 hatchet-docs/
 hatchet-docs/**
 .gstack/
+
+# Local example output
+ethical-triage-transcript.txt

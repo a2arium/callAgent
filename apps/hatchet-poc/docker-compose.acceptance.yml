@@ -1,0 +1,25 @@
+# Isolated acceptance profile. Use with a distinct Compose project name and
+# HATCHET_DATABASE_URL pointing at a disposable database.
+services:
+  nats:
+    ports: !override
+      - "14222:4222"
+      - "18222:8222"
+
+  hatchet-rabbitmq:
+    ports: !override
+      - "15683:5672"
+      - "25683:15672"
+
+  hatchet-setup-config:
+    environment:
+      SERVER_AUTH_COOKIE_DOMAIN: localhost:18080
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:17077
+
+  hatchet-engine:
+    ports: !override
+      - "17077:7070"
+
+  hatchet-dashboard:
+    ports: !override
+      - "18080:80"

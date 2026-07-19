@@ -318,6 +318,10 @@ describe('TaskEngine runtime driver routing', () => {
                     agentId: 'driver-test-agent',
                     awaiting: { kind: 'await_child', token: 'child-token' },
                     turn: 1,
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    },
                 },
                 pending: {
                     tasks: {
@@ -378,7 +382,13 @@ describe('TaskEngine runtime driver routing', () => {
             agentId: 'driver-test-agent',
             expectedWmVersion: BigInt(0),
             snapshot: {
-                meta: { agentId: 'driver-test-agent', turn: 1 },
+                meta: {
+                    agentId: 'driver-test-agent', turn: 1,
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    },
+                },
                 pending: {
                     inputs: {
                         'input-token': { schema: { type: 'object' } },
@@ -424,7 +434,13 @@ describe('TaskEngine runtime driver routing', () => {
             agentId: 'driver-test-agent',
             expectedWmVersion: BigInt(0),
             snapshot: {
-                meta: { agentId: 'driver-test-agent', turn: 1 },
+                meta: {
+                    agentId: 'driver-test-agent', turn: 1,
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    },
+                },
                 pending: {
                     tools: {
                         'tool-token': { name: 'search', args: { q: 'hi' } },

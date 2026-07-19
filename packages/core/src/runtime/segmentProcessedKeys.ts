@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { TaskTurnClaim } from '../orchestration/TaskTurnCoordinator.js';
 
 const DEFAULT_MAX_PROCESSED_KEYS = 512;
 
@@ -13,6 +14,7 @@ type SnapshotWithMeta = Record<string, unknown> & {
 type ActiveSegmentContext = {
     idempotencyKey: string;
     outboxSeq: number;
+    turnClaim?: TaskTurnClaim & { tenantId: string; taskId: string; abortSignal?: AbortSignal };
 };
 
 const activeSegmentContext = new AsyncLocalStorage<ActiveSegmentContext>();
@@ -21,11 +23,16 @@ export function currentSegmentIdempotencyKey(): string | undefined {
     return activeSegmentContext.getStore()?.idempotencyKey;
 }
 
+export function currentTaskTurnClaim(): ActiveSegmentContext['turnClaim'] {
+    return activeSegmentContext.getStore()?.turnClaim;
+}
+
 export async function runWithSegmentIdempotencyKey<T>(
     idempotencyKey: string,
-    fn: () => Promise<T>
+    fn: () => Promise<T>,
+    turnClaim?: ActiveSegmentContext['turnClaim']
 ): Promise<T> {
-    return activeSegmentContext.run({ idempotencyKey, outboxSeq: 0 }, fn);
+    return activeSegmentContext.run({ idempotencyKey, outboxSeq: 0, turnClaim }, fn);
 }
 
 export function nextSegmentOutboxIdempotencyKey(topic: string): string | undefined {

@@ -12,7 +12,7 @@ import { JsonPreview } from './JsonPreview';
 import { LlmCallsTable } from '../llm/LlmCallsTable';
 import { MemoryOpsTable } from '../memory/MemoryOpsTable';
 import { TurnDetail, TurnTimeline } from '../turn/TurnTimeline';
-import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, TurnRun } from '../../types';
+import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, TaskCoordinationView, TurnRun } from '../../types';
 
 export function NodeInspector(props: {
   graph: AgentRunGraph;
@@ -166,6 +166,10 @@ function SummaryTab(props: {
         <FactRow label="Cost">{typeof props.rollup.costUsd === 'number' ? formatCost(props.rollup.costUsd) : 'Not captured'}</FactRow>
       </InspectorSection>
 
+      {props.node.taskId === props.graph.taskId ? (
+        <CoordinationCard coordination={props.graph.coordination} />
+      ) : null}
+
       <InspectorSection title="Execution context">
         <FactRow label="Parent">{props.node.parentTaskId ? <CopyableId value={props.node.parentTaskId} label="parent task ID" /> : 'Root agent'}</FactRow>
         <FactRow label="Children">{formatNumber(children)}</FactRow>
@@ -198,6 +202,36 @@ function SummaryTab(props: {
         <FactRow label="Provider run">{props.node.providerRunId ? 'Available' : props.node.executionOrigin === 'cache' ? 'Not created for cache hit' : 'Not captured'}</FactRow>
       </InspectorSection>
     </div>
+  );
+}
+
+function CoordinationCard(props: { coordination: TaskCoordinationView }): React.ReactElement {
+  const value = props.coordination;
+  const active = value.active;
+  const issueText = value.issues.length > 0
+    ? value.issues.map((issue) => issue.replace(/_/g, ' ')).join(', ')
+    : 'None';
+  return (
+    <InspectorSection title="Coordination">
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        <Metric label="State" value={value.state} />
+        <Metric label="Health" value={value.health} />
+        <Metric label="Requested" value={value.requestedGeneration} />
+        <Metric label="Completed" value={value.completedGeneration} />
+      </div>
+      <FactRow label="Phase">{active?.phase ?? 'No active owner'}</FactRow>
+      <FactRow label="Lease">{active ? `${active.leaseState} · expires ${formatRelative(active.expiresAt)}` : 'Not owned'}</FactRow>
+      <FactRow label="Heartbeat">{active ? formatRelative(active.heartbeatAt) : 'Not applicable'}</FactRow>
+      <FactRow label="Dispatch">{value.dispatchIntent ? `${value.dispatchIntent.state} · generation ${value.dispatchIntent.generation}` : 'None'}</FactRow>
+      <FactRow label="Issues">{issueText}</FactRow>
+      {active ? (
+        <>
+          <FactRow label="Claim"><CopyableId value={active.claimId} label="claim ID" /></FactRow>
+          <FactRow label="Fence"><CopyableId value={active.fence} label="turn fence" /></FactRow>
+          <FactRow label="Owner"><CopyableId value={active.ownerId} label="owner ID" /></FactRow>
+        </>
+      ) : null}
+    </InspectorSection>
   );
 }
 

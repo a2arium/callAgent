@@ -88,6 +88,14 @@ class FakeSessionStore extends InMemorySessionManager {
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
         const cloned = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+        const meta = ((cloned.meta ?? {}) as Record<string, unknown>);
+        if (meta.turnCoordinator === undefined) {
+            meta.turnCoordinator = {
+                schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                requestedGeneration: '0', completedGeneration: '0',
+            };
+        }
+        cloned.meta = meta;
         this.snapshotsMap().set(key, { wmVersion, snapshot: cloned, agentId, updatedAt: new Date().toISOString() });
     }
 
@@ -312,7 +320,8 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         })),
     }));
     await jest.unstable_mockModule(path.join(srcDir, 'loop/loopRunner.ts'), () => ({
-        runLoop: (...args: any[]) => runLoopMock(...args)
+        runLoop: (...args: any[]) => runLoopMock(...args),
+        flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
     }));
     await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
     const mod = await import(path.join(srcDir, 'orchestration/taskEngine.ts'));

@@ -13,8 +13,6 @@ export function TurnTimeline(props: {
   tenantId?: string;
   onSelect: (turn: TurnRun) => void;
 }): React.ReactElement {
-  const duplicateSeqs = duplicateTurnSeqs(props.turns);
-
   return (
     <section className="grid gap-3 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -27,8 +25,6 @@ export function TurnTimeline(props: {
       <div className="grid max-h-[360px] gap-2 overflow-y-auto overflow-x-hidden pr-1">
         {props.turns.length === 0 ? <p className="text-sm text-muted-foreground">Turn summary was not captured for this node.</p> : null}
         {props.turns.map((turn, index) => {
-          const turnSeq = turn.turnSeq ?? index + 1;
-          const duplicate = turn.turnSeq !== undefined && duplicateSeqs.has(turn.turnSeq);
           return (
             <button
               key={turn.id}
@@ -41,17 +37,20 @@ export function TurnTimeline(props: {
             >
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="break-words font-semibold [overflow-wrap:anywhere]">Turn {turnSeq}</p>
+                  <p className="break-words font-semibold [overflow-wrap:anywhere]">{attemptTurnLabel(turn, index)}</p>
                   <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                     {turnFlowLabel(turn)}
                   </p>
                 </div>
-                <StatusBadge status={normalizeRuntimeStatus(turn.status)} />
+                <div className="flex flex-wrap justify-end gap-1">
+                  <DispositionBadge turn={turn} />
+                  <StatusBadge status={normalizeRuntimeStatus(turn.status)} />
+                </div>
               </div>
-              {duplicate ? (
+              {turn.authoritativeTerminal ? (
                 <p className="mt-2 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
-                  <AlertTriangle className="h-3 w-3" />
-                  Duplicate turn number detected
+                  <FileOutput className="h-3 w-3" />
+                  Authoritative terminal winner
                 </p>
               ) : null}
               <div className="mt-2 flex flex-wrap gap-1.5">
@@ -79,7 +78,7 @@ export function TurnDetail(props: {
 }): React.ReactElement {
   if (!props.turn) return <p className="text-sm text-muted-foreground">Select a turn to inspect APLRET cognition.</p>;
   const turn = props.turn;
-  const turnLabel = `Turn ${turn.turnSeq ?? '?'}`;
+  const turnLabel = attemptTurnLabel(turn);
   const events = props.events ?? [];
   const semanticFailure = semanticFailureFromTurn(turn);
   const stages = [
@@ -125,6 +124,10 @@ export function TurnDetail(props: {
           <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Key signals</h4>
           <div className="grid gap-1">
             <FactRow label="Turn inbox">{turn.cognition?.perception ? 'Derived from perception context' : 'No inbox event captured'}</FactRow>
+            <FactRow label="Disposition">{dispositionLabel(turn.disposition)}</FactRow>
+            <FactRow label="Claim">{turn.claimId ?? 'Not acquired'}</FactRow>
+            <FactRow label="Fence">{turn.turnFence ?? 'Not acquired'}</FactRow>
+            <FactRow label="Generation">{turn.claimedGeneration ?? 'Not acquired'}</FactRow>
             <FactRow label="Shield">{shieldSummary(turn)}</FactRow>
             <FactRow label="Execution">{executionSummary(turn)}</FactRow>
             <FactRow label="Output">{hasOutputProduced(turn) ? 'Produced' : 'Not captured'}</FactRow>
@@ -280,13 +283,33 @@ function Marker(props: { icon: React.ReactNode; label: string }): React.ReactEle
   );
 }
 
-function duplicateTurnSeqs(turns: TurnRun[]): Set<number> {
-  const counts = new Map<number, number>();
-  for (const turn of turns) {
-    if (turn.turnSeq === undefined) continue;
-    counts.set(turn.turnSeq, (counts.get(turn.turnSeq) ?? 0) + 1);
+function attemptTurnLabel(turn: TurnRun, index = 0): string {
+  const attempt = turn.attemptSeq ?? index + 1;
+  return turn.turnSeq === undefined ? `Attempt ${attempt}` : `Attempt ${attempt} · Turn ${turn.turnSeq}`;
+}
+
+function dispositionLabel(disposition: TurnRun['disposition']): string {
+  switch (disposition) {
+    case 'executed': return 'Executed';
+    case 'queued': return 'Queued';
+    case 'matching_replay': return 'Replay';
+    case 'superseded': return 'Superseded';
+    case 'terminal_replay': return 'Terminal replay';
+    default: return 'Not captured';
   }
-  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([turnSeq]) => turnSeq));
+}
+
+function DispositionBadge(props: { turn: TurnRun }): React.ReactElement | null {
+  if (!props.turn.disposition) return null;
+  const muted = props.turn.disposition === 'queued' || props.turn.disposition === 'matching_replay' || props.turn.disposition === 'superseded';
+  return (
+    <span className={cn(
+      'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+      muted ? 'border-border bg-muted text-muted-foreground' : 'border-primary/30 bg-primary/10 text-primary'
+    )}>
+      {dispositionLabel(props.turn.disposition)}
+    </span>
+  );
 }
 
 function intentLabel(turn: TurnRun): string {

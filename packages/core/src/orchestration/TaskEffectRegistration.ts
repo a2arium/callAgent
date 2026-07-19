@@ -12,6 +12,8 @@ import {
     type TaskLifecycle,
 } from './TaskLifecycle.js';
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
+import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
+import { assertCurrentTaskTurn } from './TaskTurnCoordinator.js';
 
 export type TaskEffectKind = 'tool' | 'tool.inline' | 'child' | 'child.group' | 'timer' | string;
 
@@ -102,13 +104,23 @@ export async function registerTaskEffect<T>(params: {
     }) => { snapshot: Record<string, unknown>; value: T };
 }): Promise<TaskEffectRegistrationResult<T>> {
     await reconcileTerminalAncestor(params);
+    const activeTurnClaim = currentTaskTurnClaim();
     const result = await reconcileSnapshotMutation<RegistrationDecision<T>>({
         session: params.session,
         tenantId: params.tenantId,
         sessionId: params.taskId,
         agentId: params.agentId,
         operation: params.operation,
-        mutate: ({ snapshot }) => {
+        mutate: ({ snapshot, storageNow }) => {
+            if (activeTurnClaim !== undefined) {
+                assertCurrentTaskTurn(snapshot, {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    claim: activeTurnClaim,
+                    operation: params.operation,
+                    storageNow,
+                });
+            }
             const lifecycleSnapshot = ensureTaskLifecycle(snapshot, { taskId: params.taskId });
             const lifecycle = readTaskLifecycle(lifecycleSnapshot, params.taskId)!;
             if (isTaskLifecycleTerminal(lifecycle)) {

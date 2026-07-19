@@ -152,7 +152,17 @@ const createResolved = (name: string) => ({
 });
 
 const createParentSnapshot = (agentId: string): Record<string, unknown> => ({
-    meta: { agentId, turn: 0 },
+    meta: {
+        agentId,
+        turn: 0,
+        turnCoordinator: {
+            schemaVersion: 1,
+            nextFence: '0',
+            nextTurnSeq: 0,
+            requestedGeneration: '0',
+            completedGeneration: '0',
+        },
+    },
     M: {
         memory: {
             vars: {},

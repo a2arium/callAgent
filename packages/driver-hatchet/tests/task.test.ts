@@ -4,9 +4,14 @@ import {
     resolveHatchetExecutionTimeout,
     resolveSharedSegmentHatchetExecutionTimeout,
 } from '../src/taskTimeouts.js';
-import { createSegmentTask } from '../src/tasks/segment.js';
+import { createSegmentTask, SEGMENT_TASK_NAME } from '../src/tasks/segment.js';
 import { executeSegmentTask } from '../src/tasks/segment.js';
-import { createTaskTask, executeTaskTask } from '../src/tasks/task.js';
+import {
+    createTaskTask,
+    executeTaskTask,
+    TASK_STATE_TASK_NAME,
+    TASK_TASK_NAME,
+} from '../src/tasks/task.js';
 import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
 
@@ -112,6 +117,170 @@ describe('executeTaskTask', () => {
             executionTimeout: '6m',
             retries: 0,
         }));
+    });
+
+    it('declares the sole durable root with native per-task concurrency', () => {
+        const durableTask = jest.fn((options: unknown) => options);
+
+        createTaskTask({ durableTask } as never);
+
+        expect(durableTask).toHaveBeenCalledWith(expect.objectContaining({
+            name: TASK_TASK_NAME,
+            retries: 0,
+            concurrency: expect.objectContaining({
+                expression: 'input.tenantTaskKey',
+                maxRuns: 1,
+            }),
+        }));
+    });
+
+    it('keeps the production durable root orchestration-only and routes state through task-state children', async () => {
+        const durableTask = jest.fn((options: unknown) => options);
+        const findMany = jest.fn(async () => []);
+        const findUnique = jest.fn(async () => null);
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const load = jest.fn(async () => null);
+        const schedule = jest.fn(async () => undefined);
+        const definition = createTaskTask({ durableTask } as never, {
+            prisma: {
+                outbox: { findMany },
+                wMSession: { findUnique },
+                wMEvent: { findMany },
+            } as never,
+            driverRuns: { finalizeRootRun } as never,
+            sessionManager: { load } as never,
+            runtimeTimers: { schedule } as never,
+        }) as unknown as { fn: (input: unknown, ctx: unknown) => Promise<unknown> };
+        const ctx = {
+            runChild: jest.fn(async (name: string, childInput: any) => {
+                if (name === TASK_STATE_TASK_NAME) return {};
+                if (name === SEGMENT_TASK_NAME) {
+                    return {
+                        tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                        boundary: { kind: 'complete', result: { ok: true } },
+                        taskStatus: { state: 'completed', timestamp: '2026-07-19T00:00:00.000Z' },
+                        turnDisposition: 'executed', turnSeq: 1, claimedGeneration: '1',
+                    };
+                }
+                throw new Error(`Unexpected child ${name}: ${JSON.stringify(childInput)}`);
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await definition.fn({
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1', input: { value: 'hello' },
+            idempotencyKey: 'task-1:start', tenantTaskKey: '8:tenant-1:6:task-1',
+            rootRunKey: '8:tenant-1:6:task-1:root:1',
+        }, ctx);
+
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            TASK_STATE_TASK_NAME,
+            expect.objectContaining({ operation: 'bootstrap' }),
+            expect.any(Object),
+        );
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            TASK_STATE_TASK_NAME,
+            expect.objectContaining({ operation: 'list_outbox' }),
+            expect.any(Object),
+        );
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            TASK_STATE_TASK_NAME,
+            expect.objectContaining({ operation: 'project_terminal' }),
+            expect.any(Object),
+        );
+        expect(findMany).not.toHaveBeenCalled();
+        expect(findUnique).not.toHaveBeenCalled();
+        expect(finalizeRootRun).not.toHaveBeenCalled();
+        expect(load).not.toHaveBeenCalled();
+        expect(schedule).not.toHaveBeenCalled();
+    });
+
+    it('reloads authoritative state for a replay instead of trusting the segment boundary', async () => {
+        const durableTask = jest.fn((options: unknown) => options);
+        const definition = createTaskTask({ durableTask } as never, {} as never) as unknown as {
+            fn: (input: unknown, ctx: unknown) => Promise<any>;
+        };
+        const projected: any[] = [];
+        const ctx = {
+            runChild: jest.fn(async (name: string, childInput: any) => {
+                if (name === SEGMENT_TASK_NAME) {
+                    return {
+                        tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                        boundary: { kind: 'complete', result: { source: 'stale-segment' } },
+                        taskStatus: { state: 'completed', timestamp: '2026-07-19T00:00:00.000Z' },
+                        turnDisposition: 'terminal_replay',
+                    };
+                }
+                if (childInput.operation === 'reload_authoritative') {
+                    return { authoritativeBoundary: { kind: 'complete', result: { source: 'durable-snapshot' } } };
+                }
+                if (childInput.operation === 'project_terminal') projected.push(childInput.segment);
+                return {};
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        const result = await definition.fn({
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1', input: {},
+            idempotencyKey: 'task-1:start', tenantTaskKey: '8:tenant-1:6:task-1',
+            rootRunKey: '8:tenant-1:6:task-1:root:1',
+        }, ctx);
+
+        expect(result.boundary).toEqual({ kind: 'complete', result: { source: 'durable-snapshot' } });
+        expect(projected).toEqual([expect.objectContaining({
+            boundary: { kind: 'complete', result: { source: 'durable-snapshot' } },
+        })]);
+    });
+
+    it('retries a queued turn with a fresh segment child key', async () => {
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'continue' },
+                taskStatus: { state: 'working', timestamp: '2026-06-19T00:00:00.000Z' },
+                turnDisposition: 'queued',
+            },
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { ok: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-06-19T00:00:01.000Z' },
+                turnDisposition: 'executed',
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            sleepFor: jest.fn(async () => undefined),
+        };
+
+        await executeTaskTask({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            rootTaskId: 'task-1',
+            tenantTaskKey: '8:tenant-1:6:task-1',
+            rootRunKey: '8:tenant-1:6:task-1:root:1',
+            agentId: 'agent-1',
+            input: { value: 'hello' },
+            idempotencyKey: 'task-1:start',
+        }, ctx as never);
+
+        expect(ctx.sleepFor).toHaveBeenCalledWith('1s', 'turn-owner:1');
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            1,
+            SEGMENT_TASK_NAME,
+            expect.objectContaining({ attemptSeq: 1 }),
+            expect.objectContaining({ key: '8:tenant-1:6:task-1:root:1:segment:1:task-1:start' })
+        );
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            SEGMENT_TASK_NAME,
+            expect.objectContaining({ attemptSeq: 2 }),
+            expect.objectContaining({ key: '8:tenant-1:6:task-1:root:1:segment:2:task-1:start' })
+        );
     });
 
     it('finalizes the root driver run when the durable parent reaches a complete boundary', async () => {
@@ -365,7 +534,17 @@ describe('executeTaskTask', () => {
         const events = { push: jest.fn(async () => undefined) };
         const appendEvent = jest.fn(async () => ({ eventId: 'event-1', seq: 1 }));
         let parentSnapshot: Record<string, unknown> = {
-            meta: { agentId: 'parent-agent', turn: 1 },
+            meta: {
+                agentId: 'parent-agent',
+                turn: 1,
+                turnCoordinator: {
+                    schemaVersion: 1,
+                    nextFence: '0',
+                    nextTurnSeq: 0,
+                    requestedGeneration: '1',
+                    completedGeneration: '1',
+                },
+            },
             pending: {
                 tasks: {
                     'parent-token': {
@@ -530,7 +709,7 @@ describe('executeTaskTask', () => {
                     },
                 },
                 idempotencyKey: 'task-1:child:child-token',
-                turnSeq: 2,
+                attemptSeq: 2,
             }),
             expect.any(Object)
         );
@@ -609,7 +788,7 @@ describe('executeTaskTask', () => {
                     },
                 },
                 idempotencyKey: 'task-1:external:event-token',
-                turnSeq: 2,
+                attemptSeq: 2,
             }),
             expect.any(Object)
         );
@@ -712,7 +891,7 @@ describe('executeTaskTask', () => {
                     }),
                 },
                 idempotencyKey: 'timer:tenant-1:task-1:input-token:timer-1',
-                turnSeq: 2,
+                attemptSeq: 2,
             }),
             expect.any(Object)
         );
@@ -1076,7 +1255,7 @@ describe('executeTaskTask', () => {
                     },
                 },
                 idempotencyKey: 'task-1:child:child-token',
-                turnSeq: 2,
+                attemptSeq: 2,
             }),
             expect.any(Object)
         );
@@ -1213,7 +1392,7 @@ describe('executeTaskTask', () => {
                     },
                 },
                 idempotencyKey: 'task-1:child:child-token',
-                turnSeq: 2,
+                attemptSeq: 2,
             }),
             expect.any(Object)
         );

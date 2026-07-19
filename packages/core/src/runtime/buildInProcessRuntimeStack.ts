@@ -35,6 +35,7 @@ export type BuildInProcessRuntimeStackParams = {
         dueAt: string;
         payload?: unknown;
     }) => Promise<void>;
+    enableTurnRecovery?: boolean;
 };
 
 /** Default Phase 0 stack: real segment kernel behind the in-process driver. */
@@ -57,6 +58,13 @@ export function buildInProcessRuntimeStack(
     const runtimeDriver = new InProcessRuntimeDriver({
         turnExecutor,
         runtimeTimers,
+        // Pure in-memory sessions cannot survive process loss and accepted wakes
+        // are scheduled locally. Periodic durable scanning is reserved for SQL
+        // stores, and is disabled when this stack is only the delegate behind an
+        // outer runtime driver (Hatchet/custom drivers own their recovery loop).
+        sessionManager: params.enableTurnRecovery !== false && runtimeTimers !== undefined
+            ? params.sessionManager
+            : undefined,
         onTaskRunTimeout: params.onTaskRunTimeout,
     });
     return { turnExecutor, runtimeDriver, onTaskRunTimeout: params.onTaskRunTimeout };

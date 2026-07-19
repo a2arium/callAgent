@@ -4,6 +4,7 @@ import type { EnvironmentState, ControlState, MentalState } from './types.js';
 import type { StopPolicyFanoutTrace } from '../public-types/conversation/schemas.js';
 import type { TopicPostBackpressureSample } from '../internal/conversation/BackpressureManager.js';
 import type { TurnUsage, ManifestProvenance, JsonValue } from '../types/turnTrace.js';
+import type { TurnTrace } from '../types/turnTrace.js';
 import type { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
 import type { ManifestHitlConfig } from './manifestConsent.js';
 
@@ -172,4 +173,6 @@ export type InternalTaskContext = TaskContext & {
     __manifestHitl?: ManifestHitlConfig;
     /** Conversation delivery keys consumed by this run, persisted as an internal drain cursor. */
     __conversationConsumedDeliveryKeys?: Set<string>;
+    /** Turn traces buffered until the owning snapshot claim is durably arbitrated. */
+    __pendingOperatorTurnTraces?: TurnTrace[];
 };

@@ -16,6 +16,24 @@ export type WMSessionSnapshot = {
     snapshot: Record<string, unknown>;
     agentId: string;
     updatedAt: string; // ISO
+    /** Authoritative backing-store time captured with a mutation read. */
+    storageNow?: string;
+};
+
+export type RunnableTurnRequest = {
+    tenantId: string;
+    sessionId: string;
+    agentId: string;
+    updatedAt: string;
+    generation: string;
+    deliveryKey: string;
+    runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+};
+
+export type RunnableTurnRequestCursor = {
+    updatedAt: string;
+    tenantId: string;
+    sessionId: string;
 };
 
 export type ConversationKind = 'thread' | 'topic';
@@ -130,6 +148,10 @@ export type ConversationMessageDeliveryRecord = {
 
 export interface IWorkingMemorySessionStore {
     getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null>;
+    getSessionSnapshotForMutation?(
+        tenantId: string,
+        sessionId: string
+    ): Promise<WMSessionSnapshot | null>;
     writeSnapshotCAS(params: {
         tenantId: string;
         sessionId: string;
@@ -137,6 +159,10 @@ export interface IWorkingMemorySessionStore {
         expectedWmVersion: bigint;
         snapshot: Record<string, unknown>;
     }): Promise<{ newVersion: bigint }>;
+    listRunnableTurnRequests?(params: {
+        cursor?: RunnableTurnRequestCursor;
+        limit: number;
+    }): Promise<RunnableTurnRequest[]>;
     appendEvent(params: {
         tenantId: string;
         sessionId: string;

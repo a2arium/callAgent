@@ -146,7 +146,7 @@ describe('semanticFailureFromTurns', () => {
 
 function graphFixture(): AgentRunGraph {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tenantId: 'default',
     taskId: 'root-task',
     root: {
@@ -213,6 +213,15 @@ function graphFixture(): AgentRunGraph {
     memoryOps: [],
     effects: [],
     events: [],
+    coordination: {
+      taskId: 'root-task',
+      state: 'terminal',
+      health: 'healthy',
+      observedAt: '2026-07-19T00:00:00.000Z',
+      requestedGeneration: '1',
+      completedGeneration: '1',
+      issues: [],
+    },
     debug: { driverRuns: [] },
   };
 }

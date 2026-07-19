@@ -418,27 +418,19 @@ export class A2AService implements IA2AService {
                     shouldStage: awaitCompletionValue === false
                 });
                 if (awaitCompletionValue === false) {
-                    // ✅ FIX: Check if active loop already handles this via ApiBinder sync injection
-                    // If so, we MUST NOT trigger handleChildCompleted, as it would restart the task (Phantom Restart)
-                    const hasActiveLoopInbox = !!(sourceCtx as any)?.__activeLoopInbox;
-
-                    if (hasActiveLoopInbox) {
-                        a2aLogger.info('Skipping child completion notification - active loop handles via inbox injection', {
-                            parentTaskId: options.parentTaskId,
-                            childToken: options.parentChildToken
-                        });
-                        // Do nothing - ApiBinder logic took care of it
-                    } else {
-                        // The terminal coordinator stages and consumes the token atomically.
-                        queueMicrotask(() => {
-                            const notifyPromise = deliverCompletion().catch(notifyError => {
-                                a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
-                                    parentTaskId: options.parentTaskId
-                                });
+                    // `__activeLoopInbox` is attached for the lifetime of the context and
+                    // therefore does not prove that the originating turn is still running.
+                    // Always route terminal delivery through the durable coordinator. If
+                    // ApiBinder already staged the same completion, the coordinator and
+                    // deterministic wake key make this deferred publication idempotent.
+                    queueMicrotask(() => {
+                        const notifyPromise = deliverCompletion().catch(notifyError => {
+                            a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
+                                parentTaskId: options.parentTaskId
                             });
-                            this.trackNotification(notifyPromise);
                         });
-                    }
+                        this.trackNotification(notifyPromise);
+                    });
                 } else {
                     try {
                         await deliverCompletion();

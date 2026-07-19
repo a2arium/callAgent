@@ -7,6 +7,7 @@ export { ConversationService } from './internal/conversation/ConversationService
 export { createDbMessageLog } from './eventbus/dbMessageLog.js';
 export { InMemorySessionManager } from './orchestration/InMemorySessionManager.js';
 export { SessionManager } from './orchestration/SessionManager.js';
+export { readDurableTaskTerminal } from './orchestration/TaskLifecycle.js';
 export type { IEventBus, BusEventHandler } from './public-types/eventbus/types.js';
 export {
     bootstrapCompositionRootInternal,
@@ -45,6 +46,17 @@ export {
     type TaskEffectRegistrationResult,
 } from './orchestration/TaskEffectRegistration.js';
 export { prepareChildResultForPersistence } from './orchestration/childResultPersistence.js';
+export {
+    assertCurrentTaskTurn,
+    markTaskTurnDispatchEnqueued,
+    readTaskTurnCoordinator,
+    releaseTaskTurn,
+    renewTaskTurnClaim,
+    requestTaskTurn,
+    type RequestTaskTurnResult,
+    type TaskTurnClaim,
+    type TaskTurnCoordinatorState,
+} from './orchestration/TaskTurnCoordinator.js';
 export {
     reconcileSnapshotMutation,
     SnapshotReconciliationError,

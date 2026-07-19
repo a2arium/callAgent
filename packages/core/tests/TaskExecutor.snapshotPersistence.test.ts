@@ -26,6 +26,60 @@ const createFakeArtifactPrisma = () => {
 };
 
 describe('TaskExecutor snapshot persistence', () => {
+    it('offloads thenable local artifacts before the snapshot CAS write', async () => {
+        const localArtifact = {
+            kind: 'artifact_local',
+            value: `<html>${'terminal-result'.repeat(10_000)}</html>`,
+            mimeType: 'text/html',
+            then: () => undefined,
+        };
+        let savedSnapshot: Record<string, unknown> | undefined;
+        const prisma = createFakeArtifactPrisma();
+        const sessionManager = {
+            prisma,
+            load: jest.fn(async () => ({
+                wmVersion: BigInt(1),
+                snapshot: { meta: { turn: 1, agentId: 'agent-a' } },
+            })),
+            saveSnapshot: jest.fn(async (params: { snapshot: Record<string, unknown> }) => {
+                const visit = (value: unknown): void => {
+                    expect(typeof value).not.toBe('function');
+                    if (Array.isArray(value)) {
+                        value.forEach(visit);
+                    } else if (value && typeof value === 'object') {
+                        Object.values(value as Record<string, unknown>).forEach(visit);
+                    }
+                };
+                visit(params.snapshot);
+                savedSnapshot = params.snapshot;
+                return { newVersion: BigInt(2) };
+            }),
+        };
+
+        await (TaskExecutor as any).saveSnapshot({
+            sessionManager,
+            tenantId: 'tenant-a',
+            sessionId: 'task-artifact',
+            agentId: 'agent-a',
+            env: { turn: 2, pending: {}, inbox: { current: [], all: [] } },
+            M: {},
+            mNext: { evidence: localArtifact },
+            outcome: { kind: 'complete', result: { page: localArtifact } },
+            loopOpts: {},
+            ctx: {},
+            getSessionStorePrisma: () => prisma,
+        });
+
+        expect((savedSnapshot as any).M.evidence).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
+        expect((savedSnapshot as any).meta.taskTerminal.status.metadata.result.page).toEqual(
+            expect.objectContaining({ kind: 'artifact', mimeType: 'text/html' })
+        );
+        expect((savedSnapshot as any).meta.taskTerminal.status.metadata.result.page.then).toBeUndefined();
+    });
+
     it('sanitizes raw child.completed payloads from merged inboxes before saving snapshots', async () => {
         const rawHtml = `<html>${'task-executor-child-html'.repeat(5000)}</html>`;
         const rawObservation = {

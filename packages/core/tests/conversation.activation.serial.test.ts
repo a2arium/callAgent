@@ -35,6 +35,35 @@ const activationParams = (
 });
 
 describe('conversation activation serialization', () => {
+    it('serializes two task turns for the same session instead of re-entering', async () => {
+        const engine = new TaskEngine({});
+        const harness = engine as unknown as ActivationSerialHarness;
+        const order: string[] = [];
+        let releaseFirst!: () => void;
+        const firstCanFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
+        let firstStarted!: () => void;
+        const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+
+        const first = harness.runTaskSessionExclusive('tenant', 'task-serial', async () => {
+            order.push('first:start');
+            firstStarted();
+            await firstCanFinish;
+            order.push('first:end');
+            return 1;
+        });
+        await started;
+        const second = harness.runTaskSessionExclusive('tenant', 'task-serial', async () => {
+            order.push('second:start');
+            return 2;
+        });
+        await Promise.resolve();
+        expect(order).toEqual(['first:start']);
+        releaseFirst();
+        await expect(first).resolves.toBe(1);
+        await expect(second).resolves.toBe(2);
+        expect(order).toEqual(['first:start', 'first:end', 'second:start']);
+    });
+
     it('coalesces re-entrant activation for the same member session until the active turn finishes', async () => {
         const engine = new TaskEngine({});
         const harness = engine as unknown as ActivationSerialHarness;
@@ -77,7 +106,7 @@ describe('conversation activation serialization', () => {
         expect(calls).toEqual(['m1', 'm2']);
     });
 
-    it('queues same-session conversation activation until the active task turn drains', async () => {
+    it('admits a same-session conversation activation without waiting on a process-local turn queue', async () => {
         const engine = new TaskEngine({});
         const harness = engine as unknown as ActivationSerialHarness;
         const calls: string[] = [];
@@ -113,8 +142,7 @@ describe('conversation activation serialization', () => {
             activationResolved = true;
         });
         await Promise.resolve();
-        expect(activationResolved).toBe(false);
-        expect(calls).toEqual([]);
+        expect(calls).toEqual(['reply-1']);
 
         releaseTurn?.();
         await expect(activeTurn).resolves.toBe('turn-finished');

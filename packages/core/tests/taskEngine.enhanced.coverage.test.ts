@@ -47,7 +47,8 @@ await jest.unstable_mockModule(outboxPath, () => ({
 }));
 
 await jest.unstable_mockModule(loopRunnerPath, () => ({
-    runLoop: (...args: any[]) => runLoopMock(...args)
+    runLoop: (...args: any[]) => runLoopMock(...args),
+    flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
 }));
 
 await jest.unstable_mockModule(pluginManagerPath, () => ({
@@ -84,7 +85,14 @@ class FakeSessionStore {
 
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
-        this.snapshots.set(key, { wmVersion, snapshot, agentId, updatedAt: new Date().toISOString() });
+        const meta = { ...((snapshot.meta as Record<string, unknown> | undefined) ?? {}) };
+        meta.turnCoordinator ??= {
+            schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+            requestedGeneration: '0', completedGeneration: '0',
+        };
+        this.snapshots.set(key, {
+            wmVersion, snapshot: { ...snapshot, meta }, agentId, updatedAt: new Date().toISOString(),
+        });
     }
 
     getEvents(tenantId: string, sessionId: string) {

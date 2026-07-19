@@ -14,6 +14,10 @@ describe('ApiBinder.requestTool unified API', () => {
         mockSessionManager = {
             load: jest.fn().mockResolvedValue({
                 snapshot: {
+                    meta: { turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    } },
                     pending: { tools: {} }
                 },
                 wmVersion: BigInt(1)
@@ -66,7 +70,13 @@ describe('ApiBinder.requestTool unified API', () => {
 
     it('schedules non-blocking child starts through the runtime driver when start surface is enabled', async () => {
         const snapshots = new Map<string, { snapshot: Record<string, unknown>; wmVersion: bigint; agentId: string }>([
-            ['s1', { snapshot: { pending: { tools: {} } }, wmVersion: BigInt(1), agentId: 'parent-agent' }],
+            ['s1', { snapshot: {
+                meta: { turnCoordinator: {
+                    schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                    requestedGeneration: '0', completedGeneration: '0',
+                } },
+                pending: { tools: {} },
+            }, wmVersion: BigInt(1), agentId: 'parent-agent' }],
         ]);
         mockSessionManager.load.mockImplementation(async (_tenantId, sessionId) => snapshots.get(sessionId) as any ?? null);
         mockSessionManager.saveSnapshot.mockImplementation(async (params: any) => {
@@ -186,7 +196,13 @@ describe('ApiBinder.requestTool unified API', () => {
 
     it('redacts and bounds sync child completion result previews', async () => {
         const html = `<html>${'x'.repeat(80 * 1024)}</html>`;
-        let durableSnapshot: Record<string, unknown> = { pending: { tools: {} } };
+        let durableSnapshot: Record<string, unknown> = {
+            meta: { turnCoordinator: {
+                schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                requestedGeneration: '0', completedGeneration: '0',
+            } },
+            pending: { tools: {} },
+        };
         mockSessionManager.load.mockImplementation(async () => ({
             snapshot: durableSnapshot,
             wmVersion: BigInt(1),
@@ -257,7 +273,13 @@ describe('ApiBinder.requestTool unified API', () => {
     });
 
     it('persists a terminal child execution failure as child.failed', async () => {
-        let durableSnapshot: Record<string, unknown> = { pending: { tools: {} } };
+        let durableSnapshot: Record<string, unknown> = {
+            meta: { turnCoordinator: {
+                schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                requestedGeneration: '0', completedGeneration: '0',
+            } },
+            pending: { tools: {} },
+        };
         let durableVersion = BigInt(1);
         mockSessionManager.load.mockImplementation(async () => ({
             snapshot: durableSnapshot,

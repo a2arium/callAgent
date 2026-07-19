@@ -15,6 +15,64 @@ import { setPendingExternalEvents } from '../../src/orchestration/ExternalEvents
 import { setPendingTasks } from '../../src/orchestration/Handles.js';
 import { readProcessedSegmentKeys } from '../../src/runtime/segmentProcessedKeys.js';
 import { markSegmentCancellationRequested } from '../../src/runtime/segmentCancellation.js';
+import { currentTaskTurnClaim } from '../../src/runtime/segmentProcessedKeys.js';
+import { completeTaskTurnInSnapshot } from '../../src/orchestration/TaskTurnCoordinator.js';
+import { reconcileSnapshotMutation } from '../../src/orchestration/persistence/SnapshotRepository.js';
+
+async function persistMockTurn(
+    params: Parameters<typeof TaskExecutor.executeTurn>[0],
+    result: Awaited<ReturnType<typeof TaskExecutor.executeTurn>>
+) {
+    const claim = currentTaskTurnClaim();
+    if (!claim || !params.sessionManager) return result;
+    const persisted = await reconcileSnapshotMutation({
+        session: params.sessionManager,
+        tenantId: params.tenantId,
+        sessionId: params.sessionId,
+        agentId: params.agentId,
+        operation: 'test.turn.persist',
+        mutate: ({ snapshot, storageNow }) => {
+            const completed = completeTaskTurnInSnapshot(snapshot, {
+                tenantId: params.tenantId,
+                taskId: params.sessionId,
+                claim,
+                storageNow,
+            });
+            return {
+                kind: 'write' as const,
+                snapshot: completed.snapshot,
+                value: { scheduleNext: completed.scheduleNext },
+            };
+        },
+    });
+    (params.ctx as { __wmSavedThisTurn?: boolean }).__wmSavedThisTurn = true;
+    return {
+        ...result,
+        persistence: {
+            disposition: 'committed' as const,
+            scheduleNext: persisted.value.scheduleNext,
+            snapshot: persisted.snapshot,
+            wmVersion: persisted.wmVersion,
+        },
+    };
+}
+
+function withCompletedCoordinator(snapshot: Record<string, unknown>): Record<string, unknown> {
+    const meta = (snapshot.meta as Record<string, unknown> | undefined) ?? {};
+    return {
+        ...snapshot,
+        meta: {
+            ...meta,
+            turnCoordinator: {
+                schemaVersion: 1,
+                nextFence: '1',
+                nextTurnSeq: 1,
+                requestedGeneration: '1',
+                completedGeneration: '1',
+            },
+        },
+    };
+}
 
 describe('TurnRunnerSegmentExecutor integration', () => {
     const tenantId = 'tenant-seg';
@@ -63,7 +121,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             segment += 1;
             const M = params.M ?? initialM(params.ctx);
             if (segment === 1) {
-                return {
+                return persistMockTurn(params, {
                     M,
                     outcome: { kind: 'await_input', token: inputToken },
                     metrics: {},
@@ -72,9 +130,9 @@ describe('TurnRunnerSegmentExecutor integration', () => {
                         timestamp: new Date().toISOString(),
                         metadata: { token: inputToken },
                     },
-                };
+                });
             }
-            return {
+            return persistMockTurn(params, {
                 M,
                 outcome: { kind: 'complete', result: { done: true } },
                 metrics: {},
@@ -83,7 +141,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
                     timestamp: new Date().toISOString(),
                     metadata: { result: { done: true } },
                 },
-            };
+            });
         });
 
         const startResult = await executor.runSegment({
@@ -135,7 +193,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
     });
 
     it('duplicate idempotencyKey is a no-op', async () => {
-        executeTurnSpy.mockResolvedValue({
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
             M: initialM({
                 task: { id: taskId, input: {} },
                 logger: console,
@@ -145,7 +203,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             outcome: { kind: 'complete' },
             metrics: {},
             taskStatus: { state: 'completed', timestamp: new Date().toISOString() },
-        });
+        }));
 
         const key = `${taskId}:start`;
         await executor.runSegment({
@@ -166,8 +224,77 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         expect(executeTurnSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('executes a durably queued generation after the active turn releases', async () => {
+        let releaseFirst!: () => void;
+        let firstEntered!: () => void;
+        const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+        const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+        let invocation = 0;
+        executeTurnSpy.mockImplementation(async (params) => {
+            invocation += 1;
+            const M = params.M ?? initialM(params.ctx);
+            if (invocation === 1) {
+                firstEntered();
+                await firstGate;
+                return persistMockTurn(params, {
+                    M,
+                    outcome: { kind: 'await_input', token: 'queued-input' },
+                    metrics: {},
+                    taskStatus: {
+                        state: 'input-required',
+                        timestamp: new Date().toISOString(),
+                        metadata: { token: 'queued-input' },
+                    },
+                });
+            }
+            return persistMockTurn(params, {
+                M,
+                outcome: { kind: 'complete', result: { generation: 2 } },
+                metrics: {},
+                taskStatus: {
+                    state: 'completed',
+                    timestamp: new Date().toISOString(),
+                    metadata: { result: { generation: 2 } },
+                },
+            });
+        });
+
+        const first = executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: `${taskId}:start:first`,
+            wake: { trigger: 'start', input: { generation: 1 } },
+        });
+        await entered;
+
+        const queued = await executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: `${taskId}:start:second`,
+            wake: { trigger: 'start', input: { generation: 2 } },
+        });
+        expect(queued.turnDisposition).toBe('queued');
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
+
+        releaseFirst();
+        await first;
+
+        const executed = await executor.runSegment({
+            tenantId,
+            taskId,
+            agentId,
+            idempotencyKey: `${taskId}:start:second`,
+            wake: { trigger: 'start', input: { generation: 2 } },
+        });
+        expect(executed.turnDisposition).toBe('executed');
+        expect(executed.boundary).toEqual({ kind: 'complete', result: { generation: 2 } });
+        expect(executeTurnSpy).toHaveBeenCalledTimes(2);
+    });
+
     it('persists processed keys in the snapshot for durable duplicate detection', async () => {
-        executeTurnSpy.mockResolvedValue({
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
             M: initialM({
                 task: { id: taskId, input: {} },
                 logger: console,
@@ -177,7 +304,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             outcome: { kind: 'complete' },
             metrics: {},
             taskStatus: { state: 'completed', timestamp: new Date().toISOString() },
-        });
+        }));
 
         const key = `${taskId}:start`;
         await executor.runSegment({
@@ -227,7 +354,9 @@ describe('TurnRunnerSegmentExecutor integration', () => {
                 expectedWmVersion: loaded?.wmVersion ?? BigInt(0),
                 snapshot: setPendingTools(
                     {
+                        ...((loaded?.snapshot as Record<string, unknown>) ?? {}),
                         meta: {
+                            ...(((loaded?.snapshot as { meta?: Record<string, unknown> } | undefined)?.meta) ?? {}),
                             agentId: params.agentId,
                             awaiting: { kind: 'await_tool', token },
                         },
@@ -294,7 +423,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             sessionId: taskId,
             agentId,
             expectedWmVersion: BigInt(0),
-            snapshot,
+            snapshot: withCompletedCoordinator(snapshot),
         });
 
         const result = await executor.runSegment({
@@ -336,7 +465,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             sessionId: taskId,
             agentId,
             expectedWmVersion: BigInt(0),
-            snapshot,
+            snapshot: withCompletedCoordinator(snapshot),
         });
 
         const freshExecutor = new TurnRunnerSegmentExecutor({
@@ -465,7 +594,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             sessionId: taskId,
             agentId,
             expectedWmVersion: BigInt(0),
-            snapshot: scenario.snapshot,
+            snapshot: withCompletedCoordinator(scenario.snapshot),
         });
 
         const freshExecutor = new TurnRunnerSegmentExecutor({

@@ -95,6 +95,10 @@ export type SegmentResult = {
     taskStatus: SegmentTaskStatus;
     traceId?: string;
     turnTraceId?: string;
+    /** Internal ownership outcome used by durable runtime drivers. */
+    turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+    /** Claim used by this attempt; retained only for bounded driver diagnostics. */
+    turnClaim?: { claimId: string; fence: string; claimedGeneration: string; turnSeq: number };
     /** Populated when the segment ran via a prepared turn invocation. */
     taskEntity?: TaskEntity;
 };
@@ -105,6 +109,9 @@ export type RunSegmentParams = {
     agentId?: string;
     wake: TurnWake;
     idempotencyKey: string;
+    runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
+    /** Generation already durably accepted by a dispatch intent reconciler. */
+    recoveryGeneration?: string;
     /** When set, invoke runTurn directly without wake applicator mutation. */
     prepared?: PreparedTurnInvocation;
 };

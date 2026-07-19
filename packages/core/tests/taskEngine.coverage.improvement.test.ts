@@ -26,7 +26,8 @@ const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts')
 const runLoopMock = jest.fn() as any;
 const originalDriverSurfaces = process.env.CALLAGENT_DRIVER_SURFACES;
 await jest.unstable_mockModule(loopRunnerPath, () => ({
-    runLoop: (...args: any[]) => runLoopMock(...args)
+    runLoop: (...args: any[]) => runLoopMock(...args),
+    flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
 }));
 const { runLoop } = await import(loopRunnerPath) as any;
 await jest.unstable_mockModule(a2aPath, () => ({
@@ -78,7 +79,14 @@ class FailingSessionStore implements IWorkingMemorySessionStore {
 
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
-        this.snapshots.set(key, { wmVersion, snapshot, agentId, updatedAt: new Date().toISOString() });
+        const meta = { ...((snapshot.meta as Record<string, unknown> | undefined) ?? {}) };
+        meta.turnCoordinator ??= {
+            schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+            requestedGeneration: '0', completedGeneration: '0',
+        };
+        this.snapshots.set(key, {
+            wmVersion, snapshot: { ...snapshot, meta }, agentId, updatedAt: new Date().toISOString(),
+        });
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {

@@ -6,7 +6,9 @@ import type {
 } from '@a2arium/callagent-core/unstable';
 import {
     coordinateChildTerminal,
+    defaultMetricsRegistry,
     prepareChildResultForPersistence,
+    readDurableTaskTerminal,
     readSegmentCancellation,
     timerKindToReason,
 } from '@a2arium/callagent-core/unstable';
@@ -24,6 +26,7 @@ import {
     type SegmentTaskOutput,
     type SegmentTaskWake,
 } from './segment.js';
+import { ConcurrencyLimitStrategy } from '@hatchet-dev/typescript-sdk/v1/task.js';
 import type {
     OutboxDispatchInput,
     OutboxDispatchOutput,
@@ -34,15 +37,12 @@ import { withHatchetTaskLogging } from '../hatchetLogging.js';
 import { logger } from '@a2arium/callagent-utils';
 
 export const TASK_TASK_NAME = 'aplret.task';
+export const TASK_STATE_TASK_NAME = 'aplret.task-state';
 const BOUNDARY_EVENT_LOOKBACK = '5m';
 const TASK_EXECUTION_TIMEOUT = '30m';
 const DEFAULT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = 30_000;
 const DEFAULT_AWAIT_CHILD_MAX_WAIT_MS = 25 * 60_000;
 const log = logger.createLogger({ prefix: 'HatchetTask' });
-
-export function agentTaskName(agentId: string): string {
-    return `agent.${agentId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
-}
 
 export type TaskTaskInput = JsonObject & {
     tenantId: string;
@@ -51,6 +51,10 @@ export type TaskTaskInput = JsonObject & {
     input: JsonValue;
     cache?: RuntimeResultCachePolicy;
     idempotencyKey: string;
+    rootTaskId?: string;
+    parentTaskId?: string;
+    tenantTaskKey?: string;
+    rootRunKey?: string;
 };
 
 export type TaskTaskOutput = SegmentTaskOutput;
@@ -58,6 +62,8 @@ export type TaskTaskOutput = SegmentTaskOutput;
 type TaskResultCache = Pick<AgentResultCache, 'getCachedResult' | 'setCachedResult'>;
 
 export type TaskTaskDeps = {
+    /** Production roots route state/projection work through aplret.task-state. */
+    useTaskStateChildren?: boolean;
     driverRuns?: DriverRunsRepository;
     runtimeTimers?: RuntimeTimerRepository;
     agentResultCache?: TaskResultCache;
@@ -140,6 +146,49 @@ export type TaskTaskDeps = {
     };
 };
 
+type TaskStateOperation =
+    | 'bootstrap'
+    | 'reload_authoritative'
+    | 'find_boundary_event'
+    | 'find_child_task_id'
+    | 'list_outbox'
+    | 'inspect_cancellation'
+    | 'schedule_timer'
+    | 'mark_timer_fired'
+    | 'cancel_timers'
+    | 'project_terminal'
+    | 'project_failed'
+    | 'project_canceled';
+
+export type TaskStateInput = JsonObject & {
+    operation: TaskStateOperation;
+    task: TaskTaskInput;
+    boundary?: SegmentTaskBoundary;
+    segment?: SegmentTaskOutput;
+    error?: JsonValue;
+    timerKind?: 'token_expiry' | 'sleep' | 'child_timeout';
+    timerId?: string;
+    token?: string;
+};
+
+export type TaskStateOutput = JsonObject & {
+    persistedBoundary?: { boundary: AwaitableBoundary; turnSeq: number };
+    cachedSegment?: SegmentTaskOutput;
+    event?: RuntimeWakeEvent & { idempotencyKey?: string };
+    authoritativeBoundary?: SegmentTaskBoundary;
+    childTaskId?: string;
+    outboxChildren?: OutboxDispatchInput[];
+    operatorCanceled?: boolean;
+    timer?: {
+        timerId: string;
+        dueAt: string;
+        kind: string;
+        idempotencyKey: string;
+        payload?: JsonValue;
+    };
+    firedAt?: string;
+};
+
 type AwaitableBoundary = Extract<
     SegmentTaskBoundary,
     { kind: 'await_input' | 'await_tool' | 'await_child' | 'await_event' }
@@ -167,22 +216,40 @@ async function executeTaskTaskInner(
     let turnSeq = 0;
 
     try {
-        const persistedBoundary = await findPersistedAwaitBoundary(input, deps);
+        const bootstrap = await runTaskState(ctx, input, deps, {
+            operation: 'bootstrap',
+            task: input,
+        }, `bootstrap:${idempotencyKey}`);
+        const persistedBoundary = bootstrap !== undefined
+            ? bootstrap.persistedBoundary
+            : await findPersistedAwaitBoundary(input, deps);
         if (persistedBoundary !== undefined) {
             const event =
-                await findPersistedBoundaryEvent(input, persistedBoundary.boundary, deps)
+                await findPersistedBoundaryEventRecorded(
+                    ctx, input, persistedBoundary.boundary, deps,
+                    `bootstrap:${persistedBoundary.turnSeq}:${persistedBoundary.boundary.token}`
+                )
                 ?? await waitForBoundaryEvent(ctx, input, persistedBoundary.boundary, deps);
-            const hydratedEvent = await hydratePersistedBoundaryEvent(input, persistedBoundary.boundary, event, deps);
+            const hydratedEvent = await hydratePersistedBoundaryEventRecorded(
+                ctx, input, persistedBoundary.boundary, event, deps,
+                `bootstrap-hydrate:${persistedBoundary.turnSeq}:${persistedBoundary.boundary.token}:${event.idempotencyKey ?? event.kind}`
+            );
             wake = boundaryEventToWake(persistedBoundary.boundary, hydratedEvent);
             idempotencyKey = hydratedEvent.idempotencyKey ?? `${input.taskId}:${hydratedEvent.kind}:${hydratedEvent.token}`;
             turnSeq = persistedBoundary.turnSeq;
         }
 
         if (persistedBoundary === undefined) {
-            const cachedSegment = await resolveCachedStartSegment(input, deps);
+            const cachedSegment = bootstrap !== undefined
+                ? bootstrap.cachedSegment
+                : await resolveCachedStartSegment(input, deps);
             if (cachedSegment !== undefined) {
-                await finalizeRootRun(input, cachedSegment, deps);
-                await notifyPersistedA2AParentIfTerminal(input, cachedSegment, deps);
+                if (!await runTaskState(ctx, input, deps, {
+                    operation: 'project_terminal', task: input, segment: cachedSegment,
+                }, `terminal:cache:${idempotencyKey}`)) {
+                    await finalizeRootRun(input, cachedSegment, deps);
+                    await notifyPersistedA2AParentIfTerminal(input, cachedSegment, deps);
+                }
                 return cachedSegment;
             }
         }
@@ -195,43 +262,79 @@ async function executeTaskTaskInner(
                 agentId: input.agentId,
                 wake,
                 idempotencyKey,
-                turnSeq,
+                attemptSeq: turnSeq,
+                rootTaskId: input.rootTaskId ?? input.taskId,
+                ...(input.rootRunKey !== undefined ? { rootRunKey: input.rootRunKey } : {}),
             };
             const segmentRaw = await ctx.runChild<SegmentTaskInput, SegmentTaskOutput>(
                 SEGMENT_TASK_NAME,
                 segmentInput,
                 {
-                    key: idempotencyKey,
+                    key: `${input.rootRunKey ?? input.taskId}:segment:${turnSeq}:${idempotencyKey}`,
                     additionalMetadata: buildTaskRunMetadata(input, segmentInput),
                 }
             );
             const segment = normalizeSegmentOutput(segmentRaw);
             await dispatchPendingOutboxChildren(ctx, input, segment, deps);
 
-            if (isTerminalBoundary(segment.boundary)) {
-                await writeDurableResultCache(input, segment, deps);
-                await finalizeRootRun(input, segment, deps);
-                await notifyPersistedA2AParentIfTerminal(input, segment, deps);
-                return segment;
+            if (segment.turnDisposition === 'queued') {
+                await waitForTurnAvailability(ctx, input, turnSeq);
+                continue;
+            }
+
+            let boundary = segment.boundary;
+            if (deps?.useTaskStateChildren === true && segment.turnDisposition !== 'executed') {
+                const authoritative = await runTaskState(ctx, input, deps, {
+                    operation: 'reload_authoritative', task: input,
+                }, `authoritative:${turnSeq}:${segment.turnDisposition ?? 'unknown'}`);
+                if (authoritative?.authoritativeBoundary === undefined) {
+                    defaultMetricsRegistry.increment('hatchet_root_transition_total', {
+                        disposition: segment.turnDisposition ?? 'unknown',
+                        status: 'recovering',
+                    });
+                    await waitForTurnAvailability(ctx, input, turnSeq);
+                    continue;
+                }
+                boundary = authoritative.authoritativeBoundary;
+            }
+
+            if (isTerminalBoundary(boundary)) {
+                const authoritativeSegment = boundary === segment.boundary
+                    ? segment
+                    : { ...segment, boundary };
+                if (!await runTaskState(ctx, input, deps, {
+                    operation: 'project_terminal', task: input, segment: authoritativeSegment,
+                }, `terminal:${turnSeq}:${idempotencyKey}`)) {
+                    await writeDurableResultCache(input, authoritativeSegment, deps);
+                    await finalizeRootRun(input, authoritativeSegment, deps);
+                    await notifyPersistedA2AParentIfTerminal(input, authoritativeSegment, deps);
+                }
+                return authoritativeSegment;
             }
 
             if (
-                segment.boundary.kind === 'await_input' ||
-                segment.boundary.kind === 'await_tool' ||
-                segment.boundary.kind === 'await_child' ||
-                segment.boundary.kind === 'await_event'
+                boundary.kind === 'await_input' ||
+                boundary.kind === 'await_tool' ||
+                boundary.kind === 'await_child' ||
+                boundary.kind === 'await_event'
             ) {
                 const event =
-                    await findPersistedBoundaryEvent(input, segment.boundary, deps)
-                    ?? await waitForBoundaryEvent(ctx, input, segment.boundary, deps);
-                const hydratedEvent = await hydratePersistedBoundaryEvent(input, segment.boundary, event, deps);
-                wake = boundaryEventToWake(segment.boundary, hydratedEvent);
+                    await findPersistedBoundaryEventRecorded(
+                        ctx, input, boundary, deps,
+                        `turn:${turnSeq}:${boundary.token}`
+                    )
+                    ?? await waitForBoundaryEvent(ctx, input, boundary, deps);
+                const hydratedEvent = await hydratePersistedBoundaryEventRecorded(
+                    ctx, input, boundary, event, deps,
+                    `turn-hydrate:${turnSeq}:${boundary.token}:${event.idempotencyKey ?? event.kind}`
+                );
+                wake = boundaryEventToWake(boundary, hydratedEvent);
                 idempotencyKey = hydratedEvent.idempotencyKey ?? `${input.taskId}:${hydratedEvent.kind}:${hydratedEvent.token}`;
                 continue;
             }
 
-            if (segment.boundary.kind === 'sleep') {
-                const event = await waitForSleepBoundary(ctx, input, segment.boundary, deps);
+            if (boundary.kind === 'sleep') {
+                const event = await waitForSleepBoundary(ctx, input, boundary, deps);
                 wake = { trigger: 'timer', event: event as SegmentEventWake['event'] };
                 idempotencyKey = event.idempotencyKey ?? `${input.taskId}:timer:${event.token}`;
                 continue;
@@ -240,13 +343,167 @@ async function executeTaskTaskInner(
             return segment;
         }
     } catch (error) {
-        if (await isOperatorCancellationAbort(input, deps, error)) {
-            await finalizeRootRunAsCanceled(input, deps);
+        if (await isOperatorCancellationAbortRecorded(ctx, input, deps, error, idempotencyKey)) {
+            if (!await runTaskState(ctx, input, deps, {
+                operation: 'project_canceled', task: input,
+            }, `canceled:${idempotencyKey}`)) await finalizeRootRunAsCanceled(input, deps);
         } else if (!isHatchetDurableEvictionAbort(error)) {
-            await finalizeRootRunAsFailed(input, deps, error);
+            if (!await runTaskState(ctx, input, deps, {
+                operation: 'project_failed', task: input,
+                error: serializeDriverRunError(error) as JsonValue,
+            }, `failed:${idempotencyKey}`)) await finalizeRootRunAsFailed(input, deps, error);
         }
         throw error;
     }
+}
+
+async function runTaskState(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    deps: TaskTaskDeps | undefined,
+    stateInput: TaskStateInput,
+    key: string
+): Promise<TaskStateOutput | undefined> {
+    if (deps?.useTaskStateChildren !== true) return undefined;
+    return ctx.runChild<TaskStateInput, TaskStateOutput>(TASK_STATE_TASK_NAME, stateInput, {
+        key: `${input.rootRunKey ?? input.taskId}:state:${key}`,
+        additionalMetadata: {
+            operation: `task.state.${stateInput.operation}`,
+            tenantId: input.tenantId,
+            taskId: input.taskId,
+        },
+    });
+}
+
+export async function executeTaskStateTask(
+    input: TaskStateInput,
+    deps: TaskTaskDeps
+): Promise<TaskStateOutput> {
+    const task = input.task;
+    switch (input.operation) {
+        case 'bootstrap': {
+            const persistedBoundary = await findPersistedAwaitBoundary(task, deps);
+            const cachedSegment = persistedBoundary === undefined
+                ? await resolveCachedStartSegment(task, deps)
+                : undefined;
+            return {
+                ...(persistedBoundary !== undefined ? { persistedBoundary } : {}),
+                ...(cachedSegment !== undefined ? { cachedSegment } : {}),
+            } as TaskStateOutput;
+        }
+        case 'reload_authoritative': {
+            const loaded = await deps.sessionManager?.load(task.tenantId, task.taskId);
+            const terminal = readDurableTaskTerminal(loaded?.snapshot);
+            if (terminal !== undefined) {
+                const boundary: SegmentTaskBoundary = terminal.state === 'completed'
+                    ? { kind: 'complete', result: terminal.status.metadata?.result as JsonValue }
+                    : terminal.state === 'canceled'
+                      ? { kind: 'canceled', reason: terminal.status.metadata?.reason as string | undefined }
+                      : { kind: 'fail', error: (terminal.status.metadata ?? terminal.status.message) as JsonValue };
+                return { authoritativeBoundary: boundary };
+            }
+            const persisted = await findPersistedAwaitBoundary(task, deps);
+            return persisted === undefined ? {} : { authoritativeBoundary: persisted.boundary };
+        }
+        case 'find_boundary_event': {
+            if (input.boundary === undefined || !isAwaitableBoundary(input.boundary)) return {};
+            const event = await findPersistedBoundaryEvent(task, input.boundary, deps);
+            const hydrated = event === undefined
+                ? undefined
+                : await hydratePersistedBoundaryEvent(task, input.boundary, event, deps);
+            return hydrated === undefined ? {} : { event: hydrated } as TaskStateOutput;
+        }
+        case 'find_child_task_id': {
+            if (input.boundary?.kind !== 'await_child') return {};
+            const childTaskId = await findPersistedChildTaskId(task, input.boundary, deps);
+            return childTaskId === undefined ? {} : { childTaskId };
+        }
+        case 'list_outbox':
+            return { outboxChildren: await listPendingOutboxChildren(task, input.segment, deps) };
+        case 'inspect_cancellation': {
+            if (deps.prisma?.wMSession === undefined) return { operatorCanceled: false };
+            const row = await deps.prisma.wMSession.findUnique({
+                where: { tenantId_sessionId: { tenantId: task.tenantId, sessionId: task.taskId } },
+                select: { snapshot: true },
+            });
+            return { operatorCanceled: readSegmentCancellation(row?.snapshot) !== undefined };
+        }
+        case 'schedule_timer': {
+            if (input.boundary === undefined || input.timerKind === undefined || deps.runtimeTimers === undefined) {
+                throw new Error('task-state schedule_timer requires a boundary, kind, and timer repository');
+            }
+            const timer = await scheduleBoundaryTimer(task, input.boundary as TimerBoundary, deps.runtimeTimers, input.timerKind);
+            return {
+                timer: {
+                    timerId: timer.timerId,
+                    dueAt: timer.dueAt.toISOString(),
+                    kind: timer.kind,
+                    idempotencyKey: timer.idempotencyKey,
+                    ...(timer.payload !== undefined && timer.payload !== null
+                        ? { payload: timer.payload as JsonValue }
+                        : {}),
+                },
+            };
+        }
+        case 'mark_timer_fired': {
+            if (input.token === undefined || input.timerId === undefined || deps.runtimeTimers === undefined) {
+                throw new Error('task-state mark_timer_fired requires token, timerId, and timer repository');
+            }
+            const firedAt = new Date().toISOString();
+            await deps.runtimeTimers.markFiredByTimerId({
+                tenantId: task.tenantId, taskId: task.taskId, token: input.token,
+                timerId: input.timerId, firedAt: new Date(firedAt),
+            });
+            return { firedAt };
+        }
+        case 'cancel_timers':
+            await deps.runtimeTimers?.cancelTaskTimers({
+                tenantId: task.tenantId, taskId: task.taskId,
+                ...(input.token !== undefined ? { token: input.token } : {}),
+            });
+            return {};
+        case 'project_terminal': {
+            if (input.segment === undefined) throw new Error('task-state project_terminal requires segment');
+            await writeDurableResultCache(task, input.segment, deps);
+            await finalizeRootRun(task, input.segment, deps);
+            await notifyPersistedA2AParentIfTerminal(task, input.segment, deps);
+            return {};
+        }
+        case 'project_failed':
+            await finalizeRootRunAsFailed(task, deps, input.error);
+            return {};
+        case 'project_canceled':
+            await finalizeRootRunAsCanceled(task, deps);
+            return {};
+    }
+}
+
+function isAwaitableBoundary(boundary: SegmentTaskBoundary): boundary is AwaitableBoundary {
+    return boundary.kind === 'await_input' || boundary.kind === 'await_tool' ||
+        boundary.kind === 'await_child' || boundary.kind === 'await_event';
+}
+
+async function waitForTurnAvailability(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    attemptOrdinal: number
+): Promise<void> {
+    if (typeof ctx.waitFor !== 'function') {
+        await ctx.sleepFor('1s', `turn-owner:${attemptOrdinal}`);
+        return;
+    }
+    const tenantTaskKey = input.tenantTaskKey ?? encodeTenantTaskKey(input.tenantId, input.taskId);
+    await ctx.waitFor(
+        Or(
+            new UserEventCondition(`task-turn-available:${tenantTaskKey}`, '', 'available'),
+            new SleepCondition('5s', 'recovery')
+        ),
+        `turn-owner:${attemptOrdinal}`
+    );
+}
+
+function encodeTenantTaskKey(tenantId: string, taskId: string): string {
+    return `${tenantId.length}:${tenantId}:${taskId.length}:${taskId}`;
 }
 
 async function resolveCachedStartSegment(
@@ -523,6 +780,22 @@ async function isOperatorCancellationAbort(
     return readSegmentCancellation(row?.snapshot) !== undefined;
 }
 
+async function isOperatorCancellationAbortRecorded(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    deps: TaskTaskDeps | undefined,
+    error: unknown,
+    key: string
+): Promise<boolean> {
+    if (!isHatchetAbortSignalError(error)) return false;
+    const inspected = await runTaskState(ctx, input, deps, {
+        operation: 'inspect_cancellation', task: input,
+    }, `cancellation:${key}`);
+    return inspected !== undefined
+        ? inspected.operatorCanceled === true
+        : isOperatorCancellationAbort(input, deps, error);
+}
+
 function isHatchetAbortSignalError(error: unknown): boolean {
     if (!error || typeof error !== 'object') {
         return false;
@@ -684,9 +957,45 @@ async function dispatchPendingOutboxChildren(
     segment: SegmentTaskOutput,
     deps?: TaskTaskDeps
 ): Promise<void> {
-    if (deps?.prisma === undefined) {
-        return;
-    }
+    const state = await runTaskState(ctx, input, deps, {
+        operation: 'list_outbox', task: input, segment,
+    }, `outbox:${segment.turnSeq ?? 0}:${segment.claimedGeneration ?? 'unknown'}`);
+    const children = state !== undefined
+        ? state.outboxChildren ?? []
+        : await listPendingOutboxChildren(input, segment, deps);
+
+    await Promise.all(
+        children.map((childInput) => {
+            const tenantId = childInput.tenantId ?? input.tenantId;
+            const taskId = childInput.taskId ?? input.taskId;
+            return ctx.runNoWaitChild<OutboxDispatchInput, OutboxDispatchOutput>(
+                OUTBOX_DISPATCH_TASK_NAME,
+                childInput,
+                {
+                key: childInput.outboxRowId,
+                additionalMetadata: {
+                    operation: 'effect.outbox.dispatch',
+                    tenantId,
+                    taskId,
+                    rootTaskId: input.taskId,
+                    tenantTaskKey: `${tenantId}:${taskId}`,
+                    outboxRowId: childInput.outboxRowId,
+                    eventType: childInput.eventType,
+                    ...(childInput.agentId !== undefined ? { agentId: childInput.agentId } : {}),
+                    ...(childInput.traceId !== undefined ? { traceId: childInput.traceId } : {}),
+                    ...(childInput.token !== undefined ? { token: childInput.token } : {}),
+                },
+            });
+        })
+    );
+}
+
+async function listPendingOutboxChildren(
+    input: TaskTaskInput,
+    segment: SegmentTaskOutput | undefined,
+    deps?: TaskTaskDeps
+): Promise<OutboxDispatchInput[]> {
+    if (deps?.prisma === undefined) return [];
     const rows = await deps.prisma.outbox.findMany({
         where: {
             tenantId: input.tenantId,
@@ -697,16 +1006,15 @@ async function dispatchPendingOutboxChildren(
         take: 100,
     });
 
-    await Promise.all(
-        rows.map((row) => {
+    return rows.map((row) => {
             const payload = jsonObjectOrEmpty(row.payload);
             const token = typeof payload.token === 'string' ? payload.token : undefined;
             const traceId = typeof payload.traceId === 'string' ? payload.traceId : undefined;
             const agentId =
                 typeof payload.agentId === 'string'
                     ? payload.agentId
-                    : segment.agentId ?? input.agentId;
-            const childInput: OutboxDispatchInput = {
+                    : segment?.agentId ?? input.agentId;
+            return {
                 outboxRowId: row.id,
                 eventType: row.topic,
                 tenantId: row.tenantId,
@@ -714,28 +1022,8 @@ async function dispatchPendingOutboxChildren(
                 ...(agentId !== undefined ? { agentId } : {}),
                 ...(traceId !== undefined ? { traceId } : {}),
                 ...(token !== undefined ? { token } : {}),
-            };
-            return ctx.runNoWaitChild<OutboxDispatchInput, OutboxDispatchOutput>(
-                OUTBOX_DISPATCH_TASK_NAME,
-                childInput,
-                {
-                    key: row.id,
-                    additionalMetadata: {
-                        operation: 'effect.outbox.dispatch',
-                        tenantId: row.tenantId,
-                        taskId: row.key,
-                        rootTaskId: input.taskId,
-                        tenantTaskKey: `${row.tenantId}:${row.key}`,
-                        outboxRowId: row.id,
-                        eventType: row.topic,
-                        ...(agentId !== undefined ? { agentId } : {}),
-                        ...(traceId !== undefined ? { traceId } : {}),
-                        ...(token !== undefined ? { token } : {}),
-                    },
-                }
-            );
-        })
-    );
+            } satisfies OutboxDispatchInput;
+        });
 }
 
 function jsonObjectOrEmpty(value: JsonValue): JsonObject {
@@ -749,9 +1037,12 @@ function normalizeSegmentOutput(output: unknown): SegmentTaskOutput {
         return output;
     }
     if (output !== null && typeof output === 'object' && !Array.isArray(output)) {
-        const wrapped = (output as Record<string, unknown>)[SEGMENT_TASK_NAME];
-        if (isSegmentTaskOutput(wrapped)) {
-            return wrapped;
+        const record = output as Record<string, unknown>;
+        for (const taskName of [SEGMENT_TASK_NAME]) {
+            const wrapped = record[taskName];
+            if (isSegmentTaskOutput(wrapped)) {
+                return wrapped;
+            }
         }
     }
     throw new Error('SEGMENT_OUTPUT_INVALID');
@@ -798,13 +1089,13 @@ async function waitForBoundaryEvent(
     boundary: AwaitableBoundary,
     deps?: TaskTaskDeps
 ): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
-    if (boundary.kind === 'await_input' && boundary.expiresAt !== undefined && deps?.runtimeTimers !== undefined) {
-        return waitForInputOrTimer(ctx, input, boundary, deps.runtimeTimers);
+    if (boundary.kind === 'await_input' && boundary.expiresAt !== undefined) {
+        return waitForInputOrTimer(ctx, input, boundary, deps);
     }
 
     if (boundary.kind === 'await_child') {
-        if (boundary.expiresAt !== undefined && deps?.runtimeTimers !== undefined) {
-            return waitForChildOrTimer(ctx, input, boundary, deps.runtimeTimers);
+        if (boundary.expiresAt !== undefined) {
+            return waitForChildOrTimer(ctx, input, boundary, deps);
         }
         return waitForChildBoundaryEvent(ctx, input, boundary, deps);
     }
@@ -830,10 +1121,10 @@ async function waitForChildOrTimer(
     ctx: DurableContext<TaskTaskInput>,
     input: TaskTaskInput,
     boundary: Extract<AwaitableBoundary, { kind: 'await_child' }>,
-    runtimeTimers: RuntimeTimerRepository
+    deps?: TaskTaskDeps
 ): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
     if (boundary.expiresAt === undefined) throw new Error('CHILD_TIMER_EXPIRES_AT_MISSING');
-    const timer = await scheduleBoundaryTimer(input, boundary, runtimeTimers, 'child_timeout');
+    const timer = await scheduleBoundaryTimerRecorded(ctx, input, boundary, deps, 'child_timeout');
     const winner = await waitForBoundaryRace(ctx, {
         eventKey: `aplret.child.${boundary.token}`,
         timerKey: `aplret.timer.${boundary.token}`,
@@ -844,14 +1135,7 @@ async function waitForChildOrTimer(
         label: `wait:child-or-timer:${boundary.token}`,
     });
     if (winner.kind === 'timer') {
-        const firedAt = new Date().toISOString();
-        await runtimeTimers.markFiredByTimerId({
-            tenantId: input.tenantId,
-            taskId: input.taskId,
-            token: boundary.token,
-            timerId: timer.timerId,
-            firedAt: new Date(firedAt),
-        });
+        const firedAt = await markBoundaryTimerFiredRecorded(ctx, input, boundary.token, timer, deps);
         return {
             kind: 'timer',
             token: boundary.token,
@@ -868,11 +1152,7 @@ async function waitForChildOrTimer(
             idempotencyKey: timer.idempotencyKey,
         };
     }
-    await runtimeTimers.cancelTaskTimers({
-        tenantId: input.tenantId,
-        taskId: input.taskId,
-        token: boundary.token,
-    });
+    await cancelBoundaryTimersRecorded(ctx, input, boundary.token, deps);
     return normalizeWakeEvent('child', boundary.token, winner.payload);
 }
 
@@ -892,7 +1172,7 @@ async function waitForChildBoundaryEvent(
         'CALLAGENT_AWAIT_CHILD_MAX_WAIT_MS',
         DEFAULT_AWAIT_CHILD_MAX_WAIT_MS
     );
-    const startedAt = Date.now();
+    const maxAttempts = Math.max(1, Math.ceil(maxWaitMs / intervalMs));
     let attempt = 0;
 
     for (;;) {
@@ -906,13 +1186,20 @@ async function waitForChildBoundaryEvent(
             return normalizeWakeEvent('child', boundary.token, extracted.payload);
         }
 
-        const persisted = await findPersistedBoundaryEvent(input, boundary, deps);
+        const persisted = await findPersistedBoundaryEventRecorded(
+            ctx, input, boundary, deps, `watchdog:${boundary.token}:${attempt}`
+        );
         if (persisted !== undefined) {
             return persisted;
         }
 
-        if (Date.now() - startedAt >= maxWaitMs) {
-            const childTaskId = await findPersistedChildTaskId(input, boundary, deps ?? {});
+        if (attempt + 1 >= maxAttempts) {
+            const state = await runTaskState(ctx, input, deps, {
+                operation: 'find_child_task_id', task: input, boundary,
+            }, `child-id:${boundary.token}:${attempt}`);
+            const childTaskId = state !== undefined
+                ? state.childTaskId
+                : await findPersistedChildTaskId(input, boundary, deps ?? {});
             return childWake(input, boundary.token, childTaskId ?? boundary.token, {
                 ok: false,
                 error: {
@@ -930,12 +1217,12 @@ async function waitForInputOrTimer(
     ctx: DurableContext<TaskTaskInput>,
     input: TaskTaskInput,
     boundary: Extract<SegmentTaskBoundary, { kind: 'await_input' }>,
-    runtimeTimers: RuntimeTimerRepository
+    deps?: TaskTaskDeps
 ): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
     if (boundary.expiresAt === undefined) {
         throw new Error('TIMER_EXPIRES_AT_MISSING');
     }
-    const timer = await scheduleBoundaryTimer(input, boundary, runtimeTimers, 'token_expiry');
+    const timer = await scheduleBoundaryTimerRecorded(ctx, input, boundary, deps, 'token_expiry');
     const inputKey = `aplret.input.${boundary.token}`;
     const timerKey = `aplret.timer.${boundary.token}`;
     const expression = `input.tenantId == "${input.tenantId}" && input.taskId == "${input.taskId}"`;
@@ -950,14 +1237,7 @@ async function waitForInputOrTimer(
     });
 
     if (winner.kind === 'timer') {
-        const firedAt = new Date().toISOString();
-        await runtimeTimers.markFiredByTimerId({
-            tenantId: input.tenantId,
-            taskId: input.taskId,
-            token: boundary.token,
-            timerId: timer.timerId,
-            firedAt: new Date(firedAt),
-        });
+        const firedAt = await markBoundaryTimerFiredRecorded(ctx, input, boundary.token, timer, deps);
         return {
             kind: 'timer',
             token: boundary.token,
@@ -970,11 +1250,7 @@ async function waitForInputOrTimer(
         };
     }
 
-    await runtimeTimers.cancelTaskTimers({
-        tenantId: input.tenantId,
-        taskId: input.taskId,
-        token: boundary.token,
-    });
+    await cancelBoundaryTimersRecorded(ctx, input, boundary.token, deps);
     return normalizeWakeEvent('input', boundary.token, winner.payload);
 }
 
@@ -984,7 +1260,7 @@ async function waitForSleepBoundary(
     boundary: Extract<SegmentTaskBoundary, { kind: 'sleep' }>,
     deps?: TaskTaskDeps
 ): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
-    if (deps?.runtimeTimers === undefined) {
+    if (deps?.runtimeTimers === undefined && deps?.useTaskStateChildren !== true) {
         await ctx.sleepUntil(new Date(boundary.fireAt));
         const firedAt = new Date().toISOString();
         return {
@@ -998,21 +1274,14 @@ async function waitForSleepBoundary(
             idempotencyKey: `${input.taskId}:sleep:${boundary.token}`,
         };
     }
-    const timer = await scheduleBoundaryTimer(input, boundary, deps.runtimeTimers, 'sleep');
+    const timer = await scheduleBoundaryTimerRecorded(ctx, input, boundary, deps, 'sleep');
     const winner = await waitForBoundaryRace(ctx, {
         timerKey: `aplret.timer.${boundary.token}`,
         fireAt: boundary.fireAt,
         timerReadableKey: 'timer',
         label: `wait:sleep:${boundary.token}`,
     });
-    const firedAt = new Date().toISOString();
-    await deps.runtimeTimers.markFiredByTimerId({
-        tenantId: input.tenantId,
-        taskId: input.taskId,
-        token: boundary.token,
-        timerId: timer.timerId,
-        firedAt: new Date(firedAt),
-    });
+    const firedAt = await markBoundaryTimerFiredRecorded(ctx, input, boundary.token, timer, deps);
     if (winner.kind === 'timer' && winner.payload.kind === 'timer') {
         return normalizeTimerWake(boundary.token, winner.payload, timer);
     }
@@ -1058,6 +1327,80 @@ async function scheduleBoundaryTimer(
                     },
                 }
               : {}),
+    });
+}
+
+async function scheduleBoundaryTimerRecorded(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: TimerBoundary,
+    deps: TaskTaskDeps | undefined,
+    kind: 'token_expiry' | 'sleep' | 'child_timeout'
+): Promise<RuntimeTimerRecord> {
+    const state = await runTaskState(ctx, input, deps, {
+        operation: 'schedule_timer', task: input, boundary, timerKind: kind,
+    }, `timer:schedule:${kind}:${boundary.token}`);
+    if (state?.timer !== undefined) {
+        const dueAt = new Date(state.timer.dueAt);
+        return {
+            id: state.timer.timerId,
+            tenantId: input.tenantId,
+            taskId: input.taskId,
+            agentId: input.agentId ?? null,
+            rootTaskId: input.rootTaskId ?? input.taskId,
+            token: boundary.token,
+            timerId: state.timer.timerId,
+            dueAt,
+            kind: state.timer.kind,
+            status: 'scheduled',
+            idempotencyKey: state.timer.idempotencyKey,
+            fireLeaseId: null,
+            fireLeaseUntil: null,
+            payload: state.timer.payload,
+            providerRunId: null,
+            providerTaskRunId: null,
+            error: null,
+            firedAt: null,
+            canceledAt: null,
+            createdAt: dueAt,
+            updatedAt: dueAt,
+        };
+    }
+    if (deps?.runtimeTimers === undefined) throw new Error('RUNTIME_TIMER_REPOSITORY_MISSING');
+    return scheduleBoundaryTimer(input, boundary, deps.runtimeTimers, kind);
+}
+
+async function markBoundaryTimerFiredRecorded(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    token: string,
+    timer: RuntimeTimerRecord,
+    deps?: TaskTaskDeps
+): Promise<string> {
+    const state = await runTaskState(ctx, input, deps, {
+        operation: 'mark_timer_fired', task: input, token, timerId: timer.timerId,
+    }, `timer:fired:${timer.timerId}`);
+    if (state !== undefined) return state.firedAt ?? timer.dueAt.toISOString();
+    const firedAt = new Date().toISOString();
+    await deps?.runtimeTimers?.markFiredByTimerId({
+        tenantId: input.tenantId, taskId: input.taskId, token,
+        timerId: timer.timerId, firedAt: new Date(firedAt),
+    });
+    return firedAt;
+}
+
+async function cancelBoundaryTimersRecorded(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    token: string,
+    deps?: TaskTaskDeps
+): Promise<void> {
+    const state = await runTaskState(ctx, input, deps, {
+        operation: 'cancel_timers', task: input, token,
+    }, `timer:cancel:${token}`);
+    if (state !== undefined) return;
+    await deps?.runtimeTimers?.cancelTaskTimers({
+        tenantId: input.tenantId, taskId: input.taskId, token,
     });
 }
 
@@ -1139,6 +1482,21 @@ async function findPersistedBoundaryEvent(
     return await findPersistedParentChildSnapshot(input, boundary, deps)
         ?? await findPersistedParentChildEvent(input, boundary, deps ?? {})
         ?? await findPersistedChildTerminalEvent(input, boundary, deps);
+}
+
+async function findPersistedBoundaryEventRecorded(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: AwaitableBoundary,
+    deps: TaskTaskDeps | undefined,
+    key: string
+): Promise<(RuntimeWakeEvent & { idempotencyKey?: string }) | undefined> {
+    const state = await runTaskState(ctx, input, deps, {
+        operation: 'find_boundary_event', task: input, boundary,
+    }, `boundary:${key}`);
+    return state !== undefined
+        ? state.event
+        : findPersistedBoundaryEvent(input, boundary, deps);
 }
 
 async function findPersistedParentChildSnapshot(
@@ -1313,6 +1671,22 @@ async function hydratePersistedBoundaryEvent(
         return event;
     }
     return await findPersistedChildTerminalEvent(input, boundary, deps) ?? event;
+}
+
+async function hydratePersistedBoundaryEventRecorded(
+    ctx: DurableContext<TaskTaskInput>,
+    input: TaskTaskInput,
+    boundary: AwaitableBoundary,
+    event: RuntimeWakeEvent & { idempotencyKey?: string },
+    deps: TaskTaskDeps | undefined,
+    key: string
+): Promise<RuntimeWakeEvent & { idempotencyKey?: string }> {
+    if (boundary.kind !== 'await_child' || event.kind !== 'child' ||
+        (event.output !== undefined && event.childTaskId !== boundary.token)) {
+        return event;
+    }
+    const persisted = await findPersistedBoundaryEventRecorded(ctx, input, boundary, deps, key);
+    return persisted ?? event;
 }
 
 async function findPersistedChildTaskId(
@@ -1586,11 +1960,30 @@ export function createTaskTask(
     name: string = TASK_TASK_NAME,
     options?: { executionTimeout?: Duration }
 ) {
+    // Durable roots are orchestration-only. All stateful dependencies remain
+    // available to aplret.task-state, but are deliberately withheld here so a
+    // production root cannot accidentally perform an unrecorded database,
+    // cache, outbox, projection, or timer operation.
+    const rootDeps = deps === undefined ? undefined : { useTaskStateChildren: true };
     return hatchet.durableTask<TaskTaskInput, TaskTaskOutput>({
         name,
         retries: 0,
         executionTimeout: options?.executionTimeout ?? TASK_EXECUTION_TIMEOUT,
+        concurrency: {
+            expression: 'input.tenantTaskKey',
+            maxRuns: 1,
+            limitStrategy: ConcurrencyLimitStrategy.CANCEL_NEWEST,
+        },
         fn: async (input: TaskTaskInput, ctx: DurableContext<TaskTaskInput>) =>
-            executeTaskTask(input, ctx, deps),
+            executeTaskTask(input, ctx, rootDeps),
+    });
+}
+
+export function createTaskStateTask(hatchet: HatchetClient, deps: TaskTaskDeps) {
+    return hatchet.task<TaskStateInput, TaskStateOutput>({
+        name: TASK_STATE_TASK_NAME,
+        retries: 3,
+        executionTimeout: TASK_EXECUTION_TIMEOUT,
+        fn: async (input: TaskStateInput) => executeTaskStateTask(input, deps),
     });
 }

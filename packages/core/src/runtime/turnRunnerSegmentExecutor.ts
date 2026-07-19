@@ -10,7 +10,7 @@ import type { MentalState } from '../loop/types.js';
 import type { SessionManager } from '../orchestration/SessionManager.js';
 import type { TaskContext } from '../shared/types/index.js';
 import { TurnRunner } from '../orchestration/TurnRunner.js';
-import { prepareSegmentWake } from './segmentWakeApplicator.js';
+import { applyWakeToSnapshot, type PreparedSegmentWake } from './segmentWakeApplicator.js';
 import {
     boundaryToTaskStatus,
     type RunSegmentParams,
@@ -25,6 +25,16 @@ import {
 } from './segmentProcessedKeys.js';
 import { readSegmentCancellation } from './segmentCancellation.js';
 import { reconcileSnapshotMutation } from '../orchestration/persistence/SnapshotRepository.js';
+import {
+    readTaskTurnCoordinator,
+    markTaskTurnExecuting,
+    releaseUnstartedTaskTurn,
+    renewTaskTurnClaim,
+    requestTaskTurn,
+    resolveTaskTurnLeaseConfig,
+    type TaskTurnClaim,
+} from '../orchestration/TaskTurnCoordinator.js';
+import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
@@ -58,8 +68,11 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     async runSegment(params: RunSegmentParams): Promise<SegmentResult> {
         const { tenantId, taskId, agentId, wake, idempotencyKey, prepared } = params;
 
+        // Fast replay path only. Correctness still comes from requestTaskTurn below:
+        // two workers that both miss this read race through the snapshot claim and
+        // only one can enter TurnRunner.
         if (await this.hasProcessedKey(tenantId, taskId, idempotencyKey)) {
-            return this.buildDuplicateResult(tenantId, taskId, agentId);
+            return this.buildDuplicateResult(tenantId, taskId, agentId, 'matching_replay');
         }
 
         if (prepared !== undefined) {
@@ -75,18 +88,40 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 );
             }
 
-            const taskEntity = await runWithSegmentIdempotencyKey(
+            const admission = await this.admitTurn({
+                tenantId,
+                taskId,
+                agentId,
                 idempotencyKey,
+                runtimeSurface: params.runtimeSurface,
+                wake,
+            });
+            if (admission.result.disposition !== 'acquired') {
+                return this.buildDuplicateResult(
+                    tenantId,
+                    taskId,
+                    agentId,
+                    admission.result.disposition === 'queued' ? 'queued' :
+                        admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay'
+                );
+            }
+            const taskEntity = await this.runClaimedTurn(
+                { tenantId, taskId, agentId, idempotencyKey, claim: admission.result.claim },
                 () => this.turnRunner.runTurn(
                     prepared.ctx,
                     prepared.turnParams,
                     {
-                        initialM: prepared.initialM,
-                        snapshot: prepared.snapshot,
+                        initialM: (admission.snapshot.M as MentalState | undefined) ?? initialM(prepared.ctx),
+                        snapshot: admission.snapshot,
                     }
                 )
             );
-            await this.ensureProcessedKeyRecorded(tenantId, taskId, agentId, idempotencyKey);
+            const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
+                .__turnPersistence?.disposition;
+            if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
+                this.dedupe.record(idempotencyKey);
+                return this.buildDuplicateResult(tenantId, taskId, agentId, 'superseded');
+            }
             this.dedupe.record(idempotencyKey);
 
             const boundary = await this.resolveBoundary(
@@ -112,6 +147,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     telemetry?.traceId ??
                     (prepared.ctx as { telemetry?: { traceId?: string } }).telemetry?.traceId,
                 taskEntity,
+                turnDisposition: 'executed',
+                turnClaim: admission.result.claim,
             };
         }
 
@@ -127,12 +164,27 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             );
         }
 
-        const preparedWake = await prepareSegmentWake(this.sessionManager, {
+        const admission = await this.admitTurn({
             tenantId,
             taskId,
             agentId,
             wake,
+            idempotencyKey,
+            runtimeSurface: params.runtimeSurface,
+            recoveryGeneration: params.recoveryGeneration,
         });
+
+        const preparedWake = admission.prepared ?? describeWake(admission.snapshot, wake, agentId);
+
+        if (admission.result.disposition !== 'acquired') {
+            return this.buildDuplicateResult(
+                tenantId,
+                taskId,
+                preparedWake.agentId,
+                admission.result.disposition === 'queued' ? 'queued' :
+                    admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay'
+            );
+        }
 
         if (
             preparedWake.childTerminalClaim?.terminal?.error?.code === 'CHILD_TIMEOUT' &&
@@ -146,9 +198,15 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         }
 
         if (preparedWake.skipTurn) {
-            await this.ensureProcessedKeyRecorded(tenantId, taskId, preparedWake.agentId, idempotencyKey);
+            await releaseUnstartedTaskTurn({
+                session: this.sessionManager,
+                tenantId,
+                taskId,
+                agentId: preparedWake.agentId,
+                claim: admission.result.claim,
+            });
             this.dedupe.record(idempotencyKey);
-            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId);
+            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, 'matching_replay');
         }
 
         const ctx = this.createContext({
@@ -158,10 +216,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         (ctx as { tenantId?: string }).tenantId = tenantId;
         (ctx as { agentId?: string }).agentId = preparedWake.agentId;
 
-        const M = (preparedWake.snapshot.M as MentalState | undefined) ?? initialM(ctx);
+        const M = (admission.snapshot.M as MentalState | undefined) ?? initialM(ctx);
 
-        const taskEntity = await runWithSegmentIdempotencyKey(
-            idempotencyKey,
+        const taskEntity = await this.runClaimedTurn(
+            { tenantId, taskId, agentId: preparedWake.agentId, idempotencyKey, claim: admission.result.claim },
             () => this.turnRunner.runTurn(
                 ctx,
                 {
@@ -173,12 +231,18 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 },
                 {
                     initialM: M,
-                    snapshot: preparedWake.snapshot,
+                    snapshot: admission.snapshot,
                 }
             )
         );
 
-        await this.ensureProcessedKeyRecorded(tenantId, taskId, preparedWake.agentId, idempotencyKey);
+        const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
+            .__turnPersistence?.disposition;
+        if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
+            this.dedupe.record(idempotencyKey);
+            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, 'superseded');
+        }
+
         this.dedupe.record(idempotencyKey);
 
         const boundary = await this.resolveBoundary(
@@ -201,7 +265,93 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             boundary,
             taskStatus,
             traceId: telemetry?.traceId ?? (ctx as { telemetry?: { traceId?: string } }).telemetry?.traceId,
+            turnDisposition: 'executed',
+            turnClaim: admission.result.claim,
         };
+    }
+
+    private async admitTurn(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        idempotencyKey: string;
+        runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
+        wake: RunSegmentParams['wake'];
+        recoveryGeneration?: string;
+    }) {
+        let prepared: PreparedSegmentWake | undefined;
+        const admitted = await requestTaskTurn({
+            session: this.sessionManager,
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            ownerId: `segment:${process.pid}`,
+            requestKey: params.idempotencyKey,
+            runtimeSurface: params.runtimeSurface,
+            recoveryGeneration: params.recoveryGeneration,
+            allowInitialize: params.wake.trigger === 'start' || params.wake.trigger === 'conversation',
+            stageWake: params.recoveryGeneration !== undefined ? undefined : (snapshot) => {
+                prepared = applyWakeToSnapshot(snapshot, params.wake, {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                });
+                return prepared.snapshot;
+            },
+        });
+        return { ...admitted, prepared };
+    }
+
+    private async runClaimedTurn<T>(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        idempotencyKey: string;
+        claim: TaskTurnClaim;
+    }, body: () => Promise<T>): Promise<T> {
+        await markTaskTurnExecuting({
+            session: this.sessionManager,
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            claim: params.claim,
+        });
+        let renewing = false;
+        const abortController = new AbortController();
+        const leaseConfig = resolveTaskTurnLeaseConfig();
+        const timer = setInterval(() => {
+            if (renewing) return;
+            renewing = true;
+            void renewTaskTurnClaim({
+                session: this.sessionManager,
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId,
+                claim: params.claim,
+            }).then((disposition) => {
+                if (disposition !== 'renewed') {
+                    abortController.abort(new Error(`Task turn renewal ${disposition}`));
+                }
+            }).catch((error) => {
+                abortController.abort(error);
+            }).finally(() => { renewing = false; });
+        }, leaseConfig.heartbeatMs);
+        timer.unref?.();
+        try {
+            const value = await runWithSegmentIdempotencyKey(
+                params.idempotencyKey,
+                body,
+                {
+                    ...params.claim,
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    abortSignal: abortController.signal,
+                }
+            );
+            return value;
+        } finally {
+            clearInterval(timer);
+        }
     }
 
     private async resolveBoundary(
@@ -264,7 +414,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             return { kind: 'paused', reason: 'budget_or_latency' };
         }
 
-        return { kind: 'complete' };
+        throw new Error(
+            `TASK_TURN_PROTOCOL_STATE_UNKNOWN: task ${tenantId}/${taskId} has no terminal status or durable await boundary`
+        );
     }
 
     private async hasProcessedKey(
@@ -272,11 +424,18 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         taskId: string,
         idempotencyKey: string
     ): Promise<boolean> {
-        if (this.dedupe.has(idempotencyKey)) {
-            return true;
-        }
         const snap = await this.sessionManager.load(tenantId, taskId);
-        return snapshotHasProcessedSegmentKey(snap?.snapshot, idempotencyKey);
+        if (!this.dedupe.has(idempotencyKey) &&
+            !snapshotHasProcessedSegmentKey(snap?.snapshot, idempotencyKey)) {
+            return false;
+        }
+        const coordinator = readTaskTurnCoordinator(snap?.snapshot);
+        const requested = BigInt(coordinator.requestedGeneration);
+        const completed = BigInt(coordinator.completedGeneration);
+        // A processed key means the wake was durably accepted, not necessarily
+        // that the generation it requested has executed. Re-enter admission
+        // while work remains so the queued generation cannot be stranded.
+        return requested <= completed;
     }
 
     private async ensureProcessedKeyRecorded(
@@ -307,7 +466,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     private async buildDuplicateResult(
         tenantId: string,
         taskId: string,
-        agentId?: string
+        agentId?: string,
+        turnDisposition: SegmentResult['turnDisposition'] = 'matching_replay'
     ): Promise<SegmentResult> {
         const snap = await this.sessionManager.load(tenantId, taskId);
         const base = (snap?.snapshot ?? {}) as {
@@ -315,7 +475,14 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         };
         const cancellation = readSegmentCancellation(snap?.snapshot);
         const awaiting = base.meta?.awaiting;
-        const boundary =
+        const terminal = readDurableTaskTerminal(snap?.snapshot);
+        const boundary = terminal !== undefined
+            ? terminal.state === 'completed'
+                ? { kind: 'complete' as const, result: terminal.status.metadata?.result }
+                : terminal.state === 'canceled'
+                    ? { kind: 'canceled' as const, reason: terminal.status.metadata?.reason as string | undefined }
+                    : { kind: 'fail' as const, error: terminal.status.metadata ?? terminal.status.message ?? 'task failed' }
+            :
             cancellation !== undefined
                 ? cancellation.reason !== undefined
                     ? { kind: 'canceled' as const, reason: cancellation.reason }
@@ -328,13 +495,14 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     ? { kind: 'await_child' as const, token: awaiting.token }
                     : awaiting?.kind === 'await_event'
                       ? { kind: 'await_event' as const, token: awaiting.token }
-                      : ({ kind: 'complete' as const });
+                      : ({ kind: 'paused' as const, reason: 'authoritative_state_unavailable' });
         return {
             tenantId,
             taskId,
             agentId: agentId ?? base.meta?.agentId,
             boundary,
             taskStatus: boundaryToTaskStatus(boundary),
+            turnDisposition,
         };
     }
 
@@ -398,4 +566,26 @@ function mapTaskEntityStatus(
         return 'input-required';
     }
     return boundaryToTaskStatus(boundary);
+}
+
+function describeWake(
+    snapshot: Record<string, unknown>,
+    wake: RunSegmentParams['wake'],
+    agentId?: string
+): PreparedSegmentWake {
+    const snapshotAgentId = (snapshot.meta as { agentId?: string } | undefined)?.agentId ?? agentId ?? 'default';
+    switch (wake.trigger) {
+        case 'start':
+            return { snapshot, wmVersion: 0n, agentId: snapshotAgentId, trigger: 'start', turnParams: { input: wake.input } };
+        case 'resume':
+            return { snapshot, wmVersion: 0n, agentId: snapshotAgentId, trigger: 'resume', turnParams: { input: wake.event.kind === 'input' ? wake.event.value : undefined } };
+        case 'tool':
+            return { snapshot, wmVersion: 0n, agentId: snapshotAgentId, trigger: 'tool', turnParams: wake.event.kind === 'tool' ? { toolToken: wake.event.token, toolResult: wake.event.result } : {} };
+        case 'event':
+            return { snapshot, wmVersion: 0n, agentId: snapshotAgentId, trigger: 'event', turnParams: wake.event.kind === 'external' ? { eventToken: wake.event.token, eventPayload: wake.event.data } : {} };
+        case 'conversation':
+            return { snapshot, wmVersion: 0n, agentId: snapshotAgentId, trigger: 'conversation', turnParams: {} };
+        default:
+            return { snapshot, wmVersion: 0n, agentId: snapshotAgentId, trigger: 'resume', turnParams: {} };
+    }
 }

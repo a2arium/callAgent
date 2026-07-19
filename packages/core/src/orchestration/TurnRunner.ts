@@ -14,8 +14,9 @@ import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { PluginManager } from '../plugin/pluginManager.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import type { IEventBus } from '../public-types/eventbus/types.js';
-import { createBusEvent } from '../eventbus/busEventHelpers.js';
-import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import { readDurableTaskTerminal } from './TaskLifecycle.js';
+import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
+import { assertCurrentTaskTurn } from './TaskTurnCoordinator.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import { prepareChildResultForPersistence } from './childResultPersistence.js';
 import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
@@ -24,6 +25,7 @@ import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
+import { flushBufferedOperatorTurnEvents } from '../loop/loopRunner.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
@@ -98,6 +100,7 @@ export class TurnRunner {
 
             // 4. Attach APIs and Flush Helper
             const flushMentalState = async () => {
+                const turnClaim = currentTaskTurnClaim();
                 const mutateFn = async (baseSnap: Record<string, unknown>) => {
                     // Inject LLM history into M before saving
                     try {
@@ -130,11 +133,22 @@ export class TurnRunner {
                     sessionId,
                     agentId: (ctx as any).agentId || 'default',
                     operation: 'turn.flush',
-                    mutate: async ({ snapshot }) => ({
-                        kind: 'write',
-                        snapshot: await mutateFn(snapshot),
-                        value: undefined,
-                    }),
+                    mutate: async ({ snapshot, storageNow }) => {
+                        if (turnClaim !== undefined) {
+                            assertCurrentTaskTurn(snapshot, {
+                                tenantId,
+                                taskId: sessionId,
+                                claim: turnClaim,
+                                operation: 'turn.flush',
+                                storageNow,
+                            });
+                        }
+                        return {
+                            kind: 'write',
+                            snapshot: await mutateFn(snapshot),
+                            value: undefined,
+                        };
+                    },
                 });
             };
 
@@ -419,7 +433,7 @@ export class TurnRunner {
             loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
 
             // 6. Execute Turn
-            const { outcome, taskStatus } = await TaskExecutor.executeTurn({
+            const { outcome, taskStatus, persistence } = await TaskExecutor.executeTurn({
                 ctx, M, env, overrides: moduleOverrides, loopOpts,
                 sessionManager: this.sessionManager,
                 tenantId, sessionId, agentId: agentId || 'default',
@@ -444,7 +458,11 @@ export class TurnRunner {
             // 1. Prefer taskStatus returned by TaskExecutor (contains Result/Artifacts)
             // 2. Fallback to results.status (from streaming buffer)
             // 3. Fallback to 'working'
-            const effectiveStatus = taskStatus || results.status || { state: 'working', timestamp: new Date().toISOString() };
+            const durableTerminal = persistence?.terminal ?? readDurableTaskTerminal(persistence?.snapshot);
+            const effectiveStatus = durableTerminal?.status ?? taskStatus ?? results.status ?? {
+                state: 'working',
+                timestamp: new Date().toISOString(),
+            };
 
             // Determine artifacts:
             // 1. Prefer taskStatus.metadata.result.artifacts (if present and array)
@@ -461,9 +479,17 @@ export class TurnRunner {
                 status: effectiveStatus,
                 artifacts: effectiveArtifacts
             };
+            Object.defineProperty(taskResult, '__turnPersistence', {
+                value: persistence,
+                enumerable: false,
+                configurable: false,
+            });
 
             // Map outcome validation to task status...
             if (outcome.kind === 'complete') {
+                if (durableTerminal !== undefined && durableTerminal.state !== 'completed') {
+                    return taskResult;
+                }
                 // Ensure state is completed (it should be from executor, but force if needed, preserving metadata)
                 if (taskResult.status && taskResult.status.state !== 'completed') {
                     taskResult.status = { ...taskResult.status, state: 'completed', timestamp: new Date().toISOString() };
@@ -471,30 +497,10 @@ export class TurnRunner {
                     taskResult.status = { state: 'completed', timestamp: new Date().toISOString() };
                 }
 
-                // Publish final event
-                try {
-                    void this.eventBus.publish(
-                        createBusEvent({
-                            channel: taskChannel(sessionId),
-                            partitionKey: sessionId,
-                            cloud: {
-                                id: uuidv7(),
-                                type: 'task.status',
-                                source: `/tasks/${sessionId}`,
-                                time: new Date().toISOString(),
-                                datacontenttype: 'application/json',
-                                data: {
-                                    id: sessionId,
-                                    status: taskResult.status,
-                                    final: true,
-                                },
-                            },
-                        })
-                    );
-                } catch {
-                    /* noop */
-                }
             } else if (outcome.kind === 'fail') {
+                if (durableTerminal !== undefined && durableTerminal.state !== 'failed') {
+                    return taskResult;
+                }
                 const failureReason = outcome.reason ?? outcome.error ?? 'failed';
                 taskResult.status = {
                     ...taskResult.status,
@@ -514,6 +520,9 @@ export class TurnRunner {
             return taskResult;
 
         } catch (error) {
+            if (currentTaskTurnClaim() !== undefined) {
+                await flushBufferedOperatorTurnEvents(ctx, 'superseded');
+            }
             log.error('TurnRunner error', { error });
             throw error;
         } finally {

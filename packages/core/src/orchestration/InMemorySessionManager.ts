@@ -11,8 +11,60 @@ import type {
     IWorkingMemorySessionStore,
     UpdateConversationThreadStatusInput,
     WMSessionSnapshot,
+    RunnableTurnRequest,
+    RunnableTurnRequestCursor,
 } from '@a2arium/callagent-memory-engine';
 import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/working-memory-version-conflict';
+
+type ScannableCoordinator = {
+    requestedGeneration: string;
+    completedGeneration: string;
+    active?: unknown;
+    dispatchIntent?: {
+        generation: string;
+        deliveryKey: string;
+        runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+        enqueuedAt?: string;
+    };
+};
+
+function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): ScannableCoordinator | undefined {
+    const meta = snapshot.meta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
+    const value = (meta as Record<string, unknown>).turnCoordinator;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.requestedGeneration !== 'string' ||
+        typeof candidate.completedGeneration !== 'string' ||
+        !/^\d+$/.test(candidate.requestedGeneration) ||
+        !/^\d+$/.test(candidate.completedGeneration)) return undefined;
+    const rawIntent = candidate.dispatchIntent;
+    let dispatchIntent: ScannableCoordinator['dispatchIntent'];
+    if (rawIntent && typeof rawIntent === 'object' && !Array.isArray(rawIntent)) {
+        const intent = rawIntent as Record<string, unknown>;
+        if (typeof intent.generation === 'string' && typeof intent.deliveryKey === 'string' &&
+            (intent.runtimeSurface === 'direct' || intent.runtimeSurface === 'in_process' || intent.runtimeSurface === 'hatchet')) {
+            dispatchIntent = {
+                generation: intent.generation,
+                deliveryKey: intent.deliveryKey,
+                runtimeSurface: intent.runtimeSurface,
+                ...(typeof intent.enqueuedAt === 'string' ? { enqueuedAt: intent.enqueuedAt } : {}),
+            };
+        }
+    }
+    return {
+        requestedGeneration: candidate.requestedGeneration,
+        completedGeneration: candidate.completedGeneration,
+        ...(candidate.active !== undefined ? { active: candidate.active } : {}),
+        ...(dispatchIntent ? { dispatchIntent } : {}),
+    };
+}
+
+function compareRunnableCursor(row: RunnableTurnRequest, cursor: RunnableTurnRequestCursor): number {
+    return row.updatedAt.localeCompare(cursor.updatedAt) ||
+        row.tenantId.localeCompare(cursor.tenantId) ||
+        row.sessionId.localeCompare(cursor.sessionId);
+}
 
 /**
  * In-memory implementation of IWorkingMemorySessionStore for testing and CLI usage.
@@ -25,7 +77,9 @@ import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/work
  * enabling A2A calls to work out-of-box in development and testing environments.
  */
 export class InMemorySessionManager implements IWorkingMemorySessionStore {
+    constructor(private readonly now: () => number = Date.now) {}
     private snapshots = new Map<string, WMSessionSnapshot>();
+    private snapshotIdentities = new Map<string, { tenantId: string; sessionId: string }>();
     private events = new Map<string, Array<{
         eventId: string;
         seq: number;
@@ -57,6 +111,17 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         const snapshot = this.snapshots.get(key) || null;
 
         return snapshot;
+    }
+
+    async getSessionSnapshotForMutation(
+        tenantId: string,
+        sessionId: string
+    ): Promise<WMSessionSnapshot | null> {
+        const snapshot = await this.getSessionSnapshot(tenantId, sessionId);
+        const storageNow = new Date(this.now()).toISOString();
+        return snapshot === null
+            ? { wmVersion: 0n, snapshot: {}, agentId: '', updatedAt: storageNow, storageNow }
+            : { ...snapshot, storageNow };
     }
 
     async writeSnapshotCAS(params: {
@@ -91,10 +156,45 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             wmVersion: newVersion,
             snapshot: params.snapshot,
             agentId: current?.agentId ?? params.agentId,
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date(this.now()).toISOString()
         });
+        this.snapshotIdentities.set(key, { tenantId: params.tenantId, sessionId: params.sessionId });
 
         return { newVersion };
+    }
+
+    async listRunnableTurnRequests(params: {
+        cursor?: RunnableTurnRequestCursor;
+        limit: number;
+    }): Promise<RunnableTurnRequest[]> {
+        const rows: RunnableTurnRequest[] = [];
+        const overdueBefore = this.now() - 15_000;
+        for (const [key, row] of this.snapshots.entries()) {
+            const identity = this.snapshotIdentities.get(key);
+            if (!identity) continue;
+            const { tenantId, sessionId } = identity;
+            const coordinator = readTurnCoordinatorForScan(row.snapshot);
+            if (!coordinator) continue;
+            if (BigInt(coordinator.requestedGeneration) <= BigInt(coordinator.completedGeneration)) continue;
+            if (coordinator.active !== undefined || coordinator.dispatchIntent === undefined) continue;
+            if (coordinator.dispatchIntent.enqueuedAt !== undefined &&
+                Date.parse(coordinator.dispatchIntent.enqueuedAt) > overdueBefore) continue;
+            rows.push({
+                tenantId,
+                sessionId,
+                agentId: row.agentId,
+                updatedAt: row.updatedAt,
+                generation: coordinator.dispatchIntent.generation,
+                deliveryKey: coordinator.dispatchIntent.deliveryKey,
+                runtimeSurface: coordinator.dispatchIntent.runtimeSurface,
+            });
+        }
+        rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) ||
+            a.tenantId.localeCompare(b.tenantId) || a.sessionId.localeCompare(b.sessionId));
+        const after = params.cursor
+            ? rows.filter((row) => compareRunnableCursor(row, params.cursor!) > 0)
+            : rows;
+        return after.slice(0, Math.max(1, Math.min(1000, params.limit)));
     }
 
     async appendEvent(params: {

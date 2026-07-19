@@ -14,6 +14,10 @@ import { isSyncRuntimeDriver } from '../../src/runtime/inProcessRuntimeDriver.js
 import { initialM } from '../../src/loop/init.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
 import { setPendingInputs } from '../../src/orchestration/DurableHandlerRegistry.js';
+import {
+    completeTaskTurnInSnapshot,
+    readTaskTurnCoordinator,
+} from '../../src/orchestration/TaskTurnCoordinator.js';
 
 const loopAgentPlugin = {
     resolved: {
@@ -110,15 +114,22 @@ describe('POC Scenario 0 — in-process parity via TaskEngine', () => {
             tenantId,
             taskId
         );
+        const loadedSnapshot = loaded?.snapshot as Record<string, unknown>;
+        const activeClaim = readTaskTurnCoordinator(loadedSnapshot).active;
+        if (activeClaim === undefined) throw new Error('expected active first-turn claim');
+        const committedFirstTurn = completeTaskTurnInSnapshot(loadedSnapshot, {
+            tenantId,
+            taskId,
+            claim: activeClaim,
+            storageNow: new Date().toISOString(),
+        }).snapshot;
         await (engine as unknown as { sessionManager: { saveSnapshot: (p: unknown) => Promise<unknown> } }).sessionManager.saveSnapshot({
             tenantId,
             sessionId: taskId,
             agentId,
             expectedWmVersion: loaded?.wmVersion ?? BigInt(0),
             snapshot: setPendingInputs(
-                (loaded?.snapshot as Record<string, unknown>) ?? {
-                    meta: { agentId, turn: 1 },
-                },
+                committedFirstTurn,
                 { [inputToken]: {} }
             ),
         });
