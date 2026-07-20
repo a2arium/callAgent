@@ -815,7 +815,7 @@ describe('buildAgentRunGraph', () => {
         }));
     });
 
-    it('treats complete transitions with ok false as failed semantic outcomes', async () => {
+    it('keeps complete transitions with ok false lifecycle-completed', async () => {
         const store = new InMemorySessionManager();
         const sessionManager = new SessionManager(store);
         await sessionManager.saveSnapshot({
@@ -872,8 +872,8 @@ describe('buildAgentRunGraph', () => {
             ],
         });
 
-        expect(graph.root.status).toBe('failed');
-        expect(graph.turns[0]?.status).toBe('failed');
+        expect(graph.root.status).toBe('completed');
+        expect(graph.turns[0]?.status).toBe('completed');
     });
 
     it('does not let an old await_child turn mask a failed root driver run', async () => {

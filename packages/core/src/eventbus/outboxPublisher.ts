@@ -4,12 +4,16 @@ import { logger } from '@a2arium/callagent-utils';
 import { getSafePgConfig } from '../pgStartupDiagnostic.js';
 import type { IEventBus } from '../public-types/eventbus/types.js';
 import {
-    deleteOutboxRow,
+    claimOutboxRow,
+    deleteClaimedOutboxRow,
     dispatchOutboxRow,
     handleOutboxDispatchFailure,
+    readOutboxStorageNow,
     shouldPollerSkipOutboxRow,
     type OutboxRow,
 } from './outboxDispatch.js';
+import { v7 as uuidv7 } from 'uuid';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 const log = logger.createLogger({ prefix: 'OutboxPublisher' });
 
@@ -33,6 +37,7 @@ export class OutboxPublisher {
     private readonly getPrisma?: () => PrismaClientType | null | undefined;
     private readonly maxRetries: number;
     private readonly pollIntervalMs: number;
+    private lastProcessRowScavengeAt = 0;
 
     constructor(options: OutboxPublisherOptions) {
         this.eventBus = options.eventBus;
@@ -64,6 +69,10 @@ export class OutboxPublisher {
     }
 
     start(intervalMs?: number): void {
+        if (this.eventBus.deliveryScope !== 'shared') {
+            log.debug('OutboxPublisher global scan disabled for process-local event bus');
+            return;
+        }
         const ms = intervalMs ?? this.pollIntervalMs;
         this.refreshPrismaFromGetter();
         if (!this.prisma) {
@@ -129,7 +138,17 @@ export class OutboxPublisher {
         if (!this.prisma) {
             return;
         }
+        await this.scavengeOrphanedProcessRows();
+        const storageNow = await readOutboxStorageNow(
+            this.prisma as unknown as Parameters<typeof readOutboxStorageNow>[0]
+        );
         const rows = (await this.prisma.outbox.findMany({
+            where: {
+                AND: [
+                    { OR: [{ deliveryScope: 'shared' }, { deliveryScope: null }] },
+                    { OR: [{ dispatchLeaseUntil: null }, { dispatchLeaseUntil: { lte: storageNow } }] },
+                ],
+            },
             orderBy: { createdAt: 'asc' },
             take: 50,
         })) as unknown as OutboxRow[];
@@ -137,17 +156,51 @@ export class OutboxPublisher {
             if (shouldPollerSkipOutboxRow(row)) {
                 continue;
             }
+            const leaseId = uuidv7();
+            const claim = await claimOutboxRow({
+                prisma: this.prisma as unknown as Parameters<typeof claimOutboxRow>[0]['prisma'],
+                id: row.id,
+                leaseId,
+                scope: 'shared',
+            });
+            if (claim.disposition !== 'claimed' || !claim.row) {
+                continue;
+            }
             try {
-                await dispatchOutboxRow({ eventBus: this.eventBus, row });
-                await deleteOutboxRow({ prisma: this.prisma, id: row.id });
+                await dispatchOutboxRow({ eventBus: this.eventBus, row: claim.row });
+                await deleteClaimedOutboxRow({
+                    prisma: this.prisma as unknown as Parameters<typeof deleteClaimedOutboxRow>[0]['prisma'],
+                    id: row.id,
+                    leaseId,
+                });
             } catch (e) {
                 await handleOutboxDispatchFailure({
-                    prisma: this.prisma,
-                    row,
+                    prisma: this.prisma as unknown as Parameters<typeof handleOutboxDispatchFailure>[0]['prisma'],
+                    row: claim.row,
                     error: e,
                     maxRetries: this.maxRetries,
+                    leaseId,
                 });
             }
+        }
+    }
+
+    private async scavengeOrphanedProcessRows(): Promise<void> {
+        if (!this.prisma || Date.now() - this.lastProcessRowScavengeAt < 60 * 60 * 1000) return;
+        this.lastProcessRowScavengeAt = Date.now();
+        const configured = Number(process.env.CALLAGENT_PROCESS_OUTBOX_RETENTION_MS);
+        const retentionMs = Number.isFinite(configured) && configured > 0
+            ? configured
+            : 24 * 60 * 60 * 1000;
+        const result = await this.prisma.outbox.deleteMany({
+            where: {
+                deliveryScope: 'process',
+                createdAt: { lt: new Date(Date.now() - retentionMs) },
+            },
+        });
+        if (result.count > 0) {
+            defaultMetricsRegistry.increment('runtime.outbox_orphan_scavenged_total', {}, result.count);
+            log.warn('Scavenged orphaned process-local outbox rows', { count: result.count });
         }
     }
 }

@@ -201,7 +201,9 @@ If the mark would still matter to Policy after the stage changes, it probably be
 Allowed examples:
 
 - `ctx.progress(...)`
-- `ctx.complete(...)` if completion is treated as runtime status emission
+- `ctx.complete(...)` to record a terminal intent. In fenced loop mode the call
+  does not publish a terminal status; the explicit transition returned by the
+  loop remains authoritative and publishes only after durable arbitration.
 
 Not allowed:
 
@@ -346,4 +348,3 @@ When a stage-related change is proposed, ask:
 ## Fast PR comment
 
 > Please use StageFacade as the control-plane entry point for this flow. Keep stage out of `MentalState` and out of Policy, keep invariants control-only, and keep `onEnter` telemetry-only. Add TurnTrace and invariant tests for the new stage transition.
-

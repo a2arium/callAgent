@@ -1,12 +1,12 @@
 # Bug Report: Concurrent root turns can terminalize from stale empty state
 
-> **Status:** Framework fix implemented and verified. The reopened duplicate
-> post-terminal execution path is closed. Production-shaped host verification of
-> the affected CallAgent scenarios passes; the complete host matrix still has
-> unrelated fixture, selector-state, and parser failures documented below.
+> **Status:** Fixed locally and verified on 2026-07-20. The fenced-execution defect,
+> failure-path terminal publication regression, semantic projection divergence, and
+> PostgreSQL storage-clock defect are closed by the current implementation.
 >
-> **Severity:** High. A valid root task can be durably marked failed while a
-> concurrent turn for the same task continues and produces a successful result.
+> **Severity:** High (resolved, pending commit). A valid root task could previously
+> expose contradictory terminal state or leave its originating runner waiting after
+> the durable task had already converged.
 
 ## Summary
 
@@ -316,6 +316,62 @@ migration; flush coalescing could leave an orphan rejected promise; local artifa
 thenables needed normalization before Prisma JSON persistence; and in-process async-child
 terminal delivery needed to reconstruct the persisted parent link and use the durable
 child terminal rather than stale process-local status.
+
+### Authoritative terminal publication correction (2026-07-20)
+
+The later HTTP-500 reproduction did not contain another task-lifecycle arbitration
+failure. Its snapshot had already converged to lifecycle `completed` with an explicit
+`kind: 'complete'` result containing `{ ok: false, error: { code: 'FETCH_FAILED' } }`.
+The originating runner missed the durable terminal notification, while semantic
+projections inferred lifecycle failure from the application result envelope and left
+legacy attempt rows running.
+
+The correction keeps explicit APLRET transitions authoritative:
+
+- `kind: 'complete'` is lifecycle `completed`, including application results with
+  `ok: false`; an agent must return `kind: 'fail'` for task failure;
+- fenced-loop `ctx.complete()`, `ctx.fail()`, and terminal `ctx.progress()` calls are
+  buffered intents and cannot publish before snapshot arbitration;
+- the runner reloads and emits the exact durable terminal through a delivery-key gate
+  before bounded drain, then performs full terminal cleanup and exits according to the
+  durable lifecycle;
+- process-local event buses dispatch only rows owned by their producing runtime, while
+  shared transports use storage-time leases and atomic claim/delete/release;
+- cognition iterations no longer create independent `turn_runs`; acquired runtime
+  attempts use `claim:<claimId>` and terminal projection is driven by durable lifecycle;
+- PostgreSQL storage time is read as epoch milliseconds, avoiding database-local
+  timestamp values being parsed as UTC.
+
+Migration `20260720090000_outbox_delivery_ownership` adds outbox delivery scope, owner,
+and lease fields. Historical semantic rows are repaired by the restart-safe command:
+
+```bash
+yarn projection:reconcile-terminals
+```
+
+The reconciliation job uses lexicographic keyset pagination over
+`(tenantId, sessionId)`, is idempotent, creates canonical authoritative attempts only
+when a durable turn claim exists, and supersedes every stale running attempt for a
+terminal task without inventing claims for legacy records.
+
+Final verification evidence:
+
+- full monorepo build: 20 of 20 packages passed;
+- full repository tests after the reconciliation job was added: 218 suites and 1,327
+  tests passed, with 8 suites and 92 tests skipped;
+- real Hatchet: 11 suites and 69 tests passed, including both live workflow/restart
+  cases against the local engine;
+- PostgreSQL CAS/storage-clock integration: 3 tests passed with the server configured
+  for `Europe/Riga`;
+- `FIX-S20 --skip-discovery` emitted one durable `completed` result with
+  `{ ok: false, code: 'FETCH_FAILED' }` and exited promptly; the host marker assertion
+  still fails as expected because the application result contains no hydrated detail;
+- five sequential `FIX-S01 --skip-discovery` runs passed and each persisted three fresh
+  listings;
+- the acceptance database reconciliation processed 2,338 terminal snapshots in 24
+  batches, after which SQL reported zero terminal tasks with running attempts, zero
+  contradictory `agent_runs`, and exactly one authoritative attempt for every terminal
+  claim.
 
 ## Product Contract
 
@@ -758,6 +814,144 @@ Host trace retained at:
 ```text
 /tmp/FIX-S01-post-0f40cc4.log
 ```
+
+## Reopened Failure-Path Regression Under `12302af` (2026-07-20)
+
+The `FIX-S01` success-path control passes under `12302af` and persists all three
+listings without `TASK_LIFECYCLE_TERMINAL`, duplicate child completion,
+`NO_CASE_ID`, `CHILD_FAILED`, or turn-execution diagnostics. The full host matrix
+then reproduced a separate terminal convergence failure in `FIX-S20` when the
+deployed detail endpoint returned HTTP 500.
+
+### Environment and command
+
+- CallAgent commit: `12302af fix: fence wake execution and child terminal delivery`
+- Linked `callagent-core` and freshly built `dist` verified before execution.
+- Database already includes the `driver_run_turn_ownership` and
+  `drop_legacy_turn_seq_unique` migrations.
+- No parallel scenario runner was started.
+
+```bash
+cd /Users/maximantonov/Work/_lab/itupdated
+yarn run:testscenario --all --skip-discovery
+```
+
+Full trace:
+
+```text
+/tmp/itupdated-post-12302af-full-host.log
+```
+
+### Reproduction
+
+The matrix reached `FIX-S20` detail fetch:
+
+```text
+https://idyllic-shortbread-af7363.netlify.app/pages/detail/spa-hydrated.html?id=2001
+```
+
+`fetch-html` returned a structured terminal error:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "FETCH_FAILED",
+    "message": "Request completed with status 500"
+  }
+}
+```
+
+`fetch-page-router` emitted a premature final progress/status event at
+`2026-07-20T05:50:31.469+03:00`, but the runner process did not publish/exit with
+its authoritative terminal status. The matrix remained on scenario 22 of
+41 for several minutes and had to be interrupted after the durable ledger was
+inspected.
+
+Task ID:
+
+```text
+local-task-1784526584113
+```
+
+### Contradictory SQL state
+
+`agent_runs` was projected as terminal failure:
+
+```text
+status           failed
+terminal_code    FETCH_FAILED
+terminal_message Request completed with status 500
+terminal_at      2026-07-20T02:50:31.490Z
+```
+
+However, `turn_runs` contains four rows for the same logical ownership identity:
+
+```text
+claim_id           342ce901-5ed2-4634-bcbd-b58cd3165a1c
+turn_fence         1
+claimed_generation 1
+turn_seq           1
+```
+
+Their dispositions are:
+
+| Status | Transition | Completed | Authoritative terminal |
+| --- | --- | --- | --- |
+| `failed` | `complete` | yes | `false` |
+| `completed` | `await_child` | yes | `false` |
+| `running` | none | no | `false` |
+| `running` | none | no | `false` |
+
+The authoritative snapshot, however, records lifecycle `completed` with a
+`complete` transition whose application result is `{ok:false}`. All four rows use
+distinct `attempt_key` values but the same claim, fence, generation, and logical
+turn sequence. No row is marked
+`authoritative_terminal`, even though `agent_runs` is already failed.
+
+### Expected contract
+
+1. One claim/fence/generation may have only one executing attempt at a time.
+2. A child HTTP/provider failure must converge through the same durable terminal
+   path as success.
+3. Exactly one turn attempt must be marked authoritative terminal when the task
+   becomes terminal.
+4. Other attempts for that ownership identity must become `superseded`, not remain
+   `running` or independently record `await_child`/`failed` outcomes.
+5. Explicit transition semantics win: `kind:'complete'` remains lifecycle
+   `completed` even when its result is `{ok:false}`. `kind:'fail'` is the only
+   framework failure transition.
+6. The status outbox and streaming runner must publish that authoritative
+   completed result and exit zero promptly. Host assertions may still reject the
+   application result.
+7. A user-facing progress event with `final: true` must not substitute for or
+   suppress the authoritative task terminal event.
+
+### Required regression tests
+
+- Make an awaited child return a structured `FETCH_FAILED` result followed by an
+  explicit `complete` transition and assert one completed authoritative attempt,
+  zero running attempts, prompt runner exit, and preserved `{ok:false}` output.
+- Race child-failure delivery with runtime reconciliation using the same
+  claim/fence/generation; assert only one attempt executes.
+- Verify all attempt rows for one ownership identity converge to one
+  authoritative terminal plus superseded diagnostics.
+- Repeat through standalone `fetch-page-router` and nested
+  `get-listing -> scrape-listing -> fetch-page-router -> fetch-html` paths.
+- Run with a real PostgreSQL ledger and assert that `agent_runs`, `turn_runs`,
+  status outbox, and streamed terminal result agree.
+- Add a runner test where an agent calls `ctx.complete(100, 'Fetch failed: …')`;
+  the message must not become a task state and publication must wait for the
+  canonical durable completed terminal.
+
+### Acceptance
+
+Rerun `FIX-S20 --skip-discovery` with a deterministic HTTP 500 fixture or injected
+fetch failure. It must terminate promptly with a completed `{ok:false}` task
+result, leave no running turn attempts, and permit the next scenario in the matrix
+to start. Then rerun the
+full 41-scenario host matrix and verify no claim/fence/generation has multiple
+executed attempt outcomes.
 
 ## Delivery Order and Rollout
 

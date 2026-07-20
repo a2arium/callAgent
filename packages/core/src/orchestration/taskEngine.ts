@@ -26,7 +26,13 @@ import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
 import { OutboxPublisher } from '../eventbus/outboxPublisher.js';
-import { isHatchetOutboxTopic } from '../eventbus/outboxDispatch.js';
+import {
+    claimOutboxRow,
+    deleteClaimedOutboxRow,
+    dispatchOutboxRow,
+    isHatchetOutboxTopic,
+    releaseClaimedOutboxRow,
+} from '../eventbus/outboxDispatch.js';
 import { BackpressureManager } from '../internal/conversation/BackpressureManager.js';
 import { createTraceparent } from '../tracing/Tracing.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../streaming/sessionEventMapper.js';
@@ -450,10 +456,6 @@ function deriveListRunStatus(
     }
 
     const latestTurnCompleted = [...turnEvents].reverse().find((event) => event.type === 'turn.completed');
-    if (latestTurnCompleted !== undefined && eventHasOkFalse(latestTurnCompleted.payload)) {
-        return 'failed';
-    }
-
     const latestSegment = [...relatedRuns]
         .reverse()
         .find((run) => run.operation === 'turn.segment' || run.operation === 'segment');
@@ -519,18 +521,6 @@ function normalizeListRunStatus(status: string | null | undefined): string {
         default:
             return 'unknown';
     }
-}
-
-function eventHasOkFalse(payload: unknown): boolean {
-    if (!isRecordValue(payload)) {
-        return false;
-    }
-    const transition = payload.transition;
-    if (!isRecordValue(transition)) {
-        return false;
-    }
-    const result = transition.result;
-    return isRecordValue(result) && result.ok === false;
 }
 
 function eventTransitionKind(payload: unknown): string | undefined {
@@ -1071,6 +1061,7 @@ class KeyedMutex {
 export class TaskEngine {
     static testOverrides?: TaskEngineTestOverrides;
     readonly eventBus: IEventBus;
+    private readonly runtimeInstanceId = uuidv7();
     private readonly backpressureManager = new BackpressureManager();
     private outboxPublisherInstance?: OutboxPublisher;
     private sessionManager?: SessionManager;
@@ -1136,6 +1127,11 @@ export class TaskEngine {
             log.warn('For production, configure a database-backed SessionStore');
             this.sessionManager = new SessionManager(new InMemorySessionManager());
         }
+        const deliveryScope = this.eventBus.deliveryScope ?? 'process';
+        this.sessionManager.configureOutboxDelivery({
+            scope: deliveryScope,
+            ...(deliveryScope === 'process' ? { ownerId: this.runtimeInstanceId } : {}),
+        });
         ensureBuiltinTopicProjectionsRegistered();
         this.snapshotRepo = new SnapshotRepository(this.sessionManager);
         this.conversationService = new ConversationService(this.sessionManager, {
@@ -1293,6 +1289,58 @@ export class TaskEngine {
             inProcessStack.runtimeDriver;
 
         this.sessionManager.setOnOutboxEnqueued(async (ref) => {
+            if (ref.deliveryScope === 'process') {
+                if (ref.deliveryOwnerId !== this.runtimeInstanceId) {
+                    defaultMetricsRegistry.increment('runtime.outbox_dispatch_total', {
+                        status: 'foreign_owner',
+                        type: ref.eventType,
+                    });
+                    return;
+                }
+                const prisma = this.getSessionStorePrisma();
+                if (prisma) {
+                    const leaseId = uuidv7();
+                    const claim = await claimOutboxRow({
+                        prisma: prisma as unknown as Parameters<typeof claimOutboxRow>[0]['prisma'],
+                        id: ref.outboxRowId,
+                        leaseId,
+                        scope: 'process',
+                        ownerId: this.runtimeInstanceId,
+                    });
+                    if (claim.disposition !== 'claimed' || !claim.row) return;
+                    try {
+                        await dispatchOutboxRow({ eventBus: this.eventBus, row: claim.row });
+                        await deleteClaimedOutboxRow({
+                            prisma: prisma as unknown as Parameters<typeof deleteClaimedOutboxRow>[0]['prisma'],
+                            id: ref.outboxRowId,
+                            leaseId,
+                        });
+                    } catch (error) {
+                        await releaseClaimedOutboxRow({
+                            prisma: prisma as unknown as Parameters<typeof releaseClaimedOutboxRow>[0]['prisma'],
+                            id: ref.outboxRowId,
+                            leaseId,
+                        }).catch(() => false);
+                        throw error;
+                    }
+                    return;
+                }
+                await dispatchOutboxRow({
+                    eventBus: this.eventBus,
+                    row: {
+                        id: ref.outboxRowId,
+                        tenantId: ref.tenantId,
+                        topic: ref.eventType,
+                        key: ref.key,
+                        payload: ref.payload,
+                        retryCount: 0,
+                        createdAt: new Date(),
+                        deliveryScope: 'process',
+                        deliveryOwnerId: this.runtimeInstanceId,
+                    },
+                });
+                return;
+            }
             if (isHatchetOutboxTopic(ref.eventType)) {
                 await this.runtimeDriver.dispatchOutbox({
                     outboxRowId: ref.outboxRowId,
@@ -1315,7 +1363,7 @@ export class TaskEngine {
 
         // Ensure outbox publisher is running (unless disabled for tests)
         // In test environments, we don't want background services running
-        if (!process.env.DISABLE_OUTBOX_PUBLISHER) {
+        if (!process.env.DISABLE_OUTBOX_PUBLISHER && deliveryScope === 'shared') {
             this.outboxPublisherInstance = new OutboxPublisher({
                 eventBus: this.eventBus,
                 getPrisma: () => this.getSessionStorePrisma() ?? null,
@@ -2247,9 +2295,15 @@ export class TaskEngine {
             | undefined;
         const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
         if (projectionMode === 'semantic') {
+            const current = await this.sessionManager.load(params.tenantId, params.taskId);
+            await projection?.reconcileDurableTerminal({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                snapshot: current?.snapshot,
+                agentId: current?.agentId,
+            });
             const semanticGraph = await projection?.buildGraph(params);
             if (semanticGraph !== undefined && semanticGraph.projection?.partial !== true) {
-                const current = await this.sessionManager.load(params.tenantId, params.taskId);
                 const coordination = buildTaskCoordinationView(params.taskId, current?.snapshot);
                 const terminalClaim = readDurableTaskTerminal(current?.snapshot)?.turnClaim;
                 if (terminalClaim && !semanticGraph.turns.some((turn) =>
@@ -3447,6 +3501,7 @@ export class TaskEngine {
                 // executing. Snapshot lifecycle is authoritative; a stale local turn
                 // must not publish a contradictory terminal event afterward.
                 let terminalPublicationAllowed = true;
+                let authoritativeTerminal: ReturnType<typeof readDurableTaskTerminal>;
                 const publishDurableTerminal = async (): Promise<void> => {
                     const latest = await this.sessionManager?.load(tenantId as string, sessionId as string);
                     const latestSnapshot = (latest?.snapshot as Record<string, unknown> | undefined) ?? {};
@@ -3479,6 +3534,7 @@ export class TaskEngine {
                     const latest = await this.sessionManager?.load(tenantId as string, sessionId as string);
                     const latestSnapshot = (latest?.snapshot as Record<string, unknown> | undefined) ?? {};
                     const durableTerminal = readDurableTaskTerminal(latestSnapshot);
+                    authoritativeTerminal = durableTerminal;
                     const durableStatus = durableTerminal?.status as TaskStatus | undefined;
                     if (durableStatus !== undefined && durableStatus.state !== task.status.state) {
                         terminalPublicationAllowed = false;
@@ -3486,13 +3542,25 @@ export class TaskEngine {
                     }
                 }
 
+                const terminalProjection = authoritativeTerminal?.turnClaim ? {
+                    attemptKey: authoritativeTerminal.turnClaim.attemptKey ??
+                        `claim:${authoritativeTerminal.turnClaim.claimId}`,
+                    claimId: authoritativeTerminal.turnClaim.claimId,
+                    fence: authoritativeTerminal.turnClaim.fence,
+                    claimedGeneration: authoritativeTerminal.turnClaim.generation,
+                    turnSeq: authoritativeTerminal.turnClaim.turnSeq,
+                    deliveryKey: authoritativeTerminal.deliveryKey,
+                    authoritativeTerminal: true,
+                } : {};
+
                 if (terminalPublicationAllowed && task.status?.state === 'completed') {
                     const artifacts = artifactMetadataForOperator(task.artifacts);
                     await this.sessionManager?.appendEvent(tenantId as string, sessionId as string, 'task.completed', {
                         taskId: sessionId,
                         artifactsCount: Array.isArray(task.artifacts) ? task.artifacts.length : 0,
                         ...(artifacts.length > 0 ? { artifacts } : {}),
-                        traceparent
+                        traceparent,
+                        ...terminalProjection,
                     });
                     await publishDurableTerminal();
                 } else if (terminalPublicationAllowed && task.status?.state === 'failed') {
@@ -3506,6 +3574,7 @@ export class TaskEngine {
                         error: failureMessage,
                         reason: failureReason,
                         traceparent,
+                        ...terminalProjection,
                     });
                     await publishDurableTerminal();
                 } else if (terminalPublicationAllowed && task.status?.state === 'canceled') {
@@ -3518,6 +3587,7 @@ export class TaskEngine {
                         reason: cancelReason,
                         canceledAt: task.status.timestamp ?? new Date().toISOString(),
                         traceparent,
+                        ...terminalProjection,
                     });
                     await publishDurableTerminal();
                 }
@@ -5216,6 +5286,45 @@ export class TaskEngine {
     }): Promise<void> {
         const terminal = readDurableTaskTerminal(params.snapshot);
         if (terminal === undefined || terminal.enqueuedAt !== undefined) return;
+        const terminalEventPayload = {
+            taskId: params.taskId,
+            ...(params.agentId ? { agentId: params.agentId } : {}),
+            deliveryKey: terminal.deliveryKey,
+            authoritativeTerminal: true,
+            ...(terminal.turnClaim ? {
+                attemptKey: terminal.turnClaim.attemptKey ?? `claim:${terminal.turnClaim.claimId}`,
+                claimId: terminal.turnClaim.claimId,
+                fence: terminal.turnClaim.fence,
+                claimedGeneration: terminal.turnClaim.generation,
+                turnSeq: terminal.turnClaim.turnSeq,
+            } : {}),
+            ...(terminal.status.metadata?.reason !== undefined
+                ? { reason: terminal.status.metadata.reason }
+                : {}),
+        };
+        try {
+            const terminalEventType = `task.${terminal.state}`;
+            const existingEvents = await this.sessionManager!.listEventsSince({
+                tenantId: params.tenantId,
+                sessionId: params.taskId,
+                sinceSeq: -1,
+            });
+            if (!existingEvents.some((event) => event.type === terminalEventType)) {
+                await this.sessionManager!.appendEvent(
+                    params.tenantId,
+                    params.taskId,
+                    terminalEventType,
+                    terminalEventPayload
+                );
+            }
+        } catch (error) {
+            log.warn('Durable terminal projection event append failed', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                deliveryKey: terminal.deliveryKey,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
         await this.sessionManager!.enqueueOutbox(
             params.tenantId,
             'task.status',

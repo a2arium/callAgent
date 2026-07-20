@@ -49,10 +49,15 @@ model Outbox {
   key        String
   payload    Json
   idempotencyKey String? @unique @map("idempotency_key")
+  deliveryScope String? @map("delivery_scope")
+  deliveryOwnerId String? @map("delivery_owner_id")
+  dispatchLeaseId String? @map("dispatch_lease_id")
+  dispatchLeaseUntil DateTime? @db.Timestamptz(3) @map("dispatch_lease_until")
   retryCount Int      @default(0) @map("retry_count")
   createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([tenantId, topic])
+  @@index([deliveryScope, createdAt])
   @@map("outbox")
 }
 

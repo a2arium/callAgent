@@ -53,6 +53,7 @@ import type { TaskContext } from '../shared/types/index.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
 import type { ManifestProvenance } from '../types/turnTrace.js';
 import { SessionManager } from './SessionManager.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 const log = logger.createLogger({ prefix: 'TaskExecutor' });
 
@@ -377,9 +378,33 @@ export class TaskExecutor {
             }
         }
 
-        // Determine Status
-        taskStatus = TaskExecutor.determineTaskStatus(outcome, metrics, isStreaming);
-        taskStatus = TaskExecutor.attachUsageToTaskStatus(taskStatus, ctx);
+        // The durable terminal winner is authoritative. A local outcome may have
+        // lost arbitration and must never replace that status.
+        taskStatus = persistence?.terminal?.status ?? TaskExecutor.determineTaskStatus(outcome, metrics, isStreaming);
+        if (persistence === undefined || persistence.disposition === 'committed') {
+            taskStatus = TaskExecutor.attachUsageToTaskStatus(taskStatus, ctx);
+        }
+
+        const internalCtx = ctx as InternalTaskContext;
+        if (internalCtx.__pendingTerminalIntent !== undefined) {
+            const explicitState = outcome.kind === 'complete'
+                ? 'completed'
+                : outcome.kind === 'fail' ? 'failed' : undefined;
+            if (explicitState !== internalCtx.__pendingTerminalIntent.state) {
+                defaultMetricsRegistry.increment('task.terminal_intent_total', {
+                    status: 'conflict',
+                    intent: internalCtx.__pendingTerminalIntent.state,
+                    transition: explicitState ?? outcome.kind,
+                });
+                log.warn('Buffered terminal intent disagreed with explicit loop transition', {
+                    tenantId,
+                    taskId: sessionId,
+                    intentState: internalCtx.__pendingTerminalIntent.state,
+                    transition: explicitState ?? outcome.kind,
+                });
+            }
+            internalCtx.__clearTerminalIntent?.();
+        }
 
         // Emit Status
         if (!isStreaming) {
@@ -496,6 +521,7 @@ export class TaskExecutor {
             : undefined;
         const activeIdempotencyKey = currentSegmentIdempotencyKey();
         const activeTurnClaim = currentTaskTurnClaim();
+        const terminalIntent = (ctx as InternalTaskContext).__pendingTerminalIntent;
         const persisted = await reconcileSnapshotMutation<{
             disposition: TurnPersistenceResult['disposition'];
             terminal?: DurableTaskTerminal;
@@ -555,19 +581,41 @@ export class TaskExecutor {
                               ? {
                                     state: 'completed',
                                     timestamp: storageNow,
-                                    metadata: { result: preparedOutcomeResult },
+                                    ...(terminalIntent?.state === 'completed' && terminalIntent.message
+                                        ? { message: { role: 'agent' as const, parts: [{ type: 'text' as const, text: terminalIntent.message }] } }
+                                        : {}),
+                                    metadata: {
+                                        result: preparedOutcomeResult,
+                                        ...(terminalIntent?.state === 'completed' && terminalIntent.usage
+                                            ? { usage: terminalIntent.usage }
+                                            : {}),
+                                        ...(terminalIntent?.state === 'completed' && terminalIntent.progress !== undefined
+                                            ? { progress: terminalIntent.progress }
+                                            : {}),
+                                    },
                                 }
                               : {
                                     state: 'failed',
                                     timestamp: storageNow,
                                     message: {
                                         role: 'agent',
-                                        parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }],
+                                        parts: [{
+                                            type: 'text',
+                                            text: terminalIntent?.state === 'failed' && terminalIntent.message
+                                                ? terminalIntent.message
+                                                : `Loop failed: ${outcome.reason}`,
+                                        }],
                                     },
-                                    metadata: { reason: outcome.reason },
+                                    metadata: {
+                                        reason: outcome.reason,
+                                        ...(terminalIntent?.state === 'failed' && terminalIntent.usage
+                                            ? { usage: terminalIntent.usage }
+                                            : {}),
+                                    },
                           },
                           ...(activeTurnClaim ? {
                               turnClaim: {
+                                  attemptKey: `claim:${activeTurnClaim.claimId}`,
                                   claimId: activeTurnClaim.claimId,
                                   fence: activeTurnClaim.fence,
                                   generation: activeTurnClaim.claimedGeneration,

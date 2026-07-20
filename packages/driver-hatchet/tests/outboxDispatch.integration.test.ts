@@ -40,6 +40,7 @@ describe('executeOutboxDispatch', () => {
         payload: { taskId: 'task-1' },
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
         retryCount: 0,
+        deliveryScope: 'shared',
     };
 
     it('publishes and deletes an outbox row', async () => {
@@ -52,6 +53,8 @@ describe('executeOutboxDispatch', () => {
             outbox: {
                 findUnique: jest.fn(async () => row),
                 delete: jest.fn(async () => undefined),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+                deleteMany: jest.fn(async () => ({ count: 1 })),
             },
         };
         const ctx = {
@@ -68,7 +71,9 @@ describe('executeOutboxDispatch', () => {
 
         expect(result).toEqual({ ok: true });
         expect(published).toHaveLength(1);
-        expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
+        expect(prisma.outbox.deleteMany).toHaveBeenCalledWith({
+            where: { id: 'row-1', dispatchLeaseId: expect.any(String) },
+        });
     });
 
     it('mirrors task console errors to Hatchet logs', async () => {
@@ -76,6 +81,8 @@ describe('executeOutboxDispatch', () => {
             outbox: {
                 findUnique: jest.fn(async () => row),
                 delete: jest.fn(async () => undefined),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+                deleteMany: jest.fn(async () => ({ count: 1 })),
             },
         };
         const ctx = {
@@ -126,6 +133,8 @@ describe('executeOutboxDispatch', () => {
             outbox: {
                 findUnique: jest.fn(async () => null),
                 delete: jest.fn(async () => undefined),
+                updateMany: jest.fn(async () => ({ count: 0 })),
+                deleteMany: jest.fn(async () => ({ count: 0 })),
             },
         };
         const result = await executeOutboxDispatch(
@@ -152,6 +161,8 @@ describe('executeOutboxDispatch', () => {
                 findUnique: jest.fn(async () => row),
                 delete: jest.fn(async () => undefined),
                 update: jest.fn(async () => undefined),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+                deleteMany: jest.fn(async () => ({ count: 1 })),
             },
             conversationDeadLetter: {
                 create: jest.fn(async () => undefined),
@@ -172,6 +183,8 @@ describe('executeOutboxDispatch', () => {
         ).rejects.toThrow('nats down');
 
         expect(prisma.conversationDeadLetter.create).toHaveBeenCalled();
-        expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
+        expect(prisma.outbox.deleteMany).toHaveBeenCalledWith({
+            where: { id: 'row-1', dispatchLeaseId: expect.any(String) },
+        });
     });
 });

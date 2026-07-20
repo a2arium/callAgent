@@ -14,6 +14,7 @@
     "test": "NODE_OPTIONS='--max-old-space-size=8192 --no-warnings' node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "test:coverage": "NODE_OPTIONS='--max-old-space-size=8192 --no-warnings' COVERAGE=true node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "hatchet:poc:up": "docker compose -f apps/hatchet-poc/docker-compose.yml --env-file .env up -d",
+    "projection:reconcile-terminals": "yarn workspace @a2arium/callagent-core build && node packages/core/dist/operator/terminalProjectionReconcilerCli.js",
     "verify:core-imports": "node scripts/verify-core-imports.mjs",
     "verify:publish-manifests": "node scripts/check-publish-manifests.mjs",
     "verify:packlists": "node scripts/check-packlists.mjs",

@@ -7,6 +7,7 @@ import { taskChannel } from '../src/eventbus/taskEventEmitter.js';
 import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 import { mapA2AEventToRuntimeStream } from '../src/streaming/a2aMapper.js';
 import type { A2AEvent } from '../src/shared/types/StreamingEvents.js';
+import { runWithSegmentIdempotencyKey } from '../src/runtime/segmentProcessedKeys.js';
 
 const publishTaskEvent = async (bus: ReturnType<typeof createInMemoryEventBus>, taskId: string, data: A2AEvent) => {
     await bus.publish(
@@ -102,6 +103,67 @@ describe('streaming finality', () => {
                     terminal: false,
                     metadata: { progress: 35 },
                     message: { role: 'agent', parts: [{ type: 'text', text: 'Loading context' }] },
+                }),
+            }),
+        ]);
+    });
+
+    it('buffers fenced terminal APIs until durable arbitration', async () => {
+        const taskId = 'task-buffered-terminal';
+        const bus = createInMemoryEventBus();
+        const events: A2AEvent[] = [];
+        await bus.subscribe(taskChannel(taskId), async (event) => {
+            events.push(event.payload.data as A2AEvent);
+        });
+        const ctx: any = { task: { id: taskId }, tenantId: 'tenant-test', agentId: 'agent-test' };
+        extendContextWithStreaming(ctx, true, bus);
+
+        await runWithSegmentIdempotencyKey('segment-1', async () => {
+            ctx.recordUsage({ cost: 0.25, kind: 'llm' });
+            ctx.complete(100, 'Fetch failed: HTTP 500');
+        }, {
+            tenantId: 'tenant-test',
+            taskId,
+            claimId: 'claim-1',
+            fence: '1',
+            ownerId: 'owner-1',
+            requestKey: 'segment-1',
+            claimedGeneration: '1',
+            turnSeq: 1,
+            acquiredAt: '2026-01-01T00:00:00.000Z',
+            heartbeatAt: '2026-01-01T00:00:00.000Z',
+            expiresAt: '2026-01-01T00:02:00.000Z',
+            runtimeSurface: 'in_process',
+        });
+
+        expect(events).toHaveLength(0);
+        expect(ctx.__pendingTerminalIntent).toEqual({
+            state: 'completed',
+            message: 'Fetch failed: HTTP 500',
+            progress: 100,
+            usage: { totalCost: 0.25, byKind: { llm: 0.25 } },
+        });
+    });
+
+    it('treats the second complete argument as a message in legacy mode', async () => {
+        const taskId = 'task-complete-message';
+        const bus = createInMemoryEventBus();
+        const events: A2AEvent[] = [];
+        await bus.subscribe(taskChannel(taskId), async (event) => {
+            events.push(event.payload.data as A2AEvent);
+        });
+        const ctx: any = { task: { id: taskId }, tenantId: 'tenant-test', agentId: 'agent-test' };
+        extendContextWithStreaming(ctx, true, bus);
+
+        ctx.complete(100, 'Fetch failed: HTTP 500');
+        await Promise.resolve();
+
+        expect(events).toEqual([
+            expect.objectContaining({
+                final: true,
+                status: expect.objectContaining({
+                    state: 'completed',
+                    message: { role: 'agent', parts: [{ type: 'text', text: 'Fetch failed: HTTP 500' }] },
                 }),
             }),
         ]);

@@ -1577,7 +1577,7 @@ export async function runLoop<
             };
             const stageBefore = step.stageTrace?.stageBefore ?? 'idle';
             const stageAfter = step.stageTrace?.stageAfter ?? stageBefore;
-            const turnId = uuidv7();
+            const turnId = iterationTurnNode?.id ?? uuidv7();
             const correlationId = generateCorrelationId();
             const parentNode =
                 iterationTurnNode?.parentId != null && iterationTurnNode.parentId !== ''

@@ -31,6 +31,7 @@ export type DurableTaskTerminal = {
         metadata?: Record<string, unknown>;
     };
     turnClaim?: {
+        attemptKey?: string;
         claimId: string;
         fence: string;
         generation: string;

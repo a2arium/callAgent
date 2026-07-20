@@ -468,10 +468,6 @@ function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunVi
     }
 
     const latestTurnCompleted = [...events].reverse().find((event) => event.type === 'turn.completed');
-    if (latestTurnCompleted !== undefined && eventHasSemanticFailure(latestTurnCompleted)) {
-        return 'failed';
-    }
-
     const root = chooseRootRun(driverRuns);
     const rootStatus = normalizeStatus(root?.status);
     if (rootStatus === 'canceled') {
@@ -1059,9 +1055,6 @@ function deriveTurnStatus(status: string | undefined | null, event: AgentRunSour
     if (driverStatus === 'failed') {
         return 'failed';
     }
-    if (event !== undefined && eventHasSemanticFailure(event)) {
-        return 'failed';
-    }
     if (driverStatus === 'completed') {
         return 'completed';
     }
@@ -1080,10 +1073,6 @@ function deriveTurnStatus(status: string | undefined | null, event: AgentRunSour
     return driverStatus;
 }
 
-function eventHasSemanticFailure(event: AgentRunSourceEvent): boolean {
-    return transitionResultOk(event.payload) === false;
-}
-
 function turnTransitionKind(payload: Record<string, unknown>): string | undefined {
     const transition = objectField(payload, 'transition');
     return transition ? stringField(transition, 'kind') : undefined;
@@ -1091,13 +1080,6 @@ function turnTransitionKind(payload: Record<string, unknown>): string | undefine
 
 function isAwaitBoundary(value: string | undefined): boolean {
     return value === 'await_input' || value === 'await_tool' || value === 'await_child' || value === 'await_event';
-}
-
-function transitionResultOk(payload: Record<string, unknown>): boolean | undefined {
-    const transition = objectField(payload, 'transition');
-    const result = transition ? objectField(transition, 'result') : undefined;
-    const ok = result?.ok;
-    return typeof ok === 'boolean' ? ok : undefined;
 }
 
 function normalizeStatus(status: string | undefined | null): AgentRunStatus {

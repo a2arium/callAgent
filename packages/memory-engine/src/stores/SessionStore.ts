@@ -176,6 +176,8 @@ export interface IWorkingMemorySessionStore {
         key: string;
         payload: Record<string, unknown>;
         idempotencyKey?: string;
+        deliveryScope?: 'process' | 'shared';
+        deliveryOwnerId?: string;
     }): Promise<{ id: string } | void>;
     createConversationThread(params: {
         tenantId: string;

@@ -42,6 +42,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
 import { resolveActiveRunTimeout, resolveTerminalDrainTimeout } from './backgroundTaskTimeout.js';
+import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
+import { createTerminalDeliveryGate } from './terminalDeliveryGate.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -58,6 +60,11 @@ type StreamingOptions = {
     tenantId?: string; // CLI-specified tenant override
     resolveDeps?: boolean; // Whether to resolve dependencies (default: true)
     maxTurns?: number; // Override the default maxTurns
+};
+
+export type StreamingRunResult = {
+    terminal: boolean;
+    state?: TaskStatus['state'];
 };
 
 /**
@@ -78,11 +85,11 @@ type PartialTaskContext = Omit<TaskContext,
  * @param options - Streaming and output options
  * @throws {TaskExecutionError} If agent execution fails
  */
-export async function runAgentWithStreaming(
+export async function runAgentWithStreamingDetailed(
     agentFilePath: string,
     input: TaskInput,
     options: StreamingOptions
-): Promise<void> {
+): Promise<StreamingRunResult> {
     await loadAgentIndexIfPresent();
 
     const config: MinimalConfig = loadConfig();
@@ -139,14 +146,29 @@ export async function runAgentWithStreaming(
     // Determine log method for debug logs (debug -> stdout, warn -> stderr)
     const logDebugMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
 
-    await runnerEventBus.subscribe(channel, async (be: BusEvent) => {
+    const terminalGate = createTerminalDeliveryGate((status) => transport.handleStatus(status, true));
+    const deliverTerminal = (status: TaskStatus, deliveryKey: string): boolean =>
+        terminalGate({ status, deliveryKey });
+    const mainSubscription = await runnerEventBus.subscribe(channel, async (be: BusEvent) => {
         const event = busEventData<A2AEvent>(be);
         if (!event) {
             return;
         }
         if (options.isStreaming) {
             if ('status' in event) {
-                transport.handleStatus(event.status, !!event.final);
+                const isTerminal = event.final === true && (
+                    event.status.state === 'completed' ||
+                    event.status.state === 'failed' ||
+                    event.status.state === 'canceled'
+                );
+                const deliveryKey = (event as unknown as { deliveryKey?: string }).deliveryKey;
+                if (isTerminal) {
+                    if (deliveryKey || runMode === 'legacy') {
+                        deliverTerminal(event.status, deliveryKey ?? `${taskId}:legacy:${event.status.state}`);
+                    }
+                } else {
+                    transport.handleStatus(event.status, false);
+                }
             } else if ('artifact' in event) {
                 transport.handleArtifact(event.artifact);
             }
@@ -158,7 +180,10 @@ export async function runAgentWithStreaming(
                     isFinal &&
                     (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')
                 ) {
-                    transport.handleStatus(s, true);
+                    const deliveryKey = (event as unknown as { deliveryKey?: string }).deliveryKey;
+                    if (deliveryKey || runMode === 'legacy') {
+                        deliverTerminal(s, deliveryKey ?? `${taskId}:legacy:${s.state}`);
+                    }
                 } else if (s.state === 'input-required' || (s.state as unknown) === 'waiting_input') {
                     transport.handleStatus(s, false);
                 } else if (s.state === 'working') {
@@ -424,6 +449,7 @@ export async function runAgentWithStreaming(
                             timestamp: new Date().toISOString(),
                             metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
                         } as any;
+                        deliverTerminal(finalStatus, `${taskId}:terminal:cache`);
                         try {
                             void runnerEventBus.publish(
                                 createBusEvent({
@@ -435,7 +461,12 @@ export async function runAgentWithStreaming(
                                         source: `/tasks/${taskId}`,
                                         time: new Date().toISOString(),
                                         datacontenttype: 'application/json',
-                                        data: { id: taskId, status: finalStatus, final: true },
+                                    data: {
+                                        id: taskId,
+                                        status: finalStatus,
+                                        final: true,
+                                        deliveryKey: `${taskId}:terminal:cache`,
+                                    },
                                     },
                                 })
                             );
@@ -466,7 +497,7 @@ export async function runAgentWithStreaming(
 
                     // Use transport to output results
                     if (results.status) {
-                        transport.handleStatus(results.status as any, true);
+                        deliverTerminal(results.status as any, `${taskId}:terminal:cache`);
                     }
                     for (const artifact of results.artifacts) {
                         transport.handleArtifact(artifact);
@@ -474,69 +505,18 @@ export async function runAgentWithStreaming(
 
                     logTraceMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
                 }
-                return;
+                await mainSubscription.unsubscribe().catch(() => undefined);
+                const cachePrisma = agentResultCachePrisma as PrismaClient | null;
+                if (cachePrisma?.$disconnect) {
+                    await cachePrisma.$disconnect().catch(() => undefined);
+                }
+                await import('@a2arium/callagent-memory-engine')
+                    .then((memory) => memory.disconnectMemoryPrismaClient())
+                    .catch(() => undefined);
+                return { terminal: true, state: 'completed' };
             }
         } catch (error) {
             agentLogger.error('Result cache lookup failed', error);
-        }
-    }
-
-    // If caching enabled, subscribe to final completion to persist result using original input as key
-    let cacheUnsubscribe: (() => Promise<void>) | undefined;
-    if (cacheEnabled) {
-        const channel = taskChannel(taskId);
-        const cacheListener = async (be: BusEvent): Promise<void> => {
-            const event = busEventData<A2AEvent>(be);
-            if (!event) {
-                return;
-            }
-            agentLogger.debug(`Cache listener received event`, {
-                hasStatus: 'status' in event,
-                final: (event as { final?: boolean }).final,
-                state: (event as { status?: { state?: string } }).status?.state,
-            });
-            if (
-                'status' in event &&
-                event.final === true &&
-                (event.status as { state?: string })?.state === 'completed'
-            ) {
-                try {
-                    const resultToCache = (event.status as { metadata?: { result?: unknown } })?.metadata?.result;
-                    agentLogger.info(`Caching result for agent ${plugin.resolved.agentCard.name}`, {
-                        hasResult: resultToCache !== undefined,
-                    });
-                    if (resultToCache !== undefined) {
-                        try {
-                            const cache = await ensureAgentResultCache();
-                            await cache.setCachedResult(
-                                plugin.resolved.agentCard.name,
-                                input,
-                                resultToCache,
-                                plugin.resolved.runtimeManifest.cache?.ttlSeconds || 300,
-                                plugin.resolved.runtimeManifest.cache?.excludePaths || [],
-                                finalTenantId
-                            );
-                            agentLogger.info(`Result cached successfully for agent ${plugin.resolved.agentCard.name}`);
-                        } catch (error) {
-                            agentLogger.error('Failed to persist cached result', error);
-                        }
-                    }
-                } catch (error) {
-                    agentLogger.error('Failed to cache agent result on completion', error);
-                } finally {
-                    try {
-                        await cacheUnsubscribe?.();
-                    } catch {
-                        /* noop */
-                    }
-                }
-            }
-        };
-        try {
-            const sub = await runnerEventBus.subscribe(channel, cacheListener);
-            cacheUnsubscribe = sub.unsubscribe;
-        } catch {
-            /* noop */
         }
     }
 
@@ -544,7 +524,7 @@ export async function runAgentWithStreaming(
     agentLogger.info(`Starting Engine Execution for Task ${taskCtx.task.id}`);
 
     // Establish logging context for entire task execution
-    await withLoggingContext(
+    return withLoggingContext(
         {
             taskId: taskCtx.task.id,
             tenantId: finalTenantId,
@@ -552,6 +532,7 @@ export async function runAgentWithStreaming(
             correlationId: `corr-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
         },
         async () => {
+            let cleanupExecution: (() => Promise<void>) | undefined;
             try {
                 // Register durable handlers from the module
                 try {
@@ -579,6 +560,27 @@ export async function runAgentWithStreaming(
                 const sessionStore = new WorkingMemorySessionStore();
                 await sessionStore.connect();
                 const engine = new TaskEngine({ sessionStore, eventBus: runnerEventBus });
+                let cleanedUp = false;
+                const cleanup = async (): Promise<void> => {
+                    if (cleanedUp) return;
+                    cleanedUp = true;
+                    await mainSubscription.unsubscribe().catch(() => undefined);
+                    try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
+                        runnerLogger.warn('Failed waiting for pending A2A notifications', {
+                            error: err instanceof Error ? err.message : String(err)
+                        });
+                    }
+                    try { engine.stopOutboxPublisher(); } catch { /* noop */ }
+                    try { await engine.closeTransportAdapters(); } catch { /* noop */ }
+                    try { await sessionStore.close(); } catch { /* noop */ }
+                    try { EngineLocator.setEngine(null as any); } catch { /* noop */ }
+                    if (agentResultCachePrisma?.$disconnect) {
+                        try { await agentResultCachePrisma.$disconnect(); } catch { /* noop */ }
+                    }
+                    try { await (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { /* noop */ }
+                    try { await (await import('@a2arium/callagent-memory-engine')).disconnectMemoryPrismaClient(); } catch { /* noop */ }
+                };
+                cleanupExecution = cleanup;
                 try { EngineLocator.setEngine(engine as any); } catch { }
                 const entity: TaskEntity = { id: taskCtx.task.id, input };
                 runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
@@ -619,6 +621,32 @@ export async function runAgentWithStreaming(
                     if (returnedTask !== undefined) returnedTask.status = authoritativeStatus;
                 }
 
+                const durableSnapshot = await sessionStore.getSessionSnapshot(finalTenantId, taskCtx.task.id);
+                const durableTerminal = readDurableTaskTerminal(durableSnapshot?.snapshot);
+                if (durableTerminal !== undefined) {
+                    authoritativeStatus = durableTerminal.status as TaskStatus;
+                    if (returnedTask !== undefined) returnedTask.status = authoritativeStatus;
+                    deliverTerminal(authoritativeStatus, durableTerminal.deliveryKey);
+                    if (cacheEnabled && authoritativeStatus.state === 'completed') {
+                        const resultToCache = authoritativeStatus.metadata?.result;
+                        if (resultToCache !== undefined) {
+                            try {
+                                const cache = await ensureAgentResultCache();
+                                await cache.setCachedResult(
+                                    plugin.resolved.agentCard.name,
+                                    input,
+                                    resultToCache,
+                                    plugin.resolved.runtimeManifest.cache?.ttlSeconds || 300,
+                                    plugin.resolved.runtimeManifest.cache?.excludePaths || [],
+                                    finalTenantId
+                                );
+                            } catch (error) {
+                                agentLogger.error('Failed to cache durable agent result', error);
+                            }
+                        }
+                    }
+                }
+
                 const isTerminal = authoritativeStatus?.state === 'completed' ||
                     authoritativeStatus?.state === 'failed' ||
                     authoritativeStatus?.state === 'canceled';
@@ -645,7 +673,13 @@ export async function runAgentWithStreaming(
                 }
 
                 if (authoritativeStatus?.state === 'failed' || authoritativeStatus?.state === 'canceled') {
-                    transport.handleStatus(authoritativeStatus, true);
+                    if (durableTerminal === undefined) {
+                        deliverTerminal(
+                            authoritativeStatus,
+                            `${taskCtx.task.id}:terminal:${authoritativeStatus.state}`
+                        );
+                    }
+                    await cleanup();
                     const reason = typeof authoritativeStatus.metadata?.reason === 'string'
                         ? authoritativeStatus.metadata.reason
                         : (authoritativeStatus.message?.parts?.find(p => p.type === 'text') as any)?.text ||
@@ -656,27 +690,16 @@ export async function runAgentWithStreaming(
                     });
                 }
                 logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
-                if (!options.isStreaming) {
+                if (isTerminal || !options.isStreaming) {
                     logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
-                    try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
-                        runnerLogger.warn('Failed waiting for pending A2A notifications', {
-                            error: err instanceof Error ? err.message : String(err)
-                        });
-                    }
-                    try { await sessionStore.close(); } catch { }
-                    try { EngineLocator.setEngine(null as any); } catch { }
-                    if (agentResultCachePrisma?.$disconnect) {
-                        try { await agentResultCachePrisma.$disconnect(); } catch { }
-                    }
-                    try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
-                    try { await (await import('@a2arium/callagent-memory-engine')).disconnectMemoryPrismaClient(); } catch { }
-                    try {
-                        engine.stopOutboxPublisher();
-                    } catch {
-                        /* noop */
-                    }
+                    await cleanup();
                 }
+                return {
+                    terminal: isTerminal,
+                    ...(authoritativeStatus?.state ? { state: authoritativeStatus.state } : {}),
+                };
             } catch (error: unknown) {
+                await cleanupExecution?.().catch(() => undefined);
                 // Use agentLogger here for error
                 agentLogger.error(`Unhandled Agent Execution Error`, error, {
                     taskId: taskCtx.task.id
@@ -713,6 +736,15 @@ export async function runAgentWithStreaming(
                 }
             }
         }); // End of withLoggingContext
+}
+
+/** Public compatibility wrapper. CLI callers use the detailed result internally. */
+export async function runAgentWithStreaming(
+    agentFilePath: string,
+    input: TaskInput,
+    options: StreamingOptions
+): Promise<void> {
+    await runAgentWithStreamingDetailed(agentFilePath, input, options);
 }
 
 

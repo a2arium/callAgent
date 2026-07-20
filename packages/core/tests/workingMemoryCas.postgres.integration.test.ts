@@ -7,6 +7,7 @@ import {
 } from '@a2arium/callagent-memory-sql';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { reconcileSnapshotMutation } from '../src/orchestration/persistence/SnapshotRepository.js';
+import { claimOutboxRow, deleteClaimedOutboxRow } from '../src/eventbus/outboxDispatch.js';
 
 const databaseUrl = process.env.MEMORY_DATABASE_URL;
 const describeIfPostgres = databaseUrl ? describe : describe.skip;
@@ -34,6 +35,7 @@ describeIfPostgres('working-memory CAS reconciliation on PostgreSQL', () => {
     });
 
     afterAll(async () => {
+        await prismaA?.outbox.deleteMany({ where: { tenantId } });
         await prismaA?.wMSession.deleteMany({ where: { tenantId, sessionId } });
         await Promise.all([prismaA?.$disconnect(), prismaB?.$disconnect()]);
     });
@@ -88,5 +90,38 @@ describeIfPostgres('working-memory CAS reconciliation on PostgreSQL', () => {
             left: true,
             right: true,
         });
+    });
+
+    test('storage mutation time is UTC-correct under a non-UTC PostgreSQL timezone', async () => {
+        const before = Date.now();
+        const loaded = await managerA.loadForMutation(tenantId, sessionId);
+        const after = Date.now();
+        const storageMs = Date.parse(loaded!.storageNow!);
+        expect(storageMs).toBeGreaterThanOrEqual(before - 1_000);
+        expect(storageMs).toBeLessThanOrEqual(after + 1_000);
+    });
+
+    test('two shared dispatchers cannot own the same outbox lease', async () => {
+        managerA.configureOutboxDelivery({ scope: 'shared' });
+        const enqueued = await managerA.enqueueOutbox(
+            tenantId,
+            'task.status',
+            sessionId,
+            { taskId: sessionId, status: { state: 'completed' }, final: true },
+            undefined,
+            `${tenantId}:leased-row`
+        );
+        if (!enqueued) throw new Error('outbox row missing');
+        const [left, right] = await Promise.all([
+            claimOutboxRow({ prisma: prismaA as never, id: enqueued.id, leaseId: 'lease-left', scope: 'shared' }),
+            claimOutboxRow({ prisma: prismaB as never, id: enqueued.id, leaseId: 'lease-right', scope: 'shared' }),
+        ]);
+        expect([left.disposition, right.disposition].filter((value) => value === 'claimed')).toHaveLength(1);
+        const winner = left.disposition === 'claimed' ? 'lease-left' : 'lease-right';
+        await expect(deleteClaimedOutboxRow({
+            prisma: prismaA as never,
+            id: enqueued.id,
+            leaseId: winner,
+        })).resolves.toBe(true);
     });
 });

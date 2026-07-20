@@ -243,6 +243,8 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         key: string;
         payload: Record<string, unknown>;
         idempotencyKey?: string;
+        deliveryScope?: 'process' | 'shared';
+        deliveryOwnerId?: string;
     }): Promise<{ id: string }> {
         if (params.idempotencyKey !== undefined) {
             const existing = this.outbox.find((row) => row.idempotencyKey === params.idempotencyKey);

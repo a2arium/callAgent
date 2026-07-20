@@ -32,6 +32,14 @@ export type OperatorMemoryEvent = {
  * controlVars, or __stageTrace uses this type.
  */
 export type InternalTaskContext = TaskContext & {
+    /** Terminal API intent buffered while a fenced loop turn awaits durable arbitration. */
+    __pendingTerminalIntent?: {
+        state: 'completed' | 'failed' | 'canceled';
+        message?: string;
+        progress?: number;
+        usage?: { totalCost: number; byKind: Record<string, number> };
+    };
+    __clearTerminalIntent?: () => void;
     controlVars?: Record<string, unknown>;
     __activeLoopEnv?: EnvironmentState;
     env?: {

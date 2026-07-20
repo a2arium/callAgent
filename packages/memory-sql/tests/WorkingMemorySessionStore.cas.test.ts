@@ -27,7 +27,7 @@ const params = {
 describe('WorkingMemorySessionStore.writeSnapshotCAS', () => {
     test('loads an authoritative PostgreSQL timestamp with mutation snapshots', async () => {
         const prisma = createPrisma();
-        prisma.$queryRaw.mockResolvedValue([{ storageNow: new Date('2026-07-19T10:00:00.000Z') }]);
+        prisma.$queryRaw.mockResolvedValue([{ storageNowMs: 1784455200000n }]);
         prisma.wMSession.findUnique.mockResolvedValue({
             wmVersion: 4n,
             snapshot: { active: true },

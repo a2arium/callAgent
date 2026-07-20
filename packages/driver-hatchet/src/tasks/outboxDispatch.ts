@@ -1,12 +1,15 @@
 import type { IEventBus } from '@a2arium/callagent-core/unstable';
 import {
+    claimOutboxRow,
     defaultMetricsRegistry,
-    deleteOutboxRow,
+    deleteClaimedOutboxRow,
     dispatchOutboxRow,
     handleOutboxDispatchFailure,
     HATCHET_OUTBOX_DISPATCH_RETRIES,
     type OutboxRow,
+    releaseClaimedOutboxRow,
 } from '@a2arium/callagent-core/unstable';
+import { v7 as uuidv7 } from 'uuid';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { HatchetClient } from '../hatchetClient.js';
 import { DriverRunsRepository, serializeDriverRunError } from '../driverRunsRepository.js';
@@ -39,6 +42,11 @@ export type OutboxDispatchDeps = {
                 where: { id: string };
                 data: { retryCount: number };
             }) => Promise<unknown>;
+            updateMany: (args: {
+                where: Record<string, unknown>;
+                data: Record<string, unknown>;
+            }) => Promise<{ count: number }>;
+            deleteMany: (args: { where: Record<string, unknown> }) => Promise<{ count: number }>;
         };
         conversationDeadLetter?: {
             create: (args: {
@@ -83,13 +91,17 @@ async function executeOutboxDispatchInner(
     ctx: Context<OutboxDispatchInput>,
     deps: OutboxDispatchDeps
 ): Promise<OutboxDispatchOutput> {
-    const row = (await deps.prisma.outbox.findUnique({
-        where: { id: input.outboxRowId },
-    })) as OutboxRow | null;
-
-    if (!row) {
+    const leaseId = `hatchet:${ctx.taskRunExternalId()}:${uuidv7()}`;
+    const claim = await claimOutboxRow({
+        prisma: deps.prisma as Parameters<typeof claimOutboxRow>[0]['prisma'],
+        id: input.outboxRowId,
+        leaseId,
+        scope: 'shared',
+    });
+    if (claim.disposition !== 'claimed' || !claim.row) {
         return { ok: true, skipped: true };
     }
+    const row = claim.row;
 
     const fields = driverRunFields(input, row);
 
@@ -110,7 +122,11 @@ async function executeOutboxDispatchInner(
 
     try {
         await dispatchOutboxRow({ eventBus: deps.eventBus, row });
-        await deleteOutboxRow({ prisma: deps.prisma, id: row.id });
+        await deleteClaimedOutboxRow({
+            prisma: deps.prisma as Parameters<typeof deleteClaimedOutboxRow>[0]['prisma'],
+            id: row.id,
+            leaseId,
+        });
 
         if (deps.driverRuns) {
             await deps.driverRuns.upsertByProviderRunId({
@@ -163,6 +179,14 @@ async function executeOutboxDispatchInner(
                 row,
                 error,
                 maxRetries: (row.retryCount ?? 0) + 1,
+                leaseId,
+            });
+        } else {
+            await releaseClaimedOutboxRow({
+                prisma: deps.prisma as Parameters<typeof releaseClaimedOutboxRow>[0]['prisma'],
+                id: row.id,
+                leaseId,
+                retryCount: (row.retryCount ?? 0) + 1,
             });
         }
 

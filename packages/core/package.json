@@ -66,7 +66,8 @@
     "callagent"
   ],
   "bin": {
-    "callagent-scaffold": "./dist/scaffold/scaffoldCli.js"
+    "callagent-scaffold": "./dist/scaffold/scaffoldCli.js",
+    "callagent-reconcile-terminal-projections": "./dist/operator/terminalProjectionReconcilerCli.js"
   },
   "dependencies": {
     "@a2arium/callagent-memory-engine": "^0.1.0",

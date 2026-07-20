@@ -158,6 +158,7 @@ async function executeSegmentTaskInner(
         const result = await deps.turnExecutor.runSegment({
             ...input,
             wake: input.wake as TurnWake,
+            runtimeAttemptKey: `hatchet:${ctx.workflowRunId()}:${ctx.taskRunExternalId()}`,
             runtimeSurface: 'hatchet',
         });
         const output = toSegmentTaskOutput(result);

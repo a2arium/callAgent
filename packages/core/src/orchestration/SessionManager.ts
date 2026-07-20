@@ -39,6 +39,7 @@ import {
 } from '../operator/payloadBudget.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { logger } from '@a2arium/callagent-utils';
+import { randomUUID } from 'node:crypto';
 
 const log = logger.createLogger({ prefix: 'SessionManager' });
 
@@ -50,6 +51,9 @@ export type OutboxEnqueuedRef = {
     traceId?: string;
     agentId?: string;
     token?: string;
+    deliveryScope: 'process' | 'shared';
+    deliveryOwnerId?: string;
+    payload: Record<string, unknown>;
 };
 
 export type { OutboxDispatchContext };
@@ -67,6 +71,17 @@ export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
 
     private onOutboxEnqueued?: (ref: OutboxEnqueuedRef) => void | Promise<void>;
+    private outboxDelivery: { scope: 'process' | 'shared'; ownerId?: string } = {
+        scope: 'process',
+        ownerId: `session-manager:${randomUUID()}`,
+    };
+
+    configureOutboxDelivery(params: { scope: 'process' | 'shared'; ownerId?: string }): void {
+        if (params.scope === 'process' && !params.ownerId) {
+            throw new Error('OUTBOX_PROCESS_OWNER_REQUIRED');
+        }
+        this.outboxDelivery = { ...params };
+    }
 
     setOnOutboxEnqueued(handler: (ref: OutboxEnqueuedRef) => void | Promise<void>): void {
         this.onOutboxEnqueued = handler;
@@ -360,6 +375,8 @@ export class SessionManager {
             key,
             payload: enrichedPayload,
             idempotencyKey: idempotencyKey ?? nextSegmentOutboxIdempotencyKey(topic),
+            deliveryScope: this.outboxDelivery.scope,
+            deliveryOwnerId: this.outboxDelivery.ownerId,
         });
         if (result?.id && this.onOutboxEnqueued) {
             const ctx = resolveOutboxDispatchContext(enrichedPayload, dispatchContext);
@@ -371,6 +388,9 @@ export class SessionManager {
                 traceId: ctx.traceId,
                 agentId: ctx.agentId,
                 token: ctx.token,
+                deliveryScope: this.outboxDelivery.scope,
+                deliveryOwnerId: this.outboxDelivery.ownerId,
+                payload: enrichedPayload,
             });
         }
         return result;

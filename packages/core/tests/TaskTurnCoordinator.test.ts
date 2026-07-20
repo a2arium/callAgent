@@ -159,6 +159,48 @@ describe('TaskTurnCoordinator', () => {
         expect(takeover.result.claim.fence).toBe('2');
     });
 
+    it('recovers a coordinator claim whose storage heartbeat is implausibly in the future', async () => {
+        const clockMs = Date.parse('2026-07-19T00:00:00.000Z');
+        const session = new SessionManager(new InMemorySessionManager(() => clockMs));
+        await session.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'task-a', agentId: 'agent-a', expectedWmVersion: 0n,
+            snapshot: {
+                meta: {
+                    taskLifecycle: { taskId: 'task-a', rootTaskId: 'task-a', ancestorTaskIds: [], state: 'active' },
+                    turnCoordinator: {
+                        schemaVersion: 1,
+                        nextFence: '1',
+                        nextTurnSeq: 1,
+                        requestedGeneration: '1',
+                        completedGeneration: '0',
+                        active: {
+                            claimId: 'bad-clock-claim', fence: '1', ownerId: 'old-worker', requestKey: 'task-a:start',
+                            claimedGeneration: '1', turnSeq: 1, phase: 'executing', runtimeSurface: 'hatchet',
+                            acquiredAt: '2026-07-19T02:59:00.000Z',
+                            heartbeatAt: '2026-07-19T03:00:00.000Z',
+                            expiresAt: '2026-07-19T03:02:00.000Z',
+                        },
+                    },
+                },
+            },
+        });
+
+        const recovered = await requestTaskTurn({
+            session,
+            tenantId: 'tenant-a',
+            taskId: 'task-a',
+            ownerId: 'new-worker',
+            requestKey: 'task-a:recovery',
+            leaseMs: 120_000,
+        });
+
+        expect(recovered.result.disposition).toBe('acquired');
+        if (recovered.result.disposition !== 'acquired') throw new Error('claim missing');
+        expect(recovered.result.claim.fence).toBe('2');
+        expect(recovered.result.claim.claimedGeneration).toBe('2');
+        expect(recovered.result.claim.acquiredAt).toBe('2026-07-19T00:00:00.000Z');
+    });
+
     it('admits one concurrent owner and durably queues the other wake', async () => {
         const session = await seededSession();
         const [first, second] = await Promise.all([

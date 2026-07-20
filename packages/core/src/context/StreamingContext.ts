@@ -13,6 +13,8 @@ import type { IEventBus } from '../public-types/eventbus/types.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import { logger } from '@a2arium/callagent-utils';
 import { v7 as uuidv7 } from 'uuid';
+import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
+import type { InternalTaskContext } from '../loop/internalContext.js';
 
 /**
  * Options for the reply method
@@ -70,6 +72,18 @@ export function extendContextWithStreaming(
     // Add state to hold accumulated usage
     let totalCost: number = 0;
     const byKind: Record<string, number> = {};
+    const internalCtx = ctx as InternalTaskContext;
+    const resetUsage = (): void => {
+        totalCost = 0;
+        for (const k of Object.keys(byKind)) delete byKind[k];
+    };
+    const bufferTerminalIntent = (intent: InternalTaskContext['__pendingTerminalIntent']): void => {
+        internalCtx.__pendingTerminalIntent = intent;
+    };
+    internalCtx.__clearTerminalIntent = (): void => {
+        internalCtx.__pendingTerminalIntent = undefined;
+        resetUsage();
+    };
 
     // Helper to emit or buffer events
     const emitEvent = (event: InternalEngineEvent): void => {
@@ -120,6 +134,9 @@ export function extendContextWithStreaming(
                 break;
 
             case 'STATUS':
+                if (!['submitted', 'working', 'input-required', 'completed', 'failed', 'canceled'].includes(event.status.state)) {
+                    throw new Error(`INVALID_TASK_STATE: ${String(event.status.state)}`);
+                }
                 // Store the latest status
                 buffer.latestStatus = event.status;
                 logger.debug('Task status update', {
@@ -161,8 +178,12 @@ export function extendContextWithStreaming(
                 break;
 
             case 'FINAL':
-                // For both streaming and buffered mode, this is the final event
-                const isFinal = true;
+                if (!['input-required', 'completed', 'failed', 'canceled'].includes(event.status.state)) {
+                    throw new Error(`INVALID_TASK_FINAL_STATE: ${String(event.status.state)}`);
+                }
+                // Input-required pauses an interactive task; it is not terminal.
+                const isFinal = event.status.state === 'completed' ||
+                    event.status.state === 'failed' || event.status.state === 'canceled';
 
                 logger.info('Task final state reached', {
                     taskId: event.taskId,
@@ -256,7 +277,31 @@ export function extendContextWithStreaming(
                 return;
             }
 
-            // Otherwise it's a TaskStatus object for streaming
+            const state = (statusOrPct as { state?: unknown }).state;
+            const knownStates = new Set([
+                'submitted', 'working', 'input-required', 'completed', 'failed', 'canceled',
+            ]);
+            if (typeof state !== 'string' || !knownStates.has(state)) {
+                throw new Error(`INVALID_TASK_STATE: ${String(state)}`);
+            }
+            if (
+                currentTaskTurnClaim() !== undefined &&
+                (state === 'completed' || state === 'failed' || state === 'canceled')
+            ) {
+                const message = statusOrPct.message?.parts
+                    ?.filter((part) => part.type === 'text')
+                    .map((part) => (part as { text?: string }).text)
+                    .filter((text): text is string => typeof text === 'string')
+                    .join(' ');
+                bufferTerminalIntent({
+                    state,
+                    ...(message ? { message } : {}),
+                    ...(totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : {}),
+                });
+                return;
+            }
+
+            // Otherwise it's a TaskStatus object for streaming/legacy mode.
             emitEvent({
                 kind: 'STATUS',
                 taskId: ctx.task.id,
@@ -290,20 +335,31 @@ export function extendContextWithStreaming(
         // Modify complete to include usage metadata
         complete: (pctOrStatus?: number, statusStr?: string): void => {
             const finalStatus: TaskStatus = {
-                state: (statusStr || 'completed') as TaskState,
+                state: 'completed',
                 timestamp: new Date().toISOString(),
+                ...(statusStr ? {
+                    message: { role: 'agent', parts: [{ type: 'text', text: statusStr }] },
+                } : {}),
                 metadata: totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : undefined
             };
             if (typeof pctOrStatus === 'number') {
-                (finalStatus as any).progress = pctOrStatus;
+                finalStatus.metadata = { ...finalStatus.metadata, progress: pctOrStatus };
+            }
+            if (currentTaskTurnClaim() !== undefined) {
+                bufferTerminalIntent({
+                    state: 'completed',
+                    ...(statusStr ? { message: statusStr } : {}),
+                    ...(typeof pctOrStatus === 'number' ? { progress: pctOrStatus } : {}),
+                    ...(totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : {}),
+                });
+                return;
             }
             emitEvent({
                 kind: 'FINAL',
                 taskId: ctx.task.id,
                 status: finalStatus
             });
-            totalCost = 0; // Reset after sending
-            for (const k of Object.keys(byKind)) delete byKind[k];
+            resetUsage();
         },
 
         // Modify fail to handle unknown error type and include usage metadata
@@ -324,6 +380,15 @@ export function extendContextWithStreaming(
                 metadata: totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : {}
             };
 
+            if (currentTaskTurnClaim() !== undefined) {
+                bufferTerminalIntent({
+                    state: 'failed',
+                    message: errorMessage,
+                    ...(totalCost > 0 ? { usage: { totalCost, byKind: { ...byKind } } } : {}),
+                });
+                return;
+            }
+
             // Note: The original implementation expected a TaskStatus. 
             // If specific error details from an incoming TaskStatus were needed, 
             // we'd need type checking here.
@@ -333,8 +398,7 @@ export function extendContextWithStreaming(
                 taskId: ctx.task.id,
                 status: finalStatus
             });
-            totalCost = 0; // Reset after sending
-            for (const k of Object.keys(byKind)) delete byKind[k];
+            resetUsage();
         },
 
         // Signal that the task requires more input

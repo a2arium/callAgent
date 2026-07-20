@@ -79,6 +79,10 @@ export {
 } from './orchestration/ChildTerminalCoordinator.js';
 export {
     dispatchOutboxRow,
+    claimOutboxRow,
+    deleteClaimedOutboxRow,
+    releaseClaimedOutboxRow,
+    readOutboxStorageNow,
     deleteOutboxRow,
     handleOutboxDispatchFailure,
     outboxChannel,

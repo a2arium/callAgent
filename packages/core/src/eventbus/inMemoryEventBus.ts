@@ -11,6 +11,7 @@ export function createInMemoryEventBus(): IEventBus {
 }
 
 export class InMemoryEventBus implements IEventBus {
+    readonly deliveryScope = 'process' as const;
     private readonly handlers = new Map<string, Set<BusEventHandler>>();
 
     async publish(event: BusEvent): Promise<void> {

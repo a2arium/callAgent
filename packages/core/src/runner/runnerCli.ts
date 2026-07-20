@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { runAgentWithStreaming } from './streamingRunner.js';
+import { runAgentWithStreamingDetailed } from './streamingRunner.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 import { bootstrapCompositionRoot } from '../runtime/bootstrapCompositionRoot.js';
 import { registerHandler } from '../orchestration/HandlerRegistry.js';
@@ -315,10 +315,11 @@ async function main(): Promise<void> {
     const { agentFilePath, input, options } = parseArgs();
 
     try {
-        await runAgentWithStreaming(agentFilePath, input, options);
+        const run = await runAgentWithStreamingDetailed(agentFilePath, input, options);
 
-        // For streaming mode, keep process alive
-        if (options.isStreaming) {
+        // Interactive streaming runs stay alive; terminal runs have already
+        // published their authoritative result and closed their resources.
+        if (options.isStreaming && !run.terminal) {
             // Don't exit immediately - the event listeners need to stay alive
             cliLogger.info('Streaming started - press Ctrl+C to exit');
         } else {

@@ -31,6 +31,8 @@ describe('OutboxPublisher Race Condition Tests', () => {
                 findMany: jest.fn().mockResolvedValue([]),
                 delete: jest.fn().mockResolvedValue(undefined),
                 update: jest.fn().mockResolvedValue(undefined),
+                updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+                deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
             },
             conversationDeadLetter: {
                 create: jest.fn().mockResolvedValue(undefined),

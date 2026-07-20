@@ -36,6 +36,7 @@ export type CreateHatchetOutboxStackParams = {
 
 export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams): HatchetOutboxStack {
     rejectObsoleteRuntimeConfiguration();
+    assertSharedOutboxEventBus(params.eventBus);
     if (params.turnExecutor === undefined) {
         throw new Error('HATCHET_RUNTIME_MISCONFIGURED: a turn executor is required for the Hatchet runtime stack.');
     }
@@ -84,6 +85,7 @@ export async function startOutboxWorker(params: {
     onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
 }): Promise<{ worker: { start: () => Promise<void>; stop: () => Promise<void> } }> {
     rejectObsoleteRuntimeConfiguration();
+    assertSharedOutboxEventBus(params.eventBus);
     const hatchet = params.hatchet ?? createHatchetClient();
     const driverRuns = new DriverRunsRepository(params.prisma);
     const runtimeTimers = new RuntimeTimerRepository(params.prisma);
@@ -151,6 +153,14 @@ export async function startOutboxWorker(params: {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker');
         await worker.registerWorkflows([outboxDispatchTask, timerFireTask]);
         return { worker };
+    }
+}
+
+export function assertSharedOutboxEventBus(eventBus: IEventBus): void {
+    if (eventBus.deliveryScope !== 'shared') {
+        throw new Error(
+            'HATCHET_RUNTIME_MISCONFIGURED: Hatchet outbox workers require an event bus with deliveryScope="shared" (for example NATS).'
+        );
     }
 }
 

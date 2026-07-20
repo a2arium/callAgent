@@ -433,12 +433,15 @@ describe('HatchetRuntimeDriver', () => {
             payload: { taskId: 'task-1' },
             createdAt: new Date(),
             retryCount: 0,
+            deliveryScope: 'shared',
         };
         const bus = { publish: jest.fn(async () => undefined) };
         const prisma = {
             outbox: {
                 findUnique: jest.fn(async () => row),
                 delete: jest.fn(async () => undefined),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+                deleteMany: jest.fn(async () => ({ count: 1 })),
             },
         };
         const driver = new HatchetRuntimeDriver(
@@ -456,7 +459,9 @@ describe('HatchetRuntimeDriver', () => {
         });
 
         expect(bus.publish).toHaveBeenCalled();
-        expect(prisma.outbox.delete).toHaveBeenCalledWith({ where: { id: 'row-1' } });
+        expect(prisma.outbox.deleteMany).toHaveBeenCalledWith({
+            where: { id: 'row-1', dispatchLeaseId: expect.any(String) },
+        });
     });
 
     it('uses only the shared aplret.task workflow regardless of agent identity', async () => {

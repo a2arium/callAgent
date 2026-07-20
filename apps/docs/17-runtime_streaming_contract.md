@@ -186,8 +186,26 @@ Examples:
   task may still request input, call tools, delegate to a child, or emit a final
   status later.
 - `ctx.progress(50, 'Working')` emits a public, non-terminal `task.status`.
-- `ctx.complete()` or runtime completion emits terminal `task.status` and closes
-  the stream.
+- In fenced loop mode, `ctx.complete()` and `ctx.fail()` record terminal intent;
+  they do not emit `final:true` until the explicit APLRET transition wins durable
+  arbitration. The second argument to `ctx.complete(pct, message)` is always a
+  human-readable message, never a task state.
+- The durable terminal record emits exactly one terminal `task.status` per local
+  transport and closes the stream. A `complete` transition remains lifecycle
+  `completed` even when its application result contains `{ ok: false }`; agents
+  return `kind: 'fail'` when the task lifecycle itself must fail.
+- `input-required` pauses an interactive stream and is never emitted with
+  `final:true`.
+
+Durable outbox rows declare transport ownership. Process-local event buses receive
+only rows owned by their producing engine. Shared transports (for example NATS)
+use leased, at-least-once dispatch; consumers deduplicate using the terminal
+delivery key.
+
+After deploying the outbox ownership migration to a database with historical
+semantic rows, run `yarn projection:reconcile-terminals`. The idempotent job
+converges terminal `agent_runs` and `turn_runs` from durable snapshots and may be
+safely restarted.
 
 ## Debug And Privacy
 

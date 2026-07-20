@@ -74,11 +74,17 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
 
     async runSegment(params: RunSegmentParams): Promise<SegmentResult> {
         const { tenantId, taskId, agentId, wake, idempotencyKey, prepared } = params;
+        const runtimeAttemptKey = params.runtimeAttemptKey ??
+            `${params.runtimeSurface ?? 'in_process'}:${idempotencyKey}`;
 
         // Fast replay path only. Correctness still comes from requestTaskTurn below:
         // two workers that both miss this read race through the snapshot claim and
         // only one can enter TurnRunner.
         if (await this.hasProcessedKey(tenantId, taskId, idempotencyKey)) {
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId, taskId, idempotencyKey, attemptKey: runtimeAttemptKey,
+                disposition: 'matching_replay', status: 'matching_replay',
+            });
             return this.buildDuplicateResult(tenantId, taskId, agentId, 'matching_replay');
         }
 
@@ -108,6 +114,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 await this.appendAcceptedWakeEvent(tenantId, taskId, wake);
             }
             if (admission.result.disposition !== 'acquired') {
+                const disposition = admission.result.disposition === 'queued' ? 'queued' :
+                    admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay';
+                await this.appendAttemptEvent('turn.attempt_finished', {
+                    tenantId, taskId, idempotencyKey, attemptKey: runtimeAttemptKey,
+                    disposition, status: disposition,
+                });
                 return this.buildDuplicateResult(
                     tenantId,
                     taskId,
@@ -219,6 +231,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         const preparedWake = admission.prepared ?? describeWake(admission.snapshot, wake, agentId);
 
         if (admission.result.disposition !== 'acquired') {
+            const disposition = admission.result.disposition === 'queued' ? 'queued' :
+                admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay';
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId, taskId, idempotencyKey, attemptKey: runtimeAttemptKey,
+                disposition, status: disposition,
+            });
             return this.buildDuplicateResult(
                 tenantId,
                 taskId,
@@ -385,6 +403,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             agentId: params.agentId,
             claim: params.claim,
         });
+        await this.appendAttemptEvent('turn.attempt_started', {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            idempotencyKey: params.idempotencyKey,
+            claim: params.claim,
+            disposition: 'executed',
+        });
         let renewing = false;
         const abortController = new AbortController();
         const leaseConfig = resolveTaskTurnLeaseConfig();
@@ -417,6 +442,27 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     abortSignal: abortController.signal,
                 }
             );
+            const entity = value as {
+                status?: { state?: string };
+                __turnPersistence?: { disposition?: string; terminal?: { turnClaim?: { claimId?: string } } };
+            };
+            const disposition = entity.__turnPersistence?.disposition === 'superseded' ||
+                entity.__turnPersistence?.disposition === 'competing_terminal'
+                ? 'superseded'
+                : 'executed';
+            const terminal = entity.__turnPersistence?.terminal;
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                idempotencyKey: params.idempotencyKey,
+                claim: params.claim,
+                disposition,
+                status: disposition === 'superseded'
+                    ? 'superseded'
+                    : entity.status?.state ?? 'completed',
+                authoritativeTerminal: terminal?.turnClaim?.claimId === params.claim.claimId,
+                deliveryKey: (terminal as { deliveryKey?: string } | undefined)?.deliveryKey,
+            });
             return value;
         } finally {
             clearInterval(timer);
@@ -489,10 +535,53 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 reason: disposition,
                 errorCode: supersedingCauseCode(params.error),
             });
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                idempotencyKey: params.idempotencyKey,
+                claim: params.claim,
+                disposition,
+                status: 'superseded',
+            });
         } catch {
             // Snapshot ownership is authoritative; this is a repairable diagnostic projection.
         }
         return disposition;
+    }
+
+    private async appendAttemptEvent(
+        type: 'turn.attempt_started' | 'turn.attempt_finished',
+        params: {
+            tenantId: string;
+            taskId: string;
+            idempotencyKey: string;
+            claim?: TaskTurnClaim;
+            attemptKey?: string;
+            disposition: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+            status?: string;
+            authoritativeTerminal?: boolean;
+            deliveryKey?: string;
+        }
+    ): Promise<void> {
+        try {
+            await this.sessionManager.appendEvent(params.tenantId, params.taskId, type, {
+                taskId: params.taskId,
+                attemptKey: params.claim ? `claim:${params.claim.claimId}` : params.attemptKey,
+                requestKey: params.idempotencyKey,
+                ...(params.claim ? {
+                    claimId: params.claim.claimId,
+                    fence: params.claim.fence,
+                    claimedGeneration: params.claim.claimedGeneration,
+                    turnSeq: params.claim.turnSeq,
+                } : {}),
+                disposition: params.disposition,
+                ...(params.status ? { status: params.status } : {}),
+                ...(params.authoritativeTerminal ? { authoritativeTerminal: true } : {}),
+                ...(params.deliveryKey ? { deliveryKey: params.deliveryKey } : {}),
+            });
+        } catch {
+            // Attempt projection is repairable; snapshot arbitration is authoritative.
+        }
     }
 
     private async resolveBoundary(

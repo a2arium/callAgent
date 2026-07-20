@@ -110,6 +110,8 @@ export type RunSegmentParams = {
     wake: TurnWake;
     idempotencyKey: string;
     runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
+    /** Runtime attempt identity; logical turns use claim:<claimId> after acquisition. */
+    runtimeAttemptKey?: string;
     /** Generation already durably accepted by a dispatch intent reconciler. */
     recoveryGeneration?: string;
     /** When set, invoke runTurn directly without wake applicator mutation. */

@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import {
+    claimOutboxRow,
+    deleteClaimedOutboxRow,
     deleteOutboxRow,
     dispatchOutboxRow,
     getHatchetOutboxTopics,
@@ -123,6 +125,63 @@ describe('outboxDispatch', () => {
             expect(ev.partitionKey).toBe('task-1');
             expect(ev.payload.id).toBe('row-1');
             expect(ev.payload.type).toBe('task.status');
+        });
+    });
+
+    describe('leased ownership', () => {
+        const row: OutboxRow = {
+            id: 'row-owned', tenantId: 'tenant-a', topic: 'task.status', key: 'task-1',
+            payload: {}, createdAt: new Date(), retryCount: 0,
+            deliveryScope: 'process', deliveryOwnerId: 'owner-a',
+        };
+
+        it('rejects process-local delivery by another runtime owner', async () => {
+            const prisma = {
+                outbox: {
+                    updateMany: jest.fn(async () => ({ count: 0 })),
+                    findUnique: jest.fn(async () => row),
+                    delete: jest.fn(), update: jest.fn(), deleteMany: jest.fn(),
+                },
+            };
+            await expect(claimOutboxRow({
+                prisma, id: row.id, leaseId: 'lease-b', scope: 'process', ownerId: 'owner-b',
+            })).resolves.toEqual({ disposition: 'foreign_owner' });
+        });
+
+        it('allows only one concurrent shared lease claimant', async () => {
+            let available = true;
+            const sharedRow = { ...row, deliveryScope: 'shared', deliveryOwnerId: null };
+            const prisma = {
+                outbox: {
+                    updateMany: jest.fn(async () => {
+                        if (!available) return { count: 0 };
+                        available = false;
+                        return { count: 1 };
+                    }),
+                    findUnique: jest.fn(async () => sharedRow),
+                    delete: jest.fn(), update: jest.fn(), deleteMany: jest.fn(),
+                },
+            };
+            const claims = await Promise.all([
+                claimOutboxRow({ prisma, id: row.id, leaseId: 'lease-a', scope: 'shared' }),
+                claimOutboxRow({ prisma, id: row.id, leaseId: 'lease-b', scope: 'shared' }),
+            ]);
+            expect(claims.filter((claim) => claim.disposition === 'claimed')).toHaveLength(1);
+            expect(claims.filter((claim) => claim.disposition === 'busy')).toHaveLength(1);
+        });
+
+        it('deletes only while the dispatch lease is still owned', async () => {
+            const prisma = {
+                outbox: {
+                    deleteMany: jest.fn(async () => ({ count: 0 })),
+                    findUnique: jest.fn(), updateMany: jest.fn(), delete: jest.fn(), update: jest.fn(),
+                },
+            };
+            await expect(deleteClaimedOutboxRow({ prisma, id: row.id, leaseId: 'lost' }))
+                .resolves.toBe(false);
+            expect(prisma.outbox.deleteMany).toHaveBeenCalledWith({
+                where: { id: row.id, dispatchLeaseId: 'lost' },
+            });
         });
     });
 

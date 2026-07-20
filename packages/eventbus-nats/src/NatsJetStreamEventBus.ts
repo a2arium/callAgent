@@ -33,6 +33,7 @@ export type NatsJetStreamEventBusOptions = {
 };
 
 export class NatsJetStreamEventBus implements IEventBus {
+    readonly deliveryScope = 'shared' as const;
     private readonly subs = new Set<Subscription>();
     private readonly subjectPrefix: string;
     private readonly backpressure?: NatsEventBusDispatchPressure;

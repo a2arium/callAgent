@@ -339,6 +339,7 @@ export async function requestTaskTurn(params: {
     const takeoverGraceMs = params.takeoverGraceMs ?? config.takeoverGraceMs;
     const proposedClaimId = (params.claimIdFactory ?? randomUUID)();
     const surface = params.runtimeSurface ?? 'in_process';
+    let futureSkewRecovered = false;
     const reconciled = await reconcileSnapshotMutation<RequestTaskTurnResult>({
         session: params.session,
         tenantId: params.tenantId,
@@ -369,15 +370,33 @@ export async function requestTaskTurn(params: {
                       stageWake: params.stageWake,
                       allowInitialize: params.allowInitialize,
                   });
-            const current = staged.state;
+            let current = staged.state;
+            let stagedSnapshot = staged.snapshot;
             const nowMs = storageTime(storageNow, params.tenantId, params.taskId);
+            if (
+                current.active !== undefined &&
+                Date.parse(current.active.heartbeatAt) - nowMs > leaseMs
+            ) {
+                futureSkewRecovered = true;
+                current = {
+                    ...current,
+                    active: undefined,
+                    dispatchIntent: {
+                        generation: current.requestedGeneration,
+                        deliveryKey: `${params.taskId}:turn-request:${current.requestedGeneration}`,
+                        runtimeSurface: current.active.runtimeSurface,
+                        createdAt: storageNow,
+                    },
+                };
+                stagedSnapshot = writeState(stagedSnapshot, current);
+            }
             if (current.active !== undefined) {
                 const expiresAt = Date.parse(current.active.expiresAt);
                 if (nowMs < expiresAt) {
                     const value: RequestTaskTurnResult = {
                         disposition: 'queued', activeClaim: current.active, staged: staged.staged,
                     };
-                    return staged.staged ? { kind: 'write', snapshot: staged.snapshot, value } : { kind: 'noop', value };
+                    return staged.staged ? { kind: 'write', snapshot: stagedSnapshot, value } : { kind: 'noop', value };
                 }
                 const availableAtMs = expiresAt + takeoverGraceMs;
                 if (nowMs < availableAtMs) {
@@ -385,7 +404,7 @@ export async function requestTaskTurn(params: {
                         disposition: 'queued', activeClaim: current.active, staged: staged.staged,
                         availableAt: new Date(availableAtMs).toISOString(),
                     };
-                    return staged.staged ? { kind: 'write', snapshot: staged.snapshot, value } : { kind: 'noop', value };
+                    return staged.staged ? { kind: 'write', snapshot: stagedSnapshot, value } : { kind: 'noop', value };
                 }
             }
             const requested = BigInt(current.requestedGeneration);
@@ -421,12 +440,15 @@ export async function requestTaskTurn(params: {
             };
             return {
                 kind: 'write',
-                snapshot: writeState(staged.snapshot, state),
+                snapshot: writeState(stagedSnapshot, state),
                 value: { disposition: 'acquired', claim, staged: staged.staged },
             };
         },
     });
     defaultMetricsRegistry.increment('task_turn_request_total', { status: reconciled.value.disposition });
+    if (futureSkewRecovered) {
+        defaultMetricsRegistry.increment('task_turn_future_skew_recovery_total');
+    }
     return { result: reconciled.value, snapshot: reconciled.snapshot };
 }
 

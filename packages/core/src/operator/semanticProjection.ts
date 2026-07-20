@@ -7,6 +7,7 @@ import type {
     EffectRun,
     TurnRun,
 } from './runGraph.js';
+import { readDurableTaskTerminal, readTaskLifecycle } from '../orchestration/TaskLifecycle.js';
 
 export type OperatorProjectionMode = 'bridge' | 'compare' | 'semantic';
 export type OperatorProjectionWriteMode = 'off' | 'shadow' | 'on';
@@ -81,6 +82,25 @@ type ProjectionPrisma = {
     agentRunEdge?: PrismaDelegate;
     turnRun?: PrismaDelegate;
     runEffect?: PrismaDelegate;
+    wMSession?: {
+        findMany?: (args: Record<string, unknown>) => Promise<Array<{
+            tenantId: string;
+            sessionId: string;
+            agentId: string;
+            snapshot: unknown;
+        }>>;
+    };
+};
+
+export type TerminalProjectionReconciliationCursor = {
+    tenantId: string;
+    sessionId: string;
+};
+
+export type TerminalProjectionReconciliationSummary = {
+    scanned: number;
+    reconciled: number;
+    batches: number;
 };
 
 const operatorProjectionProfileEnabled = () => process.env.CALLAGENT_OPERATOR_PROFILE === '1';
@@ -365,6 +385,7 @@ export class OperatorProjectionRepository {
                 status: 'completed',
                 resolvedAt: createdAt,
             });
+            await this.projectAuthoritativeTerminalAttempt(event, 'completed', createdAt);
             return;
         }
 
@@ -388,6 +409,7 @@ export class OperatorProjectionRepository {
                 terminalCode: errorCode(error),
                 terminalMessage: errorMessage(error) ?? (typeof error === 'string' ? error : undefined),
             });
+            await this.projectAuthoritativeTerminalAttempt(event, 'failed', createdAt);
             return;
         }
 
@@ -409,6 +431,33 @@ export class OperatorProjectionRepository {
                 status: 'canceled',
                 resolvedAt: createdAt,
                 terminalMessage: reason,
+            });
+            await this.projectAuthoritativeTerminalAttempt(event, 'canceled', createdAt);
+            return;
+        }
+
+        if (event.type === 'turn.attempt_started' || event.type === 'turn.attempt_finished') {
+            const attemptKey = stringField(event.payload, 'attemptKey');
+            if (!attemptKey) return;
+            const finished = event.type === 'turn.attempt_finished';
+            const disposition = stringField(event.payload, 'disposition') ?? 'executed';
+            const status = finished
+                ? stringField(event.payload, 'status') ?? (disposition === 'superseded' ? 'superseded' : 'completed')
+                : 'running';
+            await this.upsertEventTurn({
+                tenantId: event.tenantId,
+                taskId,
+                rootTaskId,
+                agentId,
+                turnSeq: numberField(event.payload, 'turnSeq') || undefined,
+                attemptKey,
+                disposition,
+                claimId: stringField(event.payload, 'claimId'),
+                turnFence: stringField(event.payload, 'fence'),
+                claimedGeneration: stringField(event.payload, 'claimedGeneration'),
+                status,
+                ...(finished ? { completedAt: createdAt } : { startedAt: createdAt }),
+                authoritativeTerminal: event.payload.authoritativeTerminal === true,
             });
             return;
         }
@@ -481,34 +530,9 @@ export class OperatorProjectionRepository {
             return;
         }
 
-        if (event.type === 'turn.started') {
-            const turnSeq = numberField(event.payload, 'turnSeq');
-            if (turnSeq <= 0) return;
-            const turnTraceId = stringField(event.payload, 'turnId');
-            await this.upsertEventTurn({
-                tenantId: event.tenantId,
-                taskId,
-                rootTaskId,
-                agentId,
-                turnSeq: numberField(event.payload, 'logicalTurnSeq') || turnSeq,
-                attemptKey: eventAttemptKey(event, turnTraceId ?? String(turnSeq)),
-                disposition: 'executed',
-                claimId: stringField(event.payload, 'claimId'),
-                turnFence: stringField(event.payload, 'fence'),
-                claimedGeneration: stringField(event.payload, 'claimedGeneration'),
-                status: 'running',
-                startedAt: createdAt,
-                turnTraceId,
-            });
-            await this.upsertEventRun({
-                tenantId: event.tenantId,
-                taskId,
-                rootTaskId,
-                agentId,
-                status: 'running',
-            });
-            return;
-        }
+        // Cognition iteration events remain in the event log for diagnostics;
+        // runtime attempt projection is owned by turn.attempt_* events.
+        if (event.type === 'turn.started') return;
 
         if (event.type === 'turn.completed' || event.type === 'turn.superseded') {
             const turnSeq = numberField(event.payload, 'turnSeq');
@@ -518,52 +542,29 @@ export class OperatorProjectionRepository {
             const transition = event.payload.transition;
             const transitionKindValue = transitionKind(transition);
             const boundary = isAwaitBoundaryKind(transitionKindValue) ? transitionKindValue : undefined;
-            const semanticError = eventHasOkFalse(transition);
             const output = outputProduced({ cognition: { transition }, status: 'completed' } as TurnRun);
-            await this.upsertEventTurn({
-                tenantId: event.tenantId,
-                taskId,
-                rootTaskId,
-                agentId,
-                turnSeq: numberField(event.payload, 'logicalTurnSeq') || turnSeq,
-                attemptKey: eventAttemptKey(event, turnTraceId ?? String(turnSeq)),
-                disposition: superseded ? 'superseded' : 'executed',
-                claimId: stringField(event.payload, 'claimId'),
-                turnFence: stringField(event.payload, 'fence'),
-                claimedGeneration: stringField(event.payload, 'claimedGeneration'),
-                status: superseded ? 'completed' : semanticError ? 'failed' : 'completed',
-                completedAt: createdAt,
-                transitionKind: transitionKindValue,
-                boundaryKind: boundary,
-                outputProduced: output,
-                llmCallCount: arrayCount(event.payload.llmCalls),
-                memoryOpCount: 0,
-                knownCostUsd: costFromUsage(event.payload.usage),
-                terminalCode: semanticError ? errorCode(transition) : undefined,
-                terminalMessage: semanticError ? errorMessage(transition) : undefined,
-                turnTraceId,
-            });
+            void turnTraceId;
+            void boundary;
+            void output;
             if (superseded) return;
-            const runStatus = semanticError ? 'failed' : boundary ? 'waiting' : transitionKindValue === 'complete' ? 'completed' : 'running';
+            const runStatus = boundary
+                ? 'waiting'
+                : transitionKindValue === 'complete' ? 'completed' : 'running';
             await this.upsertEventRun({
                 tenantId: event.tenantId,
                 taskId,
                 rootTaskId,
                 agentId,
                 status: runStatus,
-                terminalAt: semanticError || transitionKindValue === 'complete' ? createdAt : undefined,
-                terminalCode: semanticError ? errorCode(transition) : undefined,
-                terminalMessage: semanticError ? errorMessage(transition) : undefined,
+                terminalAt: transitionKindValue === 'complete' ? createdAt : undefined,
                 outputState: output ? 'available' : undefined,
             });
-            if (semanticError || transitionKindValue === 'complete') {
+            if (transitionKindValue === 'complete') {
                 await this.resolveEdgesForTerminalChild({
                     tenantId: event.tenantId,
                     childTaskId: taskId,
-                    status: runStatus,
+                    status: 'completed',
                     resolvedAt: createdAt,
-                    terminalCode: semanticError ? errorCode(transition) : undefined,
-                    terminalMessage: semanticError ? errorMessage(transition) : undefined,
                 });
             }
             return;
@@ -623,6 +624,162 @@ export class OperatorProjectionRepository {
                 errorMessage: stringField(event.payload, 'message') ?? 'Observability incident recorded.',
             });
         }
+    }
+
+    /** Idempotently converges semantic rows on the authoritative terminal snapshot. */
+    async reconcileDurableTerminal(params: {
+        tenantId: string;
+        taskId: string;
+        snapshot: Record<string, unknown> | undefined;
+        agentId?: string;
+    }): Promise<boolean> {
+        if (!this.isAvailable() || !params.snapshot) return false;
+        const terminal = readDurableTaskTerminal(params.snapshot);
+        const claim = terminal?.turnClaim;
+        if (!terminal) return false;
+        const lifecycle = readTaskLifecycle(params.snapshot, params.taskId);
+        const completedAt = new Date(terminal.claimedAt);
+        const runData = stripUndefined({
+            rootTaskId: lifecycle?.rootTaskId ?? params.taskId,
+            parentTaskId: lifecycle?.parentTaskId,
+            agentId: params.agentId,
+            operation: 'agent.run',
+            scope: lifecycle?.parentTaskId ? 'child' : 'root',
+            status: terminal.state,
+            terminalAt: completedAt,
+            outputState: terminal.state === 'completed' && terminal.status.metadata?.result !== undefined
+                ? 'available'
+                : undefined,
+            terminalMessage: terminal.status.message?.parts.map((part) => part.text).join(' '),
+        });
+        await this.prisma.agentRun?.upsert?.({
+            where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
+            create: { tenantId: params.tenantId, taskId: params.taskId, ...runData },
+            update: runData,
+        });
+        const attemptKey = claim?.attemptKey ?? (claim ? `claim:${claim.claimId}` : undefined);
+        if (claim && attemptKey) {
+            await this.upsertEventTurn({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                rootTaskId: lifecycle?.rootTaskId ?? params.taskId,
+                agentId: params.agentId,
+                turnSeq: claim.turnSeq,
+                attemptKey,
+                disposition: 'executed',
+                claimId: claim.claimId,
+                turnFence: claim.fence,
+                claimedGeneration: claim.generation,
+                status: terminal.state,
+                completedAt,
+                authoritativeTerminal: true,
+                outputProduced: terminal.state === 'completed' && terminal.status.metadata?.result !== undefined,
+            });
+        }
+        await this.prisma.turnRun?.updateMany?.({
+            where: {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                ...(attemptKey ? { attemptKey: { not: attemptKey } } : {}),
+                status: 'running',
+            },
+            data: {
+                status: 'superseded',
+                disposition: 'superseded',
+                completedAt,
+                authoritativeTerminal: false,
+            },
+        });
+        return true;
+    }
+
+    /**
+     * Reconcile one keyset-paginated batch of historical terminal snapshots.
+     * This is deliberately idempotent so deployment jobs may safely restart or overlap.
+     */
+    async reconcileDurableTerminalBatch(params: {
+        after?: TerminalProjectionReconciliationCursor;
+        limit?: number;
+    } = {}): Promise<{
+        scanned: number;
+        reconciled: number;
+        next?: TerminalProjectionReconciliationCursor;
+    }> {
+        if (!this.isAvailable()) return { scanned: 0, reconciled: 0 };
+        const findMany = this.prisma.wMSession?.findMany;
+        if (typeof findMany !== 'function') return { scanned: 0, reconciled: 0 };
+        const limit = Math.max(1, Math.min(1_000, params.limit ?? 100));
+        const terminalFilter = {
+            OR: ['completed', 'failed', 'canceled'].map((state) => ({
+                snapshot: { path: ['meta', 'taskTerminal', 'state'], equals: state },
+            })),
+        };
+        const rows = await findMany({
+            where: params.after
+                ? {
+                    AND: [
+                        terminalFilter,
+                        {
+                            OR: [
+                                { tenantId: { gt: params.after.tenantId } },
+                                {
+                                    tenantId: params.after.tenantId,
+                                    sessionId: { gt: params.after.sessionId },
+                                },
+                            ],
+                        },
+                    ],
+                }
+                : terminalFilter,
+            orderBy: [{ tenantId: 'asc' }, { sessionId: 'asc' }],
+            take: limit,
+            select: { tenantId: true, sessionId: true, agentId: true, snapshot: true },
+        });
+        let reconciled = 0;
+        for (const row of rows) {
+            if (await this.reconcileDurableTerminal({
+                tenantId: row.tenantId,
+                taskId: row.sessionId,
+                agentId: row.agentId,
+                snapshot: row.snapshot !== null && typeof row.snapshot === 'object' && !Array.isArray(row.snapshot)
+                    ? row.snapshot as Record<string, unknown>
+                    : undefined,
+            })) {
+                reconciled += 1;
+            }
+        }
+        const last = rows.at(-1);
+        return {
+            scanned: rows.length,
+            reconciled,
+            ...(last && rows.length === limit
+                ? { next: { tenantId: last.tenantId, sessionId: last.sessionId } }
+                : {}),
+        };
+    }
+
+    async reconcileAllDurableTerminals(params: {
+        batchSize?: number;
+        onBatch?: (summary: TerminalProjectionReconciliationSummary) => void;
+    } = {}): Promise<TerminalProjectionReconciliationSummary> {
+        const summary: TerminalProjectionReconciliationSummary = {
+            scanned: 0,
+            reconciled: 0,
+            batches: 0,
+        };
+        let after: TerminalProjectionReconciliationCursor | undefined;
+        do {
+            const batch = await this.reconcileDurableTerminalBatch({
+                ...(after ? { after } : {}),
+                limit: params.batchSize,
+            });
+            summary.scanned += batch.scanned;
+            summary.reconciled += batch.reconciled;
+            summary.batches += batch.scanned > 0 ? 1 : 0;
+            params.onBatch?.({ ...summary });
+            after = batch.next;
+        } while (after);
+        return summary;
     }
 
     async listAgentRuns(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
@@ -947,6 +1104,48 @@ export class OperatorProjectionRepository {
         });
     }
 
+    private async projectAuthoritativeTerminalAttempt(
+        event: OperatorProjectionEvent,
+        status: 'completed' | 'failed' | 'canceled',
+        completedAt: Date
+    ): Promise<void> {
+        const claimId = stringField(event.payload, 'claimId');
+        if (!claimId) return;
+        const taskId = stringField(event.payload, 'taskId') ?? event.sessionId;
+        const rootTaskId = stringField(event.payload, 'rootTaskId') ??
+            await this.parentRootTaskId(event.tenantId, event.sessionId) ?? taskId;
+        const attemptKey = stringField(event.payload, 'attemptKey') ?? `claim:${claimId}`;
+        await this.upsertEventTurn({
+            tenantId: event.tenantId,
+            taskId,
+            rootTaskId,
+            agentId: stringField(event.payload, 'agentId'),
+            turnSeq: numberField(event.payload, 'turnSeq') || undefined,
+            attemptKey,
+            disposition: 'executed',
+            claimId,
+            turnFence: stringField(event.payload, 'fence'),
+            claimedGeneration: stringField(event.payload, 'claimedGeneration'),
+            status,
+            completedAt,
+            authoritativeTerminal: true,
+        });
+        await this.prisma.turnRun?.updateMany?.({
+            where: {
+                tenantId: event.tenantId,
+                taskId,
+                attemptKey: { not: attemptKey },
+                status: 'running',
+            },
+            data: {
+                status: 'superseded',
+                disposition: 'superseded',
+                completedAt,
+                authoritativeTerminal: false,
+            },
+        });
+    }
+
     private async upsertEventTurn(params: {
         tenantId: string;
         taskId: string;
@@ -954,7 +1153,7 @@ export class OperatorProjectionRepository {
         agentId?: string;
         turnSeq?: number;
         attemptKey: string;
-        disposition?: 'executed' | 'superseded';
+        disposition?: string;
         claimId?: string;
         turnFence?: string;
         claimedGeneration?: string;
@@ -970,6 +1169,7 @@ export class OperatorProjectionRepository {
         terminalCode?: string;
         terminalMessage?: string;
         turnTraceId?: string;
+        authoritativeTerminal?: boolean;
     }): Promise<void> {
         const data = stripUndefined({
             rootTaskId: params.rootTaskId,
@@ -993,6 +1193,7 @@ export class OperatorProjectionRepository {
             claimId: params.claimId,
             turnFence: params.turnFence,
             claimedGeneration: params.claimedGeneration,
+            authoritativeTerminal: params.authoritativeTerminal,
         });
         await this.prisma.turnRun!.upsert!({
             where: { tenantId_taskId_attemptKey: { tenantId: params.tenantId, taskId: params.taskId, attemptKey: params.attemptKey } },
@@ -1436,12 +1637,6 @@ function errorMessage(value: unknown): string | undefined {
         }
     }
     return undefined;
-}
-
-function eventHasOkFalse(value: unknown): boolean {
-    if (!value || typeof value !== 'object') return false;
-    const result = (value as Record<string, unknown>).result;
-    return !!result && typeof result === 'object' && (result as Record<string, unknown>).ok === false;
 }
 
 function isAwaitBoundaryKind(value: string | undefined): boolean {

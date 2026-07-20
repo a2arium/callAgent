@@ -293,14 +293,17 @@ export class WorkingMemorySessionStore {
     ): Promise<SessionSnapshot | null> {
         await this.ensureConnected();
         return this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
-            const rows = await tx.$queryRaw<Array<{ storageNow: Date }>>`
-                SELECT clock_timestamp() AS "storageNow"
+            const rows = await tx.$queryRaw<Array<{ storageNowMs: bigint }>>`
+                SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS "storageNowMs"
             `;
             const rec = await tx.wMSession.findUnique({
                 where: { tenantId_sessionId: { tenantId, sessionId } },
             });
-            const storageNow = rows[0]?.storageNow;
-            const storageNowIso = (storageNow instanceof Date ? storageNow : new Date(storageNow)).toISOString();
+            const storageNowMs = rows[0]?.storageNowMs;
+            if (typeof storageNowMs !== 'bigint') {
+                throw new Error('WM_STORAGE_TIME_UNAVAILABLE: PostgreSQL did not return an epoch timestamp.');
+            }
+            const storageNowIso = new Date(Number(storageNowMs)).toISOString();
             if (!rec) {
                 return {
                     wmVersion: 0n,
@@ -496,8 +499,10 @@ export class WorkingMemorySessionStore {
         key: string;
         payload: Record<string, unknown>;
         idempotencyKey?: string;
+        deliveryScope?: 'process' | 'shared';
+        deliveryOwnerId?: string;
     }): Promise<{ id: string }> {
-        const { tenantId, topic, key, payload, idempotencyKey } = params;
+        const { tenantId, topic, key, payload, idempotencyKey, deliveryScope, deliveryOwnerId } = params;
         await this.ensureConnected();
         if (idempotencyKey !== undefined) {
             const row = await this.runWithReconnect(() =>
@@ -510,6 +515,8 @@ export class WorkingMemorySessionStore {
                         key,
                         payload: payload as unknown as Prisma.InputJsonValue,
                         idempotencyKey,
+                        deliveryScope,
+                        deliveryOwnerId,
                     },
                 })
             );
@@ -523,6 +530,8 @@ export class WorkingMemorySessionStore {
                     topic,
                     key,
                     payload: payload as unknown as Prisma.InputJsonValue,
+                    deliveryScope,
+                    deliveryOwnerId,
                 },
             })
         );
