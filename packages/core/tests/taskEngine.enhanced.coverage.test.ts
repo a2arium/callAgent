@@ -53,12 +53,16 @@ await jest.unstable_mockModule(loopRunnerPath, () => ({
 
 await jest.unstable_mockModule(pluginManagerPath, () => ({
     PluginManager: class {
-        async getPluginManifest(agentId: string) {
+        static async getPluginManifest(agentId: string) {
             return { runMode: 'loop' };
         }
-        async findAgent(agentName: string) {
+        static findAgent(agentName: string) {
             return {
                 manifest: { name: agentName },
+                resolved: {
+                    runtimeManifest: { name: agentName, version: '1.0.0', runMode: 'loop' },
+                    agentCard: { name: agentName, version: '1.0.0' },
+                },
                 loop: {},
                 llmAdapter: {},
                 tenantId: 'test-tenant'

@@ -1,5 +1,6 @@
 import { afterEach, describe, it, expect, jest } from '@jest/globals';
 import { HatchetRuntimeDriver } from '../src/hatchetRuntimeDriver.js';
+import { rejectObsoleteRuntimeConfiguration } from '../src/createHatchetOutboxStack.js';
 import { defaultMetricsRegistry, type RuntimeDriver } from '@a2arium/callagent-core/unstable';
 
 describe('HatchetRuntimeDriver', () => {
@@ -16,7 +17,14 @@ describe('HatchetRuntimeDriver', () => {
         }
     });
 
-    it('delegates scheduling methods to the in-process driver', async () => {
+    it('rejects the obsolete per-surface runtime router at bootstrap', () => {
+        process.env.CALLAGENT_DRIVER_SURFACES = 'start,resume';
+        expect(() => rejectObsoleteRuntimeConfiguration()).toThrow(
+            'CALLAGENT_DRIVER_SURFACES is obsolete'
+        );
+    });
+
+    it('rejects loop start when the Hatchet task workflow is missing', async () => {
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -34,13 +42,10 @@ describe('HatchetRuntimeDriver', () => {
             undefined
         );
 
-        await driver.enqueueStart({
-            tenantId: 't',
-            taskId: 'task',
-            idempotencyKey: 'k',
-            input: {},
-        });
-        expect(delegate.enqueueStart).toHaveBeenCalled();
+        await expect(driver.enqueueStart({
+            tenantId: 't', taskId: 'task', idempotencyKey: 'k', input: {},
+        })).rejects.toThrow('HATCHET_RUNTIME_MISCONFIGURED');
+        expect(delegate.enqueueStart).not.toHaveBeenCalled();
 
         await driver.dispatchOutbox({
             outboxRowId: 'row-1',
@@ -163,7 +168,6 @@ describe('HatchetRuntimeDriver', () => {
     });
 
     it('enqueues aplret.task for start when the start surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -211,7 +215,6 @@ describe('HatchetRuntimeDriver', () => {
     });
 
     it('pushes resume events when the resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -254,7 +257,6 @@ describe('HatchetRuntimeDriver', () => {
     });
 
     it('pushes external resume events when the resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -297,8 +299,7 @@ describe('HatchetRuntimeDriver', () => {
         );
     });
 
-    it('delegates conversation resume events until conversation has a durable wait boundary', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+    it('publishes conversation resume events through the durable Hatchet root', async () => {
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -331,16 +332,15 @@ describe('HatchetRuntimeDriver', () => {
             },
         });
 
-        expect(events.push).not.toHaveBeenCalled();
-        expect(delegate.enqueueResume).toHaveBeenCalledWith(expect.objectContaining({
-            tenantId: 'tenant-1',
-            taskId: 'task-1',
-            event: expect.objectContaining({ kind: 'conversation' }),
-        }));
+        expect(events.push).toHaveBeenCalledWith(
+            'aplret.conversation.task-1',
+            expect.objectContaining({ tenantId: 'tenant-1', taskId: 'task-1', kind: 'conversation' }),
+            { key: 'tenant-1:task-1:task-1' }
+        );
+        expect(delegate.enqueueResume).not.toHaveBeenCalled();
     });
 
     it('persists timers when the timers surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'timers';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -460,7 +460,6 @@ describe('HatchetRuntimeDriver', () => {
     });
 
     it('uses only the shared aplret.task workflow regardless of agent identity', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),
@@ -499,7 +498,6 @@ describe('HatchetRuntimeDriver', () => {
     });
 
     it('records a semantic budget event before throwing on oversized Hatchet start payloads', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
         process.env.CALLAGENT_HATCHET_PAYLOAD_MAX_BYTES = '220';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
@@ -558,7 +556,6 @@ describe('HatchetRuntimeDriver', () => {
     });
 
     it('records provider enqueue failures as metrics and semantic incidents', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),
             enqueueResume: jest.fn(async () => undefined),

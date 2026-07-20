@@ -1,7 +1,9 @@
 # Bug Report: Concurrent root turns can terminalize from stale empty state
 
-> **Status:** Fixed — implementation and task-ownership acceptance complete; four
-> unrelated host content assertions remain outside this framework defect
+> **Status:** Framework fix implemented and verified. The reopened duplicate
+> post-terminal execution path is closed. Production-shaped host verification of
+> the affected CallAgent scenarios passes; the complete host matrix still has
+> unrelated fixture, selector-state, and parser failures documented below.
 >
 > **Severity:** High. A valid root task can be durably marked failed while a
 > concurrent turn for the same task continues and produces a successful result.
@@ -247,16 +249,66 @@ root task may have conflicting failed and successful terminal turns.
 one authoritative task-turn coordinator. There is no compatibility router. Development
 and test Hatchet histories must be reset before running these workers.
 
-**Implementation status (2026-07-19):** complete. The coordinator, fenced commit and
-effect gates, atomic wake admission, SQL storage-time support, dispatch-intent scanners,
-single Hatchet workflow names, ownership projection, and observer schema are implemented.
-The Hatchet root has no stateful dependencies and routes database, cache, timer, outbox,
-recovery, cancellation, and projection work through keyed `aplret.task-state` children;
-first-generation reconciliation can reconstruct the deterministic root submission.
-Focused core, SQL, Hatchet, and observer suites pass, including a real Hatchet root,
-state-child, and segment run against PostgreSQL. The indexed recovery query was verified
-on 200,000 production-shaped rows. Five clean sequential FIX-S01 runs and the complete
-host suite found no stale terminal, lost wake, CAS, drain, or ownership failure.
+**Implementation status (2026-07-19, reopened correction):** implementation and
+framework verification are complete. The reopened defect exposed
+two remaining legacy entrances after coordinator admission: sync segment results without
+a local `taskEntity` could fall through to raw `TurnRunner`, and child completion could
+call `TaskExecutor` directly. Both entrances are removed. `TurnRunnerSegmentExecutor` is
+the sole loop execution entrance, and `TurnRunner` rejects initialized loop tasks without
+the matching async-local claim using `TASK_TURN_UNFENCED_EXECUTION`.
+
+Child terminal delivery now requires explicit `inline` or `async_wake` mode. Inline
+blocking calls preserve one durable observation without advancing generation; runtime
+completion, failure, and timeout claims advance one generation and publish only a
+deterministic nudge. Child groups are aggregated in the winning terminal CAS. Matching
+replays may republish the nudge but cannot create another generation or agent turn.
+Input, tool, child, external-event, timer, and conversation wakes enter durable admission
+without a process-local whole-turn queue.
+
+`CALLAGENT_DRIVER_SURFACES` has been removed as a router and is rejected by Hatchet
+bootstrap. A configured Hatchet runtime owns start, resume, and durable timers as one
+unit. Hatchet parent notification reloads the child's durable terminal record, and the
+child-timeout race rechecks the parent tombstone before accepting watchdog expiry. The
+Hatchet root continues to route stateful work through keyed `aplret.task-state` children.
+
+The final verification run passed:
+
+- repository tests: 215 suites and 1,313 tests passed; 8 suites and 90 tests skipped;
+- full monorepo build: 20 of 20 packages passed;
+- Hatchet package tests: 9 suites and 65 tests passed; 1 suite and 2 tests skipped;
+- real Hatchet protocol: both root/segment/task-state tests passed against the local
+  Hatchet engine, including accepted-root recovery after worker restart;
+- operator viewer: 2 test files and 9 tests passed, and the production build passed;
+- five sequential `FIX-S01 --skip-discovery` runs each persisted three fresh listings;
+- the affected framework acceptance scenarios `FIX-S04`, `FIX-S05`, `FIX-S17`,
+  `FIX-S19`, `FIX-S20`, and `FIX-S35` passed in the full host matrix.
+
+The real-Hatchet test worker must run without another worker registered for the same
+`aplret.task`, `aplret.segment`, and `aplret.task-state` workflow names. One verification
+attempt was consumed by the already-running production-shaped worker and returned that
+worker's real segment result. After stopping the competing worker, both tests passed.
+This is expected Hatchet queue behavior and a test-isolation requirement, not a protocol
+fallback.
+
+The full host matrix completed with 33 of 41 scenarios passing. Its eight failures did
+not contain `NO_CASE_ID`, `TASK_LIFECYCLE_TERMINAL`, `CHILD_FAILED`, raw CAS errors, or
+duplicate-child warnings in the retained scenario artifacts:
+
+- `FIX-S01` and `FIX-S36` failed matrix marker assertions after the host's simplified
+  HTML omitted fixture `data-*` attributes;
+- `FIX-S29` failed `parse-detail` in the matrix; its isolated rerun instead stopped on
+  the same simplified/cached-HTML marker class before parsing;
+- `FIX-S32` reported a routing exit in the matrix; its isolated run completed the
+  CallAgent task and then failed because simplification removed the expected
+  `data-module-absence="phone"` marker;
+- `FIX-S30` and `FIX-S31` reported transient routing exits in the matrix, while immediate
+  isolated reruns made the same routing decisions successfully;
+- `FIX-S33` failed parsing, and an isolated rerun reported host `NO_SELECTORS` semantic
+  state while explicitly running with `--skip-discovery`;
+- `FIX-S37` failed its host parse-listing command.
+
+These failures remain host acceptance work; they do not reopen the fenced execution or
+child-terminal delivery defect.
 
 During host acceptance, four additional integration gaps were found and fixed before
 the final run: the obsolete turn-sequence unique index required an explicit drop-index
@@ -591,6 +643,121 @@ All five FIX-S01 runs must persist at least two listings and must retain supplie
 - The final SQL ledger contained zero active claims, runnable generations, dispatch
   intents, terminal tasks with active children/tools/tasks, `NO_CASE_ID` turns, or tasks
   with more than one authoritative terminal attempt.
+
+## Reopened Regression (2026-07-19)
+
+The acceptance result above is not reproducible from the same host checkout after
+installing the migrations shipped in `0f40cc4`. This is not the original stale
+empty-state failure: no `NO_CASE_ID` result is emitted. Instead, a completed
+`fetch-page-router` task is executed again and attempts to register a second
+`fetch-html` child. The lifecycle fence correctly rejects the effect, but that
+rejected duplicate execution is surfaced as `CHILD_FAILED` to the parent and the
+listing pipeline returns `stopReason: "fetch_error"` with zero listings.
+
+### Verified environment
+
+- CallAgent checkout and loaded package resolve to the same inode and commit:
+  `0f40cc411bdf0a9dfd733a9e128e1de12120fbb9`.
+- `node_modules/@a2arium/callagent-core` resolves to the linked CallAgent checkout.
+- `packages/core/dist/orchestration/TaskTurnCoordinator.js` and
+  `taskEngine.js` were built at `2026-07-19 19:35:57 +0300`, after the source
+  changes, and contain the new ownership implementation.
+- The host database successfully applied all three outstanding migrations:
+  `20260718110000_semantic_tags_not_null`,
+  `20260719090000_driver_run_turn_ownership`, and
+  `20260719120000_drop_legacy_turn_seq_unique`.
+- No orphan `runTestScenario`, `runnerCli`, `runAgentWithConfig`, or
+  `runFetchRouter` process remained before the control run.
+- The recent SQL task ledger contained terminal host runs and no recent runnable
+  driver work. There were no `NO_CASE_ID` turns.
+
+### Fresh reproduction
+
+```bash
+cd /Users/maximantonov/Work/_lab/itupdated
+yarn db:migrate
+yarn run:testscenario FIX-S01 --skip-discovery
+```
+
+Observed result:
+
+```text
+fetch-routing: pass
+fetch-live: pass
+parse-listing execution: terminal success with stopReason=fetch_error
+validate-parse-listing: expected at least 2, found 0
+scenario: fail
+```
+
+The control run failed on the first post-migration attempt. `FIX-S32` reproduced
+the same nested failure independently before `FIX-S01` was run.
+
+### Failure sequence
+
+For the nested `FIX-S01` fetch task
+`a2a_a2a_local-task-1_fetch-page-route_1784481538315_fl5i8f33c`:
+
+1. `fetch-page-router` registers and awaits `fetch-html`.
+2. `fetch-html` completes successfully.
+3. The same `fetch-page-router` execution path runs again after its lifecycle is
+   already `completed`.
+4. It reaches `fetch-page-router/execution.ts:78` and attempts another
+   `sendTaskToAgent`.
+5. `TaskEffectRegistration.assertTaskEffectActive` correctly rejects it:
+
+```text
+TASK_LIFECYCLE_TERMINAL
+Task ... is completed; child registration was rejected.
+state: completed
+effectKind: child
+```
+
+6. `runLoop` records the rejected duplicate as `MODULE_EXECUTION_ERROR`.
+7. The parent logs `Duplicate child completion invocation detected` with
+   `callCount: 2`.
+8. `scrape-listing` is persisted as failed with `terminal_code=CHILD_FAILED`.
+9. `get-listing` completes with `stopReason=fetch_error`, so no records are
+   persisted.
+
+The standalone `fetch-live` prerequisite also shows the duplicate post-terminal
+execution, but its first successful terminal result remains authoritative, so the
+host marker check passes. In the nested A2A chain, the second failure contaminates
+the parent result.
+
+### Required behavior
+
+The terminal effect fence is working as designed, but it is the last line of
+defense. A superseded wake or duplicate resume for a completed task must be
+discarded before entering perception/policy/execution. In particular:
+
+1. A completed child result may schedule at most one resumed parent turn.
+2. Duplicate inbox delivery or wake admission must not execute the agent again.
+3. `TASK_LIFECYCLE_TERMINAL` caused by a superseded duplicate turn must remain a
+   diagnostic disposition; it must not be published as a second child terminal
+   result or overwrite/contaminate the successful child result.
+4. Parent completion handlers must be idempotent by child token and authoritative
+   terminal attempt, not invocation count alone.
+5. The standalone and nested A2A paths must have identical duplicate suppression.
+
+### Additional required tests
+
+- Complete an awaited child, deliver its terminal event twice, and assert the
+  parent executes exactly one resumed turn.
+- Race runtime reconciliation with direct child-terminal notification after the
+  child task is complete; assert one wake/claim and one parent completion.
+- Force a duplicate post-terminal turn to reach effect registration; assert the
+  fence rejects it diagnostically without publishing `CHILD_FAILED` upstream.
+- Run the same race through root `streamingRunner` and through two nested A2A
+  levels (`get-listing -> scrape-listing -> fetch-page-router -> fetch-html`).
+- Repeat `FIX-S01 --skip-discovery` five times against the already migrated host
+  database, not only a freshly reset database. Every run must persist three
+  listings and emit no duplicate child-completion warning.
+
+Host trace retained at:
+
+```text
+/tmp/FIX-S01-post-0f40cc4.log
+```
 
 ## Delivery Order and Rollout
 

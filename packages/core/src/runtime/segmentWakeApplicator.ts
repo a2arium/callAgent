@@ -9,6 +9,7 @@
  */
 
 import { applyInputProvided } from '../orchestration/DurableHandlerRegistry.js';
+import { throwInvariantError } from '../utils/invariantError.js';
 import {
     getPendingExternalEvents,
     setPendingExternalEvents,
@@ -84,7 +85,7 @@ function observationProvenance(token: string, turn: number, toolId?: string): En
 export function applyWakeToSnapshot(
     base: Record<string, unknown>,
     wake: TurnWake,
-    opts?: { tenantId?: string; taskId?: string; agentId?: string; hydrateChildResult?: (result: unknown) => void }
+    opts?: { tenantId?: string; taskId?: string; agentId?: string; storageNow?: string; hydrateChildResult?: (result: unknown) => void }
 ): PreparedSegmentWake {
     switch (wake.trigger) {
         case 'start':
@@ -115,7 +116,23 @@ export function applyWakeToSnapshot(
             }
             const pendingBefore = (base as { pending?: { inputs?: Record<string, { expiresAt?: string }> } })
                 .pending?.inputs;
-            const inputExpiresAt = pendingBefore?.[wake.event.token]?.expiresAt;
+            const pendingInput = pendingBefore?.[wake.event.token];
+            if (pendingInput === undefined) {
+                throwInvariantError(
+                    'INPUT_TOKEN_NOT_FOUND',
+                    `Input token ${wake.event.token} not found`,
+                    { type: 'token_validation', category: 'input', token: wake.event.token, reason: 'missing' }
+                );
+            }
+            if (pendingInput.expiresAt !== undefined &&
+                Date.parse(pendingInput.expiresAt) <= Date.parse(opts?.storageNow ?? new Date().toISOString())) {
+                throwInvariantError(
+                    'INPUT_TOKEN_EXPIRED',
+                    `Input token ${wake.event.token} expired`,
+                    { type: 'token_validation', category: 'input', token: wake.event.token, reason: 'expired' }
+                );
+            }
+            const inputExpiresAt = pendingInput.expiresAt;
             const { next } = applyInputProvided(base, wake.event.token, wake.event.value, {
                 tenantId: opts?.tenantId,
                 taskId: opts?.taskId,
@@ -218,7 +235,8 @@ export function applyWakeToSnapshot(
                 agentId: agentIdFromSnapshot(claim.snapshot, opts?.agentId),
                 trigger: 'resume',
                 turnParams: {},
-                skipTurn: !claim.won,
+                skipTurn: claim.publicationDisposition !== 'new_delivery' &&
+                    claim.publicationDisposition !== 'matching_replay',
                 childTerminalClaim: claim,
             };
         }
@@ -230,14 +248,20 @@ export function applyWakeToSnapshot(
             }
             const events = { ...getPendingExternalEvents(base) };
             const entry = events[event.token];
-            if (entry !== undefined) {
-                delete events[event.token];
+            if (entry === undefined) {
+                throwInvariantError(
+                    'EXTERNAL_EVENT_TOKEN_NOT_FOUND',
+                    `External event token ${event.token} not found`,
+                    { type: 'token_validation', category: 'event', token: event.token, reason: 'missing' }
+                );
             }
+            const eventType = typeof entry.type === 'string' ? entry.type : event.type;
+            delete events[event.token];
             let next = setPendingExternalEvents(base, events);
             const observation: EngineObservation = {
                 source: 'env',
                 kind: 'external.event',
-                payload: { token: event.token, payload: event.data, type: event.type },
+                payload: { token: event.token, payload: event.data, type: eventType },
                 provenance: observationProvenance(event.token, turnFromSnapshot(base)),
             };
             next = {
@@ -251,7 +275,7 @@ export function applyWakeToSnapshot(
                 trigger: 'event',
                 turnParams: {
                     eventToken: event.token,
-                    eventType: event.type,
+                    eventType,
                     eventPayload: event.data,
                 },
             };

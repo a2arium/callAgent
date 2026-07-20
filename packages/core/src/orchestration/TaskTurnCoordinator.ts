@@ -263,14 +263,14 @@ export function stageTaskTurnRequestInSnapshot(params: {
     requestKey: string;
     runtimeSurface: TaskTurnRuntimeSurface;
     storageNow: string;
-    stageWake?: (snapshot: Record<string, unknown>) => Record<string, unknown>;
+    stageWake?: (snapshot: Record<string, unknown>, storageNow: string) => Record<string, unknown>;
     allowInitialize?: boolean;
 }): { snapshot: Record<string, unknown>; state: TaskTurnCoordinatorState; staged: boolean } {
     const current = readState(params.snapshot, params.tenantId, params.taskId, params.allowInitialize);
     if (snapshotHasProcessedSegmentKey(params.snapshot, params.requestKey)) {
         return { snapshot: params.snapshot, state: current, staged: false };
     }
-    let snapshot = params.stageWake?.(params.snapshot) ?? params.snapshot;
+    let snapshot = params.stageWake?.(params.snapshot, params.storageNow) ?? params.snapshot;
     snapshot = addProcessedSegmentKey(snapshot, params.requestKey);
     const requested = BigInt(current.requestedGeneration) + 1n;
     const state: TaskTurnCoordinatorState = {
@@ -329,7 +329,7 @@ export async function requestTaskTurn(params: {
     takeoverGraceMs?: number;
     now?: () => number;
     claimIdFactory?: () => string;
-    stageWake?: (snapshot: Record<string, unknown>) => Record<string, unknown>;
+    stageWake?: (snapshot: Record<string, unknown>, storageNow: string) => Record<string, unknown>;
     allowInitialize?: boolean;
     /** Claims an already-staged dispatch intent without accepting another wake. */
     recoveryGeneration?: string;

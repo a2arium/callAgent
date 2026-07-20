@@ -1748,9 +1748,11 @@ Runtime config:
 
 ```bash
 CALLAGENT_OPERATOR_PROJECTION_READ=semantic \
-CALLAGENT_DRIVER_SURFACES=start \
 yarn runtime --no-dashboard
 ```
+
+This historical drill now uses the selected runtime as a single routing unit;
+the former per-surface variable has been removed.
 
 Induced failure:
 

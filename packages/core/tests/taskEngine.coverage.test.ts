@@ -27,7 +27,6 @@ import { InvariantError } from '../src/utils/errors.js';
 
 // --- Module mocks (must be defined before imports run) ---
 const runLoopMock = jest.fn<any>();
-const originalDriverSurfaces = process.env.CALLAGENT_DRIVER_SURFACES;
 
 // Create properly typed mocks
 const mockFindLocalAgent = jest.fn() as jest.MockedFunction<(agentName: string) => Promise<any>>;
@@ -291,7 +290,6 @@ const mockInlineParentResume = () =>
     });
 
 const mockLegacyInlineParentResume = () => {
-    delete process.env.CALLAGENT_DRIVER_SURFACES;
     return mockInlineParentResume();
 };
 
@@ -351,11 +349,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-    if (originalDriverSurfaces === undefined) {
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
-    } else {
-        process.env.CALLAGENT_DRIVER_SURFACES = originalDriverSurfaces;
-    }
     runLoopMock.mockReset();
     jest.clearAllMocks();
     jest.restoreAllMocks();
@@ -615,7 +608,6 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     test('cancelTask notifies an A2A parent and schedules async resume for child cancellation', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const store = new FakeSessionStore();
         const cancel = jest.fn(async () => undefined);
         const enqueueResume = jest.fn(async () => undefined);
@@ -1576,7 +1568,7 @@ describe('TaskEngine orchestration coverage', () => {
         expect(merged.current.some(o => (o as any)?.payload?.token === 'b')).toBe(true);
     });
 
-    test('attachAndRestoreLLM can be overridden for tests', async () => {
+    test('tool wake routing does not construct a second prepared context in TaskEngine', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
         const override = jest.fn().mockResolvedValue(undefined);
@@ -1593,7 +1585,7 @@ describe('TaskEngine orchestration coverage', () => {
         store.seed('t', 'task', pendingTools as any, BigInt(0), 'agent-a');
 
         await engine.handleToolCompleted({ tenantId: 't', taskId: 'task', token: 'tool-1', result: { ok: true } });
-        expect(override).toHaveBeenCalled();
+        expect(override).not.toHaveBeenCalled();
     });
     test('handles child completion without re-running loop when awaiting different token', async () => {
         const store = new FakeSessionStore();
@@ -2003,14 +1995,61 @@ describe('TaskEngine orchestration coverage', () => {
             expect.objectContaining({ input: 1 }),
             expect.objectContaining({ parentTenantId: 't', parentTaskId: 'session', skipParentNotification: true })
         );
-        expect(handleChildSpy).toHaveBeenCalledWith(expect.objectContaining({
-            parentTaskId: 'session',
-            suppressResume: true,
-        }));
+        expect(handleChildSpy).not.toHaveBeenCalled();
         const saved = store.getSnapshot('t', 'session')?.snapshot as any;
         const token = Object.keys((saved?.pending as any)?.tasks || {})[0];
         expect(ctx.__activeLoopInbox.current.some((o: any) => o?.payload?.token === token)).toBe(true);
         expect(ctx.__activeLoopEnv.pending.children[token]).toBeUndefined();
+    });
+
+    test('restoreCtx async immediate child terminal stages a wake without inline inbox injection', async () => {
+        const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
+        store.seed('t', 'session', {
+            meta: {
+                agentId: 'agent-a',
+                taskLifecycle: {
+                    taskId: 'session',
+                    rootTaskId: 'session',
+                    ancestorTaskIds: [],
+                    state: 'active',
+                },
+                turnCoordinator: {
+                    schemaVersion: 1,
+                    nextFence: '1',
+                    nextTurnSeq: 1,
+                    requestedGeneration: '0',
+                    completedGeneration: '0',
+                },
+            },
+            inbox: { current: [], all: [] },
+            pending: {},
+            M: { memory: { vars: {} } },
+        } as any, BigInt(0), 'agent-a');
+
+        // Exercise the non-runtime compatibility boundary where dispatch itself
+        // resolves terminally. It must still use async_wake semantics.
+        (engine as any).apiBinder.deps.enqueueChildStart = undefined;
+        const ctx: any = await (engine as any).restoreCtx('t', 'session');
+        ctx.__activeLoopInbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
+        ctx.__activeLoopEnv = { turn: 1, pending: { children: {}, inputs: {}, tools: {}, groups: {} } };
+
+        const dispatch = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { awaitCompletion: false });
+
+        expect(sendMock).toHaveBeenCalled();
+        expect(ctx.__activeLoopInbox.current).toHaveLength(0);
+        expect(ctx.__activeLoopInbox.all).toHaveLength(0);
+        const saved = store.getSnapshot('t', 'session')?.snapshot as any;
+        expect(saved.meta.turnCoordinator.requestedGeneration).toBe('1');
+        expect(saved.meta.turnCoordinator.dispatchIntent).toEqual(expect.objectContaining({ generation: '1' }));
+        expect(saved.inbox.all).toContainEqual(expect.objectContaining({
+            kind: 'child.completed',
+            payload: expect.objectContaining({ token: dispatch.token }),
+        }));
     });
 
     test('restoreCtx durable sendTaskToAgent does not complete a still-working child', async () => {
@@ -2054,7 +2093,7 @@ describe('TaskEngine orchestration coverage', () => {
         expect(events.some((event) => event.type === 'task.child_completed')).toBe(false);
     });
 
-    test('restoreCtx durable sendTaskToAgent falls back to handleChildCompleted when no active inbox', async () => {
+    test('restoreCtx blocking sendTaskToAgent does not publish a second async completion without an active inbox', async () => {
         // Use spyOn instead of module mocking to avoid Jest ESM issues
         const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });
 
@@ -2072,7 +2111,7 @@ describe('TaskEngine orchestration coverage', () => {
 
         await ctx.sendTaskToAgent('child-agent', { input: 'test' }, { setToken: 'child-1' });
 
-        expect(handleChildSpy).toHaveBeenCalled();
+        expect(handleChildSpy).not.toHaveBeenCalled();
     });
 
     test('startTask injects initial input into inbox for agent perception', async () => {
@@ -2117,7 +2156,6 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     test('startTask passes manifestProvenance to TurnRunner context', async () => {
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
         const store = new FakeSessionStore();
         const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
@@ -2156,7 +2194,6 @@ describe('TaskEngine orchestration coverage', () => {
     });
 
     test('startTask delegates prepared context to TurnRunner for loop execution', async () => {
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
         const store = new FakeSessionStore();
         const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });

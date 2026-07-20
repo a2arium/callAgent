@@ -110,10 +110,12 @@ Driver selection happens at the composition root:
 
 ```text
 CALLAGENT_RUNTIME_DRIVER=in-process | hatchet
-CALLAGENT_DRIVER_SURFACES=outbox,resume,children,timers
 ```
 
-Per-surface flags allow reversible migration.
+Runtime selection is atomic. A configured Hatchet runtime owns loop starts,
+asynchronous resumes, and durable timers; it never delegates an individual
+correctness-critical surface back in-process. `CALLAGENT_DRIVER_SURFACES` is
+obsolete and rejected during Hatchet bootstrap.
 
 ## Acceptance
 

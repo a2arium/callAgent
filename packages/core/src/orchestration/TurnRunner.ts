@@ -26,6 +26,7 @@ import { AgentNode } from '../telemetry/nodes/AgentNode.js';
 import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
 import { flushBufferedOperatorTurnEvents } from '../loop/loopRunner.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
@@ -87,6 +88,31 @@ export class TurnRunner {
             let snap = await this.sessionManager.load(tenantId, sessionId);
             if (!snap && trigger !== 'start' && !overrides?.snapshot) {
                 throw new Error(`Session not found for ${sessionId}`);
+            }
+            const admissionSnapshot = (snap?.snapshot ?? overrides?.snapshot) as Record<string, unknown> | undefined;
+            const admissionMeta = admissionSnapshot?.meta;
+            const coordinatorInitialized = admissionMeta !== null && typeof admissionMeta === 'object' &&
+                !Array.isArray(admissionMeta) &&
+                (admissionMeta as Record<string, unknown>).turnCoordinator !== undefined;
+            if (coordinatorInitialized) {
+                const claim = currentTaskTurnClaim();
+                if (claim === undefined || claim.tenantId !== tenantId || claim.taskId !== sessionId) {
+                    defaultMetricsRegistry.increment('task_turn_unfenced_execution_total', {
+                        operation: 'turn.run',
+                    });
+                    const error = new Error(
+                        `Task ${sessionId} cannot execute without its current fenced turn claim.`
+                    ) as Error & { code: string };
+                    error.name = 'TaskTurnUnfencedExecutionError';
+                    error.code = 'TASK_TURN_UNFENCED_EXECUTION';
+                    throw error;
+                }
+                assertCurrentTaskTurn(admissionSnapshot!, {
+                    tenantId,
+                    taskId: sessionId,
+                    claim,
+                    operation: 'turn.run',
+                });
             }
 
             const base = overrides?.snapshot || (snap?.snapshot as Record<string, unknown>) || {};

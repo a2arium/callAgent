@@ -12,11 +12,6 @@ type ActivationSerialHarness = {
     ensureConversationActivation(params: ConversationActivateParams): Promise<ConversationActivateResult>;
     runConversationActivationBody(params: ConversationActivateParams): Promise<ConversationActivateResult>;
     hasCurrentInboundConversationDelivery(params: ConversationActivateParams | undefined): Promise<boolean>;
-    runTaskSessionExclusive<T>(
-        tenantId: string,
-        sessionId: string,
-        body: () => Promise<T>
-    ): Promise<T>;
     releaseConversationActivation(activationKey: string): Promise<ConversationActivateResult | undefined>;
 };
 
@@ -35,35 +30,6 @@ const activationParams = (
 });
 
 describe('conversation activation serialization', () => {
-    it('serializes two task turns for the same session instead of re-entering', async () => {
-        const engine = new TaskEngine({});
-        const harness = engine as unknown as ActivationSerialHarness;
-        const order: string[] = [];
-        let releaseFirst!: () => void;
-        const firstCanFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
-        let firstStarted!: () => void;
-        const started = new Promise<void>((resolve) => { firstStarted = resolve; });
-
-        const first = harness.runTaskSessionExclusive('tenant', 'task-serial', async () => {
-            order.push('first:start');
-            firstStarted();
-            await firstCanFinish;
-            order.push('first:end');
-            return 1;
-        });
-        await started;
-        const second = harness.runTaskSessionExclusive('tenant', 'task-serial', async () => {
-            order.push('second:start');
-            return 2;
-        });
-        await Promise.resolve();
-        expect(order).toEqual(['first:start']);
-        releaseFirst();
-        await expect(first).resolves.toBe(1);
-        await expect(second).resolves.toBe(2);
-        expect(order).toEqual(['first:start', 'first:end', 'second:start']);
-    });
-
     it('coalesces re-entrant activation for the same member session until the active turn finishes', async () => {
         const engine = new TaskEngine({});
         const harness = engine as unknown as ActivationSerialHarness;
@@ -126,11 +92,11 @@ describe('conversation activation serialization', () => {
             return { ok: true };
         };
 
-        const activeTurn = harness.runTaskSessionExclusive('tenant', 'local-task-1', async () => {
+        const activeTurn = (async () => {
             markTurnStarted?.();
             await turnCanFinish;
             return 'turn-finished';
-        });
+        })();
         await turnStarted;
 
         const activation = harness.runConversationActivationSerial(
@@ -162,15 +128,11 @@ describe('conversation activation serialization', () => {
             return { ok: true };
         };
 
-        const activeTurn = harness.runTaskSessionExclusive('tenant', 'local-task-release', async () => {
-            return 'turn-finished';
-        });
         const queued = harness.runConversationActivationSerial(
             activationParams('reply-release', 'local-task-release')
         );
 
         await expect(queued).resolves.toEqual({ ok: true });
-        await expect(activeTurn).resolves.toBe('turn-finished');
         expect(calls).toEqual(['reply-release']);
     });
 

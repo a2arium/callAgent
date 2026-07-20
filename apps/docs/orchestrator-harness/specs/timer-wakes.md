@@ -391,20 +391,13 @@ TIMER_SCHEDULE_FAILED
 Only actual failure codes should be shown as errors; already-fired/canceled are
 debug/no-op states.
 
-## Feature Flags
+## Runtime ownership
 
-Timer migration must be reversible per surface:
-
-```text
-CALLAGENT_DRIVER_SURFACES=timers
-```
-
-When `timers` is disabled:
-
-- in-process timer behavior remains authoritative;
-- Hatchet timer tasks/reconciler do not schedule new timer wakes;
-- existing due timer facts may be reconciled manually if needed, but the default
-  path must not double-fire with in-process timers.
+Timer ownership follows the selected runtime. The in-process runtime owns its
+timers; a configured Hatchet runtime always owns durable timer persistence and
+reconciliation together with task start and resume routing. Per-surface rollout
+flags are intentionally unsupported because mixed ownership can double-fire or
+strand a wake.
 
 ## Tests
 

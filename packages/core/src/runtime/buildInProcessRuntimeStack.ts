@@ -26,7 +26,12 @@ export type BuildInProcessRuntimeStackParams = {
     createContext: (task: { id: string; input: unknown }) => TaskContext;
     isStreaming?: boolean;
     onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
-    onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
+    onTaskTerminal?: (params: {
+        tenantId: string;
+        taskId: string;
+        state: 'completed' | 'failed' | 'canceled';
+        runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+    }) => Promise<void>;
     onTaskRunTimeout?: (params: {
         tenantId: string;
         taskId: string;

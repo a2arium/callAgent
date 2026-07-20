@@ -16,6 +16,7 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
     let createTaskStateTask: typeof import('../src/tasks/task.js').createTaskStateTask;
     let worker: Awaited<ReturnType<HatchetClient['worker']>> | undefined;
     let workerStart: Promise<void> | undefined;
+    let hatchetInitialized = false;
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
     const turnExecutor = {
@@ -99,23 +100,25 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
     }
 
     beforeAll(async () => {
-        const [hatchetClientModule, segmentModule, taskModule] = await Promise.all([
-            import('../src/hatchetClient.js'),
-            import('../src/tasks/segment.js'),
-            import('../src/tasks/task.js'),
-        ]);
+        // Jest's ESM linker cannot safely link the shared core graph through
+        // concurrent dynamic imports. Production uses the native Node loader;
+        // keep this integration harness deterministic by linking sequentially.
+        const hatchetClientModule = await import('../src/hatchetClient.js');
+        const segmentModule = await import('../src/tasks/segment.js');
+        const taskModule = await import('../src/tasks/task.js');
         createSegmentTask = segmentModule.createSegmentTask;
         createTaskStateTask = taskModule.createTaskStateTask;
         const { createHatchetClient } = hatchetClientModule;
         const { createTaskTask } = taskModule;
         hatchet = createHatchetClient();
+        hatchetInitialized = true;
         rootTask = createTaskTask(hatchet, {});
         await startWorker();
     });
 
     afterAll(async () => {
         await stopWorker();
-        await hatchet.durableListener.stop();
+        if (hatchetInitialized) await hatchet.durableListener.stop();
     });
 
     it('executes the sole root, segment, and task-state workflow protocol', async () => {

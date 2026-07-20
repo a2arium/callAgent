@@ -23,6 +23,8 @@ import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
+import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
 import type { InternalTaskContext, OperatorMemoryEvent } from './internalContext.js';
 import type { TurnTrace, ManifestProvenance, TurnTimings, TurnUsage } from '../types/turnTrace.js';
 import { TurnTraceSchema } from '../types/turnTrace.js';
@@ -40,6 +42,23 @@ import {
 } from './conversationInboxIdentity.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
+
+/**
+ * Ownership loss is an admission result, not an application failure. Module
+ * boundaries wrap provider/effect errors, so preserve these typed causes for
+ * the segment executor to prove against the latest durable snapshot.
+ */
+function hasTaskTurnOwnershipLossCause(error: unknown): boolean {
+    const seen = new Set<object>();
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+        if (isTaskTurnSupersededError(current) || isTaskLifecycleTerminalError(current)) return true;
+        if (typeof current !== 'object' || seen.has(current)) return false;
+        seen.add(current);
+        current = (current as { cause?: unknown }).cause;
+    }
+    return false;
+}
 
 /** Walk telemetry parents and ctx so TurnNode keeps the session trace id across async boundaries. */
 function resolveTraceIdForTurnParent(
@@ -1900,7 +1919,7 @@ export async function runLoop<
                 };
             } catch { /* noop */ }
         } catch (error) {
-            if (error instanceof InvariantError) throw error;
+            if (error instanceof InvariantError || hasTaskTurnOwnershipLossCause(error)) throw error;
             console.error(`[LoopRunner] 🛑 FATAL: Turn ${turn} failed with exception!`, error);
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {

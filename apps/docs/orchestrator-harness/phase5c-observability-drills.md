@@ -227,7 +227,7 @@ Recorded live drill result:
 - Commit: recorded with the P5 terminal-projection fix changeset.
 - Config:
   - `CALLAGENT_OPERATOR_PROJECTION_READ=semantic`;
-  - `CALLAGENT_DRIVER_SURFACES=start`;
+  - Hatchet selected as the runtime for the complete start/resume/timer boundary;
   - `yarn runtime --no-dashboard`;
   - local Compose Hatchet/NATS stack.
 - Induced failure:

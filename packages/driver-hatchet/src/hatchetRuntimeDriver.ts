@@ -87,8 +87,8 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
 
     async enqueueStart(params: EnqueueStartParams): Promise<void> {
         const taskTask = this.resolveTaskTask(params.agentId);
-        if (!this.isSurfaceEnabled('start') || taskTask === undefined) {
-            return this.delegate.enqueueStart(params);
+        if (taskTask === undefined) {
+            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: aplret.task is unavailable; configure a Hatchet turn executor before starting loop tasks.');
         }
 
         const input: TaskTaskInput = {
@@ -155,12 +155,11 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
     }
 
     async enqueueResume(params: EnqueueResumeParams): Promise<void> {
-        if (
-            !this.isSurfaceEnabled('resume') ||
-            this.events === undefined ||
-            !isHatchetResumeEvent(params.event.kind)
-        ) {
-            return this.delegate.enqueueResume(params);
+        if (this.events === undefined) {
+            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: Hatchet event publishing is unavailable; asynchronous task resumes cannot be delegated in-process.');
+        }
+        if (!isHatchetResumeEvent(params.event.kind)) {
+            throw new Error(`HATCHET_RUNTIME_MISCONFIGURED: unsupported durable resume event ${params.event.kind}.`);
         }
 
         const payload = {
@@ -212,8 +211,8 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
     }
 
     async scheduleTimer(params: ScheduleTimerParams): Promise<{ timerId: string }> {
-        if (!this.isSurfaceEnabled('timers') || this.runtimeTimers === undefined) {
-            return this.delegate.scheduleTimer(params);
+        if (this.runtimeTimers === undefined) {
+            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: durable timer storage is unavailable; Hatchet timers cannot be delegated in-process.');
         }
         const timer = await this.runtimeTimers.schedule({
             ...params,
@@ -374,15 +373,6 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         return this.delegate;
     }
 
-    private isSurfaceEnabled(surface: 'start' | 'resume' | 'timers'): boolean {
-        const raw = process.env.CALLAGENT_DRIVER_SURFACES;
-        if (raw === undefined || raw.trim().length === 0) {
-            return false;
-        }
-        const surfaces = raw.split(',').map((value) => value.trim()).filter(Boolean);
-        return surfaces.includes('all') || surfaces.includes(surface);
-    }
-
     private resolveTaskTask(
         _agentId: string | undefined
     ): TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput> | undefined {
@@ -465,7 +455,7 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
 }
 
 function isHatchetResumeEvent(kind: EnqueueResumeParams['event']['kind']): boolean {
-    return kind === 'input' || kind === 'tool' || kind === 'child' || kind === 'external' || kind === 'timer';
+    return kind === 'input' || kind === 'tool' || kind === 'child' || kind === 'external' || kind === 'timer' || kind === 'conversation';
 }
 
 function buildTaskMetadata(

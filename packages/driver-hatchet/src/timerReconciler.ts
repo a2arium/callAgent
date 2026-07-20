@@ -127,12 +127,3 @@ export class TimerReconciler {
 function formatError(error: unknown): { message: string } {
     return { message: error instanceof Error ? error.message : String(error) };
 }
-
-export function isTimerSurfaceEnabled(): boolean {
-    const raw = process.env.CALLAGENT_DRIVER_SURFACES;
-    if (raw === undefined || raw.trim().length === 0) {
-        return false;
-    }
-    const surfaces = raw.split(',').map((value) => value.trim()).filter(Boolean);
-    return surfaces.includes('all') || surfaces.includes('timers');
-}

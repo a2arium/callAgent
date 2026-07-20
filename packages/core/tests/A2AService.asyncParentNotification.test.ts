@@ -39,7 +39,7 @@ describe('A2AService async parent notification', () => {
         handleChildCompleted.mockReset();
     });
 
-    it('delivers terminal completion even when the source context retains an active-loop inbox', async () => {
+    it('does not create a second dispatch-path producer for runtime-owned async children', async () => {
         const sourceCtx = {
             tenantId: 'tenant-a',
             agentId: 'parent-agent',
@@ -56,12 +56,6 @@ describe('A2AService async parent notification', () => {
         } as any);
         await service.waitForPendingNotifications();
 
-        expect(handleChildCompleted).toHaveBeenCalledTimes(1);
-        expect(handleChildCompleted).toHaveBeenCalledWith(expect.objectContaining({
-            tenantId: 'tenant-a',
-            parentTaskId: 'parent-task',
-            childToken: 'child-token',
-            childAgentId: 'child-agent',
-        }));
+        expect(handleChildCompleted).not.toHaveBeenCalled();
     });
 });

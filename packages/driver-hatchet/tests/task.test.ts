@@ -605,6 +605,22 @@ describe('executeTaskTask', () => {
                                         parentTaskId: 'parent-task-1',
                                         parentChildToken: 'parent-token',
                                     },
+                                    taskTerminal: {
+                                        taskId: 'child-task-1',
+                                        state: 'completed',
+                                        claimedAt: '2026-06-19T00:00:00.000Z',
+                                        deliveryKey: 'child-task-1:terminal',
+                                        status: {
+                                            state: 'completed',
+                                            timestamp: '2026-06-19T00:00:00.000Z',
+                                            metadata: {
+                                                result: {
+                                                    ok: false,
+                                                    error: { code: 'ALL_MODES_FAILED', message: 'No content' },
+                                                },
+                                            },
+                                        },
+                                    },
                                 },
                             },
                         })),

@@ -20,7 +20,7 @@ import { applyInputProvided, getPendingInputs, setPendingInputs } from './Durabl
 import type { DurableHandlerInvoker } from './DurableHandlerInvoker.js';
 import { DurableHandlerInvokerCore } from './DurableHandlerInvoker.js';
 import { InputHandle, createTaskHandle, createGroupHandle, type GroupHandle } from './Handles.js';
-import { getPendingTasks, setPendingTasks, getPendingGroups, setPendingGroups } from './Handles.js';
+import { getPendingTasks, setPendingTasks } from './Handles.js';
 import { globalA2AService } from './A2AService.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
@@ -68,7 +68,6 @@ import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { pruneSnapshot } from '../loop/hygiene.js';
 import { ArtifactHydrationService, HYDRATED_ARTIFACT_HANDLE_SYMBOL } from './ArtifactHydrationService.js';
 import { InboxManager, type EngineObservation, type EngineObservationInbox } from './InboxManager.js';
-import { TaskExecutor } from './TaskExecutor.js';
 import {
     buildInProcessRuntimeStack,
     InProcessRuntimeDriver,
@@ -77,6 +76,7 @@ import {
     type PreparedTurnInvocation,
     type RuntimeDriver,
     type RuntimeWakeEvent,
+    type SegmentResult,
     type TurnExecutor,
 } from '../runtime/index.js';
 import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
@@ -116,7 +116,7 @@ import {
     prepareChildResultsInInboxForPersistence,
 } from './childResultPersistence.js';
 import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
-import { coordinateChildTerminal } from './ChildTerminalCoordinator.js';
+import { coordinateChildTerminal, type ChildTerminalIdentity } from './ChildTerminalCoordinator.js';
 import { coordinateToolTerminal } from './ToolTerminalCoordinator.js';
 import { detachPendingToolsInSnapshot } from './ToolTerminalCoordinator.js';
 import {
@@ -188,6 +188,84 @@ export type AwaitTaskTerminalResult = {
  */
 
 const log = logger.createLogger({ prefix: 'TaskEngine' });
+
+function taskEntityFromSegmentResult(segment: SegmentResult, input: unknown): TaskEntity {
+    if (segment.taskEntity !== undefined) return segment.taskEntity;
+
+    if (segment.turnDisposition === undefined || segment.turnDisposition === 'executed') {
+        throw new Error(
+            `TASK_TURN_PROTOCOL_STATE_UNKNOWN: ${segment.taskId} returned ${segment.turnDisposition ?? 'no disposition'} without a committed task entity`
+        );
+    }
+    if (segment.turnDisposition === 'terminal_replay' &&
+        segment.boundary.kind !== 'complete' &&
+        segment.boundary.kind !== 'fail' &&
+        segment.boundary.kind !== 'canceled') {
+        throw new Error(
+            `TASK_TURN_PROTOCOL_STATE_UNKNOWN: ${segment.taskId} returned terminal_replay with ${segment.boundary.kind}`
+        );
+    }
+
+    const timestamp = new Date().toISOString();
+    let status: TaskStatus;
+    switch (segment.boundary.kind) {
+        case 'complete':
+            status = {
+                state: 'completed',
+                timestamp,
+                metadata: { result: segment.boundary.result },
+            };
+            break;
+        case 'fail':
+            status = {
+                state: 'failed',
+                timestamp,
+                metadata: { error: segment.boundary.error },
+            };
+            break;
+        case 'canceled':
+            status = {
+                state: 'canceled',
+                timestamp,
+                ...(segment.boundary.reason !== undefined
+                    ? { metadata: { reason: segment.boundary.reason } }
+                    : {}),
+            };
+            break;
+        case 'await_input':
+            status = {
+                state: 'input-required',
+                timestamp,
+                metadata: { token: segment.boundary.token },
+            };
+            break;
+        default:
+            status = {
+                state: 'working',
+                timestamp,
+                metadata: {
+                    disposition: segment.turnDisposition,
+                    boundary: segment.boundary.kind,
+                },
+            };
+    }
+    return { id: segment.taskId, input: input as TaskInput, status } as TaskEntity;
+}
+
+function resolveChildToken(
+    snapshot: Record<string, unknown>,
+    tasks: ReturnType<typeof getPendingTasks>,
+    childToken?: string,
+    childTaskId?: string
+): string | undefined {
+    if (childToken !== undefined) return childToken;
+    const pendingToken = Object.keys(tasks).find((token) => tasks[token]?.childTaskId === childTaskId);
+    if (pendingToken !== undefined) return pendingToken;
+    const terminals = (snapshot as {
+        pending?: { childTerminals?: Record<string, { childTaskId?: string }> };
+    }).pending?.childTerminals ?? {};
+    return Object.keys(terminals).find((token) => terminals[token]?.childTaskId === childTaskId);
+}
 
 const delay = (ms: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
@@ -998,7 +1076,6 @@ export class TaskEngine {
     private sessionManager?: SessionManager;
     private snapshotRepo?: SnapshotRepository;
     private taskExecutorInitialized = false;
-    private readonly childCompletionInFlight = new Map<string, number>();
     private flushScheduler = new FlushScheduler();
     private taskCreationMutex = new KeyedMutex();
     private handlerInvoker?: DurableHandlerInvoker;
@@ -1023,7 +1100,6 @@ export class TaskEngine {
     private topicLifecycleSweeper: TopicLifecycleSweeper;
     private readonly activeConversationActivations = new Set<string>();
     private readonly pendingConversationActivations = new Map<string, PendingConversationActivation>();
-    private readonly taskSessionTails = new Map<string, Promise<void>>();
     private readonly recentConversationActivationTargets = new Map<string, ConversationActivateParams>();
     private transportClose?: () => Promise<void>;
     /** When adapters are resolved via `resolveTransportAdapters`, wired here for projections / extensions. */
@@ -1162,7 +1238,6 @@ export class TaskEngine {
             backgroundTaskPromises: this.backgroundTaskPromises,
             trackBackgroundTask: (promise, metadata) => this.trackBackgroundTask(promise, metadata),
             runOwnedEffect: (factory, metadata) => this.runOwnedEffect(factory, metadata),
-            handleChildCompleted: (p) => this.handleChildCompleted(p),
             handleToolCompleted: (p) => this.handleToolCompleted(p),
             conversationService: this.conversationService,
             eventBus: this.eventBus,
@@ -1192,10 +1267,16 @@ export class TaskEngine {
                 });
             },
             onTaskTerminal: async (params) => {
-                await this.notifyPersistedA2AParentIfTerminal({
-                    tenantId: params.tenantId,
-                    taskId: params.taskId,
-                });
+                // Hatchet parent delivery is owned exclusively by the keyed
+                // aplret.task-state terminal projection. The shared segment
+                // executor still performs local branch cleanup, but must not
+                // become a second asynchronous completion producer.
+                if (params.runtimeSurface !== 'hatchet') {
+                    await this.notifyPersistedA2AParentIfTerminal({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                    });
+                }
                 await this.detachTaskBranch({
                     tenantId: params.tenantId,
                     taskId: params.taskId,
@@ -1295,28 +1376,6 @@ export class TaskEngine {
         return result;
     }
 
-    private async runTaskSessionExclusive<T>(
-        tenantId: string,
-        sessionId: string,
-        body: () => Promise<T>
-    ): Promise<T> {
-        const taskKey = `${tenantId}:${sessionId}`;
-        const predecessor = this.taskSessionTails.get(taskKey) ?? Promise.resolve();
-        let release!: () => void;
-        const owned = new Promise<void>((resolve) => { release = resolve; });
-        const tail = predecessor.catch(() => undefined).then(() => owned);
-        this.taskSessionTails.set(taskKey, tail);
-        await predecessor.catch(() => undefined);
-        try {
-            return await body();
-        } finally {
-            release();
-            if (this.taskSessionTails.get(taskKey) === tail) {
-                this.taskSessionTails.delete(taskKey);
-            }
-        }
-    }
-
     /**
      * Phase 0.3: route a prepared turn through the runtime driver while preserving
      * today's synchronous await semantics and TaskEngine-prepared ctx/snapshot.
@@ -1360,61 +1419,35 @@ export class TaskEngine {
                           event: params.resumeEvent!,
                           prepared,
                       });
-            if (segmentResult.taskEntity !== undefined) {
-                return segmentResult.taskEntity;
-            }
+            return taskEntityFromSegmentResult(segmentResult, params.input ?? {});
         }
 
-        if (this.shouldScheduleAsyncThroughRuntimeDriver(params.operation)) {
-            if (params.operation === 'start') {
-                await this.runtimeDriver.enqueueStart({
-                    tenantId: params.tenantId,
-                    taskId: params.taskId,
-                    agentId: params.agentId,
-                    idempotencyKey: params.idempotencyKey,
-                    input: params.input ?? {},
-                });
-            } else {
-                await this.runtimeDriver.enqueueResume({
-                    tenantId: params.tenantId,
-                    taskId: params.taskId,
-                    agentId: params.agentId,
-                    idempotencyKey: params.idempotencyKey,
-                    event: params.resumeEvent!,
-                });
-            }
-
-            return {
-                id: params.taskId,
-                input: params.input ?? {},
-                status: {
-                    state: 'working',
-                    timestamp: new Date().toISOString(),
-                },
-            } as TaskEntity;
-        }
-
-        const task = await this.turnRunner.runTurn(params.ctx, params.turnParams, {
-            initialM: params.initialM,
-            snapshot: params.snapshot,
-        });
-        if (isA2ATerminalTaskState(task.status?.state)) {
-            await this.detachTaskBranch({
+        if (params.operation === 'start') {
+            await this.runtimeDriver.enqueueStart({
                 tenantId: params.tenantId,
                 taskId: params.taskId,
-                reason: `task_${task.status!.state}`,
+                agentId: params.agentId,
+                idempotencyKey: params.idempotencyKey,
+                input: params.input ?? {},
+            });
+        } else {
+            await this.runtimeDriver.enqueueResume({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId,
+                idempotencyKey: params.idempotencyKey,
+                event: params.resumeEvent!,
             });
         }
-        return task;
-    }
 
-    private shouldScheduleAsyncThroughRuntimeDriver(operation: 'start' | 'resume'): boolean {
-        const raw = process.env.CALLAGENT_DRIVER_SURFACES;
-        if (raw === undefined || raw.trim().length === 0) {
-            return false;
-        }
-        const surfaces = raw.split(',').map((value) => value.trim()).filter(Boolean);
-        return surfaces.includes('all') || surfaces.includes(operation);
+        return {
+            id: params.taskId,
+            input: params.input ?? {},
+            status: {
+                state: 'working',
+                timestamp: new Date().toISOString(),
+            },
+        } as TaskEntity;
     }
 
     private async notifyA2AParentIfTerminal(
@@ -1460,6 +1493,9 @@ export class TaskEngine {
                             ? metadata.reason
                             : `Child task ${authoritativeStatus.state}`),
                 },
+                ...(durableTerminal?.turnClaim !== undefined
+                    ? { childTerminalIdentity: durableTerminal.turnClaim }
+                    : {}),
             });
             return;
         }
@@ -1470,6 +1506,9 @@ export class TaskEngine {
             childTaskId: task.id,
             result: { ...task, status: authoritativeStatus },
             childAgentId,
+            ...(durableTerminal?.turnClaim !== undefined
+                ? { childTerminalIdentity: durableTerminal.turnClaim }
+                : {}),
         });
     }
 
@@ -3377,8 +3416,7 @@ export class TaskEngine {
             if (runMode === 'legacy') {
                 await runLegacy();
             } else {
-                const taskResult = await this.runTaskSessionExclusive(tenantId, sessionId, () =>
-                    this.runPreparedTurnThroughDriver({
+                const taskResult = await this.runPreparedTurnThroughDriver({
                         operation: 'start',
                         tenantId,
                         taskId: sessionId,
@@ -3395,8 +3433,9 @@ export class TaskEngine {
                         },
                         initialM: M,
                         snapshot: baseSnap,
-                    })
-                );
+                    });
+                const terminalHandledBySegmentRuntime =
+                    (taskResult as { __turnPersistence?: unknown }).__turnPersistence !== undefined;
 
                 if (taskResult) {
                     task.status = taskResult.status;
@@ -3484,7 +3523,11 @@ export class TaskEngine {
                 }
 
                 this.finalizeAgentNodeTelemetry(agentNode, task);
-                if (terminalPublicationAllowed) {
+                if (terminalPublicationAllowed && !terminalHandledBySegmentRuntime) {
+                    // A committed in-process segment already invoked the runtime
+                    // terminal callback. This path remains for terminal replays
+                    // and injected/custom segment results that did not execute
+                    // through the standard TurnRunner persistence boundary.
                     await this.notifyA2AParentIfTerminal(
                         ctx,
                         task,
@@ -3558,6 +3601,61 @@ export class TaskEngine {
         } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
             log.error('Task engine error', { error: err.message });
+
+            if (runMode === 'loop') {
+                // Loop-mode failures are arbitrated inside the fenced segment. If
+                // a terminal commit already won, recover and republish that exact
+                // durable result. Otherwise surface the internal/runtime error;
+                // synthesizing an unfenced failed status here could overwrite or
+                // notify from a losing attempt.
+                let latest: Awaited<ReturnType<SessionManager['load']>> | undefined;
+                try {
+                    latest = await this.sessionManager?.load(tenantId, sessionId) ?? undefined;
+                } catch (recoveryError) {
+                    log.warn('Unable to inspect durable terminal while propagating loop execution error', {
+                        tenantId,
+                        taskId: sessionId,
+                        error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+                    });
+                }
+                const terminal = readDurableTaskTerminal(
+                    latest?.snapshot as Record<string, unknown> | undefined
+                );
+                if (terminal !== undefined) {
+                    task.status = terminal.status as TaskStatus;
+                    try {
+                        await this.ensureTaskTerminalPublished({
+                            tenantId,
+                            taskId: sessionId,
+                            agentId: activeAgentId,
+                            snapshot: latest?.snapshot as Record<string, unknown>,
+                        });
+                    } catch (projectionError) {
+                        log.warn('Durable terminal recovery projection failed', {
+                            tenantId,
+                            taskId: sessionId,
+                            error: projectionError instanceof Error
+                                ? projectionError.message
+                                : String(projectionError),
+                        });
+                    }
+                    try {
+                        await this.notifyA2AParentIfTerminal(ctx, task, activeAgentId);
+                    } catch (notificationError) {
+                        log.warn('Durable terminal recovery parent notification failed', {
+                            tenantId,
+                            taskId: sessionId,
+                            error: notificationError instanceof Error
+                                ? notificationError.message
+                                : String(notificationError),
+                        });
+                    }
+                    this.finalizeAgentNodeTelemetry(agentNode, task);
+                    return task;
+                }
+                this.finalizeAgentNodeTelemetry(agentNode, task, err);
+                throw err;
+            }
 
             // Set failure status for non-streaming mode
             if (!isStreaming) {
@@ -3663,6 +3761,28 @@ export class TaskEngine {
         }
 
         const base = (snap.snapshot as Record<string, unknown>) || {};
+        const loopAgentName = snap.agentId ?? (base as { meta?: { agentId?: string } }).meta?.agentId;
+        const loopPlugin = loopAgentName ? PluginManager.findAgent(loopAgentName) : null;
+        const configuredRunMode = loopPlugin?.resolved.runtimeManifest.runMode ?? 'loop';
+        if (configuredRunMode !== 'legacy') {
+            if (input && typeof input === 'object') {
+                const prisma = this.getSessionStorePrisma();
+                if (prisma) hydrateArtifacts(input, new AgentResultCache(prisma), tenantId);
+            }
+            const resume = {
+                tenantId,
+                taskId,
+                agentId: loopAgentName,
+                idempotencyKey: `${taskId}:input:${token}`,
+                event: { kind: 'input' as const, token, value: input },
+            };
+            if (isSyncRuntimeDriver(this.runtimeDriver)) {
+                await this.runtimeDriver.enqueueResumeSync(resume);
+            } else {
+                await this.runtimeDriver.enqueueResume(resume);
+            }
+            return { acknowledged: true };
+        }
         // Validate token existence/expiry
         try {
             const pend = getPendingInputs(base) as any;
@@ -3879,8 +3999,7 @@ export class TaskEngine {
             if (runMode === 'legacy') {
                 await this.executeTaskHandler(ctx);
             } else {
-                const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
-                    this.runPreparedTurnThroughDriver({
+                const taskResult = await this.runPreparedTurnThroughDriver({
                         operation: 'resume',
                         tenantId,
                         taskId,
@@ -3897,8 +4016,7 @@ export class TaskEngine {
                         },
                         initialM: M,
                         snapshot: baseNow,
-                    })
-                );
+                    });
 
                 const channel = taskChannel(taskId);
                 try {
@@ -3939,7 +4057,6 @@ export class TaskEngine {
      */
     async handleToolCompleted(params: { tenantId: string; taskId: string; token: string; result: unknown }): Promise<void> {
         const { tenantId, taskId, token, result } = params;
-        await this.runTaskSessionExclusive(tenantId, taskId, async () => {
         const completedAt = new Date().toISOString();
         const terminalClaim = await coordinateToolTerminal({
             session: {
@@ -4008,53 +4125,18 @@ export class TaskEngine {
             }
         }
 
-        // Auto-resume one loop turn to consume the tool result. The per-task mutex
-        // serializes this with any still-active turn; relying only on LoopRegistry
-        // can leave completed async tools staged but never consumed after await_tool.
-        if (LoopRegistry.__activeLoopContexts?.has(taskId)) {
-            log.debug('handleToolCompleted: Active loop exists; durable resume will wait for task lock', { taskId, token });
+        const resume = {
+            tenantId,
+            taskId,
+            agentId: agentName,
+            idempotencyKey: `${taskId}:tool:${token}`,
+            event: { kind: 'tool' as const, token, result },
+        };
+        if (isSyncRuntimeDriver(this.runtimeDriver)) {
+            await this.runtimeDriver.enqueueResumeSync(resume);
+        } else {
+            await this.runtimeDriver.enqueueResume(resume);
         }
-
-        try {
-            const ctx = this.createContext({ id: taskId, input: {} });
-            (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
-
-            // Use 'next' directly - it's the snapshot we just saved with the observation
-            const baseNow = next as Record<string, unknown>;
-            const a2aParent = readA2AParentLink(
-                (baseNow as { meta?: { a2aParent?: unknown } }).meta?.a2aParent
-            );
-            if (a2aParent) {
-                (ctx as A2AChildContext).__a2aParent = a2aParent;
-            }
-            const M: MentalState = (baseNow as any).M as MentalState || initialM(ctx);
-            // Attach and restore LLM before running loop
-            await this.attachAndRestoreLLM(ctx, agentName, M);
-
-            const taskResult = await this.runPreparedTurnThroughDriver({
-                    operation: 'resume',
-                    tenantId,
-                    taskId,
-                    agentId: agentName,
-                    idempotencyKey: `${taskId}:tool:${token}`,
-                    resumeEvent: { kind: 'tool', token, result },
-                    ctx,
-                    turnParams: {
-                        tenantId,
-                        sessionId: taskId,
-                        trigger: 'tool',
-                        toolToken: token,
-                        toolResult: result,
-                        isStreaming: false,
-                    },
-                    initialM: M,
-                    snapshot: baseNow,
-                });
-            await this.notifyA2AParentIfTerminal(ctx, taskResult, agentName);
-            // Note: TurnRunner.runTurn already publishes the completion event via eventBus,
-            // so we don't need to publish again here.
-        } catch { /* ignore resume errors */ }
-        });
     }
 
     /**
@@ -4067,24 +4149,31 @@ export class TaskEngine {
         const base = (snap.snapshot as Record<string, unknown>) || {};
         const events = getPendingExternalEvents(base) as any;
         const entry = events[token];
-        if (!entry) return;
 
         const agentName = (snap as any)?.agentId ?? (base as any)?.meta?.agentId;
-        if (this.shouldScheduleAsyncThroughRuntimeDriver('resume') && !isSyncRuntimeDriver(this.runtimeDriver)) {
-            await this.runtimeDriver.enqueueResume({
+        const eventPlugin = agentName ? PluginManager.findAgent(agentName) : null;
+        if ((eventPlugin?.resolved.runtimeManifest.runMode ?? 'loop') !== 'legacy') {
+            const resume = {
                 tenantId,
                 taskId,
                 agentId: agentName,
                 idempotencyKey: `${taskId}:external:${token}`,
                 event: {
-                    kind: 'external',
+                    kind: 'external' as const,
                     token,
                     type: entry?.type ?? 'external',
                     data: payload,
                 },
-            });
+            };
+            if (isSyncRuntimeDriver(this.runtimeDriver)) {
+                await this.runtimeDriver.enqueueResumeSync(resume);
+            } else {
+                await this.runtimeDriver.enqueueResume(resume);
+            }
             return;
         }
+
+        if (!entry) return;
 
         delete events[token];
         const next = setPendingExternalEvents(base, events) as Record<string, unknown>;
@@ -4113,8 +4202,7 @@ export class TaskEngine {
             // Attach and restore LLM before running loop
             await this.attachAndRestoreLLM(ctx, agentName, M);
 
-            const taskResult = await this.runTaskSessionExclusive(tenantId, taskId, () =>
-                this.runPreparedTurnThroughDriver({
+            const taskResult = await this.runPreparedTurnThroughDriver({
                     operation: 'resume',
                     tenantId,
                     taskId,
@@ -4138,8 +4226,7 @@ export class TaskEngine {
                     },
                     initialM: M,
                     snapshot: baseNow,
-                })
-            );
+                });
 
             const channel = taskChannel(taskId);
             try {
@@ -4181,7 +4268,7 @@ export class TaskEngine {
         if (!snap || !this.sessionManager) return;
         const base = (snap.snapshot as Record<string, unknown>) || {};
         const tasks = getPendingTasks(base);
-        const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
+        const token = resolveChildToken(base, tasks, childToken, childTaskId);
         if (!token) return;
         const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
         const a2aTelemetry = readA2aResultTelemetry(result);
@@ -4199,6 +4286,8 @@ export class TaskEngine {
             session: this.sessionManager,
             tenantId,
             parentTaskId,
+            deliveryMode: 'inline',
+            runtimeSurface: 'in_process',
             request: {
                 kind: 'completed',
                 token,
@@ -4217,41 +4306,16 @@ export class TaskEngine {
      * Route child completion to parent's durable handler using pending task mappings.
      * Provide either childToken (preferred correlation) or childTaskId.
      */
-    async handleChildCompleted(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; suppressResume?: boolean }): Promise<void> {
-        const { tenantId, parentTaskId, childToken, childTaskId, result, childAgentId } = params;
+    async handleChildCompleted(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; childTerminalIdentity?: ChildTerminalIdentity }): Promise<void> {
+        const { tenantId, parentTaskId, childToken, childTaskId, result, childAgentId, childTerminalIdentity } = params;
         const completionReceivedAt = new Date().toISOString();
-        const inflightKey = `${parentTaskId}:${childToken ?? childTaskId ?? 'n/a'}`;
-        const callCount = (this.childCompletionInFlight.get(inflightKey) ?? 0) + 1;
-        this.childCompletionInFlight.set(inflightKey, callCount);
-        log.debug('Child completion processing started', {
-            parentTaskId: parentTaskId.substring(0, 25),
-            childToken: childToken?.substring(0, 15),
-            callCount,
-            inflightKey
-        });
-        if (callCount > 1) {
-            log.warn('Duplicate child completion invocation detected', { inflightKey, callCount });
-        }
-
-        const detach = () => {
-            this.childCompletionInFlight.delete(inflightKey);
-        };
-
-        let ctx: TaskContext | undefined;
-        try {
             const snap = await this.sessionManager?.load(tenantId, parentTaskId);
             if (!snap) return;
             const base = (snap.snapshot as Record<string, unknown>) || {};
             const tasks = getPendingTasks(base);
-            const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
+            const token = resolveChildToken(base, tasks, childToken, childTaskId);
             if (!token) return;
             const entry = tasks[token] as any;
-            const hadPendingEntry = Boolean(entry);
-            // If this child was awaited synchronously by the parent, skip auto-resume (already handled in-turn)
-            if (entry && entry.handlers && entry.handlers.completed === undefined && entry.handlers.failed === undefined && entry.handlers.inputRequired === undefined && (result as any)?.status?.state !== 'input-required') {
-                // Default await path: no handlers set and result is terminal -> no extra resume needed
-                // Fall through to cleanup mapping only
-            }
             // Extract clean result from potentially wrapped TaskEntity
             // This fixes the confusing nested structure where result might be a TaskEntity wrapper
             const cleanChildResult = TaskStateUtils.extractCleanChildResult(result);
@@ -4281,14 +4345,18 @@ export class TaskEngine {
                 executionMetadata: Object.keys(childExecutionMetadata).length > 0
                     ? childExecutionMetadata as any
                     : undefined,
+                ...(childTerminalIdentity !== undefined ? { terminalIdentity: childTerminalIdentity } : {}),
             };
             const terminalClaim = await coordinateChildTerminal({
                 session: this.sessionManager!,
                 tenantId,
                 parentTaskId,
+                deliveryMode: 'async_wake',
+                runtimeSurface: 'in_process',
                 request: completionRequest,
             });
-            if (terminalClaim.resumeEligible !== true || terminalClaim.observation === undefined) {
+            if ((terminalClaim.publicationDisposition !== 'new_delivery' &&
+                terminalClaim.publicationDisposition !== 'matching_replay') || terminalClaim.observation === undefined) {
                 return;
             }
             const childObservation = terminalClaim.observation;
@@ -4307,6 +4375,26 @@ export class TaskEngine {
                 executionMetadata?: unknown;
             };
             const durableChildResult = durableChildPayload.result;
+            if (terminalClaim.disposition === 'committed' && this.handlerInvoker) {
+                if (entry?.handlers?.completed !== undefined) {
+                    await this.handlerInvoker.invoke({
+                        tenantId,
+                        taskId: parentTaskId,
+                        handlerName: entry.handlers.completed,
+                        input: durableChildResult,
+                    });
+                }
+                for (const intent of terminalClaim.groupIntents ?? []) {
+                    if (intent.handler !== undefined) {
+                        await this.handlerInvoker.invoke({
+                            tenantId,
+                            taskId: parentTaskId,
+                            handlerName: intent.handler,
+                            input: intent.results,
+                        });
+                    }
+                }
+            }
             const childCompletedPayload = {
                 token,
                 childTaskId: durableChildPayload.childTaskId || cleanChildResult.childTaskId || childTaskId || token,
@@ -4315,10 +4403,6 @@ export class TaskEngine {
                 executionMetadata: durableChildPayload.executionMetadata,
                 resultPreview: makeSafeEventPreview(durableChildResult),
             };
-            if (params.suppressResume === true) {
-                return;
-            }
-
             if (terminalClaim.kind === 'failed') {
                 const terminalError = terminalClaim.terminal?.error ?? {
                     code: 'CHILD_FAILED',
@@ -4348,528 +4432,28 @@ export class TaskEngine {
                 return;
             }
 
-            if (this.shouldScheduleAsyncThroughRuntimeDriver('resume')) {
-                await this.runtimeDriver.enqueueResume({
-                    tenantId,
-                    taskId: parentTaskId,
-                    agentId: parentAgentId,
-                    token,
-                    idempotencyKey: `${parentTaskId}:child:${token}`,
-                    event: {
-                        kind: 'child',
-                        token,
-                        childTaskId: childCompletedPayload.childTaskId,
-                        outcome: 'completed',
-                        output: durableChildResult,
-                        completedAt: completionReceivedAt,
-                        terminalClaimed: true,
-                    },
-                });
-                return;
-            }
-
-            try {
-                const agentName = (snap as any)?.agentId;
-                let plugin: AgentPlugin | null = null;
-                if (agentName) {
-                    const findAgent = (PluginManager as any)?.findAgent;
-                    if (typeof findAgent === 'function') {
-                        try {
-                            plugin = findAgent.call(PluginManager, agentName);
-                        } catch (pluginError) {
-                            log.warn('Failed to resolve plugin before resuming child completion', {
-                                error: pluginError instanceof Error ? pluginError.message : String(pluginError),
-                                parentTaskId,
-                                agentName
-                            });
-                        }
-                    } else {
-                        log.debug('PluginManager.findAgent unavailable while handling child completion', { agentName });
-                    }
-                }
-                ctx = this.createContext({ id: parentTaskId, input: {} });
-                (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
-                if (!(ctx as any).task) {
-                    (ctx as any).task = { id: parentTaskId, input: {} };
-                }
-                try {
-                    extendContextWithStreaming(ctx, true, this.eventBus);
-                } catch {
-                    /* noop */
-                }
-                // --- START RETRY LOOP ---
-                let resumeSuccess = false;
-                let resumeRetryCount = 0;
-                const resumeMaxRetries = 3;
-                let shouldResumeParent = false;
-                let resumeReason: string | undefined;
-
-                while (!resumeSuccess && resumeRetryCount < resumeMaxRetries) {
-                    try {
-                        // OPTION 1: Version Coordination in Parent Resume
-                        // After ALL saves in handleChildCompleted, load the final snapshot
-                        // ✅ FIX: Load the latest snapshot AFTER staging observation to ensure we have it
-                        const finalSnap = await this.sessionManager!.load(tenantId, parentTaskId);
-
-                        // ✅ FIX: Guard against empty/missing snapshot to prevent phantom restarts (Turn 1 resets)
-                        // ✅ FIX: Guard against empty/missing snapshot to prevent phantom restarts (Turn 1 resets)
-                        if (!finalSnap || !finalSnap.snapshot) {
-                            log.warn('handleChildCompleted: Final snapshot is empty. Aborting resume to prevent state corruption (phantom loop).', {
-                                parentTaskId,
-                                hasSnap: !!finalSnap,
-                                hasData: !!finalSnap?.snapshot,
-                                wmVersion: finalSnap?.wmVersion?.toString()
-                            });
-                            return;
-                        }
-
-                        if (!(finalSnap.snapshot as any).meta) {
-                            log.warn('handleChildCompleted: Snapshot missing meta. Proceeding with caution (might be first turn or migration).', {
-                                parentTaskId,
-                                wmVersion: finalSnap?.wmVersion?.toString()
-                            });
-                        }
-
-                        let baseNow = (finalSnap?.snapshot as Record<string, unknown>) || {};
-
-                        // ✅ FIX: Always ensure inbox has the observation, even if snapshotSaved is true
-                        // This handles race conditions where stageChildCompletionObservation saved but
-                        // handleChildCompleted loaded an older version
-                        let finalInbox = InboxManager.normalizeInbox((baseNow as any)?.inbox);
-                        const finalPrisma = this.getSessionStorePrisma();
-                        if (finalPrisma) {
-                            const cache = new AgentResultCache(finalPrisma);
-                            finalInbox = await prepareChildResultsInInboxForPersistence(finalInbox, cache, tenantId);
-                        }
-                        const observationPredicateForCheck = (obs: EngineObservation) =>
-                            obs?.kind === 'child.completed' &&
-                            typeof obs === 'object' &&
-                            obs !== null &&
-                            (obs as any)?.payload &&
-                            (obs as any).payload.token === token;
-                        const hasObservation = finalInbox.all.some(observationPredicateForCheck);
-
-                        if (!hasObservation) {
-                            log.warn('Durable child terminal observation missing after terminal claim', {
-                                parentTaskId,
-                                childToken: token,
-                            });
-                            return;
-                        }
-
-                        const prevMetaCheck = (baseNow as any).meta || {};
-                        if (prevMetaCheck.lastChildToken === token) {
-                            return;
-                        }
-
-                        // CRITICAL: Store the FINAL version in context for coordination
-                        // This ensures all subsequent operations use the correct expected version
-                        (ctx as any).__coordinatedVersion = finalSnap?.wmVersion ?? BigInt(0);
-
-                        // ✅ FIX: Only extend context with memory if it doesn't already exist
-                        // This prevents creating multiple PrismaClient instances and exhausting DB connections
-                        // The context should already have memory set up from the initial task start
-                        if (!(ctx as any).memory) {
-                            try {
-                                // ✅ FIX: Always use singleton PrismaClient to prevent connection exhaustion
-                                const { getMemoryPrismaClient, setMemoryPrismaClient } = await import('@a2arium/callagent-memory-engine');
-                                const singletonPrisma = await getMemoryPrismaClient();
-
-                                // Try to reuse existing PrismaClient from session store if available, otherwise use singleton
-                                const existingPrisma = (this.sessionManager as any)?.store?.prisma || singletonPrisma;
-
-                                // If we got PrismaClient from session store, set it as singleton for future use
-                                if ((this.sessionManager as any)?.store?.prisma && !singletonPrisma) {
-                                    setMemoryPrismaClient((this.sessionManager as any).store.prisma);
-                                }
-
-                                const { createEmbeddingFunction, isEmbeddingAvailable } = await import('../llm/LLMFactory.js');
-                                const embeddingFunction = isEmbeddingAvailable() ? await createEmbeddingFunction() : undefined;
-
-                                const memoryRegistry = await createMemoryRegistry(
-                                    tenantId,
-                                    agentName || 'default',
-                                    ctx,
-                                    {
-                                        ...(existingPrisma ? { database: { prismaClient: existingPrisma } } : {}),
-                                        embeddingFunction
-                                    }
-                                );
-                                // Extract semantic adapter from the registry - it's a MemoryRegistry object with backends
-                                const semanticBackends = (memoryRegistry.semantic as any)?.backends;
-                                const semanticAdapter = semanticBackends?.sql || semanticBackends?.mlo || undefined;
-
-                                log.debug('Extending context with memory in handleChildCompleted', {
-                                    parentTaskId,
-                                    agentName,
-                                    hasSemanticAdapter: !!semanticAdapter,
-                                    hasMemoryRegistry: !!memoryRegistry,
-                                    reusedPrisma: !!existingPrisma
-                                });
-
-                                await extendContextWithMemory(
-                                    ctx,
-                                    tenantId,
-                                    agentName || 'default',
-                                    plugin?.resolved.runtimeManifest || {},
-                                    semanticAdapter,
-                                    existingPrisma // ✅ FIX: Always pass PrismaClient to reuse it
-                                );
-
-                                log.debug('Context extended with memory successfully', {
-                                    parentTaskId,
-                                    agentName,
-                                    hasMemory: !!(ctx as Record<string, unknown>).memory
-                                });
-                            } catch (memoryError) {
-                                log.error('Failed to extend context with memory in handleChildCompleted', {
-                                    error: memoryError instanceof Error ? memoryError.message : String(memoryError),
-                                    stack: memoryError instanceof Error ? memoryError.stack : undefined,
-                                    parentTaskId,
-                                    agentName
-                                });
-                                // Continue without memory extension - ctx.memory will be undefined but loop should still work
-                            }
-                        } else {
-                            log.debug('Context already has memory setup, skipping extendContextWithMemory', {
-                                parentTaskId,
-                                agentName,
-                                hasMemory: !!(ctx as Record<string, unknown>).memory
-                            });
-                        }
-
-                        // FINAL VERSION COORDINATION: Load the absolute latest version right before execution
-                        // ✅ PERF FIX: Host snapshot load BEFORE attachWorkingMemory to prevent double-loading (OOM fix)
-                        const absoluteLatestSnap = await this.sessionManager!.load(tenantId, parentTaskId);
-                        (ctx as any).__coordinatedVersion = absoluteLatestSnap?.wmVersion ?? BigInt(0);
-
-                        // ✅ FIX: Use the ABSOLUTE LATEST snapshot for MentalState loading
-                        // This ensures we have the most recent MentalState including any updates
-                        const latestBase = (absoluteLatestSnap?.snapshot as Record<string, unknown>) || {};
-                        let M: MentalState = (latestBase as any).M as MentalState || initialM(ctx);
-                        const resumedA2AParent = readA2AParentLink(
-                            (latestBase as { meta?: { a2aParent?: unknown } }).meta?.a2aParent
-                        );
-                        if (resumedA2AParent) {
-                            (ctx as A2AChildContext).__a2aParent = resumedA2AParent;
-                        }
-
-                        // Hydrate artifacts immediately
-                        M = (ArtifactHydrationService.hydrateMentalStateArtifacts(
-                            M,
-                            this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma,
-                            tenantId,
-                            'handleChildCompleted'
-                        ) as MentalState) || M;
-
-                        // Attach working memory using the ALREADY LOADED MentalState
-                        // This also sets up orchestration APIs (sendTaskToAgent, requestInput, etc.)
-                        await this.attachWorkingMemory(ctx, tenantId, parentTaskId, agentName || 'default', M);
-
-                        // Load MentalState from latest snapshot
-                        await this.attachAndRestoreLLM(ctx, agentName, M);
-
-                        // ✅ FIX: Verify snapshot agentId to prevent cross-agent contamination
-                        const snapshotAgentId = (latestBase as any)?.meta?.agentId || (finalSnap as any)?.agentId;
-                        if (snapshotAgentId && agentName && snapshotAgentId !== agentName && snapshotAgentId !== 'default') {
-                            log.warn('CRITICAL: Resume loaded snapshot with mismatched Agent ID', {
-                                expected: agentName,
-                                actual: snapshotAgentId,
-                                parentTaskId
-                            });
-                            // In production, we might want to abort here, but for now we log heavily
-                        }
-
-                        const recordedTurn = Number((latestBase as any)?.meta?.turn) || 0;
-
-                        // Log detailed state for debugging the "reset to turn 1" issue
-                        log.debug('🔍 RESUME: Determining parent turn', {
-                            parentTaskId,
-                            metaTurn: (latestBase as any)?.meta?.turn,
-                            recordedTurn,
-                            nextTurn: recordedTurn + 1,
-                            token,
-                            snapshotAgentId,
-                            snapshotKeys: Object.keys(latestBase),
-                            wmVersion: finalSnap?.wmVersion?.toString()
-                        });
-
-                        const startTurnTotal2 = recordedTurn;
-                        let envInbox = InboxManager.normalizeInbox((latestBase as any)?.inbox);
-                        const envPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
-                        envInbox = await prepareChildResultsInInboxForPersistence(
-                            envInbox,
-                            envPrisma ? new AgentResultCache(envPrisma) : undefined,
-                            tenantId
-                        );
-                        envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
-                            envInbox,
-                            envPrisma,
-                            tenantId,
-                            'handleChildCompleted'
-                        );
-                        log.debug('Child resume before helper', {
-                            sessionId: parentTaskId,
-                            currentLength: envInbox.current.length,
-                            allLength: envInbox.all.length,
-                            currentKinds: envInbox.current.map(o => o.kind),
-                            allKinds: envInbox.all.map(o => o.kind),
-                        });
-
-                        // ✅ FIX: Always ensure the observation is in the inbox before resuming
-                        // This is critical for synchronous completions where the observation must be available immediately
-                        const observationPredicate = (obs: EngineObservation) =>
-                            obs?.kind === 'child.completed' &&
-                            typeof obs === 'object' &&
-                            obs !== null &&
-                            (obs as any)?.payload &&
-                            (obs as any).payload.token === token;
-                        envInbox = InboxManager.addObservationToInboxIfMissing(envInbox, childObservation, observationPredicate);
-
-                        // ✅ FIX: Ensure observation is in current inbox - critical for preventing infinite loops
-                        // If current is empty but observation exists in all, move it to current
-                        if (envInbox.current.length === 0) {
-                            const obsInAll = envInbox.all.find(observationPredicate);
-                            if (obsInAll) {
-                                envInbox.current = [obsInAll];
-                                log.debug('Fixed: Moved observation from all to current inbox', { token });
-                            } else {
-                                // Last resort: add it directly
-                                envInbox.current = [childObservation];
-                                if (!envInbox.all.some(observationPredicate)) {
-                                    envInbox.all.push(childObservation);
-                                }
-                                log.warn('CRITICAL: Had to add observation directly - this indicates a bug!', { token });
-                            }
-                        }
-
-                        log.debug('Child resume after helper', {
-                            sessionId: parentTaskId,
-                            currentLength: envInbox.current.length,
-                            allLength: envInbox.all.length,
-                            currentKinds: envInbox.current.map(o => o.kind),
-                            allKinds: envInbox.all.map(o => o.kind),
-                        });
-
-                        // ✅ FIX: ONLY resume if parent has explicitly saved await_child state for THIS token
-                        //     OR we detected a pending entry before awaiting metadata could be persisted.
-                        const awaiting = (latestBase as any)?.meta?.awaiting;
-                        const awaitingKind = (awaiting as any)?.kind;
-                        const awaitingToken = (awaiting as any)?.token;
-                        const hasAwaitingMetadata = Boolean(awaitingKind || awaitingToken);
-                        const resumeDueToMetadata = awaitingKind === 'await_child' && awaitingToken === token;
-                        const resumeDueToPendingOnly = !hasAwaitingMetadata && hadPendingEntry;
-                        const resumeReasonText = resumeDueToMetadata
-                            ? 'awaiting metadata matched this child'
-                            : resumeDueToPendingOnly
-                                ? 'pending entry observed before awaiting metadata persisted'
-                                : undefined;
-                        shouldResumeParent = resumeDueToMetadata || resumeDueToPendingOnly;
-                        resumeReason = resumeReasonText;
-
-                        if (!shouldResumeParent) {
-                            log.debug('handleChildCompleted: Not resuming parent - not explicitly awaiting this child', {
-                                parentTaskId,
-                                childToken: token,
-                                awaiting: awaiting ? { kind: awaitingKind, token: awaitingToken } : 'undefined',
-                                reason: awaiting ? 'awaiting different token' : 'awaiting metadata missing'
-                            });
-                            // The observation is already staged in the inbox
-                            // The parent will pick it up when it finishes its current turn
-                            detach();
-                            return;
-                        }
-
-                        log.debug('handleChildCompleted: Resuming parent - explicitly awaiting this child', {
-                            parentTaskId,
-                            childToken: token,
-                            recordedTurn,
-                            nextTurn: recordedTurn + 1,
-                            reason: resumeReasonText
-                        });
-
-                        const env: EnvironmentState = {
-                            time: new Date().toISOString(),
-                            sessionId: parentTaskId,
-                            turn: recordedTurn, // Bug 1 Fix: Let loopRunner increment
-                            budget: { maxTurns: Infinity, latencyMs: Infinity },
-                            pending: {
-                                inputs: ((latestBase as any)?.pending?.inputs) || {},
-                                children: ((latestBase as any)?.pending?.children) || {},
-                                tools: ((latestBase as any)?.pending?.tools) || {},
-                                groups: ((latestBase as any)?.pending?.groups) || {},
-                                controlVars: ((latestBase as any)?.pending?.controlVars) || {},
-                                manifestConsents: ((latestBase as any)?.pending?.manifestConsents) || {}
-                            },
-                            inbox: envInbox,
-                            lastExec: (latestBase as any)?.meta?.lastExec || undefined,
-                            externalEvents: undefined
-                        };
-
-                        const overrides = (plugin as { loop?: { modules?: Record<string, unknown> } })?.loop?.modules || {};
-
-                        // Restore manifest provenance from parent snapshot
-                        const latestMeta = (latestBase as Record<string, unknown>)?.meta as { manifestProvenance?: ManifestProvenance } | undefined;
-                        if (latestMeta?.manifestProvenance) {
-                            (ctx as InternalTaskContext).__manifestProvenance = latestMeta.manifestProvenance;
-                        }
-
-                        let loopOpts: import('./TaskExecutor.js').LoopOpts = {};
-                        try {
-                            // Restore budgets from snapshot first, then fallback to manifest
-                            const persistedBudgets = readLoopBudgetsFromSnapshotMeta(
-                                (latestBase as Record<string, unknown>)?.meta
-                            );
-                            const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
-                            const hitl = plugin?.resolved.runtimeManifest.hitl;
-
-                            if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                                loopOpts = persistedBudgets;
-                            }
-
-                            // ✅ FIX: Force reload budgets from manifest if missing or Infinity (regression fix)
-                            if ((!loopOpts.maxTurns || loopOpts.maxTurns === Infinity) && manifestBudgets && typeof manifestBudgets === 'object') {
-                                loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
-                                log.debug('Resume restored budgets from manifest', loopOpts);
-                            } else if (!loopOpts.maxTurns) {
-                                // Bug 2 Fix: Use default if manifest/snapshot missing
-                                loopOpts = { maxTurns: 50 };
-                            }
-
-                            if (typeof loopOpts.maxTurns === 'number') {
-                                env.budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
-                            }
-                            if (hitl) loopOpts.hitl = hitl;
-                        } catch (err) {
-                            try { (ctx as { logger?: { warn?: (msg: string, o?: unknown) => void } }).logger?.warn?.('Failed to restore budgets in handleChildCompleted', { error: err }); } catch { }
-                        }
-                        loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
-                        try {
-                            // Child resume still uses executeTurn directly — see
-                            // apps/docs/orchestrator-harness/specs/child-completion-routing.md
-                            const { taskStatus } = await TaskExecutor.executeTurn({
-                                ctx, M, env, overrides, loopOpts,
-                                sessionManager: this.sessionManager,
-                                tenantId, sessionId: parentTaskId, agentId: agentName || 'default',
-                                isStreaming: false,
-                                getSessionStorePrisma: () => this.getSessionStorePrisma(),
-                                eventBus: this.eventBus,
-                                throwOnSaveFailure: true // Rethrow CAS/save errors to trigger retry loop
-                            });
-                            await this.notifyA2AParentIfTerminal(
-                                ctx,
-                                {
-                                    id: parentTaskId,
-                                    input: {},
-                                    status: taskStatus,
-                                } as TaskEntity,
-                                agentName || undefined
-                            );
-                            const channel = taskChannel(parentTaskId);
-                            try {
-                                void this.eventBus.publish(
-                                    createBusEvent({
-                                        channel,
-                                        partitionKey: parentTaskId,
-                                        cloud: {
-                                            id: uuidv7(),
-                                            type: 'task.status',
-                                            source: `/tasks/${parentTaskId}`,
-                                            time: new Date().toISOString(),
-                                            datacontenttype: 'application/json',
-                                            data: {
-                                                id: parentTaskId,
-                                                status: taskStatus,
-                                                final:
-                                                    taskStatus.state === 'completed' ||
-                                                    taskStatus.state === 'failed',
-                                            },
-                                        },
-                                    })
-                                );
-                            } catch {
-                                /* noop */
-                            }
-
-                            resumeSuccess = true;
-                        } catch (e) {
-                            if (isSnapshotReconciliationError(e) || isWorkingMemoryVersionConflict(e)) throw e;
-                            // Log but convert other save errors to success (we don't retry non-CAS errors here usually)
-                            try { (ctx as any).logger?.warn?.('Failed to save in handleChildCompleted', { error: e }); } catch { }
-                            resumeSuccess = true; // Exit loop on non-CAS error
-                        }
-                    } catch (e) {
-                        throw e; // Re-throw other errors
-                    }
-                }
-                // --- END RETRY LOOP ---
-            } catch (resumeError) {
-                if (isSnapshotReconciliationError(resumeError)) throw resumeError;
-                // If resume fails (e.g., database connection closed), log the error
-                // This is expected when deferred notifications run after parent task completes
-                log.warn('Failed to resume parent after child completion', {
-                    error: (resumeError as Error).message,
-                    parentTaskId,
-                    childToken: token,
-                    note: 'This may occur if the parent task completed before the deferred notification ran'
-                });
-            }
-
-            // Update any pending group aggregations that include this child token
-            const groupUpdate = await reconcileSnapshotMutation({
-                session: this.sessionManager!,
+            const completedResume = {
                 tenantId,
-                sessionId: parentTaskId,
-                operation: 'child.group.completed',
-                mutate: ({ snapshot }) => {
-                    const groups = getPendingGroups(snapshot) || {};
-                    const completed: Array<{ groupToken: string; handler?: string; results: unknown }> = [];
-                    let mutated = false;
-                    for (const [gToken, gEntry] of Object.entries(groups || {})) {
-                    const g = gEntry as any;
-                    if (g.childTokens?.includes(token) && g.results?.[token] === undefined) {
-                        g.results = g.results || {} as any;
-                        (g.results as any)[token] = { ok: true, value: durableChildResult };
-                        mutated = true;
-                        const allDone = g.childTokens.every((ct: string) => (g.results as any)[ct] !== undefined);
-                        if (allDone) {
-                            completed.push({
-                                groupToken: gToken,
-                                handler: g.handlers?.allCompleted,
-                                results: g.results,
-                            });
-                            delete groups[gToken];
-                        }
-                    }
-                    }
-                    return mutated
-                        ? {
-                              kind: 'write',
-                              snapshot: setPendingGroups(snapshot, groups),
-                              value: completed,
-                          }
-                        : { kind: 'noop', value: completed };
+                taskId: parentTaskId,
+                agentId: parentAgentId,
+                token,
+                idempotencyKey: `${parentTaskId}:child:${token}`,
+                event: {
+                    kind: 'child' as const,
+                    token,
+                    childTaskId: childCompletedPayload.childTaskId,
+                    outcome: 'completed' as const,
+                    output: durableChildResult,
+                    completedAt: completionReceivedAt,
+                    terminalClaimed: true,
                 },
-            });
-            if (groupUpdate.status === 'committed') {
-                for (const completed of groupUpdate.value) {
-                    await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_completed', {
-                        groupToken: completed.groupToken,
-                    });
-                    if (completed.handler && this.handlerInvoker) {
-                        await this.handlerInvoker.invoke({
-                            tenantId,
-                            taskId: parentTaskId,
-                            handlerName: completed.handler,
-                            input: completed.results,
-                        });
-                    }
-                }
+            };
+            if (isSyncRuntimeDriver(this.runtimeDriver)) {
+                await this.runtimeDriver.enqueueResumeSync(completedResume);
+            } else {
+                await this.runtimeDriver.enqueueResume(completedResume);
             }
 
-        } finally {
-            detach();
-        }
     }
 
     /**
@@ -4881,7 +4465,7 @@ export class TaskEngine {
         if (!snap) return;
         const base = (snap.snapshot as Record<string, unknown>) || {};
         const tasks = getPendingTasks(base);
-        const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
+        const token = resolveChildToken(base, tasks, childToken, childTaskId);
         if (!token) return;
         const entry = tasks[token] as any;
         const alreadyDelivered = !!entry?.deliveredInput;
@@ -5024,13 +4608,13 @@ export class TaskEngine {
     /**
      * Route child failure to parent's durable handler and update group aggregations.
      */
-    async handleChildFailed(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; error: unknown }): Promise<void> {
-        const { tenantId, parentTaskId, childToken, childTaskId, error } = params;
+    async handleChildFailed(params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; error: unknown; childTerminalIdentity?: ChildTerminalIdentity }): Promise<void> {
+        const { tenantId, parentTaskId, childToken, childTaskId, error, childTerminalIdentity } = params;
         const snap = await this.sessionManager?.load(tenantId, parentTaskId);
         if (!snap) return;
         const base = (snap.snapshot as Record<string, unknown>) || {};
         const tasks = getPendingTasks(base);
-        const token = childToken || Object.keys(tasks).find(t => (tasks[t] as any)?.childTaskId === childTaskId);
+        const token = resolveChildToken(base, tasks, childToken, childTaskId);
         if (!token) return;
         const entry = tasks[token];
         const handlerName = entry?.handlers?.failed;
@@ -5050,6 +4634,8 @@ export class TaskEngine {
             session: this.sessionManager!,
             tenantId,
             parentTaskId,
+            deliveryMode: 'async_wake',
+            runtimeSurface: 'in_process',
             request: {
                 kind: 'failed',
                 token,
@@ -5057,9 +4643,11 @@ export class TaskEngine {
                 childTaskId: childTaskId ?? entry?.childTaskId ?? token,
                 agentId: entry?.agentId ?? entry?.target,
                 error: rawError,
+                ...(childTerminalIdentity !== undefined ? { terminalIdentity: childTerminalIdentity } : {}),
             },
         });
-        if (terminalClaim.resumeEligible !== true) return;
+        if (terminalClaim.publicationDisposition !== 'new_delivery' &&
+            terminalClaim.publicationDisposition !== 'matching_replay') return;
         const terminalError = terminalClaim.terminal?.error ?? rawError;
         if (terminalError.code === 'CHILD_TIMEOUT') {
             const timedOutChildTaskId = terminalClaim.terminal?.childTaskId ?? childTaskId ?? entry?.childTaskId;
@@ -5087,61 +4675,24 @@ export class TaskEngine {
                 terminalClaimed: true,
             },
         };
+        await this.runtimeDriver.cancelTimer?.({ tenantId, taskId: parentTaskId, token });
         if (isSyncRuntimeDriver(this.runtimeDriver)) {
             await this.runtimeDriver.enqueueResumeSync(resume);
         } else {
             await this.runtimeDriver.enqueueResume(resume);
         }
-        await this.runtimeDriver.cancelTimer?.({ tenantId, taskId: parentTaskId, token });
         if (terminalClaim.disposition !== 'committed') return;
         if (handlerName && this.handlerInvoker) {
             await this.handlerInvoker.invoke({ tenantId, taskId: parentTaskId, handlerName, input: error });
         }
-
-        // Update group aggregations
-        const groupUpdate = await reconcileSnapshotMutation({
-            session: this.sessionManager!,
-            tenantId,
-            sessionId: parentTaskId,
-            operation: 'child.group.failed',
-            mutate: ({ snapshot }) => {
-                const groups = getPendingGroups(snapshot);
-                const failed: Array<{ groupToken: string; handler: string; results: unknown }> = [];
-                let mutated = false;
-                for (const [gToken, gEntry] of Object.entries(groups)) {
-                    const g = gEntry as any;
-                    if (!g.childTokens?.includes(token) || g.results?.[token] !== undefined) continue;
-                    g.results = g.results || {} as any;
-                    (g.results as any)[token] = {
-                        ok: false,
-                        error: error instanceof Error ? error.message : String(error),
-                    };
-                    mutated = true;
-                    if (g.handlers?.anyFailed) {
-                        failed.push({ groupToken: gToken, handler: g.handlers.anyFailed, results: g.results });
-                        delete groups[gToken];
-                    }
-                }
-                return mutated
-                    ? {
-                          kind: 'write',
-                          snapshot: setPendingGroups(snapshot, groups),
-                          value: failed,
-                      }
-                    : { kind: 'noop', value: failed };
-            },
-        });
-        if (groupUpdate.status === 'committed') {
-            for (const failed of groupUpdate.value) {
-                await this.sessionManager?.appendEvent(tenantId, parentTaskId, 'task.group_failed', {
-                    groupToken: failed.groupToken,
-                });
-                if (this.handlerInvoker) {
+        if (this.handlerInvoker) {
+            for (const intent of terminalClaim.groupIntents ?? []) {
+                if (intent.handler !== undefined) {
                     await this.handlerInvoker.invoke({
                         tenantId,
                         taskId: parentTaskId,
-                        handlerName: failed.handler,
-                        input: failed.results,
+                        handlerName: intent.handler,
+                        input: intent.results,
                     });
                 }
             }
@@ -6032,7 +5583,6 @@ export class TaskEngine {
                 backgroundTaskPromises: this.backgroundTaskPromises,
                 trackBackgroundTask: (promise, metadata) => this.trackBackgroundTask(promise, metadata),
                 runOwnedEffect: (factory, metadata) => this.runOwnedEffect(factory, metadata),
-                handleChildCompleted: (p) => this.handleChildCompleted(p),
                 handleToolCompleted: (p) => this.handleToolCompleted(p),
                 conversationService: this.conversationService,
                 enqueueChildStart: (p) => this.runtimeDriver.enqueueStart(p),

@@ -33,7 +33,6 @@ describe('TaskEngine sync completion', () => {
     const buildEngine = async (sendTaskToAgent?: (params: any) => Promise<any>) => {
         jest.resetModules();
         process.env.DISABLE_OUTBOX_PUBLISHER = 'true';
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const sendMock = jest.fn(sendTaskToAgent ?? (async () => undefined));
         const findMock = jest.fn(async () => ({
             manifest: { name: 'child-agent' },
@@ -166,7 +165,7 @@ describe('TaskEngine sync completion', () => {
         (ctx as any).__activeLoopInbox = mockInbox;
         (ctx as any).__activeLoopEnv = { turn: 5 };
 
-        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: false }) as any;
+        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: true }) as any;
 
         expect(result.token).toBeDefined();
 
@@ -216,7 +215,7 @@ describe('TaskEngine sync completion', () => {
         (ctx as any).__activeLoopInbox = mockInbox;
         (ctx as any).__activeLoopEnv = { turn: 5 };
 
-        await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: false });
+        await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: true });
 
         const serialized = JSON.stringify(mockInbox);
         expect(serialized).not.toContain(rawHtml);

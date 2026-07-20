@@ -124,6 +124,16 @@ const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> =>
         }),
     ]);
 
+const waitFor = async <T>(read: () => Promise<T> | T, accept: (value: T) => boolean, ms = 2_000): Promise<T> => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+        const value = await read();
+        if (accept(value)) return value;
+        if (Date.now() >= deadline) throw new Error(`Timed out waiting for condition after ${ms}ms`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+};
+
 const createAgentCard = (name: string) => ({
     name,
     version: '1.0.0',
@@ -410,11 +420,9 @@ const createAwaitingParentPlugin = (
 describe('A2A async child lifecycle', () => {
     afterEach(() => {
         EngineLocator.setEngine(undefined as never);
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
     });
 
     it('does not inject child.completed when the child only suspended on an async tool', async () => {
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
         const tenantId = 't-a2a-async-child-repro';
         const parentAgentId = `parent-repro-${Date.now()}`;
         const childAgentId = `child-repro-${Date.now()}`;
@@ -465,7 +473,10 @@ describe('A2A async child lifecycle', () => {
             throw new Error('Expected child task id on returned task handle');
         }
 
-        const childSnap = await engineAccess.sessionManager.load(tenantId, childTaskId);
+        const childSnap = await waitFor(
+            () => engineAccess.sessionManager.load(tenantId, childTaskId),
+            (value) => Object.keys((value?.snapshot as SnapshotWithPending | undefined)?.pending?.tools ?? {}).length > 0
+        );
         const childSnapshot = childSnap?.snapshot as SnapshotWithPending | undefined;
         const [toolToken] = Object.keys(childSnapshot?.pending?.tools ?? {});
         expect(typeof toolToken).toBe('string');
@@ -480,7 +491,12 @@ describe('A2A async child lifecycle', () => {
             result: { status: 'ok', html: '<html>ok</html>' },
         });
 
-        const parentSnap = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        const parentSnap = await waitFor(
+            () => engineAccess.sessionManager.load(tenantId, parentTaskId),
+            (value) => ((value?.snapshot as any)?.inbox?.all ?? []).some(
+                (entry: Observation) => entry.kind === 'child.completed'
+            )
+        );
         const parentSnapshot = parentSnap?.snapshot as { inbox?: { all?: Observation[] } } | undefined;
         const parentCompletions = (parentSnapshot?.inbox?.all ?? []).filter(
             (entry) => entry.kind === 'child.completed'
@@ -589,7 +605,7 @@ describe('A2A async child lifecycle', () => {
         expect(terminal[0]?.kind).toBe('child.failed');
     });
 
-    it('stages child.failed before returning when initial async dispatch reaches its deadline', async () => {
+    it('delivers child.failed asynchronously when the durable child deadline expires', async () => {
         const tenantId = 't-a2a-async-dispatch-timeout';
         const parentAgentId = `parent-dispatch-timeout-${Date.now()}`;
         const childAgentId = `child-dispatch-timeout-${Date.now()}`;
@@ -627,20 +643,19 @@ describe('A2A async child lifecycle', () => {
         );
         if (!isSendTaskDispatch(dispatch)) throw new Error('Expected child dispatch');
 
-        expect(activeInbox.current).toEqual([
-            expect.objectContaining({
-                kind: 'child.failed',
-                payload: expect.objectContaining({
-                    token: dispatch.token,
-                    error: expect.objectContaining({ code: 'CHILD_TIMEOUT' }),
-                }),
-            }),
-        ]);
-        expect((activeInbox.current[0]?.payload as any)?.error).toMatchObject({
-            code: 'CHILD_TIMEOUT',
-            timeoutMs: 20,
-        });
-        const parent = await engineAccess.sessionManager.load(tenantId, parentTaskId);
+        expect(activeInbox.current).toEqual([]);
+        const parent = await waitFor(
+            () => engineAccess.sessionManager.load(tenantId, parentTaskId),
+            (value) => ((value?.snapshot as any)?.inbox?.all ?? []).some(
+                (entry: Observation) => entry.kind === 'child.failed' &&
+                    (entry.payload as any)?.token === dispatch.token
+            )
+        );
+        const timeoutObservation = ((parent?.snapshot as any)?.inbox?.all ?? []).find(
+            (entry: Observation) => entry.kind === 'child.failed' &&
+                (entry.payload as any)?.token === dispatch.token
+        );
+        expect((timeoutObservation?.payload as any)?.error).toMatchObject({ code: 'CHILD_TIMEOUT', timeoutMs: 20 });
         expect((parent?.snapshot as any)?.pending?.tasks?.[dispatch.token]).toBeUndefined();
 
         await new Promise((resolve) => setTimeout(resolve, 120));
@@ -743,14 +758,17 @@ describe('A2A async child lifecycle', () => {
         if (!snapshots) {
             throw new Error('Expected in-memory session snapshots to be available in test');
         }
-        const childEntry = [...snapshots.entries()].find(([key, value]) => {
-            const snapshot = value.snapshot as SnapshotWithPending | undefined;
-            return (
-                key.startsWith(`${tenantId}:`) &&
-                value.agentId === childAgentId &&
-                Object.keys(snapshot?.pending?.tools ?? {}).length > 0
-            );
-        });
+        const childEntry = await waitFor(
+            () => [...snapshots.entries()].find(([key, value]) => {
+                const snapshot = value.snapshot as SnapshotWithPending | undefined;
+                return (
+                    key.startsWith(`${tenantId}:`) &&
+                    value.agentId === childAgentId &&
+                    Object.keys(snapshot?.pending?.tools ?? {}).length > 0
+                );
+            }),
+            (value) => value !== undefined
+        );
         expect(childEntry).toBeDefined();
         if (!childEntry) {
             throw new Error('Expected child session snapshot');

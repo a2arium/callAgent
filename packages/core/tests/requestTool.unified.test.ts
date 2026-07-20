@@ -89,7 +89,6 @@ describe('ApiBinder.requestTool unified API', () => {
             });
             return { newVersion: nextVersion };
         });
-        process.env.CALLAGENT_DRIVER_SURFACES = 'start,resume';
         const enqueueChildStart = jest.fn().mockResolvedValue(undefined);
         const localA2ASpy = jest
             .spyOn(globalA2AService, 'sendTaskToAgent')
@@ -189,7 +188,6 @@ describe('ApiBinder.requestTool unified API', () => {
                 })
             }));
         } finally {
-            delete process.env.CALLAGENT_DRIVER_SURFACES;
             localA2ASpy.mockRestore();
         }
     });

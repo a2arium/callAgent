@@ -34,17 +34,15 @@ const createAsyncOnlyDriver = (): RuntimeDriver => ({
 describe('TaskEngine runtime driver routing', () => {
     beforeEach(() => {
         process.env.DISABLE_OUTBOX_PUBLISHER = 'true';
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
         jest.spyOn(PluginManager, 'findAgent').mockReturnValue(loopAgentPlugin as never);
     });
 
     afterEach(() => {
         delete process.env.DISABLE_OUTBOX_PUBLISHER;
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
         jest.restoreAllMocks();
     });
 
-    it('falls back to turnRunner when driver lacks sync extensions', async () => {
+    it('never falls through to TurnRunner when a runtime driver lacks sync extensions', async () => {
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn').mockResolvedValue({
             M: initialM({ task: { id: 't-fallback', input: {} } } as TaskContext),
             outcome: { kind: 'complete', result: {} },
@@ -76,8 +74,9 @@ describe('TaskEngine runtime driver routing', () => {
             },
         });
 
-        expect(asyncOnlyDriver.enqueueStart).not.toHaveBeenCalled();
-        expect(runTurnSpy).toHaveBeenCalledTimes(1);
+        expect(asyncOnlyDriver.enqueueStart).toHaveBeenCalledTimes(1);
+        expect(runTurnSpy).not.toHaveBeenCalled();
+        expect(executeTurnSpy).not.toHaveBeenCalled();
         executeTurnSpy.mockRestore();
         runTurnSpy.mockRestore();
     });
@@ -202,8 +201,7 @@ describe('TaskEngine runtime driver routing', () => {
         consoleSpy.mockRestore();
     });
 
-    it('persists task.failed when async start scheduling fails before a turn runs', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'start';
+    it('propagates async start scheduling failure without synthesizing an unfenced terminal', async () => {
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
         const runtimeDriver = createAsyncOnlyDriver();
         jest.mocked(runtimeDriver.enqueueStart).mockRejectedValue(new Error('provider enqueue failed'));
@@ -213,7 +211,7 @@ describe('TaskEngine runtime driver routing', () => {
             runtimeDriver,
         });
 
-        const result = await engine.startTask({
+        await expect(engine.startTask({
             tenantId: 't',
             agentId: 'driver-test-agent',
             isStreaming: false,
@@ -222,9 +220,8 @@ describe('TaskEngine runtime driver routing', () => {
                 input: { x: 1 },
                 status: { state: 'submitted', timestamp: new Date().toISOString() },
             },
-        });
+        })).rejects.toThrow('provider enqueue failed');
 
-        expect(result.status?.state).toBe('failed');
         expect(runtimeDriver.enqueueStart).toHaveBeenCalledTimes(1);
         expect(executeTurnSpy).not.toHaveBeenCalled();
         const events = await store.listEventsSince({
@@ -232,14 +229,8 @@ describe('TaskEngine runtime driver routing', () => {
             sessionId: 't-start-fail',
             sinceSeq: -1,
         });
-        expect(events.map((event) => event.type)).toEqual(expect.arrayContaining([
-            'task.started',
-            'task.failed',
-        ]));
-        expect(events.find((event) => event.type === 'task.failed')?.payload).toEqual(expect.objectContaining({
-            taskId: 't-start-fail',
-            error: 'provider enqueue failed',
-        }));
+        expect(events.map((event) => event.type)).toContain('task.started');
+        expect(events.map((event) => event.type)).not.toContain('task.failed');
 
         executeTurnSpy.mockRestore();
     });
@@ -303,8 +294,7 @@ describe('TaskEngine runtime driver routing', () => {
         completionSpy.mockRestore();
     });
 
-    it('routes child completion through the runtime driver when resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
+    it('routes child completion through the configured runtime driver', async () => {
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
         const runtimeDriver = createAsyncOnlyDriver();
         const store = new InMemorySessionManager();
@@ -372,7 +362,6 @@ describe('TaskEngine runtime driver routing', () => {
     });
 
     it('routes input resume through the runtime driver when resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
         const runtimeDriver = createAsyncOnlyDriver();
         const store = new InMemorySessionManager();
@@ -424,7 +413,6 @@ describe('TaskEngine runtime driver routing', () => {
     });
 
     it('routes tool completion through the runtime driver when resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
         const runtimeDriver = createAsyncOnlyDriver();
         const store = new InMemorySessionManager();
@@ -476,7 +464,6 @@ describe('TaskEngine runtime driver routing', () => {
     });
 
     it('routes external event wake through the runtime driver when resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
         const runtimeDriver = createAsyncOnlyDriver();
         const store = new InMemorySessionManager();
@@ -527,7 +514,6 @@ describe('TaskEngine runtime driver routing', () => {
     });
 
     it('routes conversation activation through the runtime driver when resume surface is enabled', async () => {
-        process.env.CALLAGENT_DRIVER_SURFACES = 'resume';
         const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn');
         const runtimeDriver = createAsyncOnlyDriver();
         const store = new InMemorySessionManager();

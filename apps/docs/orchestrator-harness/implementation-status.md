@@ -112,8 +112,8 @@ first POC candidate.
 - `specs/deletion-inventory.md` — line-referenced marked-for-deletion list.
 - `specs/driver-sync-api.md` — sync vs async driver API (Phase 0 shim vs Hatchet).
 - `specs/composition-roots-scope.md` — which entry points use shared bootstrap.
-- `specs/child-completion-routing.md` — why `handleChildCompleted` stays on
-  `executeTurn` until Phase 2.
+- `specs/child-completion-routing.md` — canonical inline versus asynchronous
+  child terminal delivery and fenced parent-resume routing.
 - `specs/operator-viewer.md` — operator viewer data sources, event taxonomy,
   endpoints, SPA contract, and acceptance.
 - `specs/production-readiness-gates.md` — Phase 5 production-readiness contract:

@@ -1,36 +1,38 @@
-# Child Completion Routing (Deferred)
+# Child Completion Routing
 
 ## Status
 
-`handleChildCompleted` still calls `TaskExecutor.executeTurn` directly (~2778 in
-`taskEngine.ts`). It is **not** routed through `runtimeDriver.enqueueResumeSync`.
+Child completion is fully routed through the durable task-turn coordinator.
+`TaskEngine` never calls `TaskExecutor.executeTurn` or `TurnRunner.runTurn`.
+`TurnRunnerSegmentExecutor` is the sole loop-mode entry to agent code.
 
-## Why deferred (Phase 0)
+## Delivery modes
 
-Child resume is the most complex scheduling path in `TaskEngine`:
+Every child terminal claim declares one internal delivery mode:
 
-1. **Custom `EnvironmentState`** — builds a pre-hydrated `env.inbox` with
-   `child.completed` and passes it straight to `executeTurn`, bypassing
-   `TurnRunner` snapshot loading.
-2. **CAS retry loops** — snapshot save + parent resume retry on `CAS_MISMATCH`
-   (~2320–2835).
-3. **`shouldResumeParent` gating** — resumes only when `meta.awaiting` matches
-   the child token or a pending entry was observed before metadata persisted.
-4. **Active-loop interaction** — overlaps with `LoopRegistry` injection paths
-   documented in `deletion-inventory.md` Category C/D.
+- `inline`: blocking `awaitCompletion:true` calls terminalize the token and
+  preserve one correlated observation for the currently owned loop. They do
+  not advance the requested generation, record a wake key, or create a
+  dispatch intent.
+- `async_wake`: runtime terminal callbacks terminalize the token, stage the
+  observation, advance one generation, record the processed wake key, and
+  create the dispatch intent in one snapshot CAS.
 
-Routing through `runPreparedTurnThroughDriver` without replicating this logic risks
-subtle regressions across 150+ `TaskEngine` tests.
+Completion, failure, and timeout use the same terminal coordinator. A matching
+replay may republish the deterministic runtime nudge, but it does not advance
+another generation. Competing or late outcomes cannot publish a parent wake.
 
-## Phase 2 prerequisite
+## Runtime ownership
 
-Before Hatchet child dispatch (Phase 2–3):
+The in-process runtime publishes through `onTaskTerminal`. Hatchet reloads the
+child's durable terminal record inside keyed `aplret.task-state`, claims the
+parent token with `async_wake`, and publishes `aplret.child.<token>`. Neither
+surface trusts a stale process-local task entity or segment boundary.
 
-1. Collapse child resume to: snapshot already contains `child.completed` →
-   `enqueueResumeSync` with `PreparedTurnInvocation` (trigger `resume`).
-2. Or: `TurnExecutor.runSegment` with `child` wake + durable dedupe (ADR 0005).
-3. Delete CAS/retry loops only after parity harness proves equivalent behavior.
+The runtime nudge always re-enters coordinator admission. `terminal_replay`,
+`matching_replay`, `queued`, and `superseded` are authoritative non-executing
+results and never fall through to raw turn execution.
 
-## Idempotency key (when routed)
+## Idempotency key
 
 `${parentTaskId}:child:${token}` — align with ADR 0009 per-effect keys.

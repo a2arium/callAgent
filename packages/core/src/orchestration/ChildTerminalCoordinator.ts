@@ -1,5 +1,5 @@
 import { InboxManager, type EngineObservation } from './InboxManager.js';
-import { getPendingTasks, setPendingTasks, type PendingTask, type PendingTaskTerminal } from './Handles.js';
+import { getPendingGroups, getPendingTasks, setPendingGroups, setPendingTasks, type PendingTask, type PendingTaskTerminal } from './Handles.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
 import type { ChildEnvelope } from '../types/observation.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
@@ -17,6 +17,14 @@ export type ChildTerminalError = {
     timeoutMs?: number;
 };
 
+export type ChildTerminalDeliveryMode = 'inline' | 'async_wake';
+export type ChildTerminalIdentity = {
+    claimId: string;
+    fence: string;
+    generation: string;
+    turnSeq: number;
+};
+
 export type ChildTerminalRequest =
     | {
           kind: 'completed';
@@ -26,6 +34,7 @@ export type ChildTerminalRequest =
           agentId?: string;
           result: unknown;
           executionMetadata?: ChildEnvelope['executionMetadata'];
+          terminalIdentity?: ChildTerminalIdentity;
       }
     | {
           kind: 'failed';
@@ -34,6 +43,7 @@ export type ChildTerminalRequest =
           childTaskId?: string;
           agentId?: string;
           error: ChildTerminalError;
+          terminalIdentity?: ChildTerminalIdentity;
       };
 
 export type ChildTerminalClaim = {
@@ -45,9 +55,15 @@ export type ChildTerminalClaim = {
     entry?: PendingTask;
     lateCompletion?: boolean;
     disposition?: 'committed' | 'matching_replay' | 'competing_terminal' | 'missing';
-    /** A matching replay may safely republish the deterministic runtime wake. */
-    resumeEligible?: boolean;
+    deliveryMode?: ChildTerminalDeliveryMode;
+    publicationDisposition?: 'new_delivery' | 'matching_replay' | 'inline_consumed' | 'none';
     attempts?: number;
+    groupIntents?: Array<{
+        kind: 'completed' | 'failed';
+        groupToken: string;
+        handler?: string;
+        results: Record<string, unknown>;
+    }>;
 };
 
 function timeoutError(token: string, timeoutMs: number): ChildTerminalError {
@@ -113,7 +129,7 @@ export function claimChildTerminalInSnapshot(
                 : matchingReplay
                   ? 'matching_replay'
                   : 'competing_terminal',
-            resumeEligible: matchingReplay && observation !== undefined,
+            publicationDisposition: matchingReplay && observation !== undefined ? 'matching_replay' : 'none',
         };
     }
 
@@ -132,10 +148,18 @@ export function claimChildTerminalInSnapshot(
     const terminal: PendingTaskTerminal = {
         kind,
         claimedAt,
+        deliveryKey: `${request.token}:terminal`,
         ...(childTaskId !== undefined ? { childTaskId } : {}),
         ...(agentId !== undefined ? { agentId } : {}),
         ...(error !== undefined ? { error } : {}),
     };
+    const identity = request.terminalIdentity;
+    if (identity !== undefined) {
+        terminal.claimId = identity.claimId;
+        terminal.fence = identity.fence;
+        terminal.generation = identity.generation;
+        terminal.turnSeq = identity.turnSeq;
+    }
 
     const observation: EngineObservation = {
         source: 'child',
@@ -197,6 +221,48 @@ export function claimChildTerminalInSnapshot(
         inbox: InboxManager.addObservationToInbox(inbox, observation),
     };
 
+    const groupIntents: NonNullable<ChildTerminalClaim['groupIntents']> = [];
+    const groups = getPendingGroups(next);
+    let groupsChanged = false;
+    for (const [groupToken, rawGroup] of Object.entries(groups)) {
+        if (!rawGroup.childTokens.includes(request.token) || rawGroup.results?.[request.token] !== undefined) {
+            continue;
+        }
+        const group = {
+            ...rawGroup,
+            results: {
+                ...(rawGroup.results ?? {}),
+                [request.token]: kind === 'completed' && request.kind === 'completed'
+                    ? { ok: true, value: request.result }
+                    : { ok: false, error: error?.message ?? 'Child failed.' },
+            },
+        };
+        groupsChanged = true;
+        const allDone = group.childTokens.every((childToken) => group.results[childToken] !== undefined);
+        if (kind === 'failed' && group.handlers?.anyFailed !== undefined) {
+            groupIntents.push({
+                kind: 'failed',
+                groupToken,
+                handler: group.handlers.anyFailed,
+                results: group.results,
+            });
+            delete groups[groupToken];
+        } else if (allDone) {
+            groupIntents.push({
+                kind: 'completed',
+                groupToken,
+                ...(group.handlers?.allCompleted !== undefined ? { handler: group.handlers.allCompleted } : {}),
+                results: group.results,
+            });
+            delete groups[groupToken];
+        } else {
+            groups[groupToken] = group;
+        }
+    }
+    if (groupsChanged) {
+        next = setPendingGroups(next, groups);
+    }
+
     return {
         snapshot: next,
         won: true,
@@ -206,7 +272,8 @@ export function claimChildTerminalInSnapshot(
         entry,
         lateCompletion: timedOut,
         disposition: 'committed',
-        resumeEligible: true,
+        publicationDisposition: 'new_delivery',
+        groupIntents,
     };
 }
 
@@ -242,10 +309,11 @@ export async function coordinateChildTerminal(params: {
     tenantId: string;
     parentTaskId: string;
     request: ChildTerminalRequest;
+    deliveryMode: ChildTerminalDeliveryMode;
     runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
     maxAttempts?: number;
 }): Promise<ChildTerminalClaim> {
-    const result = await reconcileSnapshotMutation({
+    const result = await reconcileSnapshotMutation<ChildTerminalClaim>({
         session: params.session,
         tenantId: params.tenantId,
         sessionId: params.parentTaskId,
@@ -253,7 +321,28 @@ export async function coordinateChildTerminal(params: {
         maxAttempts: params.maxAttempts,
         mutate: ({ snapshot, storageNow }) => {
             const claim = claimChildTerminalInSnapshot(snapshot, params.request);
-            if (!claim.won) return { kind: 'noop' as const, value: claim };
+            if (!claim.won) {
+                return {
+                    kind: 'noop' as const,
+                    value: {
+                        ...claim,
+                        deliveryMode: params.deliveryMode,
+                        publicationDisposition: claim.disposition === 'matching_replay'
+                            ? params.deliveryMode === 'async_wake'
+                                ? 'matching_replay' as const
+                                : 'inline_consumed' as const
+                            : 'none' as const,
+                    } as ChildTerminalClaim,
+                };
+            }
+            if (params.deliveryMode === 'inline') {
+                const inlineClaim: ChildTerminalClaim = {
+                    ...claim,
+                    deliveryMode: params.deliveryMode,
+                    publicationDisposition: 'inline_consumed' as const,
+                };
+                return { kind: 'write' as const, snapshot: inlineClaim.snapshot, value: inlineClaim };
+            }
             const advanced = advanceTaskTurnGenerationInSnapshot({
                 snapshot: claim.snapshot,
                 tenantId: params.tenantId,
@@ -265,11 +354,26 @@ export async function coordinateChildTerminal(params: {
                 advanced.snapshot,
                 `${params.parentTaskId}:child:${params.request.token}`
             );
-            const stagedClaim = { ...claim, snapshot: stagedSnapshot };
+            const stagedClaim: ChildTerminalClaim = {
+                ...claim,
+                snapshot: stagedSnapshot,
+                deliveryMode: params.deliveryMode,
+                publicationDisposition: 'new_delivery' as const,
+            };
             return { kind: 'write' as const, snapshot: stagedClaim.snapshot, value: stagedClaim };
         },
     });
     const claim: ChildTerminalClaim = { ...result.value, attempts: result.attempts };
+
+    defaultMetricsRegistry.increment('child.terminal_delivery_total', {
+        mode: params.deliveryMode,
+        disposition: claim.publicationDisposition ?? 'unknown',
+    });
+    if (claim.publicationDisposition === 'matching_replay' && params.deliveryMode === 'async_wake') {
+        defaultMetricsRegistry.increment('child.deterministic_nudge_republication_total', {
+            surface: params.runtimeSurface ?? 'in_process',
+        });
+    }
 
     if (result.status === 'committed') {
         const payload = childTerminalEventPayload(claim);
@@ -299,6 +403,23 @@ export async function coordinateChildTerminal(params: {
         });
         if (claim.terminal?.error?.code === 'CHILD_TIMEOUT') {
             defaultMetricsRegistry.increment('child.timeout_total', { source: params.request.kind });
+        }
+        for (const intent of claim.groupIntents ?? []) {
+            try {
+                await params.session.appendEvent(
+                    params.tenantId,
+                    params.parentTaskId,
+                    intent.kind === 'failed' ? 'task.group_failed' : 'task.group_completed',
+                    { groupToken: intent.groupToken }
+                );
+            } catch (error) {
+                log.warn('Child terminal committed with group state but group event append failed', {
+                    tenantId: params.tenantId,
+                    parentTaskId: params.parentTaskId,
+                    groupToken: intent.groupToken,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
         }
     } else if (claim.lateCompletion && params.request.kind === 'completed') {
         defaultMetricsRegistry.increment('child.late_completion_total', { source: 'terminal_coordinator' });

@@ -35,6 +35,8 @@ import {
     type TaskTurnClaim,
 } from '../orchestration/TaskTurnCoordinator.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
+import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
 
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
@@ -43,7 +45,12 @@ export type TurnRunnerSegmentExecutorDeps = {
     isStreaming?: boolean;
     dedupe?: SegmentDedupe;
     onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
-    onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
+    onTaskTerminal?: (params: {
+        tenantId: string;
+        taskId: string;
+        state: 'completed' | 'failed' | 'canceled';
+        runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+    }) => Promise<void>;
 };
 
 export class TurnRunnerSegmentExecutor implements TurnExecutor {
@@ -53,7 +60,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     private readonly isStreaming: boolean;
     private readonly dedupe: SegmentDedupe;
     private readonly onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
-    private readonly onTaskTerminal?: (params: { tenantId: string; taskId: string; state: 'completed' | 'failed' | 'canceled' }) => Promise<void>;
+    private readonly onTaskTerminal?: TurnRunnerSegmentExecutorDeps['onTaskTerminal'];
 
     constructor(deps: TurnRunnerSegmentExecutorDeps) {
         this.turnRunner = deps.turnRunner;
@@ -84,6 +91,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     agentId,
                     idempotencyKey,
                     preparedCancellation.reason,
+                    params.runtimeSurface ?? 'in_process',
                     prepared.ctx as { telemetry?: { traceId?: string } }
                 );
             }
@@ -96,6 +104,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 runtimeSurface: params.runtimeSurface,
                 wake,
             });
+            if (admission.result.staged) {
+                await this.appendAcceptedWakeEvent(tenantId, taskId, wake);
+            }
             if (admission.result.disposition !== 'acquired') {
                 return this.buildDuplicateResult(
                     tenantId,
@@ -105,17 +116,38 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                         admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay'
                 );
             }
-            const taskEntity = await this.runClaimedTurn(
-                { tenantId, taskId, agentId, idempotencyKey, claim: admission.result.claim },
-                () => this.turnRunner.runTurn(
-                    prepared.ctx,
-                    prepared.turnParams,
-                    {
-                        initialM: (admission.snapshot.M as MentalState | undefined) ?? initialM(prepared.ctx),
-                        snapshot: admission.snapshot,
-                    }
-                )
-            );
+            if ((prepared.ctx as { task?: unknown }).task === undefined) {
+                (prepared.ctx as { task?: { id: string; input: unknown } }).task = {
+                    id: taskId,
+                    input: wake.trigger === 'start' ? wake.input : {},
+                };
+            }
+            let taskEntity;
+            try {
+                taskEntity = await this.runClaimedTurn(
+                    { tenantId, taskId, agentId, idempotencyKey, claim: admission.result.claim },
+                    () => this.turnRunner.runTurn(
+                        prepared.ctx,
+                        prepared.turnParams,
+                        {
+                            initialM: (admission.snapshot.M as MentalState | undefined) ?? initialM(prepared.ctx),
+                            snapshot: admission.snapshot,
+                        }
+                    )
+                );
+            } catch (error) {
+                const disposition = await this.classifySupersededExecutionError({
+                    error,
+                    tenantId,
+                    taskId,
+                    agentId,
+                    idempotencyKey,
+                    claim: admission.result.claim,
+                });
+                if (disposition === undefined) throw error;
+                this.dedupe.record(idempotencyKey);
+                return this.buildDuplicateResult(tenantId, taskId, agentId, disposition);
+            }
             const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
                 .__turnPersistence?.disposition;
             if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
@@ -131,7 +163,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 undefined
             );
             const taskStatus = mapTaskEntityStatus(taskEntity.status?.state, boundary);
-            await this.finalizeIfTerminal(tenantId, taskId, taskStatus);
+            await this.finalizeIfTerminal(
+                tenantId,
+                taskId,
+                taskStatus,
+                params.runtimeSurface ?? 'in_process'
+            );
 
             const snapAfter = await this.sessionManager.load(tenantId, taskId);
             const telemetry = (snapAfter?.snapshot as { meta?: { telemetry?: { traceId?: string } } } | undefined)
@@ -160,7 +197,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 taskId,
                 agentId ?? snapBeforeWake?.agentId,
                 idempotencyKey,
-                cancellationBeforeWake.reason
+                cancellationBeforeWake.reason,
+                params.runtimeSurface ?? 'in_process'
             );
         }
 
@@ -173,6 +211,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             runtimeSurface: params.runtimeSurface,
             recoveryGeneration: params.recoveryGeneration,
         });
+
+        if (admission.result.staged) {
+            await this.appendAcceptedWakeEvent(tenantId, taskId, wake);
+        }
 
         const preparedWake = admission.prepared ?? describeWake(admission.snapshot, wake, agentId);
 
@@ -213,28 +255,49 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             id: taskId,
             input: wake.trigger === 'start' ? wake.input : {},
         });
+        if ((ctx as { task?: unknown }).task === undefined) {
+            (ctx as { task?: { id: string; input: unknown } }).task = {
+                id: taskId,
+                input: wake.trigger === 'start' ? wake.input : {},
+            };
+        }
         (ctx as { tenantId?: string }).tenantId = tenantId;
         (ctx as { agentId?: string }).agentId = preparedWake.agentId;
 
         const M = (admission.snapshot.M as MentalState | undefined) ?? initialM(ctx);
 
-        const taskEntity = await this.runClaimedTurn(
-            { tenantId, taskId, agentId: preparedWake.agentId, idempotencyKey, claim: admission.result.claim },
-            () => this.turnRunner.runTurn(
-                ctx,
-                {
-                    tenantId,
-                    sessionId: taskId,
-                    trigger: preparedWake.trigger,
-                    isStreaming: this.isStreaming,
-                    ...preparedWake.turnParams,
-                },
-                {
-                    initialM: M,
-                    snapshot: admission.snapshot,
-                }
-            )
-        );
+        let taskEntity;
+        try {
+            taskEntity = await this.runClaimedTurn(
+                { tenantId, taskId, agentId: preparedWake.agentId, idempotencyKey, claim: admission.result.claim },
+                () => this.turnRunner.runTurn(
+                    ctx,
+                    {
+                        tenantId,
+                        sessionId: taskId,
+                        trigger: preparedWake.trigger,
+                        isStreaming: this.isStreaming,
+                        ...preparedWake.turnParams,
+                    },
+                    {
+                        initialM: M,
+                        snapshot: admission.snapshot,
+                    }
+                )
+            );
+        } catch (error) {
+            const disposition = await this.classifySupersededExecutionError({
+                error,
+                tenantId,
+                taskId,
+                agentId: preparedWake.agentId,
+                idempotencyKey,
+                claim: admission.result.claim,
+            });
+            if (disposition === undefined) throw error;
+            this.dedupe.record(idempotencyKey);
+            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, disposition);
+        }
 
         const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
             .__turnPersistence?.disposition;
@@ -252,7 +315,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             preparedWake.inputExpiresAt
         );
         const taskStatus = mapTaskEntityStatus(taskEntity.status?.state, boundary);
-        await this.finalizeIfTerminal(tenantId, taskId, taskStatus);
+        await this.finalizeIfTerminal(
+            tenantId,
+            taskId,
+            taskStatus,
+            params.runtimeSurface ?? 'in_process'
+        );
 
         const snapAfter = await this.sessionManager.load(tenantId, taskId);
         const telemetry = (snapAfter?.snapshot as { meta?: { telemetry?: { traceId?: string } } } | undefined)
@@ -290,11 +358,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             runtimeSurface: params.runtimeSurface,
             recoveryGeneration: params.recoveryGeneration,
             allowInitialize: params.wake.trigger === 'start' || params.wake.trigger === 'conversation',
-            stageWake: params.recoveryGeneration !== undefined ? undefined : (snapshot) => {
+            stageWake: params.recoveryGeneration !== undefined ? undefined : (snapshot, storageNow) => {
                 prepared = applyWakeToSnapshot(snapshot, params.wake, {
                     tenantId: params.tenantId,
                     taskId: params.taskId,
                     agentId: params.agentId,
+                    storageNow,
                 });
                 return prepared.snapshot;
             },
@@ -352,6 +421,78 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         } finally {
             clearInterval(timer);
         }
+    }
+
+    private async appendAcceptedWakeEvent(
+        tenantId: string,
+        taskId: string,
+        wake: RunSegmentParams['wake']
+    ): Promise<void> {
+        try {
+            if (wake.trigger === 'resume' && wake.event.kind === 'input') {
+                await this.sessionManager.appendEvent(tenantId, taskId, 'task.input_provided', {
+                    token: wake.event.token,
+                });
+            } else if (wake.trigger === 'event' && wake.event.kind === 'external') {
+                await this.sessionManager.appendEvent(tenantId, taskId, 'task.external_event_registered', {
+                    token: wake.event.token,
+                    type: wake.event.type,
+                });
+            }
+        } catch {
+            // Durable wake acceptance is authoritative; event append is repairable projection work.
+        }
+    }
+
+    private async classifySupersededExecutionError(params: {
+        error: unknown;
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        idempotencyKey: string;
+        claim: TaskTurnClaim;
+    }): Promise<'superseded' | 'terminal_replay' | undefined> {
+        if (!hasSupersedingCause(params.error)) return undefined;
+
+        const proof = await reconcileSnapshotMutation<{
+            disposition?: 'superseded' | 'terminal_replay';
+        }>({
+            session: this.sessionManager,
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            agentId: params.agentId,
+            operation: 'turn.supersession.classify',
+            mutate: ({ snapshot, storageNow }) => {
+                const terminal = readDurableTaskTerminal(snapshot);
+                if (terminal !== undefined) {
+                    return { kind: 'noop', value: { disposition: 'terminal_replay' } };
+                }
+                const coordinator = readTaskTurnCoordinator(snapshot);
+                const active = coordinator.active;
+                const replaced = active === undefined ||
+                    active.claimId !== params.claim.claimId ||
+                    active.fence !== params.claim.fence ||
+                    Date.parse(storageNow) >= Date.parse(active.expiresAt);
+                return {
+                    kind: 'noop',
+                    value: replaced ? { disposition: 'superseded' } : {},
+                };
+            },
+        });
+        const disposition = proof.value.disposition;
+        if (disposition === undefined) return undefined;
+        try {
+            await this.sessionManager.appendEvent(params.tenantId, params.taskId, 'turn.superseded', {
+                requestKey: params.idempotencyKey,
+                claimId: params.claim.claimId,
+                fence: params.claim.fence,
+                reason: disposition,
+                errorCode: supersedingCauseCode(params.error),
+            });
+        } catch {
+            // Snapshot ownership is authoritative; this is a repairable diagnostic projection.
+        }
+        return disposition;
     }
 
     private async resolveBoundary(
@@ -503,6 +644,15 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             boundary,
             taskStatus: boundaryToTaskStatus(boundary),
             turnDisposition,
+            ...(terminal !== undefined
+                ? {
+                      taskEntity: {
+                          id: taskId,
+                          input: {},
+                          status: terminal.status,
+                      },
+                  }
+                : {}),
         };
     }
 
@@ -512,6 +662,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         agentId: string | undefined,
         idempotencyKey: string,
         reason?: string,
+        runtimeSurface: 'direct' | 'in_process' | 'hatchet' = 'in_process',
         ctx?: { telemetry?: { traceId?: string } }
     ): Promise<SegmentResult> {
         await this.ensureProcessedKeyRecorded(tenantId, taskId, agentId, idempotencyKey);
@@ -523,7 +674,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         const boundary = reason !== undefined
             ? { kind: 'canceled' as const, reason }
             : { kind: 'canceled' as const };
-        await this.finalizeIfTerminal(tenantId, taskId, 'canceled');
+        await this.finalizeIfTerminal(tenantId, taskId, 'canceled', runtimeSurface);
 
         return {
             tenantId,
@@ -538,13 +689,14 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     private async finalizeIfTerminal(
         tenantId: string,
         taskId: string,
-        state: SegmentResult['taskStatus']
+        state: SegmentResult['taskStatus'],
+        runtimeSurface: 'direct' | 'in_process' | 'hatchet'
     ): Promise<void> {
         if (
             this.onTaskTerminal !== undefined &&
             (state === 'completed' || state === 'failed' || state === 'canceled')
         ) {
-            await this.onTaskTerminal({ tenantId, taskId, state });
+            await this.onTaskTerminal({ tenantId, taskId, state, runtimeSurface });
         }
     }
 }
@@ -566,6 +718,32 @@ function mapTaskEntityStatus(
         return 'input-required';
     }
     return boundaryToTaskStatus(boundary);
+}
+
+function hasSupersedingCause(error: unknown): boolean {
+    const seen = new Set<object>();
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+        if (isTaskTurnSupersededError(current) || isTaskLifecycleTerminalError(current)) return true;
+        if (typeof current !== 'object') return false;
+        if (seen.has(current)) return false;
+        seen.add(current);
+        current = (current as { cause?: unknown }).cause;
+    }
+    return false;
+}
+
+function supersedingCauseCode(error: unknown): string {
+    const seen = new Set<object>();
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+        if (isTaskTurnSupersededError(current)) return 'TASK_TURN_SUPERSEDED';
+        if (isTaskLifecycleTerminalError(current)) return 'TASK_LIFECYCLE_TERMINAL';
+        if (typeof current !== 'object' || seen.has(current)) break;
+        seen.add(current);
+        current = (current as { cause?: unknown }).cause;
+    }
+    return 'TASK_TURN_SUPERSEDED';
 }
 
 function describeWake(

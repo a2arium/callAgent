@@ -673,6 +673,20 @@ describe('applyWakeToSnapshot', () => {
         expect(inbox.current[0]?.payload.type).toBe('webhook.received');
     });
 
+    it('rejects a missing external token inside the wake mutation', () => {
+        expect(() => applyWakeToSnapshot(base, {
+            trigger: 'event',
+            event: {
+                kind: 'external',
+                token: 'missing-event-token',
+                type: 'untrusted.caller.type',
+                data: { ok: true },
+            },
+        })).toThrow(expect.objectContaining({
+            code: 'EXTERNAL_EVENT_TOKEN_NOT_FOUND',
+        }));
+    });
+
     it('timer wake becomes a timer.expired observation', () => {
         const prepared = applyWakeToSnapshot(base, {
             trigger: 'timer',

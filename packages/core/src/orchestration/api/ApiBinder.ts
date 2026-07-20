@@ -5,7 +5,7 @@ import { logger } from '@a2arium/callagent-utils';
 import type { TaskContext } from '../../shared/types/index.js';
 import { ArtifactHydrationService } from '../ArtifactHydrationService.js';
 import { AgentResultCache, ArtifactImpl } from '@a2arium/callagent-memory-engine';
-import { type EngineObservation, type EngineObservationInbox } from '../InboxManager.js';
+import { InboxManager, type EngineObservation, type EngineObservationInbox } from '../InboxManager.js';
 import { applyInputProvided, getPendingInputs, setPendingInputs } from '../DurableHandlerRegistry.js';
 import { compactModuleOutput } from '../../telemetry/turnTraceHelpers.js';
 import { getPendingTools, setPendingTools } from '../ToolsRegistry.js';
@@ -91,15 +91,6 @@ function childExecutionFailure(result: unknown, state: string): { code: string; 
     };
 }
 
-function shouldScheduleChildStartThroughRuntimeDriver(): boolean {
-    const raw = process.env.CALLAGENT_DRIVER_SURFACES;
-    if (raw === undefined || raw.trim().length === 0) {
-        return false;
-    }
-    const surfaces = raw.split(',').map((value) => value.trim()).filter(Boolean);
-    return surfaces.includes('all') || surfaces.includes('start');
-}
-
 function buildA2AChildTaskId(sourceTaskId: string, targetAgentId: string): string {
     const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
     return `a2a_${sourceTaskId.slice(0, 16)}_${targetAgentId.slice(0, 16)}_${uniqueSuffix}`;
@@ -145,7 +136,6 @@ export interface ApiBinderDependencies {
             pendingKind?: 'tools' | 'tasks';
         }
     ) => Promise<T>;
-    handleChildCompleted: (params: { tenantId: string; parentTaskId: string; childToken?: string; childTaskId?: string; result: unknown; childAgentId?: string; suppressResume?: boolean }) => Promise<void>;
     handleToolCompleted?: (params: { tenantId: string; taskId: string; token: string; result: unknown }) => Promise<void>;
     conversationService: InternalConversationApi;
     eventBus?: IEventBus;
@@ -346,9 +336,7 @@ export class ApiBinder {
         const idempotencyKey =
             childTaskId ?? `a2a:${tenantId}:${sessionId}:${agentId}:${agent}:${token}`;
 
-        const useRuntimeChildStart = awaitCompletion === false &&
-            deps.enqueueChildStart !== undefined &&
-            shouldScheduleChildStartThroughRuntimeDriver();
+        const useRuntimeChildStart = awaitCompletion === false && deps.enqueueChildStart !== undefined;
         const parentSnapshotForLifecycle = await deps.sessionManager.load(tenantId, sessionId);
         const parentLifecycle = readTaskLifecycle(parentSnapshotForLifecycle?.snapshot, sessionId);
         const childRootTaskId = parentLifecycle?.rootTaskId ?? sessionId;
@@ -587,6 +575,8 @@ export class ApiBinder {
                     session: deps.sessionManager,
                     tenantId,
                     parentTaskId: sessionId,
+                    deliveryMode: 'async_wake',
+                    runtimeSurface: 'in_process',
                     request: {
                         kind: 'failed',
                         token,
@@ -606,33 +596,6 @@ export class ApiBinder {
                         taskId: claim.terminal.childTaskId ?? childTaskId,
                         reason: 'child_timeout',
                     });
-                }
-                const activeLoop = ctx as {
-                    __activeLoopInbox?: { current: EngineObservation[]; all: EngineObservation[] };
-                    __activeLoopEnv?: { pending?: { children?: Record<string, unknown> } };
-                };
-                let timeoutObservation = claim.observation;
-                if (timeoutObservation === undefined) {
-                    const terminalSnapshot = await deps.sessionManager.load(tenantId, sessionId);
-                    timeoutObservation = ((terminalSnapshot?.snapshot as any)?.inbox?.all ?? []).find(
-                        (candidate: EngineObservation) =>
-                            candidate.kind === 'child.failed' &&
-                            (candidate.payload as { token?: unknown } | undefined)?.token === token
-                    ) as EngineObservation | undefined;
-                }
-                if (timeoutObservation !== undefined && activeLoop.__activeLoopInbox !== undefined) {
-                    const terminalPredicate = (candidate: EngineObservation) =>
-                        (candidate.kind === 'child.completed' || candidate.kind === 'child.failed') &&
-                        (candidate.payload as { token?: unknown } | undefined)?.token === token;
-                    activeLoop.__activeLoopInbox.current = activeLoop.__activeLoopInbox.current
-                        .filter((candidate) => !terminalPredicate(candidate));
-                    activeLoop.__activeLoopInbox.all = activeLoop.__activeLoopInbox.all
-                        .filter((candidate) => !terminalPredicate(candidate));
-                    activeLoop.__activeLoopInbox.current.push(timeoutObservation);
-                    activeLoop.__activeLoopInbox.all.push(timeoutObservation);
-                    if (activeLoop.__activeLoopEnv?.pending?.children) {
-                        delete activeLoop.__activeLoopEnv.pending.children[token];
-                    }
                 }
                 const tracked = dispatchPromise.then(
                     async (lateResult) => {
@@ -739,6 +702,8 @@ export class ApiBinder {
                 session: deps.sessionManager,
                 tenantId,
                 parentTaskId: sessionId,
+                deliveryMode: awaitCompletion ? 'inline' : 'async_wake',
+                runtimeSurface: 'in_process',
                 request: childFailed
                     ? {
                           kind: 'failed',
@@ -828,7 +793,7 @@ export class ApiBinder {
                 }
             }
 
-            if (childIsTerminal) {
+            if (awaitCompletion && childIsTerminal) {
                 const obs: EngineObservation = {
                     source: 'child',
                     kind: childFailed ? 'child.failed' : 'child.completed',
@@ -856,17 +821,6 @@ export class ApiBinder {
                     },
                 };
 
-                if (!childFailed) {
-                    await deps.handleChildCompleted({
-                        tenantId,
-                        parentTaskId: sessionId,
-                        childToken: token,
-                        childTaskId: cleanChildResult.childTaskId,
-                        childAgentId: agent,
-                        result,
-                        suppressResume: true,
-                    });
-                }
                 const terminalSnapshot = await deps.sessionManager.load(tenantId, sessionId);
                 const durableTerminal = ((terminalSnapshot?.snapshot as any)?.inbox?.all ?? []).find(
                     (candidate: EngineObservation) =>
@@ -874,19 +828,30 @@ export class ApiBinder {
                         (candidate.payload as { token?: unknown } | undefined)?.token === token
                 ) as EngineObservation | undefined;
                 const deliveredObservation = durableTerminal ?? obs;
-                inbox.current.push(deliveredObservation);
-                inbox.all.push(deliveredObservation);
+                const terminalPredicate = (candidate: EngineObservation) =>
+                    (candidate.kind === 'child.completed' || candidate.kind === 'child.failed') &&
+                    (candidate.payload as { token?: unknown } | undefined)?.token === token;
+                const mergedInbox = InboxManager.addObservationToInboxIfMissing(
+                    { current: inbox.current as EngineObservation[], all: inbox.all as EngineObservation[] },
+                    deliveredObservation,
+                    terminalPredicate
+                );
+                inbox.current.splice(0, inbox.current.length, ...mergedInbox.current);
+                inbox.all.splice(0, inbox.all.length, ...mergedInbox.all);
 
                 log.debug('✅ SYNC CHILD: Injected completion into active loop inbox', { token, awaitCompletion });
-            } else {
+            } else if (!childIsTerminal) {
                 log.debug('SYNC CHILD: Child is still active; pending without completion injection', {
                     token,
                     awaitCompletion,
                     state: childState,
                 });
+            } else {
+                log.debug('ASYNC CHILD: Terminal delivery staged for runtime wake without inline injection', {
+                    token,
+                    state: childState,
+                });
             }
-        } else if (awaitCompletion && childIsTerminal && !childFailed) {
-            await deps.handleChildCompleted({ tenantId, parentTaskId: sessionId, childToken: token, result });
         }
 
         if (result && typeof result === 'object') {

@@ -12,7 +12,7 @@ import { createOutboxDispatchTask } from './tasks/outboxDispatch.js';
 import { createSegmentTask } from './tasks/segment.js';
 import { createTaskStateTask, createTaskTask } from './tasks/task.js';
 import { createTimerFireTask, type TimerFireDeps } from './tasks/timerFire.js';
-import { isTimerSurfaceEnabled, TimerReconciler } from './timerReconciler.js';
+import { TimerReconciler } from './timerReconciler.js';
 import { TurnRequestReconciler } from './turnRequestReconciler.js';
 import { resolveSharedSegmentHatchetExecutionTimeout } from './taskTimeouts.js';
 
@@ -29,13 +29,21 @@ export type CreateHatchetOutboxStackParams = {
     eventBus: IEventBus;
     prisma: PrismaClient;
     hatchet?: HatchetClient;
-    turnExecutor?: TurnExecutor;
+    turnExecutor: TurnExecutor;
     budgetEvents?: PayloadBudgetEventRecorder;
     onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
 };
 
 export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams): HatchetOutboxStack {
+    rejectObsoleteRuntimeConfiguration();
+    if (params.turnExecutor === undefined) {
+        throw new Error('HATCHET_RUNTIME_MISCONFIGURED: a turn executor is required for the Hatchet runtime stack.');
+    }
     const hatchet = params.hatchet ?? createHatchetClient();
+    const events = resolveEventPusher(hatchet);
+    if (events === undefined) {
+        throw new Error('HATCHET_RUNTIME_MISCONFIGURED: Hatchet event publishing is required for durable resume routing.');
+    }
     const driverRuns = new DriverRunsRepository(params.prisma);
     const runtimeTimers = new RuntimeTimerRepository(params.prisma);
     const outboxDispatchTask = createOutboxDispatchTask(hatchet, {
@@ -43,14 +51,11 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
         prisma: params.prisma,
         driverRuns,
     });
-    if (process.env.CALLAGENT_HATCHET_RUNTIME_PROTOCOL_VERSION !== undefined) {
-        throw new Error('CALLAGENT_HATCHET_RUNTIME_PROTOCOL_VERSION is obsolete; remove it and reset non-production Hatchet histories.');
-    }
-    const taskTask = params.turnExecutor !== undefined ? createTaskTask(hatchet) : undefined;
+    const taskTask = createTaskTask(hatchet);
     const timerFireTask = createTimerFireTask(hatchet, {
         runtimeTimers,
         driverRuns,
-        events: resolveEventPusher(hatchet),
+        events,
         onTaskRunTimeout: params.onTaskRunTimeout,
     });
     const runtimeDriver = new HatchetRuntimeDriver(
@@ -59,15 +64,13 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
         driverRuns,
         { eventBus: params.eventBus, prisma: params.prisma },
         taskTask,
-        resolveEventPusher(hatchet),
+        events,
         resolveRunsCanceller(hatchet),
         runtimeTimers,
         timerFireTask,
         params.budgetEvents
     );
-    const timerReconciler = isTimerSurfaceEnabled()
-        ? new TimerReconciler(runtimeTimers, timerFireTask)
-        : undefined;
+    const timerReconciler = new TimerReconciler(runtimeTimers, timerFireTask);
     return { runtimeDriver, hatchet, outboxDispatchTask, driverRuns, timerReconciler };
 }
 
@@ -80,6 +83,7 @@ export async function startOutboxWorker(params: {
     turnExecutor?: TurnExecutor;
     onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
 }): Promise<{ worker: { start: () => Promise<void>; stop: () => Promise<void> } }> {
+    rejectObsoleteRuntimeConfiguration();
     const hatchet = params.hatchet ?? createHatchetClient();
     const driverRuns = new DriverRunsRepository(params.prisma);
     const runtimeTimers = new RuntimeTimerRepository(params.prisma);
@@ -95,6 +99,13 @@ export async function startOutboxWorker(params: {
         onTaskRunTimeout: params.onTaskRunTimeout,
     });
     if (params.turnExecutor !== undefined) {
+        if (params.sessionManager === undefined) {
+            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: a SQL-backed session manager is required for Hatchet task-state operations.');
+        }
+        const events = resolveEventPusher(hatchet);
+        if (events === undefined) {
+            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: Hatchet event publishing is required for durable resume routing.');
+        }
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker', {
             slots: Number(process.env.HATCHET_WORKER_SLOTS ?? 100),
             durableSlots: Number(process.env.HATCHET_WORKER_DURABLE_SLOTS ?? 100),
@@ -106,7 +117,7 @@ export async function startOutboxWorker(params: {
             sessionManager: params.sessionManager,
             driverRuns,
             runtimeTimers,
-            events: resolveEventPusher(hatchet),
+            events,
             resolveCacheConfig: (agentId) =>
                 PluginManager.findAgent(agentId ?? '')?.resolved.runtimeManifest.cache,
         });
@@ -117,7 +128,7 @@ export async function startOutboxWorker(params: {
                 sessionManager: params.sessionManager,
                 driverRuns,
                 runtimeTimers,
-                events: resolveEventPusher(hatchet),
+                events,
                 resolveCacheConfig: (agentId) =>
                     PluginManager.findAgent(agentId ?? '')?.resolved.runtimeManifest.cache,
             }),
@@ -129,11 +140,9 @@ export async function startOutboxWorker(params: {
             sharedTask,
             timerFireTask,
         ]);
-        if (isTimerSurfaceEnabled()) {
-            new TimerReconciler(runtimeTimers, timerFireTask).start();
-        }
-        if (params.sessionManager && resolveEventPusher(hatchet)) {
-            new TurnRequestReconciler(params.sessionManager, resolveEventPusher(hatchet)!, {
+        new TimerReconciler(runtimeTimers, timerFireTask).start();
+        if (params.sessionManager) {
+            new TurnRequestReconciler(params.sessionManager, events, {
                 rootTask: sharedTask,
             }).start();
         }
@@ -142,6 +151,15 @@ export async function startOutboxWorker(params: {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker');
         await worker.registerWorkflows([outboxDispatchTask, timerFireTask]);
         return { worker };
+    }
+}
+
+export function rejectObsoleteRuntimeConfiguration(): void {
+    if (process.env.CALLAGENT_HATCHET_RUNTIME_PROTOCOL_VERSION !== undefined) {
+        throw new Error('CALLAGENT_HATCHET_RUNTIME_PROTOCOL_VERSION is obsolete; remove it and reset non-production Hatchet histories.');
+    }
+    if (process.env.CALLAGENT_DRIVER_SURFACES !== undefined) {
+        throw new Error('CALLAGENT_DRIVER_SURFACES is obsolete; remove it. A configured Hatchet runtime owns start, resume, and durable timer routing as one correctness boundary.');
     }
 }
 

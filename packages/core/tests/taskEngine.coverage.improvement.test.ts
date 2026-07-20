@@ -24,7 +24,6 @@ const outboxPath = path.resolve(__dirname, '../src/eventbus/outboxPublisher.ts')
 
 // Mock dependencies
 const runLoopMock = jest.fn() as any;
-const originalDriverSurfaces = process.env.CALLAGENT_DRIVER_SURFACES;
 await jest.unstable_mockModule(loopRunnerPath, () => ({
     runLoop: (...args: any[]) => runLoopMock(...args),
     flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
@@ -195,7 +194,6 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-    process.env.CALLAGENT_DRIVER_SURFACES = '';
     runLoopMock.mockResolvedValue({
         M: { memory: { sensory: {}, longTerm: { episodic: [], semantic: { concepts: [] }, procedural: { skills: [] } } }, worldModel: {}, goalState: { hierarchy: { nodes: {}, roots: [] } }, emotion: { valence: 0, arousal: 0 }, rewardParams: { extrinsicWeights: [], intrinsic: { curiosity: 0, novelty: 0, competence: 0, exploration: 0 }, discountGamma: 1 }, policyParams: { theta: undefined, stochastic: false } },
         outcome: { kind: 'continue' },
@@ -204,11 +202,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-    if (originalDriverSurfaces === undefined) {
-        delete process.env.CALLAGENT_DRIVER_SURFACES;
-    } else {
-        process.env.CALLAGENT_DRIVER_SURFACES = originalDriverSurfaces;
-    }
     runLoopMock.mockClear();
     jest.clearAllMocks();
     TaskEngine.testOverrides = undefined;
@@ -248,15 +241,11 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             };
             failingStore.seed('t', 'session-load-fail', base, BigInt(0), 'agent-a');
 
-            const result = await engine.startTask({
+            await expect(engine.startTask({
                 task: { id: 'session-load-fail', input: { test: 'data' } },
                 isStreaming: false,
                 tenantId: 't'
-            });
-
-            // TaskEngine catches the error and returns a failed task entity
-            expect(result).toBeDefined();
-            expect(['failed', 'error']).toContain(result.status.state);
+            })).rejects.toThrow('SessionStore.load failed (attempt 1)');
 
             // The load should have been attempted at least once
             expect(failingStore.failureCount).toBeGreaterThanOrEqual(0);
@@ -282,21 +271,11 @@ describe('TaskEngine Coverage Improvement Tests', () => {
                 inbox: { current: [], all: [] }
             };
             failingStore.seed('t', 'session-write-fail', base, BigInt(0), 'agent-a');
-            await engineWithHandler.startTask({
+            await expect(engineWithHandler.startTask({
                 task: { id: 'session-write-fail', input: { test: 'data' } },
                 isStreaming: false,
                 tenantId: 't'
-            });
-
-            const result = await engineWithHandler.startTask({
-                task: { id: 'session-write-fail', input: { test: 'data' } },
-                isStreaming: false,
-                tenantId: 't'
-            });
-
-            // TaskEngine catches the error and returns a failed task entity
-            expect(result).toBeDefined();
-            expect(['failed', 'error']).toContain(result.status.state);
+            })).rejects.toThrow('SessionStore.writeSnapshotCAS failed (attempt 1)');
 
             // The write should have been attempted at least once
             expect(failingStore.failureCount).toBeGreaterThanOrEqual(0);
@@ -543,7 +522,6 @@ describe('TaskEngine Coverage Improvement Tests', () => {
 
     describe('Await-child parent resume', () => {
         test('starts awaiting child and resumes once completion arrives', async () => {
-            process.env.CALLAGENT_DRIVER_SURFACES = '';
             const store = new FailingSessionStore();
             const engine = new TaskEngine({
                 sessionStore: store,
@@ -618,8 +596,7 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             expect(((afterResume?.snapshot as any)?.meta as any)?.awaiting).toBeUndefined();
         });
 
-        test('propagates terminal resumed child completion to its own A2A parent', async () => {
-            process.env.CALLAGENT_DRIVER_SURFACES = '';
+        test('does not propagate a resumed child result without a durable terminal winner', async () => {
             const store = new FailingSessionStore();
             const engine = new TaskEngine({
                 sessionStore: store,
@@ -707,11 +684,9 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             });
 
             expect(executeTurnSpy).toHaveBeenCalled();
-            expect(handleChildSpy).toHaveBeenCalledWith(expect.objectContaining({
-                tenantId: 't',
-                parentTaskId: 'root',
-                childToken: 'router-token',
-                childAgentId: 'fetch-page-router',
+            expect(handleChildSpy).toHaveBeenCalledTimes(1);
+            expect(handleChildSpy).not.toHaveBeenCalledWith(expect.objectContaining({
+                parentTaskId: 'root', childToken: 'router-token',
             }));
         });
 

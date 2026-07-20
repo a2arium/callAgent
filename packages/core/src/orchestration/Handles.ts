@@ -16,6 +16,11 @@ export type PendingTaskTerminal = {
     childTaskId?: string;
     agentId?: string;
     error?: { code: string; message: string; timeoutMs?: number };
+    deliveryKey?: string;
+    claimId?: string;
+    fence?: string;
+    generation?: string;
+    turnSeq?: number;
 };
 
 export type PendingTask = {

@@ -418,18 +418,13 @@ export class A2AService implements IA2AService {
                     shouldStage: awaitCompletionValue === false
                 });
                 if (awaitCompletionValue === false) {
-                    // `__activeLoopInbox` is attached for the lifetime of the context and
-                    // therefore does not prove that the originating turn is still running.
-                    // Always route terminal delivery through the durable coordinator. If
-                    // ApiBinder already staged the same completion, the coordinator and
-                    // deterministic wake key make this deferred publication idempotent.
-                    queueMicrotask(() => {
-                        const notifyPromise = deliverCompletion().catch(notifyError => {
-                            a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
-                                parentTaskId: options.parentTaskId
-                            });
-                        });
-                        this.trackNotification(notifyPromise);
+                    // Runtime-owned asynchronous children publish their terminal state
+                    // through onTaskTerminal (or Hatchet task-state recovery). Publishing
+                    // from the dispatch call as well creates a second producer and is no
+                    // longer part of the correctness path.
+                    a2aLogger.debug('Skipping dispatch-path parent notification for runtime-owned child', {
+                        parentTaskId: options.parentTaskId,
+                        childToken: options.parentChildToken,
                     });
                 } else {
                     try {

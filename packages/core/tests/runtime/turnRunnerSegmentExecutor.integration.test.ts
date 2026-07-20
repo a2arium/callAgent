@@ -18,6 +18,8 @@ import { markSegmentCancellationRequested } from '../../src/runtime/segmentCance
 import { currentTaskTurnClaim } from '../../src/runtime/segmentProcessedKeys.js';
 import { completeTaskTurnInSnapshot } from '../../src/orchestration/TaskTurnCoordinator.js';
 import { reconcileSnapshotMutation } from '../../src/orchestration/persistence/SnapshotRepository.js';
+import { ModuleExecutionError, FrameworkModule } from '../../src/utils/errors.js';
+import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 
 async function persistMockTurn(
     params: Parameters<typeof TaskExecutor.executeTurn>[0],
@@ -111,6 +113,148 @@ describe('TurnRunnerSegmentExecutor integration', () => {
 
     afterEach(() => {
         executeTurnSpy.mockRestore();
+    });
+
+    it('rejects raw TurnRunner execution for an initialized loop task without a fence', async () => {
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: taskId,
+            agentId,
+            expectedWmVersion: 0n,
+            snapshot: withCompletedCoordinator({ meta: { agentId }, M: {} }),
+        });
+        const ctx = {
+            task: { id: taskId, input: {} }, logger: console,
+            progress: jest.fn(), fail: jest.fn(), tenantId, agentId,
+        } as unknown as TaskContext;
+
+        await expect(turnRunner.runTurn(ctx, {
+            tenantId, sessionId: taskId, trigger: 'resume', isStreaming: false,
+        })).rejects.toMatchObject({ code: 'TASK_TURN_UNFENCED_EXECUTION' });
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+    });
+
+    it('identifies Hatchet terminal callbacks so parent delivery remains task-state owned', async () => {
+        const hatchetTaskId = `${taskId}-hatchet-terminal`;
+        const onTaskTerminal = jest.fn(async () => undefined);
+        const hatchetExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) => ({
+                task,
+                logger: console,
+                progress: jest.fn(),
+                fail: jest.fn(),
+            }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+            onTaskTerminal,
+        });
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
+            M: initialM(params.ctx),
+            outcome: { kind: 'complete', result: { done: true } },
+            metrics: {},
+            taskStatus: {
+                state: 'completed',
+                timestamp: new Date().toISOString(),
+                metadata: { result: { done: true } },
+            },
+        }));
+
+        await hatchetExecutor.runSegment({
+            tenantId,
+            taskId: hatchetTaskId,
+            agentId,
+            idempotencyKey: `${hatchetTaskId}:start`,
+            runtimeSurface: 'hatchet',
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(onTaskTerminal).toHaveBeenCalledWith({
+            tenantId,
+            taskId: hatchetTaskId,
+            state: 'completed',
+            runtimeSurface: 'hatchet',
+        });
+    });
+
+    it('classifies a wrapped terminal-effect error only after durable ownership is lost', async () => {
+        const supersededTaskId = `${taskId}-wrapped-superseded`;
+        const turnSpy = jest.spyOn(turnRunner, 'runTurn').mockImplementation(async () => {
+            const claim = currentTaskTurnClaim();
+            expect(claim).toBeDefined();
+            await reconcileSnapshotMutation({
+                session: sessionManager,
+                tenantId,
+                sessionId: supersededTaskId,
+                agentId,
+                operation: 'test.replace.turn.claim',
+                mutate: ({ snapshot }) => {
+                    const meta = snapshot.meta as Record<string, unknown>;
+                    const coordinator = meta.turnCoordinator as Record<string, unknown>;
+                    const active = coordinator.active as Record<string, unknown>;
+                    return {
+                        kind: 'write' as const,
+                        snapshot: {
+                            ...snapshot,
+                            meta: {
+                                ...meta,
+                                turnCoordinator: {
+                                    ...coordinator,
+                                    active: { ...active, claimId: 'replacement-claim' },
+                                },
+                            },
+                        },
+                        value: undefined,
+                    };
+                },
+            });
+            const cause = new TaskLifecycleTerminalError({
+                tenantId,
+                taskId: supersededTaskId,
+                state: 'completed',
+                effectKind: 'child',
+            });
+            throw new ModuleExecutionError(FrameworkModule.Execution, cause.message, cause);
+        });
+
+        const result = await executor.runSegment({
+            tenantId,
+            taskId: supersededTaskId,
+            agentId,
+            idempotencyKey: `${supersededTaskId}:start`,
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(result.turnDisposition).toBe('superseded');
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+        turnSpy.mockRestore();
+    });
+
+    it('does not swallow a wrapped terminal-effect error while the claim remains valid', async () => {
+        const activeTaskId = `${taskId}-wrapped-active`;
+        const cause = new TaskLifecycleTerminalError({
+            tenantId,
+            taskId: activeTaskId,
+            state: 'completed',
+            effectKind: 'child',
+        });
+        const turnSpy = jest.spyOn(turnRunner, 'runTurn').mockRejectedValue(
+            new ModuleExecutionError(FrameworkModule.Execution, cause.message, cause)
+        );
+
+        await expect(executor.runSegment({
+            tenantId,
+            taskId: activeTaskId,
+            agentId,
+            idempotencyKey: `${activeTaskId}:start`,
+            wake: { trigger: 'start', input: {} },
+        })).rejects.toMatchObject({
+            code: 'MODULE_EXECUTION_ERROR',
+            cause,
+        });
+
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+        turnSpy.mockRestore();
     });
 
     it('start → await_input → resume → complete through real TurnRunner', async () => {

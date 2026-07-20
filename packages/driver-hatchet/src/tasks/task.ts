@@ -808,7 +808,7 @@ function isHatchetAbortSignalError(error: unknown): boolean {
 
 async function notifyPersistedA2AParentIfTerminal(
     input: TaskTaskInput,
-    segment: SegmentTaskOutput,
+    _segment: SegmentTaskOutput,
     deps?: TaskTaskDeps
 ): Promise<void> {
     if (deps?.prisma?.wMSession === undefined) {
@@ -825,6 +825,8 @@ async function notifyPersistedA2AParentIfTerminal(
         select: { snapshot: true },
     });
     const snapshot = jsonObjectOrEmpty(row?.snapshot ?? null);
+    const durableTerminal = readDurableTaskTerminal(snapshot as Record<string, unknown>);
+    if (durableTerminal === undefined) return;
     const meta = jsonObjectOrEmpty((snapshot.meta ?? null) as JsonValue);
     const parent = jsonObjectOrEmpty((meta.a2aParent ?? null) as JsonValue);
     const parentTenantId =
@@ -840,14 +842,22 @@ async function notifyPersistedA2AParentIfTerminal(
 
     const idempotencyKey = `${parentTaskId}:child:${parentChildToken}`;
     const completedAt = new Date().toISOString();
-    const output = outputFromTerminalBoundary(segment.boundary);
+    const durableStatus = durableTerminal.status;
+    const output = durableTerminal.state === 'completed'
+        ? durableStatus.metadata?.result
+        : {
+              error: durableStatus.metadata?.error ??
+                  durableStatus.metadata?.reason ??
+                  durableStatus.message ??
+                  `Child task ${durableTerminal.state}.`,
+          };
     const childResultForParent = await prepareChildResultForPersistence(
         output,
         deps.prisma ? new AgentResultCache(deps.prisma as never) : undefined,
         parentTenantId
     );
     if (deps.sessionManager === undefined) return;
-    const failure = segment.boundary.kind === 'complete'
+    const failure = durableTerminal.state === 'completed'
         ? undefined
         : (childResultForParent as { error?: unknown })?.error ?? childResultForParent;
     const normalizedFailure =
@@ -863,20 +873,28 @@ async function notifyPersistedA2AParentIfTerminal(
         session: deps.sessionManager,
         tenantId: parentTenantId,
         parentTaskId,
-        request: segment.boundary.kind === 'complete'
+        deliveryMode: 'async_wake',
+        runtimeSurface: 'hatchet',
+        request: durableTerminal.state === 'completed'
             ? {
                   kind: 'completed', token: parentChildToken, completedAt,
                   childTaskId: input.taskId, agentId: input.agentId,
                   result: childResultForParent,
-                  executionMetadata: segment.executionMetadata,
+                  ...(durableTerminal.turnClaim !== undefined
+                      ? { terminalIdentity: durableTerminal.turnClaim }
+                      : {}),
               }
             : {
                   kind: 'failed', token: parentChildToken, failedAt: completedAt,
                   childTaskId: input.taskId, agentId: input.agentId,
                   error: normalizedFailure,
+                  ...(durableTerminal.turnClaim !== undefined
+                      ? { terminalIdentity: durableTerminal.turnClaim }
+                      : {}),
               },
     });
-    if (claim.resumeEligible !== true || claim.observation === undefined) return;
+    if ((claim.publicationDisposition !== 'new_delivery' &&
+        claim.publicationDisposition !== 'matching_replay') || claim.observation === undefined) return;
     await deps.runtimeTimers?.cancelTaskTimers({
         tenantId: parentTenantId,
         taskId: parentTaskId,
@@ -902,7 +920,6 @@ async function notifyPersistedA2AParentIfTerminal(
                 : { error: (claim.observation.payload as { error?: unknown }).error }),
             completedAt,
             terminalClaimed: true,
-            ...(segment.executionMetadata !== undefined ? { executionMetadata: segment.executionMetadata } : {}),
         },
         { key: `${parentTenantId}:${parentTaskId}:${parentChildToken}` }
     );
@@ -1135,6 +1152,17 @@ async function waitForChildOrTimer(
         label: `wait:child-or-timer:${boundary.token}`,
     });
     if (winner.kind === 'timer') {
+        const persistedChild = await findPersistedBoundaryEventRecorded(
+            ctx,
+            input,
+            boundary,
+            deps,
+            `timer-race:${boundary.token}`
+        );
+        if (persistedChild !== undefined) {
+            await cancelBoundaryTimersRecorded(ctx, input, boundary.token, deps);
+            return persistedChild;
+        }
         const firedAt = await markBoundaryTimerFiredRecorded(ctx, input, boundary.token, timer, deps);
         return {
             kind: 'timer',
