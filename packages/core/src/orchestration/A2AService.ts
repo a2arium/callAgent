@@ -68,6 +68,11 @@ function normalizeCacheableA2AResult(value: unknown): { cacheable: boolean; resu
         : { cacheable: true, result: terminalResult };
 }
 
+type A2ATargetExecution = {
+    result: unknown;
+    origin: 'cache' | 'live';
+};
+
 function getRequiredEngine(): TaskEngine {
     const engine = EngineLocator.getEngine<TaskEngine>();
     if (!engine) {
@@ -317,9 +322,12 @@ export class A2AService implements IA2AService {
                     options.parentTelemetryNodeId ?? sourceCtx.telemetry?.nodeId,
             };
 
-            let result;
+            let result: unknown;
+            let executionOrigin: A2ATargetExecution['origin'];
             try {
-                result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, execOptions);
+                const execution = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, execOptions);
+                result = execution.result;
+                executionOrigin = execution.origin;
             } finally {
                 // Unregister when complete (even if error)
                 this.callChainTracker.unregisterCall(targetCtx.task.id);
@@ -437,9 +445,10 @@ export class A2AService implements IA2AService {
                 }
             }
 
-            // Flush child snapshot (vars + llm) after turn (avoid duplicate if already saved during requestInput turn)
+            // A cache hit executes no child turn, so there is no turn-owned state to flush
+            // and no child coordinator against which a flush could be fenced.
             try {
-                if (!(targetCtx as any).__wmSavedThisTurn) {
+                if (executionOrigin === 'live' && !(targetCtx as any).__wmSavedThisTurn) {
                     await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name, targetCtx as any);
                 }
             } catch { }
@@ -994,7 +1003,7 @@ export class A2AService implements IA2AService {
         targetCtx: FullTaskContext,
         operationId: string,
         options: A2ACallOptions
-    ): Promise<unknown> {
+    ): Promise<A2ATargetExecution> {
         return withLoggingContext(
             {
                 agentId: targetPlugin.resolved.agentCard.name,
@@ -1097,7 +1106,7 @@ export class A2AService implements IA2AService {
                                 childAgentNodeId: agentNode?.id,
                                 executionOrigin: 'cache',
                             });
-                            return servedCachedResult;
+                            return { result: servedCachedResult, origin: 'cache' };
                         } else if (cachedResult) {
                             a2aLogger.warn('Ignoring non-terminal A2A cache entry', {
                                 operationId,
@@ -1213,7 +1222,7 @@ export class A2AService implements IA2AService {
                         childTraceId: targetCtx.telemetry?.traceId,
                         childAgentNodeId: agentNode?.id,
                     });
-                    return result;
+                    return { result, origin: 'live' };
                 } catch (error) {
                     a2aLogger.error('Target agent execution failed', error, {
                         operationId,

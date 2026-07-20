@@ -5,10 +5,16 @@ import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 import { mock } from 'jest-mock-extended';
 import type { AgentPlugin } from '../src/plugin/types.js';
 import { ARTIFACT_MARKER_KIND } from '@a2arium/callagent-memory-engine';
+import { runWithSegmentIdempotencyKey } from '../src/runtime/segmentProcessedKeys.js';
 
 describe('A2AService Artifact Hydration (Reproduction)', () => {
     let service: A2AService;
     let mockAgent: AgentPlugin;
+    let mockEngine: {
+        attachWorkingMemory: jest.Mock;
+        flushContextSnapshot: jest.Mock;
+        handleChildCompleted: jest.Mock;
+    };
 
     beforeEach(() => {
         // Prevent real cache initialization attempting to overwrite our mock
@@ -34,11 +40,12 @@ describe('A2AService Artifact Hydration (Reproduction)', () => {
         jest.spyOn(PluginManager, 'findAgent').mockReturnValue(mockAgent);
 
         // Mock EngineLocator to bypass check
-        jest.spyOn(EngineLocator, 'getEngine').mockReturnValue({
+        mockEngine = {
             attachWorkingMemory: jest.fn(),
             flushContextSnapshot: jest.fn(),
             handleChildCompleted: jest.fn()
-        } as any);
+        };
+        jest.spyOn(EngineLocator, 'getEngine').mockReturnValue(mockEngine as any);
     });
 
     afterEach(() => {
@@ -80,6 +87,7 @@ describe('A2AService Artifact Hydration (Reproduction)', () => {
         // 3. Verify Cache Was Hit
         expect(mockCache.getCachedResult).toHaveBeenCalled();
         expect(mockAgent.handleTask).not.toHaveBeenCalled();
+        expect(mockEngine.flushContextSnapshot).not.toHaveBeenCalled();
 
         // Debug logging
         console.log('Result from A2AService:', JSON.stringify(result, null, 2));
@@ -129,6 +137,7 @@ describe('A2AService Artifact Hydration (Reproduction)', () => {
 
         expect(mockCache.getCachedResult).toHaveBeenCalled();
         expect(mockAgent.handleTask).toHaveBeenCalledTimes(1);
+        expect(mockEngine.flushContextSnapshot).toHaveBeenCalledTimes(1);
         expect(result).toEqual(liveResult);
         expect(mockCache.setCachedResult).toHaveBeenCalledWith(
             'test-agent',
@@ -169,6 +178,82 @@ describe('A2AService Artifact Hydration (Reproduction)', () => {
 
         expect(mockCache.getCachedResult).toHaveBeenCalled();
         expect(mockAgent.handleTask).not.toHaveBeenCalled();
+        expect(mockEngine.flushContextSnapshot).not.toHaveBeenCalled();
         expect(result).toEqual(terminalResult);
+    });
+
+    it('does not flush a primitive cached result', async () => {
+        const mockCache = {
+            getCachedResult: jest.fn().mockResolvedValue('cached text'),
+            setCachedResult: jest.fn()
+        };
+        (service as any).agentResultCache = mockCache;
+
+        const result = await service.sendTaskToAgent(
+            {
+                tenantId: 'test-tenant',
+                agentId: 'source-agent',
+                task: { id: 'task-1', input: {} } as any
+            } as any,
+            'test-agent',
+            { url: 'https://example.test' },
+            { cache: { enabled: true } }
+        );
+
+        expect(result).toBe('cached text');
+        expect(mockAgent.handleTask).not.toHaveBeenCalled();
+        expect(mockEngine.flushContextSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('delivers a cached blocking child once without flushing under the parent turn claim', async () => {
+        const terminalResult = { ok: true, data: { html: '<html>cached</html>' } };
+        const mockCache = {
+            getCachedResult: jest.fn().mockResolvedValue(terminalResult),
+            setCachedResult: jest.fn()
+        };
+        (service as any).agentResultCache = mockCache;
+
+        const result = await runWithSegmentIdempotencyKey('parent-task:start', () =>
+            service.sendTaskToAgent(
+                {
+                    tenantId: 'test-tenant',
+                    agentId: 'parent-agent',
+                    task: { id: 'parent-task', input: {} } as any
+                } as any,
+                'test-agent',
+                { url: 'https://example.test' },
+                {
+                    awaitCompletion: true,
+                    parentTenantId: 'test-tenant',
+                    parentTaskId: 'parent-task',
+                    parentChildToken: 'child-token',
+                    cache: { enabled: true }
+                } as any
+            ),
+            {
+                tenantId: 'test-tenant',
+                taskId: 'parent-task',
+                claimId: 'claim-parent',
+                fence: '1',
+                ownerId: 'worker-parent',
+                requestKey: 'parent-task:start',
+                claimedGeneration: '1',
+                turnSeq: 1,
+                acquiredAt: '2099-07-20T00:00:00.000Z',
+                heartbeatAt: '2099-07-20T00:00:00.000Z',
+                expiresAt: '2099-07-20T00:02:00.000Z',
+                runtimeSurface: 'in_process'
+            }
+        );
+
+        expect(result).toBe(terminalResult);
+        expect(mockEngine.flushContextSnapshot).not.toHaveBeenCalled();
+        expect(mockEngine.handleChildCompleted).toHaveBeenCalledTimes(1);
+        expect(mockEngine.handleChildCompleted).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 'test-tenant',
+            parentTaskId: 'parent-task',
+            childToken: 'child-token',
+            result: terminalResult
+        }));
     });
 });
