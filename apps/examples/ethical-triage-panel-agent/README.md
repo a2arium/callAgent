@@ -57,7 +57,7 @@ Use a separate process with `persona-agent-runtime.json` / `dist/persona-agent.j
 ## Tests
 
 ```bash
-yarn jest apps/examples/ethical-triage-panel-agent/tests/ethical-triage-panel.harness.test.ts
+yarn test --runInBand apps/examples/ethical-triage-panel-agent/tests/ethical-triage-panel.harness.test.ts
 ```
 
 ## What to inspect
