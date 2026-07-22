@@ -119,6 +119,12 @@ export class TurnRunner {
 
             // 2. Prepare Mental State (M)
             let M: MentalState = overrides?.initialM || (base.M as MentalState) || initialM(ctx);
+            M = (ArtifactHydrationService.hydrateMentalStateArtifacts(
+                M,
+                this.getSessionStorePrisma(),
+                tenantId,
+                `turn.${trigger}`
+            ) as MentalState) || M;
             // Ensure ctx knows about M for syncing
             (ctx as any).M = M;
 

@@ -7,6 +7,7 @@ import { TaskContext } from '../src/shared/types/index.js';
 import { initialM } from '../src/loop/init.js';
 import { jest } from '@jest/globals';
 import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
+import { AgentResultCache, ArtifactImpl } from '@a2arium/callagent-memory-engine';
 
 describe('TurnRunner', () => {
     const tenantId = 'test-tenant';
@@ -111,6 +112,92 @@ describe('TurnRunner', () => {
 
         const callArgs = executeTurnSpy.mock.calls[0][0];
         expect(callArgs.M).toBe(customM);
+
+        executeTurnSpy.mockRestore();
+    });
+
+    it('hydrates persisted artifacts in mental state before a resumed turn', async () => {
+        const rawHtml = `<html>${'persisted-mental-html'.repeat(100)}</html>`;
+        const artifactId = 'persisted-mental-artifact';
+        const hydratedArtifactId = 'already-hydrated-mental-artifact';
+        const alreadyHydratedValue = '<html>already hydrated</html>';
+        const artifactPrisma = createFakeArtifactPrisma();
+        const cache = new AgentResultCache(artifactPrisma as any);
+        await cache.setCachedResult(
+            'artifact_store',
+            { artifactId },
+            rawHtml,
+            60,
+            [],
+            tenantId,
+        );
+        await cache.setCachedResult(
+            'artifact_store',
+            { artifactId: hydratedArtifactId },
+            alreadyHydratedValue,
+            60,
+            [],
+            tenantId,
+        );
+        turnRunner = new TurnRunner(
+            sessionManager,
+            apiBinder,
+            () => artifactPrisma,
+            createInMemoryEventBus(),
+        );
+
+        const persistedM = initialM(ctx);
+        (persistedM as any).sensory = {
+            html: {
+                kind: 'artifact',
+                id: artifactId,
+                mimeType: 'text/html',
+                estimatedSize: rawHtml.length,
+            },
+            alreadyHydrated: new ArtifactImpl(
+                hydratedArtifactId,
+                cache,
+                tenantId,
+                'text/html',
+                alreadyHydratedValue.length,
+            ),
+        };
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn')
+            .mockImplementation(async (params: any) => {
+                (params.ctx as any).__wmSavedThisTurn = true;
+                return {
+                    M: params.M,
+                    outcome: { kind: 'complete', result: { done: true } },
+                    metrics: {},
+                    taskStatus: { state: 'completed', timestamp: 'test' },
+                };
+            });
+
+        await turnRunner.runTurn(ctx, {
+            tenantId,
+            sessionId,
+            trigger: 'resume',
+            isStreaming: false,
+        }, {
+            initialM: persistedM,
+            snapshot: {
+                M: persistedM,
+                meta: { turn: 1 },
+                inbox: { current: [], all: [] },
+            },
+        });
+
+        const hydratedHtml = (executeTurnSpy.mock.calls[0][0].M as any).sensory.html;
+        expect(hydratedHtml).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            id: artifactId,
+            mimeType: 'text/html',
+        }));
+        expect(typeof hydratedHtml.then).toBe('function');
+        await expect(Promise.resolve(hydratedHtml)).resolves.toBe(rawHtml);
+        const alreadyHydrated = (executeTurnSpy.mock.calls[0][0].M as any).sensory.alreadyHydrated;
+        expect(typeof alreadyHydrated.then).toBe('function');
+        await expect(Promise.resolve(alreadyHydrated)).resolves.toBe(alreadyHydratedValue);
 
         executeTurnSpy.mockRestore();
     });
