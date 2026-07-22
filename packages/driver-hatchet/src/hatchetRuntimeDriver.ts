@@ -91,11 +91,13 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         if (taskTask === undefined) {
             throw new Error('HATCHET_RUNTIME_MISCONFIGURED: aplret.task is unavailable; configure a Hatchet turn executor before starting loop tasks.');
         }
+        const rootTaskId = params.rootTaskId ?? params.taskId;
 
         const input: TaskTaskInput = {
             tenantId: params.tenantId,
             taskId: params.taskId,
-            rootTaskId: params.taskId,
+            rootTaskId,
+            ...(params.parentTaskId !== undefined ? { parentTaskId: params.parentTaskId } : {}),
             tenantTaskKey: `${params.tenantId.length}:${params.tenantId}:${params.taskId.length}:${params.taskId}`,
             rootRunKey: `${params.tenantId.length}:${params.tenantId}:${params.taskId.length}:${params.taskId}:root:1`,
             ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
@@ -148,7 +150,8 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                 traceId: params.traceId ?? null,
                 token: params.token ?? null,
                 idempotencyKey: params.idempotencyKey,
-                rootTaskId: params.taskId,
+                rootTaskId,
+                parentTaskId: params.parentTaskId ?? null,
                 operation: 'agent.run',
                 status: 'queued',
             });
@@ -463,11 +466,12 @@ function buildTaskMetadata(
     params: EnqueueStartParams,
     operation: string
 ): Record<string, string> {
+    const rootTaskId = params.rootTaskId ?? params.taskId;
     const metadata: Record<string, string> = {
         operation,
         tenantId: params.tenantId,
         taskId: params.taskId,
-        rootTaskId: params.taskId,
+        rootTaskId,
         tenantTaskKey: `${params.tenantId}:${params.taskId}`,
         idempotencyKey: params.idempotencyKey,
     };
@@ -479,6 +483,9 @@ function buildTaskMetadata(
     }
     if (params.token !== undefined) {
         metadata.token = params.token;
+    }
+    if (params.parentTaskId !== undefined) {
+        metadata.parentTaskId = params.parentTaskId;
     }
     return metadata;
 }

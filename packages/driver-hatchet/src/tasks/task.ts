@@ -1,15 +1,18 @@
 import type {
+    DurableTaskTerminal,
     RuntimeResultCachePolicy,
     RuntimeWakeEvent,
     RuntimeTimerRecord,
     RuntimeTimerRepository,
 } from '@a2arium/callagent-core/unstable';
 import {
+    claimTaskTerminalInSnapshot,
     coordinateChildTerminal,
     defaultMetricsRegistry,
     prepareChildResultForPersistence,
     readDurableTaskTerminal,
     readSegmentCancellation,
+    reconcileSnapshotMutation,
     timerKindToReason,
 } from '@a2arium/callagent-core/unstable';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
@@ -200,6 +203,7 @@ export type TaskStateInput = JsonObject & {
 export type TaskStateOutput = JsonObject & {
     persistedBoundary?: { boundary: AwaitableBoundary; turnSeq: number };
     cachedSegment?: SegmentTaskOutput;
+    terminalSegment?: SegmentTaskOutput;
     event?: RuntimeWakeEvent & { idempotencyKey?: string };
     authoritativeBoundary?: SegmentTaskBoundary;
     childTaskId?: string;
@@ -275,13 +279,13 @@ async function executeTaskTaskInner(
                 ? bootstrap.cachedSegment
                 : await resolveCachedStartSegment(input, deps);
             if (cachedSegment !== undefined) {
-                if (!await runTaskState(ctx, input, deps, {
+                const projection = await runTaskState(ctx, input, deps, {
                     operation: 'project_terminal', task: input, segment: cachedSegment,
-                }, `terminal:cache:${idempotencyKey}`)) {
-                    await finalizeRootRun(input, cachedSegment, deps);
-                    await notifyPersistedA2AParentIfTerminal(input, cachedSegment, deps);
+                }, `terminal:cache:${idempotencyKey}`);
+                if (projection === undefined) {
+                    return projectTerminalSegment(input, cachedSegment, deps);
                 }
-                return cachedSegment;
+                return projection.terminalSegment ?? cachedSegment;
             }
         }
 
@@ -295,6 +299,7 @@ async function executeTaskTaskInner(
                 idempotencyKey,
                 attemptSeq: turnSeq,
                 rootTaskId: input.rootTaskId ?? input.taskId,
+                ...(input.parentTaskId !== undefined ? { parentTaskId: input.parentTaskId } : {}),
                 ...(input.rootRunKey !== undefined ? { rootRunKey: input.rootRunKey } : {}),
             };
             const segmentRaw = await ctx.runChild<SegmentTaskInput, SegmentTaskOutput>(
@@ -336,9 +341,7 @@ async function executeTaskTaskInner(
                 if (!await runTaskState(ctx, input, deps, {
                     operation: 'project_terminal', task: input, segment: authoritativeSegment,
                 }, `terminal:${turnSeq}:${idempotencyKey}`)) {
-                    await writeDurableResultCache(input, authoritativeSegment, deps);
-                    await finalizeRootRun(input, authoritativeSegment, deps);
-                    await notifyPersistedA2AParentIfTerminal(input, authoritativeSegment, deps);
+                    await projectTerminalSegment(input, authoritativeSegment, deps);
                 }
                 return authoritativeSegment;
             }
@@ -497,10 +500,8 @@ export async function executeTaskStateTask(
             return {};
         case 'project_terminal': {
             if (input.segment === undefined) throw new Error('task-state project_terminal requires segment');
-            await writeDurableResultCache(task, input.segment, deps);
-            await finalizeRootRun(task, input.segment, deps);
-            await notifyPersistedA2AParentIfTerminal(task, input.segment, deps);
-            return {};
+            const terminalSegment = await projectTerminalSegment(task, input.segment, deps);
+            return isCacheOriginSegment(input.segment) ? { terminalSegment } : {};
         }
         case 'project_failed':
             await finalizeRootRunAsFailed(task, deps, input.error);
@@ -586,6 +587,146 @@ async function resolveCachedStartSegment(
         } as never,
         executionMetadata: { origin: 'cache' },
     } as TaskTaskOutput;
+}
+
+function isCacheOriginSegment(segment: SegmentTaskOutput): boolean {
+    return segment.executionMetadata?.origin === 'cache';
+}
+
+async function prepareCachedTerminalSegment(
+    input: TaskTaskInput,
+    segment: SegmentTaskOutput,
+    deps?: TaskTaskDeps
+): Promise<SegmentTaskOutput> {
+    if (segment.boundary.kind !== 'complete') return segment;
+    const preparedResult = await prepareChildResultForPersistence(
+        segment.boundary.result,
+        resolveResultCache(input, deps) as AgentResultCache | undefined,
+        input.tenantId
+    );
+    return {
+        ...segment,
+        boundary: { kind: 'complete', result: preparedResult as JsonValue },
+    };
+}
+
+function statusForTerminalBoundary(
+    segment: SegmentTaskOutput,
+    timestamp: string
+): DurableTaskTerminal['status'] {
+    const boundary = segment.boundary;
+    if (boundary.kind !== 'complete' && boundary.kind !== 'canceled' && boundary.kind !== 'fail') {
+        throw new Error(`Cannot persist non-terminal cache boundary: ${boundary.kind}`);
+    }
+    const state: DurableTaskTerminal['state'] = boundary.kind === 'complete'
+        ? 'completed'
+        : boundary.kind === 'canceled'
+          ? 'canceled'
+          : 'failed';
+    const rawStatus = isRecord(segment.taskStatus) ? segment.taskStatus : undefined;
+    const matchingRawStatus = rawStatus?.state === state ? rawStatus : undefined;
+    const rawMetadata = isRecord(matchingRawStatus?.metadata)
+        ? matchingRawStatus.metadata
+        : {};
+    const metadata: Record<string, unknown> = {
+        ...rawMetadata,
+        ...(boundary.kind === 'complete'
+            ? { result: boundary.result }
+            : boundary.kind === 'canceled'
+              ? { reason: boundary.reason }
+              : { error: boundary.error }),
+        ...(isCacheOriginSegment(segment) ? { source: 'cache', origin: 'cache' } : {}),
+    };
+    const message = matchingRawStatus?.message;
+    return {
+        state,
+        timestamp,
+        ...(isRecord(message)
+            ? { message: message as DurableTaskTerminal['status']['message'] }
+            : {}),
+        metadata,
+    };
+}
+
+async function persistCachedTaskTerminal(
+    input: TaskTaskInput,
+    segment: SegmentTaskOutput,
+    deps?: TaskTaskDeps
+): Promise<DurableTaskTerminal | undefined> {
+    if (deps?.sessionManager === undefined) return undefined;
+    const result = await reconcileSnapshotMutation({
+        session: deps.sessionManager,
+        tenantId: input.tenantId,
+        sessionId: input.taskId,
+        agentId: segment.agentId ?? input.agentId,
+        operation: 'task.terminal.cache_hit',
+        mutate: ({ snapshot, storageNow }) => {
+            const status = statusForTerminalBoundary(segment, storageNow);
+            const claim = claimTaskTerminalInSnapshot(snapshot, {
+                taskId: input.taskId,
+                state: status.state,
+                claimedAt: storageNow,
+                status,
+                ...(segment.boundary.kind === 'canceled' && segment.boundary.reason !== undefined
+                    ? { reason: segment.boundary.reason }
+                    : {}),
+            });
+            return claim.changed
+                ? { kind: 'write' as const, snapshot: claim.snapshot, value: claim.terminal }
+                : { kind: 'noop' as const, value: claim.terminal };
+        },
+    });
+    return result.value;
+}
+
+async function readPersistedTaskTerminal(
+    input: TaskTaskInput,
+    deps?: TaskTaskDeps
+): Promise<DurableTaskTerminal | undefined> {
+    if (deps?.sessionManager === undefined) return undefined;
+    const loaded = await deps.sessionManager.load(input.tenantId, input.taskId);
+    return readDurableTaskTerminal(loaded?.snapshot);
+}
+
+function segmentFromDurableTerminal(
+    segment: SegmentTaskOutput,
+    terminal: DurableTaskTerminal
+): SegmentTaskOutput {
+    const boundary: SegmentTaskBoundary = terminal.state === 'completed'
+        ? { kind: 'complete', result: terminal.status.metadata?.result as JsonValue }
+        : terminal.state === 'canceled'
+          ? { kind: 'canceled', reason: terminal.status.metadata?.reason as string | undefined }
+          : { kind: 'fail', error: terminal.status.metadata?.error as JsonValue };
+    return { ...segment, boundary };
+}
+
+async function projectTerminalSegment(
+    input: TaskTaskInput,
+    segment: SegmentTaskOutput,
+    deps?: TaskTaskDeps
+): Promise<SegmentTaskOutput> {
+    if (!isCacheOriginSegment(segment)) {
+        await writeDurableResultCache(input, segment, deps);
+        await finalizeRootRun(input, segment, deps);
+        await notifyPersistedA2AParentIfTerminal(input, segment, deps);
+        return segment;
+    }
+
+    // A cache hit has no segment turn to persist the terminal claim. Prepare the
+    // cached value before the claim so working memory never receives local or
+    // oversized artifact content, then let an existing terminal winner prevail.
+    const existingTerminal = await readPersistedTaskTerminal(input, deps);
+    const preparedSegment = existingTerminal === undefined
+        ? await prepareCachedTerminalSegment(input, segment, deps)
+        : segmentFromDurableTerminal(segment, existingTerminal);
+    const terminal = existingTerminal ?? await persistCachedTaskTerminal(input, preparedSegment, deps);
+    const authoritativeSegment = terminal === undefined
+        ? preparedSegment
+        : segmentFromDurableTerminal(preparedSegment, terminal);
+    await writeDurableResultCache(input, authoritativeSegment, deps);
+    await notifyPersistedA2AParentIfTerminal(input, authoritativeSegment, deps);
+    await finalizeRootRun(input, authoritativeSegment, deps);
+    return authoritativeSegment;
 }
 
 async function writeDurableResultCache(
@@ -876,6 +1017,8 @@ async function notifyPersistedA2AParentIfTerminal(
     const idempotencyKey = `${parentTaskId}:child:${parentChildToken}`;
     const completedAt = new Date().toISOString();
     const durableStatus = durableTerminal.status;
+    const cacheOrigin = durableStatus.metadata?.origin === 'cache' ||
+        durableStatus.metadata?.source === 'cache';
     const output = durableTerminal.state === 'completed'
         ? durableStatus.metadata?.result
         : {
@@ -913,6 +1056,7 @@ async function notifyPersistedA2AParentIfTerminal(
                   kind: 'completed', token: parentChildToken, completedAt,
                   childTaskId: input.taskId, agentId: input.agentId,
                   result: childResultForParent,
+                  ...(cacheOrigin ? { executionMetadata: { origin: 'cache' as const } } : {}),
                   ...(durableTerminal.turnClaim !== undefined
                       ? { terminalIdentity: durableTerminal.turnClaim }
                       : {}),
@@ -928,6 +1072,12 @@ async function notifyPersistedA2AParentIfTerminal(
     });
     if ((claim.publicationDisposition !== 'new_delivery' &&
         claim.publicationDisposition !== 'matching_replay') || claim.observation === undefined) return;
+    const publicationKind = claim.kind ??
+        (claim.observation.kind === 'child.completed' ? 'completed' : 'failed');
+    const publicationPayload = claim.observation.payload as {
+        result?: unknown;
+        error?: unknown;
+    };
     await deps.runtimeTimers?.cancelTaskTimers({
         tenantId: parentTenantId,
         taskId: parentTaskId,
@@ -947,10 +1097,10 @@ async function notifyPersistedA2AParentIfTerminal(
             kind: 'child',
             token: parentChildToken,
             childTaskId: input.taskId,
-            outcome: claim.kind,
-            ...(claim.kind === 'completed'
-                ? { output: (claim.observation.payload as { result?: unknown }).result }
-                : { error: (claim.observation.payload as { error?: unknown }).error }),
+            outcome: publicationKind,
+            ...(publicationKind === 'completed'
+                ? { output: publicationPayload.result }
+                : { error: publicationPayload.error }),
             completedAt,
             terminalClaimed: true,
         },
@@ -1141,13 +1291,16 @@ function buildTaskRunMetadata(
         operation: 'turn.segment',
         tenantId: input.tenantId,
         taskId: input.taskId,
-        rootTaskId: input.taskId,
+        rootTaskId: input.rootTaskId ?? input.taskId,
         tenantTaskKey: `${input.tenantId}:${input.taskId}`,
         idempotencyKey: segmentInput.idempotencyKey,
         turnSeq: String(segmentInput.turnSeq ?? ''),
     };
     if (input.agentId !== undefined) {
         metadata.agentId = input.agentId;
+    }
+    if (input.parentTaskId !== undefined) {
+        metadata.parentTaskId = input.parentTaskId;
     }
     return metadata;
 }

@@ -158,7 +158,9 @@ describe('ApiBinder.requestTool unified API', () => {
                 input: { url: 'https://example.test' },
                 cache: { enabled: true, ttlSeconds: 900, excludePaths: ['traceparent'] },
                 token: result.token,
-                traceId: 'trace-1'
+                traceId: 'trace-1',
+                rootTaskId: 's1',
+                parentTaskId: 's1',
             }));
             const scheduledTaskId = (enqueueChildStart.mock.calls[0]?.[0] as any)?.taskId;
             expect(typeof scheduledTaskId).toBe('string');

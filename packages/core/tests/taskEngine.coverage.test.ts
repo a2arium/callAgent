@@ -1451,7 +1451,7 @@ describe('TaskEngine orchestration coverage', () => {
 
     test('offloadArtifacts deduplicates repeated LocalArtifacts', async () => {
         const spy = jest.fn<any>().mockResolvedValue({ artifactId: 'art-1', size: 123 });
-        const cache = { storeArtifact: spy };
+        const cache = { storeArtifact: spy, publishArtifact: spy };
         const artifact = new LocalArtifactImpl('<html>1</html>', 'text/html');
         const payload = {
             first: artifact,

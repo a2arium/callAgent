@@ -1,8 +1,10 @@
 import type { LocalArtifact } from '../shared/types/index.js';
 import { LOCAL_ARTIFACT_KIND } from '../shared/types/index.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export class LocalArtifactImpl<T = unknown> implements LocalArtifact<T> {
     readonly kind = LOCAL_ARTIFACT_KIND;
+    readonly publicationId = uuidv4();
 
     constructor(public value: T, public mimeType?: string) { }
 
@@ -13,4 +15,3 @@ export class LocalArtifactImpl<T = unknown> implements LocalArtifact<T> {
         return Promise.resolve(this.value).then(onfulfilled, onrejected);
     }
 }
-

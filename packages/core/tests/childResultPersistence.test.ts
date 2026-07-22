@@ -10,7 +10,14 @@ const createFakeArtifactPrisma = () => {
     return {
         agentResultCache: {
             upsert: jest.fn(async (args: any) => {
-                artifacts.set(args.create.cacheKey, args.create.result);
+                const cacheKey = args.where.tenantId_agentName_cacheKey.cacheKey;
+                if (artifacts.has(cacheKey)) {
+                    if (Object.prototype.hasOwnProperty.call(args.update, 'result')) {
+                        artifacts.set(cacheKey, args.update.result);
+                    }
+                    return { ...args.create, result: artifacts.get(cacheKey) };
+                }
+                artifacts.set(cacheKey, args.create.result);
                 return args.create;
             }),
             findUnique: jest.fn(async (args: any) => {
@@ -96,6 +103,44 @@ describe('child result persistence preparation', () => {
 
         expect(prepared.first.id).not.toBe(prepared.second.id);
         expect(prisma.agentResultCache.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('reuses one durable artifact id across separately cloned persistence payloads', async () => {
+        const { AgentResultCache, Artifact } = await import('@a2arium/callagent-memory-engine');
+        const prisma = createFakeArtifactPrisma();
+        const cache = new AgentResultCache(prisma as any);
+        const artifact = Artifact.create('<html>one publication</html>', { mimeType: 'text/html' });
+        const cloned = JSON.parse(JSON.stringify(artifact));
+
+        const first = await prepareChildResultForPersistence({ html: artifact }, cache, 'tenant-a') as any;
+        const second = await prepareChildResultForPersistence({ html: cloned }, cache, 'tenant-a') as any;
+
+        expect(artifact.publicationId).toBeTruthy();
+        expect(cloned.publicationId).toBe(artifact.publicationId);
+        expect(first.html.id).toBe(artifact.publicationId);
+        expect(second.html.id).toBe(first.html.id);
+        expect((prisma as any).agentResultCache.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails closed when an immutable publication id is reused for different content', async () => {
+        const { AgentResultCache } = await import('@a2arium/callagent-memory-engine');
+        const cache = new AgentResultCache(createFakeArtifactPrisma() as any);
+
+        await cache.publishArtifact('tenant-a', 'publication-1', { value: 'first' });
+        await expect(cache.publishArtifact('tenant-a', 'publication-1', { value: 'changed' }))
+            .rejects.toMatchObject({ code: 'ARTIFACT_PUBLICATION_CONFLICT' });
+    });
+
+    it('allows concurrent identical immutable publications to converge', async () => {
+        const { AgentResultCache } = await import('@a2arium/callagent-memory-engine');
+        const cache = new AgentResultCache(createFakeArtifactPrisma() as any);
+
+        const results = await Promise.all([
+            cache.publishArtifact('tenant-a', 'publication-1', { value: 'same' }),
+            cache.publishArtifact('tenant-a', 'publication-1', { value: 'same' }),
+        ]);
+
+        expect(new Set(results.map((result) => result.artifactId))).toEqual(new Set(['publication-1']));
     });
 
     it('fails closed when a configured artifact backend rejects a write', async () => {

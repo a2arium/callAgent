@@ -760,7 +760,7 @@ function buildTurnRuns(
                 status,
                 operation: 'turn.segment',
                 ...(turnSeq !== undefined ? { turnSeq } : {}),
-                attemptKey: driverAttemptKey(run, index),
+                attemptKey: canonicalTurnAttemptKey(run.claimId, driverAttemptKey(run, index)),
                 ...(run.attemptSeq !== null && run.attemptSeq !== undefined ? { attemptSeq: run.attemptSeq } : {}),
                 ...(isTurnDisposition(run.turnDisposition) ? { disposition: run.turnDisposition } : {}),
                 ...(run.claimId ? { claimId: run.claimId } : {}),
@@ -799,6 +799,9 @@ function buildTurnRuns(
             const startedEvent = turnSeq !== undefined ? turnStartedByTurn.get(turnKey(taskId, turnSeq)) : undefined;
             const traceId = stringField(event.payload, 'traceId');
             const spanId = stringField(event.payload, 'spanId');
+            const claimId = stringField(event.payload, 'claimId');
+            const fallbackAttemptKey = stringField(event.payload, 'attemptKey') ??
+                stringField(event.payload, 'turnId') ?? `turn-event-${event.seq}-${index}`;
             return {
                 id: stringField(event.payload, 'turnId') ?? `turn-event-${event.seq}-${index}`,
                 rootTaskId,
@@ -807,6 +810,10 @@ function buildTurnRuns(
                 status: deriveTurnStatus('completed', event),
                 operation: 'turn.segment',
                 ...(turnSeq !== undefined ? { turnSeq } : {}),
+                attemptKey: canonicalTurnAttemptKey(claimId, fallbackAttemptKey),
+                ...(claimId ? { claimId, disposition: 'executed' as const } : {}),
+                ...(stringField(event.payload, 'fence') ? { turnFence: stringField(event.payload, 'fence') } : {}),
+                ...(stringField(event.payload, 'claimedGeneration') ? { claimedGeneration: stringField(event.payload, 'claimedGeneration') } : {}),
                 ...(traceId ? { traceId } : {}),
                 ...(spanId ? { spanId } : {}),
                 turnTraceRef: {
@@ -833,6 +840,9 @@ function buildTurnRuns(
             const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
             const traceId = stringField(event.payload, 'traceId');
             const spanId = stringField(event.payload, 'spanId');
+            const claimId = stringField(event.payload, 'claimId');
+            const fallbackAttemptKey = stringField(event.payload, 'attemptKey') ??
+                stringField(event.payload, 'turnId') ?? `turn-started-${event.seq}-${index}`;
             return {
                 id: stringField(event.payload, 'turnId') ?? `turn-started-${event.seq}-${index}`,
                 rootTaskId,
@@ -841,6 +851,10 @@ function buildTurnRuns(
                 status: 'running',
                 operation: 'turn.segment',
                 ...(turnSeq !== undefined ? { turnSeq } : {}),
+                attemptKey: canonicalTurnAttemptKey(claimId, fallbackAttemptKey),
+                ...(claimId ? { claimId, disposition: 'executed' as const } : {}),
+                ...(stringField(event.payload, 'fence') ? { turnFence: stringField(event.payload, 'fence') } : {}),
+                ...(stringField(event.payload, 'claimedGeneration') ? { claimedGeneration: stringField(event.payload, 'claimedGeneration') } : {}),
                 ...(traceId ? { traceId } : {}),
                 ...(spanId ? { spanId } : {}),
                 turnTraceRef: {
@@ -854,7 +868,7 @@ function buildTurnRuns(
             };
         });
     const attempts = finalizeSupersededRunningTurns(
-        [...driverTurns, ...eventOnlyTurns, ...eventOnlyRunningTurns]
+        coalesceAttemptEvidence([...driverTurns, ...eventOnlyTurns, ...eventOnlyRunningTurns])
             .sort((a, b) => {
                 if (a.taskId !== b.taskId) return a.taskId.localeCompare(b.taskId);
                 return (a.turnSeq ?? 0) - (b.turnSeq ?? 0);
@@ -886,9 +900,10 @@ export function groupTurnAttempts(attempts: TurnAttemptRun[]): {
     turns: TurnRun[];
     unassignedAttempts: TurnAttemptRun[];
 } {
-    const assigned = attempts.filter((attempt) => attempt.turnSeq !== undefined);
+    const canonicalAttempts = coalesceAttemptEvidence(attempts);
+    const assigned = canonicalAttempts.filter((attempt) => attempt.turnSeq !== undefined);
     const unassigned: TurnAttemptRun[] = [];
-    for (const attempt of attempts.filter((item) => item.turnSeq === undefined)) {
+    for (const attempt of canonicalAttempts.filter((item) => item.turnSeq === undefined)) {
         const associatedTurnSeq = inferHistoricalTurnAssociation(attempt, assigned);
         if (associatedTurnSeq === undefined) {
             unassigned.push(attempt);
@@ -1039,6 +1054,96 @@ function driverAttemptKey(run: DriverRunView, index: number): string {
         return `hatchet:${run.providerRunId}:${run.providerTaskRunId}`;
     }
     return run.id ?? run.providerTaskRunId ?? run.providerRunId ?? `attempt-${index}`;
+}
+
+/** One physical execution is owned by its durable claim when one exists. */
+export function canonicalTurnAttemptKey(
+    claimId: string | null | undefined,
+    fallbackAttemptKey: string
+): string {
+    return claimId ? `claim:${claimId}` : fallbackAttemptKey;
+}
+
+function coalesceAttemptEvidence(attempts: TurnAttemptRun[]): TurnAttemptRun[] {
+    const byIdentity = new Map<string, TurnAttemptRun>();
+    for (const attempt of attempts) {
+        const fallback = attempt.attemptKey ?? attempt.id;
+        const attemptKey = canonicalTurnAttemptKey(attempt.claimId, fallback);
+        const identity = `${attempt.taskId}\u001f${attemptKey}`;
+        const normalized = { ...attempt, attemptKey };
+        const existing = byIdentity.get(identity);
+        byIdentity.set(identity, existing ? mergeAttemptEvidence(existing, normalized) : normalized);
+    }
+    return [...byIdentity.values()];
+}
+
+function mergeAttemptEvidence(existing: TurnAttemptRun, incoming: TurnAttemptRun): TurnAttemptRun {
+    const authoritative = incoming.authoritativeTerminal === true
+        ? incoming
+        : existing.authoritativeTerminal === true
+          ? existing
+          : undefined;
+    const preferred = attemptEvidenceScore(incoming) >= attemptEvidenceScore(existing) ? incoming : existing;
+    const secondary = preferred === incoming ? existing : incoming;
+    const status = authoritative?.status ?? mergeAttemptStatus(existing.status, incoming.status);
+    const disposition = mergeAttemptDisposition(existing.disposition, incoming.disposition, authoritative === incoming);
+    return {
+        ...secondary,
+        ...preferred,
+        id: preferred.id,
+        attemptKey: preferred.attemptKey ?? secondary.attemptKey,
+        status,
+        ...(disposition ? { disposition } : {}),
+        ...(existing.authoritativeTerminal || incoming.authoritativeTerminal ? { authoritativeTerminal: true } : {}),
+        ...(existing.agentId ?? incoming.agentId ? { agentId: existing.agentId ?? incoming.agentId } : {}),
+        ...(existing.claimId ?? incoming.claimId ? { claimId: existing.claimId ?? incoming.claimId } : {}),
+        ...(existing.turnFence ?? incoming.turnFence ? { turnFence: existing.turnFence ?? incoming.turnFence } : {}),
+        ...(existing.claimedGeneration ?? incoming.claimedGeneration ? { claimedGeneration: existing.claimedGeneration ?? incoming.claimedGeneration } : {}),
+        ...(existing.boundaryKind ?? incoming.boundaryKind ? { boundaryKind: existing.boundaryKind ?? incoming.boundaryKind } : {}),
+        ...(existing.providerRunId ?? incoming.providerRunId ? { providerRunId: existing.providerRunId ?? incoming.providerRunId } : {}),
+        ...(existing.cognition ?? incoming.cognition ? { cognition: existing.cognition ?? incoming.cognition } : {}),
+        ...(existing.llmCalls ?? incoming.llmCalls ? { llmCalls: existing.llmCalls ?? incoming.llmCalls } : {}),
+        ...(existing.memoryOps ?? incoming.memoryOps ? { memoryOps: existing.memoryOps ?? incoming.memoryOps } : {}),
+        ...(earliestTimestamp([existing.startedAt, incoming.startedAt]) ? { startedAt: earliestTimestamp([existing.startedAt, incoming.startedAt]) } : {}),
+        ...(latestTimestamp([existing.finishedAt, incoming.finishedAt]) ? { finishedAt: latestTimestamp([existing.finishedAt, incoming.finishedAt]) } : {}),
+        ...(existing.error ?? incoming.error ? { error: existing.error ?? incoming.error } : {}),
+    };
+}
+
+function attemptEvidenceScore(attempt: TurnAttemptRun): number {
+    return (attempt.authoritativeTerminal ? 32 : 0) +
+        (attempt.claimId ? 16 : 0) +
+        (attempt.disposition === 'executed' ? 8 : 0) +
+        (attempt.providerRunId ? 4 : 0) +
+        (attempt.cognition ? 2 : 0) +
+        (attempt.boundaryKind ? 1 : 0);
+}
+
+function mergeAttemptStatus(a: AgentRunStatus, b: AgentRunStatus): AgentRunStatus {
+    if (isTerminalRunStatus(a)) return a;
+    if (isTerminalRunStatus(b)) return b;
+    const rank: Record<AgentRunStatus, number> = {
+        unknown: 0,
+        queued: 1,
+        running: 2,
+        waiting: 3,
+        completed: 4,
+        failed: 4,
+        canceled: 4,
+    };
+    return rank[b] > rank[a] ? b : a;
+}
+
+function mergeAttemptDisposition(
+    existing: TurnAttemptRun['disposition'],
+    incoming: TurnAttemptRun['disposition'],
+    incomingAuthoritative: boolean
+): TurnAttemptRun['disposition'] {
+    if (incomingAuthoritative) return incoming ?? existing;
+    if (existing === 'superseded') return existing;
+    if (incoming === 'superseded') return incoming;
+    if (existing === 'executed' || incoming === 'executed') return 'executed';
+    return incoming ?? existing;
 }
 
 function turnEventProjection(

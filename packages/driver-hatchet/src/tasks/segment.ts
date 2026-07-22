@@ -59,6 +59,7 @@ export type SegmentTaskInput = JsonObject & {
     idempotencyKey: string;
     attemptSeq?: number;
     rootTaskId?: string;
+    parentTaskId?: string;
     rootRunKey?: string;
 };
 
@@ -109,6 +110,7 @@ function segmentDriverRunFields(input: SegmentTaskInput) {
         agentId: input.agentId ?? null,
         idempotencyKey: input.idempotencyKey,
         rootTaskId: input.rootTaskId ?? input.taskId,
+        parentTaskId: input.parentTaskId ?? null,
         rootRunKey: input.rootRunKey ?? null,
         attemptSeq: input.attemptSeq ?? null,
         turnSeq: null,
@@ -147,6 +149,7 @@ async function executeSegmentTaskInner(
             token: fields.token,
             idempotencyKey: fields.idempotencyKey,
             rootTaskId: fields.rootTaskId,
+            parentTaskId: fields.parentTaskId,
             turnSeq: fields.turnSeq,
             attemptSeq: fields.attemptSeq,
             rootRunKey: fields.rootRunKey,
@@ -174,6 +177,7 @@ async function executeSegmentTaskInner(
                 token: fields.token,
                 idempotencyKey: fields.idempotencyKey,
                 rootTaskId: fields.rootTaskId,
+                parentTaskId: fields.parentTaskId,
                 turnSeq: output.turnSeq ?? output.associatedTurnSeq ?? null,
                 attemptSeq: fields.attemptSeq,
                 claimId: output.claimId ?? null,
@@ -202,6 +206,7 @@ async function executeSegmentTaskInner(
                 token: fields.token,
                 idempotencyKey: fields.idempotencyKey,
                 rootTaskId: fields.rootTaskId,
+                parentTaskId: fields.parentTaskId,
                 turnSeq: fields.turnSeq,
                 attemptSeq: fields.attemptSeq,
                 rootRunKey: fields.rootRunKey,

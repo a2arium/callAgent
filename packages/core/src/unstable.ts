@@ -7,7 +7,11 @@ export { ConversationService } from './internal/conversation/ConversationService
 export { createDbMessageLog } from './eventbus/dbMessageLog.js';
 export { InMemorySessionManager } from './orchestration/InMemorySessionManager.js';
 export { SessionManager } from './orchestration/SessionManager.js';
-export { readDurableTaskTerminal } from './orchestration/TaskLifecycle.js';
+export {
+    claimTaskTerminalInSnapshot,
+    readDurableTaskTerminal,
+    type DurableTaskTerminal,
+} from './orchestration/TaskLifecycle.js';
 export type { IEventBus, BusEventHandler } from './public-types/eventbus/types.js';
 export {
     bootstrapCompositionRootInternal,

@@ -8,7 +8,7 @@ import type {
     TurnAttemptRun,
     TurnRun,
 } from './runGraph.js';
-import { groupTurnAttempts, severityForStatus } from './runGraph.js';
+import { canonicalTurnAttemptKey, groupTurnAttempts, severityForStatus } from './runGraph.js';
 import { readDurableTaskTerminal, readTaskLifecycle } from '../orchestration/TaskLifecycle.js';
 
 export type OperatorProjectionMode = 'bridge' | 'compare' | 'semantic';
@@ -288,6 +288,10 @@ export class OperatorProjectionRepository {
                 await this.upsertTurn(attempt, nodesByTask, graph);
             }
         }
+        await this.convergePersistedTerminalTasks(
+            graph.tenantId,
+            graph.nodes.map((node) => node.taskId),
+        );
         for (const effect of graph.effects) {
             await this.upsertEffect(effect, graph);
         }
@@ -436,9 +440,7 @@ export class OperatorProjectionRepository {
                 resolvedAt: createdAt,
                 terminalMessage: reason,
             });
-            if (event.type === 'task.canceled') {
-                await this.projectAuthoritativeTerminalAttempt(event, 'canceled', createdAt);
-            }
+            await this.projectAuthoritativeTerminalAttempt(event, 'canceled', createdAt);
             return;
         }
 
@@ -450,6 +452,21 @@ export class OperatorProjectionRepository {
             const status = finished
                 ? stringField(event.payload, 'status') ?? (disposition === 'superseded' ? 'superseded' : 'completed')
                 : 'running';
+            const normalizedStatus = normalizeStatus(status);
+            const authoritativeTerminal = finished &&
+                event.payload.authoritativeTerminal === true &&
+                TERMINAL_AGENT_RUN_STATUSES.has(normalizedStatus);
+            if (authoritativeTerminal) {
+                await this.upsertEventRun({
+                    tenantId: event.tenantId,
+                    taskId,
+                    rootTaskId,
+                    agentId,
+                    status: normalizedStatus,
+                    terminalAt: createdAt,
+                    traceId,
+                });
+            }
             await this.upsertEventTurn({
                 tenantId: event.tenantId,
                 taskId,
@@ -463,8 +480,17 @@ export class OperatorProjectionRepository {
                 claimedGeneration: stringField(event.payload, 'claimedGeneration'),
                 status,
                 ...(finished ? { completedAt: createdAt } : { startedAt: createdAt }),
-                authoritativeTerminal: event.payload.authoritativeTerminal === true,
+                authoritativeTerminal,
             });
+            if (authoritativeTerminal) {
+                await this.convergeTerminalAttempts({
+                    tenantId: event.tenantId,
+                    taskId,
+                    status: normalizedStatus as 'completed' | 'failed' | 'canceled',
+                    completedAt: createdAt,
+                    authoritativeAttemptKey: attemptKey,
+                });
+            }
             return;
         }
 
@@ -533,6 +559,12 @@ export class OperatorProjectionRepository {
                 terminalCode: failed ? errorCode(error) : undefined,
                 terminalMessage: failed ? errorMessage(error) ?? (typeof error === 'string' ? error : undefined) : undefined,
             });
+            await this.convergeTerminalAttempts({
+                tenantId: event.tenantId,
+                taskId: childTaskId,
+                status: failed ? 'failed' : 'completed',
+                completedAt: createdAt,
+            });
             return;
         }
 
@@ -571,6 +603,12 @@ export class OperatorProjectionRepository {
                     childTaskId: taskId,
                     status: 'completed',
                     resolvedAt: createdAt,
+                });
+                await this.convergeTerminalAttempts({
+                    tenantId: event.tenantId,
+                    taskId,
+                    status: 'completed',
+                    completedAt: createdAt,
                 });
             }
             return;
@@ -686,19 +724,12 @@ export class OperatorProjectionRepository {
                 outputProduced: terminal?.state === 'completed' && terminal.status.metadata?.result !== undefined,
             });
         }
-        await this.prisma.turnRun?.updateMany?.({
-            where: {
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                ...(attemptKey ? { attemptKey: { not: attemptKey } } : {}),
-                status: 'running',
-            },
-            data: {
-                status: 'superseded',
-                disposition: 'superseded',
-                completedAt,
-                authoritativeTerminal: false,
-            },
+        await this.convergeTerminalAttempts({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            status,
+            completedAt,
+            authoritativeAttemptKey: attemptKey,
         });
         return true;
     }
@@ -941,7 +972,15 @@ export class OperatorProjectionRepository {
         const expectedTurnCount = runs.reduce((sum, run) => sum + Math.max(0, run.turnCount ?? 0), 0);
         const expectedEdgeCount = runs.reduce((sum, run) => sum + Math.max(0, run.childCount ?? 0), 0);
         const turnProjection = groupTurnAttempts(turns.map(rowToTurnAttempt));
-        const partial = turnProjection.turns.length < expectedTurnCount || edges.length < expectedEdgeCount;
+        const partial = semanticProjectionIsPartial({
+            rootTaskId: params.taskId,
+            runs,
+            edges,
+            turns: turnProjection.turns,
+            unassignedAttempts: turnProjection.unassignedAttempts,
+            expectedTurnCount,
+            expectedEdgeCount,
+        });
         const graph: AgentRunGraph = {
             schemaVersion: 3,
             tenantId: params.tenantId,
@@ -1125,40 +1164,125 @@ export class OperatorProjectionRepository {
         completedAt: Date
     ): Promise<void> {
         const claimId = stringField(event.payload, 'claimId');
-        if (!claimId) return;
         const taskId = stringField(event.payload, 'taskId') ?? event.sessionId;
-        const rootTaskId = stringField(event.payload, 'rootTaskId') ??
-            await this.parentRootTaskId(event.tenantId, event.sessionId) ?? taskId;
-        const attemptKey = stringField(event.payload, 'attemptKey') ?? `claim:${claimId}`;
-        await this.upsertEventTurn({
-            tenantId: event.tenantId,
-            taskId,
-            rootTaskId,
-            agentId: stringField(event.payload, 'agentId'),
-            turnSeq: eventTurnSeq(event.payload) || undefined,
-            attemptKey,
-            disposition: 'executed',
-            claimId,
-            turnFence: stringField(event.payload, 'fence'),
-            claimedGeneration: stringField(event.payload, 'claimedGeneration'),
-            status,
-            completedAt,
-            authoritativeTerminal: true,
-        });
-        await this.prisma.turnRun?.updateMany?.({
-            where: {
+        const attemptKey = claimId
+            ? stringField(event.payload, 'attemptKey') ?? `claim:${claimId}`
+            : undefined;
+        if (claimId && attemptKey) {
+            const rootTaskId = stringField(event.payload, 'rootTaskId') ??
+                await this.parentRootTaskId(event.tenantId, event.sessionId) ?? taskId;
+            await this.upsertEventTurn({
                 tenantId: event.tenantId,
                 taskId,
-                attemptKey: { not: attemptKey },
+                rootTaskId,
+                agentId: stringField(event.payload, 'agentId'),
+                turnSeq: eventTurnSeq(event.payload) || undefined,
+                attemptKey,
+                disposition: 'executed',
+                claimId,
+                turnFence: stringField(event.payload, 'fence'),
+                claimedGeneration: stringField(event.payload, 'claimedGeneration'),
+                status,
+                completedAt,
+                authoritativeTerminal: true,
+            });
+        }
+        await this.convergeTerminalAttempts({
+            tenantId: event.tenantId,
+            taskId,
+            status,
+            completedAt,
+            authoritativeAttemptKey: attemptKey,
+        });
+    }
+
+    private async convergeTerminalAttempts(params: {
+        tenantId: string;
+        taskId: string;
+        status: 'completed' | 'failed' | 'canceled';
+        completedAt: Date;
+        authoritativeAttemptKey?: string;
+    }): Promise<void> {
+        const updateMany = this.prisma.turnRun?.updateMany;
+        if (typeof updateMany !== 'function') return;
+        if (params.authoritativeAttemptKey) {
+            await updateMany({
+                where: {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    attemptKey: params.authoritativeAttemptKey,
+                    status: 'running',
+                },
+                data: {
+                    status: params.status,
+                    completedAt: params.completedAt,
+                    authoritativeTerminal: true,
+                },
+            });
+            await updateMany({
+                where: {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    attemptKey: { not: params.authoritativeAttemptKey },
+                    status: 'running',
+                },
+                data: {
+                    status: 'superseded',
+                    disposition: 'superseded',
+                    completedAt: params.completedAt,
+                    authoritativeTerminal: false,
+                },
+            });
+            return;
+        }
+        await updateMany({
+            where: {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                authoritativeTerminal: true,
+                status: 'running',
+            },
+            data: {
+                status: params.status,
+                completedAt: params.completedAt,
+            },
+        });
+        await updateMany({
+            where: {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                authoritativeTerminal: false,
                 status: 'running',
             },
             data: {
                 status: 'superseded',
                 disposition: 'superseded',
-                completedAt,
+                completedAt: params.completedAt,
                 authoritativeTerminal: false,
             },
         });
+    }
+
+    private async convergePersistedTerminalTasks(tenantId: string, taskIds: string[]): Promise<void> {
+        const uniqueTaskIds = [...new Set(taskIds)];
+        if (uniqueTaskIds.length === 0) return;
+        const rows = await this.prisma.agentRun!.findMany!({
+            where: {
+                tenantId,
+                taskId: { in: uniqueTaskIds },
+                status: { in: [...TERMINAL_AGENT_RUN_STATUSES] },
+            },
+        }) as SemanticRunRow[];
+        for (const row of rows) {
+            const status = normalizeStatus(row.status);
+            if (!TERMINAL_AGENT_RUN_STATUSES.has(status)) continue;
+            await this.convergeTerminalAttempts({
+                tenantId,
+                taskId: row.taskId,
+                status: status as 'completed' | 'failed' | 'canceled',
+                completedAt: new Date(row.terminalAt ?? row.updatedAt),
+            });
+        }
     }
 
     private async upsertEventTurn(params: {
@@ -1186,38 +1310,9 @@ export class OperatorProjectionRepository {
         turnTraceId?: string;
         authoritativeTerminal?: boolean;
     }): Promise<void> {
-        const data = stripUndefined({
-            rootTaskId: params.rootTaskId,
-            agentId: params.agentId,
-            status: normalizeStatus(params.status),
-            startedAt: params.startedAt,
-            completedAt: params.completedAt,
-            durationMs: params.startedAt && params.completedAt ? Math.max(0, params.completedAt.getTime() - params.startedAt.getTime()) : undefined,
-            transitionKind: params.transitionKind,
-            boundaryKind: params.boundaryKind,
-            outputProduced: params.outputProduced,
-            llmCallCount: params.llmCallCount,
-            memoryOpCount: params.memoryOpCount,
-            knownCostUsd: params.knownCostUsd,
-            terminalCode: params.terminalCode,
-            terminalMessage: params.terminalMessage,
-            turnTraceId: params.turnTraceId,
-            turnSeq: params.turnSeq,
-            attemptKey: params.attemptKey,
-            disposition: params.disposition,
-            claimId: params.claimId,
-            turnFence: params.turnFence,
-            claimedGeneration: params.claimedGeneration,
-            authoritativeTerminal: params.authoritativeTerminal,
-        });
-        await this.prisma.turnRun!.upsert!({
-            where: { tenantId_taskId_attemptKey: { tenantId: params.tenantId, taskId: params.taskId, attemptKey: params.attemptKey } },
-            create: {
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                ...data,
-            },
-            update: data,
+        await this.upsertTurnEvidence({
+            ...params,
+            attemptKey: canonicalTurnAttemptKey(params.claimId, params.attemptKey),
         });
     }
 
@@ -1355,16 +1450,17 @@ export class OperatorProjectionRepository {
 
     private async upsertTurn(turn: TurnAttemptRun, nodesByTask: Map<string, AgentRunNode>, graph: AgentRunGraph): Promise<void> {
         const turnSeq = turn.turnSeq;
-        const attemptKey = turn.attemptKey ?? turn.id;
+        const attemptKey = canonicalTurnAttemptKey(turn.claimId, turn.attemptKey ?? turn.id);
         const node = nodesByTask.get(turn.taskId);
         const transition = turn.cognition?.transition;
-        const data = stripUndefined({
+        await this.upsertTurnEvidence({
+            tenantId: graph.tenantId,
+            taskId: turn.taskId,
             rootTaskId: turn.rootTaskId,
             agentId: turn.agentId ?? node?.agentId,
-            status: normalizeStatus(turn.status),
+            status: turn.status,
             startedAt: turn.startedAt ? new Date(turn.startedAt) : undefined,
             completedAt: turn.finishedAt ? new Date(turn.finishedAt) : undefined,
-            durationMs: durationMs(turn.startedAt, turn.finishedAt),
             transitionKind: transitionKind(transition),
             boundaryKind: turn.boundaryKind,
             outputProduced: outputProduced(turn),
@@ -1380,17 +1476,112 @@ export class OperatorProjectionRepository {
             claimId: turn.claimId,
             turnFence: turn.turnFence,
             claimedGeneration: turn.claimedGeneration,
-            authoritativeTerminal: turn.authoritativeTerminal ?? false,
+            authoritativeTerminal: turn.authoritativeTerminal,
         });
+    }
+
+    private async upsertTurnEvidence(params: {
+        tenantId: string;
+        taskId: string;
+        rootTaskId: string;
+        agentId?: string;
+        turnSeq?: number;
+        attemptKey: string;
+        attemptSeq?: number;
+        disposition?: string;
+        claimId?: string;
+        turnFence?: string;
+        claimedGeneration?: string;
+        status: string;
+        startedAt?: Date;
+        completedAt?: Date;
+        transitionKind?: string;
+        boundaryKind?: string;
+        outputProduced?: boolean;
+        llmCallCount?: number;
+        memoryOpCount?: number;
+        knownCostUsd?: number;
+        terminalCode?: string;
+        terminalMessage?: string;
+        turnTraceId?: string;
+        authoritativeTerminal?: boolean;
+    }): Promise<void> {
+        const attemptKey = canonicalTurnAttemptKey(params.claimId, params.attemptKey);
+        const existing = await this.findTurn(params.tenantId, params.taskId, attemptKey);
+        const status = normalizeTurnStatus(params.status);
+        const startedAt = earliestDate(existing?.startedAt, params.startedAt);
+        const completedAt = latestDate(existing?.completedAt, params.completedAt);
+        const authoritativeTerminal = existing?.authoritativeTerminal === true || params.authoritativeTerminal === true;
+        const disposition = mergePersistedDisposition(
+            existing?.disposition,
+            params.disposition,
+            params.authoritativeTerminal === true
+        );
+        const data = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            agentId: params.agentId ?? existing?.agentId ?? undefined,
+            startedAt,
+            completedAt,
+            durationMs: startedAt && completedAt ? Math.max(0, completedAt.getTime() - startedAt.getTime()) : existing?.durationMs ?? undefined,
+            transitionKind: params.transitionKind ?? existing?.transitionKind ?? undefined,
+            boundaryKind: params.boundaryKind ?? existing?.boundaryKind ?? undefined,
+            outputProduced: Boolean(existing?.outputProduced || params.outputProduced),
+            llmCallCount: Math.max(existing?.llmCallCount ?? 0, params.llmCallCount ?? 0),
+            memoryOpCount: Math.max(existing?.memoryOpCount ?? 0, params.memoryOpCount ?? 0),
+            knownCostUsd: params.knownCostUsd,
+            terminalCode: params.terminalCode ?? existing?.terminalCode ?? undefined,
+            terminalMessage: params.terminalMessage ?? existing?.terminalMessage ?? undefined,
+            turnTraceId: params.turnTraceId ?? existing?.turnTraceId ?? undefined,
+            turnSeq: params.turnSeq ?? existing?.turnSeq ?? undefined,
+            attemptKey,
+            attemptSeq: params.attemptSeq ?? existing?.attemptSeq ?? undefined,
+            disposition,
+            claimId: params.claimId ?? existing?.claimId ?? undefined,
+            turnFence: params.turnFence ?? existing?.turnFence ?? undefined,
+            claimedGeneration: params.claimedGeneration ?? existing?.claimedGeneration ?? undefined,
+        });
+        const updateMany = this.prisma.turnRun?.updateMany;
         await this.prisma.turnRun!.upsert!({
-            where: { tenantId_taskId_attemptKey: { tenantId: graph.tenantId, taskId: turn.taskId, attemptKey } },
+            where: { tenantId_taskId_attemptKey: { tenantId: params.tenantId, taskId: params.taskId, attemptKey } },
             create: {
-                tenantId: graph.tenantId,
-                taskId: turn.taskId,
+                tenantId: params.tenantId,
+                taskId: params.taskId,
                 ...data,
+                status,
+                authoritativeTerminal,
             },
-            update: data,
+            update: {
+                ...data,
+                ...(params.authoritativeTerminal === true ? { authoritativeTerminal: true, status } : {}),
+                ...(typeof updateMany !== 'function' ? { status } : {}),
+            },
         });
+        if (typeof updateMany === 'function') {
+            const statusWhere = turnStatusTransitionWhere(status, params.authoritativeTerminal === true);
+            if (statusWhere !== undefined) {
+                await updateMany({
+                    where: {
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        attemptKey,
+                        ...statusWhere,
+                    },
+                    data: {
+                        status,
+                        ...(params.authoritativeTerminal === true ? { authoritativeTerminal: true } : {}),
+                    },
+                });
+            }
+        }
+    }
+
+    private async findTurn(tenantId: string, taskId: string, attemptKey: string): Promise<SemanticTurnRow | undefined> {
+        if (typeof this.prisma.turnRun?.findMany !== 'function') return undefined;
+        const rows = await this.prisma.turnRun.findMany({
+            where: { tenantId, taskId, attemptKey },
+            take: 1,
+        }) as SemanticTurnRow[];
+        return rows[0];
     }
 
     private async upsertEffect(effect: EffectRun, graph: AgentRunGraph): Promise<void> {
@@ -1533,6 +1724,67 @@ function semanticExecutionOrigin(row: SemanticRunRow, status: AgentRunStatus): A
         return 'projected';
     }
     return undefined;
+}
+
+function semanticProjectionIsPartial(params: {
+    rootTaskId: string;
+    runs: SemanticRunRow[];
+    edges: SemanticEdgeRow[];
+    turns: TurnRun[];
+    unassignedAttempts: TurnAttemptRun[];
+    expectedTurnCount: number;
+    expectedEdgeCount: number;
+}): boolean {
+    if (params.turns.length < params.expectedTurnCount || params.edges.length < params.expectedEdgeCount) {
+        return true;
+    }
+    if (params.runs.some((run) => run.rootTaskId !== params.rootTaskId) ||
+        params.edges.some((edge) => edge.rootTaskId !== params.rootTaskId) ||
+        params.turns.some((turn) => turn.rootTaskId !== params.rootTaskId)) {
+        return true;
+    }
+
+    const taskIds = new Set(params.runs.map((run) => run.taskId));
+    if (params.edges.some((edge) => !taskIds.has(edge.parentTaskId) || !taskIds.has(edge.childTaskId))) {
+        return true;
+    }
+    if (params.unassignedAttempts.some((attempt) =>
+        attempt.claimId !== undefined || attempt.disposition === 'executed'
+    )) {
+        return true;
+    }
+
+    for (const turn of params.turns) {
+        if (turn.status === 'unknown' || !turn.agentId || !isCanonicalAttemptIdentity(turn)) {
+            return true;
+        }
+        if (turn.status === 'waiting' && !turn.boundaryKind) {
+            return true;
+        }
+    }
+
+    const turnsByTask = new Map<string, TurnRun[]>();
+    for (const turn of params.turns) {
+        const taskTurns = turnsByTask.get(turn.taskId) ?? [];
+        taskTurns.push(turn);
+        turnsByTask.set(turn.taskId, taskTurns);
+    }
+    for (const run of params.runs) {
+        const status = normalizeStatus(run.status);
+        if (!TERMINAL_AGENT_RUN_STATUSES.has(status) || (run.turnCount ?? 0) === 0) continue;
+        const latest = [...(turnsByTask.get(run.taskId) ?? [])]
+            .sort((a, b) => b.turnSeq - a.turnSeq)[0];
+        if (!latest || latest.status === 'queued' || latest.status === 'running' || latest.status === 'unknown') {
+            return true;
+        }
+    }
+    return false;
+}
+
+function isCanonicalAttemptIdentity(attempt: TurnAttemptRun): boolean {
+    const attemptKey = attempt.attemptKey;
+    if (!attemptKey) return false;
+    return attempt.claimId === undefined || attemptKey === `claim:${attempt.claimId}`;
 }
 
 function rowToEdge(row: SemanticEdgeRow): AgentRunEdge {
@@ -1699,6 +1951,69 @@ function normalizeStatus(status: string): AgentRunStatus {
         default:
             return 'unknown';
     }
+}
+
+function normalizeTurnStatus(status: string): AgentRunStatus {
+    return status === 'superseded' ? 'completed' : normalizeStatus(status);
+}
+
+function mergePersistedDisposition(
+    existing: string | null | undefined,
+    incoming: string | undefined,
+    incomingAuthoritative: boolean
+): string | undefined {
+    if (incomingAuthoritative) return incoming ?? existing ?? undefined;
+    if (existing === 'superseded') return existing;
+    if (incoming === 'superseded') return incoming;
+    if (existing === 'executed' || incoming === 'executed') return 'executed';
+    return incoming ?? existing ?? undefined;
+}
+
+function turnStatusTransitionWhere(
+    incoming: AgentRunStatus,
+    authoritative: boolean
+): Record<string, unknown> | undefined {
+    if (incoming === 'unknown') return undefined;
+    if (authoritative && TERMINAL_AGENT_RUN_STATUSES.has(incoming)) return {};
+    if (TERMINAL_AGENT_RUN_STATUSES.has(incoming)) {
+        return {
+            authoritativeTerminal: false,
+            status: { notIn: [...TERMINAL_AGENT_RUN_STATUSES] },
+        };
+    }
+    if (incoming === 'waiting') {
+        return { authoritativeTerminal: false, status: { in: ['unknown', 'queued', 'running'] } };
+    }
+    if (incoming === 'running') {
+        return { authoritativeTerminal: false, status: { in: ['unknown', 'queued', 'running'] } };
+    }
+    return { authoritativeTerminal: false, status: { in: ['unknown', 'queued'] } };
+}
+
+function earliestDate(
+    existing: Date | string | null | undefined,
+    incoming: Date | undefined
+): Date | undefined {
+    const existingDate = toValidDate(existing);
+    if (!existingDate) return incoming;
+    if (!incoming) return existingDate;
+    return existingDate.getTime() <= incoming.getTime() ? existingDate : incoming;
+}
+
+function latestDate(
+    existing: Date | string | null | undefined,
+    incoming: Date | undefined
+): Date | undefined {
+    const existingDate = toValidDate(existing);
+    if (!existingDate) return incoming;
+    if (!incoming) return existingDate;
+    return existingDate.getTime() >= incoming.getTime() ? existingDate : incoming;
+}
+
+function toValidDate(value: Date | string | null | undefined): Date | undefined {
+    if (value === null || value === undefined) return undefined;
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 function shouldPreserveTerminal(existingStatus: string | undefined, incomingStatus: AgentRunStatus): boolean {

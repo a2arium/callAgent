@@ -130,11 +130,8 @@ export class DriverRunsRepository {
         await this.prisma.driverRun.updateMany({
             where: {
                 tenantId: record.tenantId,
+                taskId: record.taskId,
                 operation: { in: ['agent.run', 'task.start'] },
-                OR: [
-                    { taskId: record.taskId },
-                    { rootTaskId: record.taskId },
-                ],
             },
             data: {
                 status: record.status,

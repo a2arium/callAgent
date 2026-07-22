@@ -72,6 +72,10 @@ export type RuntimeWakeEvent =
 export type EnqueueStartParams = RuntimeDriverIds & {
     input: unknown;
     cache?: RuntimeResultCachePolicy;
+    /** Original root task for nested runtime starts. Defaults to taskId for roots. */
+    rootTaskId?: string;
+    /** Immediate parent task for nested runtime starts. */
+    parentTaskId?: string;
 };
 export type EnqueueResumeParams = RuntimeDriverIds & { event: RuntimeWakeEvent };
 export type EnqueueChildDispatchParams = RuntimeDriverIds & {

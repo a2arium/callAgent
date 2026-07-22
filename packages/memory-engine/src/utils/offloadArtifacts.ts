@@ -40,12 +40,19 @@ async function offloadArtifactsInternal(
         const local = obj as LocalArtifact;
         const upload = (async () => {
             try {
-                const { size, artifactId } = await cache.storeArtifact(
-                    tenantId,
-                    undefined,
-                    local.value,
-                    local.mimeType
-                );
+                const { size, artifactId } = local.publicationId
+                    ? await cache.publishArtifact(
+                        tenantId,
+                        local.publicationId,
+                        local.value,
+                        local.mimeType
+                    )
+                    : await cache.storeArtifact(
+                        tenantId,
+                        undefined,
+                        local.value,
+                        local.mimeType
+                    );
 
                 const handle = new ArtifactImpl(
                     artifactId,
@@ -65,6 +72,12 @@ async function offloadArtifactsInternal(
                 };
             } catch (err) {
                 log.error('Failed to offload artifact', { error: err instanceof Error ? err.message : String(err) });
+                if (
+                    err && typeof err === 'object' &&
+                    (err as { code?: unknown }).code === 'ARTIFACT_PUBLICATION_CONFLICT'
+                ) {
+                    throw err;
+                }
                 return obj; // Return original if failed
             }
         })();

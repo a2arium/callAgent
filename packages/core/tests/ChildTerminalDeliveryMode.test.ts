@@ -119,4 +119,48 @@ describe('child terminal delivery modes', () => {
         }));
         expect(snapshot.inbox.all).toHaveLength(1);
     });
+
+    it('keeps a parent timeout authoritative when child completion arrives late', async () => {
+        const session = await parentSession('parent-timeout');
+        const timeout = await coordinateChildTerminal({
+            session,
+            tenantId: 'tenant',
+            parentTaskId: 'parent-timeout',
+            deliveryMode: 'async_wake',
+            runtimeSurface: 'hatchet',
+            request: {
+                kind: 'failed', token: 'child', failedAt: '2026-07-19T12:00:00.000Z',
+                childTaskId: 'child-task', agentId: 'child-agent',
+                error: { code: 'CHILD_TIMEOUT', message: 'Child timed out.', timeoutMs: 30_000 },
+            },
+        });
+        const lateCompletion = await coordinateChildTerminal({
+            session,
+            tenantId: 'tenant',
+            parentTaskId: 'parent-timeout',
+            deliveryMode: 'async_wake',
+            runtimeSurface: 'hatchet',
+            request: {
+                kind: 'completed', token: 'child', completedAt: '2026-07-19T12:00:01.000Z',
+                childTaskId: 'child-task', agentId: 'child-agent', result: { ok: true },
+                executionMetadata: { origin: 'cache' },
+            },
+        });
+
+        expect(timeout.publicationDisposition).toBe('new_delivery');
+        expect(lateCompletion).toEqual(expect.objectContaining({
+            won: false,
+            lateCompletion: true,
+            disposition: 'competing_terminal',
+            publicationDisposition: 'none',
+        }));
+        const persisted = await session.load('tenant', 'parent-timeout');
+        const snapshot = persisted?.snapshot as any;
+        expect(snapshot.pending.childTerminals.child).toEqual(expect.objectContaining({
+            kind: 'failed',
+            error: expect.objectContaining({ code: 'CHILD_TIMEOUT' }),
+        }));
+        expect(snapshot.inbox.all).toHaveLength(1);
+        expect(snapshot.inbox.all[0].kind).toBe('child.failed');
+    });
 });

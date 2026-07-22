@@ -841,6 +841,53 @@ describe('TaskEngine Coverage Improvement Tests', () => {
             expect(JSON.stringify(event?.payload)).not.toContain('<html>');
             expect(artifactWrites).toEqual(expect.arrayContaining([html]));
         });
+
+        test('persists only a safe preview when operator artifact publication conflicts', async () => {
+            const store = new FailingSessionStore();
+            (store as any).prisma = {
+                agentResultCache: {
+                    upsert: jest.fn(async () => ({ result: 'different durable content' })),
+                    findUnique: jest.fn(async () => null),
+                },
+            };
+            const engine = new TaskEngine({
+                sessionStore: store,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+            const html = `<html>${'private'.repeat(16 * 1024)}</html>`;
+
+            await engine.appendOperatorEvent({
+                tenantId: 't',
+                sessionId: 'operator-task',
+                type: 'turn.completed',
+                payload: {
+                    taskId: 'operator-task',
+                    transition: {
+                        kind: 'complete',
+                        result: {
+                            html: {
+                                kind: 'artifact_local',
+                                publicationId: 'publication-1',
+                                value: html,
+                                mimeType: 'text/html',
+                            },
+                        },
+                    },
+                },
+            });
+
+            const event = store.getEvents('t', 'operator-task').find((item) => item.type === 'turn.completed');
+            expect(JSON.stringify(event?.payload)).not.toContain('<html>');
+            expect(event?.payload.transition).toEqual(expect.objectContaining({
+                result: expect.objectContaining({
+                    html: expect.objectContaining({
+                        state: 'artifact_only',
+                        artifactId: 'local',
+                        mimeType: 'text/html',
+                    }),
+                }),
+            }));
+        });
     });
 
     describe('Child and Tool Event Handling Edge Cases', () => {

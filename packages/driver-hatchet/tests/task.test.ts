@@ -11,12 +11,45 @@ import {
     createTaskStateTask,
     createTaskTask,
     DEFAULT_TASK_PROTOCOL_NAMES,
+    executeTaskStateTask,
     executeTaskTask,
     TASK_STATE_TASK_NAME,
     TASK_TASK_NAME,
 } from '../src/tasks/task.js';
 import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
+
+function createMemorySessions(initial: Record<string, Record<string, unknown>>) {
+    const snapshots = new Map(Object.entries(initial));
+    const versions = new Map(Object.keys(initial).map((key) => [key, BigInt(1)]));
+    const appendEvent = jest.fn(async () => ({ eventId: 'event-1', seq: 1 }));
+    const sessionManager = {
+        load: jest.fn(async (_tenantId: string, sessionId: string) => {
+            const snapshot = snapshots.get(sessionId);
+            return snapshot === undefined ? null : {
+                snapshot,
+                wmVersion: versions.get(sessionId) ?? BigInt(0),
+                agentId: (snapshot.meta as { agentId?: string } | undefined)?.agentId,
+            };
+        }),
+        saveSnapshot: jest.fn(async (params: {
+            sessionId: string;
+            expectedWmVersion: bigint;
+            snapshot: Record<string, unknown>;
+        }) => {
+            const currentVersion = versions.get(params.sessionId) ?? BigInt(0);
+            if (currentVersion !== params.expectedWmVersion) {
+                throw new Error('unexpected test version conflict');
+            }
+            const nextVersion = currentVersion + BigInt(1);
+            snapshots.set(params.sessionId, params.snapshot);
+            versions.set(params.sessionId, nextVersion);
+            return { snapshot: params.snapshot, newVersion: nextVersion };
+        }),
+        appendEvent,
+    };
+    return { snapshots, versions, sessionManager, appendEvent };
+}
 
 describe('executeTaskTask', () => {
     it('derives Hatchet execution timeout from latency budget plus grace', () => {
@@ -86,16 +119,29 @@ describe('executeTaskTask', () => {
             taskRunExternalId: () => 'task-run-1',
             retryCount: () => 0,
         };
+        const upsertByProviderRunId = jest.fn(async () => undefined);
 
         await expect(executeSegmentTask({
             tenantId: 'tenant-1',
             taskId: 'task-1',
+            rootTaskId: 'root-task',
+            parentTaskId: 'parent-task',
             agentId: 'agent-1',
             wake: { trigger: 'start', input: {} },
             idempotencyKey: 'task-1:start',
-        }, ctx as never, { turnExecutor: turnExecutor as never }))
+        }, ctx as never, {
+            turnExecutor: turnExecutor as never,
+            driverRuns: { upsertByProviderRunId } as never,
+        }))
             .rejects.toBeInstanceOf(NonRetryableError);
         expect(turnExecutor.runSegment).toHaveBeenCalledTimes(1);
+        expect(upsertByProviderRunId).toHaveBeenCalledTimes(2);
+        expect(upsertByProviderRunId).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            rootTaskId: 'root-task', parentTaskId: 'parent-task', status: 'running',
+        }));
+        expect(upsertByProviderRunId).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            rootTaskId: 'root-task', parentTaskId: 'parent-task', status: 'failed',
+        }));
     });
 
     it('declares durable parent tasks with an explicit execution timeout', () => {
@@ -168,6 +214,7 @@ describe('executeTaskTask', () => {
         await definition.fn({
             tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1', input: {},
             idempotencyKey: 'task-1:start', tenantTaskKey: 'tenant-1:task-1',
+            rootTaskId: 'root-task', parentTaskId: 'parent-task',
             rootRunKey: 'tenant-1:task-1:root:1',
         }, ctx);
 
@@ -175,7 +222,7 @@ describe('executeTaskTask', () => {
         expect(stateTask).toHaveBeenCalledWith(expect.objectContaining({ name: protocolNames.taskState }));
         expect(ctx.runChild).toHaveBeenCalledWith(
             protocolNames.segment,
-            expect.any(Object),
+            expect.objectContaining({ rootTaskId: 'root-task', parentTaskId: 'parent-task' }),
             expect.any(Object),
         );
         expect(ctx.runChild).not.toHaveBeenCalledWith(
@@ -613,6 +660,273 @@ describe('executeTaskTask', () => {
             status: 'completed',
             boundaryKind: 'complete',
         }));
+    });
+
+    it('persists a durable terminal when task-state projects a cached root result', async () => {
+        const memory = createMemorySessions({
+            'task-1': { meta: { agentId: 'fetch-html' } },
+        });
+        const setCachedResult = jest.fn(async () => undefined);
+
+        const output = await executeTaskStateTask({
+            operation: 'project_terminal',
+            task: {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html', input: { url: 'x' },
+                cache: { enabled: true }, idempotencyKey: 'task-1:start',
+            },
+            segment: {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html',
+                boundary: { kind: 'complete', result: { ok: true, data: 'cached' } },
+                taskStatus: {
+                    state: 'completed', timestamp: '2000-01-01T00:00:00.000Z',
+                    metadata: { source: 'cache', origin: 'cache' },
+                } as never,
+                executionMetadata: { origin: 'cache' },
+            },
+        }, {
+            sessionManager: memory.sessionManager,
+            agentResultCache: {
+                getCachedResult: jest.fn(async () => null), setCachedResult,
+            } as never,
+        });
+
+        expect(output.terminalSegment?.boundary).toEqual({
+            kind: 'complete', result: { ok: true, data: 'cached' },
+        });
+        expect(memory.snapshots.get('task-1')).toEqual(expect.objectContaining({
+            meta: expect.objectContaining({
+                taskLifecycle: expect.objectContaining({ state: 'completed' }),
+                taskTerminal: expect.objectContaining({
+                    state: 'completed',
+                    status: expect.objectContaining({
+                        state: 'completed',
+                        metadata: expect.objectContaining({
+                            result: { ok: true, data: 'cached' },
+                            source: 'cache',
+                            origin: 'cache',
+                        }),
+                    }),
+                }),
+            }),
+        }));
+        expect(setCachedResult).toHaveBeenCalledTimes(1);
+    });
+
+    it('completes and wakes an async cached child, with replay-safe diagnostics and cache provenance', async () => {
+        const memory = createMemorySessions({
+            'child-task-1': {
+                meta: {
+                    agentId: 'fetch-html',
+                    taskLifecycle: {
+                        taskId: 'child-task-1', rootTaskId: 'parent-task-1',
+                        parentTaskId: 'parent-task-1', ancestorTaskIds: ['parent-task-1'], state: 'active',
+                    },
+                    a2aParent: {
+                        parentTenantId: 'tenant-1', parentTaskId: 'parent-task-1',
+                        parentChildToken: 'child-token',
+                    },
+                },
+            },
+            'parent-task-1': {
+                meta: {
+                    agentId: 'parent-agent', turn: 1,
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '1', completedGeneration: '1',
+                    },
+                },
+                pending: {
+                    tasks: {
+                        'child-token': {
+                            target: 'fetch-html', agentId: 'fetch-html',
+                            childTaskId: 'child-task-1', handlers: {},
+                        },
+                    },
+                    children: { 'child-token': { agent: 'fetch-html' } },
+                },
+            },
+        });
+        const events = { push: jest.fn(async () => undefined) };
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const getCachedResult = jest.fn(async () => ({ ok: true, data: { html: '<html>cached</html>' } }));
+        const setCachedResult = jest.fn(async () => undefined);
+        const prisma = {
+            outbox: { findMany: jest.fn(async () => []) },
+            wMSession: {
+                findUnique: jest.fn(async (args: any) => {
+                    const snapshot = memory.snapshots.get(args.where.tenantId_sessionId.sessionId);
+                    return snapshot === undefined ? null : { snapshot };
+                }),
+            },
+        };
+        const ctx = {
+            runChild: jest.fn(async () => { throw new Error('segment should not run on cache hit'); }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+        const input = {
+            tenantId: 'tenant-1', taskId: 'child-task-1', agentId: 'fetch-html',
+            input: { url: 'https://example.test/listing.html' }, cache: { enabled: true },
+            idempotencyKey: 'child-task-1:start',
+        } as const;
+        const deps = {
+            driverRuns: { finalizeRootRun } as never,
+            sessionManager: memory.sessionManager,
+            events,
+            prisma: prisma as never,
+            agentResultCache: { getCachedResult, setCachedResult } as never,
+        };
+
+        await executeTaskTask(input as never, ctx as never, deps);
+        await executeTaskTask(input as never, ctx as never, deps);
+
+        expect(ctx.runChild).not.toHaveBeenCalled();
+        expect(memory.appendEvent).toHaveBeenCalledTimes(1);
+        expect(memory.appendEvent).toHaveBeenCalledWith(
+            'tenant-1',
+            'parent-task-1',
+            'task.child_completed',
+            expect.objectContaining({
+                token: 'child-token',
+                childTaskId: 'child-task-1',
+                executionMetadata: { origin: 'cache' },
+            })
+        );
+        expect(events.push).toHaveBeenCalledTimes(2);
+        expect(events.push).toHaveBeenLastCalledWith(
+            'aplret.child.child-token',
+            expect.objectContaining({ outcome: 'completed', terminalClaimed: true }),
+            { key: 'tenant-1:parent-task-1:child-token' }
+        );
+        expect((memory.snapshots.get('child-task-1') as any).meta.taskTerminal.status.metadata)
+            .toEqual(expect.objectContaining({ origin: 'cache', source: 'cache' }));
+    });
+
+    it('does not overwrite a cancellation that wins before cached terminal projection', async () => {
+        const memory = createMemorySessions({
+            'task-1': {
+                meta: {
+                    agentId: 'fetch-html',
+                    taskLifecycle: {
+                        taskId: 'task-1', rootTaskId: 'task-1', ancestorTaskIds: [],
+                        state: 'canceled', changedAt: '2026-07-22T00:00:00.000Z', reason: 'operator_cancel',
+                    },
+                },
+            },
+        });
+        const setCachedResult = jest.fn(async () => undefined);
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const result = await executeTaskTask({
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html', input: {},
+            cache: { enabled: true }, idempotencyKey: 'task-1:start',
+        }, {
+            runChild: jest.fn(async () => { throw new Error('segment should not run'); }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        } as never, {
+            sessionManager: memory.sessionManager,
+            driverRuns: { finalizeRootRun } as never,
+            agentResultCache: {
+                getCachedResult: jest.fn(async () => ({ ok: true })), setCachedResult,
+            } as never,
+        });
+
+        expect(result.boundary).toEqual({ kind: 'canceled', reason: 'operator_cancel' });
+        expect((memory.snapshots.get('task-1') as any).meta.taskLifecycle.state).toBe('canceled');
+        expect((memory.snapshots.get('task-1') as any).meta.taskTerminal.state).toBe('canceled');
+        expect(setCachedResult).not.toHaveBeenCalled();
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({ status: 'canceled' }));
+    });
+
+    it('offloads oversized cached HTML before committing it and does not nest artifact markers', async () => {
+        const memory = createMemorySessions({ 'task-1': { meta: { agentId: 'fetch-html' } } });
+        const html = `<html>${'x'.repeat(70_000)}</html>`;
+        const storeArtifact = jest.fn(async () => ({ size: html.length, artifactId: 'artifact-html' }));
+        const cachedResult: unknown = { ok: true, data: { html } };
+        const setCachedResult = jest.fn(async () => undefined);
+        const input = {
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html', input: {},
+            cache: { enabled: true }, idempotencyKey: 'task-1:start',
+        } as const;
+        const ctx = {
+            runChild: jest.fn(async () => { throw new Error('segment should not run'); }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+        const deps = {
+            sessionManager: memory.sessionManager,
+            agentResultCache: {
+                getCachedResult: jest.fn(async () => cachedResult),
+                setCachedResult,
+                storeArtifact,
+            } as never,
+        };
+        const result = await executeTaskTask(input as never, ctx as never, deps);
+        const replay = await executeTaskTask(input as never, ctx as never, deps);
+        const marker = {
+            kind: 'artifact', id: 'artifact-html', mimeType: 'text/html', estimatedSize: html.length,
+        };
+
+        expect(result.boundary).toEqual({ kind: 'complete', result: { ok: true, data: { html: marker } } });
+        expect(replay.boundary).toEqual(result.boundary);
+        expect((memory.snapshots.get('task-1') as any).meta.taskTerminal.status.metadata.result)
+            .toEqual({ ok: true, data: { html: marker } });
+        expect(setCachedResult).toHaveBeenCalledWith(
+            'fetch-html', {}, { ok: true, data: { html: marker } }, 300, [], 'tenant-1'
+        );
+        expect(storeArtifact).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not claim a cached terminal when required artifact persistence fails', async () => {
+        const memory = createMemorySessions({ 'task-1': { meta: { agentId: 'fetch-html' } } });
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const html = `<html>${'x'.repeat(70_000)}</html>`;
+        const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        try {
+            await expect(executeTaskTask({
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html', input: {},
+                cache: { enabled: true }, idempotencyKey: 'task-1:start',
+            }, {
+                runChild: jest.fn(async () => { throw new Error('segment should not run'); }),
+                runNoWaitChild: jest.fn(async () => undefined),
+            } as never, {
+                sessionManager: memory.sessionManager,
+                driverRuns: { finalizeRootRun } as never,
+                agentResultCache: {
+                    getCachedResult: jest.fn(async () => ({ ok: true, data: { html } })),
+                    setCachedResult: jest.fn(async () => undefined),
+                    storeArtifact: jest.fn(async () => { throw new Error('artifact store unavailable'); }),
+                } as never,
+            })).rejects.toMatchObject({ code: 'ARTIFACT_PERSISTENCE_FAILED' });
+        } finally {
+            consoleError.mockRestore();
+        }
+
+        expect((memory.snapshots.get('task-1') as any).meta.taskTerminal).toBeUndefined();
+        expect(memory.sessionManager.saveSnapshot).not.toHaveBeenCalled();
+        expect(finalizeRootRun).not.toHaveBeenCalled();
+    });
+
+    it('retains completed durable semantics for a cached ok:false result', async () => {
+        const memory = createMemorySessions({ 'task-1': { meta: { agentId: 'fetch-html' } } });
+        const finalizeRootRun = jest.fn(async () => undefined);
+        await executeTaskTask({
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html', input: {},
+            cache: { enabled: true }, idempotencyKey: 'task-1:start',
+        }, {
+            runChild: jest.fn(async () => { throw new Error('segment should not run'); }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        } as never, {
+            sessionManager: memory.sessionManager,
+            driverRuns: { finalizeRootRun } as never,
+            agentResultCache: {
+                getCachedResult: jest.fn(async () => ({
+                    ok: false, error: { code: 'NO_HTML', message: 'No HTML' },
+                })),
+                setCachedResult: jest.fn(async () => undefined),
+            } as never,
+        });
+
+        expect((memory.snapshots.get('task-1') as any).meta.taskTerminal.state).toBe('completed');
+        expect(finalizeRootRun).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
     });
 
     it('finalizes complete ok:false outcomes as failed semantic runs', async () => {

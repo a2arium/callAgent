@@ -4,6 +4,16 @@ import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory
 import type { TaskInput } from '../shared/types/index.js';
 import { logger } from '@a2arium/callagent-utils';
 
+export class ArtifactPublicationConflictError extends Error {
+    readonly code = 'ARTIFACT_PUBLICATION_CONFLICT';
+
+    constructor(public readonly artifactId: string) {
+        super(`ARTIFACT_PUBLICATION_CONFLICT: artifact ${artifactId} was already published with different content`);
+        this.name = 'ArtifactPublicationConflictError';
+        Object.setPrototypeOf(this, ArtifactPublicationConflictError.prototype);
+    }
+}
+
 /**
  * Agent Result Cache Service
  * 
@@ -171,6 +181,39 @@ export class AgentResultCache {
     }
 
     /**
+     * Publishes an immutable local artifact. Repeated publication of identical
+     * cloned content reuses the row; conflicting content fails closed.
+     */
+    async publishArtifact(
+        tenantId: string,
+        artifactId: string,
+        value: unknown,
+        _mimeType?: string
+    ): Promise<{ size: number; artifactId: string }> {
+        const size = JSON.stringify(value).length;
+        const agentName = 'artifact_store';
+        const cacheKey = this.generateCacheKey({ artifactId }, []);
+        const expiresAt = new Date(Date.now() + 86400 * 30 * 1000);
+        const stored = await this.prisma.agentResultCache.upsert({
+            where: {
+                tenantId_agentName_cacheKey: { tenantId, agentName, cacheKey }
+            },
+            update: { expiresAt },
+            create: {
+                tenantId,
+                agentName,
+                cacheKey,
+                result: value as any,
+                expiresAt
+            }
+        });
+        if (!this.jsonValuesEqual(stored.result, value)) {
+            throw new ArtifactPublicationConflictError(artifactId);
+        }
+        return { size, artifactId };
+    }
+
+    /**
      * Load a raw artifact directly.
      */
     async loadArtifact<T>(tenantId: string, artifactId: string): Promise<T> {
@@ -251,5 +294,13 @@ export class AgentResultCache {
                 result[key] = this.sortObjectKeys(obj[key]);
                 return result;
             }, {} as any);
+    }
+
+    private jsonValuesEqual(left: unknown, right: unknown): boolean {
+        const normalize = (value: unknown) => {
+            const serialized = JSON.stringify(value);
+            return serialized === undefined ? undefined : this.sortObjectKeys(JSON.parse(serialized));
+        };
+        return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
     }
 }

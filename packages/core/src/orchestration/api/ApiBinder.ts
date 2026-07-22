@@ -513,6 +513,8 @@ export class ApiBinder {
                 idempotencyKey,
                 token,
                 traceId,
+                rootTaskId: childRootTaskId,
+                parentTaskId: sessionId,
             });
             return { handle, token };
         }

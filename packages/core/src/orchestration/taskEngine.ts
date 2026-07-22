@@ -2283,6 +2283,7 @@ export class TaskEngine {
                     taskId: params.sessionId,
                     error: error instanceof Error ? error.message : String(error),
                 });
+                payload = makeSafeEventPreview(params.payload) as Record<string, unknown>;
             }
         }
         return this.sessionManager.appendEvent(

@@ -214,6 +214,53 @@ describe('HatchetRuntimeDriver', () => {
         );
     });
 
+    it('preserves supplied root and parent ancestry for nested starts', async () => {
+        const delegate: RuntimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 't1' })),
+            cancel: jest.fn(async () => undefined),
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const taskTask = {
+            runNoWait: jest.fn(async () => ({ runId: Promise.resolve('child-run-1') })),
+        };
+        const driverRuns = { upsertByProviderRunId: jest.fn(async () => undefined) };
+        const driver = new HatchetRuntimeDriver(
+            delegate,
+            { runNoWait: jest.fn() } as never,
+            driverRuns as never,
+            undefined,
+            taskTask as never
+        );
+
+        await driver.enqueueStart({
+            tenantId: 'tenant-1',
+            taskId: 'child-task',
+            rootTaskId: 'root-task',
+            parentTaskId: 'parent-task',
+            agentId: 'child-agent',
+            idempotencyKey: 'child-task:start',
+            input: {},
+        });
+
+        expect(taskTask.runNoWait).toHaveBeenCalledWith(
+            expect.objectContaining({
+                taskId: 'child-task', rootTaskId: 'root-task', parentTaskId: 'parent-task',
+                rootRunKey: '8:tenant-1:10:child-task:root:1',
+            }),
+            expect.objectContaining({
+                additionalMetadata: expect.objectContaining({
+                    rootTaskId: 'root-task', parentTaskId: 'parent-task',
+                }),
+            })
+        );
+        expect(driverRuns.upsertByProviderRunId).toHaveBeenCalledWith(expect.objectContaining({
+            taskId: 'child-task', rootTaskId: 'root-task', parentTaskId: 'parent-task',
+        }));
+    });
+
     it('pushes resume events when the resume surface is enabled', async () => {
         const delegate: RuntimeDriver = {
             enqueueStart: jest.fn(async () => undefined),

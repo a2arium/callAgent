@@ -1,7 +1,12 @@
 import { describe, expect, it } from '@jest/globals';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
-import { buildAgentRunGraph, type AgentRunSourceEvent, type DriverRunView } from '../src/operator/runGraph.js';
+import {
+    buildAgentRunGraph,
+    groupTurnAttempts,
+    type AgentRunSourceEvent,
+    type DriverRunView,
+} from '../src/operator/runGraph.js';
 
 describe('buildAgentRunGraph', () => {
     it('projects a user-facing agent graph from driver runs and working-memory events', async () => {
@@ -1542,5 +1547,61 @@ describe('buildAgentRunGraph', () => {
         expect(graph.turns).toEqual([
             expect.objectContaining({ turnSeq: 2 }),
         ]);
+    });
+
+    it('uses the durable claim as the identity for event-only cognition turns', async () => {
+        const sessionManager = new SessionManager(new InMemorySessionManager());
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1', sessionId: 'root-task', agentId: 'root-agent', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'turn.started', {
+            taskId: 'root-task', agentId: 'root-agent', turnSeq: 2, logicalTurnSeq: 2,
+            claimId: 'claim-2', fence: '8', claimedGeneration: '2', attemptKey: 'segment-key',
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'turn.completed', {
+            taskId: 'root-task', agentId: 'root-agent', turnSeq: 2, logicalTurnSeq: 2,
+            claimId: 'claim-2', fence: '8', claimedGeneration: '2', attemptKey: 'segment-key',
+            transition: { kind: 'complete', result: { ok: true } },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1', taskId: 'root-task', sessionManager, driverRuns: [],
+        });
+
+        expect(graph.turns[0]?.attempts).toHaveLength(1);
+        expect(graph.turns[0]?.attempts[0]).toEqual(expect.objectContaining({
+            attemptKey: 'claim:claim-2', claimId: 'claim-2', disposition: 'executed',
+        }));
+    });
+
+    it('coalesces claim and provider evidence without merging distinct claims', () => {
+        const projection = groupTurnAttempts([
+            {
+                id: 'claim-row', rootTaskId: 'root-task', taskId: 'root-task', agentId: 'agent-1',
+                status: 'running', operation: 'turn.segment', turnSeq: 2,
+                attemptKey: 'claim:claim-2', claimId: 'claim-2', disposition: 'executed',
+            },
+            {
+                id: 'provider-row', rootTaskId: 'root-task', taskId: 'root-task', agentId: 'agent-1',
+                status: 'completed', operation: 'turn.segment', turnSeq: 2,
+                attemptKey: 'hatchet:run:task', claimId: 'claim-2', disposition: 'executed',
+                providerRunId: 'run-1', boundaryKind: 'await_child',
+            },
+            {
+                id: 'retry-row', rootTaskId: 'root-task', taskId: 'root-task', agentId: 'agent-1',
+                status: 'queued', operation: 'turn.segment', turnSeq: 2,
+                attemptKey: 'claim:claim-3', claimId: 'claim-3', disposition: 'queued',
+            },
+        ]);
+
+        expect(projection.turns).toHaveLength(1);
+        expect(projection.turns[0]?.attempts).toHaveLength(2);
+        expect(projection.turns[0]?.attempts).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                attemptKey: 'claim:claim-2', status: 'completed', providerRunId: 'run-1',
+            }),
+            expect.objectContaining({ attemptKey: 'claim:claim-3', status: 'queued' }),
+        ]));
     });
 });

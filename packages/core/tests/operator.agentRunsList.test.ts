@@ -1095,6 +1095,10 @@ describe('TaskEngine operator agent run list', () => {
                 rootTaskId: 'root-task',
                 agentId: 'root-agent',
                 turnSeq: 1,
+                attemptKey: 'claim:claim-1',
+                claimId: 'claim-1',
+                disposition: 'executed',
+                authoritativeTerminal: false,
                 status: 'completed',
                 startedAt: now,
                 completedAt: new Date('2026-06-23T12:00:05.000Z'),
@@ -1520,6 +1524,43 @@ describe('TaskEngine operator agent run list', () => {
 
         expect(graph.projection).toEqual({ source: 'bridge', partial: false });
         expect(graph.root.taskId).toBe('root-task');
+    });
+
+    it('falls back when semantic row counts match but attempt quality is incomplete', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
+        process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
+        const semanticRunRows = [{
+            id: 'root-row', tenantId: 'default', taskId: 'root-task', rootTaskId: 'root-task',
+            agentId: 'root-agent', scope: 'root', status: 'running', childCount: 0, turnCount: 1,
+            llmCallCount: 0, memoryOpCount: 0, knownCostUsd: null, startedAt: now,
+            terminalAt: null, durationMs: null, terminalCode: null, terminalMessage: null,
+            outputState: 'not_captured', traceId: null, providerRunId: null, updatedAt: now,
+        }];
+        const semanticTurnRows = [{
+            id: 'bad-turn', tenantId: 'default', taskId: 'root-task', rootTaskId: 'root-task',
+            agentId: null, turnSeq: 1, attemptKey: 'hatchet:orphan', claimId: 'claim-1',
+            authoritativeTerminal: false, status: 'unknown', outputProduced: false,
+            llmCallCount: 0, memoryOpCount: 0,
+        }];
+        const driverRows = [{
+            id: 'run-root', provider: 'hatchet', tenantId: 'default', taskId: 'root-task',
+            rootTaskId: 'root-task', parentTaskId: null, agentId: 'root-agent',
+            operation: 'agent.run', status: 'running', createdAt: now, updatedAt: now,
+        }];
+        const prisma = {
+            driverRun: { findMany: jest.fn(async () => driverRows) },
+            agentRun: { findMany: jest.fn(async () => semanticRunRows) },
+            agentRunEdge: { findMany: jest.fn(async () => []) },
+            turnRun: { findMany: jest.fn(async () => semanticTurnRows) },
+            runEffect: { findMany: jest.fn(async () => []) },
+        };
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
+
+        expect(graph.projection).toEqual({ source: 'bridge', partial: false });
+        expect(prisma.driverRun.findMany).toHaveBeenCalled();
     });
 
     it('caps large graphs by preserving the root and reporting collapsed branches', async () => {
