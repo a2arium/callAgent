@@ -195,6 +195,76 @@ describe('executeTaskTask', () => {
         expect(schedule).not.toHaveBeenCalled();
     });
 
+    it('unwraps task-state child output before reading a recorded boundary timer', async () => {
+        const durableTask = jest.fn((options: unknown) => options);
+        const definition = createTaskTask({ durableTask } as never, {} as never) as unknown as {
+            fn: (input: unknown, ctx: unknown) => Promise<any>;
+        };
+        const dueAt = new Date(Date.now() + 60_000).toISOString();
+        const firedAt = new Date(Date.now() + 60_001).toISOString();
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                boundary: { kind: 'await_input', token: 'input-token', expiresAt: dueAt },
+                taskStatus: { state: 'working', timestamp: '2026-07-19T00:00:00.000Z' },
+                turnDisposition: 'executed', turnSeq: 1, claimedGeneration: '1',
+            },
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { ok: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-07-19T00:00:01.000Z' },
+                turnDisposition: 'executed', turnSeq: 2, claimedGeneration: '2',
+            },
+        ];
+        const stateOutput = (output: Record<string, unknown>) => ({
+            [TASK_STATE_TASK_NAME]: output,
+        });
+        const ctx = {
+            runChild: jest.fn(async (name: string, childInput: any) => {
+                if (name === SEGMENT_TASK_NAME) return segmentOutputs.shift();
+                if (name !== TASK_STATE_TASK_NAME) throw new Error(`Unexpected child ${name}`);
+                if (childInput.operation === 'schedule_timer') {
+                    return stateOutput({
+                        timer: {
+                            timerId: 'timer-1', dueAt, kind: 'token_expiry',
+                            idempotencyKey: 'timer:tenant-1:task-1:input-token:timer-1',
+                        },
+                    });
+                }
+                if (childInput.operation === 'mark_timer_fired') {
+                    return stateOutput({ firedAt });
+                }
+                return stateOutput({});
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+            waitFor: jest.fn(async () => ({ timer: {} })),
+        };
+
+        await definition.fn({
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1', input: {},
+            idempotencyKey: 'task-1:start', tenantTaskKey: '8:tenant-1:6:task-1',
+            rootRunKey: '8:tenant-1:6:task-1:root:1',
+        }, ctx);
+
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            TASK_STATE_TASK_NAME,
+            expect.objectContaining({ operation: 'schedule_timer' }),
+            expect.any(Object),
+        );
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            SEGMENT_TASK_NAME,
+            expect.objectContaining({
+                wake: {
+                    trigger: 'timer',
+                    event: expect.objectContaining({
+                        kind: 'timer', token: 'input-token', timerId: 'timer-1', firedAt,
+                    }),
+                },
+            }),
+            expect.any(Object),
+        );
+    });
+
     it('reloads authoritative state for a replay instead of trusting the segment boundary', async () => {
         const durableTask = jest.fn((options: unknown) => options);
         const definition = createTaskTask({ durableTask } as never, {} as never) as unknown as {

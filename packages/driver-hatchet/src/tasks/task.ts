@@ -189,6 +189,10 @@ export type TaskStateOutput = JsonObject & {
     firedAt?: string;
 };
 
+type TaskStateChildOutput =
+    | TaskStateOutput
+    | (JsonObject & { [TASK_STATE_TASK_NAME]: TaskStateOutput });
+
 type AwaitableBoundary = Extract<
     SegmentTaskBoundary,
     { kind: 'await_input' | 'await_tool' | 'await_child' | 'await_event' }
@@ -365,7 +369,7 @@ async function runTaskState(
     key: string
 ): Promise<TaskStateOutput | undefined> {
     if (deps?.useTaskStateChildren !== true) return undefined;
-    return ctx.runChild<TaskStateInput, TaskStateOutput>(TASK_STATE_TASK_NAME, stateInput, {
+    const output = await ctx.runChild<TaskStateInput, TaskStateChildOutput>(TASK_STATE_TASK_NAME, stateInput, {
         key: `${input.rootRunKey ?? input.taskId}:state:${key}`,
         additionalMetadata: {
             operation: `task.state.${stateInput.operation}`,
@@ -373,6 +377,7 @@ async function runTaskState(
             taskId: input.taskId,
         },
     });
+    return normalizeTaskStateOutput(output);
 }
 
 export async function executeTaskStateTask(
@@ -1063,6 +1068,21 @@ function normalizeSegmentOutput(output: unknown): SegmentTaskOutput {
         }
     }
     throw new Error('SEGMENT_OUTPUT_INVALID');
+}
+
+function normalizeTaskStateOutput(output: unknown): TaskStateOutput {
+    if (output === null || typeof output !== 'object' || Array.isArray(output)) {
+        throw new Error('TASK_STATE_OUTPUT_INVALID');
+    }
+    const record = output as Record<string, unknown>;
+    const wrapped = record[TASK_STATE_TASK_NAME];
+    if (wrapped !== undefined) {
+        if (wrapped === null || typeof wrapped !== 'object' || Array.isArray(wrapped)) {
+            throw new Error('TASK_STATE_OUTPUT_INVALID');
+        }
+        return wrapped as TaskStateOutput;
+    }
+    return record as TaskStateOutput;
 }
 
 function isSegmentTaskOutput(value: unknown): value is SegmentTaskOutput {
