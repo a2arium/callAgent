@@ -172,7 +172,7 @@ export function deriveGraphInsights(graph: AgentRunGraph | undefined): GraphInsi
     children.push(node);
     childrenByParent.set(node.parentTaskId, children);
   }
-  const failedNodes = graph.nodes.filter((node) => normalizeRuntimeStatus(node.status) === 'failed');
+  const failedNodes = graph.nodes.filter((node) => normalizeRuntimeStatus(node.status) === 'failed' || node.severity === 'error');
   const failedLeaves = failedNodes.filter((node) => !hasFailedDescendant(node.taskId, childrenByParent));
   const deepest = [...failedLeaves].sort((a, b) => depthOf(b, graph.nodes) - depthOf(a, graph.nodes))[0] ?? failedNodes[0];
   const pathNodeIds = deepest ? pathToRoot(deepest.taskId, graph.nodes) : [];
@@ -220,7 +220,7 @@ function durationSince(value: string | undefined, now: Date): number | undefined
 
 function hasFailedDescendant(taskId: string, childrenByParent: Map<string, AgentRunNode[]>): boolean {
   const children = childrenByParent.get(taskId) ?? [];
-  return children.some((child) => normalizeRuntimeStatus(child.status) === 'failed' || hasFailedDescendant(child.taskId, childrenByParent));
+  return children.some((child) => normalizeRuntimeStatus(child.status) === 'failed' || child.severity === 'error' || hasFailedDescendant(child.taskId, childrenByParent));
 }
 
 function depthOf(node: AgentRunNode, nodes: AgentRunNode[]): number {
@@ -251,6 +251,9 @@ function buildGraphSummary(graph: AgentRunGraph, deepest: AgentRunNode | undefin
   if (deepest) {
     const leaf = deepest.agentId ?? deepest.taskId;
     const root = graph.root.agentId ?? graph.root.taskId;
+    if (normalizeRuntimeStatus(deepest.status) === 'cancelled') {
+      return `Cancelled after an error in ${leaf}.`;
+    }
     if (pathNodeIds.length > 1) {
       return `Failed in ${leaf}. The failure propagated to ${root}.`;
     }

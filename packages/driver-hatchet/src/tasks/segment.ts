@@ -94,6 +94,7 @@ export type SegmentTaskOutput = JsonObject & {
     turnFence?: string;
     claimedGeneration?: string;
     turnSeq?: number;
+    associatedTurnSeq?: number;
 };
 
 export type SegmentTaskDeps = {
@@ -173,7 +174,7 @@ async function executeSegmentTaskInner(
                 token: fields.token,
                 idempotencyKey: fields.idempotencyKey,
                 rootTaskId: fields.rootTaskId,
-                turnSeq: output.turnSeq ?? null,
+                turnSeq: output.turnSeq ?? output.associatedTurnSeq ?? null,
                 attemptSeq: fields.attemptSeq,
                 claimId: output.claimId ?? null,
                 turnFence: output.turnFence ?? null,
@@ -238,6 +239,7 @@ function toSegmentTaskOutput(result: SegmentResult): SegmentTaskOutput {
         ...(result.traceId !== undefined ? { traceId: result.traceId } : {}),
         ...(result.turnTraceId !== undefined ? { turnTraceId: result.turnTraceId } : {}),
         ...(result.turnDisposition !== undefined ? { turnDisposition: result.turnDisposition } : {}),
+        ...(result.associatedTurnSeq !== undefined ? { associatedTurnSeq: result.associatedTurnSeq } : {}),
         ...(result.turnClaim !== undefined ? {
             claimId: result.turnClaim.claimId,
             turnFence: result.turnClaim.fence,

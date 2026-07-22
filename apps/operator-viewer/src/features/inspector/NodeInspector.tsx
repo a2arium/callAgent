@@ -72,7 +72,13 @@ export function NodeInspector(props: {
             </div>
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-            <StatusBadge status={status.status} derived={status.derived} />
+            <StatusBadge
+              status={status.status}
+              derived={status.derived}
+              className={props.node.severity === 'error' && status.status === 'cancelled'
+                ? 'border-danger-border bg-danger-bg text-danger'
+                : undefined}
+            />
             <div className="flex shrink-0 items-center gap-1.5">
               {props.onCancel ? (
                 <Button
@@ -118,7 +124,12 @@ export function NodeInspector(props: {
               onBack={props.onTurnBack}
             />
           ) : (
-            <TurnTimeline turns={rollup.turns} tenantId={props.tenantId} onSelect={props.onTurnSelect} />
+            <TurnTimeline
+              turns={rollup.turns}
+              unassignedAttempts={props.graph.unassignedAttempts.filter((attempt) => attempt.taskId === props.node?.taskId)}
+              tenantId={props.tenantId}
+              onSelect={props.onTurnSelect}
+            />
           )}
         </TabsContent>
         <TabsContent value="tools" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">

@@ -194,7 +194,11 @@ function driverRunErrorUpdate(
     if (error !== undefined) {
         return error ?? Prisma.JsonNull;
     }
-    return normalizeDriverRunStatus(status) === 'failed' ? undefined : Prisma.JsonNull;
+    const normalized = normalizeDriverRunStatus(status);
+    if (normalized === 'failed' || normalized === 'canceled' || normalized === 'cancelled') {
+        return undefined;
+    }
+    return Prisma.JsonNull;
 }
 
 function normalizeDriverRunStatus(status: string): string {

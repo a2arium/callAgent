@@ -67,6 +67,13 @@ export function AgentRunGraphView(props: {
           <span className="rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">No child agents</span>
         ) : null}
       </div>
+      <div className="absolute right-3 top-3 z-10 hidden items-center gap-3 rounded-md border border-border bg-card/95 px-2.5 py-1.5 text-[10px] text-muted-foreground shadow-sm md:flex">
+        <SeverityLegendDot className="border-emerald-600 bg-emerald-500" label="Successful" />
+        <SeverityLegendDot className="border-sky-600 bg-sky-500" label="Active" />
+        <SeverityLegendDot className="border-amber-600 bg-amber-500" label="Attention" />
+        <SeverityLegendDot className="border-rose-600 bg-rose-500" label="Error" />
+        <SeverityLegendDot className="border-slate-500 bg-slate-300" label="Neutral" />
+      </div>
       <ReactFlow
         nodes={flow.nodes}
         edges={flow.edges}
@@ -163,7 +170,12 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
             </div>
             <CopyableId value={node.taskId} label="task ID" max={18} />
           </div>
-          <StatusBadge status={status.status} derived={status.derived} />
+          <div className="flex shrink-0 items-center gap-1.5">
+            {node.severity === 'error' && status.status === 'cancelled' ? (
+              <span className="h-2.5 w-2.5 rounded-full border border-rose-700 bg-rose-500" title="Error occurred before cancellation" />
+            ) : null}
+            <StatusBadge status={status.status} derived={status.derived} />
+          </div>
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
           <Metric label="Turns" value={String(rollup.turns.length)} />
@@ -174,6 +186,12 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
           <div className="mt-2 min-w-0 rounded-md border border-rose-500/45 bg-rose-100 px-2 py-1 text-xs text-rose-900 dark:border-rose-400/35 dark:bg-rose-500/10 dark:text-rose-100">
             <p className="truncate font-medium">{semanticFailure.code ?? 'Semantic failure'}</p>
             <p className="truncate opacity-85" title={semanticFailure.message}>{semanticFailure.message}</p>
+          </div>
+        ) : null}
+        {!semanticFailure && node.severity === 'error' && status.status === 'cancelled' ? (
+          <div className="mt-2 min-w-0 rounded-md border border-rose-500/45 bg-rose-100 px-2 py-1 text-xs text-rose-900 dark:border-rose-400/35 dark:bg-rose-500/10 dark:text-rose-100">
+            <p className="font-medium">Error occurred before cancellation</p>
+            {runtimeErrorMessage(node.error) ? <p className="truncate opacity-85" title={runtimeErrorMessage(node.error)}>{runtimeErrorMessage(node.error)}</p> : null}
           </div>
         ) : null}
         <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
@@ -205,37 +223,42 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
   const { turn, selected } = props.data;
   const status = normalizeRuntimeStatus(turn.status);
   const flowLabel = turnFlowLabel(turn);
-  const boundary = effectiveBoundaryKind(turn);
+  const boundary = humanizeBoundary(effectiveBoundaryKind(turn));
+  const attemptCount = turn.attempts.length;
+  const severity = turn.severity;
   return (
     <div className="relative">
       <Handle id="left" type="target" position={Position.Left} />
       <Handle id="right" type="source" position={Position.Right} />
       <article
         className={cn(
-          'w-[118px] rounded-md border bg-background px-2 py-1.5 text-left shadow-sm transition-colors',
+          'w-[146px] rounded-md border bg-background px-2 py-1.5 text-left shadow-sm transition-colors',
           selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
-          status === 'failed' ? 'bg-rose-500/10' : '',
+          severity === 'error' ? 'border-rose-300 bg-rose-500/10' : '',
           status === 'running' || status === 'waiting' ? 'border-sky-300 bg-sky-500/10' : ''
         )}
-        aria-label={`Turn ${turn.turnSeq ?? '?'} ${status}`}
+        aria-label={`Turn ${turn.turnSeq} ${status}${severity === 'error' ? ', error severity' : ''}, ${attemptCount} execution attempt${attemptCount === 1 ? '' : 's'}`}
       >
         <div className="flex min-w-0 items-start justify-between gap-1.5">
           <div className="min-w-0">
-            <p className="truncate text-[11px] font-semibold">Turn {turn.turnSeq ?? '?'}</p>
+            <p className="truncate text-[11px] font-semibold">Turn {turn.turnSeq}</p>
             <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={flowLabel}>{boundary ?? status}</p>
           </div>
           <span
             className={cn(
               'mt-0.5 h-2 w-2 shrink-0 rounded-full border',
-              status === 'completed' ? 'border-emerald-600 bg-emerald-500' : '',
-              status === 'failed' ? 'border-rose-600 bg-rose-500' : '',
-              status === 'running' || status === 'waiting' ? 'border-sky-600 bg-sky-500' : '',
-              status === 'queued' ? 'border-slate-500 bg-slate-300' : '',
-              status === 'unknown' ? 'border-muted-foreground bg-muted' : ''
+              severity === 'success' ? 'border-emerald-600 bg-emerald-500' : '',
+              severity === 'error' ? 'border-rose-600 bg-rose-500' : '',
+              severity === 'info' ? 'border-sky-600 bg-sky-500' : '',
+              severity === 'warning' ? 'border-amber-600 bg-amber-500' : '',
+              severity === 'neutral' ? 'border-slate-500 bg-slate-300' : ''
             )}
-            title={status}
+            title={severity === 'error' && status === 'cancelled' ? 'Cancelled after error' : status}
           />
         </div>
+        {attemptCount > 1 || turn.attempts.some((attempt) => attempt.disposition && attempt.disposition !== 'executed') ? (
+          <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{attemptCount} execution attempts</p>
+        ) : null}
       </article>
     </div>
   );
@@ -320,7 +343,7 @@ function buildFlow(
         markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
         style: {
           strokeWidth: 2,
-          stroke: status === 'failed' ? '#fb7185' : status === 'running' || status === 'waiting' ? '#38bdf8' : '#94a3b8',
+          stroke: turn.severity === 'error' ? '#fb7185' : status === 'running' || status === 'waiting' ? '#38bdf8' : '#94a3b8',
         },
       };
     });
@@ -370,7 +393,7 @@ type LayoutPoint = { x: number; y: number };
 const AGENT_WIDTH = 250;
 const AGENT_HEIGHT = 148;
 const ROOT_AGENT_WIDTH = 220;
-const TURN_HEIGHT = 48;
+const TURN_HEIGHT = 58;
 const AGENT_COLUMN_GAP = 560;
 const TURN_COLUMN_OFFSET = 300;
 const TURN_GAP = 24;
@@ -495,7 +518,40 @@ function layoutExecutionGraph(graph: AgentRunGraph): { positions: Map<string, La
 }
 
 function turnNodeId(turn: TurnRun): string {
-  return `turn:${turn.taskId}:${turn.turnSeq ?? turn.id}`;
+  return `turn:${turn.taskId}:${turn.turnSeq}`;
+}
+
+function SeverityLegendDot(props: { className: string; label: string }): React.ReactElement {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={cn('h-2 w-2 rounded-full border', props.className)} />
+      {props.label}
+    </span>
+  );
+}
+
+function humanizeBoundary(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const labels: Record<string, string> = {
+    await_child: 'Awaiting child',
+    await_input: 'Awaiting input',
+    await_tool: 'Awaiting tool',
+    await_event: 'Awaiting event',
+    complete: 'Completed',
+    fail: 'Failed',
+    canceled: 'Cancelled',
+  };
+  return labels[value] ?? value.replace(/_/g, ' ');
+}
+
+function runtimeErrorMessage(error: unknown): string | undefined {
+  if (typeof error === 'string') return error;
+  if (!isRecord(error)) return undefined;
+  return typeof error.message === 'string'
+    ? error.message
+    : typeof error.code === 'string'
+      ? error.code
+      : undefined;
 }
 
 function turnFlowLabel(turn: TurnRun): string {

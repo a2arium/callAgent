@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { deriveGraphInsights, deriveStatus, normalizeRuntimeStatus } from './derive';
 import { semanticFailureFromTurns } from './semanticFailure';
-import type { AgentRunGraph } from '../types';
+import type { AgentRunGraph, TurnRun } from '../types';
 
 describe('deriveGraphInsights', () => {
   it('selects the deepest failed node and failure path', () => {
@@ -12,6 +12,19 @@ describe('deriveGraphInsights', () => {
     expect(insights.failurePathNodeIds).toEqual(['root-task', 'child-task', 'leaf-task']);
     expect(insights.failurePathEdgeIds).toEqual(['e1', 'e2']);
     expect(insights.selectedNodeId).toBe('leaf');
+  });
+
+  it('treats cancelled-after-error as an error path without changing lifecycle status', () => {
+    const graph = graphFixture();
+    graph.root.status = 'canceled';
+    graph.root.severity = 'error';
+    graph.nodes = [{ ...graph.root }];
+    graph.edges = [];
+
+    const insights = deriveGraphInsights(graph);
+
+    expect(insights.deepestFailedNodeId).toBe('root');
+    expect(insights.summary).toBe('Cancelled after an error in root-agent.');
   });
 });
 
@@ -26,14 +39,14 @@ describe('deriveStatus', () => {
       status: 'running',
       updatedAt: '2026-06-19T10:00:00.000Z',
       turns: [
-        {
+        turnFixture({
           id: 't1',
           rootTaskId: 'root-task',
           taskId: 'root-task',
           status: 'running',
           operation: 'turn.segment',
           boundaryKind: 'await_child',
-        },
+        }),
       ],
       now: new Date('2026-06-19T10:05:00.000Z'),
     });
@@ -41,14 +54,14 @@ describe('deriveStatus', () => {
       status: 'running',
       updatedAt: '2026-06-19T10:00:00.000Z',
       turns: [
-        {
+        turnFixture({
           id: 't1',
           rootTaskId: 'root-task',
           taskId: 'root-task',
           status: 'running',
           operation: 'turn.segment',
           boundaryKind: 'await_child',
-        },
+        }),
       ],
       now: new Date('2026-06-19T10:20:00.000Z'),
     });
@@ -64,7 +77,7 @@ describe('deriveStatus', () => {
       status: 'running',
       updatedAt: '2026-06-19T10:00:00.000Z',
       turns: [
-        {
+        turnFixture({
           id: 't1',
           rootTaskId: 'root-task',
           taskId: 'root-task',
@@ -73,7 +86,7 @@ describe('deriveStatus', () => {
           cognition: {
             transition: { kind: 'await_child' },
           },
-        },
+        }),
       ],
       now: new Date('2026-06-19T10:05:00.000Z'),
     });
@@ -87,7 +100,7 @@ describe('deriveStatus', () => {
       status: 'running',
       updatedAt: '2026-06-19T10:10:00.000Z',
       turns: [
-        {
+        turnFixture({
           id: 't1',
           rootTaskId: 'root-task',
           taskId: 'root-task',
@@ -95,15 +108,15 @@ describe('deriveStatus', () => {
           operation: 'turn.segment',
           turnSeq: 1,
           boundaryKind: 'await_child',
-        },
-        {
+        }),
+        turnFixture({
           id: 't2',
           rootTaskId: 'root-task',
           taskId: 'root-task',
           status: 'running',
           operation: 'turn.segment',
           turnSeq: 2,
-        },
+        }),
       ],
       now: new Date('2026-06-19T10:11:00.000Z'),
     });
@@ -116,7 +129,7 @@ describe('deriveStatus', () => {
 describe('semanticFailureFromTurns', () => {
   it('extracts readable transition failure details', () => {
     const failure = semanticFailureFromTurns([
-      {
+      turnFixture({
         id: 't1',
         rootTaskId: 'root-task',
         taskId: 'root-task',
@@ -134,7 +147,7 @@ describe('semanticFailureFromTurns', () => {
             },
           },
         },
-      },
+      }),
     ]);
 
     expect(failure).toEqual({
@@ -146,7 +159,7 @@ describe('semanticFailureFromTurns', () => {
 
 function graphFixture(): AgentRunGraph {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tenantId: 'default',
     taskId: 'root-task',
     root: {
@@ -157,6 +170,7 @@ function graphFixture(): AgentRunGraph {
       taskId: 'root-task',
       agentId: 'root-agent',
       status: 'failed',
+      severity: 'error',
     },
     nodes: [
       {
@@ -167,6 +181,7 @@ function graphFixture(): AgentRunGraph {
         taskId: 'root-task',
         agentId: 'root-agent',
         status: 'failed',
+        severity: 'error',
       },
       {
         id: 'child',
@@ -177,6 +192,7 @@ function graphFixture(): AgentRunGraph {
         parentTaskId: 'root-task',
         agentId: 'child-agent',
         status: 'failed',
+        severity: 'error',
       },
       {
         id: 'leaf',
@@ -187,6 +203,7 @@ function graphFixture(): AgentRunGraph {
         parentTaskId: 'child-task',
         agentId: 'leaf-agent',
         status: 'failed',
+        severity: 'error',
       },
     ],
     edges: [
@@ -210,6 +227,7 @@ function graphFixture(): AgentRunGraph {
       },
     ],
     turns: [],
+    unassignedAttempts: [],
     memoryOps: [],
     effects: [],
     events: [],
@@ -223,5 +241,25 @@ function graphFixture(): AgentRunGraph {
       issues: [],
     },
     debug: { driverRuns: [] },
+  };
+}
+
+function turnFixture(overrides: Partial<TurnRun>): TurnRun {
+  const attempt = {
+    id: overrides.id ?? 'attempt-1',
+    rootTaskId: overrides.rootTaskId ?? 'root-task',
+    taskId: overrides.taskId ?? 'root-task',
+    status: overrides.status ?? 'completed',
+    operation: 'turn.segment' as const,
+    turnSeq: overrides.turnSeq ?? 1,
+    boundaryKind: overrides.boundaryKind,
+    cognition: overrides.cognition,
+  };
+  return {
+    ...attempt,
+    ...overrides,
+    turnSeq: overrides.turnSeq ?? 1,
+    severity: overrides.severity ?? (overrides.status === 'failed' ? 'error' : overrides.status === 'completed' ? 'success' : 'info'),
+    attempts: overrides.attempts ?? [attempt],
   };
 }

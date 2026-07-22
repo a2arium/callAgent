@@ -4,15 +4,17 @@ import { readTaskTurnCoordinator } from '../orchestration/TaskTurnCoordinator.js
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 
 export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'unknown';
+export type RunSeverity = 'success' | 'info' | 'warning' | 'error' | 'neutral';
 
 export type AgentRunGraph = {
-    schemaVersion: 2;
+    schemaVersion: 3;
     tenantId: string;
     taskId: string;
     root: AgentRunNode;
     nodes: AgentRunNode[];
     edges: AgentRunEdge[];
     turns: TurnRun[];
+    unassignedAttempts: TurnAttemptRun[];
     memoryOps: MemoryOperationRun[];
     effects: EffectRun[];
     events: AgentRunEvent[];
@@ -81,6 +83,7 @@ export type AgentRunNode = {
     parentTaskId?: string;
     agentId?: string;
     status: AgentRunStatus;
+    severity: RunSeverity;
     inputPreview?: unknown;
     outputPreview?: unknown;
     error?: unknown;
@@ -118,7 +121,7 @@ export type AgentRunEdge = {
     finishedAt?: string;
 };
 
-export type TurnRun = {
+export type TurnAttemptRun = {
     id: string;
     rootTaskId: string;
     taskId: string;
@@ -150,6 +153,12 @@ export type TurnRun = {
     startedAt?: string;
     finishedAt?: string;
     error?: unknown;
+};
+
+export type TurnRun = TurnAttemptRun & {
+    turnSeq: number;
+    severity: RunSeverity;
+    attempts: TurnAttemptRun[];
 };
 
 export type TurnCognition = {
@@ -297,7 +306,7 @@ export async function buildAgentRunGraph(
     const rootRun = chooseRootRun(rootDriverRuns);
     const agentId = rootRun?.agentId ?? snapshot?.agentId ?? readSnapshotAgentId(snapshot?.snapshot);
     const rootStatus = deriveRootStatus(rootEvents, rootDriverRuns);
-    const rootError = rootStatus === 'failed' ? rootRun?.error : undefined;
+    const rootError = rootStatus === 'failed' || rootStatus === 'canceled' ? rootRun?.error : undefined;
     const rootCancellation = readCancellation(snapshot?.snapshot);
     const rootStartedAt = firstEventTime(rootEvents) ?? rootRun?.createdAt;
     const rootFinishedAt =
@@ -314,6 +323,7 @@ export async function buildAgentRunGraph(
         taskId: params.taskId,
         ...(agentId ? { agentId } : {}),
         status: rootStatus,
+        severity: severityForStatus(rootStatus, rootError),
         inputPreview: deriveInputPreview(rootEvents, snapshot?.snapshot),
         outputPreview: deriveOutputPreview(rootEvents),
         ...(rootError ? { error: rootError } : {}),
@@ -341,7 +351,8 @@ export async function buildAgentRunGraph(
     });
     const memoryOps = buildMemoryOps(params.taskId, events);
     const terminal = readDurableTaskTerminal(snapshot?.snapshot);
-    const turns = buildTurnRuns(params.taskId, driverRuns, events, memoryOps, terminal?.turnClaim);
+    const turnProjection = buildTurnRuns(params.taskId, driverRuns, events, memoryOps, terminal?.turnClaim);
+    const turns = applyAgentTerminalStatusToTurns(turnProjection.turns, [root, ...childNodes]);
     const effects = buildEffectRuns(params.taskId, driverRuns, events);
     const graphEvents = buildGraphEvents(params.taskId, agentId ?? undefined, events, driverRuns);
     const coordination = buildTaskCoordinationView(params.taskId, snapshot?.snapshot);
@@ -351,13 +362,14 @@ export async function buildAgentRunGraph(
     }
 
     return {
-        schemaVersion: 2,
+        schemaVersion: 3,
         tenantId: params.tenantId,
         taskId: params.taskId,
         root,
         nodes: [root, ...childNodes],
         edges,
         turns,
+        unassignedAttempts: turnProjection.unassignedAttempts,
         memoryOps,
         effects,
         events: graphEvents,
@@ -623,7 +635,7 @@ function edgeToNode(
     const childDriverRuns = driverRuns.filter((run) => run.taskId === taskId);
     const childRun = chooseRootRun(childDriverRuns);
     const status = deriveChildNodeStatus(edge.status, childEvents, childDriverRuns);
-    const error = status === 'failed' ? childRun?.error ?? edge.error : undefined;
+    const error = status === 'failed' || status === 'canceled' ? childRun?.error ?? edge.error : undefined;
     const startedAt = firstEventTime(childEvents) ?? childRun?.createdAt ?? edge.startedAt;
     const finishedAt =
         isTerminalRunStatus(status)
@@ -638,6 +650,7 @@ function edgeToNode(
         parentTaskId: edge.parentTaskId,
         ...(edge.childAgentId ? { agentId: edge.childAgentId } : {}),
         status,
+        severity: severityForStatus(status, error),
         inputPreview: deriveInputPreview(childEvents, undefined) ?? edge.inputPreview,
         outputPreview: deriveOutputPreview(childEvents) ?? edge.resultPreview,
         ...(error ? { error } : {}),
@@ -697,7 +710,7 @@ function buildTurnRuns(
     events: AgentRunSourceEvent[],
     memoryOps: MemoryOperationRun[],
     terminalClaim?: { claimId: string; fence: string; generation: string; turnSeq: number }
-): TurnRun[] {
+): { turns: TurnRun[]; unassignedAttempts: TurnAttemptRun[] } {
     const turnEvents = events.filter((event) => event.type === 'turn.completed');
     const turnStartedEvents = events.filter((event) => event.type === 'turn.started');
     const turnStartedByTurn = new Map<string, AgentRunSourceEvent>();
@@ -717,12 +730,13 @@ function buildTurnRuns(
 
     const driverTurns = driverRuns
         .filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
-        .map((run, index): TurnRun => {
+        .map((run, index): TurnAttemptRun => {
             const turnSeq = run.turnSeq ?? undefined;
             const key = turnSeq === undefined ? undefined : turnKey(run.taskId ?? rootTaskId, turnSeq);
             const turnEvent = key === undefined ? undefined : cognitionByTurn.get(key);
             const startedEvent = key === undefined ? undefined : turnStartedByTurn.get(key);
-            const status = deriveTurnStatus(run.status, turnEvent);
+            const ownsTurn = run.turnDisposition === 'executed' || Boolean(run.claimId) || run.turnDisposition === null || run.turnDisposition === undefined;
+            const status = deriveTurnStatus(run.status, ownsTurn ? turnEvent : undefined);
             const startedAt = run.createdAt ?? startedEvent?.createdAt;
             const terminalTimestamp = run.updatedAt ?? run.createdAt ?? turnEvent?.createdAt ?? startedEvent?.createdAt;
             const finishedAt = isTerminalRunStatus(status)
@@ -736,7 +750,7 @@ function buildTurnRuns(
                 status,
                 operation: 'turn.segment',
                 ...(turnSeq !== undefined ? { turnSeq } : {}),
-                attemptKey: run.id ?? run.providerTaskRunId ?? run.providerRunId ?? `attempt-${index}`,
+                attemptKey: driverAttemptKey(run, index),
                 ...(run.attemptSeq !== null && run.attemptSeq !== undefined ? { attemptSeq: run.attemptSeq } : {}),
                 ...(isTurnDisposition(run.turnDisposition) ? { disposition: run.turnDisposition } : {}),
                 ...(run.claimId ? { claimId: run.claimId } : {}),
@@ -755,7 +769,7 @@ function buildTurnRuns(
                     ...(run.spanId ? { spanId: run.spanId } : {}),
                     ...(run.turnTraceId ? { turnTraceId: run.turnTraceId } : {}),
                 },
-                ...turnEventProjection(turnEvent, memoryOps),
+                ...turnEventProjection(ownsTurn ? turnEvent : undefined, memoryOps),
                 ...(run.providerRunId ? { providerRunId: run.providerRunId } : {}),
                 ...(startedAt ? { startedAt: toIso(startedAt) } : {}),
                 ...(finishedAt ? { finishedAt: toIso(finishedAt) } : {}),
@@ -769,7 +783,7 @@ function buildTurnRuns(
             const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
             return turnSeq !== undefined && !existingTurns.has(turnKey(taskId, turnSeq));
         })
-        .map((event, index): TurnRun => {
+        .map((event, index): TurnAttemptRun => {
             const turnSeq = numberField(event.payload, 'turnSeq');
             const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
             const startedEvent = turnSeq !== undefined ? turnStartedByTurn.get(turnKey(taskId, turnSeq)) : undefined;
@@ -804,7 +818,7 @@ function buildTurnRuns(
             const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
             return turnSeq !== undefined && !existingCompletedOrDriverTurns.has(turnKey(taskId, turnSeq));
         })
-        .map((event, index): TurnRun => {
+        .map((event, index): TurnAttemptRun => {
             const turnSeq = numberField(event.payload, 'turnSeq');
             const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
             const traceId = stringField(event.payload, 'traceId');
@@ -829,16 +843,17 @@ function buildTurnRuns(
                     : [],
             };
         });
-    return finalizeSupersededRunningTurns(
+    const attempts = finalizeSupersededRunningTurns(
         [...driverTurns, ...eventOnlyTurns, ...eventOnlyRunningTurns]
             .sort((a, b) => {
                 if (a.taskId !== b.taskId) return a.taskId.localeCompare(b.taskId);
                 return (a.turnSeq ?? 0) - (b.turnSeq ?? 0);
             })
     );
+    return groupTurnAttempts(attempts);
 }
 
-function finalizeSupersededRunningTurns(turns: TurnRun[]): TurnRun[] {
+function finalizeSupersededRunningTurns(turns: TurnAttemptRun[]): TurnAttemptRun[] {
     const maxTurnSeqByTask = new Map<string, number>();
     for (const turn of turns) {
         if (turn.turnSeq === undefined) continue;
@@ -857,14 +872,169 @@ function finalizeSupersededRunningTurns(turns: TurnRun[]): TurnRun[] {
     });
 }
 
+export function groupTurnAttempts(attempts: TurnAttemptRun[]): {
+    turns: TurnRun[];
+    unassignedAttempts: TurnAttemptRun[];
+} {
+    const assigned = attempts.filter((attempt) => attempt.turnSeq !== undefined);
+    const unassigned: TurnAttemptRun[] = [];
+    for (const attempt of attempts.filter((item) => item.turnSeq === undefined)) {
+        const associatedTurnSeq = inferHistoricalTurnAssociation(attempt, assigned);
+        if (associatedTurnSeq === undefined) {
+            unassigned.push(attempt);
+            continue;
+        }
+        assigned.push({ ...attempt, turnSeq: associatedTurnSeq });
+    }
+
+    const groups = new Map<string, TurnAttemptRun[]>();
+    for (const attempt of assigned) {
+        if (attempt.turnSeq === undefined) continue;
+        const key = turnKey(attempt.taskId, attempt.turnSeq);
+        const group = groups.get(key) ?? [];
+        group.push(attempt);
+        groups.set(key, group);
+    }
+
+    const turns = [...groups.values()].map((group): TurnRun => {
+        const sorted = [...group].sort(compareAttempts);
+        const primary = selectPrimaryAttempt(sorted);
+        const turnSeq = primary.turnSeq!;
+        const status = logicalTurnStatus(sorted, primary);
+        const error = sorted.find((attempt) => attempt.error !== undefined)?.error;
+        return {
+            ...primary,
+            id: `turn:${primary.taskId}:${turnSeq}`,
+            turnSeq,
+            status,
+            severity: severityForStatus(status, error),
+            attempts: sorted,
+            ...(sorted.some((attempt) => attempt.authoritativeTerminal) ? { authoritativeTerminal: true } : {}),
+            ...(earliestTimestamp(sorted.map((attempt) => attempt.startedAt)) ? {
+                startedAt: earliestTimestamp(sorted.map((attempt) => attempt.startedAt)),
+            } : {}),
+            ...(latestTimestamp(sorted.map((attempt) => attempt.finishedAt)) ? {
+                finishedAt: latestTimestamp(sorted.map((attempt) => attempt.finishedAt)),
+            } : {}),
+            ...(error !== undefined ? { error } : {}),
+        };
+    }).sort((a, b) => a.taskId === b.taskId
+        ? a.turnSeq - b.turnSeq
+        : a.taskId.localeCompare(b.taskId));
+
+    return { turns, unassignedAttempts: unassigned.sort(compareAttempts) };
+}
+
+function inferHistoricalTurnAssociation(
+    attempt: TurnAttemptRun,
+    assigned: TurnAttemptRun[]
+): number | undefined {
+    const sameTask = assigned.filter((candidate) => candidate.taskId === attempt.taskId && candidate.turnSeq !== undefined);
+    if (attempt.idempotencyKey) {
+        const exact = sameTask.filter((candidate) => candidate.idempotencyKey === attempt.idempotencyKey);
+        const turnSeqs = [...new Set(exact.map((candidate) => candidate.turnSeq!))];
+        if (turnSeqs.length === 1) return turnSeqs[0];
+    }
+    const attemptTime = timestampMs(attempt.startedAt ?? attempt.finishedAt);
+    if (attemptTime === undefined) return undefined;
+    const active = sameTask
+        .filter((candidate) => candidate.status === 'running' || candidate.status === 'waiting' || candidate.finishedAt === undefined)
+        .filter((candidate) => {
+            const startedAt = timestampMs(candidate.startedAt);
+            return startedAt === undefined || startedAt <= attemptTime;
+        })
+        .sort((a, b) => (timestampMs(b.startedAt) ?? 0) - (timestampMs(a.startedAt) ?? 0));
+    return active[0]?.turnSeq;
+}
+
+function selectPrimaryAttempt(attempts: TurnAttemptRun[]): TurnAttemptRun {
+    return attempts.find((attempt) => attempt.disposition === 'executed' && attempt.cognition !== undefined)
+        ?? attempts.find((attempt) => attempt.disposition === 'executed' || attempt.claimId !== undefined)
+        ?? attempts.find((attempt) => attempt.cognition !== undefined)
+        ?? attempts[0]!;
+}
+
+function logicalTurnStatus(attempts: TurnAttemptRun[], primary: TurnAttemptRun): AgentRunStatus {
+    const owningAttempts = attempts.filter((attempt) =>
+        attempt.disposition === 'executed' || attempt.claimId !== undefined || attempt.cognition !== undefined
+    );
+    if (owningAttempts.some((attempt) => attempt.status === 'failed')) return 'failed';
+    if (owningAttempts.some((attempt) => attempt.status === 'running')) return 'running';
+    if (owningAttempts.some((attempt) => attempt.status === 'waiting')) return 'waiting';
+    if (owningAttempts.some((attempt) => attempt.status === 'canceled')) return 'canceled';
+    if (owningAttempts.some((attempt) => attempt.status === 'completed')) return 'completed';
+    if (attempts.every((attempt) => attempt.disposition === 'queued')) return 'queued';
+    return primary.status;
+}
+
+function applyAgentTerminalStatusToTurns(turns: TurnRun[], nodes: AgentRunNode[]): TurnRun[] {
+    const latestByTask = new Map<string, number>();
+    for (const turn of turns) {
+        latestByTask.set(turn.taskId, Math.max(latestByTask.get(turn.taskId) ?? 0, turn.turnSeq));
+    }
+    const nodesByTask = new Map(nodes.map((node) => [node.taskId, node]));
+    return turns.map((turn) => {
+        const node = nodesByTask.get(turn.taskId);
+        if (!node || latestByTask.get(turn.taskId) !== turn.turnSeq) return turn;
+        if (node.status !== 'canceled' && node.status !== 'failed') return turn;
+        if (turn.status === 'completed') return turn;
+        const status = node.status;
+        const error = turn.error ?? node.error;
+        return {
+            ...turn,
+            status,
+            severity: severityForStatus(status, error),
+            ...(error !== undefined ? { error } : {}),
+            ...(node.finishedAt ? { finishedAt: node.finishedAt } : {}),
+        };
+    });
+}
+
+function compareAttempts(a: TurnAttemptRun, b: TurnAttemptRun): number {
+    const seq = (a.attemptSeq ?? Number.MAX_SAFE_INTEGER) - (b.attemptSeq ?? Number.MAX_SAFE_INTEGER);
+    if (seq !== 0) return seq;
+    return (timestampMs(a.startedAt ?? a.finishedAt) ?? 0) - (timestampMs(b.startedAt ?? b.finishedAt) ?? 0);
+}
+
+function earliestTimestamp(values: Array<string | undefined>): string | undefined {
+    return values.filter((value): value is string => value !== undefined)
+        .sort((a, b) => (timestampMs(a) ?? 0) - (timestampMs(b) ?? 0))[0];
+}
+
+function latestTimestamp(values: Array<string | undefined>): string | undefined {
+    return values.filter((value): value is string => value !== undefined)
+        .sort((a, b) => (timestampMs(b) ?? 0) - (timestampMs(a) ?? 0))[0];
+}
+
+function timestampMs(value: string | undefined): number | undefined {
+    if (!value) return undefined;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function severityForStatus(status: AgentRunStatus, error?: unknown): RunSeverity {
+    if (error !== undefined || status === 'failed') return 'error';
+    if (status === 'completed') return 'success';
+    if (status === 'running') return 'info';
+    if (status === 'waiting') return 'warning';
+    return 'neutral';
+}
+
 function turnKey(taskId: string, turnSeq: number): string {
     return `${taskId}:${turnSeq}`;
+}
+
+function driverAttemptKey(run: DriverRunView, index: number): string {
+    if (run.provider === 'hatchet' && run.providerRunId && run.providerTaskRunId) {
+        return `hatchet:${run.providerRunId}:${run.providerTaskRunId}`;
+    }
+    return run.id ?? run.providerTaskRunId ?? run.providerRunId ?? `attempt-${index}`;
 }
 
 function turnEventProjection(
     event: AgentRunSourceEvent | undefined,
     memoryOps: MemoryOperationRun[]
-): Pick<TurnRun, 'cognition' | 'llmCalls' | 'memoryOps'> {
+): Pick<TurnAttemptRun, 'cognition' | 'llmCalls' | 'memoryOps'> {
     if (event === undefined) {
         return {};
     }

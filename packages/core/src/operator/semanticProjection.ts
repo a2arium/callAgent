@@ -5,8 +5,10 @@ import type {
     AgentRunNode,
     AgentRunStatus,
     EffectRun,
+    TurnAttemptRun,
     TurnRun,
 } from './runGraph.js';
+import { groupTurnAttempts, severityForStatus } from './runGraph.js';
 import { readDurableTaskTerminal, readTaskLifecycle } from '../orchestration/TaskLifecycle.js';
 
 export type OperatorProjectionMode = 'bridge' | 'compare' | 'semantic';
@@ -282,7 +284,9 @@ export class OperatorProjectionRepository {
             await this.upsertEdge(edge, graph);
         }
         for (const turn of graph.turns) {
-            await this.upsertTurn(turn, nodesByTask, graph);
+            for (const attempt of turn.attempts) {
+                await this.upsertTurn(attempt, nodesByTask, graph);
+            }
         }
         for (const effect of graph.effects) {
             await this.upsertEffect(effect, graph);
@@ -927,15 +931,17 @@ export class OperatorProjectionRepository {
         const nodes = runs.map(rowToNode);
         const expectedTurnCount = runs.reduce((sum, run) => sum + Math.max(0, run.turnCount ?? 0), 0);
         const expectedEdgeCount = runs.reduce((sum, run) => sum + Math.max(0, run.childCount ?? 0), 0);
-        const partial = turns.length < expectedTurnCount || edges.length < expectedEdgeCount;
+        const turnProjection = groupTurnAttempts(turns.map(rowToTurnAttempt));
+        const partial = turnProjection.turns.length < expectedTurnCount || edges.length < expectedEdgeCount;
         const graph: AgentRunGraph = {
-            schemaVersion: 2,
+            schemaVersion: 3,
             tenantId: params.tenantId,
             taskId: params.taskId,
             root: rowToNode(root),
             nodes,
             edges: edges.map(rowToEdge),
-            turns: turns.map(rowToTurn),
+            turns: turnProjection.turns,
+            unassignedAttempts: turnProjection.unassignedAttempts,
             memoryOps: [],
             effects: effects.map(rowToEffect),
             events: [],
@@ -1338,7 +1344,7 @@ export class OperatorProjectionRepository {
         });
     }
 
-    private async upsertTurn(turn: TurnRun, nodesByTask: Map<string, AgentRunNode>, graph: AgentRunGraph): Promise<void> {
+    private async upsertTurn(turn: TurnAttemptRun, nodesByTask: Map<string, AgentRunNode>, graph: AgentRunGraph): Promise<void> {
         const turnSeq = turn.turnSeq;
         const attemptKey = turn.attemptKey ?? turn.id;
         const node = nodesByTask.get(turn.taskId);
@@ -1490,6 +1496,9 @@ function rowToNode(row: SemanticRunRow): AgentRunNode {
         ...(row.agentId ? { agentId: row.agentId } : {}),
         ...(row.scope === 'child' ? { parentTaskId: row.parentTaskId ?? undefined } : {}),
         status,
+        severity: severityForStatus(status, row.terminalCode || row.terminalMessage
+            ? { code: row.terminalCode, message: row.terminalMessage }
+            : undefined),
         ...(row.terminalCode || row.terminalMessage ? { error: { code: row.terminalCode, message: row.terminalMessage } } : {}),
         ...(status === 'canceled' || row.cancelReason ? { cancellation: { requested: true, reason: row.cancelReason ?? undefined } } : {}),
         ...(row.traceId ? { traceId: row.traceId } : {}),
@@ -1534,7 +1543,7 @@ function rowToEdge(row: SemanticEdgeRow): AgentRunEdge {
     };
 }
 
-function rowToTurn(row: SemanticTurnRow): TurnRun {
+function rowToTurnAttempt(row: SemanticTurnRow): TurnAttemptRun {
     return {
         id: row.id,
         rootTaskId: row.rootTaskId,
@@ -1592,7 +1601,7 @@ function parentTurnSeq(graph: AgentRunGraph, parentTaskId: string, childTaskId: 
     return matching?.turnSeq;
 }
 
-function outputProduced(turn: TurnRun): boolean {
+function outputProduced(turn: TurnAttemptRun): boolean {
     const transition = turn.cognition?.transition;
     if (!transition || typeof transition !== 'object') return false;
     const kind = (transition as Record<string, unknown>).kind;

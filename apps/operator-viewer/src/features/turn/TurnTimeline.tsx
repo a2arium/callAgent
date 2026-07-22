@@ -5,26 +5,36 @@ import { formatCost, formatDuration, stringFromUnknown } from '../../design/form
 import { normalizeRuntimeStatus } from '../../domain/derive';
 import { semanticFailureFromTurn, type SemanticFailure } from '../../domain/semanticFailure';
 import { JsonPreview } from '../inspector/JsonPreview';
-import type { AgentRunEvent, TurnRun } from '../../types';
+import type { AgentRunEvent, TurnAttemptRun, TurnRun } from '../../types';
 import { cn } from '../../lib/utils';
 
 export function TurnTimeline(props: {
   turns: TurnRun[];
+  unassignedAttempts?: TurnAttemptRun[];
   tenantId?: string;
   onSelect: (turn: TurnRun) => void;
 }): React.ReactElement {
+  const attemptCount = props.turns.reduce((count, turn) => count + turn.attempts.length, 0);
   return (
     <section className="grid gap-3 p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h4 className="text-sm font-semibold">Turn timeline</h4>
-          <p className="text-xs text-muted-foreground">{props.turns.length} captured turns</p>
+          <p className="text-xs text-muted-foreground">
+            {props.turns.length} {props.turns.length === 1 ? 'turn' : 'turns'} · {attemptCount} execution {attemptCount === 1 ? 'attempt' : 'attempts'}
+          </p>
         </div>
       </div>
 
+      {(props.unassignedAttempts?.length ?? 0) > 0 ? (
+        <Notice title={`${props.unassignedAttempts!.length} unassigned execution ${props.unassignedAttempts!.length === 1 ? 'attempt' : 'attempts'}`}>
+          Legacy runtime data could not be associated with one logical turn safely. These attempts are excluded from the graph and turn count.
+        </Notice>
+      ) : null}
+
       <div className="grid max-h-[360px] gap-2 overflow-y-auto overflow-x-hidden pr-1">
         {props.turns.length === 0 ? <p className="text-sm text-muted-foreground">Turn summary was not captured for this node.</p> : null}
-        {props.turns.map((turn, index) => {
+        {props.turns.map((turn) => {
           return (
             <button
               key={turn.id}
@@ -37,14 +47,21 @@ export function TurnTimeline(props: {
             >
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="break-words font-semibold [overflow-wrap:anywhere]">{attemptTurnLabel(turn, index)}</p>
+                  <p className="break-words font-semibold [overflow-wrap:anywhere]">Turn {turn.turnSeq}</p>
                   <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                     {turnFlowLabel(turn)}
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-end gap-1">
-                  <DispositionBadge turn={turn} />
-                  <StatusBadge status={normalizeRuntimeStatus(turn.status)} />
+                  <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    {turn.attempts.length} {turn.attempts.length === 1 ? 'attempt' : 'attempts'}
+                  </span>
+                  <StatusBadge
+                    status={normalizeRuntimeStatus(turn.status)}
+                    className={turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled'
+                      ? 'border-danger-border bg-danger-bg text-danger'
+                      : undefined}
+                  />
                 </div>
               </div>
               {turn.authoritativeTerminal ? (
@@ -56,10 +73,10 @@ export function TurnTimeline(props: {
               <div className="mt-2 flex flex-wrap gap-1.5">
                 <Marker icon={<Brain className="h-3 w-3" />} label={intentLabel(turn)} />
                 {turn.cognition?.shield?.action ? <Marker icon={<ShieldAlert className="h-3 w-3" />} label={String(turn.cognition.shield.action) === 'pass' ? 'Shield pass' : `Shield ${String(turn.cognition.shield.action)}`} /> : null}
-                {turn.boundaryKind?.startsWith('await') ? <Marker icon={<Timer className="h-3 w-3" />} label={turn.boundaryKind} /> : null}
+                {turn.boundaryKind?.startsWith('await') ? <Marker icon={<Timer className="h-3 w-3" />} label={humanizeBoundary(turn.boundaryKind)} /> : null}
                 {hasOutputProduced(turn) ? <Marker icon={<FileOutput className="h-3 w-3" />} label="Output produced" /> : null}
                 {turn.llmCalls?.length ? <Marker icon={<DollarSign className="h-3 w-3" />} label={formatCost(turnCost(turn))} /> : null}
-                {normalizeRuntimeStatus(turn.status) === 'failed' ? <Marker icon={<AlertTriangle className="h-3 w-3" />} label="Error" /> : null}
+                {turn.severity === 'error' ? <Marker icon={<AlertTriangle className="h-3 w-3" />} label={normalizeRuntimeStatus(turn.status) === 'cancelled' ? 'Error before cancellation' : 'Error'} /> : null}
               </div>
             </button>
           );
@@ -78,7 +95,7 @@ export function TurnDetail(props: {
 }): React.ReactElement {
   if (!props.turn) return <p className="text-sm text-muted-foreground">Select a turn to inspect APLRET cognition.</p>;
   const turn = props.turn;
-  const turnLabel = attemptTurnLabel(turn);
+  const turnLabel = `Turn ${turn.turnSeq}`;
   const events = props.events ?? [];
   const semanticFailure = semanticFailureFromTurn(turn);
   const stages = [
@@ -102,7 +119,12 @@ export function TurnDetail(props: {
             <ArrowLeft className="h-4 w-4 shrink-0" />
             <span>Back to turns</span>
           </span>
-          <StatusBadge status={normalizeRuntimeStatus(turn.status)} />
+          <StatusBadge
+            status={normalizeRuntimeStatus(turn.status)}
+            className={turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled'
+              ? 'border-danger-border bg-danger-bg text-danger'
+              : undefined}
+          />
         </div>
         <p className="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
           {props.agentId ?? 'selected agent'} → {turnLabel} · {turnFlowLabel(turn)}
@@ -113,12 +135,17 @@ export function TurnDetail(props: {
         <section className="grid gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Summary</h4>
           {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}
-          {!semanticFailure ? (
+          {!semanticFailure && turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled' ? (
+            <SemanticFailureNotice failure={failureFromAttemptError(turn.error) ?? { message: 'An error occurred before this turn was cancelled.' }} />
+          ) : null}
+          {!semanticFailure && !(turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled') ? (
             <p className="rounded-lg border border-border bg-background/50 p-3 text-sm text-muted-foreground">
               {turnSummary(turn)}
             </p>
           ) : null}
         </section>
+
+        <ExecutionAttempts attempts={turn.attempts} tenantId={props.tenantId} />
 
         <section className="grid gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Key signals</h4>
@@ -274,6 +301,117 @@ function FactRow(props: { label: string; children: React.ReactNode }): React.Rea
   );
 }
 
+function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: string }): React.ReactElement {
+  const groups = compressAttemptGroups(props.attempts);
+  const queuedCount = props.attempts.filter((attempt) => attempt.disposition === 'queued').length;
+  return (
+    <details className="min-w-0 rounded-lg border border-border bg-background/50">
+      <summary className="flex cursor-pointer items-center justify-between gap-3 p-3">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold">Execution attempts</h4>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {props.attempts.length} total{queuedCount > 0 ? ` · ${queuedCount} queued` : ''}
+          </p>
+        </div>
+        <span className="shrink-0 text-xs text-muted-foreground">Show attempts</span>
+      </summary>
+      <div className="grid gap-2 border-t border-border p-3">
+        {groups.map((group) => {
+          if (group.length === 1) {
+            return <AttemptRow key={group[0]!.attemptKey ?? group[0]!.id} attempt={group[0]!} tenantId={props.tenantId} />;
+          }
+          const first = group[0]!;
+          const last = group[group.length - 1]!;
+          return (
+            <details key={`${first.attemptKey ?? first.id}:${last.attemptKey ?? last.id}`} className="rounded-md border border-border bg-card">
+              <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm">
+                <span className="font-medium">
+                  Attempts {attemptNumber(first)}–{attemptNumber(last)} · {dispositionLabel(first.disposition)} ×{group.length}
+                </span>
+                <span className="text-xs text-muted-foreground">Expand</span>
+              </summary>
+              <div className="grid gap-2 border-t border-border p-2">
+                {group.map((attempt) => (
+                  <AttemptRow key={attempt.attemptKey ?? attempt.id} attempt={attempt} tenantId={props.tenantId} />
+                ))}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function AttemptRow(props: { attempt: TurnAttemptRun; tenantId?: string }): React.ReactElement {
+  const attempt = props.attempt;
+  const duration = attemptDuration(attempt);
+  const rawDetails = {
+    attemptKey: attempt.attemptKey,
+    providerRunId: attempt.providerRunId,
+    disposition: attempt.disposition,
+    providerStatus: attempt.status,
+    claimId: attempt.claimId,
+    turnFence: attempt.turnFence,
+    claimedGeneration: attempt.claimedGeneration,
+    idempotencyKey: attempt.idempotencyKey,
+    error: attempt.error,
+  };
+  return (
+    <div className="min-w-0 rounded-md border border-border bg-background px-3 py-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Attempt {attemptNumber(attempt)}</p>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+            {attempt.claimId ? `Claim ${attempt.claimId}` : attempt.disposition === 'queued' ? 'Blocked by active turn ownership' : 'No claim acquired'}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <DispositionBadge attempt={attempt} />
+          {duration !== undefined ? <span className="text-xs text-muted-foreground">{formatDuration(duration)}</span> : null}
+        </div>
+      </div>
+      <details className="mt-2 text-xs">
+        <summary className="cursor-pointer text-muted-foreground">Technical details</summary>
+        <div className="mt-2 rounded-md border border-border p-2">
+          <JsonPreview value={rawDetails} tenantId={props.tenantId} summaryFields={['disposition', 'providerStatus', 'claimId', 'claimedGeneration', 'error']} maxPreviewRows={7} maxRawHeight={220} />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function compressAttemptGroups(attempts: TurnAttemptRun[]): TurnAttemptRun[][] {
+  const sorted = [...attempts].sort((a, b) => attemptNumber(a) - attemptNumber(b));
+  const groups: TurnAttemptRun[][] = [];
+  for (const attempt of sorted) {
+    const current = groups[groups.length - 1];
+    const previous = current?.[current.length - 1];
+    if (
+      current && previous &&
+      previous.disposition === attempt.disposition &&
+      previous.status === attempt.status &&
+      attemptNumber(attempt) === attemptNumber(previous) + 1
+    ) {
+      current.push(attempt);
+    } else {
+      groups.push([attempt]);
+    }
+  }
+  return groups;
+}
+
+function attemptNumber(attempt: TurnAttemptRun): number {
+  return attempt.attemptSeq ?? 0;
+}
+
+function attemptDuration(attempt: TurnAttemptRun): number | undefined {
+  if (!attempt.startedAt || !attempt.finishedAt) return undefined;
+  const start = Date.parse(attempt.startedAt);
+  const finish = Date.parse(attempt.finishedAt);
+  return Number.isFinite(start) && Number.isFinite(finish) ? Math.max(0, finish - start) : undefined;
+}
+
 function Marker(props: { icon: React.ReactNode; label: string }): React.ReactElement {
   return (
     <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -283,12 +421,7 @@ function Marker(props: { icon: React.ReactNode; label: string }): React.ReactEle
   );
 }
 
-function attemptTurnLabel(turn: TurnRun, index = 0): string {
-  const attempt = turn.attemptSeq ?? index + 1;
-  return turn.turnSeq === undefined ? `Attempt ${attempt}` : `Attempt ${attempt} · Turn ${turn.turnSeq}`;
-}
-
-function dispositionLabel(disposition: TurnRun['disposition']): string {
+function dispositionLabel(disposition: TurnAttemptRun['disposition']): string {
   switch (disposition) {
     case 'executed': return 'Executed';
     case 'queued': return 'Queued';
@@ -299,15 +432,15 @@ function dispositionLabel(disposition: TurnRun['disposition']): string {
   }
 }
 
-function DispositionBadge(props: { turn: TurnRun }): React.ReactElement | null {
-  if (!props.turn.disposition) return null;
-  const muted = props.turn.disposition === 'queued' || props.turn.disposition === 'matching_replay' || props.turn.disposition === 'superseded';
+function DispositionBadge(props: { attempt: TurnAttemptRun }): React.ReactElement | null {
+  if (!props.attempt.disposition) return null;
+  const muted = props.attempt.disposition === 'queued' || props.attempt.disposition === 'matching_replay' || props.attempt.disposition === 'superseded';
   return (
     <span className={cn(
       'rounded-full border px-2 py-0.5 text-[10px] font-medium',
       muted ? 'border-border bg-muted text-muted-foreground' : 'border-primary/30 bg-primary/10 text-primary'
     )}>
-      {dispositionLabel(props.turn.disposition)}
+      {dispositionLabel(props.attempt.disposition)}
     </span>
   );
 }
@@ -335,7 +468,7 @@ function turnFlowLabel(turn: TurnRun): string {
   const before = turn.cognition?.stageBefore ?? '?';
   const terminal = transitionKind(turn) ?? turn.boundaryKind;
   if (terminal && terminal !== 'continue') {
-    return `${before} → ${terminal}`;
+    return `${before} → ${humanizeBoundary(terminal)}`;
   }
   return `${before} → ${turn.cognition?.stageAfter ?? terminal ?? '?'}`;
 }
@@ -563,6 +696,28 @@ function valueContainsKey(value: unknown, key: string): boolean {
 
 function truncateText(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}...` : value;
+}
+
+function humanizeBoundary(value: string): string {
+  const labels: Record<string, string> = {
+    await_child: 'Awaiting child',
+    await_input: 'Awaiting input',
+    await_tool: 'Awaiting tool',
+    await_event: 'Awaiting event',
+    complete: 'Completed',
+    fail: 'Failed',
+    canceled: 'Cancelled',
+  };
+  return labels[value] ?? value.replace(/_/g, ' ');
+}
+
+function failureFromAttemptError(error: unknown): SemanticFailure | undefined {
+  if (typeof error === 'string' && error.length > 0) return { message: error };
+  if (!isRecord(error)) return undefined;
+  const code = stringField(error, 'code') ?? stringField(error, 'name');
+  const message = stringField(error, 'message') ?? code;
+  if (!message) return undefined;
+  return { ...(code ? { code } : {}), message };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

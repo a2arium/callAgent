@@ -1,4 +1,5 @@
 export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'cancelled' | 'unknown';
+export type RunSeverity = 'success' | 'info' | 'warning' | 'error' | 'neutral';
 
 export type AgentRunListItem = {
   agentId?: string;
@@ -49,6 +50,7 @@ export type AgentRunNode = {
   parentTaskId?: string;
   agentId?: string;
   status: AgentRunStatus;
+  severity: RunSeverity;
   inputPreview?: unknown;
   outputPreview?: unknown;
   error?: unknown;
@@ -123,7 +125,7 @@ export type MemoryOperationRun = {
   spanId?: string;
 };
 
-export type TurnRun = {
+export type TurnAttemptRun = {
   id: string;
   rootTaskId: string;
   taskId: string;
@@ -155,6 +157,12 @@ export type TurnRun = {
   startedAt?: string;
   finishedAt?: string;
   error?: unknown;
+};
+
+export type TurnRun = TurnAttemptRun & {
+  turnSeq: number;
+  severity: RunSeverity;
+  attempts: TurnAttemptRun[];
 };
 
 export type EffectRun = {
@@ -211,13 +219,14 @@ export type AgentRunEvent = {
 };
 
 export type AgentRunGraph = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   tenantId: string;
   taskId: string;
   root: AgentRunNode;
   nodes: AgentRunNode[];
   edges: AgentRunEdge[];
   turns: TurnRun[];
+  unassignedAttempts: TurnAttemptRun[];
   memoryOps: MemoryOperationRun[];
   effects: EffectRun[];
   events: AgentRunEvent[];

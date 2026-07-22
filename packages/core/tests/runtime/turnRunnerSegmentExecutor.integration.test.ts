@@ -420,6 +420,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             wake: { trigger: 'start', input: { generation: 2 } },
         });
         expect(queued.turnDisposition).toBe('queued');
+        expect(queued.associatedTurnSeq).toBe(1);
         expect(executeTurnSpy).toHaveBeenCalledTimes(1);
 
         releaseFirst();

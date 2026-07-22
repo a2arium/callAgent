@@ -686,7 +686,7 @@ function withOperatorResponseBudget(graph: AgentRunGraph, source: 'bridge' | 'se
     };
     if (measureJsonBytes(withoutEvents) <= limitBytes) return withoutEvents;
     return {
-        schemaVersion: 2,
+        schemaVersion: 3,
         tenantId: withoutEvents.tenantId,
         taskId: withoutEvents.taskId,
         root: withoutEvents.root,
@@ -694,6 +694,7 @@ function withOperatorResponseBudget(graph: AgentRunGraph, source: 'bridge' | 'se
         nodes: [],
         edges: [],
         turns: [],
+        unassignedAttempts: [],
         memoryOps: [],
         effects: [budgetEffect],
         events: [],

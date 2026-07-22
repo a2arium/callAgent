@@ -72,4 +72,24 @@ describe('DriverRunsRepository', () => {
             }),
         }));
     });
+
+    it('preserves a preceding root error when cancellation becomes authoritative', async () => {
+        const updateMany = jest.fn(async () => undefined);
+        const repo = new DriverRunsRepository({
+            driverRun: { updateMany },
+        } as never);
+
+        await repo.finalizeRootRun({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            status: 'canceled',
+        });
+
+        expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                status: 'canceled',
+                error: undefined,
+            }),
+        }));
+    });
 });

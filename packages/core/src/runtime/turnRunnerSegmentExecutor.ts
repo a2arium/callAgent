@@ -119,13 +119,19 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 await this.appendAttemptEvent('turn.attempt_finished', {
                     tenantId, taskId, idempotencyKey, attemptKey: runtimeAttemptKey,
                     disposition, status: disposition,
+                    ...(admission.result.disposition === 'queued' && admission.result.activeClaim
+                        ? { turnSeq: admission.result.activeClaim.turnSeq }
+                        : {}),
                 });
                 return this.buildDuplicateResult(
                     tenantId,
                     taskId,
                     agentId,
                     admission.result.disposition === 'queued' ? 'queued' :
-                        admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay'
+                        admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay',
+                    admission.result.disposition === 'queued'
+                        ? admission.result.activeClaim?.turnSeq
+                        : undefined
                 );
             }
             if ((prepared.ctx as { task?: unknown }).task === undefined) {
@@ -236,13 +242,19 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             await this.appendAttemptEvent('turn.attempt_finished', {
                 tenantId, taskId, idempotencyKey, attemptKey: runtimeAttemptKey,
                 disposition, status: disposition,
+                ...(admission.result.disposition === 'queued' && admission.result.activeClaim
+                    ? { turnSeq: admission.result.activeClaim.turnSeq }
+                    : {}),
             });
             return this.buildDuplicateResult(
                 tenantId,
                 taskId,
                 preparedWake.agentId,
                 admission.result.disposition === 'queued' ? 'queued' :
-                    admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay'
+                    admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay',
+                admission.result.disposition === 'queued'
+                    ? admission.result.activeClaim?.turnSeq
+                    : undefined
             );
         }
 
@@ -697,7 +709,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         tenantId: string,
         taskId: string,
         agentId?: string,
-        turnDisposition: SegmentResult['turnDisposition'] = 'matching_replay'
+        turnDisposition: SegmentResult['turnDisposition'] = 'matching_replay',
+        associatedTurnSeq?: number
     ): Promise<SegmentResult> {
         const snap = await this.sessionManager.load(tenantId, taskId);
         const base = (snap?.snapshot ?? {}) as {
@@ -733,6 +746,11 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             boundary,
             taskStatus: boundaryToTaskStatus(boundary),
             turnDisposition,
+            ...(associatedTurnSeq !== undefined
+                ? { associatedTurnSeq }
+                : terminal?.turnClaim?.turnSeq !== undefined
+                  ? { associatedTurnSeq: terminal.turnClaim.turnSeq }
+                  : {}),
             ...(terminal !== undefined
                 ? {
                       taskEntity: {

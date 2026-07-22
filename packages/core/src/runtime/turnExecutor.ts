@@ -99,6 +99,8 @@ export type SegmentResult = {
     turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
     /** Claim used by this attempt; retained only for bounded driver diagnostics. */
     turnClaim?: { claimId: string; fence: string; claimedGeneration: string; turnSeq: number };
+    /** Logical turn this attempt executed, replayed, or was queued behind. */
+    associatedTurnSeq?: number;
     /** Populated when the segment ran via a prepared turn invocation. */
     taskEntity?: TaskEntity;
 };

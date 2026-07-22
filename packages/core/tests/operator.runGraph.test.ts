@@ -138,7 +138,7 @@ describe('buildAgentRunGraph', () => {
         }));
         expect(graph.turns).toEqual([
             expect.objectContaining({
-                id: 'turn-1',
+                id: 'turn:task-1:7',
                 rootTaskId: 'task-1',
                 operation: 'turn.segment',
                 turnSeq: 7,
@@ -768,7 +768,7 @@ describe('buildAgentRunGraph', () => {
         expect(graph.turns).toEqual([
             expect.objectContaining({ turnSeq: 3, status: 'completed' }),
             expect.objectContaining({
-                id: 'turn-4-id',
+                id: 'turn:task-live-turn:4',
                 turnSeq: 4,
                 status: 'running',
                 turnTraceRef: { traceId: 'trace-1', spanId: 'span-4' },
@@ -809,7 +809,7 @@ describe('buildAgentRunGraph', () => {
 
         expect(graph.turns).toHaveLength(1);
         expect(graph.turns[0]).toEqual(expect.objectContaining({
-            id: 'turn-4-complete',
+            id: 'turn:task-completed-turn:4',
             turnSeq: 4,
             status: 'completed',
         }));
@@ -1388,5 +1388,62 @@ describe('buildAgentRunGraph', () => {
                 inputPreview: { url: 'https://example.test/listing.html' },
             }),
         ]));
+    });
+
+    it('groups queued attempts under their logical turn and preserves canceled error severity', async () => {
+        const store = new InMemorySessionManager();
+        const sessionManager = new SessionManager(store);
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1',
+            sessionId: 'task-attempts',
+            agentId: 'root-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'root-agent', cancellation: { requested: true, reason: 'operator stop' } } },
+        });
+        const error = { name: 'Error', message: 'RUNTIME_TIMER_REPOSITORY_MISSING' };
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1',
+            taskId: 'task-attempts',
+            sessionManager,
+            driverRuns: [
+                {
+                    providerRunId: 'root-run', tenantId: 'tenant-1', taskId: 'task-attempts',
+                    rootTaskId: 'task-attempts', agentId: 'root-agent', operation: 'agent.run',
+                    status: 'canceled', error, updatedAt: '2026-07-22T10:01:00.000Z',
+                },
+                {
+                    providerRunId: 'turn-1', tenantId: 'tenant-1', taskId: 'task-attempts',
+                    rootTaskId: 'task-attempts', operation: 'turn.segment', status: 'completed',
+                    turnSeq: 1, attemptSeq: 1, turnDisposition: 'executed', boundaryKind: 'await_child',
+                    createdAt: '2026-07-22T10:00:00.000Z', updatedAt: '2026-07-22T10:00:01.000Z',
+                },
+                {
+                    providerRunId: 'turn-2-owner', tenantId: 'tenant-1', taskId: 'task-attempts',
+                    rootTaskId: 'task-attempts', operation: 'turn.segment', status: 'running',
+                    turnSeq: 2, attemptSeq: 2, turnDisposition: 'executed', claimId: 'claim-2',
+                    createdAt: '2026-07-22T10:00:02.000Z', updatedAt: '2026-07-22T10:00:03.000Z',
+                },
+                {
+                    providerRunId: 'turn-2-queued-1', tenantId: 'tenant-1', taskId: 'task-attempts',
+                    rootTaskId: 'task-attempts', operation: 'turn.segment', status: 'completed',
+                    turnSeq: 2, attemptSeq: 3, turnDisposition: 'queued', boundaryKind: 'await_child',
+                    createdAt: '2026-07-22T10:00:10.000Z', updatedAt: '2026-07-22T10:00:11.000Z',
+                },
+                {
+                    providerRunId: 'turn-2-queued-legacy', tenantId: 'tenant-1', taskId: 'task-attempts',
+                    rootTaskId: 'task-attempts', operation: 'turn.segment', status: 'completed',
+                    attemptSeq: 4, turnDisposition: 'queued', boundaryKind: 'await_child',
+                    createdAt: '2026-07-22T10:00:20.000Z', updatedAt: '2026-07-22T10:00:21.000Z',
+                },
+            ],
+        });
+
+        expect(graph.schemaVersion).toBe(3);
+        expect(graph.turns).toHaveLength(2);
+        expect(graph.unassignedAttempts).toHaveLength(0);
+        expect(graph.root).toEqual(expect.objectContaining({ status: 'canceled', severity: 'error', error }));
+        expect(graph.turns[1]).toEqual(expect.objectContaining({ turnSeq: 2, status: 'canceled', severity: 'error', error }));
+        expect(graph.turns[1]?.attempts).toHaveLength(3);
+        expect(graph.turns[1]?.attempts.map((attempt) => attempt.disposition)).toEqual(['executed', 'queued', 'queued']);
     });
 });
