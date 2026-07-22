@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { ArtifactModalProvider } from '../features/inspector/JsonPreview';
 import { ThemeProvider } from './theme';
+import { AuthGate } from './auth';
 
 export function Providers(props: { children: React.ReactNode }): React.ReactElement {
   const [client] = useState(
@@ -18,7 +19,7 @@ export function Providers(props: { children: React.ReactNode }): React.ReactElem
   return (
     <ThemeProvider>
       <QueryClientProvider client={client}>
-        <ArtifactModalProvider>{props.children}</ArtifactModalProvider>
+        <AuthGate><ArtifactModalProvider>{props.children}</ArtifactModalProvider></AuthGate>
       </QueryClientProvider>
     </ThemeProvider>
   );

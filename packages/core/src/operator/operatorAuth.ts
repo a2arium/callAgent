@@ -6,6 +6,7 @@ export type OperatorRequestLike = {
     query?: Record<string, unknown>;
     body?: unknown;
     header?: (name: string) => string | undefined;
+    operatorContext?: OperatorRequestContext;
 };
 
 export type OperatorRequestContext = {
@@ -13,6 +14,12 @@ export type OperatorRequestContext = {
     actorId: string;
     actorType: OperatorActorType;
     production: boolean;
+    email?: string;
+    role?: 'viewer' | 'operator' | 'admin';
+    sessionId?: string;
+    sessionCreatedAt?: Date;
+    installationOwner?: boolean;
+    mustChangePassword?: boolean;
 };
 
 export class OperatorAuthError extends Error {
@@ -27,13 +34,12 @@ export class OperatorAuthError extends Error {
 }
 
 export function resolveOperatorRequestContext(req: OperatorRequestLike): OperatorRequestContext {
+    if (req.operatorContext) return req.operatorContext;
     const production = isProductionMode();
-    const configuredToken = readEnv('CALLAGENT_OPERATOR_AUTH_TOKEN');
-    if (production && !configuredToken) {
-        throw new OperatorAuthError('Operator auth token is required in production mode', 503, 'OPERATOR_AUTH_NOT_CONFIGURED');
+    if (production) {
+        throw new OperatorAuthError('Named-user authentication is required', 401, 'AUTH_REQUIRED');
     }
-
-    const actor = authenticateOperator(req, configuredToken, production);
+    const actor = { actorId: 'dev-local', actorType: 'dev-local' as const };
     const tenantId = resolveTenantId(req, production);
     assertAllowedTenant(tenantId);
 
@@ -51,31 +57,6 @@ export function isProductionMode(): boolean {
 
 export function isPublicRpcEnabled(): boolean {
     return readEnv('CALLAGENT_RPC_PUBLIC') === 'true';
-}
-
-function authenticateOperator(
-    req: OperatorRequestLike,
-    configuredToken: string | undefined,
-    production: boolean
-): { actorId: string; actorType: OperatorActorType } {
-    if (!configuredToken) {
-        if (production) {
-            throw new OperatorAuthError('Operator auth token is required', 503, 'OPERATOR_AUTH_NOT_CONFIGURED');
-        }
-        return { actorId: 'dev-local', actorType: 'dev-local' };
-    }
-
-    const presented = req.header?.('x-callagent-operator-key') ?? bearerToken(req.header?.('authorization'));
-    if (presented !== configuredToken) {
-        throw new OperatorAuthError('Operator authorization is required', 401, 'OPERATOR_AUTH_REQUIRED');
-    }
-    return { actorId: 'operator-token', actorType: 'service' };
-}
-
-function bearerToken(value: string | undefined): string | undefined {
-    if (!value) return undefined;
-    const match = /^Bearer\s+(.+)$/i.exec(value.trim());
-    return match?.[1];
 }
 
 function resolveTenantId(req: OperatorRequestLike, production: boolean): string {

@@ -273,7 +273,7 @@ model OperatorProjectionCursor {
 
 model OperatorAuditEvent {
   id               String   @id @default(cuid())
-  tenantId         String   @map("tenant_id")
+  tenantId         String?  @map("tenant_id")
   action           String
   actorType        String   @map("actor_type")
   actorId          String   @map("actor_id")

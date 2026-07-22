@@ -408,7 +408,7 @@ model OperatorProjectionCursor {
 
 model OperatorAuditEvent {
   id               String   @id @default(cuid())
-  tenantId         String   @map("tenant_id")
+  tenantId         String?  @map("tenant_id")
   action           String
   actorType        String   @map("actor_type")
   actorId          String   @map("actor_id")
@@ -428,6 +428,159 @@ model OperatorAuditEvent {
   @@index([tenantId, action, createdAt])
   @@index([tenantId, taskId, createdAt])
   @@map("operator_audit_events")
+}
+
+enum OperatorRole {
+  VIEWER
+  OPERATOR
+  ADMIN
+}
+
+enum OperatorMembershipStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum OperatorInvitationStatus {
+  PENDING
+  CLAIMING
+  ACCEPTED
+  REVOKED
+}
+
+model OperatorAuthUser {
+  id                           String    @id
+  name                         String
+  email                        String    @unique
+  emailVerified                Boolean   @default(false) @map("email_verified")
+  image                        String?
+  mustChangePassword           Boolean   @default(false) @map("must_change_password")
+  bootstrapCredentialExpiresAt DateTime? @map("bootstrap_credential_expires_at")
+  createdAt                    DateTime  @default(now()) @map("created_at")
+  updatedAt                    DateTime  @updatedAt @map("updated_at")
+
+  sessions            OperatorAuthSession[]
+  accounts            OperatorAuthAccount[]
+  memberships         OperatorTenantMembership[] @relation("OperatorMembershipUser")
+  createdMemberships  OperatorTenantMembership[] @relation("OperatorMembershipCreator")
+  invitationsCreated  OperatorInvitation[]       @relation("OperatorInvitationCreator")
+  invitationsAccepted OperatorInvitation[]       @relation("OperatorInvitationAcceptor")
+  installationOwner   OperatorInstallationOwner?
+
+  @@map("operator_auth_users")
+}
+
+model OperatorAuthSession {
+  id        String           @id
+  expiresAt DateTime         @map("expires_at")
+  token     String           @unique
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+  ipAddress String?          @map("ip_address")
+  userAgent String?          @map("user_agent")
+  userId    String           @map("user_id")
+  user      OperatorAuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("operator_auth_sessions")
+}
+
+model OperatorAuthAccount {
+  id                    String           @id
+  accountId             String           @map("account_id")
+  providerId            String           @map("provider_id")
+  userId                String           @map("user_id")
+  accessToken           String?          @map("access_token")
+  refreshToken          String?          @map("refresh_token")
+  idToken               String?          @map("id_token")
+  accessTokenExpiresAt  DateTime?        @map("access_token_expires_at")
+  refreshTokenExpiresAt DateTime?        @map("refresh_token_expires_at")
+  scope                 String?
+  password              String?
+  createdAt             DateTime         @default(now()) @map("created_at")
+  updatedAt             DateTime         @updatedAt @map("updated_at")
+  user                  OperatorAuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("operator_auth_accounts")
+}
+
+model OperatorAuthVerification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([identifier])
+  @@index([expiresAt])
+  @@map("operator_auth_verifications")
+}
+
+model OperatorTenantMembership {
+  id              String                   @id @default(cuid())
+  userId          String                   @map("user_id")
+  tenantId        String                   @map("tenant_id")
+  role            OperatorRole
+  status          OperatorMembershipStatus @default(ACTIVE)
+  createdByUserId String?                  @map("created_by_user_id")
+  createdAt       DateTime                 @default(now()) @map("created_at")
+  updatedAt       DateTime                 @updatedAt @map("updated_at")
+  user            OperatorAuthUser         @relation("OperatorMembershipUser", fields: [userId], references: [id], onDelete: Restrict)
+  createdBy       OperatorAuthUser?        @relation("OperatorMembershipCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, tenantId])
+  @@index([tenantId, status, role])
+  @@map("operator_tenant_memberships")
+}
+
+model OperatorInvitation {
+  id               String                   @id @default(cuid())
+  tenantId         String                   @map("tenant_id")
+  email            String
+  role             OperatorRole
+  tokenHash        String                   @unique @map("token_hash")
+  status           OperatorInvitationStatus @default(PENDING)
+  expiresAt        DateTime                 @map("expires_at")
+  claimId          String?                  @map("claim_id")
+  claimExpiresAt   DateTime?                @map("claim_expires_at")
+  createdByUserId  String                   @map("created_by_user_id")
+  acceptedByUserId String?                  @map("accepted_by_user_id")
+  acceptedAt       DateTime?                @map("accepted_at")
+  revokedAt        DateTime?                @map("revoked_at")
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  updatedAt        DateTime                 @updatedAt @map("updated_at")
+  createdBy        OperatorAuthUser         @relation("OperatorInvitationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  acceptedBy       OperatorAuthUser?        @relation("OperatorInvitationAcceptor", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status, expiresAt])
+  @@index([email])
+  @@map("operator_invitations")
+}
+
+model OperatorInstallationOwner {
+  id        String           @id @default("primary")
+  userId    String           @unique @map("user_id")
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+  user      OperatorAuthUser @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("operator_installation_owner")
+}
+
+model OperatorBootstrapState {
+  id             String    @id @default("primary")
+  status         String
+  claimedBy      String?   @map("claimed_by")
+  claimExpiresAt DateTime? @map("claim_expires_at")
+  completedAt    DateTime? @map("completed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@map("operator_bootstrap_state")
 }
 
 model DurableSubscriptionCursor {

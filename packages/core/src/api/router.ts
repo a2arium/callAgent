@@ -1,5 +1,5 @@
 // src/api/router.ts
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import fs from 'node:fs/promises';
 import {
     handleTasksSend,
@@ -16,8 +16,6 @@ import type { AgentCard } from '@a2arium/callagent-types';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import {
-    isProductionMode,
-    isPublicRpcEnabled,
     OperatorAuthError,
     resolveOperatorRequestContext,
     type OperatorRequestContext,
@@ -42,16 +40,22 @@ type ListedAgent = {
 };
 
 /**
- * Create the main API router for A2A endpoints
+ * Create the machine-facing API router. Pass runtimeOnly=false only for
+ * composition/testing; applications should use the explicit router factories.
  */
-export function createApiRouter(): Router {
+export type CreateApiRouterOptions = {
+    operatorAccessControl?: RequestHandler;
+    runtimeOnly?: boolean;
+};
+
+export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
     const router = Router();
+    if (options.operatorAccessControl) router.use(options.operatorAccessControl);
 
     // JSON-RPC endpoint
     router.post('/rpc', observeRoute('rpc', async (req, res) => {
         const method = req.body?.method;
-        const protectedRpc = isOperatorLaunch(req) || shouldProtectRpcMethod(method);
-        const operatorContext = protectedRpc ? contextOrThrow(req) : undefined;
+        const operatorContext = options.operatorAccessControl || req.operatorContext ? contextOrThrow(req) : undefined;
         if (operatorContext && isTaskStartingRpcMethod(method)) {
             const normalized = normalizeRpcTaskParams(req.body?.params);
             if (normalized) {
@@ -106,8 +110,6 @@ export function createApiRouter(): Router {
     }));
 
     router.get('/metrics', (_req, res) => {
-        const context = contextOrRespond(_req, res);
-        if (!context) return;
         if (process.env.CALLAGENT_METRICS_ENABLED === 'false') {
             res.status(404).json({ ok: false, error: 'Metrics endpoint is disabled' });
             return;
@@ -117,6 +119,8 @@ export function createApiRouter(): Router {
             metrics: defaultMetricsRegistry.snapshot(),
         });
     });
+
+    if (options.runtimeOnly !== false) return router;
 
     router.get('/agent-runs', observeRoute('agent-runs', async (req, res) => {
         try {
@@ -692,6 +696,16 @@ export function createApiRouter(): Router {
     return router;
 }
 
+/** Machine-facing runtime protocol router. */
+export function createRuntimeApiRouter(): Router {
+    return createApiRouter({ runtimeOnly: true });
+}
+
+/** Human Observer router. Authentication is mandatory at construction time. */
+export function createOperatorApiRouter(operatorAccessControl: RequestHandler): Router {
+    return createApiRouter({ operatorAccessControl, runtimeOnly: false });
+}
+
 function inferArtifactContentType(value: unknown): string {
     if (typeof value === 'string') {
         return value.trimStart().startsWith('<') ? 'text/html' : 'text/plain';
@@ -818,15 +832,6 @@ function isProbeFilter(value: unknown): value is { path: string; operator: strin
         typeof (value as Record<string, unknown>).path === 'string' &&
         ((value as Record<string, unknown>).path as string).trim().length > 0 &&
         ['=', '!=', 'CONTAINS', 'STARTS_WITH', 'ENDS_WITH'].includes(String((value as Record<string, unknown>).operator));
-}
-
-function isOperatorLaunch(req: any): boolean {
-    return req.header?.('x-callagent-operator-launch') === 'true';
-}
-
-function shouldProtectRpcMethod(method: unknown): boolean {
-    if (!isProductionMode() || isPublicRpcEnabled()) return false;
-    return method === 'tasks/send' || method === 'tasks/sendSubscribe' || method === 'tasks/input';
 }
 
 function isTaskStartingRpcMethod(method: unknown): method is 'tasks/send' | 'tasks/sendSubscribe' {

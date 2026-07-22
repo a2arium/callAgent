@@ -213,20 +213,16 @@ export type SemanticMemoryAuditPage = {
   items: SemanticMemoryAuditItem[];
 };
 
-function operatorAuthHeaders(): Record<string, string> {
-  const token = window.localStorage.getItem('callagent.operator.token')?.trim();
-  return token ? { 'x-callagent-operator-key': token } : {};
-}
-
 async function fetchJson<T>(path: string, tenantId?: string): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(operatorPath(path), {
+    credentials: 'same-origin',
     headers: tenantId
       ? {
           'x-tenant-id': tenantId,
-          ...operatorAuthHeaders(),
         }
-      : operatorAuthHeaders(),
+      : undefined,
   });
+  if (response.status === 401) window.dispatchEvent(new Event('callagent:auth-required'));
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -238,12 +234,12 @@ async function fetchJson<T>(path: string, tenantId?: string): Promise<T> {
 }
 
 async function writeJson<T>(path: string, input: { tenantId: string; method: 'POST' | 'PATCH' | 'DELETE'; body: unknown }): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(operatorPath(path), {
     method: input.method,
+    credentials: 'same-origin',
     headers: {
       'content-type': 'application/json',
       'x-tenant-id': input.tenantId,
-      ...operatorAuthHeaders(),
     },
     body: JSON.stringify(input.body),
   });
@@ -298,12 +294,12 @@ export async function getRunGraph(tenantId: string, taskId: string): Promise<Age
 }
 
 export async function cancelRun(input: CancelRunInput): Promise<CancelRunResponse> {
-  const response = await fetch(`/tasks/${encodeURIComponent(input.taskId)}/cancel`, {
+  const response = await fetch(operatorPath(`/tasks/${encodeURIComponent(input.taskId)}/cancel`), {
     method: 'POST',
+    credentials: 'same-origin',
     headers: {
       'content-type': 'application/json',
       'x-tenant-id': input.tenantId,
-      ...operatorAuthHeaders(),
     },
     body: JSON.stringify({
       ...(input.agentId ? { agentId: input.agentId } : {}),
@@ -330,7 +326,7 @@ export async function getArtifact(tenantId: string, artifactId: string): Promise
 
 export async function getOperatorConfig(): Promise<OperatorConfig> {
   try {
-    const response = await fetch('/operator-config');
+    const response = await fetch('/operator-api/config', { credentials: 'same-origin', headers: { 'x-tenant-id': preferredTenantId() } });
     if (!response.ok) return {};
     return response.json() as Promise<OperatorConfig>;
   } catch {
@@ -448,13 +444,12 @@ export async function listAgents(tenantId = 'default'): Promise<ListedAgentsPage
 }
 
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> {
-  const response = await fetch('/rpc', {
+  const response = await fetch('/operator-api/rpc', {
     method: 'POST',
+    credentials: 'same-origin',
     headers: {
       'content-type': 'application/json',
       'x-tenant-id': input.tenantId,
-      'x-callagent-operator-launch': 'true',
-      ...operatorAuthHeaders(),
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -472,6 +467,14 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> 
   }
 
   return response.json() as Promise<RunAgentResponse>;
+}
+
+function operatorPath(path: string): string {
+  return path.startsWith('/operator-api/') ? path : `/operator-api${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+function preferredTenantId(): string {
+  return window.localStorage.getItem('callagent.operator.tenant')?.trim() || 'default';
 }
 
 export function hatchetRunUrl(providerRunId: string, config: OperatorConfig): string {

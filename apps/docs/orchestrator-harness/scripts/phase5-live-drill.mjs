@@ -152,7 +152,6 @@ async function postJson(url, body) {
     headers: {
       'content-type': 'application/json',
       'x-tenant-id': tenantId,
-      'x-callagent-operator-launch': 'true',
     },
     body: JSON.stringify(body),
   });

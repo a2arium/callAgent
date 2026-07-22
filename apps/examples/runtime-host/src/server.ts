@@ -16,7 +16,8 @@ async function main(): Promise<void> {
     const [
         {
             bootstrapCompositionRoot,
-            createApiRouter,
+            createRuntimeApiRouter,
+            createOperatorApiRouter,
         },
         {
             DEMO_AGENT_ID,
@@ -83,7 +84,29 @@ async function main(): Promise<void> {
         },
     });
 
+    const production = process.env.CALLAGENT_MODE === 'production' || process.env.NODE_ENV === 'production';
+    const operatorEnabled = process.env.CALLAGENT_OPERATOR_ENABLED !== 'false' && (sessionStore !== undefined || production);
+    let operatorAuth: Awaited<ReturnType<typeof import('@a2arium/callagent-operator-auth')['createOperatorAuthRuntime']>> | undefined;
+    if (operatorEnabled) {
+        if (!sessionStore) throw new Error('MEMORY_DATABASE_URL is required when Observer authentication is enabled');
+        const { createOperatorAuthRuntime, validateOperatorAuthEnvironment } = await import('@a2arium/callagent-operator-auth');
+        const { baseURL, secret } = validateOperatorAuthEnvironment(process.env, production);
+        operatorAuth = createOperatorAuthRuntime({
+            prisma: sessionStore.getPrismaClient(),
+            baseURL,
+            secret,
+            production,
+            log: (message) => console.log(message),
+        });
+        await operatorAuth.bootstrap();
+    } else {
+        console.warn('Observer authentication is disabled; configure MEMORY_DATABASE_URL and BETTER_AUTH_SECRET to enable it');
+    }
+
     const app = express();
+    if (operatorAuth) {
+        app.all('/operator-api/auth/*splat', operatorAuth.authHandler);
+    }
     app.use(express.json({ limit: '1mb' }));
     app.use((req, _res, next) => {
         const tenant = req.header('x-tenant-id');
@@ -111,14 +134,26 @@ async function main(): Promise<void> {
     ].find((candidate): candidate is string =>
         typeof candidate === 'string' && existsSync(join(candidate, 'index.html'))
     );
-    app.get('/operator-config', (_req, res) => {
+    const sendOperatorConfig = (_req: express.Request, res: express.Response) => {
         res.json({
             hatchetDashboardUrl: process.env.HATCHET_DASHBOARD_URL ?? 'http://127.0.0.1:8080',
             hatchetDashboardTenantId: process.env.HATCHET_DASHBOARD_TENANT_ID ??
                 '707d0855-80ab-4e1f-a156-f1c4546cbf52',
             environment: process.env.OPERATOR_ENVIRONMENT ?? 'local-dev',
         });
-    });
+    };
+    if (operatorAuth) {
+        app.use('/operator-api', operatorAuth.managementRouter);
+        app.get('/operator-api/config', operatorAuth.operatorMiddleware, sendOperatorConfig);
+        app.use('/operator-api', createOperatorApiRouter(operatorAuth.operatorMiddleware));
+    } else {
+        app.use('/operator-api', (_req, res) => {
+            res.status(503).json({
+                error: 'OPERATOR_AUTH_NOT_CONFIGURED',
+                message: 'Configure MEMORY_DATABASE_URL and BETTER_AUTH_SECRET to enable Observer',
+            });
+        });
+    }
     if (operatorViewerDist !== undefined) {
         app.use('/operator', express.static(operatorViewerDist));
         app.get('/operator', (_req, res) => {
@@ -128,7 +163,7 @@ async function main(): Promise<void> {
             res.sendFile(join(operatorViewerDist, 'index.html'));
         });
     }
-    app.use('/', createApiRouter());
+    app.use('/', createRuntimeApiRouter());
 
     const server = app.listen(port, host, () => {
         console.log(`Runtime host listening on http://${host}:${port}`);

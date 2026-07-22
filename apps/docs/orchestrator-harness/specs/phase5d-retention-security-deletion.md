@@ -6,33 +6,24 @@ per-surface deletion gate for legacy in-process coordination code.
 
 ## Operator Auth
 
-- Local development remains open by default.
-- Production mode is `CALLAGENT_MODE=production` or `NODE_ENV=production`.
-- Production operator surfaces require `CALLAGENT_OPERATOR_AUTH_TOKEN`.
-- Requests authenticate with `x-callagent-operator-key` or
-  `Authorization: Bearer <token>`.
-- `x-tenant-id`, query `tenantId`, and JSON-RPC payload `tenantId` must not
-  conflict.
-- `CALLAGENT_OPERATOR_TENANT_ID` pins the operator surface to one
-  server-authoritative tenant. If unset in production, requests must provide a
-  tenant that is allowed by `CALLAGENT_OPERATOR_ALLOWED_TENANTS`.
-- `CALLAGENT_OPERATOR_ALLOWED_TENANTS` may restrict tenant ids.
-- Production `/rpc` task-start/mutation methods are protected by operator auth
-  unless `CALLAGENT_RPC_PUBLIC=true` is explicitly configured.
+- Observer uses named email/password identities and database sessions provided
+  by Better Auth.
+- Human routes live under `/operator-api`; `/rpc` remains a separate machine
+  protocol surface.
+- `x-tenant-id` is accepted only after the session's active tenant membership
+  and role are checked. Observer RPC payload tenant ids are overwritten.
+- Production requires `MEMORY_DATABASE_URL`, `BETTER_AUTH_SECRET`, and
+  `CALLAGENT_PUBLIC_URL` and fails closed when they are missing.
 
 Protected surfaces:
 
-- `/agent-runs`
-- `/agents`
-- `/tasks/:taskId/run-graph`
-- `/tasks/:taskId/cancel`
-- `/tasks/:taskId/turns/:turnSeq`
-- `/tasks/:taskId/memory`
-- `/metrics`
-- operator-launched `/rpc` `tasks/send` and `tasks/sendSubscribe` requests
-  marked with `x-callagent-operator-launch: true`
-- production non-public `/rpc` `tasks/send`, `tasks/sendSubscribe`, and
-  `tasks/input`
+- `/operator-api/agent-runs`
+- `/operator-api/agents`
+- `/operator-api/tasks/*`
+- `/operator-api/memory/*`
+- `/operator-api/artifacts/*`
+- `/operator-api/rpc`
+- `/operator-api/access/*`
 
 ## Audit Records
 

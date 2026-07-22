@@ -769,9 +769,10 @@ Phase 5D defaults:
 - raw `wm_events` pruning additionally requires
   `CALLAGENT_RETENTION_PRUNE_WM_EVENTS=true`;
 - outbox rows are not pruned until the schema has a resolved/dispatched state;
-- production operator auth requires `CALLAGENT_OPERATOR_AUTH_TOKEN`.
-- production `/rpc` `tasks/send`, `tasks/sendSubscribe`, and `tasks/input` are
-  operator-auth protected unless `CALLAGENT_RPC_PUBLIC=true`.
+- production Observer auth requires a migrated PostgreSQL database,
+  `BETTER_AUTH_SECRET`, and `CALLAGENT_PUBLIC_URL`.
+- human Observer actions use `/operator-api/rpc`; the machine-facing `/rpc`
+  authorization contract is configured independently.
 
 ## Tests
 

@@ -14,6 +14,7 @@
     "@a2arium/callagent-driver-hatchet": "workspace:*",
     "@a2arium/callagent-eventbus-nats": "workspace:*",
     "@a2arium/callagent-memory-sql": "workspace:*",
+    "@a2arium/callagent-operator-auth": "workspace:*",
     "@a2arium/phase2-loop-agent": "workspace:*",
     "@a2arium/phase2-parent-agent": "workspace:*",
     "dotenv": "^17.3.1",

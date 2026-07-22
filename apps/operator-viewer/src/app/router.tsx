@@ -6,6 +6,7 @@ import { RunDetailPage } from '../features/run/RunDetailPage';
 import { AgentsPage } from '../features/agents/AgentsPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { parseMemorySearch } from './state';
+import { AccessPage } from '../features/access/AccessPage';
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -38,7 +39,13 @@ const memoryRoute = createRoute({
   component: MemoryPage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, agentsRoute, memoryRoute, runRoute]);
+const usersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/users',
+  component: AccessPage,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, agentsRoute, memoryRoute, usersRoute, runRoute]);
 
 export const router = createRouter({
   routeTree,

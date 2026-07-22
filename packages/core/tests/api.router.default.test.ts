@@ -10,7 +10,7 @@ const getRpcHandler = () => {
 };
 
 const getHandler = (path: string, method: string) => {
-    const router = createApiRouter() as any;
+    const router = createApiRouter({ runtimeOnly: false }) as any;
     const layer = router.stack.find((l: any) => l.route?.path === path && l.route?.methods?.[method]);
     return layer.route.stack[0].handle;
 };
@@ -166,7 +166,7 @@ describe('API router default branch', () => {
         });
     });
 
-    it('rejects operator requests in production without a configured token', async () => {
+    it('rejects operator requests in production without named-user context', async () => {
         process.env.CALLAGENT_MODE = 'production';
         const handler = getHandler('/agent-runs', 'get');
         const res = fakeRes();
@@ -177,15 +177,14 @@ describe('API router default branch', () => {
             header: () => undefined,
         }, res);
 
-        expect(res.statusCode).toBe(503);
+        expect(res.statusCode).toBe(401);
         expect(res.body).toEqual(expect.objectContaining({
-            error: 'OPERATOR_AUTH_NOT_CONFIGURED',
+            error: 'AUTH_REQUIRED',
         }));
     });
 
-    it('requires the configured operator token in production', async () => {
+    it('does not accept the removed shared operator token', async () => {
         process.env.CALLAGENT_MODE = 'production';
-        process.env.CALLAGENT_OPERATOR_AUTH_TOKEN = 'secret';
         const listAgentRuns = jest.fn(async () => ({ items: [], nextCursor: null }));
         EngineLocator.setEngine({ listAgentRuns });
         const handler = getHandler('/agent-runs', 'get');
@@ -198,22 +197,20 @@ describe('API router default branch', () => {
         }, rejected);
         expect(rejected.statusCode).toBe(401);
 
-        const accepted = fakeRes();
+        const bearerAttempt = fakeRes();
         await handler({
             method: 'GET',
             query: { tenantId: 'tenant-1' },
             header: (name: string) => name === 'x-callagent-operator-key' ? 'secret' : undefined,
-        }, accepted);
-        expect(accepted.statusCode).toBe(200);
-        expect(listAgentRuns).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-1' }));
+        }, bearerAttempt);
+        expect(bearerAttempt.statusCode).toBe(401);
+        expect(listAgentRuns).not.toHaveBeenCalled();
     });
 
     it('requires auth for every operator endpoint in production', async () => {
         process.env.CALLAGENT_MODE = 'production';
-        process.env.CALLAGENT_OPERATOR_AUTH_TOKEN = 'secret';
         process.env.CALLAGENT_OPERATOR_TENANT_ID = 'tenant-1';
         const cases = [
-            { path: '/metrics', method: 'get', req: { method: 'GET', header: () => undefined } },
             { path: '/agent-runs', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
             { path: '/artifacts/:artifactId', method: 'get', req: { method: 'GET', params: { artifactId: 'artifact-1' }, query: {}, header: () => undefined } },
             { path: '/agents', method: 'get', req: { method: 'GET', query: {}, header: () => undefined } },
@@ -236,7 +233,7 @@ describe('API router default branch', () => {
             const res = fakeRes();
             await handler(item.req, res);
             expect(res.statusCode).toBe(401);
-            expect(res.body).toEqual(expect.objectContaining({ error: 'OPERATOR_AUTH_REQUIRED' }));
+            expect(res.body).toEqual(expect.objectContaining({ error: 'AUTH_REQUIRED' }));
         }
     });
 
@@ -406,13 +403,16 @@ describe('API router default branch', () => {
 
         await handler({
             method: 'POST',
+            operatorContext: {
+                tenantId: 'tenant-1', actorId: 'user-1', actorType: 'user', production: true,
+                email: 'operator@example.test', role: 'operator', sessionId: 'session-1',
+            },
             body: {
                 id: 1,
                 method: 'tasks/send',
                 params: { id: 'task-1', agentId: 'agent-1', url: 'https://example.test' },
             },
             header: (name: string) => {
-                if (name === 'x-callagent-operator-launch') return 'true';
                 if (name === 'x-tenant-id') return 'tenant-1';
                 return undefined;
             },
@@ -643,20 +643,10 @@ describe('API router default branch', () => {
         }));
     });
 
-    it('protects production tasks/send even without the operator launch marker', async () => {
+    it('uses named-user context for Observer tasks/send and audit', async () => {
         process.env.CALLAGENT_MODE = 'production';
-        process.env.CALLAGENT_OPERATOR_AUTH_TOKEN = 'secret';
         process.env.CALLAGENT_OPERATOR_TENANT_ID = 'tenant-1';
         const handler = getRpcHandler();
-
-        const rejected = fakeRes();
-        await handler({
-            method: 'POST',
-            body: { id: 1, method: 'tasks/send', params: { id: 'task-1', agentId: 'agent-1' } },
-            header: () => undefined,
-        }, rejected);
-        expect(rejected.statusCode).toBe(401);
-        expect(rejected.body).toEqual(expect.objectContaining({ error: 'OPERATOR_AUTH_REQUIRED' }));
 
         const startTask = jest.fn(async () => ({ id: 'task-1', status: { state: 'completed' } }));
         const create = jest.fn(async () => ({}));
@@ -667,8 +657,9 @@ describe('API router default branch', () => {
         const accepted = fakeRes();
         await handler({
             method: 'POST',
+            operatorContext: { tenantId: 'tenant-1', actorId: 'user-1', actorType: 'user', production: true },
             body: { id: 1, method: 'tasks/send', params: { id: 'task-1', agentId: 'agent-1' } },
-            header: (name: string) => name === 'x-callagent-operator-key' ? 'secret' : undefined,
+            header: () => undefined,
         }, accepted);
 
         expect(accepted.statusCode).toBe(200);
@@ -682,19 +673,10 @@ describe('API router default branch', () => {
         });
     });
 
-    it('protects production tasks/sendSubscribe and audits launch', async () => {
+    it('uses named-user context for Observer tasks/sendSubscribe and audit', async () => {
         process.env.CALLAGENT_MODE = 'production';
-        process.env.CALLAGENT_OPERATOR_AUTH_TOKEN = 'secret';
         process.env.CALLAGENT_OPERATOR_TENANT_ID = 'tenant-1';
         const handler = getRpcHandler();
-
-        const rejected = fakeRes();
-        await handler({
-            method: 'POST',
-            body: { id: 1, method: 'tasks/sendSubscribe', params: { id: 'task-1', agentId: 'agent-1' } },
-            header: () => undefined,
-        }, rejected);
-        expect(rejected.statusCode).toBe(401);
 
         const startTask = jest.fn(async () => ({ id: 'task-1' }));
         const create = jest.fn(async () => ({}));
@@ -705,8 +687,9 @@ describe('API router default branch', () => {
         const accepted = fakeRes();
         await handler({
             method: 'POST',
+            operatorContext: { tenantId: 'tenant-1', actorId: 'user-1', actorType: 'user', production: true },
             body: { id: 1, method: 'tasks/sendSubscribe', params: { id: 'task-1', agentId: 'agent-1' } },
-            header: (name: string) => name === 'x-callagent-operator-key' ? 'secret' : undefined,
+            header: () => undefined,
             get: () => undefined,
             query: {},
             on: jest.fn(),
@@ -726,27 +709,19 @@ describe('API router default branch', () => {
         });
     });
 
-    it('protects production tasks/input and propagates the server tenant', async () => {
+    it('propagates the named-user tenant for Observer tasks/input', async () => {
         process.env.CALLAGENT_MODE = 'production';
-        process.env.CALLAGENT_OPERATOR_AUTH_TOKEN = 'secret';
         process.env.CALLAGENT_OPERATOR_TENANT_ID = 'tenant-1';
         const resumeInput = jest.fn(async () => ({ ok: true }));
         EngineLocator.setEngine({ resumeInput });
         const handler = getRpcHandler();
 
-        const rejected = fakeRes();
-        await handler({
-            method: 'POST',
-            body: { id: 1, method: 'tasks/input', params: { id: 'task-1', token: 'tok', input: { ok: true } } },
-            header: () => undefined,
-        }, rejected);
-        expect(rejected.statusCode).toBe(401);
-
         const accepted = fakeRes();
         await handler({
             method: 'POST',
+            operatorContext: { tenantId: 'tenant-1', actorId: 'user-1', actorType: 'user', production: true },
             body: { id: 1, method: 'tasks/input', params: { id: 'task-1', token: 'tok', input: { ok: true } } },
-            header: (name: string) => name === 'x-callagent-operator-key' ? 'secret' : undefined,
+            header: () => undefined,
         }, accepted);
 
         expect(accepted.body?.result).toEqual({ ok: true });
@@ -759,7 +734,6 @@ describe('API router default branch', () => {
 
     it('allows public production RPC only when explicitly configured', async () => {
         process.env.CALLAGENT_MODE = 'production';
-        process.env.CALLAGENT_OPERATOR_AUTH_TOKEN = 'secret';
         process.env.CALLAGENT_RPC_PUBLIC = 'true';
         const startTask = jest.fn(async () => ({ id: 'task-1', status: { state: 'completed' } }));
         EngineLocator.setEngine({ startTask });

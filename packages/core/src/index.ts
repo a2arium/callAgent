@@ -5,7 +5,12 @@ import './pgStartupDiagnostic.js';
 export * from './config/index.js';
 export * from './plugin/types.js';
 export * from './plugin/createAgent.js';
-export { createApiRouter } from './api/router.js';
+export {
+    createApiRouter,
+    createRuntimeApiRouter,
+    createOperatorApiRouter,
+    type CreateApiRouterOptions,
+} from './api/router.js';
 export {
     buildAgentRunGraph,
     type AgentRunGraph,

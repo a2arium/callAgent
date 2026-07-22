@@ -15,6 +15,7 @@ import { NodeInspector } from '../inspector/NodeInspector';
 import type { TurnRun } from '../../types';
 import { parseRunSearch } from '../../app/state';
 import { cn } from '../../lib/utils';
+import { useAuth } from '../../app/auth';
 
 const INSPECTOR_WIDTH_KEY = 'operator.runDetail.inspectorWidth';
 const INSPECTOR_COLLAPSED_KEY = 'operator.runDetail.inspectorCollapsed';
@@ -27,6 +28,9 @@ const SPLITTER_WIDTH = 10;
 export function RunDetailPage(): React.ReactElement {
   const params = useParams({ strict: false }) as { taskId?: string };
   const search = parseRunSearch(useSearch({ strict: false }) as Record<string, unknown>);
+  const { session } = useAuth();
+  const role = session.memberships.find((membership) => membership.tenantId === search.tenantId)?.role;
+  const canOperate = role === 'operator' || role === 'admin';
   const navigate = useNavigate({ from: '/runs/$taskId' });
   const taskId = params.taskId;
   const graphQuery = useRunGraph(search.tenantId, taskId);
@@ -217,7 +221,7 @@ export function RunDetailPage(): React.ReactElement {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {canRunNewInstance ? (
+            {canRunNewInstance && canOperate ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -233,7 +237,7 @@ export function RunDetailPage(): React.ReactElement {
               <RefreshCw className={cn('h-4 w-4', graphQuery.isFetching ? 'animate-spin' : '')} />
               Refresh
             </Button>
-            {rootCancelable ? (
+            {rootCancelable && canOperate ? (
               <Button
                 variant="ghost"
                 size="sm"
@@ -311,13 +315,13 @@ export function RunDetailPage(): React.ReactElement {
                 selectedTurnSeq={selectedTurnSeq}
                 config={configQuery.data ?? {}}
                 collapseButtonRef={collapseButtonRef}
-                canCancel={selectedNodeCancelable}
+                canCancel={selectedNodeCancelable && canOperate}
                 cancelPending={cancelRun.isPending}
                 onTabChange={(tab) => updateSearch({ tab })}
                 onTurnSelect={selectTurn}
                 onTurnBack={() => updateSearch({ turn: '', tab: 'turns' })}
                 onCollapse={() => setInspectorOpen(false)}
-                onCancel={selectedNodeCancelable ? cancelSelectedNode : undefined}
+                onCancel={selectedNodeCancelable && canOperate ? cancelSelectedNode : undefined}
               />
             </div>
           )}

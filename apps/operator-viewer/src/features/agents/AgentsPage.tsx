@@ -25,6 +25,7 @@ import {
   saveAgentPayloadPresetState,
   type AgentPayloadPresetState,
 } from './payloadPresets';
+import { useAuth } from '../../app/auth';
 
 type RunState =
   | { state: 'idle' }
@@ -50,8 +51,12 @@ type AgentViewState = {
 };
 
 export function AgentsPage(): React.ReactElement {
+  const { session } = useAuth();
   const navigate = useNavigate();
-  const [tenantId, setTenantId] = useState('default');
+  const preferredTenant = window.localStorage.getItem('callagent.operator.tenant') || session.memberships[0]?.tenantId || 'default';
+  const [tenantId, setTenantId] = useState(preferredTenant);
+  const role = session.memberships.find((membership) => membership.tenantId === tenantId)?.role;
+  const canRun = role === 'operator' || role === 'admin';
   const query = useAgents(tenantId);
   const agents = query.data?.items ?? [];
   const [usageState, setUsageState] = useState<AgentUsageState>(() => loadAgentUsageState());
@@ -95,6 +100,7 @@ export function AgentsPage(): React.ReactElement {
   }, [presetState, selectedAgent?.id]);
 
   async function submitRun(): Promise<void> {
+    if (!canRun) { setRunState({ state: 'error', message: 'Operator access is required to run agents.' }); return; }
     if (!selectedAgent) {
       setRunState({ state: 'error', message: 'Select an agent first.' });
       return;
@@ -225,6 +231,7 @@ export function AgentsPage(): React.ReactElement {
               onTenantId={setTenantId}
               onPresetState={setPresetState}
               onSubmit={() => void submitRun()}
+              canRun={canRun}
             />
           ) : (
             <Notice title="Select an agent">Choose an agent from the registry to prepare a run.</Notice>
@@ -306,6 +313,7 @@ function AgentRunner(props: {
   onTenantId: (value: string) => void;
   onPresetState: (value: AgentPayloadPresetState) => void;
   onSubmit: () => void;
+  canRun: boolean;
 }): React.ReactElement {
   const selectedPreset =
     props.presetState.presets.find((preset) => preset.id === props.presetState.selectedPresetId) ??
@@ -500,9 +508,9 @@ function AgentRunner(props: {
               Developer mode sends raw JSON. The payload will be formatted before the run starts.
             </p>
           </div>
-          <Button type="button" onClick={props.onSubmit} disabled={props.runState.state === 'running' || !parsedPayload.ok}>
+          <Button type="button" onClick={props.onSubmit} disabled={!props.canRun || props.runState.state === 'running' || !parsedPayload.ok}>
           <Play className="h-4 w-4" />
-          {props.runState.state === 'running' ? 'Starting...' : 'Run agent'}
+          {!props.canRun ? 'Operator role required' : props.runState.state === 'running' ? 'Starting...' : 'Run agent'}
         </Button>
         </div>
       </div>

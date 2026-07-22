@@ -13,9 +13,14 @@ import { formatDateTime, formatNumber, formatRelative } from '../../design/forma
 import { JsonPreview } from '../inspector/JsonPreview';
 import { JsonEditor, parseJsonAny } from '../inspector/JsonEditor';
 import { cn } from '../../lib/utils';
+import { useAuth } from '../../app/auth';
 
 export function MemoryPage(): React.ReactElement {
   const search = parseMemorySearch(useSearch({ strict: false }) as Record<string, unknown>);
+  const { session } = useAuth();
+  const role = session.memberships.find((membership) => membership.tenantId === search.tenantId)?.role;
+  const canEdit = role === 'operator' || role === 'admin';
+  const canDelete = role === 'admin';
   const navigate = useNavigate({ from: '/memory' });
   const updateSearch = (patch: Partial<MemorySearch>) => void navigate({ search: { ...search, ...patch } });
   const memoryQuery = useSemanticMemory({
@@ -134,6 +139,8 @@ export function MemoryPage(): React.ReactElement {
             isLoading={selectedDetail.isLoading}
             error={selectedDetail.error}
             onKeyChanged={(key) => updateSearch({ selectedKey: key, key })}
+            canEdit={canEdit}
+            canDelete={canDelete}
             onChanged={() => {
               void memoryQuery.refetch();
               void selectedDetail.refetch();
@@ -428,7 +435,7 @@ function EntitiesTable(props: { items: SemanticEntityItem[]; isLoading: boolean;
   );
 }
 
-function MemoryInspector(props: { tenantId: string; item?: SemanticMemoryItem; isLoading: boolean; error: unknown; onChanged: () => void; onKeyChanged: (key: string) => void }): React.ReactElement {
+function MemoryInspector(props: { tenantId: string; item?: SemanticMemoryItem; isLoading: boolean; error: unknown; canEdit: boolean; canDelete: boolean; onChanged: () => void; onKeyChanged: (key: string) => void }): React.ReactElement {
   const retag = useRetagSemanticMemory();
   const updateMemory = useUpdateSemanticMemory();
   const remove = useDeleteSemanticMemory();
@@ -565,16 +572,16 @@ function MemoryInspector(props: { tenantId: string; item?: SemanticMemoryItem; i
         ) : (
           <div className="mt-1 flex min-w-0 items-center gap-2">
             <h3 className="min-w-0 truncate font-mono text-sm font-semibold">{props.item.key}</h3>
-            <Button type="button" variant="outline" size="icon" className="h-6 w-6 shrink-0" title="Edit key" aria-label="Edit key" onClick={() => setKeyEditorOpen(true)}>
+            {props.canEdit ? <Button type="button" variant="outline" size="icon" className="h-6 w-6 shrink-0" title="Edit key" aria-label="Edit key" onClick={() => setKeyEditorOpen(true)}>
               <Pencil className="h-3.5 w-3.5" />
-            </Button>
+            </Button> : null}
           </div>
         )}
         <div className="mt-2 flex flex-wrap gap-2">
-          <Button variant="ghost" size="sm" onClick={runDelete} disabled={remove.isPending} className="text-danger hover:bg-danger-bg hover:text-danger">
+          {props.canDelete ? <Button variant="ghost" size="sm" onClick={runDelete} disabled={remove.isPending} className="text-danger hover:bg-danger-bg hover:text-danger">
             <Trash2 className="h-4 w-4" />
             Delete
-          </Button>
+          </Button> : null}
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span>Updated {formatRelative(item.updatedAt)}</span>
@@ -590,7 +597,7 @@ function MemoryInspector(props: { tenantId: string; item?: SemanticMemoryItem; i
         {remove.error instanceof Error ? <Notice kind="error" title="Delete failed">{remove.error.message}</Notice> : null}
         <Panel title="Tags">
           <div className="grid gap-3">
-            {!tagEditorOpen ? (
+            {!props.canEdit ? <ChipList values={draftTags} empty="none" /> : !tagEditorOpen ? (
               <div className="flex items-center justify-between gap-2">
                 <EditableTags tags={draftTags} onRemove={removeTagAndEdit} compact />
                 <Button type="button" variant="outline" size="icon" className="h-6 w-6 shrink-0" title="Add tag" aria-label="Add tag" onClick={() => setTagEditorOpen(true)}>
@@ -658,9 +665,9 @@ function MemoryInspector(props: { tenantId: string; item?: SemanticMemoryItem; i
         <Panel title="Value">
           <div className="grid gap-2">
             <div className="flex justify-end">
-              <Button type="button" variant="outline" size="icon" className="h-7 w-7" title="Edit JSON" aria-label="Edit JSON" onClick={() => setValueEditorOpen(true)}>
+              {props.canEdit ? <Button type="button" variant="outline" size="icon" className="h-7 w-7" title="Edit JSON" aria-label="Edit JSON" onClick={() => setValueEditorOpen(true)}>
                 <Pencil className="h-3.5 w-3.5" />
-              </Button>
+              </Button> : null}
             </div>
             <JsonPreview value={props.item.value ?? props.item.valuePreview} tenantId={props.tenantId} defaultExpanded maxRawHeight={420} />
           </div>
@@ -681,12 +688,12 @@ function MemoryInspector(props: { tenantId: string; item?: SemanticMemoryItem; i
             <JsonPreview value={props.item.blobMetadata} tenantId={props.tenantId} maxRawHeight={240} />
           </Panel>
         ) : null}
-        <Notice kind="warning" title="Mutations are audited">
-          Key, value, tag, and delete changes require a reason and are recorded as operator audit events.
+        <Notice kind="warning" title={props.canEdit ? 'Mutations are audited' : 'Read-only access'}>
+          {props.canEdit ? 'Key, value, tag, and delete changes require a reason and are recorded as operator audit events.' : 'Your tenant role can inspect memory but cannot change it.'}
         </Notice>
       </div>
     </aside>
-    {valueEditorOpen ? (
+    {valueEditorOpen && props.canEdit ? (
       <JsonValueEditorModal
         memoryKey={item.key}
         value={draftValue}

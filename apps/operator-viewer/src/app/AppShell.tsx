@@ -1,15 +1,19 @@
 import { Link, Outlet, useLocation } from '@tanstack/react-router';
-import { Activity, HelpCircle, Moon, Search, ShieldCheck, Sun, UserCircle } from 'lucide-react';
+import { Activity, HelpCircle, LogOut, Moon, Search, ShieldCheck, Sun, UserCircle } from 'lucide-react';
 import { useOperatorConfig } from '../api/hooks';
 import { Button } from '../design/components/ui/button';
 import { cn } from '../lib/utils';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useTheme } from './theme';
+import { useAuth } from './auth';
 
 export function AppShell(): React.ReactElement {
   const configQuery = useOperatorConfig();
   const location = useLocation();
   const theme = useTheme();
+  const auth = useAuth();
+  const preferredTenant = window.localStorage.getItem('callagent.operator.tenant') || auth.session.memberships[0]?.tenantId || 'default';
+  const membership = auth.session.memberships.find((item) => item.tenantId === preferredTenant);
   const environment = configQuery.data?.environment ?? 'local-dev';
   const isProd = environment.toLowerCase().includes('prod');
   return (
@@ -28,6 +32,7 @@ export function AppShell(): React.ReactElement {
           </NavLink>
         </nav>
         <div className="absolute bottom-4 left-4 right-4 grid gap-2 text-xs text-muted-foreground">
+          {membership?.role === 'admin' ? <NavLink to="/users" active={location.pathname === '/users'}>Users</NavLink> : null}
           <div
             className={cn(
               'rounded-lg border p-3',
@@ -40,12 +45,11 @@ export function AppShell(): React.ReactElement {
               <ShieldCheck className="h-4 w-4" />
               {environment}
             </div>
-            <p className="mt-1 opacity-80">Environment is visible on every page.</p>
           </div>
           <div className="rounded-lg border border-border bg-surface-muted p-3">
             <div className="flex items-center gap-2">
               <UserCircle className="h-4 w-4" />
-              Auth reserved
+              {auth.session.user.email}
             </div>
           </div>
         </div>
@@ -61,6 +65,19 @@ export function AppShell(): React.ReactElement {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <select
+                aria-label="Active tenant"
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                value={preferredTenant}
+                onChange={(event) => {
+                  window.localStorage.setItem('callagent.operator.tenant', event.target.value);
+                  const url = new URL(window.location.href);
+                  url.searchParams.set('tenantId', event.target.value);
+                  window.location.assign(url);
+                }}
+              >
+                {auth.session.memberships.map((item) => <option key={item.id} value={item.tenantId}>{item.tenantId} · {item.role}</option>)}
+              </select>
               <div className="hidden items-center gap-2 rounded-md border border-border bg-card/80 px-3 py-1.5 text-sm text-muted-foreground md:flex">
                 <Search className="h-4 w-4" />
                 Global search reserved
@@ -78,6 +95,10 @@ export function AppShell(): React.ReactElement {
               <Button variant="ghost" size="sm">
                 <HelpCircle className="h-4 w-4" />
                 Help
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => void auth.signOut()}>
+                <LogOut className="h-4 w-4" />
+                Sign out
               </Button>
             </div>
           </div>
