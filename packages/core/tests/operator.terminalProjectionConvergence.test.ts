@@ -146,4 +146,32 @@ describe('durable terminal projection convergence', () => {
             where: { tenantId: 'tenant-a', taskId: 'legacy-task', status: 'running' },
         }));
     });
+
+    it('repairs detached lifecycle snapshots as canceled without inventing a turn', async () => {
+        const prisma = {
+            agentRun: { upsert: jest.fn(async () => ({})), findMany: jest.fn(async () => []) },
+            agentRunEdge: { upsert: jest.fn(async () => ({})), updateMany: jest.fn(async () => ({ count: 0 })) },
+            turnRun: { upsert: jest.fn(async () => ({})), updateMany: jest.fn(async () => ({ count: 0 })) },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+
+        await expect(projection.reconcileDurableTerminal({
+            tenantId: 'tenant-a', taskId: 'child-task', agentId: 'fetch-html',
+            snapshot: {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'child-task', rootTaskId: 'root-task', parentTaskId: 'root-task',
+                        ancestorTaskIds: ['root-task'], state: 'detached',
+                        changedAt: '2026-07-22T10:00:00.000Z', reason: 'child_timeout',
+                    },
+                },
+            },
+        })).resolves.toBe(true);
+
+        expect(prisma.agentRun.upsert).toHaveBeenCalledWith(expect.objectContaining({
+            update: expect.objectContaining({ status: 'canceled', cancelReason: 'child_timeout' }),
+        }));
+        expect(prisma.turnRun.upsert).not.toHaveBeenCalled();
+    });
 });

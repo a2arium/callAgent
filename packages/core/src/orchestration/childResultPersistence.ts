@@ -5,45 +5,103 @@ import { makeSafeEventPreview } from './safeEventPreview.js';
 const CHILD_RESULT_INLINE_STRING_MAX_CHARS = 64 * 1024;
 const CHILD_RESULT_PERSISTENCE_DEPTH_LIMIT = 20;
 
+export class ArtifactPersistenceError extends Error {
+    public readonly code = 'ARTIFACT_PERSISTENCE_FAILED';
+    public readonly cause?: unknown;
+
+    constructor(message: string, options?: { cause?: unknown }) {
+        super(message);
+        this.name = 'ArtifactPersistenceError';
+        this.cause = options?.cause;
+        Object.setPrototypeOf(this, ArtifactPersistenceError.prototype);
+    }
+}
+
+export function isArtifactPersistenceError(error: unknown): error is ArtifactPersistenceError {
+    return error instanceof ArtifactPersistenceError || (
+        !!error &&
+        typeof error === 'object' &&
+        (error as { code?: unknown }).code === 'ARTIFACT_PERSISTENCE_FAILED'
+    );
+}
+
+type ChildResultPersistenceContext = {
+    cache: AgentResultCache | undefined;
+    tenantId: string;
+    visited: WeakMap<object, unknown>;
+    localArtifacts: WeakMap<object, Promise<Record<string, unknown>>>;
+};
+
 function inferChildResultArtifactMimeType(value: string): string {
     return value.trimStart().startsWith('<') ? 'text/html' : 'text/plain';
 }
 
-async function offloadChildResultValueAsArtifact(
-    value: unknown,
-    cache: AgentResultCache,
-    tenantId: string,
-    mimeType?: string
-): Promise<unknown> {
-    return offloadArtifacts(
-        {
-            kind: 'artifact_local',
-            value,
-            ...(mimeType ? { mimeType } : {}),
-        },
-        cache,
-        tenantId
-    );
+function canonicalArtifactMarker(value: unknown): Record<string, unknown> | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const record = value as Record<string, unknown>;
+    if (record.kind !== 'artifact') return undefined;
+
+    let serialized: unknown = value;
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === 'function') {
+        serialized = toJSON.call(value);
+    }
+    if (!serialized || typeof serialized !== 'object') return undefined;
+    const marker = serialized as Record<string, unknown>;
+    if (marker.kind !== 'artifact' || typeof marker.id !== 'string') return undefined;
+
+    return {
+        kind: 'artifact',
+        id: marker.id,
+        ...(typeof marker.mimeType === 'string' ? { mimeType: marker.mimeType } : {}),
+        ...(typeof marker.estimatedSize === 'number' && Number.isFinite(marker.estimatedSize)
+            ? { estimatedSize: marker.estimatedSize }
+            : {}),
+    };
 }
 
-export async function prepareChildResultForPersistence(
+async function offloadLocalArtifact(
+    value: object,
+    context: ChildResultPersistenceContext
+): Promise<Record<string, unknown>> {
+    const existing = context.localArtifacts.get(value);
+    if (existing) return existing;
+
+    const upload = (async () => {
+        try {
+            const prepared = await offloadArtifacts(value, context.cache!, context.tenantId);
+            const marker = canonicalArtifactMarker(prepared);
+            if (!marker) {
+                throw new ArtifactPersistenceError(
+                    'Artifact storage did not return a durable artifact marker.'
+                );
+            }
+            return marker;
+        } catch (error) {
+            if (isArtifactPersistenceError(error)) throw error;
+            throw new ArtifactPersistenceError('Failed to persist artifact content.', { cause: error });
+        }
+    })();
+    context.localArtifacts.set(value, upload);
+    return upload;
+}
+
+async function prepareChildResultForPersistenceInternal(
     value: unknown,
-    cache: AgentResultCache | undefined,
-    tenantId: string,
-    depth = 0,
-    visited = new WeakMap<object, unknown>()
+    depth: number,
+    context: ChildResultPersistenceContext
 ): Promise<unknown> {
     if (typeof value === 'string') {
         if (value.length <= CHILD_RESULT_INLINE_STRING_MAX_CHARS) {
             return value;
         }
-        if (cache) {
-            return offloadChildResultValueAsArtifact(
+        if (context.cache) {
+            const local = {
+                kind: 'artifact_local',
                 value,
-                cache,
-                tenantId,
-                inferChildResultArtifactMimeType(value)
-            );
+                mimeType: inferChildResultArtifactMimeType(value),
+            };
+            return offloadLocalArtifact(local, context);
         }
         return makeSafeEventPreview(value);
     }
@@ -65,74 +123,55 @@ export async function prepareChildResultForPersistence(
 
     const record = value as Record<string, unknown>;
     if (record.kind === 'artifact') {
-        return value;
+        const marker = canonicalArtifactMarker(value);
+        if (!marker) {
+            throw new ArtifactPersistenceError('Artifact handle did not provide a valid durable marker.');
+        }
+        return marker;
     }
     if (record.kind === 'artifact_local') {
-        if (cache) {
-            return offloadArtifacts(value, cache, tenantId);
+        if (context.cache) {
+            return offloadLocalArtifact(value as object, context);
         }
         return makeSafeEventPreview(value);
     }
     if (value instanceof Date) {
         return value.toISOString();
     }
-    if (visited.has(value as object)) {
-        return visited.get(value as object);
+    if (context.visited.has(value as object)) {
+        return context.visited.get(value as object);
     }
 
     if (Array.isArray(value)) {
         const output: unknown[] = [];
-        visited.set(value, output);
+        context.visited.set(value, output);
         for (const item of value) {
-            output.push(await prepareChildResultForPersistence(item, cache, tenantId, depth + 1, visited));
+            output.push(await prepareChildResultForPersistenceInternal(item, depth + 1, context));
         }
         return output;
     }
 
     const output: Record<string, unknown> = {};
-    visited.set(value as object, output);
+    context.visited.set(value as object, output);
     for (const [key, item] of Object.entries(record)) {
-        output[key] = await prepareChildResultForPersistence(item, cache, tenantId, depth + 1, visited);
+        output[key] = await prepareChildResultForPersistenceInternal(item, depth + 1, context);
     }
     return output;
 }
 
-function isChildCompletedObservation(value: unknown): value is Record<string, unknown> & {
-    payload: Record<string, unknown>;
-} {
-    return !!value &&
-        typeof value === 'object' &&
-        (value as Record<string, unknown>).kind === 'child.completed' &&
-        !!(value as { payload?: unknown }).payload &&
-        typeof (value as { payload?: unknown }).payload === 'object';
-}
-
-async function prepareChildObservationForPersistence(
-    observation: unknown,
+export async function prepareChildResultForPersistence(
+    value: unknown,
     cache: AgentResultCache | undefined,
-    tenantId: string
+    tenantId: string,
+    depth = 0,
+    visited = new WeakMap<object, unknown>()
 ): Promise<unknown> {
-    if (!isChildCompletedObservation(observation)) {
-        return observation;
-    }
-
-    const payload = observation.payload;
-    if (!Object.prototype.hasOwnProperty.call(payload, 'result')) {
-        return observation;
-    }
-
-    const preparedResult = await prepareChildResultForPersistence(payload.result, cache, tenantId);
-    if (preparedResult === payload.result) {
-        return observation;
-    }
-
-    return {
-        ...observation,
-        payload: {
-            ...payload,
-            result: preparedResult,
-        },
-    };
+    return prepareChildResultForPersistenceInternal(value, depth, {
+        cache,
+        tenantId,
+        visited,
+        localArtifacts: new WeakMap<object, Promise<Record<string, unknown>>>(),
+    });
 }
 
 export async function prepareChildResultsInInboxForPersistence(
@@ -140,20 +179,5 @@ export async function prepareChildResultsInInboxForPersistence(
     cache: AgentResultCache | undefined,
     tenantId: string
 ): Promise<ObservationInbox> {
-    const current = await Promise.all(
-        (inbox.current ?? []).map((observation) =>
-            prepareChildObservationForPersistence(observation, cache, tenantId)
-        )
-    );
-    const all = await Promise.all(
-        (inbox.all ?? []).map((observation) =>
-            prepareChildObservationForPersistence(observation, cache, tenantId)
-        )
-    );
-
-    return {
-        ...inbox,
-        current: current as ObservationInbox['current'],
-        all: all as ObservationInbox['all'],
-    };
+    return prepareChildResultForPersistence(inbox, cache, tenantId) as Promise<ObservationInbox>;
 }

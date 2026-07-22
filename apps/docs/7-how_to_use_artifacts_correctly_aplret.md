@@ -249,6 +249,25 @@ Artifacts are not a substitute for normal memory writes.
 
 If the value is small and already reasoning-ready, write it directly to `MentalState`.
 
+### Mistake 4: wrapping an artifact handle with `Artifact.create()`
+
+`Artifact.create()` accepts a raw value. Do not call it on an artifact handle received
+from a child, inbox entry, or memory read. Re-wrapping a handle creates an artifact
+whose payload is the first artifact's marker instead of the underlying content.
+
+```ts
+// Wrong: `html` may already be an Artifact<string>.
+const storedHtml = Artifact.create(html, { mimeType: 'text/html' });
+
+// Correct: wrap only raw strings and preserve existing handles.
+const storedHtml = typeof html === 'string'
+  ? Artifact.create(html, { mimeType: 'text/html' })
+  : html;
+```
+
+When the content is needed, await the existing handle and validate the loaded value's
+runtime type before passing it to a parser.
+
 ## Testing checklist
 
 Minimum tests:
@@ -256,6 +275,7 @@ Minimum tests:
 - artifact affects cognition: Learning loads it and writes compact facts
 - artifact affects action only: Execution loads it, Policy stays sync
 - no inline giant payload stored in memory snapshot
+- an incoming artifact handle is retained rather than wrapped in another artifact
 - TurnTrace still shows the decision path even when raw content is offloaded
 
 ## Debug checklist
@@ -266,4 +286,3 @@ If behavior is wrong, ask:
 - Did Learning load it when cognition depended on it?
 - Did Policy branch on a compact fact rather than trying to read the handle?
 - Did Execution load it only when action required it?
-

@@ -142,15 +142,30 @@ export class AgentResultCache {
         // We use the virtual agent 'artifact_store' and cacheKey = artifactId
         // This reuses the existing table structure without changes.
         const size = JSON.stringify(value).length;
+        const agentName = 'artifact_store';
+        const cacheKey = this.generateCacheKey({ artifactId: id }, []);
+        const expiresAt = new Date(Date.now() + 86400 * 30 * 1000);
 
-        await this.setCachedResult(
-            'artifact_store',
-            { artifactId: id }, // Mock input
-            value,
-            86400 * 30, // 30 days
-            [],
-            tenantId
-        );
+        // Artifact publication is not a best-effort cache write. Returning an ID
+        // after a rejected write creates an unusable durable marker, so propagate
+        // the storage error to the persistence boundary.
+        await this.prisma.agentResultCache.upsert({
+            where: {
+                tenantId_agentName_cacheKey: { tenantId, agentName, cacheKey }
+            },
+            update: {
+                result: value as any,
+                expiresAt,
+                createdAt: new Date()
+            },
+            create: {
+                tenantId,
+                agentName,
+                cacheKey,
+                result: value as any,
+                expiresAt
+            }
+        });
 
         return { size, artifactId: id };
     }
@@ -237,4 +252,4 @@ export class AgentResultCache {
                 return result;
             }, {} as any);
     }
-} 
+}

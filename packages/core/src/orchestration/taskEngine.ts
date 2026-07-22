@@ -1242,6 +1242,7 @@ export class TaskEngine {
             scheduleChildTimeout: (p) => this.runtimeDriver.scheduleTimer(p),
             cancelTimer: (p) => this.runtimeDriver.cancelTimer?.(p) ?? Promise.resolve(),
             detachTaskBranch: (p) => this.detachTaskBranch(p),
+            getRuntimeSurface: () => this.runtimeDriver.surface ?? 'in_process',
         });
 
         this.turnRunner = new TurnRunner(
@@ -1962,6 +1963,7 @@ export class TaskEngine {
                                 childTaskIds: [] as string[],
                                 toolTerminals: [] as Array<PendingToolTerminal & { token: string }>,
                                 timerTokens: [] as string[],
+                                lifecycleDetached: false,
                             },
                         };
                     }
@@ -2028,12 +2030,31 @@ export class TaskEngine {
                         ? {
                               kind: 'write',
                               snapshot: cleanedSnapshot,
-                              value: { childTaskIds, toolTerminals: tools.detached, timerTokens },
+                              value: {
+                                  childTaskIds,
+                                  toolTerminals: tools.detached,
+                                  timerTokens,
+                                  lifecycleDetached: lifecycle?.state === 'active' || lifecycle === undefined,
+                              },
                           }
-                        : { kind: 'noop', value: { childTaskIds, toolTerminals: tools.detached, timerTokens } };
+                        : {
+                              kind: 'noop',
+                              value: { childTaskIds, toolTerminals: tools.detached, timerTokens, lifecycleDetached: false },
+                          };
                 },
             });
-            if (reconciled.status === 'committed') detachedTasks += 1;
+            if (reconciled.status === 'committed') {
+                detachedTasks += 1;
+                if (reconciled.value.lifecycleDetached) {
+                    try {
+                        await this.sessionManager?.appendEvent(params.tenantId, taskId, 'task.detached', {
+                            taskId,
+                            reason: params.reason,
+                            detachedAt,
+                        });
+                    } catch { /* diagnostic projection is repaired from the durable snapshot */ }
+                }
+            }
             detachedTools += reconciled.value.toolTerminals.length;
             for (const terminal of reconciled.value.toolTerminals) {
                 defaultMetricsRegistry.increment('tool.terminal_winner_total', { kind: 'detached' });
@@ -4358,7 +4379,7 @@ export class TaskEngine {
             tenantId,
             parentTaskId,
             deliveryMode: 'inline',
-            runtimeSurface: 'in_process',
+            runtimeSurface: this.runtimeDriver.surface ?? 'in_process',
             request: {
                 kind: 'completed',
                 token,
@@ -4423,7 +4444,7 @@ export class TaskEngine {
                 tenantId,
                 parentTaskId,
                 deliveryMode: 'async_wake',
-                runtimeSurface: 'in_process',
+                runtimeSurface: this.runtimeDriver.surface ?? 'in_process',
                 request: completionRequest,
             });
             if ((terminalClaim.publicationDisposition !== 'new_delivery' &&
@@ -4706,7 +4727,7 @@ export class TaskEngine {
             tenantId,
             parentTaskId,
             deliveryMode: 'async_wake',
-            runtimeSurface: 'in_process',
+            runtimeSurface: this.runtimeDriver.surface ?? 'in_process',
             request: {
                 kind: 'failed',
                 token,
@@ -5699,6 +5720,7 @@ export class TaskEngine {
                 scheduleChildTimeout: (p) => this.runtimeDriver.scheduleTimer(p),
                 cancelTimer: (p) => this.runtimeDriver.cancelTimer?.(p) ?? Promise.resolve(),
                 detachTaskBranch: (p) => this.detachTaskBranch(p),
+                getRuntimeSurface: () => this.runtimeDriver.surface ?? 'in_process',
             },
             ctx,
             {

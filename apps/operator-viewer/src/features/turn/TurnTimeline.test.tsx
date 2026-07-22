@@ -12,9 +12,9 @@ describe('TurnTimeline', () => {
     const turn = canceledTurn();
     render(<TurnTimeline turns={[turn]} onSelect={vi.fn()} />);
 
-    expect(screen.getByText('1 turn · 4 execution attempts')).toBeTruthy();
+    expect(screen.getByText('1 turn · 4 runtime deliveries')).toBeTruthy();
     expect(screen.getByText('Turn 2')).toBeTruthy();
-    expect(screen.getByText('4 attempts')).toBeTruthy();
+    expect(screen.getByText('4 deliveries')).toBeTruthy();
     expect(screen.getByText('Error before cancellation')).toBeTruthy();
     expect(screen.queryByText('Turn ?')).toBeNull();
   });
@@ -24,7 +24,8 @@ describe('TurnTimeline', () => {
 
     expect(screen.getByLabelText('Cancelled run')).toBeTruthy();
     expect(screen.getByText('RUNTIME_TIMER_REPOSITORY_MISSING')).toBeTruthy();
-    expect(screen.getByText('Execution attempts')).toBeTruthy();
+    expect(screen.getByText('Runtime deliveries')).toBeTruthy();
+    expect(screen.getByText('4 total · 1 executed · 3 ownership probes')).toBeTruthy();
     expect(screen.getByText('Attempts 2–4 · Queued ×3')).toBeTruthy();
   });
 });

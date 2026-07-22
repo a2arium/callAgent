@@ -21,14 +21,14 @@ export function TurnTimeline(props: {
         <div>
           <h4 className="text-sm font-semibold">Turn timeline</h4>
           <p className="text-xs text-muted-foreground">
-            {props.turns.length} {props.turns.length === 1 ? 'turn' : 'turns'} · {attemptCount} execution {attemptCount === 1 ? 'attempt' : 'attempts'}
+            {props.turns.length} {props.turns.length === 1 ? 'turn' : 'turns'} · {attemptCount} runtime {attemptCount === 1 ? 'delivery' : 'deliveries'}
           </p>
         </div>
       </div>
 
       {(props.unassignedAttempts?.length ?? 0) > 0 ? (
-        <Notice title={`${props.unassignedAttempts!.length} unassigned execution ${props.unassignedAttempts!.length === 1 ? 'attempt' : 'attempts'}`}>
-          Legacy runtime data could not be associated with one logical turn safely. These attempts are excluded from the graph and turn count.
+        <Notice title={`${props.unassignedAttempts!.length} unassigned runtime ${props.unassignedAttempts!.length === 1 ? 'delivery' : 'deliveries'}`}>
+          Legacy runtime data could not be associated with one logical turn safely. These deliveries are excluded from the graph and turn count.
         </Notice>
       ) : null}
 
@@ -54,7 +54,7 @@ export function TurnTimeline(props: {
                 </div>
                 <div className="flex flex-wrap justify-end gap-1">
                   <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                    {turn.attempts.length} {turn.attempts.length === 1 ? 'attempt' : 'attempts'}
+                    {turn.attempts.length} {turn.attempts.length === 1 ? 'delivery' : 'deliveries'}
                   </span>
                   <StatusBadge
                     status={normalizeRuntimeStatus(turn.status)}
@@ -304,16 +304,24 @@ function FactRow(props: { label: string; children: React.ReactNode }): React.Rea
 function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: string }): React.ReactElement {
   const groups = compressAttemptGroups(props.attempts);
   const queuedCount = props.attempts.filter((attempt) => attempt.disposition === 'queued').length;
+  const replayCount = props.attempts.filter((attempt) => attempt.disposition === 'matching_replay' || attempt.disposition === 'terminal_replay').length;
+  const executedCount = props.attempts.filter((attempt) => attempt.disposition === 'executed').length;
+  const summary = [
+    `${props.attempts.length} total`,
+    executedCount > 0 ? `${executedCount} executed` : undefined,
+    queuedCount > 0 ? `${queuedCount} ownership probes` : undefined,
+    replayCount > 0 ? `${replayCount} replays` : undefined,
+  ].filter((value): value is string => value !== undefined).join(' · ');
   return (
     <details className="min-w-0 rounded-lg border border-border bg-background/50">
       <summary className="flex cursor-pointer items-center justify-between gap-3 p-3">
         <div className="min-w-0">
-          <h4 className="text-sm font-semibold">Execution attempts</h4>
+          <h4 className="text-sm font-semibold">Runtime deliveries</h4>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {props.attempts.length} total{queuedCount > 0 ? ` · ${queuedCount} queued` : ''}
+            {summary}
           </p>
         </div>
-        <span className="shrink-0 text-xs text-muted-foreground">Show attempts</span>
+        <span className="shrink-0 text-xs text-muted-foreground">Show deliveries</span>
       </summary>
       <div className="grid gap-2 border-t border-border p-3">
         {groups.map((group) => {

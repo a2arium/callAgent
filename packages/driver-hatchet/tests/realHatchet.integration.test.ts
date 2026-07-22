@@ -18,6 +18,7 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
     let workerStart: Promise<void> | undefined;
     let hatchetInitialized = false;
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let protocolNames: ReturnType<typeof import('../src/tasks/task.js').createNamespacedTaskProtocolNames>;
 
     const turnExecutor = {
         runSegment: jest.fn(async (input: {
@@ -56,8 +57,8 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
             handleKill: false,
         });
         await worker.registerWorkflows([
-            createTaskStateTask(hatchet, {}),
-            createSegmentTask(hatchet, { turnExecutor }),
+            createTaskStateTask(hatchet, { protocolNames }),
+            createSegmentTask(hatchet, { turnExecutor }, { name: protocolNames.segment }),
             rootTask,
         ]);
         workerStart = worker.start();
@@ -109,10 +110,11 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
         createSegmentTask = segmentModule.createSegmentTask;
         createTaskStateTask = taskModule.createTaskStateTask;
         const { createHatchetClient } = hatchetClientModule;
-        const { createTaskTask } = taskModule;
+        const { createNamespacedTaskProtocolNames, createTaskTask } = taskModule;
         hatchet = createHatchetClient();
         hatchetInitialized = true;
-        rootTask = createTaskTask(hatchet, {});
+        protocolNames = createNamespacedTaskProtocolNames(`aplret.test.${suffix}`);
+        rootTask = createTaskTask(hatchet, {}, protocolNames.task, { protocolNames });
         await startWorker();
     });
 
@@ -130,6 +132,10 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
             result: { ok: true, taskId: taskInput.taskId },
         });
         expect(output.turnDisposition).toBe('executed');
+        expect(turnExecutor.runSegment).toHaveBeenCalledWith(expect.objectContaining({
+            taskId: taskInput.taskId,
+            runtimeSurface: 'hatchet',
+        }));
     });
 
     it('retains an accepted durable root while no worker is available and resumes after restart', async () => {
@@ -145,5 +151,9 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
             result: { ok: true, taskId: taskInput.taskId },
         });
         expect(output.turnDisposition).toBe('executed');
+        expect(turnExecutor.runSegment).toHaveBeenCalledWith(expect.objectContaining({
+            taskId: taskInput.taskId,
+            runtimeSurface: 'hatchet',
+        }));
     });
 });

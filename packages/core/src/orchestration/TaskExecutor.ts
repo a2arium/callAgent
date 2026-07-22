@@ -27,8 +27,8 @@ import {
     setTaskTurnPhaseInSnapshot,
 } from './TaskTurnCoordinator.js';
 import {
+    isArtifactPersistenceError,
     prepareChildResultForPersistence,
-    prepareChildResultsInInboxForPersistence,
 } from './childResultPersistence.js';
 import {
     isSnapshotReconciliationError,
@@ -52,7 +52,7 @@ import type { TurnOutcome } from '../loop/oneTurn.js';
 import type { TaskContext } from '../shared/types/index.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
 import type { ManifestProvenance } from '../types/turnTrace.js';
-import { SessionManager } from './SessionManager.js';
+import { isSnapshotLimitError, SessionManager } from './SessionManager.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 const log = logger.createLogger({ prefix: 'TaskExecutor' });
@@ -339,31 +339,88 @@ export class TaskExecutor {
 
                 (ctx as any).__wmSavedThisTurn = true;
             } catch (e) {
-                // Logic for retrying with prune
-                if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                    try {
-                        log.warn('Snapshot too large at end of turn, pruning and retrying...');
-                        persistence = await TaskExecutor.saveSnapshot({
+                if (isArtifactPersistenceError(e)) {
+                    persistence = await TaskExecutor.persistDeterministicFailure({
+                        sessionManager,
+                        tenantId,
+                        sessionId,
+                        agentId,
+                        code: e.code,
+                        message: e.message,
+                    });
+                    outcome = { kind: 'fail', reason: e.code } as LoopOutcome;
+                    (ctx as any).__wmSavedThisTurn = true;
+                } else if (isSnapshotLimitError(e) || (e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                    // Retry with pruning only when it can change a local candidate surface.
+                    const normalizedInbox = InboxManager.normalizeInbox(env.inbox);
+                    const prunedMental = pruneSnapshot(mNext);
+                    const prunedInbox = pruneSnapshot(normalizedInbox as any);
+                    const pruneCanChangeCandidate =
+                        JSON.stringify(prunedMental) !== JSON.stringify(mNext) ||
+                        JSON.stringify(prunedInbox) !== JSON.stringify(normalizedInbox);
+
+                    if (!pruneCanChangeCandidate && currentTaskTurnClaim() !== undefined) {
+                        persistence = await TaskExecutor.persistDeterministicFailure({
                             sessionManager,
                             tenantId,
                             sessionId,
                             agentId,
-                            env,
-                            M,
-                            mNext,
-                            outcome,
-                            loopOpts,
-                            ctx,
-                            getSessionStorePrisma,
-                            prune: true,
-                            finalizeTurnClaim: true,
+                            code: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+                            message: 'Working-memory snapshot exceeded the configured size limit.',
                         });
+                        outcome = { kind: 'fail', reason: 'LIMIT_WM_SNAPSHOT_TOO_LARGE' } as LoopOutcome;
                         (ctx as any).__wmSavedThisTurn = true;
-                    } catch (err) {
-                        if (isSnapshotReconciliationError(err)) throw err;
-                        if (currentTaskTurnClaim() !== undefined) throw err;
-                        if (throwOnSaveFailure) throw err;
-                        log.error('Snapshot save failed after prune (end of turn)', { error: err });
+                    } else {
+                        try {
+                            log.warn('Snapshot too large at end of turn, pruning and retrying...');
+                            persistence = await TaskExecutor.saveSnapshot({
+                                sessionManager,
+                                tenantId,
+                                sessionId,
+                                agentId,
+                                env,
+                                M,
+                                mNext,
+                                outcome,
+                                loopOpts,
+                                ctx,
+                                getSessionStorePrisma,
+                                prune: true,
+                                finalizeTurnClaim: true,
+                            });
+                            (ctx as any).__wmSavedThisTurn = true;
+                        } catch (err) {
+                            if (isArtifactPersistenceError(err)) {
+                                persistence = await TaskExecutor.persistDeterministicFailure({
+                                    sessionManager,
+                                    tenantId,
+                                    sessionId,
+                                    agentId,
+                                    code: err.code,
+                                    message: err.message,
+                                });
+                                outcome = { kind: 'fail', reason: err.code } as LoopOutcome;
+                                (ctx as any).__wmSavedThisTurn = true;
+                            } else if ((isSnapshotLimitError(err) ||
+                                (err as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') &&
+                                currentTaskTurnClaim() !== undefined) {
+                                persistence = await TaskExecutor.persistDeterministicFailure({
+                                    sessionManager,
+                                    tenantId,
+                                    sessionId,
+                                    agentId,
+                                    code: 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
+                                    message: 'Working-memory snapshot exceeded the configured size limit after pruning.',
+                                });
+                                outcome = { kind: 'fail', reason: 'LIMIT_WM_SNAPSHOT_TOO_LARGE' } as LoopOutcome;
+                                (ctx as any).__wmSavedThisTurn = true;
+                            } else {
+                                if (isSnapshotReconciliationError(err)) throw err;
+                                if (currentTaskTurnClaim() !== undefined) throw err;
+                                if (throwOnSaveFailure) throw err;
+                                log.error('Snapshot save failed after prune (end of turn)', { error: err });
+                            }
+                        }
                     }
                 } else {
                     if (isSnapshotReconciliationError(e)) throw e;
@@ -426,6 +483,136 @@ export class TaskExecutor {
         (ctx as InternalTaskContext).__conversationConsumedDeliveryKeys = undefined;
 
         return { M: mNext, outcome, metrics, taskStatus, ...(persistence ? { persistence } : {}) };
+    }
+
+    private static async persistDeterministicFailure(params: {
+        sessionManager: SessionManager;
+        tenantId: string;
+        sessionId: string;
+        agentId: string;
+        code: string;
+        message: string;
+    }): Promise<TurnPersistenceResult> {
+        const activeTurnClaim = currentTaskTurnClaim();
+        if (activeTurnClaim === undefined) {
+            const error = Object.assign(new Error(params.message), { code: params.code });
+            error.name = params.code;
+            throw error;
+        }
+        const activeIdempotencyKey = currentSegmentIdempotencyKey();
+        const persisted = await reconcileSnapshotMutation<{
+            disposition: TurnPersistenceResult['disposition'];
+            terminal?: DurableTaskTerminal;
+            scheduleNext: boolean;
+        }>({
+            session: params.sessionManager,
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            agentId: params.agentId || 'default',
+            operation: 'turn.persist_deterministic_failure',
+            mutate: ({ snapshot: baseNow, storageNow }) => {
+                try {
+                    assertCurrentTaskTurn(baseNow, {
+                        tenantId: params.tenantId,
+                        taskId: params.sessionId,
+                        claim: activeTurnClaim,
+                        operation: 'turn.persist_deterministic_failure',
+                        storageNow,
+                    });
+                } catch (error) {
+                    if (!(error instanceof TaskTurnSupersededError)) throw error;
+                    return {
+                        kind: 'noop',
+                        value: {
+                            disposition: 'superseded' as const,
+                            terminal: readDurableTaskTerminal(baseNow),
+                            scheduleNext: false,
+                        },
+                    };
+                }
+
+                baseNow = setTaskTurnPhaseInSnapshot(baseNow, {
+                    tenantId: params.tenantId,
+                    taskId: params.sessionId,
+                    claim: activeTurnClaim,
+                    phase: 'committing',
+                    storageNow,
+                });
+                const lifecycleBase = ensureTaskLifecycle(baseNow, { taskId: params.sessionId });
+                const terminalClaim = claimTaskTerminalInSnapshot(lifecycleBase, {
+                    taskId: params.sessionId,
+                    state: 'failed',
+                    claimedAt: storageNow,
+                    reason: params.code,
+                    status: {
+                        state: 'failed',
+                        timestamp: storageNow,
+                        message: {
+                            role: 'agent',
+                            parts: [{ type: 'text', text: params.message }],
+                        },
+                        metadata: {
+                            code: params.code,
+                            reason: params.message,
+                        },
+                    },
+                    turnClaim: {
+                        attemptKey: `claim:${activeTurnClaim.claimId}`,
+                        claimId: activeTurnClaim.claimId,
+                        fence: activeTurnClaim.fence,
+                        generation: activeTurnClaim.claimedGeneration,
+                        turnSeq: activeTurnClaim.turnSeq,
+                    },
+                });
+                if (terminalClaim.disposition === 'competing_terminal') {
+                    return {
+                        kind: 'noop',
+                        value: {
+                            disposition: 'competing_terminal' as const,
+                            terminal: terminalClaim.terminal,
+                            scheduleNext: false,
+                        },
+                    };
+                }
+
+                let next = terminalClaim.snapshot;
+                if (activeIdempotencyKey !== undefined) {
+                    next = addProcessedSegmentKey(next, activeIdempotencyKey);
+                }
+                const finalized = completeTaskTurnInSnapshot(next, {
+                    tenantId: params.tenantId,
+                    taskId: params.sessionId,
+                    claim: activeTurnClaim,
+                    storageNow,
+                });
+                if (finalized.disposition === 'superseded') {
+                    return {
+                        kind: 'noop',
+                        value: {
+                            disposition: 'superseded' as const,
+                            terminal: readDurableTaskTerminal(baseNow),
+                            scheduleNext: false,
+                        },
+                    };
+                }
+                return {
+                    kind: 'write',
+                    snapshot: finalized.snapshot,
+                    value: {
+                        disposition: terminalClaim.disposition === 'matching_replay'
+                            ? 'matching_terminal' as const
+                            : 'committed' as const,
+                        terminal: terminalClaim.terminal,
+                        scheduleNext: false,
+                    },
+                };
+            },
+        });
+        return {
+            ...persisted.value,
+            snapshot: persisted.snapshot,
+            wmVersion: persisted.wmVersion,
+        };
     }
 
     /**
@@ -492,33 +679,29 @@ export class TaskExecutor {
             log.warn('Failed to fetch LLM state during saveSnapshot', { error: (err as Error).message });
         }
 
-        // Artifact publication and JSON normalization are external/expensive effects. Do
-        // them once before entering the replayable CAS mutator so retries remain pure and
-        // Prisma never sees LocalArtifact.then (or another non-JSON value).
-        mNextEffective = await prepareChildResultForPersistence(
-            mNextEffective,
+        // Publish artifacts and normalize every parent-owned persistence surface in one
+        // operation. A LocalArtifact referenced from several surfaces therefore gets one
+        // durable ID, while the replayable CAS mutator remains side-effect free.
+        const persistenceSurfaces = {
+            mentalState: mNextEffective,
+            inbox: InboxManager.normalizeInbox(env.inbox),
+            ...(attachedLlmState !== undefined ? { llmState: attachedLlmState } : {}),
+            ...(outcome.kind === 'complete' ? { outcomeResult: outcome.result } : {}),
+        };
+        const preparedSurfaces = await prepareChildResultForPersistence(
+            persistenceSurfaces,
             childResultCache,
             tenantId
-        ) as MentalState;
-        const preparedLocalInbox = await prepareChildResultForPersistence(
-            await prepareChildResultsInInboxForPersistence(
-                InboxManager.normalizeInbox(env.inbox),
-                childResultCache,
-                tenantId
-            ),
-            childResultCache,
-            tenantId
-        ) as ReturnType<typeof InboxManager.normalizeInbox>;
-        if (attachedLlmState !== undefined) {
-            attachedLlmState = await prepareChildResultForPersistence(
-                attachedLlmState,
-                childResultCache,
-                tenantId
-            );
-        }
-        const preparedOutcomeResult = outcome.kind === 'complete'
-            ? await prepareChildResultForPersistence(outcome.result, childResultCache, tenantId)
-            : undefined;
+        ) as {
+            mentalState: MentalState;
+            inbox: ReturnType<typeof InboxManager.normalizeInbox>;
+            llmState?: unknown;
+            outcomeResult?: unknown;
+        };
+        mNextEffective = preparedSurfaces.mentalState;
+        const preparedLocalInbox = preparedSurfaces.inbox;
+        attachedLlmState = preparedSurfaces.llmState;
+        const preparedOutcomeResult = preparedSurfaces.outcomeResult;
         const activeIdempotencyKey = currentSegmentIdempotencyKey();
         const activeTurnClaim = currentTaskTurnClaim();
         const terminalIntent = (ctx as InternalTaskContext).__pendingTerminalIntent;

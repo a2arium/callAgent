@@ -38,6 +38,30 @@ import { logger } from '@a2arium/callagent-utils';
 
 export const TASK_TASK_NAME = 'aplret.task';
 export const TASK_STATE_TASK_NAME = 'aplret.task-state';
+
+export type TaskProtocolNames = {
+    task: string;
+    segment: string;
+    taskState: string;
+};
+
+export const DEFAULT_TASK_PROTOCOL_NAMES: TaskProtocolNames = Object.freeze({
+    task: TASK_TASK_NAME,
+    segment: SEGMENT_TASK_NAME,
+    taskState: TASK_STATE_TASK_NAME,
+});
+
+export function createNamespacedTaskProtocolNames(namespace: string): TaskProtocolNames {
+    const normalized = namespace.trim().replace(/\.+$/u, '');
+    if (normalized.length === 0) {
+        throw new Error('HATCHET_TASK_PROTOCOL_NAMESPACE_REQUIRED');
+    }
+    return {
+        task: `${normalized}.task`,
+        segment: `${normalized}.segment`,
+        taskState: `${normalized}.task-state`,
+    };
+}
 const BOUNDARY_EVENT_LOOKBACK = '5m';
 const TASK_EXECUTION_TIMEOUT = '30m';
 const DEFAULT_AWAIT_CHILD_RECOVERY_INTERVAL_MS = 30_000;
@@ -64,6 +88,8 @@ type TaskResultCache = Pick<AgentResultCache, 'getCachedResult' | 'setCachedResu
 export type TaskTaskDeps = {
     /** Production roots route state/projection work through aplret.task-state. */
     useTaskStateChildren?: boolean;
+    /** Coherent workflow names used by a root and its children. Defaults preserve production history. */
+    protocolNames?: TaskProtocolNames;
     driverRuns?: DriverRunsRepository;
     runtimeTimers?: RuntimeTimerRepository;
     agentResultCache?: TaskResultCache;
@@ -215,6 +241,7 @@ async function executeTaskTaskInner(
     ctx: DurableContext<TaskTaskInput>,
     deps?: TaskTaskDeps
 ): Promise<TaskTaskOutput> {
+    const protocolNames = deps?.protocolNames ?? DEFAULT_TASK_PROTOCOL_NAMES;
     let wake: SegmentTaskWake = { trigger: 'start', input: input.input };
     let idempotencyKey = input.idempotencyKey;
     let turnSeq = 0;
@@ -271,14 +298,14 @@ async function executeTaskTaskInner(
                 ...(input.rootRunKey !== undefined ? { rootRunKey: input.rootRunKey } : {}),
             };
             const segmentRaw = await ctx.runChild<SegmentTaskInput, SegmentTaskOutput>(
-                SEGMENT_TASK_NAME,
+                protocolNames.segment,
                 segmentInput,
                 {
                     key: `${input.rootRunKey ?? input.taskId}:segment:${turnSeq}:${idempotencyKey}`,
                     additionalMetadata: buildTaskRunMetadata(input, segmentInput),
                 }
             );
-            const segment = normalizeSegmentOutput(segmentRaw);
+            const segment = normalizeSegmentOutput(segmentRaw, protocolNames.segment);
             await dispatchPendingOutboxChildren(ctx, input, segment, deps);
 
             if (segment.turnDisposition === 'queued') {
@@ -369,7 +396,8 @@ async function runTaskState(
     key: string
 ): Promise<TaskStateOutput | undefined> {
     if (deps?.useTaskStateChildren !== true) return undefined;
-    const output = await ctx.runChild<TaskStateInput, TaskStateChildOutput>(TASK_STATE_TASK_NAME, stateInput, {
+    const taskStateName = deps.protocolNames?.taskState ?? TASK_STATE_TASK_NAME;
+    const output = await ctx.runChild<TaskStateInput, TaskStateChildOutput>(taskStateName, stateInput, {
         key: `${input.rootRunKey ?? input.taskId}:state:${key}`,
         additionalMetadata: {
             operation: `task.state.${stateInput.operation}`,
@@ -377,7 +405,7 @@ async function runTaskState(
             taskId: input.taskId,
         },
     });
-    return normalizeTaskStateOutput(output);
+    return normalizeTaskStateOutput(output, taskStateName);
 }
 
 export async function executeTaskStateTask(
@@ -1054,28 +1082,32 @@ function jsonObjectOrEmpty(value: JsonValue): JsonObject {
         : {};
 }
 
-function normalizeSegmentOutput(output: unknown): SegmentTaskOutput {
+function normalizeSegmentOutput(
+    output: unknown,
+    segmentTaskName: string = SEGMENT_TASK_NAME
+): SegmentTaskOutput {
     if (isSegmentTaskOutput(output)) {
         return output;
     }
     if (output !== null && typeof output === 'object' && !Array.isArray(output)) {
         const record = output as Record<string, unknown>;
-        for (const taskName of [SEGMENT_TASK_NAME]) {
-            const wrapped = record[taskName];
-            if (isSegmentTaskOutput(wrapped)) {
-                return wrapped;
-            }
+        const wrapped = record[segmentTaskName];
+        if (isSegmentTaskOutput(wrapped)) {
+            return wrapped;
         }
     }
     throw new Error('SEGMENT_OUTPUT_INVALID');
 }
 
-function normalizeTaskStateOutput(output: unknown): TaskStateOutput {
+function normalizeTaskStateOutput(
+    output: unknown,
+    taskStateName: string = TASK_STATE_TASK_NAME
+): TaskStateOutput {
     if (output === null || typeof output !== 'object' || Array.isArray(output)) {
         throw new Error('TASK_STATE_OUTPUT_INVALID');
     }
     const record = output as Record<string, unknown>;
-    const wrapped = record[TASK_STATE_TASK_NAME];
+    const wrapped = record[taskStateName];
     if (wrapped !== undefined) {
         if (wrapped === null || typeof wrapped !== 'object' || Array.isArray(wrapped)) {
             throw new Error('TASK_STATE_OUTPUT_INVALID');
@@ -2006,13 +2038,25 @@ export function createTaskTask(
     hatchet: HatchetClient,
     deps?: TaskTaskDeps,
     name: string = TASK_TASK_NAME,
-    options?: { executionTimeout?: Duration }
+    options?: { executionTimeout?: Duration; protocolNames?: TaskProtocolNames }
 ) {
     // Durable roots are orchestration-only. All stateful dependencies remain
     // available to aplret.task-state, but are deliberately withheld here so a
     // production root cannot accidentally perform an unrecorded database,
     // cache, outbox, projection, or timer operation.
-    const rootDeps = deps === undefined ? undefined : { useTaskStateChildren: true };
+    const protocolNames = options?.protocolNames ?? deps?.protocolNames ?? {
+        ...DEFAULT_TASK_PROTOCOL_NAMES,
+        task: name,
+    };
+    if (protocolNames.task !== name) {
+        throw new Error('HATCHET_TASK_PROTOCOL_ROOT_NAME_MISMATCH');
+    }
+    const rootDeps = deps === undefined && options?.protocolNames === undefined
+        ? undefined
+        : {
+              ...(deps === undefined ? {} : { useTaskStateChildren: true }),
+              protocolNames,
+          };
     return hatchet.durableTask<TaskTaskInput, TaskTaskOutput>({
         name,
         retries: 0,
@@ -2027,9 +2071,17 @@ export function createTaskTask(
     });
 }
 
-export function createTaskStateTask(hatchet: HatchetClient, deps: TaskTaskDeps) {
+export function createTaskStateTask(
+    hatchet: HatchetClient,
+    deps: TaskTaskDeps,
+    options?: { name?: string }
+) {
+    const name = options?.name ?? deps.protocolNames?.taskState ?? TASK_STATE_TASK_NAME;
+    if (deps.protocolNames !== undefined && name !== deps.protocolNames.taskState) {
+        throw new Error('HATCHET_TASK_PROTOCOL_STATE_NAME_MISMATCH');
+    }
     return hatchet.task<TaskStateInput, TaskStateOutput>({
-        name: TASK_STATE_TASK_NAME,
+        name,
         retries: 3,
         executionTimeout: TASK_EXECUTION_TIMEOUT,
         fn: async (input: TaskStateInput) => executeTaskStateTask(input, deps),

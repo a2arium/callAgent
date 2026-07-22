@@ -54,6 +54,7 @@ import { segmentEffectIdempotencyKey } from '../../runtime/segmentProcessedKeys.
 import { mapWorkingMemoryEventToRuntimeStream } from '../../streaming/sessionEventMapper.js';
 import type { TaskState } from '../../shared/types/StreamingEvents.js';
 import type { EnqueueStartParams, ScheduleTimerParams } from '../../runtime/runtimeDriver.js';
+import type { TaskTurnRuntimeSurface } from '../TaskTurnCoordinator.js';
 import { makeSafeEventPreview } from '../safeEventPreview.js';
 import { prepareChildResultForPersistence } from '../childResultPersistence.js';
 import { coordinateChildTerminal } from '../ChildTerminalCoordinator.js';
@@ -67,6 +68,21 @@ const TERMINAL_CHILD_STATES: ReadonlySet<TaskState> = new Set(['completed', 'fai
 
 function isTerminalChildState(state: string | undefined): boolean {
     return state === undefined || TERMINAL_CHILD_STATES.has(state as TaskState);
+}
+
+function projectPreparedChildResult(result: unknown, preparedResult: unknown): unknown {
+    if (!TaskStateUtils.isTaskEntityResult(result)) return preparedResult;
+    const task = result as Record<string, any>;
+    return {
+        ...task,
+        status: {
+            ...task.status,
+            metadata: {
+                ...(task.status?.metadata ?? {}),
+                result: preparedResult,
+            },
+        },
+    };
 }
 
 function childExecutionFailure(result: unknown, state: string): { code: string; message: string } {
@@ -143,6 +159,7 @@ export interface ApiBinderDependencies {
     scheduleChildTimeout?: (params: ScheduleTimerParams) => Promise<{ timerId: string }>;
     cancelTimer?: (params: { tenantId: string; taskId: string; token: string }) => Promise<void>;
     detachTaskBranch?: (params: { tenantId: string; taskId: string; reason: string }) => Promise<unknown>;
+    getRuntimeSurface?: () => TaskTurnRuntimeSurface;
 }
 
 export class ApiBinder {
@@ -576,7 +593,7 @@ export class ApiBinder {
                     tenantId,
                     parentTaskId: sessionId,
                     deliveryMode: 'async_wake',
-                    runtimeSurface: 'in_process',
+                    runtimeSurface: deps.getRuntimeSurface?.() ?? 'in_process',
                     request: {
                         kind: 'failed',
                         token,
@@ -677,6 +694,7 @@ export class ApiBinder {
             ...(a2aTel?.executionOrigin ? { origin: a2aTel.executionOrigin } : {}),
         };
         let childResultForParent = cleanChildResult.result;
+        let projectedResultForCaller = result;
 
         if (childIsTerminal) {
             childCallNode.endTime = Date.now();
@@ -685,10 +703,7 @@ export class ApiBinder {
                 childError.name = terminalFailure!.code;
                 childCallNode.fail(childError);
                 telemetry.failNode(childCallNode, childError);
-            } else {
-                childCallNode.end(cleanChildResult.result, 'success');
             }
-            telemetry.endNode(childCallNode);
             if (!childFailed) {
                 const prisma = deps.getSessionStorePrisma();
                 const cache = prisma ? new AgentResultCache(prisma) : undefined;
@@ -697,13 +712,25 @@ export class ApiBinder {
                     cache,
                     tenantId
                 );
+                if (cache) {
+                    projectedResultForCaller = projectPreparedChildResult(result, childResultForParent);
+                }
+                if (cache && projectedResultForCaller && typeof projectedResultForCaller === 'object') {
+                    ArtifactHydrationService.tryHydrateChildResult(
+                        projectedResultForCaller,
+                        cache,
+                        tenantId
+                    );
+                }
+                childCallNode.end(childResultForParent, 'success');
             }
+            telemetry.endNode(childCallNode);
             await coordinateChildTerminal({
                 session: deps.sessionManager,
                 tenantId,
                 parentTaskId: sessionId,
                 deliveryMode: awaitCompletion ? 'inline' : 'async_wake',
-                runtimeSurface: 'in_process',
+                runtimeSurface: deps.getRuntimeSurface?.() ?? 'in_process',
                 request: childFailed
                     ? {
                           kind: 'failed',
@@ -737,8 +764,8 @@ export class ApiBinder {
                 childAgentNodeId: childCallNode.id,
                 childTraceId: a2aTel?.childTraceId,
                 resultSummary:
-                    cleanChildResult.result != null
-                        ? compactModuleOutput({ result: cleanChildResult.result })
+                    childResultForParent != null
+                        ? compactModuleOutput({ result: childResultForParent })
                         : undefined,
             });
         } else if (iCtx.__turnChildCalls && childFailed) {
@@ -854,10 +881,10 @@ export class ApiBinder {
             }
         }
 
-        if (result && typeof result === 'object') {
+        if (projectedResultForCaller && typeof projectedResultForCaller === 'object') {
             const h = handle as unknown as Record<string, unknown>;
-            const r = result as Record<string, unknown>;
-            for (const key of Object.keys(result)) {
+            const r = projectedResultForCaller as Record<string, unknown>;
+            for (const key of Object.keys(projectedResultForCaller)) {
                 if (key !== 'token') {
                     try {
                         h[key] = r[key];

@@ -7,7 +7,10 @@ import {
 import { createSegmentTask, SEGMENT_TASK_NAME } from '../src/tasks/segment.js';
 import { executeSegmentTask } from '../src/tasks/segment.js';
 import {
+    createNamespacedTaskProtocolNames,
+    createTaskStateTask,
     createTaskTask,
+    DEFAULT_TASK_PROTOCOL_NAMES,
     executeTaskTask,
     TASK_STATE_TASK_NAME,
     TASK_TASK_NAME,
@@ -117,6 +120,94 @@ describe('executeTaskTask', () => {
             executionTimeout: '6m',
             retries: 0,
         }));
+    });
+
+    it('creates a coherent namespaced protocol without changing production defaults', () => {
+        expect(DEFAULT_TASK_PROTOCOL_NAMES).toEqual({
+            task: TASK_TASK_NAME,
+            segment: SEGMENT_TASK_NAME,
+            taskState: TASK_STATE_TASK_NAME,
+        });
+        expect(createNamespacedTaskProtocolNames('aplret.test.run-1.')).toEqual({
+            task: 'aplret.test.run-1.task',
+            segment: 'aplret.test.run-1.segment',
+            taskState: 'aplret.test.run-1.task-state',
+        });
+        expect(() => createNamespacedTaskProtocolNames('  '))
+            .toThrow('HATCHET_TASK_PROTOCOL_NAMESPACE_REQUIRED');
+    });
+
+    it('routes a custom durable protocol only through its matching child names', async () => {
+        const durableTask = jest.fn((options: unknown) => options);
+        const stateTask = jest.fn((options: unknown) => options);
+        const protocolNames = createNamespacedTaskProtocolNames('aplret.test.isolated');
+        createTaskStateTask({ task: stateTask } as never, {}, { name: protocolNames.taskState });
+        const definition = createTaskTask(
+            { durableTask } as never,
+            {},
+            protocolNames.task,
+            { protocolNames }
+        ) as unknown as { fn: (input: unknown, ctx: unknown) => Promise<unknown> };
+        const ctx = {
+            runChild: jest.fn(async (name: string) => {
+                if (name === protocolNames.taskState) return { [protocolNames.taskState]: {} };
+                if (name === protocolNames.segment) {
+                    const output = {
+                        tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                        boundary: { kind: 'complete', result: { ok: true } },
+                        taskStatus: { state: 'completed', timestamp: '2026-07-22T00:00:00.000Z' },
+                        turnDisposition: 'executed', turnSeq: 1, claimedGeneration: '1',
+                    };
+                    return { [protocolNames.segment]: output };
+                }
+                throw new Error(`Unexpected child ${name}`);
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await definition.fn({
+            tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1', input: {},
+            idempotencyKey: 'task-1:start', tenantTaskKey: 'tenant-1:task-1',
+            rootRunKey: 'tenant-1:task-1:root:1',
+        }, ctx);
+
+        expect(durableTask).toHaveBeenCalledWith(expect.objectContaining({ name: protocolNames.task }));
+        expect(stateTask).toHaveBeenCalledWith(expect.objectContaining({ name: protocolNames.taskState }));
+        expect(ctx.runChild).toHaveBeenCalledWith(
+            protocolNames.segment,
+            expect.any(Object),
+            expect.any(Object),
+        );
+        expect(ctx.runChild).not.toHaveBeenCalledWith(
+            SEGMENT_TASK_NAME,
+            expect.anything(),
+            expect.anything(),
+        );
+    });
+
+    it('rejects a mismatched custom root protocol before registration', () => {
+        const durableTask = jest.fn((options: unknown) => options);
+        const protocolNames = createNamespacedTaskProtocolNames('aplret.test.mismatch');
+
+        expect(() => createTaskTask(
+            { durableTask } as never,
+            {},
+            'another-root',
+            { protocolNames }
+        )).toThrow('HATCHET_TASK_PROTOCOL_ROOT_NAME_MISMATCH');
+        expect(durableTask).not.toHaveBeenCalled();
+    });
+
+    it('rejects a mismatched task-state registration before publishing it', () => {
+        const task = jest.fn((options: unknown) => options);
+        const protocolNames = createNamespacedTaskProtocolNames('aplret.test.state-mismatch');
+
+        expect(() => createTaskStateTask(
+            { task } as never,
+            { protocolNames },
+            { name: 'another-state-task' }
+        )).toThrow('HATCHET_TASK_PROTOCOL_STATE_NAME_MISMATCH');
+        expect(task).not.toHaveBeenCalled();
     });
 
     it('declares the sole durable root with native per-task concurrency', () => {

@@ -43,6 +43,27 @@ import { randomUUID } from 'node:crypto';
 
 const log = logger.createLogger({ prefix: 'SessionManager' });
 
+export class SnapshotLimitError extends Error {
+    public readonly code = 'LIMIT_WM_SNAPSHOT_TOO_LARGE';
+
+    constructor(
+        public readonly limitBytes: number,
+        public readonly actualBytes: number
+    ) {
+        super('LIMIT_WM_SNAPSHOT_TOO_LARGE');
+        this.name = 'SnapshotLimitError';
+        Object.setPrototypeOf(this, SnapshotLimitError.prototype);
+    }
+}
+
+export function isSnapshotLimitError(error: unknown): error is SnapshotLimitError {
+    return error instanceof SnapshotLimitError || (
+        !!error &&
+        typeof error === 'object' &&
+        (error as { code?: unknown }).code === 'LIMIT_WM_SNAPSHOT_TOO_LARGE'
+    );
+}
+
 export type OutboxEnqueuedRef = {
     outboxRowId: string;
     eventType: string;
@@ -308,7 +329,7 @@ export class SessionManager {
                     limitBytes: maxBytes,
                     actualBytes: sizeBytes,
                 });
-                throw new Error('LIMIT_WM_SNAPSHOT_TOO_LARGE');
+                throw new SnapshotLimitError(maxBytes, sizeBytes);
             }
         } catch (e) {
             if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') throw e;

@@ -230,4 +230,39 @@ describe('TaskEngine sync completion', () => {
             mimeType: 'text/html',
         }));
     });
+
+    it('returns the canonical blocking-child artifact marker with the durable ID', async () => {
+        const { Artifact } = await import('@a2arium/callagent-memory-engine');
+        const rawHtml = `<html>${'canonical-child-html'.repeat(5000)}</html>`;
+        const localArtifact = Artifact.create(rawHtml, { mimeType: 'text/html' });
+        const mockChildTaskEntity = {
+            id: 'child-task-canonical',
+            status: {
+                state: 'completed',
+                timestamp: 123456,
+                metadata: { result: { html: localArtifact } },
+            },
+        };
+        const { engine, sessionManager } = await buildEngine(async () => mockChildTaskEntity);
+        const prisma = createFakeArtifactPrisma();
+        (sessionManager as any).store.prisma = prisma;
+        const ctx = await setupContext(engine, sessionManager);
+        const mockInbox: any = { current: [], all: [] };
+        (ctx as any).__activeLoopInbox = mockInbox;
+        (ctx as any).__activeLoopEnv = { turn: 5 };
+
+        const returned = await ctx.sendTaskToAgent(
+            'child-agent',
+            { some: 'input' },
+            { awaitCompletion: true }
+        ) as any;
+
+        const returnedArtifact = returned.handle.status.metadata.result.html;
+        const observedArtifact = mockInbox.current[0].payload.result.html;
+        expect(returnedArtifact.id).toBe(observedArtifact.id);
+        expect(typeof returnedArtifact.then).toBe('function');
+        await expect(returnedArtifact).resolves.toBe(rawHtml);
+        expect(prisma.agentResultCache.upsert).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(returned)).not.toContain(rawHtml);
+    });
 });

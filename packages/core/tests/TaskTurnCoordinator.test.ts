@@ -2,6 +2,7 @@ import { describe, expect, it, jest } from '@jest/globals';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import {
+    advanceTaskTurnGenerationInSnapshot,
     readTaskTurnCoordinator,
     markTaskTurnDispatchEnqueued,
     releaseTaskTurn,
@@ -41,6 +42,53 @@ async function seededSession() {
 }
 
 describe('TaskTurnCoordinator', () => {
+    it('persists runtime affinity and rejects claims from another surface', async () => {
+        const session = await seededSession();
+        const first = await requestTaskTurn({
+            session,
+            tenantId: 'tenant-a',
+            taskId: 'task-a',
+            ownerId: 'hatchet-worker',
+            requestKey: 'task-a:start',
+            runtimeSurface: 'hatchet',
+        });
+        expect(first.result.disposition).toBe('acquired');
+        expect(readTaskTurnCoordinator(first.snapshot).runtimeSurface).toBe('hatchet');
+
+        await expect(requestTaskTurn({
+            session,
+            tenantId: 'tenant-a',
+            taskId: 'task-a',
+            ownerId: 'local-worker',
+            requestKey: 'task-a:child:1',
+            runtimeSurface: 'in_process',
+        })).rejects.toMatchObject({ code: 'TASK_TURN_COORDINATOR_INVALID' });
+    });
+
+    it('routes terminal-generated demand to the persisted task surface', () => {
+        const advanced = advanceTaskTurnGenerationInSnapshot({
+            snapshot: {
+                meta: {
+                    turnCoordinator: {
+                        schemaVersion: 1,
+                        runtimeSurface: 'hatchet',
+                        nextFence: '1',
+                        nextTurnSeq: 1,
+                        requestedGeneration: '1',
+                        completedGeneration: '1',
+                    },
+                },
+            },
+            tenantId: 'tenant-a',
+            taskId: 'task-a',
+            runtimeSurface: 'in_process',
+            storageNow: '2026-07-22T10:00:00.000Z',
+        });
+
+        expect(advanced.state.runtimeSurface).toBe('hatchet');
+        expect(advanced.state.dispatchIntent?.runtimeSurface).toBe('hatchet');
+    });
+
     it.each([
         { nextFence: '01' },
         { requestedGeneration: '-1' },
@@ -191,6 +239,7 @@ describe('TaskTurnCoordinator', () => {
             taskId: 'task-a',
             ownerId: 'new-worker',
             requestKey: 'task-a:recovery',
+            runtimeSurface: 'hatchet',
             leaseMs: 120_000,
         });
 

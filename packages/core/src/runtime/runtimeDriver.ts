@@ -104,6 +104,8 @@ export type DispatchOutboxParams = {
  * it completes; completion is observed via task state / stream events as today.
  */
 export type RuntimeDriver = {
+    /** Durable routing identity used by the task turn coordinator. */
+    readonly surface?: 'direct' | 'in_process' | 'hatchet';
     enqueueStart(params: EnqueueStartParams): Promise<void>;
     enqueueResume(params: EnqueueResumeParams): Promise<void>;
     enqueueChildDispatch(params: EnqueueChildDispatchParams): Promise<void>;

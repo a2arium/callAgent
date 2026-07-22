@@ -69,6 +69,7 @@ export type PayloadBudgetEventRecorder = {
 };
 
 export class HatchetRuntimeDriver implements RuntimeDriver {
+    readonly surface = 'hatchet' as const;
     constructor(
         private readonly delegate: RuntimeDriver,
         private readonly outboxDispatchTask: TaskWorkflowDeclaration<

@@ -109,6 +109,7 @@ export function wakeEventToTurnWake(event: RuntimeWakeEvent): TurnWake {
 }
 
 export class InProcessRuntimeDriver implements RuntimeDriver {
+    readonly surface = 'in_process' as const;
     private readonly turnExecutor: TurnExecutor;
     private readonly childDispatcher?: (params: EnqueueChildDispatchParams) => Promise<void>;
     private readonly outboxDispatcher?: (params: DispatchOutboxParams) => Promise<void>;

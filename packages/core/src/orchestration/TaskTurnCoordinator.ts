@@ -39,6 +39,12 @@ export type TaskTurnClaim = {
 
 export type TaskTurnCoordinatorState = {
     schemaVersion: 1;
+    /**
+     * Durable execution-surface affinity for the task. Once selected, every
+     * subsequent wake must be claimed on the same runtime surface. Optional on
+     * read for snapshots written before affinity was introduced.
+     */
+    runtimeSurface?: TaskTurnRuntimeSurface;
     nextFence: string;
     nextTurnSeq: number;
     requestedGeneration: string;
@@ -220,8 +226,21 @@ function readState(
     if (active !== undefined && dispatchIntent !== undefined) {
         return invalid(tenantId, taskId, 'active claim and dispatch intent cannot coexist');
     }
+    const explicitSurface = value.runtimeSurface;
+    if (explicitSurface !== undefined && !['direct', 'in_process', 'hatchet'].includes(String(explicitSurface))) {
+        return invalid(tenantId, taskId, 'runtimeSurface is invalid');
+    }
+    const runtimeSurface = (explicitSurface as TaskTurnRuntimeSurface | undefined) ??
+        active?.runtimeSurface ?? dispatchIntent?.runtimeSurface;
+    if (runtimeSurface !== undefined && active !== undefined && active.runtimeSurface !== runtimeSurface) {
+        return invalid(tenantId, taskId, 'active runtime surface conflicts with task affinity');
+    }
+    if (runtimeSurface !== undefined && dispatchIntent !== undefined && dispatchIntent.runtimeSurface !== runtimeSurface) {
+        return invalid(tenantId, taskId, 'dispatch runtime surface conflicts with task affinity');
+    }
     return {
         schemaVersion: 1,
+        ...(runtimeSurface !== undefined ? { runtimeSurface } : {}),
         nextFence: nextFence.toString(),
         nextTurnSeq: value.nextTurnSeq as number,
         requestedGeneration: requested.toString(),
@@ -267,6 +286,14 @@ export function stageTaskTurnRequestInSnapshot(params: {
     allowInitialize?: boolean;
 }): { snapshot: Record<string, unknown>; state: TaskTurnCoordinatorState; staged: boolean } {
     const current = readState(params.snapshot, params.tenantId, params.taskId, params.allowInitialize);
+    const runtimeSurface = current.runtimeSurface ?? params.runtimeSurface;
+    if (current.runtimeSurface !== undefined && current.runtimeSurface !== params.runtimeSurface) {
+        return invalid(
+            params.tenantId,
+            params.taskId,
+            `runtime surface ${params.runtimeSurface} cannot serve task affined to ${current.runtimeSurface}`
+        );
+    }
     if (snapshotHasProcessedSegmentKey(params.snapshot, params.requestKey)) {
         return { snapshot: params.snapshot, state: current, staged: false };
     }
@@ -275,12 +302,13 @@ export function stageTaskTurnRequestInSnapshot(params: {
     const requested = BigInt(current.requestedGeneration) + 1n;
     const state: TaskTurnCoordinatorState = {
         ...current,
+        runtimeSurface,
         requestedGeneration: requested.toString(),
         ...(!current.active ? {
             dispatchIntent: {
                 generation: requested.toString(),
                 deliveryKey: `${params.taskId}:turn-request:${requested}`,
-                runtimeSurface: params.runtimeSurface,
+                runtimeSurface,
                 createdAt: params.storageNow,
             },
         } : {}),
@@ -301,15 +329,17 @@ export function advanceTaskTurnGenerationInSnapshot(params: {
     storageNow: string;
 }): { snapshot: Record<string, unknown>; state: TaskTurnCoordinatorState } {
     const current = readState(params.snapshot, params.tenantId, params.taskId);
+    const runtimeSurface = current.runtimeSurface ?? params.runtimeSurface;
     const requested = BigInt(current.requestedGeneration) + 1n;
     const state: TaskTurnCoordinatorState = {
         ...current,
+        runtimeSurface,
         requestedGeneration: requested.toString(),
         ...(!current.active ? {
             dispatchIntent: {
                 generation: requested.toString(),
                 deliveryKey: `${params.taskId}:turn-request:${requested}`,
-                runtimeSurface: params.runtimeSurface,
+                runtimeSurface,
                 createdAt: params.storageNow,
             },
         } : {}),
@@ -419,6 +449,14 @@ export async function requestTaskTurn(params: {
             }
             const fence = BigInt(current.nextFence) + 1n;
             const turnSeq = current.nextTurnSeq + 1;
+            const claimSurface = current.runtimeSurface ?? current.dispatchIntent?.runtimeSurface ?? surface;
+            if (claimSurface !== surface) {
+                return invalid(
+                    params.tenantId,
+                    params.taskId,
+                    `runtime surface ${surface} cannot claim task affined to ${claimSurface}`
+                );
+            }
             const claim: TaskTurnClaim = {
                 claimId: proposedClaimId,
                 fence: fence.toString(),
@@ -429,10 +467,11 @@ export async function requestTaskTurn(params: {
                 acquiredAt: storageNow,
                 heartbeatAt: storageNow,
                 expiresAt: new Date(nowMs + leaseMs).toISOString(),
-                runtimeSurface: surface,
+                runtimeSurface: claimSurface,
             };
             const state: TaskTurnCoordinatorState = {
                 ...current,
+                runtimeSurface: claimSurface,
                 nextFence: fence.toString(),
                 nextTurnSeq: turnSeq,
                 active: { ...claim, phase: 'claimed' },
@@ -573,13 +612,14 @@ export function completeTaskTurnInSnapshot(
     const scheduleNext = !terminal && requested > completed;
     const next: TaskTurnCoordinatorState = {
         ...state,
+        runtimeSurface: state.runtimeSurface ?? params.claim.runtimeSurface,
         completedGeneration: completed.toString(),
         active: undefined,
         dispatchIntent: scheduleNext
             ? {
                   generation: requested.toString(),
                   deliveryKey: `${params.taskId}:turn-request:${requested}`,
-                  runtimeSurface: params.runtimeSurface ?? params.claim.runtimeSurface,
+                  runtimeSurface: state.runtimeSurface ?? params.runtimeSurface ?? params.claim.runtimeSurface,
                   createdAt: params.storageNow,
               }
             : undefined,

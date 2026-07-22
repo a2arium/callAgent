@@ -1,6 +1,11 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
 import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
+import { SessionManager } from '../src/orchestration/SessionManager.js';
+import { requestTaskTurn, readTaskTurnCoordinator } from '../src/orchestration/TaskTurnCoordinator.js';
+import { readDurableTaskTerminal } from '../src/orchestration/TaskLifecycle.js';
+import { runWithSegmentIdempotencyKey, snapshotHasProcessedSegmentKey } from '../src/runtime/segmentProcessedKeys.js';
 
 const createFakeArtifactPrisma = () => {
     const artifacts = new Map<string, unknown>();
@@ -26,13 +31,61 @@ const createFakeArtifactPrisma = () => {
 };
 
 describe('TaskExecutor snapshot persistence', () => {
+    it('persists one authoritative failed terminal for a deterministic claimed-turn failure', async () => {
+        const tenantId = 'tenant-failure';
+        const taskId = 'task-failure';
+        const requestKey = `${taskId}:child:artifact`;
+        const manager = new SessionManager(new InMemorySessionManager());
+        await manager.saveSnapshot({
+            tenantId,
+            sessionId: taskId,
+            agentId: 'agent-a',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'agent-a' } },
+        });
+        const admission = await requestTaskTurn({
+            session: manager,
+            tenantId,
+            taskId,
+            agentId: 'agent-a',
+            ownerId: 'worker-a',
+            requestKey,
+            allowInitialize: true,
+            claimIdFactory: () => 'claim-artifact-failure',
+        });
+        expect(admission.result.disposition).toBe('acquired');
+        if (admission.result.disposition !== 'acquired') throw new Error('claim not acquired');
+
+        const persistence = await runWithSegmentIdempotencyKey(
+            requestKey,
+            () => (TaskExecutor as any).persistDeterministicFailure({
+                sessionManager: manager,
+                tenantId,
+                sessionId: taskId,
+                agentId: 'agent-a',
+                code: 'ARTIFACT_PERSISTENCE_FAILED',
+                message: 'Failed to persist artifact content.',
+            }),
+            { ...admission.result.claim, tenantId, taskId }
+        );
+
+        expect(persistence.disposition).toBe('committed');
+        const stored = await manager.load(tenantId, taskId);
+        const terminal = readDurableTaskTerminal(stored?.snapshot);
+        expect(terminal?.state).toBe('failed');
+        expect(terminal?.status.metadata).toMatchObject({
+            code: 'ARTIFACT_PERSISTENCE_FAILED',
+        });
+        expect(snapshotHasProcessedSegmentKey(stored?.snapshot as any, requestKey)).toBe(true);
+        expect(readTaskTurnCoordinator(stored?.snapshot).active).toBeUndefined();
+    });
+
     it('offloads thenable local artifacts before the snapshot CAS write', async () => {
-        const localArtifact = {
-            kind: 'artifact_local',
-            value: `<html>${'terminal-result'.repeat(10_000)}</html>`,
-            mimeType: 'text/html',
-            then: () => undefined,
-        };
+        const { Artifact } = await import('@a2arium/callagent-memory-engine');
+        const localArtifact = Artifact.create(
+            `<html>${'x'.repeat(600 * 1024)}</html>`,
+            { mimeType: 'text/html' }
+        );
         let savedSnapshot: Record<string, unknown> | undefined;
         const prisma = createFakeArtifactPrisma();
         const sessionManager = {
@@ -61,12 +114,24 @@ describe('TaskExecutor snapshot persistence', () => {
             tenantId: 'tenant-a',
             sessionId: 'task-artifact',
             agentId: 'agent-a',
-            env: { turn: 2, pending: {}, inbox: { current: [], all: [] } },
+            env: {
+                turn: 2,
+                pending: { children: { 'artifact-child': { agentId: 'child-agent' } } },
+                inbox: {
+                    current: [{ source: 'child', kind: 'child.completed', payload: { token: 'artifact-child', result: { page: localArtifact } } }],
+                    all: [{ source: 'child', kind: 'child.completed', payload: { token: 'artifact-child', result: { page: localArtifact } } }],
+                },
+            },
             M: {},
             mNext: { evidence: localArtifact },
             outcome: { kind: 'complete', result: { page: localArtifact } },
             loopOpts: {},
-            ctx: {},
+            ctx: {
+                llm: {
+                    getHistoryMode: () => 'full',
+                    getMessages: () => [{ role: 'user', content: localArtifact }],
+                },
+            },
             getSessionStorePrisma: () => prisma,
         });
 
@@ -78,6 +143,15 @@ describe('TaskExecutor snapshot persistence', () => {
             expect.objectContaining({ kind: 'artifact', mimeType: 'text/html' })
         );
         expect((savedSnapshot as any).meta.taskTerminal.status.metadata.result.page.then).toBeUndefined();
+        const ids = [
+            (savedSnapshot as any).M.evidence.id,
+            (savedSnapshot as any).inbox.current[0].payload.result.page.id,
+            (savedSnapshot as any).llmState.messages[0].content.id,
+            (savedSnapshot as any).meta.taskTerminal.status.metadata.result.page.id,
+        ];
+        expect(new Set(ids)).toEqual(new Set([ids[0]]));
+        expect(prisma.agentResultCache.upsert).toHaveBeenCalledTimes(1);
+        expect(Buffer.byteLength(JSON.stringify(savedSnapshot), 'utf8')).toBeLessThan(2 * 1024 * 1024);
     });
 
     it('sanitizes raw child.completed payloads from merged inboxes before saving snapshots', async () => {

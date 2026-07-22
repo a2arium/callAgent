@@ -39,14 +39,17 @@ export {
     type SegmentTaskOutput,
 } from './tasks/segment.js';
 export {
+    DEFAULT_TASK_PROTOCOL_NAMES,
     TASK_STATE_TASK_NAME,
     TASK_TASK_NAME,
+    createNamespacedTaskProtocolNames,
     createTaskStateTask,
     createTaskTask,
     executeTaskStateTask,
     executeTaskTask,
     type TaskStateInput,
     type TaskStateOutput,
+    type TaskProtocolNames,
     type TaskTaskInput,
     type TaskTaskOutput,
 } from './tasks/task.js';

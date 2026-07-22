@@ -1446,4 +1446,101 @@ describe('buildAgentRunGraph', () => {
         expect(graph.turns[1]?.attempts).toHaveLength(3);
         expect(graph.turns[1]?.attempts.map((attempt) => attempt.disposition)).toEqual(['executed', 'queued', 'queued']);
     });
+
+    it('projects an explicitly detached zero-turn child as canceled', async () => {
+        const sessionManager = new SessionManager(new InMemorySessionManager());
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1', sessionId: 'root-task', agentId: 'root-agent', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'task.child_started', {
+            token: 'child-token', childTaskId: 'child-task', childAgentId: 'fetch-html',
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'task.child_completed', {
+            token: 'child-token', childTaskId: 'child-task', childAgentId: 'fetch-html',
+        });
+        await sessionManager.appendEvent('tenant-1', 'child-task', 'task.detached', {
+            taskId: 'child-task', reason: 'child_timeout', detachedAt: '2026-07-22T10:00:00.000Z',
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1', taskId: 'root-task', sessionManager,
+            events: [
+                {
+                    eventId: 'edge-start', sessionId: 'root-task', seq: 1,
+                    type: 'task.child_started', createdAt: '2026-07-22T09:59:00.000Z',
+                    payload: { token: 'child-token', childTaskId: 'child-task', childAgentId: 'fetch-html' },
+                },
+                {
+                    eventId: 'edge-complete', sessionId: 'root-task', seq: 2,
+                    type: 'task.child_completed', createdAt: '2026-07-22T09:59:01.000Z',
+                    payload: { token: 'child-token', childTaskId: 'child-task', childAgentId: 'fetch-html' },
+                },
+                {
+                    eventId: 'child-detached', sessionId: 'child-task', seq: 1,
+                    type: 'task.detached', createdAt: '2026-07-22T10:00:00.000Z',
+                    payload: { taskId: 'child-task', reason: 'child_timeout' },
+                },
+            ],
+            driverRuns: [{
+                providerRunId: 'child-provider-run', tenantId: 'tenant-1', taskId: 'child-task',
+                rootTaskId: 'root-task', parentTaskId: 'root-task', agentId: 'fetch-html',
+                operation: 'agent.run', status: 'completed',
+            }],
+        });
+
+        expect(graph.nodes.find((node) => node.taskId === 'child-task')).toEqual(expect.objectContaining({
+            status: 'canceled',
+        }));
+    });
+
+    it('does not call a provider-only zero-turn child completed without terminal evidence', async () => {
+        const sessionManager = new SessionManager(new InMemorySessionManager());
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1', sessionId: 'root-task', agentId: 'root-agent', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        const events: AgentRunSourceEvent[] = [
+            {
+                eventId: 'edge-start', sessionId: 'root-task', seq: 1,
+                type: 'task.child_started', createdAt: '2026-07-22T09:59:00.000Z',
+                payload: { token: 'child-token', childTaskId: 'child-task', childAgentId: 'fetch-html' },
+            },
+        ];
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1', taskId: 'root-task', sessionManager, events,
+            driverRuns: [{
+                providerRunId: 'child-provider-run', tenantId: 'tenant-1', taskId: 'child-task',
+                rootTaskId: 'root-task', parentTaskId: 'root-task', agentId: 'fetch-html',
+                operation: 'agent.run', status: 'completed',
+            }],
+        });
+
+        expect(graph.nodes.find((node) => node.taskId === 'child-task')).toEqual(expect.objectContaining({
+            status: 'unknown',
+        }));
+    });
+
+    it('groups cognition events by logicalTurnSeq before provider attempt sequence', async () => {
+        const sessionManager = new SessionManager(new InMemorySessionManager());
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1', sessionId: 'root-task', agentId: 'root-agent', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'turn.started', {
+            taskId: 'root-task', turnSeq: 8, logicalTurnSeq: 2,
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'turn.completed', {
+            taskId: 'root-task', turnSeq: 8, logicalTurnSeq: 2,
+            transition: { kind: 'await_child', token: 'child-token' },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1', taskId: 'root-task', sessionManager, driverRuns: [],
+        });
+
+        expect(graph.turns).toEqual([
+            expect.objectContaining({ turnSeq: 2 }),
+        ]);
+    });
 });

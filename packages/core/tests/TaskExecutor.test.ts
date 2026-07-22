@@ -55,7 +55,9 @@ await jest.unstable_mockModule(resolve(srcDir, 'plugin/pluginManager.ts'), () =>
 }));
 
 await jest.unstable_mockModule(resolve(srcDir, 'orchestration/SessionManager.ts'), () => ({
-    SessionManager: class { }
+    SessionManager: class { },
+    isSnapshotLimitError: (error: unknown) =>
+        error instanceof Error && error.message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE',
 }));
 
 await jest.unstable_mockModule(resolve(srcDir, 'loop/hygiene.ts'), () => ({

@@ -1,5 +1,6 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import {
+    ArtifactPersistenceError,
     prepareChildResultForPersistence,
     prepareChildResultsInInboxForPersistence,
 } from '../src/orchestration/childResultPersistence.js';
@@ -28,6 +29,101 @@ const createFakeArtifactPrisma = () => {
 };
 
 describe('child result persistence preparation', () => {
+    it('projects a hydrated ArtifactImpl without loading its content', async () => {
+        const { ArtifactImpl } = await import('@a2arium/callagent-memory-engine');
+        const cache = {
+            getCachedResult: jest.fn(async () => '<html>must-not-load</html>'),
+        };
+        const handle = new ArtifactImpl('artifact-existing', cache as any, 'tenant-a', 'text/html', 1234);
+
+        const prepared = await prepareChildResultForPersistence(
+            { html: handle },
+            undefined,
+            'tenant-a'
+        ) as any;
+
+        expect(prepared.html).toEqual({
+            kind: 'artifact',
+            id: 'artifact-existing',
+            mimeType: 'text/html',
+            estimatedSize: 1234,
+        });
+        expect(cache.getCachedResult).not.toHaveBeenCalled();
+        expect((prepared.html as any).then).toBeUndefined();
+    });
+
+    it('stores one LocalArtifact object once across one persistence operation', async () => {
+        const { AgentResultCache, Artifact } = await import('@a2arium/callagent-memory-engine');
+        const prisma = createFakeArtifactPrisma();
+        const cache = new AgentResultCache(prisma as any);
+        const artifact = Artifact.create(`<html>${'shared'.repeat(20_000)}</html>`, { mimeType: 'text/html' });
+
+        const prepared = await prepareChildResultForPersistence(
+            {
+                mental: { html: artifact },
+                inbox: { html: artifact },
+                llm: { html: artifact },
+                outcome: { html: artifact },
+            },
+            cache,
+            'tenant-a'
+        ) as any;
+
+        const ids = [
+            prepared.mental.html.id,
+            prepared.inbox.html.id,
+            prepared.llm.html.id,
+            prepared.outcome.html.id,
+        ];
+        expect(new Set(ids)).toEqual(new Set([ids[0]]));
+        expect(prisma.agentResultCache.upsert).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(prepared)).not.toContain('shared'.repeat(100));
+    });
+
+    it('keeps distinct LocalArtifact objects distinct', async () => {
+        const { AgentResultCache, Artifact } = await import('@a2arium/callagent-memory-engine');
+        const prisma = createFakeArtifactPrisma();
+        const cache = new AgentResultCache(prisma as any);
+
+        const prepared = await prepareChildResultForPersistence(
+            {
+                first: Artifact.create('first artifact'),
+                second: Artifact.create('second artifact'),
+            },
+            cache,
+            'tenant-a'
+        ) as any;
+
+        expect(prepared.first.id).not.toBe(prepared.second.id);
+        expect(prisma.agentResultCache.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails closed when a configured artifact backend rejects a write', async () => {
+        const { AgentResultCache, Artifact } = await import('@a2arium/callagent-memory-engine');
+        const prisma = createFakeArtifactPrisma();
+        prisma.agentResultCache.upsert.mockRejectedValueOnce(new Error('store unavailable'));
+        const artifact = Artifact.create('secret artifact content', { mimeType: 'text/plain' });
+
+        await expect(prepareChildResultForPersistence(
+            { artifact },
+            new AgentResultCache(prisma as any),
+            'tenant-a'
+        )).rejects.toBeInstanceOf(ArtifactPersistenceError);
+    });
+
+    it('keeps no-backend local artifact previews bounded and non-thenable', async () => {
+        const { Artifact } = await import('@a2arium/callagent-memory-engine');
+        const raw = 'private-content-'.repeat(10_000);
+        const prepared = await prepareChildResultForPersistence(
+            { artifact: Artifact.create(raw) },
+            undefined,
+            'tenant-a'
+        ) as any;
+
+        expect(JSON.stringify(prepared)).not.toContain(raw);
+        expect(prepared.artifact.then).toBeUndefined();
+    });
+
     it('keeps large child result strings artifact-backed', async () => {
         const rawHtml = `<html>${'child-result-html'.repeat(5000)}</html>`;
         const { AgentResultCache } = await import('@a2arium/callagent-memory-engine');

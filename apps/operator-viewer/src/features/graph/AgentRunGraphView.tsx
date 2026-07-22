@@ -237,7 +237,7 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
           severity === 'error' ? 'border-rose-300 bg-rose-500/10' : '',
           status === 'running' || status === 'waiting' ? 'border-sky-300 bg-sky-500/10' : ''
         )}
-        aria-label={`Turn ${turn.turnSeq} ${status}${severity === 'error' ? ', error severity' : ''}, ${attemptCount} execution attempt${attemptCount === 1 ? '' : 's'}`}
+        aria-label={`Turn ${turn.turnSeq} ${status}${severity === 'error' ? ', error severity' : ''}, ${attemptCount} runtime ${attemptCount === 1 ? 'delivery' : 'deliveries'}`}
       >
         <div className="flex min-w-0 items-start justify-between gap-1.5">
           <div className="min-w-0">
@@ -257,7 +257,7 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
           />
         </div>
         {attemptCount > 1 || turn.attempts.some((attempt) => attempt.disposition && attempt.disposition !== 'executed') ? (
-          <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{attemptCount} execution attempts</p>
+          <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{attemptCount} runtime deliveries</p>
         ) : null}
       </article>
     </div>

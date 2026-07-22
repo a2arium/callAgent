@@ -417,7 +417,7 @@ export class OperatorProjectionRepository {
             return;
         }
 
-        if (event.type === 'task.canceled') {
+        if (event.type === 'task.canceled' || event.type === 'task.detached') {
             const reason = stringField(event.payload, 'reason');
             await this.upsertEventRun({
                 tenantId: event.tenantId,
@@ -436,7 +436,9 @@ export class OperatorProjectionRepository {
                 resolvedAt: createdAt,
                 terminalMessage: reason,
             });
-            await this.projectAuthoritativeTerminalAttempt(event, 'canceled', createdAt);
+            if (event.type === 'task.canceled') {
+                await this.projectAuthoritativeTerminalAttempt(event, 'canceled', createdAt);
+            }
             return;
         }
 
@@ -453,7 +455,7 @@ export class OperatorProjectionRepository {
                 taskId,
                 rootTaskId,
                 agentId,
-                turnSeq: numberField(event.payload, 'turnSeq') || undefined,
+                turnSeq: eventTurnSeq(event.payload) || undefined,
                 attemptKey,
                 disposition,
                 claimId: stringField(event.payload, 'claimId'),
@@ -539,7 +541,7 @@ export class OperatorProjectionRepository {
         if (event.type === 'turn.started') return;
 
         if (event.type === 'turn.completed' || event.type === 'turn.superseded') {
-            const turnSeq = numberField(event.payload, 'turnSeq');
+            const turnSeq = eventTurnSeq(event.payload);
             if (turnSeq <= 0) return;
             const superseded = event.type === 'turn.superseded';
             const turnTraceId = stringField(event.payload, 'turnId');
@@ -639,22 +641,26 @@ export class OperatorProjectionRepository {
     }): Promise<boolean> {
         if (!this.isAvailable() || !params.snapshot) return false;
         const terminal = readDurableTaskTerminal(params.snapshot);
-        const claim = terminal?.turnClaim;
-        if (!terminal) return false;
         const lifecycle = readTaskLifecycle(params.snapshot, params.taskId);
-        const completedAt = new Date(terminal.claimedAt);
+        if (!terminal && lifecycle?.state !== 'detached') return false;
+        const claim = terminal?.turnClaim;
+        const status = terminal?.state ?? 'canceled';
+        const terminalAt = terminal?.claimedAt ?? lifecycle?.changedAt;
+        if (terminalAt === undefined) return false;
+        const completedAt = new Date(terminalAt);
         const runData = stripUndefined({
             rootTaskId: lifecycle?.rootTaskId ?? params.taskId,
             parentTaskId: lifecycle?.parentTaskId,
             agentId: params.agentId,
             operation: 'agent.run',
             scope: lifecycle?.parentTaskId ? 'child' : 'root',
-            status: terminal.state,
+            status,
             terminalAt: completedAt,
-            outputState: terminal.state === 'completed' && terminal.status.metadata?.result !== undefined
+            outputState: terminal?.state === 'completed' && terminal.status.metadata?.result !== undefined
                 ? 'available'
                 : undefined,
-            terminalMessage: terminal.status.message?.parts.map((part) => part.text).join(' '),
+            terminalMessage: terminal?.status.message?.parts.map((part) => part.text).join(' '),
+            cancelReason: lifecycle?.state === 'detached' ? lifecycle.reason : undefined,
         });
         await this.prisma.agentRun?.upsert?.({
             where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
@@ -674,10 +680,10 @@ export class OperatorProjectionRepository {
                 claimId: claim.claimId,
                 turnFence: claim.fence,
                 claimedGeneration: claim.generation,
-                status: terminal.state,
+                status,
                 completedAt,
                 authoritativeTerminal: true,
-                outputProduced: terminal.state === 'completed' && terminal.status.metadata?.result !== undefined,
+                outputProduced: terminal?.state === 'completed' && terminal.status.metadata?.result !== undefined,
             });
         }
         await this.prisma.turnRun?.updateMany?.({
@@ -714,9 +720,12 @@ export class OperatorProjectionRepository {
         if (typeof findMany !== 'function') return { scanned: 0, reconciled: 0 };
         const limit = Math.max(1, Math.min(1_000, params.limit ?? 100));
         const terminalFilter = {
-            OR: ['completed', 'failed', 'canceled'].map((state) => ({
-                snapshot: { path: ['meta', 'taskTerminal', 'state'], equals: state },
-            })),
+            OR: [
+                ...['completed', 'failed', 'canceled'].map((state) => ({
+                    snapshot: { path: ['meta', 'taskTerminal', 'state'], equals: state },
+                })),
+                { snapshot: { path: ['meta', 'taskLifecycle', 'state'], equals: 'detached' } },
+            ],
         };
         const rows = await findMany({
             where: params.after
@@ -1126,7 +1135,7 @@ export class OperatorProjectionRepository {
             taskId,
             rootTaskId,
             agentId: stringField(event.payload, 'agentId'),
-            turnSeq: numberField(event.payload, 'turnSeq') || undefined,
+            turnSeq: eventTurnSeq(event.payload) || undefined,
             attemptKey,
             disposition: 'executed',
             claimId,
@@ -1660,6 +1669,10 @@ function stringField(value: Record<string, unknown>, key: string): string | unde
 function numberField(value: Record<string, unknown>, key: string): number {
     const field = value[key];
     return typeof field === 'number' && Number.isFinite(field) ? field : 0;
+}
+
+function eventTurnSeq(payload: Record<string, unknown>): number {
+    return numberField(payload, 'logicalTurnSeq') || numberField(payload, 'turnSeq');
 }
 
 function arrayCount(value: unknown): number {

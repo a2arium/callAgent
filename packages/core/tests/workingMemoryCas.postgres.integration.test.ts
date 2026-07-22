@@ -8,6 +8,8 @@ import {
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { reconcileSnapshotMutation } from '../src/orchestration/persistence/SnapshotRepository.js';
 import { claimOutboxRow, deleteClaimedOutboxRow } from '../src/eventbus/outboxDispatch.js';
+import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
+import { Artifact } from '@a2arium/callagent-memory-engine';
 
 const databaseUrl = process.env.MEMORY_DATABASE_URL;
 const describeIfPostgres = databaseUrl ? describe : describe.skip;
@@ -36,7 +38,8 @@ describeIfPostgres('working-memory CAS reconciliation on PostgreSQL', () => {
 
     afterAll(async () => {
         await prismaA?.outbox.deleteMany({ where: { tenantId } });
-        await prismaA?.wMSession.deleteMany({ where: { tenantId, sessionId } });
+        await prismaA?.agentResultCache.deleteMany({ where: { tenantId } });
+        await prismaA?.wMSession.deleteMany({ where: { tenantId } });
         await Promise.all([prismaA?.$disconnect(), prismaB?.$disconnect()]);
     });
 
@@ -123,5 +126,78 @@ describeIfPostgres('working-memory CAS reconciliation on PostgreSQL', () => {
             id: enqueued.id,
             leaseId: winner,
         })).resolves.toBe(true);
+    });
+
+    test('one 600 KiB child artifact stays marker-sized across every parent snapshot surface', async () => {
+        const artifactSessionId = `${sessionId}-artifact`;
+        await managerA.saveSnapshot({
+            tenantId,
+            sessionId: artifactSessionId,
+            agentId: 'parent',
+            expectedWmVersion: BigInt(0),
+            snapshot: { meta: { agentId: 'parent' } },
+        });
+
+        const rawHtml = `<html>${'x'.repeat(600 * 1024)}</html>`;
+        const localArtifact = Artifact.create(rawHtml, { mimeType: 'text/html' });
+        await (TaskExecutor as any).saveSnapshot({
+            sessionManager: managerA,
+            tenantId,
+            sessionId: artifactSessionId,
+            agentId: 'parent',
+            env: {
+                turn: 2,
+                pending: { children: { child: { agentId: 'fetch-html' } } },
+                inbox: {
+                    current: [{
+                        source: 'child',
+                        kind: 'child.completed',
+                        payload: { token: 'child', result: { html: localArtifact } },
+                    }],
+                    all: [{
+                        source: 'child',
+                        kind: 'child.completed',
+                        payload: { token: 'child', result: { html: localArtifact } },
+                    }],
+                },
+            },
+            M: {},
+            mNext: { html: localArtifact },
+            outcome: { kind: 'complete', result: { html: localArtifact } },
+            loopOpts: {},
+            ctx: {
+                llm: {
+                    getHistoryMode: () => 'full',
+                    getMessages: () => [{ role: 'user', content: localArtifact }],
+                },
+            },
+            getSessionStorePrisma: () => prismaA,
+        });
+
+        const stored = await managerA.load(tenantId, artifactSessionId);
+        const snapshot = stored?.snapshot as any;
+        const markers = [
+            snapshot.M.html,
+            snapshot.inbox.current[0].payload.result.html,
+            snapshot.inbox.all[0].payload.result.html,
+            snapshot.llmState.messages[0].content,
+            snapshot.meta.taskTerminal.status.metadata.result.html,
+        ];
+        const artifactRows = await prismaA.agentResultCache.findMany({
+            where: { tenantId, agentName: 'artifact_store' },
+        });
+
+        expect(artifactRows).toHaveLength(1);
+        expect(new Set(markers.map((marker) => marker.id))).toEqual(new Set([markers[0].id]));
+        for (const marker of markers) {
+            expect(marker).toEqual({
+                kind: 'artifact',
+                id: markers[0].id,
+                mimeType: 'text/html',
+                estimatedSize: JSON.stringify(rawHtml).length,
+            });
+        }
+        expect(JSON.stringify(snapshot)).not.toContain(rawHtml);
+        expect(Buffer.byteLength(JSON.stringify(snapshot), 'utf8')).toBeLessThan(2 * 1024 * 1024);
     });
 });
