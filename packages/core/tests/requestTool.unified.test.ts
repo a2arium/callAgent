@@ -4,6 +4,7 @@ import { globalA2AService } from '../src/orchestration/A2AService';
 import { SessionManager } from '../src/orchestration/SessionManager';
 import { v4 as uuidv4 } from 'uuid';
 import { jest } from '@jest/globals';
+import { ARTIFACT_STORAGE_UNAVAILABLE } from '../src/context/artifactFactory.js';
 
 describe('ApiBinder.requestTool unified API', () => {
     let apiBinder: ApiBinder;
@@ -66,6 +67,44 @@ describe('ApiBinder.requestTool unified API', () => {
                 close: jest.fn().mockResolvedValue(undefined),
             } as any,
         });
+    });
+
+    it('attaches a synchronous artifact handle factory when the context has none', async () => {
+        const ctx = {} as any;
+
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'a1',
+            flushMentalState: jest.fn(),
+        });
+
+        const handle = ctx.artifacts.create<string>();
+        expect(handle).not.toBeInstanceOf(Promise);
+        expect(typeof handle.set).toBe('function');
+        expect(typeof handle.load).toBe('function');
+        expect(typeof handle.then).toBe('function');
+        await expect(handle.set('value')).rejects.toMatchObject({
+            code: ARTIFACT_STORAGE_UNAVAILABLE,
+        });
+    });
+
+    it('preserves an existing trusted artifact factory', async () => {
+        const existing = {
+            create: jest.fn(),
+            text: jest.fn(),
+            json: jest.fn(),
+        };
+        const ctx = { artifacts: existing } as any;
+
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'a1',
+            flushMentalState: jest.fn(),
+        });
+
+        expect(ctx.artifacts).toBe(existing);
     });
 
     it('schedules non-blocking child starts through the runtime driver when start surface is enabled', async () => {

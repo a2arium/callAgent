@@ -4,7 +4,7 @@ const uuidv7 = uuid.v7;
 import { logger } from '@a2arium/callagent-utils';
 import type { TaskContext } from '../../shared/types/index.js';
 import { ArtifactHydrationService } from '../ArtifactHydrationService.js';
-import { AgentResultCache, ArtifactImpl } from '@a2arium/callagent-memory-engine';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { InboxManager, type EngineObservation, type EngineObservationInbox } from '../InboxManager.js';
 import { applyInputProvided, getPendingInputs, setPendingInputs } from '../DurableHandlerRegistry.js';
 import { compactModuleOutput } from '../../telemetry/turnTraceHelpers.js';
@@ -61,6 +61,10 @@ import { coordinateChildTerminal } from '../ChildTerminalCoordinator.js';
 import { ensureTaskLifecycle, readTaskLifecycle } from '../TaskLifecycle.js';
 import { assertTaskEffectActive, registerTaskEffect } from '../TaskEffectRegistration.js';
 import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import {
+    assertArtifactsFactory,
+    createArtifactFactory,
+} from '../../context/artifactFactory.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -1054,27 +1058,25 @@ export class ApiBinder {
 
         // Artifacts Factory
         if (!(ctx as any).artifacts) {
-            (ctx as any).artifacts = {
-                create: async (val: unknown, options?: { mimeType?: string; preview?: string }) => {
+            (ctx as any).artifacts = createArtifactFactory({
+                tenantId,
+                resolveCache: () => {
                     const prisma = this.deps.getSessionStorePrisma();
-                    if (!prisma) {
-                        throw new Error("Artifacts not available: no database connection");
-                    }
-                    const cache = new AgentResultCache(prisma);
-                    const art = new ArtifactImpl(undefined, cache, tenantId, options?.mimeType, undefined);
-                    if (val !== undefined) {
-                        await art.set(val);
-                    }
-                    return art;
+                    return prisma ? new AgentResultCache(prisma) : undefined;
                 },
-                json: async (val: unknown) => {
-                    return (ctx as any).artifacts.create(val, { mimeType: "application/json" });
+                onFailure: ({ operation, error, artifactId }) => {
+                    log.error('Artifact factory operation failed', {
+                        operation,
+                        tenantId,
+                        taskId: sessionId,
+                        agentId,
+                        artifactId,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
                 },
-                text: async (val: string) => {
-                    return (ctx as any).artifacts.create(val, { mimeType: "text/plain" });
-                }
-            };
+            });
         }
+        assertArtifactsFactory((ctx as any).artifacts);
 
         // Goals API (if available) - assuming it's external/imported or we skip moving it for now if complex imports?
         // In TaskEngine.ts it imported 'goals' from somewhere? 

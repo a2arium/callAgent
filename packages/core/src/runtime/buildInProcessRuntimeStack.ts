@@ -10,7 +10,10 @@ import type { TurnRunner } from '../orchestration/TurnRunner.js';
 import type { TaskContext } from '../shared/types/index.js';
 import { InProcessRuntimeDriver } from './inProcessRuntimeDriver.js';
 import type { RuntimeDriver } from './runtimeDriver.js';
-import { TurnRunnerSegmentExecutor } from './turnRunnerSegmentExecutor.js';
+import {
+    TurnRunnerSegmentExecutor,
+    type RuntimeContextBinding,
+} from './turnRunnerSegmentExecutor.js';
 import type { TurnExecutor } from './turnExecutor.js';
 import { RuntimeTimerRepository } from './runtimeTimer.js';
 
@@ -23,7 +26,10 @@ export type InProcessRuntimeStack = {
 export type BuildInProcessRuntimeStackParams = {
     turnRunner: TurnRunner;
     sessionManager: SessionManager;
-    createContext: (task: { id: string; input: unknown }) => TaskContext;
+    createContext: (
+        task: { id: string; input: unknown },
+        binding?: RuntimeContextBinding
+    ) => TaskContext;
     isStreaming?: boolean;
     onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
     onTaskTerminal?: (params: {

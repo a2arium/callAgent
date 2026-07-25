@@ -33,19 +33,14 @@ export class ArtifactImpl<T = unknown> implements ArtifactHandle<T> {
 
         this._pendingWrite = (async () => {
             const cache = await this.getCache();
-            await cache.setCachedResult(
-                'artifact_store',
-                { artifactId: this.id! },
+            const stored = await cache.storeArtifact(
+                this.tenantId,
+                this.id,
                 value,
-                86400 * 30, // 30 days TTL
-                [],
-                this.tenantId
+                this.mimeType
             );
-            try {
-                this.estimatedSize = JSON.stringify(value).length;
-            } catch {
-                // ignore serialization errors for size estimation
-            }
+            this.id = stored.artifactId;
+            this.estimatedSize = stored.size;
         })();
 
         return this._pendingWrite;
@@ -110,4 +105,3 @@ export function isArtifactMarker(value: unknown): value is ArtifactMarker {
         typeof (value as ArtifactMarker).id === 'string'
     );
 }
-

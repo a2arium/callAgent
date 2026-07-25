@@ -30,7 +30,10 @@ describe('TaskEngine sync completion', () => {
         };
     };
 
-    const buildEngine = async (sendTaskToAgent?: (params: any) => Promise<any>) => {
+    const buildEngine = async (
+        sendTaskToAgent?: (params: any) => Promise<any>,
+        artifactPrisma?: ReturnType<typeof createFakeArtifactPrisma>
+    ) => {
         jest.resetModules();
         process.env.DISABLE_OUTBOX_PUBLISHER = 'true';
         const sendMock = jest.fn(sendTaskToAgent ?? (async () => undefined));
@@ -55,11 +58,51 @@ describe('TaskEngine sync completion', () => {
             import(path.join(srcDir, 'orchestration/InMemorySessionManager.ts')),
         ]);
         const store = new InMemorySessionManager();
+        if (artifactPrisma !== undefined) {
+            (store as any).prisma = artifactPrisma;
+        }
         const engine = new TaskEngine({ sessionStore: store });
         // Access private sessionManager for test setup
         const sessionManager = (engine as any).sessionManager;
         return { engine, sessionManager, sendMock };
     };
+
+    it('reconstructs the canonical artifact factory after a fresh TaskEngine instance', async () => {
+        const prisma = createFakeArtifactPrisma();
+        const first = await buildEngine(undefined, prisma);
+        const firstCtx: TaskContext = (first.engine as any).createContext(
+            { id: parentTaskId, input: {} },
+            { tenantId, agentId: 'parent-agent' }
+        );
+        await (first.engine as any).apiBinder.attachOrchestrationAPIs(firstCtx, {
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: 'parent-agent',
+            flushMentalState: async () => {},
+        });
+
+        const beforeRestart = firstCtx.artifacts.text('before restart');
+        await expect(Promise.resolve(beforeRestart)).resolves.toBe('before restart');
+
+        const second = await buildEngine(undefined, prisma);
+        const resumedCtx: TaskContext = (second.engine as any).createContext(
+            { id: parentTaskId, input: {} },
+            { tenantId, agentId: 'parent-agent' }
+        );
+        const suppliedFactory = resumedCtx.artifacts;
+        await (second.engine as any).apiBinder.attachOrchestrationAPIs(resumedCtx, {
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: 'parent-agent',
+            flushMentalState: async () => {},
+        });
+
+        expect(resumedCtx.artifacts).toBe(suppliedFactory);
+        const afterRestart = resumedCtx.artifacts.json({ phase: 'resumed' });
+        expect(afterRestart).not.toBeInstanceOf(Promise);
+        await expect(Promise.resolve(afterRestart)).resolves.toEqual({ phase: 'resumed' });
+        await expect(Promise.resolve(beforeRestart)).resolves.toBe('before restart');
+    });
 
     const setupContext = async (engine: any, sessionManager: any) => {
         const taskEntity = { id: parentTaskId, input: {} };

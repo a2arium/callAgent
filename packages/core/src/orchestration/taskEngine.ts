@@ -37,6 +37,7 @@ import { BackpressureManager } from '../internal/conversation/BackpressureManage
 import { createTraceparent } from '../tracing/Tracing.js';
 import { mapWorkingMemoryEventToRuntimeStream } from '../streaming/sessionEventMapper.js';
 import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
+import { createArtifactFactory } from '../context/artifactFactory.js';
 import { makeSafeEventPreview } from './safeEventPreview.js';
 import type {
     GoalId,
@@ -67,7 +68,7 @@ import type { ManifestProvenance, ManifestSource } from '../types/turnTrace.js';
 import type { InternalTaskContext, OperatorTurnTraceCapture } from '../loop/internalContext.js';
 import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
 import { createMemoryRegistry } from '@a2arium/callagent-memory-engine';
-import { ArtifactImpl, isArtifactMarker, type ArtifactMarker } from '@a2arium/callagent-memory-engine';
+import { isArtifactMarker, type ArtifactMarker } from '@a2arium/callagent-memory-engine';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { hydrateArtifacts } from '@a2arium/callagent-memory-engine';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
@@ -82,6 +83,7 @@ import {
     type PreparedTurnInvocation,
     type RuntimeDriver,
     type RuntimeWakeEvent,
+    type RuntimeContextBinding,
     type SegmentResult,
     type TurnExecutor,
 } from '../runtime/index.js';
@@ -1255,8 +1257,11 @@ export class TaskEngine {
         const inProcessStack = buildInProcessRuntimeStack({
             turnRunner: this.turnRunner,
             sessionManager: this.sessionManager!,
-            createContext: (task) =>
-                this.createContext({ id: task.id, input: task.input as TaskInput }),
+            createContext: (task, binding) =>
+                this.createContext(
+                    { id: task.id, input: task.input as TaskInput },
+                    binding
+                ),
             onChildTimeout: async (params) => {
                 await this.detachTaskBranch({
                     tenantId: params.tenantId,
@@ -3111,7 +3116,10 @@ export class TaskEngine {
         } catch { /* ignore telemetry errors to prevent blockers */ }
 
         // Use provided context if present, otherwise create a basic one
-        const ctx = initialContext ?? this.createContext(task);
+        const ctx = initialContext ?? this.createContext(task, {
+            tenantId: startTenantId ?? 'default',
+            ...(agentId !== undefined ? { agentId } : {}),
+        });
 
         // Inject telemetry context
         if (agentNode) {
@@ -3920,7 +3928,13 @@ export class TaskEngine {
             const agentName = (snap as any)?.agentId;
             const plugin = agentName ? PluginManager.findAgent(agentName) : null;
             // Build context for this resume turn; use provided input as the current turn input
-            const ctx = this.createContext({ id: taskId, input: input as any });
+            const ctx = this.createContext(
+                { id: taskId, input: input as any },
+                {
+                    tenantId,
+                    ...(agentName !== undefined ? { agentId: agentName } : {}),
+                }
+            );
             (ctx as any).tenantId = tenantId;
             if (agentName) (ctx as any).agentId = agentName;
             // Ensure replies in this resumed turn are streamed to chat
@@ -4286,7 +4300,13 @@ export class TaskEngine {
         await this.sessionManager?.appendEvent(tenantId, taskId, 'task.external_event_registered', { token, type: entry?.type });
         // Always auto-resume one loop turn to consume the external event
         try {
-            const ctx = this.createContext({ id: taskId, input: {} });
+            const ctx = this.createContext(
+                { id: taskId, input: {} },
+                {
+                    tenantId,
+                    ...(agentName !== undefined ? { agentId: agentName } : {}),
+                }
+            );
             (ctx as any).tenantId = tenantId; if (agentName) (ctx as any).agentId = agentName;
 
             const snapNow = await this.sessionManager!.load(tenantId, taskId);
@@ -4890,21 +4910,36 @@ export class TaskEngine {
     /**
      * Create a basic task context
      */
-    private createContext(task: TaskEntity): TaskContext {
+    private createContext(
+        task: TaskEntity,
+        binding?: RuntimeContextBinding
+    ): TaskContext {
         // This is a simplified version - a real implementation would
         // inject all required dependencies like LLM, tools, etc.
         const ctx: TaskContext = {
-            tenantId: 'default', // TODO: Get from agent/task context
-            agentId: 'default', // TODO: Get from agent/task context
+            tenantId: binding?.tenantId ?? 'default',
+            agentId: binding?.agentId ?? 'default',
             task: {
                 id: task.id,
                 input: task.input as TaskInput
             },
-            artifacts: {
-                create: () => { throw new Error('Artifacts factory not attached'); },
-                text: () => { throw new Error('Artifacts factory not attached'); },
-                json: () => { throw new Error('Artifacts factory not attached'); }
-            },
+            artifacts: createArtifactFactory({
+                tenantId: binding?.tenantId ?? 'default',
+                resolveCache: () => {
+                    const prisma = this.getSessionStorePrisma();
+                    return prisma ? new AgentResultCache(prisma) : undefined;
+                },
+                onFailure: ({ operation, error, artifactId }) => {
+                    log.error('Artifact factory operation failed', {
+                        operation,
+                        tenantId: binding?.tenantId ?? 'default',
+                        taskId: task.id,
+                        agentId: binding?.agentId ?? 'default',
+                        artifactId,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                },
+            }),
             // These will be replaced by the streaming context
             reply: async (parts) => {
                 const { withSafety } = await import('../loop/effectSafety.js');
@@ -5051,9 +5086,13 @@ export class TaskEngine {
 
     private async restoreCtx(tenantId: string, taskId: string): Promise<TaskContext> {
         const task: TaskEntity = { id: taskId, input: {} };
-        const ctx = this.createContext(task);
-        (ctx as any).tenantId = tenantId;
         const snap = await this.sessionManager?.load(tenantId, taskId);
+        const agentName = snap?.agentId;
+        const ctx = this.createContext(task, {
+            tenantId,
+            ...(agentName !== undefined ? { agentId: agentName } : {}),
+        });
+        (ctx as any).tenantId = tenantId;
         const baseSnap = (snap?.snapshot as Record<string, unknown>) || {};
         // Expose MentalState on durable handler context
         try {
@@ -5063,7 +5102,6 @@ export class TaskEngine {
         } catch { /* noop */ }
         // Reattach LLM for this agent if available AND restore its conversation state
         try {
-            const agentName = snap?.agentId;
             if (agentName) {
                 const { PluginManager } = await import('../plugin/pluginManager.js');
                 const plugin = PluginManager.findAgent(agentName);

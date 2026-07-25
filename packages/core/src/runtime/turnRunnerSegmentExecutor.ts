@@ -41,7 +41,10 @@ import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-su
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
     sessionManager: SessionManager;
-    createContext: (task: { id: string; input: unknown }) => TaskContext;
+    createContext: (
+        task: { id: string; input: unknown },
+        binding?: RuntimeContextBinding
+    ) => TaskContext;
     isStreaming?: boolean;
     dedupe?: SegmentDedupe;
     onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
@@ -53,10 +56,15 @@ export type TurnRunnerSegmentExecutorDeps = {
     }) => Promise<void>;
 };
 
+export type RuntimeContextBinding = {
+    tenantId: string;
+    agentId?: string;
+};
+
 export class TurnRunnerSegmentExecutor implements TurnExecutor {
     private readonly turnRunner: TurnRunner;
     private readonly sessionManager: SessionManager;
-    private readonly createContext: (task: { id: string; input: unknown }) => TaskContext;
+    private readonly createContext: TurnRunnerSegmentExecutorDeps['createContext'];
     private readonly isStreaming: boolean;
     private readonly dedupe: SegmentDedupe;
     private readonly onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
@@ -281,10 +289,18 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, 'matching_replay');
         }
 
-        const ctx = this.createContext({
-            id: taskId,
-            input: wake.trigger === 'start' ? wake.input : {},
-        });
+        const ctx = this.createContext(
+            {
+                id: taskId,
+                input: wake.trigger === 'start' ? wake.input : {},
+            },
+            {
+                tenantId,
+                ...(preparedWake.agentId !== undefined
+                    ? { agentId: preparedWake.agentId }
+                    : {}),
+            }
+        );
         if ((ctx as { task?: unknown }).task === undefined) {
             (ctx as { task?: { id: string; input: unknown } }).task = {
                 id: taskId,

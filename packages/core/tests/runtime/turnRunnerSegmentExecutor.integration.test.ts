@@ -115,6 +115,48 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         executeTurnSpy.mockRestore();
     });
 
+    it('passes authoritative tenant and agent identity into reconstructed contexts', async () => {
+        const boundContexts: Array<{
+            tenantId?: string;
+            agentId?: string;
+        }> = [];
+        const boundExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task, binding) => {
+                boundContexts.push(binding ?? {});
+                return {
+                    task,
+                    logger: console,
+                    progress: jest.fn(),
+                    fail: jest.fn(),
+                } as unknown as TaskContext;
+            },
+            dedupe: createInMemorySegmentDedupe(),
+        });
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
+            M: initialM(params.ctx),
+            outcome: { kind: 'complete', result: { done: true } },
+            metrics: {},
+            taskStatus: {
+                state: 'completed',
+                timestamp: new Date().toISOString(),
+                metadata: { result: { done: true } },
+            },
+        }));
+
+        await boundExecutor.runSegment({
+            tenantId,
+            taskId: `${taskId}-binding`,
+            agentId,
+            idempotencyKey: `${taskId}-binding:start`,
+            runtimeSurface: 'hatchet',
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(boundContexts).toEqual([{ tenantId, agentId }]);
+    });
+
     it('rejects raw TurnRunner execution for an initialized loop task without a fence', async () => {
         await sessionManager.saveSnapshot({
             tenantId,

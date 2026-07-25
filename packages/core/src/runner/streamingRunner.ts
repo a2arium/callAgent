@@ -6,7 +6,7 @@ import { StreamTransport } from './StreamTransport.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig, type MinimalConfig } from '../config/index.js';
 import { PluginManager } from '../plugin/pluginManager.js';
-import type { TaskContext, TaskInput, MessagePart, Artifact as ArtifactHandle } from '../shared/types/index.js';
+import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus, Artifact as StreamArtifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../plugin/types.js';
 import { logger, withLoggingContext, type LoggerConfig } from '@a2arium/callagent-utils';
@@ -36,7 +36,6 @@ import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
 import { resolveTenantId } from '../plugin/tenantResolver.js';
 import { globalA2AService } from '../orchestration/A2AService.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
-import { ArtifactImpl } from '@a2arium/callagent-memory-engine';
 import { PrismaClient } from '../generated/prisma-client/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
@@ -44,6 +43,10 @@ import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
 import { resolveActiveRunTimeout, resolveTerminalDrainTimeout } from './backgroundTaskTimeout.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 import { createTerminalDeliveryGate } from './terminalDeliveryGate.js';
+import {
+    ArtifactStorageUnavailableError,
+    createArtifactFactory,
+} from '../context/artifactFactory.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
@@ -227,7 +230,7 @@ export async function runAgentWithStreamingDetailed(
             return agentResultCache;
         } catch (error) {
             agentLogger.error('Failed to initialize AgentResultCache', error);
-            throw new Error('Artifacts require a database connection. Please ensure Prisma is configured.');
+            throw new ArtifactStorageUnavailableError();
         }
     };
 
@@ -244,23 +247,20 @@ export async function runAgentWithStreamingDetailed(
     }
 
     // Create basic task context with resolved tenant information (excluding working memory methods)
-    const artifactsFactory: TaskContext['artifacts'] = {
-        create: <T>(val?: T, options?: { mimeType?: string; preview?: string }): ArtifactHandle<T> => {
-            const cachePromise = ensureAgentResultCache();
-            const artifact = new ArtifactImpl<T>(undefined, cachePromise, finalTenantId, options?.mimeType);
-            if (val !== undefined) {
-                // Fire and forget set (handled internally by ArtifactImpl tracking _pendingWrite)
-                artifact.set(val).catch((err: unknown) => {
-                    agentLogger.error('Failed to set artifact value in background', err);
-                });
-            }
-            return artifact;
+    const artifactsFactory = createArtifactFactory({
+        tenantId: finalTenantId,
+        resolveCache: ensureAgentResultCache,
+        onFailure: ({ operation, error, artifactId }) => {
+            agentLogger.error('Artifact factory operation failed', {
+                operation,
+                tenantId: finalTenantId,
+                taskId,
+                agentId: agentName,
+                artifactId,
+                error: error instanceof Error ? error.message : String(error),
+            });
         },
-        text: (val?: string): ArtifactHandle<string> =>
-            artifactsFactory.create<string>(val, { mimeType: 'text/plain' }),
-        json: <T>(val?: T): ArtifactHandle<T> =>
-            artifactsFactory.create<T>(val, { mimeType: 'application/json' })
-    };
+    });
 
     const partialCtx: PartialTaskContext = {
         tenantId: finalTenantId,

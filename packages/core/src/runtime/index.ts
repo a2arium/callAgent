@@ -88,7 +88,10 @@ export {
 export type { SegmentCancellation } from './segmentCancellation.js';
 
 export { TurnRunnerSegmentExecutor } from './turnRunnerSegmentExecutor.js';
-export type { TurnRunnerSegmentExecutorDeps } from './turnRunnerSegmentExecutor.js';
+export type {
+    RuntimeContextBinding,
+    TurnRunnerSegmentExecutorDeps,
+} from './turnRunnerSegmentExecutor.js';
 
 export { buildInProcessRuntimeStack } from './buildInProcessRuntimeStack.js';
 export type {
