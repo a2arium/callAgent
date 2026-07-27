@@ -51,6 +51,31 @@ cd packages/memory-sql && yarn db:migrate && yarn db:generate
 yarn hatchet:poc:up
 ```
 
+Lifecycle commands are bounded so an unhealthy Docker daemon cannot leave the
+terminal hanging:
+
+```bash
+yarn hatchet:poc:down
+yarn hatchet:poc:restart
+```
+
+`down` first asks Compose to stop containers gracefully. If the command exceeds
+its deadline, it terminates the stuck Compose client, sends `SIGKILL` to the POC
+containers, and runs zero-grace cleanup. Named volumes are preserved.
+
+The deadlines can be adjusted when debugging slow machines:
+
+```bash
+HATCHET_POC_UP_TIMEOUT_SECONDS=120
+HATCHET_POC_DOWN_TIMEOUT_SECONDS=30
+HATCHET_POC_STOP_GRACE_SECONDS=10
+HATCHET_POC_HARD_TIMEOUT_SECONDS=15
+```
+
+If both graceful and forced cleanup time out, check `docker info` and available
+host disk space. Compose cannot stop containers while the Docker Engine itself
+is unresponsive.
+
 For acceptance testing, do not reuse a development Hatchet history. Create a
 fresh Hatchet database and launch a separate Compose project with the isolated
 port/volume profile:
