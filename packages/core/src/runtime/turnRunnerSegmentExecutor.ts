@@ -37,6 +37,10 @@ import {
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
+import {
+    isTaskReplyStreaming,
+    readTaskReplyDeliveryMode,
+} from '../context/taskReplyDelivery.js';
 
 export type TurnRunnerSegmentExecutorDeps = {
     turnRunner: TurnRunner;
@@ -311,6 +315,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         (ctx as { agentId?: string }).agentId = preparedWake.agentId;
 
         const M = (admission.snapshot.M as MentalState | undefined) ?? initialM(ctx);
+        const persistedReplyMode = readTaskReplyDeliveryMode(admission.snapshot);
+        const isStreaming = persistedReplyMode !== undefined
+            ? isTaskReplyStreaming(persistedReplyMode)
+            : this.isStreaming;
 
         let taskEntity;
         try {
@@ -322,7 +330,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                         tenantId,
                         sessionId: taskId,
                         trigger: preparedWake.trigger,
-                        isStreaming: this.isStreaming,
+                        isStreaming,
                         ...preparedWake.turnParams,
                     },
                     {

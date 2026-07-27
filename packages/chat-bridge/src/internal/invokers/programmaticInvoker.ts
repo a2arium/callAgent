@@ -33,6 +33,7 @@ type TaskEngine = {
         taskId: string;
         token: string;
         input: BridgeTaskInput;
+        isStreaming?: boolean;
     }): Promise<unknown>;
 };
 type WorkingMemoryEvent = {
@@ -375,7 +376,13 @@ export class ProgrammaticInvoker implements Invoker, StreamingInvoker {
         unsubResume = resumeSub.unsubscribe;
 
         // Resume input and wait for next status
-        await engine.resumeInput({ tenantId, taskId: id, token: effectiveToken, input: normalizedInput });
+        await engine.resumeInput({
+            tenantId,
+            taskId: id,
+            token: effectiveToken,
+            input: normalizedInput,
+            isStreaming: true,
+        });
         return done;
     }
 
@@ -409,6 +416,7 @@ export class ProgrammaticInvoker implements Invoker, StreamingInvoker {
                 taskId: id,
                 token: effectiveToken,
                 input: normalizedInput,
+                isStreaming: true,
             }),
         });
     }

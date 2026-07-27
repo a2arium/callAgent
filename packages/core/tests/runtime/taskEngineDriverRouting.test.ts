@@ -9,6 +9,7 @@ import type { RuntimeDriver } from '../../src/runtime/runtimeDriver.js';
 import { initialM } from '../../src/loop/init.js';
 import type { TaskContext } from '../../src/shared/types/index.js';
 import { StreamTransport } from '../../src/runner/StreamTransport.js';
+import { setPendingInputs } from '../../src/orchestration/DurableHandlerRegistry.js';
 
 const loopAgentPlugin = {
     resolved: {
@@ -112,8 +113,164 @@ describe('TaskEngine runtime driver routing', () => {
         });
 
         expect(startSpy).toHaveBeenCalledTimes(1);
+        const persisted = await store.getSessionSnapshot('t', 't-sync');
+        expect((persisted?.snapshot as any)?.meta?.replyDeliveryMode).toBe('buffer');
         executeTurnSpy.mockRestore();
         startSpy.mockRestore();
+    });
+
+    it('persists streaming reply delivery before the first segment runs', async () => {
+        const executeTurnSpy = jest.spyOn(TaskExecutor, 'executeTurn').mockResolvedValue({
+            M: initialM({ task: { id: 't-stream-mode', input: {} } } as TaskContext),
+            outcome: { kind: 'complete', result: { ok: true } },
+            metrics: {},
+            taskStatus: {
+                state: 'completed',
+                timestamp: new Date().toISOString(),
+                metadata: { result: { ok: true } },
+            },
+        });
+        const store = new InMemorySessionManager();
+        const engine = new TaskEngine({ sessionStore: store });
+
+        await engine.startTask({
+            tenantId: 't',
+            agentId: 'driver-test-agent',
+            isStreaming: true,
+            task: { id: 't-stream-mode', input: {} },
+        });
+
+        const persisted = await store.getSessionSnapshot('t', 't-stream-mode');
+        expect((persisted?.snapshot as any)?.meta?.replyDeliveryMode).toBe('stream');
+        executeTurnSpy.mockRestore();
+    });
+
+    it('reconciles simultaneous identical reply-delivery declarations', async () => {
+        const store = new InMemorySessionManager();
+        const driver = createAsyncOnlyDriver();
+        const engine = new TaskEngine({
+            sessionStore: store,
+            runtimeDriver: driver,
+        });
+        const start = () => engine.startTask({
+            tenantId: 't',
+            agentId: 'driver-test-agent',
+            isStreaming: true,
+            task: { id: 't-concurrent-stream-mode', input: {} },
+        });
+
+        await expect(Promise.all([start(), start()])).resolves.toHaveLength(2);
+
+        const persisted = await store.getSessionSnapshot('t', 't-concurrent-stream-mode');
+        expect((persisted?.snapshot as any)?.meta?.replyDeliveryMode).toBe('stream');
+    });
+
+    it('seeds streaming mode for a valid historical input resume before enqueue', async () => {
+        const store = new InMemorySessionManager();
+        const driver = createAsyncOnlyDriver();
+        const engine = new TaskEngine({
+            sessionStore: store,
+            runtimeDriver: driver,
+        });
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 't-historical-stream',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: setPendingInputs(
+                { meta: { agentId: 'driver-test-agent' } },
+                { 'input-token': {} }
+            ),
+        });
+
+        await engine.resumeInput({
+            tenantId: 't',
+            taskId: 't-historical-stream',
+            token: 'input-token',
+            input: { text: 'answer' },
+            isStreaming: true,
+        });
+
+        const persisted = await store.getSessionSnapshot('t', 't-historical-stream');
+        expect((persisted?.snapshot as any)?.meta?.replyDeliveryMode).toBe('stream');
+        expect(driver.enqueueResume).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects changing reply delivery mode for a live task', async () => {
+        const store = new InMemorySessionManager();
+        const driver = createAsyncOnlyDriver();
+        const engine = new TaskEngine({
+            sessionStore: store,
+            runtimeDriver: driver,
+        });
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 't-buffered-live',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: setPendingInputs(
+                {
+                    meta: {
+                        agentId: 'driver-test-agent',
+                        replyDeliveryMode: 'buffer',
+                    },
+                },
+                { 'input-token': {} }
+            ),
+        });
+
+        await expect(engine.resumeInput({
+            tenantId: 't',
+            taskId: 't-buffered-live',
+            token: 'input-token',
+            input: { text: 'answer' },
+            isStreaming: true,
+        })).rejects.toMatchObject({
+            code: 'TASK_REPLY_DELIVERY_MODE_CONFLICT',
+        });
+        expect(driver.enqueueResume).not.toHaveBeenCalled();
+    });
+
+    it('does not rewrite or conflict with delivery mode during terminal replay', async () => {
+        const store = new InMemorySessionManager();
+        const driver = createAsyncOnlyDriver();
+        const engine = new TaskEngine({
+            sessionStore: store,
+            runtimeDriver: driver,
+        });
+        await store.writeSnapshotCAS({
+            tenantId: 't',
+            sessionId: 't-buffered-terminal',
+            agentId: 'driver-test-agent',
+            expectedWmVersion: BigInt(0),
+            snapshot: setPendingInputs(
+                {
+                    meta: {
+                        agentId: 'driver-test-agent',
+                        replyDeliveryMode: 'buffer',
+                        taskLifecycle: {
+                            taskId: 't-buffered-terminal',
+                            rootTaskId: 't-buffered-terminal',
+                            ancestorTaskIds: [],
+                            state: 'completed',
+                        },
+                    },
+                },
+                { 'input-token': {} }
+            ),
+        });
+
+        await expect(engine.resumeInput({
+            tenantId: 't',
+            taskId: 't-buffered-terminal',
+            token: 'input-token',
+            input: { text: 'late answer' },
+            isStreaming: true,
+        })).resolves.toEqual({ acknowledged: true });
+
+        const persisted = await store.getSessionSnapshot('t', 't-buffered-terminal');
+        expect((persisted?.snapshot as any)?.meta?.replyDeliveryMode).toBe('buffer');
+        expect(driver.enqueueResume).toHaveBeenCalledTimes(1);
     });
 
     it('persists and publishes a failed terminal result returned by the sync driver', async () => {

@@ -16,6 +16,52 @@ import { v7 as uuidv7 } from 'uuid';
 import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
 import type { InternalTaskContext } from '../loop/internalContext.js';
 
+const TASK_REPLY_CAPABILITY = Symbol('callagent.taskReplyCapability');
+
+type TaskReplyCapabilityMarker = {
+    eventBus: IEventBus;
+    isStreaming: boolean;
+};
+
+type ContextWithTaskReplyCapability = TaskContext & {
+    [TASK_REPLY_CAPABILITY]?: TaskReplyCapabilityMarker;
+};
+
+export const TASK_REPLY_CAPABILITY_UNAVAILABLE = 'TASK_REPLY_CAPABILITY_UNAVAILABLE';
+
+export class TaskReplyCapabilityUnavailableError extends Error {
+    readonly code = TASK_REPLY_CAPABILITY_UNAVAILABLE;
+
+    constructor(taskId?: string) {
+        super(
+            `${TASK_REPLY_CAPABILITY_UNAVAILABLE}: reply/progress capability was not ` +
+            `finalized${taskId ? ` for task ${taskId}` : ''}.`
+        );
+        this.name = 'TaskReplyCapabilityUnavailableError';
+        Object.setPrototypeOf(this, TaskReplyCapabilityUnavailableError.prototype);
+    }
+}
+
+export function hasTaskReplyCapability(
+    ctx: TaskContext,
+    expected?: { eventBus?: IEventBus; isStreaming?: boolean }
+): boolean {
+    const marker = (ctx as ContextWithTaskReplyCapability)[TASK_REPLY_CAPABILITY];
+    if (marker === undefined) return false;
+    if (expected?.eventBus !== undefined && marker.eventBus !== expected.eventBus) return false;
+    if (expected?.isStreaming !== undefined && marker.isStreaming !== expected.isStreaming) return false;
+    return true;
+}
+
+export function assertTaskReplyCapability(
+    ctx: TaskContext,
+    expected?: { eventBus?: IEventBus; isStreaming?: boolean }
+): void {
+    if (!hasTaskReplyCapability(ctx, expected)) {
+        throw new TaskReplyCapabilityUnavailableError(ctx.task?.id);
+    }
+}
+
 /**
  * Options for the reply method
  */
@@ -45,7 +91,15 @@ export function extendContextWithStreaming(
     isStreaming: boolean,
     eventBusParam?: IEventBus
 ): void {
-    const eventBus = eventBusParam ?? createInMemoryEventBus();
+    const capabilityContext = ctx as ContextWithTaskReplyCapability;
+    const existingCapability = capabilityContext[TASK_REPLY_CAPABILITY];
+    const eventBus = eventBusParam ?? existingCapability?.eventBus ?? createInMemoryEventBus();
+    if (
+        existingCapability?.eventBus === eventBus &&
+        existingCapability.isStreaming === isStreaming
+    ) {
+        return;
+    }
 
     const publishA2aPayload = (taskId: string, data: Record<string, unknown>): void => {
         void eventBus.publish(
@@ -429,5 +483,11 @@ export function extendContextWithStreaming(
             logger.error(`Agent threw structured error: [${code}] ${message}`, { code, message, detailType: detail.type });
             throwInvariantError(code, message, detail, context);
         },
+    });
+    Object.defineProperty(capabilityContext, TASK_REPLY_CAPABILITY, {
+        value: { eventBus, isStreaming },
+        configurable: true,
+        enumerable: false,
+        writable: false,
     });
 } 

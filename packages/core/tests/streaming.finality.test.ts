@@ -32,6 +32,61 @@ describe('streaming finality', () => {
         jest.restoreAllMocks();
     });
 
+    it('keeps the same reply capability and buffered state when finalized twice', async () => {
+        const taskId = 'task-idempotent-streaming-context';
+        const bus = createInMemoryEventBus();
+        const ctx: any = {
+            task: { id: taskId },
+            tenantId: 'tenant-test',
+            agentId: 'agent-test',
+        };
+
+        extendContextWithStreaming(ctx, false, bus);
+        const firstReply = ctx.reply;
+        await ctx.reply('first buffered reply');
+
+        extendContextWithStreaming(ctx, false, bus);
+
+        expect(ctx.reply).toBe(firstReply);
+        expect(ctx.getBufferedResults().artifacts).toEqual([
+            expect.objectContaining({
+                parts: [
+                    expect.objectContaining({
+                        type: 'text',
+                        text: 'first buffered reply',
+                    }),
+                ],
+            }),
+        ]);
+    });
+
+    it('publishes one reply after repeated streaming finalization', async () => {
+        const taskId = 'task-idempotent-streaming-publish';
+        const bus = createInMemoryEventBus();
+        const events: A2AEvent[] = [];
+        await bus.subscribe(taskChannel(taskId), async (event) => {
+            events.push(event.payload.data as A2AEvent);
+        });
+        const ctx: any = {
+            task: { id: taskId },
+            tenantId: 'tenant-test',
+            agentId: 'agent-test',
+        };
+
+        extendContextWithStreaming(ctx, true, bus);
+        extendContextWithStreaming(ctx, true, bus);
+        await ctx.reply('one event');
+        await Promise.resolve();
+
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+            id: taskId,
+            artifact: {
+                parts: [{ type: 'text', text: 'one event' }],
+            },
+        });
+    });
+
     it('does not promote reply lastChunk to task-level final', async () => {
         const taskId = 'task-last-chunk';
         const bus = createInMemoryEventBus();

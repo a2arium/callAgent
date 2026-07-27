@@ -1,11 +1,16 @@
 import {
     PluginManager,
+    TaskEngine,
     createBusEvent,
     createInMemoryEventBus,
     taskChannel,
     type A2AEvent,
     type RuntimeStreamChatProjectionEvent,
 } from '@a2arium/callagent-core';
+import { InMemorySessionManager } from '../../core/src/orchestration/InMemorySessionManager.js';
+import { TaskExecutor } from '../../core/src/orchestration/TaskExecutor.js';
+import { initialM } from '../../core/src/loop/init.js';
+import { setPendingInputs } from '../../core/src/orchestration/DurableHandlerRegistry.js';
 import { jest } from '@jest/globals';
 import {
     createStreamForwardState,
@@ -27,6 +32,96 @@ describe('ProgrammaticInvoker', () => {
 
         expect(typeof invoker.start).toBe('function');
         expect(typeof invoker.resume).toBe('function');
+    });
+
+    test('real loop resume delivers reply and the next input prompt to chat', async () => {
+        const taskId = 'task-real-chat-resume';
+        const tenantId = 'tenant-real-chat-resume';
+        const agentId = 'agent-real-chat-resume';
+        const inputToken = 'existing-input-token';
+        const route: ChatRoute = { network: 'web', conversationId: 'real-user' };
+        const bus = createInMemoryEventBus();
+        const store = new InMemorySessionManager();
+        const sentMessages: string[] = [];
+
+        jest.spyOn(PluginManager, 'findAgent').mockReturnValue({
+            resolved: {
+                runtimeManifest: {
+                    name: agentId,
+                    version: '1.0.0',
+                    runMode: 'loop',
+                    budgets: { maxTurns: 5 },
+                },
+                agentCard: { name: agentId, version: '1.0.0' },
+            },
+        } as any);
+        jest.spyOn(TaskExecutor, 'executeTurn').mockImplementation(async (params) => {
+            await params.ctx.reply('reply after button');
+            const nextInput = await params.ctx.requestInput('Choose again');
+            return {
+                M: params.M ?? initialM(params.ctx),
+                outcome: { kind: 'await_input', token: nextInput.token },
+                metrics: {},
+                taskStatus: {
+                    state: 'input-required',
+                    timestamp: new Date().toISOString(),
+                    metadata: { token: nextInput.token },
+                },
+            };
+        });
+        await store.writeSnapshotCAS({
+            tenantId,
+            sessionId: taskId,
+            agentId,
+            expectedWmVersion: BigInt(0),
+            snapshot: setPendingInputs(
+                {
+                    meta: {
+                        agentId,
+                        turnCoordinator: {
+                            schemaVersion: 1,
+                            nextFence: '0',
+                            nextTurnSeq: 0,
+                            requestedGeneration: '0',
+                            completedGeneration: '0',
+                        },
+                    },
+                },
+                { [inputToken]: {} }
+            ),
+        });
+
+        const engine = new TaskEngine({ sessionStore: store, eventBus: bus });
+        const invoker = new ProgrammaticInvoker({
+            chatSender: {
+                async sendMessage(_routeArg, text) {
+                    sentMessages.push(text);
+                },
+            },
+            runtime: {
+                engine,
+                eventBus: bus,
+                taskChannel,
+                wmStore: store,
+            },
+        });
+
+        const result = await invoker.resume({
+            id: taskId,
+            token: inputToken,
+            input: { route, text: 'more' },
+            tenantId,
+            route,
+        });
+
+        expect(result).toMatchObject({
+            id: taskId,
+            status: 'input_required',
+            prompt: 'Choose again',
+        });
+        expect(sentMessages).toEqual(['reply after button', 'Choose again']);
+        const persisted = await store.getSessionSnapshot(tenantId, taskId);
+        expect((persisted?.snapshot as any)?.meta?.replyDeliveryMode).toBe('stream');
     });
 
     test('streams bus events to chat and resolves on terminal task status', async () => {
@@ -265,7 +360,13 @@ describe('ProgrammaticInvoker', () => {
         const route: ChatRoute = { network: 'web', conversationId: 'u1' };
         const bus = createInMemoryEventBus();
         const sentMessages: string[] = [];
-        const resumeCalls: Array<{ tenantId: string; taskId: string; token: string; inputText?: string }> = [];
+        const resumeCalls: Array<{
+            tenantId: string;
+            taskId: string;
+            token: string;
+            inputText?: string;
+            isStreaming?: boolean;
+        }> = [];
 
         const publishA2AEvent = async (event: A2AEvent, id: string) => {
             await bus.publish(createBusEvent({
@@ -282,12 +383,19 @@ describe('ProgrammaticInvoker', () => {
 
         const engine = {
             async startTask() { },
-            async resumeInput(params: { tenantId: string; taskId: string; token: string; input: { text?: string } }) {
+            async resumeInput(params: {
+                tenantId: string;
+                taskId: string;
+                token: string;
+                input: { text?: string };
+                isStreaming?: boolean;
+            }) {
                 resumeCalls.push({
                     tenantId: params.tenantId,
                     taskId: params.taskId,
                     token: params.token,
                     inputText: params.input.text,
+                    isStreaming: params.isStreaming,
                 });
                 await publishA2AEvent({
                     id: taskId,
@@ -343,7 +451,13 @@ describe('ProgrammaticInvoker', () => {
             output: { text: 'after input' },
         });
 
-        expect(resumeCalls).toEqual([{ tenantId, taskId, token, inputText: 'answer' }]);
+        expect(resumeCalls).toEqual([{
+            tenantId,
+            taskId,
+            token,
+            inputText: 'answer',
+            isStreaming: true,
+        }]);
         expect(sentMessages).toEqual(['after ', 'input']);
     });
 
@@ -352,7 +466,12 @@ describe('ProgrammaticInvoker', () => {
         const tenantId = 'tenant-chat-stream';
         const route: ChatRoute = { network: 'web', conversationId: 'u1' };
         const bus = createInMemoryEventBus();
-        const resumeCalls: Array<{ tenantId: string; taskId: string; token: string }> = [];
+        const resumeCalls: Array<{
+            tenantId: string;
+            taskId: string;
+            token: string;
+            isStreaming?: boolean;
+        }> = [];
 
         const publishA2AEvent = async (event: A2AEvent, id: string) => {
             await bus.publish(createBusEvent({
@@ -368,7 +487,12 @@ describe('ProgrammaticInvoker', () => {
         };
         const engine = {
             async startTask() { },
-            async resumeInput(params: { tenantId: string; taskId: string; token: string }) {
+            async resumeInput(params: {
+                tenantId: string;
+                taskId: string;
+                token: string;
+                isStreaming?: boolean;
+            }) {
                 resumeCalls.push(params);
                 await publishA2AEvent({
                     id: taskId,
@@ -408,7 +532,14 @@ describe('ProgrammaticInvoker', () => {
             route,
         }));
 
-        expect(resumeCalls).toEqual([expect.objectContaining({ tenantId, taskId, token: 'tok' })]);
+        expect(resumeCalls).toEqual([
+            expect.objectContaining({
+                tenantId,
+                taskId,
+                token: 'tok',
+                isStreaming: true,
+            }),
+        ]);
         expect(events.map((event) => event.type)).toEqual(['artifact.delta', 'task.status']);
         expect(events[1]).toMatchObject({ type: 'task.status', data: { state: 'completed', terminal: true } });
     });

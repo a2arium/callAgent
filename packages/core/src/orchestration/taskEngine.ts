@@ -11,7 +11,14 @@ import type { MessageLog } from '../public-types/messageLog/types.js';
 import type { DurableSubscription } from '../public-types/messageLog/durableSubscription.types.js';
 import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
-import { extendContextWithStreaming } from '../context/StreamingContext.js';
+import {
+    extendContextWithStreaming,
+    TaskReplyCapabilityUnavailableError,
+} from '../context/StreamingContext.js';
+import {
+    ensureTaskReplyDeliveryMode,
+    taskReplyDeliveryModeFromStreaming,
+} from '../context/taskReplyDelivery.js';
 import { SessionManager } from './SessionManager.js';
 import { InMemorySessionManager } from './InMemorySessionManager.js';
 import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
@@ -3214,7 +3221,8 @@ export class TaskEngine {
             const session = await this.sessionManager?.load(tenantId, sessionId) ?? null;
 
 
-            const baseSnap = (session?.snapshot as Record<string, unknown>) || {};
+            let baseSnap = (session?.snapshot as Record<string, unknown>) || {};
+            let contextWmVersion = session?.wmVersion;
             // Restore manifest provenance from snapshot if present (resume path)
             const meta = baseSnap.meta as { manifestProvenance?: ManifestProvenance } | undefined;
             if (meta?.manifestProvenance) {
@@ -3237,22 +3245,67 @@ export class TaskEngine {
                 metaObj.a2aParent = a2aParent;
                 baseSnap.meta = metaObj;
             }
-            let M: MentalState = (baseSnap as Record<string, unknown>).M as MentalState || initialM(ctx);
+            // Reply delivery is task-scoped and must be durable before a loop
+            // segment can be reconstructed by this or another process.
+            const declaredAgentId = ((ctx as any).agentId || activeAgentId || 'default') as string;
+            const requestedReplyMode = taskReplyDeliveryModeFromStreaming(isStreaming);
+            if (this.sessionManager) {
+                const desiredMeta = (baseSnap.meta as Record<string, unknown> | undefined) ?? {};
+                const reconciled = await reconcileSnapshotMutation({
+                    session: this.sessionManager,
+                    tenantId,
+                    sessionId,
+                    agentId: declaredAgentId,
+                    operation: 'task.seed_reply_delivery_mode',
+                    mutate: ({ snapshot, agentId: storedAgentId }) => {
+                        const lifecycle = readTaskLifecycle(snapshot, sessionId);
+                        const delivery = isTaskLifecycleTerminal(lifecycle)
+                            ? { snapshot, changed: false }
+                            : ensureTaskReplyDeliveryMode(snapshot, requestedReplyMode);
+                        const currentMeta =
+                            delivery.snapshot.meta !== null &&
+                            typeof delivery.snapshot.meta === 'object' &&
+                            !Array.isArray(delivery.snapshot.meta)
+                                ? delivery.snapshot.meta as Record<string, unknown>
+                                : {};
+                        const nextMeta = { ...currentMeta };
+                        let changed = delivery.changed;
+                        for (const key of ['manifestProvenance', 'a2aParent'] as const) {
+                            if (nextMeta[key] === undefined && desiredMeta[key] !== undefined) {
+                                nextMeta[key] = desiredMeta[key];
+                                changed = true;
+                            }
+                        }
+                        const needsAgentIdentity = !storedAgentId || storedAgentId === 'default';
+                        if (!changed && !needsAgentIdentity) {
+                            return { kind: 'noop', value: undefined };
+                        }
+                        return {
+                            kind: 'write',
+                            snapshot: {
+                                ...delivery.snapshot,
+                                meta: nextMeta,
+                            },
+                            value: undefined,
+                        };
+                    },
+                });
+                baseSnap = reconciled.snapshot;
+                contextWmVersion = reconciled.wmVersion;
+            } else {
+                const lifecycle = readTaskLifecycle(baseSnap, sessionId);
+                if (!isTaskLifecycleTerminal(lifecycle)) {
+                    baseSnap = ensureTaskReplyDeliveryMode(baseSnap, requestedReplyMode).snapshot;
+                }
+            }
 
+            let M: MentalState = (baseSnap as Record<string, unknown>).M as MentalState || initialM(ctx);
             // Hydrate any persisted Artifact markers inside the mental state / vars
             const mentalHydrationPrisma = this.getSessionStorePrisma() || (this.sessionManager as any)?.prisma;
             M = (ArtifactHydrationService.hydrateMentalStateArtifacts(M, mentalHydrationPrisma, tenantId, 'startTask') as MentalState) || M;
-            // Ensure session agentId is correctly set for this task upfront
-            try {
-                const declaredAgentId = ((ctx as any).agentId || activeAgentId || 'default') as string;
-                const currentAgentId = (session as any)?.agentId as string | undefined;
-                if (this.sessionManager && declaredAgentId && (!currentAgentId || currentAgentId === 'default')) {
-                    await this.sessionManager.saveSnapshot({ tenantId, sessionId, agentId: declaredAgentId, expectedWmVersion: session?.wmVersion ?? BigInt(0), snapshot: baseSnap });
-                }
-            } catch { /* best-effort */ }
             // Expose MentalState on context for in-turn cognitive operations (e.g., goals API)
             (ctx as Record<string, unknown>).__mental = M;
-            (ctx as Record<string, unknown>).__wmVersion = session?.wmVersion;
+            (ctx as Record<string, unknown>).__wmVersion = contextWmVersion;
 
             // Seed loop budget limits if provided in params.options
             if (params.options) {
@@ -3848,9 +3901,15 @@ export class TaskEngine {
      * Resume a task on input (scaffold): append input event and publish status via outbox.
      * Real handler dispatch will be added with durable handler registry.
      */
-    async resumeInput(params: { tenantId: string; taskId: string; token: string; input: unknown }): Promise<{ acknowledged: true }> {
+    async resumeInput(params: {
+        tenantId: string;
+        taskId: string;
+        token: string;
+        input: unknown;
+        isStreaming?: boolean;
+    }): Promise<{ acknowledged: true }> {
         log.debug('Resume input processing started');
-        const { tenantId, taskId, token, input } = params;
+        const { tenantId, taskId, token, input, isStreaming } = params;
         // load snapshot
         const snap = await this.sessionManager?.load(tenantId, taskId);
         if (!snap) {
@@ -3866,6 +3925,35 @@ export class TaskEngine {
         const loopPlugin = loopAgentName ? PluginManager.findAgent(loopAgentName) : null;
         const configuredRunMode = loopPlugin?.resolved.runtimeManifest.runMode ?? 'loop';
         if (configuredRunMode !== 'legacy') {
+            if (isStreaming !== undefined) {
+                const requestedMode = taskReplyDeliveryModeFromStreaming(isStreaming);
+                await reconcileSnapshotMutation({
+                    session: this.sessionManager!,
+                    tenantId,
+                    sessionId: taskId,
+                    agentId: loopAgentName,
+                    operation: 'input.seed_reply_delivery_mode',
+                    mutate: ({ snapshot, storageNow }) => {
+                        const lifecycle = readTaskLifecycle(snapshot, taskId);
+                        if (isTaskLifecycleTerminal(lifecycle)) {
+                            return { kind: 'noop', value: undefined };
+                        }
+                        const pending = getPendingInputs(snapshot);
+                        const entry = pending[token];
+                        const tokenIsValid = entry !== undefined && (
+                            entry.expiresAt === undefined ||
+                            Date.parse(entry.expiresAt) >= Date.parse(storageNow)
+                        );
+                        if (!tokenIsValid) {
+                            return { kind: 'noop', value: undefined };
+                        }
+                        const ensured = ensureTaskReplyDeliveryMode(snapshot, requestedMode);
+                        return ensured.changed
+                            ? { kind: 'write', snapshot: ensured.snapshot, value: undefined }
+                            : { kind: 'noop', value: undefined };
+                    },
+                });
+            }
             if (input && typeof input === 'object') {
                 const prisma = this.getSessionStorePrisma();
                 if (prisma) hydrateArtifacts(input, new AgentResultCache(prisma), tenantId);
@@ -4940,12 +5028,14 @@ export class TaskEngine {
                     });
                 },
             }),
-            // These will be replaced by the streaming context
-            reply: async (parts) => {
-                const { withSafety } = await import('../loop/effectSafety.js');
-                await withSafety(async () => { /* real reply implementation is injected by streaming runner */ }, { timeoutMs: 5000, maxRetries: 1 });
+            // These fail closed until the canonical turn finalizer installs the
+            // real reply/progress transport.
+            reply: async () => {
+                throw new TaskReplyCapabilityUnavailableError(task.id);
             },
-            progress: () => { },
+            progress: () => {
+                throw new TaskReplyCapabilityUnavailableError(task.id);
+            },
             complete: () => { },
             fail: async () => { },
             // Add stub for recordUsage

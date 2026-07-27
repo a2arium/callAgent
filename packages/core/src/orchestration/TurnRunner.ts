@@ -27,6 +27,14 @@ import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublish
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
 import { flushBufferedOperatorTurnEvents } from '../loop/loopRunner.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
+import {
+    assertTaskReplyCapability,
+    extendContextWithStreaming,
+} from '../context/StreamingContext.js';
+import {
+    isTaskReplyStreaming,
+    readTaskReplyDeliveryMode,
+} from '../context/taskReplyDelivery.js';
 import * as uuid from 'uuid';
 const uuidv7 = uuid.v7;
 
@@ -75,7 +83,7 @@ export class TurnRunner {
             snapshot?: Record<string, unknown>;
         }
     ): Promise<TaskEntity> {
-        const { tenantId, sessionId, trigger, isStreaming } = params;
+        const { tenantId, sessionId, trigger, isStreaming: requestedStreaming } = params;
         log.debug('runTurn called', { trigger, sessionId, toolToken: params.toolToken });
 
         // Telemetry state
@@ -116,6 +124,11 @@ export class TurnRunner {
             }
 
             const base = overrides?.snapshot || (snap?.snapshot as Record<string, unknown>) || {};
+            const persistedReplyMode = readTaskReplyDeliveryMode(base);
+            const isStreaming = persistedReplyMode !== undefined
+                ? isTaskReplyStreaming(persistedReplyMode)
+                : requestedStreaming;
+            extendContextWithStreaming(ctx, isStreaming, this.eventBus);
 
             // 2. Prepare Mental State (M)
             let M: MentalState = overrides?.initialM || (base.M as MentalState) || initialM(ctx);
@@ -465,6 +478,10 @@ export class TurnRunner {
             loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
 
             // 6. Execute Turn
+            assertTaskReplyCapability(ctx, {
+                eventBus: this.eventBus,
+                isStreaming,
+            });
             const { outcome, taskStatus, persistence } = await TaskExecutor.executeTurn({
                 ctx, M, env, overrides: moduleOverrides, loopOpts,
                 sessionManager: this.sessionManager,

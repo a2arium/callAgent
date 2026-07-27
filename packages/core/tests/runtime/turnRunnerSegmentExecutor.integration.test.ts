@@ -20,6 +20,8 @@ import { completeTaskTurnInSnapshot } from '../../src/orchestration/TaskTurnCoor
 import { reconcileSnapshotMutation } from '../../src/orchestration/persistence/SnapshotRepository.js';
 import { ModuleExecutionError, FrameworkModule } from '../../src/utils/errors.js';
 import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { taskChannel } from '../../src/eventbus/taskEventEmitter.js';
+import type { A2AEvent } from '../../src/shared/types/StreamingEvents.js';
 
 async function persistMockTurn(
     params: Parameters<typeof TaskExecutor.executeTurn>[0],
@@ -86,6 +88,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
     let turnRunner: TurnRunner;
     let executor: TurnRunnerSegmentExecutor;
     let executeTurnSpy: ReturnType<typeof jest.spyOn>;
+    let eventBus: ReturnType<typeof createInMemoryEventBus>;
 
     beforeEach(() => {
         store = new InMemorySessionManager();
@@ -93,7 +96,8 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         const apiBinder = {
             attachOrchestrationAPIs: jest.fn().mockResolvedValue(undefined),
         } as unknown as ApiBinder;
-        turnRunner = new TurnRunner(sessionManager, apiBinder, () => undefined, createInMemoryEventBus());
+        eventBus = createInMemoryEventBus();
+        turnRunner = new TurnRunner(sessionManager, apiBinder, () => undefined, eventBus);
 
         executor = new TurnRunnerSegmentExecutor({
             turnRunner,
@@ -376,6 +380,222 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         };
         expect(inbox?.inbox?.current[0]?.kind).toBe('input.provided');
         expect(inbox?.inbox?.current[0]?.payload.value).toBe('my answer');
+    });
+
+    it('restores streaming reply delivery on a reconstructed input resume', async () => {
+        const streamingTaskId = `${taskId}-streaming-resume`;
+        const inputToken = 'streaming-input-token';
+        const events: A2AEvent[] = [];
+        let segment = 0;
+        await eventBus.subscribe(taskChannel(streamingTaskId), async (event) => {
+            events.push(event.payload.data as A2AEvent);
+        });
+
+        executeTurnSpy.mockImplementation(async (params) => {
+            segment += 1;
+            const M = params.M ?? initialM(params.ctx);
+            if (segment === 1) {
+                return persistMockTurn(params, {
+                    M,
+                    outcome: { kind: 'await_input', token: inputToken },
+                    metrics: {},
+                    taskStatus: {
+                        state: 'input-required',
+                        timestamp: new Date().toISOString(),
+                        metadata: { token: inputToken },
+                    },
+                });
+            }
+            await params.ctx.reply('reply after resume');
+            return persistMockTurn(params, {
+                M,
+                outcome: { kind: 'complete', result: { done: true } },
+                metrics: {},
+                taskStatus: {
+                    state: 'completed',
+                    timestamp: new Date().toISOString(),
+                    metadata: { result: { done: true } },
+                },
+            });
+        });
+
+        await executor.runSegment({
+            tenantId,
+            taskId: streamingTaskId,
+            agentId,
+            idempotencyKey: `${streamingTaskId}:start`,
+            wake: { trigger: 'start', input: {} },
+        });
+
+        const loaded = await sessionManager.load(tenantId, streamingTaskId);
+        const snapshot = setPendingInputs(
+            (loaded?.snapshot as Record<string, unknown>) ?? {},
+            { [inputToken]: {} }
+        );
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: streamingTaskId,
+            agentId,
+            expectedWmVersion: loaded?.wmVersion ?? BigInt(0),
+            snapshot: {
+                ...snapshot,
+                meta: {
+                    ...((snapshot.meta as Record<string, unknown> | undefined) ?? {}),
+                    replyDeliveryMode: 'stream',
+                },
+            },
+        });
+
+        await executor.runSegment({
+            tenantId,
+            taskId: streamingTaskId,
+            agentId,
+            idempotencyKey: `${streamingTaskId}:input:${inputToken}`,
+            wake: {
+                trigger: 'resume',
+                event: { kind: 'input', token: inputToken, value: 'answer' },
+            },
+        });
+        await Promise.resolve();
+
+        expect(events.filter((event) => 'artifact' in event)).toEqual([
+            expect.objectContaining({
+                id: streamingTaskId,
+                artifact: expect.objectContaining({
+                    parts: [
+                        expect.objectContaining({
+                            type: 'text',
+                            text: 'reply after resume',
+                        }),
+                    ],
+                }),
+            }),
+        ]);
+    });
+
+    it.each([
+        {
+            name: 'tool',
+            snapshot: (token: string) => setPendingTools(
+                { meta: { agentId, replyDeliveryMode: 'stream' } },
+                { [token]: { name: 'fetch', args: {} } }
+            ),
+            wake: (token: string) => ({
+                trigger: 'tool' as const,
+                event: { kind: 'tool' as const, token, result: { ok: true } },
+            }),
+        },
+        {
+            name: 'child',
+            snapshot: (token: string) => setPendingTasks(
+                { meta: { agentId, replyDeliveryMode: 'stream' } },
+                { [token]: { target: 'child-agent', handlers: {} } }
+            ),
+            wake: (token: string) => ({
+                trigger: 'child' as const,
+                event: {
+                    kind: 'child' as const,
+                    token,
+                    childTaskId: 'child-task',
+                    outcome: 'completed' as const,
+                    output: { result: { ok: true } },
+                },
+            }),
+        },
+        {
+            name: 'external event',
+            snapshot: (token: string) => setPendingExternalEvents(
+                { meta: { agentId, replyDeliveryMode: 'stream' } },
+                { [token]: { type: 'webhook.received' } }
+            ),
+            wake: (token: string) => ({
+                trigger: 'event' as const,
+                event: {
+                    kind: 'external' as const,
+                    token,
+                    type: 'webhook.received',
+                    data: { ok: true },
+                },
+            }),
+        },
+        {
+            name: 'timer',
+            snapshot: () => ({ meta: { agentId, replyDeliveryMode: 'stream' } }),
+            wake: (token: string) => ({
+                trigger: 'timer' as const,
+                event: {
+                    kind: 'timer' as const,
+                    token,
+                    timerId: 'timer-1',
+                    dueAt: '2026-07-27T00:00:00.000Z',
+                    firedAt: '2026-07-27T00:00:01.000Z',
+                    reason: 'sleep_due' as const,
+                },
+            }),
+        },
+        {
+            name: 'conversation',
+            snapshot: () => ({ meta: { agentId, replyDeliveryMode: 'stream' } }),
+            wake: (token: string) => ({
+                trigger: 'conversation' as const,
+                event: {
+                    kind: 'conversation' as const,
+                    token,
+                    messageId: 'message-1',
+                    data: { kind: 'message.received', text: 'hello' },
+                },
+            }),
+        },
+    ])('restores streaming reply delivery on a reconstructed $name wake', async (scenario) => {
+        const wakeTaskId = `${taskId}-streaming-${scenario.name.replaceAll(' ', '-')}`;
+        const token = `${scenario.name.replaceAll(' ', '-')}-token`;
+        const events: A2AEvent[] = [];
+        await eventBus.subscribe(taskChannel(wakeTaskId), async (event) => {
+            events.push(event.payload.data as A2AEvent);
+        });
+        await sessionManager.saveSnapshot({
+            tenantId,
+            sessionId: wakeTaskId,
+            agentId,
+            expectedWmVersion: BigInt(0),
+            snapshot: withCompletedCoordinator(scenario.snapshot(token)),
+        });
+        executeTurnSpy.mockImplementation(async (params) => {
+            await params.ctx.reply(`reply after ${scenario.name}`);
+            return persistMockTurn(params, {
+                M: params.M ?? initialM(params.ctx),
+                outcome: { kind: 'complete', result: { done: true } },
+                metrics: {},
+                taskStatus: {
+                    state: 'completed',
+                    timestamp: new Date().toISOString(),
+                    metadata: { result: { done: true } },
+                },
+            });
+        });
+
+        await executor.runSegment({
+            tenantId,
+            taskId: wakeTaskId,
+            agentId,
+            idempotencyKey: `${wakeTaskId}:${token}`,
+            wake: scenario.wake(token),
+        });
+        await Promise.resolve();
+
+        expect(events.filter((event) => 'artifact' in event)).toEqual([
+            expect.objectContaining({
+                id: wakeTaskId,
+                artifact: expect.objectContaining({
+                    parts: [
+                        expect.objectContaining({
+                            type: 'text',
+                            text: `reply after ${scenario.name}`,
+                        }),
+                    ],
+                }),
+            }),
+        ]);
     });
 
     it('duplicate idempotencyKey is a no-op', async () => {
