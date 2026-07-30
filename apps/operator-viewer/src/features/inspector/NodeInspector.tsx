@@ -1,5 +1,5 @@
-import { ExternalLink, PanelRightClose, XCircle } from 'lucide-react';
-import { hatchetRunUrl, type OperatorConfig } from '../../api/client';
+import { PanelRightClose, XCircle } from 'lucide-react';
+import type { OperatorConfig } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -8,23 +8,25 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../design/component
 import { formatCost, formatDuration, formatNumber, formatRelative } from '../../design/format';
 import { buildNodeRollup, deriveStatus, normalizeRuntimeStatus } from '../../domain/derive';
 import { semanticFailureFromTurns, type SemanticFailure } from '../../domain/semanticFailure';
+import type { RunInspectorTab } from '../../app/state';
 import { JsonPreview } from './JsonPreview';
 import { LlmCallsTable } from '../llm/LlmCallsTable';
 import { MemoryOpsTable } from '../memory/MemoryOpsTable';
 import { TurnDetail, TurnTimeline } from '../turn/TurnTimeline';
+import { HatchetRunLink } from '../hatchet/HatchetRunLink';
 import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, TaskCoordinationView, TurnRun } from '../../types';
 
 export function NodeInspector(props: {
   graph: AgentRunGraph;
   node: AgentRunNode | undefined;
   tenantId: string;
-  activeTab: string;
+  activeTab: RunInspectorTab;
   selectedTurnSeq?: number;
   config: OperatorConfig;
   collapseButtonRef?: React.Ref<HTMLButtonElement>;
   canCancel?: boolean;
   cancelPending?: boolean;
-  onTabChange: (tab: string) => void;
+  onTabChange: (tab: RunInspectorTab) => void;
   onTurnSelect: (turn: TurnRun) => void;
   onTurnBack: () => void;
   onCollapse?: () => void;
@@ -80,6 +82,15 @@ export function NodeInspector(props: {
                 : undefined}
             />
             <div className="flex shrink-0 items-center gap-1.5">
+              {props.node.providerRunId ? (
+                <HatchetRunLink
+                  providerRunId={props.node.providerRunId}
+                  config={props.config}
+                  label="Hatchet run"
+                  ariaLabel="Open agent run in Hatchet"
+                  className="h-7 px-2"
+                />
+              ) : null}
               {props.onCancel ? (
                 <Button
                   type="button"
@@ -99,7 +110,7 @@ export function NodeInspector(props: {
         </div>
       </div>
 
-      <Tabs value={props.activeTab || 'summary'} onValueChange={props.onTabChange} className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <Tabs value={props.activeTab || 'summary'} onValueChange={(tab) => props.onTabChange(tab as RunInspectorTab)} className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="border-b border-border px-4 py-2">
           <TabsList className="h-8 w-full justify-start rounded-none bg-transparent p-0">
             <TabsTrigger value="summary" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Summary</TabsTrigger>
@@ -107,12 +118,11 @@ export function NodeInspector(props: {
             <TabsTrigger value="tools" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Tools</TabsTrigger>
             <TabsTrigger value="llm" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">LLM</TabsTrigger>
             <TabsTrigger value="memory" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Memory</TabsTrigger>
-            <TabsTrigger value="links" className="h-8 rounded-none border-b-2 border-transparent px-2 shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none">Links</TabsTrigger>
           </TabsList>
         </div>
 
         <TabsContent value="summary" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-          <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} tenantId={props.tenantId} />
+          <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} tenantId={props.tenantId} config={props.config} />
         </TabsContent>
         <TabsContent value="turns" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-0">
           {selectedTurn ? (
@@ -121,6 +131,7 @@ export function NodeInspector(props: {
               agentId={props.node.agentId ?? props.node.taskId}
               events={eventsForTurn(props.graph, props.node, selectedTurn)}
               tenantId={props.tenantId}
+              config={props.config}
               onBack={props.onTurnBack}
             />
           ) : (
@@ -141,9 +152,6 @@ export function NodeInspector(props: {
         <TabsContent value="memory" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
           <MemoryOpsTable operations={rollup.memoryOps} tenantId={props.tenantId} />
         </TabsContent>
-        <TabsContent value="links" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-          <LinksTab node={props.node} config={props.config} />
-        </TabsContent>
       </Tabs>
     </aside>
   );
@@ -155,6 +163,7 @@ function SummaryTab(props: {
   rollup: ReturnType<typeof buildNodeRollup>;
   status: ReturnType<typeof deriveStatus>['status'];
   tenantId: string;
+  config: OperatorConfig;
 }): React.ReactElement {
   const children = props.graph.nodes.filter((node) => node.parentTaskId === props.node.taskId).length;
   const outboxRows = outboxRowsForNode(props.graph, props.node);
@@ -185,7 +194,6 @@ function SummaryTab(props: {
         <FactRow label="Parent">{props.node.parentTaskId ? <CopyableId value={props.node.parentTaskId} label="parent task ID" /> : 'Root agent'}</FactRow>
         <FactRow label="Children">{formatNumber(children)}</FactRow>
         <FactRow label="Started">{formatRelative(props.node.startedAt)}</FactRow>
-        <FactRow label="Task ID"><CopyableId value={props.node.taskId} label="task ID" /></FactRow>
       </InspectorSection>
 
       <InspectorSection title="Task input">
@@ -203,15 +211,23 @@ function SummaryTab(props: {
       </InspectorSection>
 
       <InspectorSection title="Outbox">
-        <OutboxTable rows={outboxRows} tenantId={props.tenantId} />
+        <OutboxTable rows={outboxRows} tenantId={props.tenantId} config={props.config} />
       </InspectorSection>
 
-      <InspectorSection title="Data availability">
-        <FactRow label="Input preview">{props.node.inputPreview === undefined ? 'Not captured' : 'Available'}</FactRow>
-        <FactRow label="Output preview">{props.node.outputPreview === undefined ? 'Not captured' : 'Available'}</FactRow>
-        <FactRow label="Trace">{props.node.traceId ? 'Available' : 'Not captured'}</FactRow>
-        <FactRow label="Provider run">{props.node.providerRunId ? 'Available' : props.node.executionOrigin === 'cache' ? 'Not created for cache hit' : 'Not captured'}</FactRow>
-      </InspectorSection>
+      <details className="rounded-lg border border-border bg-background/50">
+        <summary className="cursor-pointer px-3 py-2 text-sm font-semibold">Technical details</summary>
+        <div className="grid gap-2 border-t border-border p-3">
+          <FactRow label="Task ID"><CopyableId value={props.node.taskId} label="task ID" /></FactRow>
+          <FactRow label="Root task ID"><CopyableId value={props.node.rootTaskId} label="root task ID" /></FactRow>
+          {props.node.agentId ? <FactRow label="Agent ID"><CopyableId value={props.node.agentId} label="agent ID" /></FactRow> : null}
+          {props.node.traceId ? <FactRow label="Trace ID"><CopyableId value={props.node.traceId} label="trace ID" /></FactRow> : null}
+          {props.node.providerRunId ? <FactRow label="Provider run"><CopyableId value={props.node.providerRunId} label="provider run ID" /></FactRow> : null}
+          <FactRow label="Input preview">{props.node.inputPreview === undefined ? 'Not captured' : 'Available'}</FactRow>
+          <FactRow label="Output preview">{props.node.outputPreview === undefined ? 'Not captured' : 'Available'}</FactRow>
+          <FactRow label="Trace data">{props.node.traceId ? 'Available' : 'Not captured'}</FactRow>
+          <FactRow label="Provider data">{props.node.providerRunId ? 'Available' : props.node.executionOrigin === 'cache' ? 'Not created for cache hit' : 'Not captured'}</FactRow>
+        </div>
+      </details>
     </div>
   );
 }
@@ -253,31 +269,6 @@ function CacheOriginNotice(): React.ReactElement {
       <p className="mt-1 text-xs opacity-90">
         This child returned from the previous run result cache, so no Hatchet provider run or turn trace was created for it.
       </p>
-    </div>
-  );
-}
-
-function LinksTab(props: { node: AgentRunNode; config: OperatorConfig }): React.ReactElement {
-  const hatchetUrl = props.node.providerRunId ? hatchetRunUrl(props.node.providerRunId, props.config) : undefined;
-  return (
-    <div className="grid gap-4">
-      <InspectorSection title="Trace">
-        {props.node.traceId ? (
-          <FactRow label="Trace ID"><CopyableId value={props.node.traceId} /></FactRow>
-        ) : (
-          <FactRow label="Trace">Not captured</FactRow>
-        )}
-      </InspectorSection>
-      <InspectorSection title="Backend run">
-        {hatchetUrl ? <ExternalButton href={hatchetUrl}>Open in Hatchet</ExternalButton> : <FactRow label="Hatchet">Provider run ID not captured</FactRow>}
-      </InspectorSection>
-      <InspectorSection title="IDs">
-        <FactRow label="Task ID"><CopyableId value={props.node.taskId} /></FactRow>
-        <FactRow label="Root task ID"><CopyableId value={props.node.rootTaskId} /></FactRow>
-        <FactRow label="Agent ID"><CopyableId value={props.node.agentId} /></FactRow>
-        <FactRow label="Trace ID"><CopyableId value={props.node.traceId} /></FactRow>
-        <FactRow label="Provider run"><CopyableId value={props.node.providerRunId} /></FactRow>
-      </InspectorSection>
     </div>
   );
 }
@@ -464,7 +455,7 @@ function RuntimeErrorNotice(props: { error: RuntimeErrorSummary }): React.ReactE
   );
 }
 
-function OutboxTable(props: { rows: Array<OutboxRow>; tenantId: string }): React.ReactElement {
+function OutboxTable(props: { rows: Array<OutboxRow>; tenantId: string; config: OperatorConfig }): React.ReactElement {
   if (props.rows.length === 0) {
     return <p className="text-sm text-muted-foreground">No execution events or effects captured for this agent.</p>;
   }
@@ -480,7 +471,18 @@ function OutboxTable(props: { rows: Array<OutboxRow>; tenantId: string }): React
               </div>
               <p className="mt-1 break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">{row.preview}</p>
             </div>
-            {row.status ? <StatusBadge status={normalizeRuntimeStatus(row.status)} /> : null}
+            <div className="flex shrink-0 items-center gap-2">
+              {row.status ? <StatusBadge status={normalizeRuntimeStatus(row.status)} /> : null}
+              {row.providerRunId ? (
+                <HatchetRunLink
+                  providerRunId={row.providerRunId}
+                  config={props.config}
+                  label="Hatchet run"
+                  ariaLabel={`Open ${row.kind} in Hatchet`}
+                  className="h-7 px-2"
+                />
+              ) : null}
+            </div>
           </div>
           <details className="min-w-0">
             <summary className="cursor-pointer text-xs font-medium text-foreground">Show details</summary>
@@ -494,17 +496,6 @@ function OutboxTable(props: { rows: Array<OutboxRow>; tenantId: string }): React
   );
 }
 
-function ExternalButton(props: { href: string; children: React.ReactNode }): React.ReactElement {
-  return (
-    <Button asChild variant="outline" size="sm">
-      <a href={props.href} target="_blank" rel="noreferrer">
-        <ExternalLink className="h-4 w-4" />
-        {props.children}
-      </a>
-    </Button>
-  );
-}
-
 type OutboxRow = {
   id: string;
   turn?: number;
@@ -512,6 +503,7 @@ type OutboxRow = {
   status?: string;
   preview: string;
   payload: unknown;
+  providerRunId?: string;
 };
 
 type ToolRow = {
@@ -647,14 +639,18 @@ function outboxRowsForNode(graph: AgentRunGraph, node: AgentRunNode): OutboxRow[
   const events = graph.events
     .filter((event) => eventBelongsToNode(event, node))
     .filter((event) => event.type.startsWith('task.') || event.type === 'turn.completed')
-    .map((event): OutboxRow => ({
-      id: event.id,
-      turn: numberField(eventPayloadValue(event), 'turnSeq'),
-      kind: event.type,
-      status: stringField(eventPayloadValue(event), 'status'),
-      preview: eventPreview(event),
-      payload: eventPayloadValue(event),
-    }));
+    .map((event): OutboxRow => {
+      const payload = eventPayloadValue(event);
+      return {
+        id: event.id,
+        turn: numberField(payload, 'turnSeq'),
+        kind: event.type,
+        status: stringField(payload, 'status'),
+        preview: eventPreview(event),
+        payload,
+        providerRunId: stringField(payload, 'providerRunId'),
+      };
+    });
   const effects = graph.effects
     .filter((effect) => effectBelongsToNode(effect, node))
     .map((effect): OutboxRow => ({
@@ -663,6 +659,7 @@ function outboxRowsForNode(graph: AgentRunGraph, node: AgentRunNode): OutboxRow[
       status: effect.status,
       preview: effect.token ?? effect.outboxRowId ?? effect.providerRunId ?? 'Effect captured',
       payload: effect,
+      providerRunId: effect.providerRunId,
     }));
   return [...events, ...effects].slice(0, 12);
 }

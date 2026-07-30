@@ -1,4 +1,5 @@
 import { AlertTriangle, ArrowLeft, Brain, DollarSign, FileOutput, ShieldAlert, Timer } from 'lucide-react';
+import type { OperatorConfig } from '../../api/client';
 import { Notice } from '../../design/components/ui/notice';
 import { StatusBadge } from '../../design/components/ui/status-badge';
 import { formatCost, formatDuration, stringFromUnknown } from '../../design/format';
@@ -7,6 +8,7 @@ import { semanticFailureFromTurn, type SemanticFailure } from '../../domain/sema
 import { JsonPreview } from '../inspector/JsonPreview';
 import type { AgentRunEvent, TurnAttemptRun, TurnRun } from '../../types';
 import { cn } from '../../lib/utils';
+import { HatchetRunLink } from '../hatchet/HatchetRunLink';
 
 export function TurnTimeline(props: {
   turns: TurnRun[];
@@ -91,6 +93,7 @@ export function TurnDetail(props: {
   agentId?: string;
   events?: AgentRunEvent[];
   tenantId?: string;
+  config?: OperatorConfig;
   onBack: () => void;
 }): React.ReactElement {
   if (!props.turn) return <p className="text-sm text-muted-foreground">Select a turn to inspect APLRET cognition.</p>;
@@ -145,7 +148,7 @@ export function TurnDetail(props: {
           ) : null}
         </section>
 
-        <ExecutionAttempts attempts={turn.attempts} tenantId={props.tenantId} />
+        <ExecutionAttempts attempts={turn.attempts} tenantId={props.tenantId} config={props.config ?? {}} />
 
         <section className="grid gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Key signals</h4>
@@ -301,7 +304,7 @@ function FactRow(props: { label: string; children: React.ReactNode }): React.Rea
   );
 }
 
-function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: string }): React.ReactElement {
+function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: string; config: OperatorConfig }): React.ReactElement {
   const groups = compressAttemptGroups(props.attempts);
   const queuedCount = props.attempts.filter((attempt) => attempt.disposition === 'queued').length;
   const replayCount = props.attempts.filter((attempt) => attempt.disposition === 'matching_replay' || attempt.disposition === 'terminal_replay').length;
@@ -326,7 +329,7 @@ function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: strin
       <div className="grid gap-2 border-t border-border p-3">
         {groups.map((group) => {
           if (group.length === 1) {
-            return <AttemptRow key={group[0]!.attemptKey ?? group[0]!.id} attempt={group[0]!} tenantId={props.tenantId} />;
+            return <AttemptRow key={group[0]!.attemptKey ?? group[0]!.id} attempt={group[0]!} tenantId={props.tenantId} config={props.config} />;
           }
           const first = group[0]!;
           const last = group[group.length - 1]!;
@@ -340,7 +343,7 @@ function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: strin
               </summary>
               <div className="grid gap-2 border-t border-border p-2">
                 {group.map((attempt) => (
-                  <AttemptRow key={attempt.attemptKey ?? attempt.id} attempt={attempt} tenantId={props.tenantId} />
+                  <AttemptRow key={attempt.attemptKey ?? attempt.id} attempt={attempt} tenantId={props.tenantId} config={props.config} />
                 ))}
               </div>
             </details>
@@ -351,7 +354,7 @@ function ExecutionAttempts(props: { attempts: TurnAttemptRun[]; tenantId?: strin
   );
 }
 
-function AttemptRow(props: { attempt: TurnAttemptRun; tenantId?: string }): React.ReactElement {
+function AttemptRow(props: { attempt: TurnAttemptRun; tenantId?: string; config: OperatorConfig }): React.ReactElement {
   const attempt = props.attempt;
   const duration = attemptDuration(attempt);
   const rawDetails = {
@@ -377,6 +380,15 @@ function AttemptRow(props: { attempt: TurnAttemptRun; tenantId?: string }): Reac
         <div className="flex shrink-0 items-center gap-2">
           <DispositionBadge attempt={attempt} />
           {duration !== undefined ? <span className="text-xs text-muted-foreground">{formatDuration(duration)}</span> : null}
+          {attempt.providerRunId ? (
+            <HatchetRunLink
+              providerRunId={attempt.providerRunId}
+              config={props.config}
+              label="Open delivery"
+              ariaLabel={`Open delivery attempt ${attemptNumber(attempt)} in Hatchet`}
+              className="h-7 px-2"
+            />
+          ) : null}
         </div>
       </div>
       <details className="mt-2 text-xs">

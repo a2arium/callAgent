@@ -13,8 +13,10 @@ export type FleetSearch = {
 export type RunSearch = FleetSearch & {
   nodeId: string;
   turn: string;
-  tab: string;
+  tab: RunInspectorTab;
 };
+
+export type RunInspectorTab = 'summary' | 'turns' | 'tools' | 'llm' | 'memory';
 
 export type MemorySearch = {
   tenantId: string;
@@ -52,7 +54,7 @@ export function parseRunSearch(value: Record<string, unknown>): RunSearch {
     ...fleet,
     nodeId: stringParam(value.nodeId, ''),
     turn: stringParam(value.turn, ''),
-    tab: stringParam(value.tab, 'summary'),
+    tab: runInspectorTabParam(value.tab),
   };
 }
 
@@ -82,6 +84,12 @@ function stringParam(value: unknown, fallback: string): string {
 
 function boolParam(value: unknown): boolean {
   return value === true || value === 'true';
+}
+
+function runInspectorTabParam(value: unknown): RunInspectorTab {
+  return value === 'turns' || value === 'tools' || value === 'llm' || value === 'memory'
+    ? value
+    : 'summary';
 }
 
 function costStateParam(value: unknown): FleetSearch['costState'] {

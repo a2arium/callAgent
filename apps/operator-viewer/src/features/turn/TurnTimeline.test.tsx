@@ -20,13 +20,22 @@ describe('TurnTimeline', () => {
   });
 
   it('keeps cancelled lifecycle wording while exposing the error and compressed attempts', () => {
-    render(<TurnDetail turn={canceledTurn()} onBack={vi.fn()} />);
+    render(<TurnDetail
+      turn={canceledTurn()}
+      config={{ hatchetDashboardUrl: 'http://hatchet.test/', hatchetDashboardTenantId: 'tenant/one' }}
+      onBack={vi.fn()}
+    />);
 
     expect(screen.getByLabelText('Cancelled run')).toBeTruthy();
     expect(screen.getByText('RUNTIME_TIMER_REPOSITORY_MISSING')).toBeTruthy();
     expect(screen.getByText('Runtime deliveries')).toBeTruthy();
     expect(screen.getByText('4 total · 1 executed · 3 ownership probes')).toBeTruthy();
     expect(screen.getByText('Attempts 2–4 · Queued ×3')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open delivery attempt 1 in Hatchet' }).getAttribute('href')).toBe(
+      'http://hatchet.test/tenants/tenant%2Fone/runs/hatchet-run-1',
+    );
+    expect(screen.queryByRole('link', { name: /attempts 2–4/i })).toBeNull();
+    expect(screen.getAllByRole('link')).toHaveLength(1);
   });
 });
 
@@ -67,5 +76,6 @@ function attempt(
     boundaryKind: 'await_child',
     startedAt: `2026-07-22T10:00:0${attemptSeq}.000Z`,
     finishedAt: `2026-07-22T10:00:0${attemptSeq}.500Z`,
+    ...(attemptSeq === 1 ? { providerRunId: 'hatchet-run-1' } : {}),
   };
 }

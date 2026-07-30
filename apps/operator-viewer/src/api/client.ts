@@ -486,5 +486,5 @@ export function hatchetRunUrl(providerRunId: string, config: OperatorConfig): st
     config.hatchetDashboardTenantId ||
     (import.meta.env.VITE_HATCHET_DASHBOARD_TENANT_ID as string | undefined) ||
     '707d0855-80ab-4e1f-a156-f1c4546cbf52';
-  return `${base.replace(/\/$/, '')}/tenants/${encodeURIComponent(dashboardTenantId)}/runs/${encodeURIComponent(providerRunId)}`;
+  return `${base.replace(/\/+$/, '')}/tenants/${encodeURIComponent(dashboardTenantId)}/runs/${encodeURIComponent(providerRunId)}`;
 }
