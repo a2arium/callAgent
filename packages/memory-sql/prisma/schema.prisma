@@ -26,6 +26,8 @@ model AgentMemoryStore {
     @@id([tenantId, key]) // Compound primary key for tenant isolation
     @@index([tenantId]) // Index for fast tenant-scoped queries
     @@index([tags(ops: ArrayOps)], type: Gin, map: "agent_memory_store_tags_gin_idx")
+    @@index([tenantId, createdAt, key], map: "agent_memory_store_tenant_created_key_idx")
+    @@index([tenantId, updatedAt, key], map: "agent_memory_store_tenant_updated_key_idx")
     @@map("agent_memory_store")
 }
 

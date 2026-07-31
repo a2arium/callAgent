@@ -232,6 +232,22 @@ export type SemanticReadFilter = {
 };
 
 /**
+ * A bounded, deterministic semantic-memory page query.
+ *
+ * Exact-id and random reads deliberately remain outside the pagination
+ * contract because neither describes a stable collection traversal.
+ */
+export type SemanticReadPageFilter =
+    Omit<SemanticReadFilter, 'id' | 'random' | 'limit' | 'orderBy'> & {
+        limit: number;
+        cursor?: string;
+        orderBy?: {
+            path: 'createdAt' | 'updatedAt';
+            direction: 'asc' | 'desc';
+        };
+    };
+
+/**
  * Returned high-level wrapper item from semantic memory
  */
 export type SemanticItem<T = unknown> = {
@@ -239,6 +255,11 @@ export type SemanticItem<T = unknown> = {
     value: T;
     tags?: string[];
     entities?: Record<string, unknown>;
+};
+
+export type SemanticReadPage<T = unknown> = {
+    items: SemanticItem<T>[];
+    nextCursor?: string;
 };
 
 /**
@@ -311,6 +332,21 @@ export type SemanticQueryTelemetry = SemanticQueryExecutionStats & {
     outcome: 'ok' | 'error';
     errorCode?: string;
     compatibilityPath?: 'legacy-object-remove' | 'predicate-remove';
+    paginated?: boolean;
+    cursorProvided?: boolean;
+    hasNextPage?: boolean;
+};
+
+/** Optional native pagination implemented by a semantic-memory backend. */
+export type SemanticPaginationCapability = {
+    readPage<T = unknown>(
+        filter: Omit<SemanticReadPageFilter, 'backend'>,
+        options: {
+            /** Registry name, used to bind opaque cursors to backend selection. */
+            backendName: string;
+            [SEMANTIC_QUERY_EXECUTION_OBSERVER]?: SemanticQueryExecutionObserver;
+        },
+    ): Promise<SemanticReadPage<T>>;
 };
 
 /**
@@ -329,6 +365,9 @@ export type SemanticMemoryBackend = {
 
     /** Optional real atomic operations. Registries must never emulate these. */
     atomic?: SemanticAtomicCapability;
+
+    /** Optional native keyset pagination. Registries must never emulate it. */
+    pagination?: SemanticPaginationCapability;
 
     /** Optional truthful declarations for structured tag queries and removals. */
     capabilities?: SemanticMemoryCapabilities;
@@ -400,6 +439,7 @@ export type IMemory = {
         getAtomic?(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
         add(item: SemanticAddInput): Promise<void>;
         readItems<T = unknown>(filter?: SemanticReadFilter): Promise<SemanticItem<T>[]>;
+        readItemsPage?<T = unknown>(filter: SemanticReadPageFilter): Promise<SemanticReadPage<T>>;
         removeItem(id: string, options?: { backend?: string }): Promise<void>;
         /** @deprecated Use removeItems(filter). */
         removeItem(filter: SemanticRemoveFilter): Promise<void>;

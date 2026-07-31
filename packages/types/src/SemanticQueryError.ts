@@ -14,6 +14,8 @@ export type SemanticQueryErrorCode =
     | 'SEMANTIC_QUERY_SCAN_BUDGET_EXCEEDED'
     | 'SEMANTIC_QUERY_ENVELOPE_MUTATED'
     | 'SEMANTIC_QUERY_COMBINATION_UNSUPPORTED'
+    | 'SEMANTIC_CURSOR_INVALID'
+    | 'SEMANTIC_CURSOR_QUERY_MISMATCH'
     | 'SEMANTIC_REMOVE_CONTENTION';
 
 export type SemanticQueryErrorDetails = Readonly<Record<string, string | number | boolean | null | undefined>>;

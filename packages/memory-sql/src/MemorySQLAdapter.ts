@@ -23,6 +23,9 @@ import {
     SemanticQueryError,
     SEMANTIC_QUERY_EXECUTION_OBSERVER,
     SemanticQueryExecutionObserver,
+    SemanticPaginationCapability,
+    SemanticReadPageFilter,
+    SemanticReadPage,
 } from '@a2arium/callagent-types';
 import { MemorySetOptions, EntityAlignment, VectorEmbedding, GetManyInput, GetManyOptions, GetManyQuery } from './types.js';
 import { EntityFieldParser } from './EntityFieldParser.js';
@@ -35,9 +38,15 @@ import {
     normalizeRequiredTags,
     normalizeStoredTags,
     SEMANTIC_TAG_LIMITS,
+    validateSemanticReadPageInput,
 } from '@a2arium/callagent-utils';
 import { validatePgEnvironment } from './pgEnvValidator.js';
 import { createSafePool } from './safePool.js';
+import {
+    parseSemanticCursorKey,
+    SemanticPageCursorCodec,
+    semanticPageQueryDigest,
+} from './SemanticPageCursor.js';
 
 /**
  * Configuration options for MemorySQLAdapter
@@ -55,6 +64,8 @@ export interface MemorySQLConfig {
     defaultQueryLimit?: number;
     /** Maximum candidates inspected by a compatibility residual scan. */
     maxResidualScanRows?: number;
+    /** Stable base64url-encoded 32-byte key used for opaque page cursors. */
+    semanticCursorKey?: string;
 }
 
 // Define system tenant constants locally for this adapter
@@ -112,6 +123,9 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     private defaultTenantId: string;
     private defaultQueryLimit: number = SEMANTIC_TAG_LIMITS.defaultQueryLimit;
     private maxResidualScanRows = 50_000;
+    private semanticPageCursorCodec?: SemanticPageCursorCodec;
+
+    public readonly pagination?: SemanticPaginationCapability;
 
     public readonly capabilities = {
         backendKind: 'sql',
@@ -134,7 +148,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
     constructor(
         configOrPrisma?: MemorySQLConfig | PrismaClientType,
         embedFunction?: (text: string) => Promise<number[]>,
-        options: { defaultTenantId?: string; defaultQueryLimit?: number; maxResidualScanRows?: number } = {}
+        options: { defaultTenantId?: string; defaultQueryLimit?: number; maxResidualScanRows?: number; semanticCursorKey?: string } = {}
     ) {
         let config: MemorySQLConfig;
 
@@ -147,6 +161,7 @@ export class MemorySQLAdapter implements SemanticMemoryBackend {
                 defaultTenantId: options.defaultTenantId,
                 defaultQueryLimit: options.defaultQueryLimit,
                 maxResidualScanRows: options.maxResidualScanRows,
+                semanticCursorKey: options.semanticCursorKey,
             };
         } else {
             // New signature: constructor(config?)
@@ -198,6 +213,14 @@ new MemorySQLAdapter({
         // Set configuration options
         this.defaultTenantId = config.defaultTenantId || 'default';
         this.embedFunction = config.embedFunction;
+        const semanticCursorKey = parseSemanticCursorKey(config.semanticCursorKey ?? process.env.SEMANTIC_CURSOR_KEY);
+        if (semanticCursorKey) {
+            this.semanticPageCursorCodec = new SemanticPageCursorCodec(semanticCursorKey);
+            this.pagination = {
+                readPage: <T>(filter: Omit<SemanticReadPageFilter, 'backend'>, pageOptions: Parameters<SemanticPaginationCapability['readPage']>[1]) =>
+                    this.readSemanticPage<T>(filter, pageOptions),
+            };
+        }
         if (config.defaultQueryLimit !== undefined) this.defaultQueryLimit = this.validateQueryLimit(config.defaultQueryLimit);
         if (config.maxResidualScanRows !== undefined) {
             if (!Number.isInteger(config.maxResidualScanRows) || config.maxResidualScanRows <= 0 || config.maxResidualScanRows > 1_000_000) {
@@ -623,7 +646,9 @@ new MemorySQLAdapter({
                 INSERT INTO agent_memory_store
                     (tenant_id, key, value, tags, created_at, updated_at)
                 VALUES
-                    (${tenantId}, ${input.key}, ${serializedValue}::jsonb, ${normalizedTags}::text[], NOW(), NOW())
+                    (${tenantId}, ${input.key}, ${serializedValue}::jsonb, ${normalizedTags}::text[],
+                        (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3),
+                        (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3))
                 ON CONFLICT (tenant_id, key) DO NOTHING
                 RETURNING version
             `;
@@ -634,7 +659,7 @@ new MemorySQLAdapter({
                     tags = ${normalizedTags}::text[],
                     blob_data = NULL,
                     blob_metadata = NULL,
-                    updated_at = NOW()
+                    updated_at = (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
                 WHERE tenant_id = ${tenantId}
                     AND key = ${input.key}
                     AND version = ${expectedVersion}
@@ -1339,6 +1364,155 @@ new MemorySQLAdapter({
         const column = path === 'createdAt' ? 'created_at' : 'updated_at';
         const direction = options.orderBy?.direction === 'asc' ? 'ASC' : 'DESC';
         return `${column} ${direction}, key ASC`;
+    }
+
+    private normalizePageFilter(filter: ParsedFilter): unknown {
+        if (filter.type === 'atomic') {
+            return {
+                type: 'atomic',
+                path: filter.path,
+                operator: filter.operator,
+                value: filter.value,
+                isArrayPath: filter.isArrayPath,
+            };
+        }
+        const filters = filter.filters.map((child) => this.normalizePageFilter(child));
+        filters.sort((left, right) => semanticPageQueryDigest(left).localeCompare(semanticPageQueryDigest(right)));
+        return { type: 'group', logic: filter.logic, filters };
+    }
+
+    private async readSemanticPage<T>(
+        filter: Omit<SemanticReadPageFilter, 'backend'>,
+        options: Parameters<SemanticPaginationCapability['readPage']>[1],
+    ): Promise<SemanticReadPage<T>> {
+        validateSemanticReadPageInput(filter);
+        const codec = this.semanticPageCursorCodec;
+        if (!codec) {
+            throw new SemanticQueryError(
+                'SEMANTIC_BACKEND_METHOD_UNAVAILABLE',
+                'SQL semantic-memory pagination is not configured',
+            );
+        }
+        const limit = this.validateQueryLimit(filter.limit);
+        if (limit === 0) {
+            throw new SemanticQueryError('SEMANTIC_QUERY_LIMIT_INVALID', 'Semantic-memory page limit must be positive', {
+                details: { maxQueryLimit: SEMANTIC_TAG_LIMITS.maxQueryLimit },
+            });
+        }
+        const orderBy = filter.orderBy ?? { path: 'updatedAt' as const, direction: 'desc' as const };
+        if (orderBy.path !== 'createdAt' && orderBy.path !== 'updatedAt') {
+            throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Semantic-memory order path is unsupported');
+        }
+        if (orderBy.direction !== 'asc' && orderBy.direction !== 'desc') {
+            throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Semantic-memory order direction is unsupported');
+        }
+
+        const tenantId = this.defaultTenantId;
+        const { requiredTags } = normalizeRequiredTags(filter);
+        const sortedTags = [...requiredTags].sort();
+        let parsedFilters: ParsedFilter[];
+        try {
+            parsedFilters = FilterParser.parseFilters(filter.filters ?? []);
+        } catch (error) {
+            throw new MemoryError(`Invalid filter: ${error instanceof Error ? error.message : String(error)}`, {
+                code: 'INVALID_FILTER',
+            });
+        }
+        const normalizedFilters = parsedFilters
+            .map((entry) => this.normalizePageFilter(entry))
+            .sort((left, right) => semanticPageQueryDigest(left).localeCompare(semanticPageQueryDigest(right)));
+        const queryDigest = semanticPageQueryDigest({
+            tenantId,
+            backendName: options.backendName,
+            tags: sortedTags,
+            filters: normalizedFilters,
+            orderBy,
+        });
+        const cursor = filter.cursor !== undefined ? codec.decode(filter.cursor, queryDigest) : undefined;
+
+        const orderColumn = orderBy.path === 'createdAt' ? 'memory.created_at' : 'memory.updated_at';
+        const comparison = orderBy.direction === 'asc' ? '>' : '<';
+        const directionSql = orderBy.direction === 'asc' ? 'ASC' : 'DESC';
+        const timestampFormat = 'YYYY-MM-DD HH24:MI:SS.MS';
+        const queryParams: unknown[] = [tenantId, cursor?.asOf ?? null];
+        let query = `
+            WITH page_clock AS (
+                SELECT COALESCE(
+                    $2::timestamp(3),
+                    (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
+                ) AS as_of
+            )
+            SELECT
+                memory.key,
+                memory.value,
+                COALESCE(memory.tags, ARRAY[]::text[]) AS tags,
+                to_char(${orderColumn}, '${timestampFormat}') AS order_value,
+                to_char(page_clock.as_of, '${timestampFormat}') AS as_of
+            FROM agent_memory_store AS memory
+            CROSS JOIN page_clock
+            WHERE memory.tenant_id = $1
+              AND ${orderColumn} <= page_clock.as_of
+        `;
+
+        if (sortedTags.length > 0) {
+            queryParams.push(sortedTags);
+            query += ` AND memory.tags @> $${queryParams.length}::text[]`;
+        }
+        if (parsedFilters.length > 0) {
+            const group: FilterGroup = { type: 'group', logic: 'AND', filters: parsedFilters };
+            const compiled = parsedFilters.some((entry) => this.hasEntityOperators(entry))
+                ? await this.buildEntityAwareFilterSQL(group, queryParams.length + 1, tenantId)
+                : this.buildFilterRecursiveRawSQL(group, queryParams.length + 1);
+            query += ` AND (${compiled.sql})`;
+            queryParams.push(...compiled.params);
+            if ('entityCandidateCount' in compiled && typeof compiled.entityCandidateCount === 'number') {
+                options[SEMANTIC_QUERY_EXECUTION_OBSERVER]?.({
+                    residualFilter: false,
+                    scannedRows: compiled.entityCandidateCount,
+                });
+            }
+        }
+        if (cursor) {
+            queryParams.push(cursor.after.orderValue, cursor.after.key);
+            const timestampParameter = `$${queryParams.length - 1}::timestamp(3)`;
+            const keyParameter = `$${queryParams.length}`;
+            query += ` AND (${orderColumn} ${comparison} ${timestampParameter}`
+                + ` OR (${orderColumn} = ${timestampParameter} AND memory.key ${comparison} ${keyParameter}))`;
+        }
+        queryParams.push(limit + 1);
+        query += ` ORDER BY ${orderColumn} ${directionSql}, memory.key ${directionSql} LIMIT $${queryParams.length}`;
+
+        const observer = options[SEMANTIC_QUERY_EXECUTION_OBSERVER];
+        const startedAt = Date.now();
+        const rows = await this.prisma.$queryRawUnsafe(query, ...queryParams) as Array<{
+            key: string;
+            value: unknown;
+            tags: string[] | null;
+            order_value: string;
+            as_of: string;
+        }>;
+        observer?.({ databaseDurationMs: Date.now() - startedAt });
+
+        const pageRows = rows.slice(0, limit);
+        const mapped = await this.mapQueryRows<T>(pageRows, tenantId, observer);
+        const items = mapped.map((item) => ({
+            id: item.key,
+            value: item.value,
+            tags: item.tags,
+            entities: item.entities,
+        }));
+        const lastRow = pageRows.at(-1);
+        return {
+            items,
+            ...(rows.length > limit && lastRow
+                ? {
+                    nextCursor: codec.encode(queryDigest, {
+                        asOf: lastRow.as_of,
+                        after: { orderValue: lastRow.order_value, key: lastRow.key },
+                    }),
+                }
+                : {}),
+        };
     }
 
     /**

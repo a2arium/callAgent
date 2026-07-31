@@ -12,6 +12,8 @@ import type {
     SemanticAddInput,
     SemanticItem,
     SemanticReadFilter,
+    SemanticReadPageFilter,
+    SemanticReadPage,
     SemanticRemoveFilter,
     SemanticPredicateFilter,
     SemanticAtomicCapability,
@@ -42,6 +44,8 @@ describe('Type exports', () => {
         type _SemanticAddInput = SemanticAddInput;
         type _SemanticItem = SemanticItem;
         type _SemanticReadFilter = SemanticReadFilter;
+        type _SemanticReadPageFilter = SemanticReadPageFilter;
+        type _SemanticReadPage = SemanticReadPage;
         type _SemanticRemoveFilter = SemanticRemoveFilter;
         type _SemanticPredicateFilter = SemanticPredicateFilter;
         type _SemanticAtomicCapability = SemanticAtomicCapability;
@@ -64,6 +68,7 @@ describe('Type exports', () => {
         } satisfies SemanticMemoryBackend;
 
         expect('atomic' in backend).toBe(false);
+        expect('pagination' in backend).toBe(false);
     });
 
     it('keeps pre-CAS memory facades source-compatible', () => {
@@ -75,5 +80,26 @@ describe('Type exports', () => {
         } satisfies IMemory;
 
         expect(memory.semantic).toBe(legacySemantic);
+    });
+
+    it('is structurally compatible with the lifecycle scheduler page contract', () => {
+        type LifecyclePageMemory = {
+            readItemsPage?<T = unknown>(filter: {
+                tag?: string;
+                tags?: string[];
+                filters?: Array<{ path: string; operator: '='; value: unknown }>;
+                backend?: string;
+                limit: number;
+                orderBy: { path: 'createdAt' | 'updatedAt'; direction: 'asc' | 'desc' };
+                cursor?: string;
+            }): Promise<{
+                items: Array<{ id: string; value: T; tags?: string[] }>;
+                nextCursor?: string;
+            }>;
+        };
+
+        const semantic = null as unknown as IMemory['semantic'];
+        const lifecycleMemory: LifecyclePageMemory = semantic;
+        expect(lifecycleMemory).toBe(semantic);
     });
 });

@@ -25,9 +25,10 @@ const config = {
         '<rootDir>/packages/.*/dist/'
     ],
 
-    // Force TypeScript transformation with ts-jest only
+    // Transform TypeScript only. Generated Prisma JavaScript must execute
+    // natively; transpiling it corrupts derived error construction in VM tests.
     transform: {
-        '^.+\\.[jt]sx?$': [
+        '^.+\\.tsx?$': [
             'ts-jest',
             {
                 useESM: true,

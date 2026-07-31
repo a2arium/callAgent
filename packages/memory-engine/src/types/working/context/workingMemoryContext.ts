@@ -127,7 +127,10 @@ export async function extendContextWithMemory(
     if (!semanticMemoryAdapter && prisma) {
         try {
             const { MemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
-            semanticMemoryAdapter = new MemorySQLAdapter({ prismaClient: prisma });
+            semanticMemoryAdapter = new MemorySQLAdapter({
+                prismaClient: prisma,
+                defaultTenantId: tenantId,
+            });
             contextLogger.debug('Semantic memory adapter auto-created from existing Prisma client', {
                 tenantId,
                 agentId

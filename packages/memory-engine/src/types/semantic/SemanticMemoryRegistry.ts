@@ -15,6 +15,8 @@ import {
     SemanticAddInput as PublicSemanticAddInput,
     SemanticItem,
     SemanticReadFilter,
+    SemanticReadPageFilter,
+    SemanticReadPage,
     SemanticRemoveFilter,
     SemanticPredicateFilter,
     SemanticRemoveResult,
@@ -27,6 +29,7 @@ import {
     normalizeRequiredTags,
     normalizeStoredTags,
     SEMANTIC_TAG_LIMITS,
+    validateSemanticReadPageInput,
 } from '@a2arium/callagent-utils';
 
 export type SemanticMemoryEvent = {
@@ -73,6 +76,16 @@ function validateLimit(limit: unknown): number {
     return resolved as number;
 }
 
+function validatePageLimit(limit: unknown): number {
+    const resolved = validateLimit(limit);
+    if (resolved === 0) {
+        throw new SemanticQueryError('SEMANTIC_QUERY_LIMIT_INVALID', 'Semantic-memory page limit must be positive', {
+            details: { maxQueryLimit: SEMANTIC_TAG_LIMITS.maxQueryLimit },
+        });
+    }
+    return resolved;
+}
+
 function hasEntityFilters(filters: readonly unknown[]): boolean {
     return filters.some((filter) => {
         if (typeof filter === 'string') return /\bENTITY_(FUZZY|EXACT|ALIAS)\b/.test(filter);
@@ -109,6 +122,8 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
     public backends: Record<string, SemanticMemoryBackend>;
     /** Name of the default backend */
     private defaultBackend: string;
+    private readonly pageDispatcher = <T = unknown>(filter: SemanticReadPageFilter): Promise<SemanticReadPage<T>> =>
+        this.dispatchReadItemsPage<T>(filter);
 
     /**
      * Create a new SemanticMemoryRegistry
@@ -123,6 +138,16 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
     ) {
         this.backends = backends;
         this.defaultBackend = defaultBackend;
+    }
+
+    /**
+     * Truthful facade-level capability discovery. The getter stays dynamic for
+     * registries whose public backend map is extended after construction.
+     */
+    get readItemsPage(): (<T = unknown>(filter: SemanticReadPageFilter) => Promise<SemanticReadPage<T>>) | undefined {
+        return Object.values(this.backends).some((backend) => backend.pagination !== undefined)
+            ? this.pageDispatcher
+            : undefined;
     }
 
     private async emit(event: SemanticMemoryEvent): Promise<void> {
@@ -418,6 +443,92 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
                 op: 'read', keys: [], resultCount: 0, status: 'failure', backend: backendName, source: 'context.memory',
                 query: {
                     ...telemetryBase, ...executionStats, resultCount: 0, durationMs: Date.now() - startedAt, outcome: 'error',
+                    ...(error instanceof SemanticQueryError ? { errorCode: error.code } : {}),
+                },
+            });
+            throw error;
+        }
+    }
+
+    private async dispatchReadItemsPage<T = unknown>(filter: SemanticReadPageFilter): Promise<SemanticReadPage<T>> {
+        validateSemanticReadPageInput(filter);
+        const limit = validatePageLimit(filter.limit);
+        const { requiredTags } = normalizeRequiredTags(filter);
+        const { backendName, backend } = this.resolveBackend(filter.backend);
+        const startedAt = Date.now();
+        const orderBy = filter.orderBy ?? { path: 'updatedAt' as const, direction: 'desc' as const };
+        const telemetryBase = {
+            operation: 'read' as const,
+            backendKind: backendKind(backendName, backend),
+            queryMode: 'structured' as const,
+            requiredTagCount: requiredTags.length,
+            hasFilters: Boolean(filter.filters?.length),
+            hasEntityFilters: hasEntityFilters(filter.filters ?? []),
+            random: false,
+            requestedLimit: limit,
+            paginated: true,
+            cursorProvided: filter.cursor !== undefined,
+        };
+
+        if (requiredTags.length > 1 && backend.capabilities?.tagQuery?.allOf !== true) {
+            const error = new SemanticQueryError('SEMANTIC_TAG_QUERY_UNSUPPORTED', 'Selected semantic-memory backend does not support all-of tag queries', {
+                details: { backendKind: backendKind(backendName, backend), requiredTagCount: requiredTags.length },
+            });
+            await this.emit({
+                op: 'read', keys: [], resultCount: 0, status: 'failure', backend: backendName, source: 'context.memory',
+                query: { ...telemetryBase, resultCount: 0, durationMs: Date.now() - startedAt, outcome: 'error', errorCode: error.code },
+            });
+            throw error;
+        }
+
+        const pagination = backend.pagination;
+        if (!pagination) {
+            const error = new SemanticQueryError(
+                'SEMANTIC_BACKEND_METHOD_UNAVAILABLE',
+                `Semantic-memory backend '${backendName}' does not implement pagination`,
+                { details: { backendKind: backendKind(backendName, backend) } },
+            );
+            await this.emit({
+                op: 'read', keys: [], resultCount: 0, status: 'failure', backend: backendName, source: 'context.memory',
+                query: { ...telemetryBase, resultCount: 0, durationMs: Date.now() - startedAt, outcome: 'error', errorCode: error.code },
+            });
+            throw error;
+        }
+
+        let executionStats: SemanticQueryExecutionStats = {};
+        try {
+            const page = await pagination.readPage<T>({
+                ...(requiredTags.length > 0 ? { tags: [...requiredTags] } : {}),
+                ...(filter.filters ? { filters: [...filter.filters] } : {}),
+                ...(filter.cursor !== undefined ? { cursor: filter.cursor } : {}),
+                limit,
+                orderBy,
+            }, {
+                backendName,
+                [SEMANTIC_QUERY_EXECUTION_OBSERVER]: (stats) => { executionStats = { ...executionStats, ...stats }; },
+            });
+            await this.emit({
+                op: 'read', keys: [], resultKeys: page.items.map((item) => item.id), resultCount: page.items.length,
+                status: 'success', backend: backendName, source: 'context.memory',
+                query: {
+                    ...telemetryBase,
+                    ...executionStats,
+                    resultCount: page.items.length,
+                    durationMs: Date.now() - startedAt,
+                    outcome: 'ok',
+                    hasNextPage: page.nextCursor !== undefined,
+                },
+            });
+            return page;
+        } catch (error) {
+            await this.emit({
+                op: 'read', keys: [], resultCount: 0, status: 'failure', backend: backendName, source: 'context.memory',
+                query: {
+                    ...telemetryBase,
+                    ...executionStats,
+                    resultCount: 0,
+                    durationMs: Date.now() - startedAt,
+                    outcome: 'error',
                     ...(error instanceof SemanticQueryError ? { errorCode: error.code } : {}),
                 },
             });

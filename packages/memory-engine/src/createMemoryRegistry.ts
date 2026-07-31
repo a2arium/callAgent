@@ -46,6 +46,8 @@ export interface MemoryRegistryConfig {
     };
     /** Embedding function provider */
     embeddingFunction?: (text: string) => Promise<number[]>;
+    /** Stable base64url-encoded 32-byte key for semantic pagination cursors. */
+    semanticCursorKey?: string;
 }
 
 export async function createMemoryRegistry(
@@ -82,7 +84,8 @@ export async function createMemoryRegistry(
                     prismaClient: config?.database?.prismaClient,
                     databaseUrl: config?.database?.url,
                     defaultTenantId: resolvedTenantId,
-                    embedFunction: config?.embeddingFunction
+                    embedFunction: config?.embeddingFunction,
+                    semanticCursorKey: config?.semanticCursorKey,
                 });
 
                 memoryLogger.debug('Created MemorySQLAdapter with configuration');

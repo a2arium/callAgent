@@ -137,6 +137,82 @@ describe('SemanticMemoryRegistry', () => {
         expect((read.mock.calls as unknown[][])[0]?.[0]).toEqual({ tag: 'one', limit: 1000 });
     });
 
+    it('exposes pagination only when a backend implements it and routes normalized pages', async () => {
+        const withoutPagination = new SemanticMemoryRegistry({ custom: backendWith() }, 'custom');
+        expect(withoutPagination.readItemsPage).toBeUndefined();
+
+        const readPage = jest.fn(async () => ({
+            items: [{ id: 'record:1', value: { ready: true }, tags: ['one', 'two', 'stored'] }],
+            nextCursor: 'opaque',
+        }));
+        const events: SemanticMemoryEvent[] = [];
+        const registry = new SemanticMemoryRegistry({
+            mlo: backendWith(),
+            sql: backendWith({
+                capabilities: { tagQuery: { allOf: true, returnsStoredTags: true } },
+                pagination: { readPage },
+            }),
+        }, 'mlo', (event) => { events.push(event); });
+
+        const page = registry.readItemsPage;
+        expect(page).toBeDefined();
+        await expect(page!({
+            tag: ' TWO ',
+            tags: ['one', 'two'],
+            backend: 'sql',
+            limit: 25,
+            cursor: 'incoming-opaque-cursor',
+        })).resolves.toEqual({
+            items: [{ id: 'record:1', value: { ready: true }, tags: ['one', 'two', 'stored'] }],
+            nextCursor: 'opaque',
+        });
+        expect((readPage.mock.calls as unknown[][])[0]?.[0]).toMatchObject({
+            tags: ['two', 'one'],
+            limit: 25,
+            orderBy: { path: 'updatedAt', direction: 'desc' },
+            cursor: 'incoming-opaque-cursor',
+        });
+        expect((readPage.mock.calls as unknown[][])[0]?.[1]).toMatchObject({ backendName: 'sql' });
+        expect(events.at(-1)).toMatchObject({
+            op: 'read',
+            resultKeys: ['record:1'],
+            query: { paginated: true, hasNextPage: true, outcome: 'ok' },
+        });
+    });
+
+    it('fails closed for an unsupported selected page backend and invalid limits', async () => {
+        const readPage = jest.fn(async () => ({ items: [] }));
+        const registry = new SemanticMemoryRegistry({
+            mlo: backendWith(),
+            sql: backendWith({ pagination: { readPage } }),
+        }, 'mlo');
+        const page = registry.readItemsPage!;
+
+        await expect(page({ backend: 'mlo', limit: 1 }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_BACKEND_METHOD_UNAVAILABLE' });
+        await expect(page({ backend: 'sql', limit: 0 }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_QUERY_LIMIT_INVALID' });
+        expect(readPage).not.toHaveBeenCalled();
+    });
+
+    it('rejects empty cursors and unsupported runtime selectors before invoking a page backend', async () => {
+        const readPage = jest.fn(async () => ({ items: [] }));
+        const registry = new SemanticMemoryRegistry({
+            sql: backendWith({ pagination: { readPage } }),
+        }, 'sql');
+        const page = registry.readItemsPage!;
+
+        await expect(page({ backend: 'sql', limit: 1, cursor: '' }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_CURSOR_INVALID' });
+        await expect(page({ backend: 'sql', limit: 1, cursor: '   ' }))
+            .rejects.toMatchObject({ code: 'SEMANTIC_CURSOR_INVALID' });
+        await expect(page({ backend: 'sql', limit: 1, id: 'record:1' } as any))
+            .rejects.toMatchObject({ code: 'SEMANTIC_QUERY_INVALID_COMBINATION' });
+        await expect(page({ backend: 'sql', limit: 1, random: false } as any))
+            .rejects.toMatchObject({ code: 'SEMANTIC_QUERY_INVALID_COMBINATION' });
+        expect(readPage).not.toHaveBeenCalled();
+    });
+
     it('rejects exact-id predicates and honors caller order while skipping missing ids', async () => {
         const get = jest.fn(async (key: string) => key === 'b' ? { found: key } : null);
         const events: SemanticMemoryEvent[] = [];

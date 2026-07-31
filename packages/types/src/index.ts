@@ -21,6 +21,8 @@ export type {
     SemanticAddInput,
     SemanticItem,
     SemanticReadFilter,
+    SemanticReadPageFilter,
+    SemanticReadPage,
     SemanticRemoveFilter,
     SemanticRemoveResult,
     SemanticPredicateFilter,
@@ -32,6 +34,7 @@ export type {
     SemanticMemoryCapabilities,
     SemanticTagQueryCapability,
     SemanticPredicateRemovalCapability,
+    SemanticPaginationCapability,
     SemanticQueryTelemetry,
 } from './IMemory.js';
 

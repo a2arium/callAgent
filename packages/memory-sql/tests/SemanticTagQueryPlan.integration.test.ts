@@ -57,7 +57,8 @@ describeIfDb('semantic tag representative query plan', () => {
             FROM agent_memory_store
             WHERE tenant_id = $1
               AND tags @> $2::text[]
-            ORDER BY updated_at DESC, key ASC
+              AND (updated_at, key) < ((statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3), 'zzzzzzzz')
+            ORDER BY updated_at DESC, key DESC
             LIMIT $3
         `, [primaryTenant, ['plan:rare'], 100]);
         const plan = result.rows[0]['QUERY PLAN'][0];
@@ -65,6 +66,24 @@ describeIfDb('semantic tag representative query plan', () => {
         expect(serialized).toContain('agent_memory_store_tags_gin_idx');
         expect(serialized).toContain('plan:rare');
         expect(serialized).toContain(primaryTenant);
+        expect(plan.Plan['Node Type']).toBe('Limit');
+        expect(plan['Execution Time']).toBeGreaterThanOrEqual(0);
+    });
+
+    it('uses the tenant-created-key index for a broad bounded ordered scan', async () => {
+        const result = await client.query(`
+            EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+            SELECT key, value, tags
+            FROM agent_memory_store
+            WHERE tenant_id = $1
+              AND created_at <= (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
+              AND (created_at, key) > (TIMESTAMP '2000-01-01 00:00:00.000', '')
+            ORDER BY created_at ASC, key ASC
+            LIMIT 100
+        `, [primaryTenant]);
+        const plan = result.rows[0]['QUERY PLAN'][0];
+        const serialized = JSON.stringify(plan);
+        expect(serialized).toContain('agent_memory_store_tenant_created_key_idx');
         expect(plan.Plan['Node Type']).toBe('Limit');
         expect(plan['Execution Time']).toBeGreaterThanOrEqual(0);
     });
