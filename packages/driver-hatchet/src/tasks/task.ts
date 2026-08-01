@@ -13,6 +13,7 @@ import {
     readDurableTaskTerminal,
     readSegmentCancellation,
     reconcileSnapshotMutation,
+    settleUnclaimedTaskTurnInSnapshot,
     timerKindToReason,
 } from '@a2arium/callagent-core/unstable';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
@@ -82,6 +83,8 @@ export type TaskTaskInput = JsonObject & {
     parentTaskId?: string;
     tenantTaskKey?: string;
     rootRunKey?: string;
+    recoveryGeneration?: string;
+    recoveryDeliveryKey?: string;
 };
 
 export type TaskTaskOutput = SegmentTaskOutput;
@@ -249,6 +252,7 @@ async function executeTaskTaskInner(
     let wake: SegmentTaskWake = { trigger: 'start', input: input.input };
     let idempotencyKey = input.idempotencyKey;
     let turnSeq = 0;
+    let recoveryGeneration = input.recoveryGeneration;
 
     try {
         const bootstrap = await runTaskState(ctx, input, deps, {
@@ -301,6 +305,9 @@ async function executeTaskTaskInner(
                 rootTaskId: input.rootTaskId ?? input.taskId,
                 ...(input.parentTaskId !== undefined ? { parentTaskId: input.parentTaskId } : {}),
                 ...(input.rootRunKey !== undefined ? { rootRunKey: input.rootRunKey } : {}),
+                ...(recoveryGeneration !== undefined
+                    ? { recoveryGeneration }
+                    : {}),
             };
             const segmentRaw = await ctx.runChild<SegmentTaskInput, SegmentTaskOutput>(
                 protocolNames.segment,
@@ -317,6 +324,7 @@ async function executeTaskTaskInner(
                 await waitForTurnAvailability(ctx, input, turnSeq);
                 continue;
             }
+            recoveryGeneration = undefined;
 
             let boundary = segment.boundary;
             if (deps?.useTaskStateChildren === true && segment.turnDisposition !== 'executed') {
@@ -671,8 +679,18 @@ async function persistCachedTaskTerminal(
                     ? { reason: segment.boundary.reason }
                     : {}),
             });
-            return claim.changed
-                ? { kind: 'write' as const, snapshot: claim.snapshot, value: claim.terminal }
+            const settled = input.recoveryGeneration !== undefined &&
+                input.recoveryDeliveryKey !== undefined
+                ? settleUnclaimedTaskTurnInSnapshot({
+                    snapshot: claim.snapshot,
+                    tenantId: input.tenantId,
+                    taskId: input.taskId,
+                    generation: input.recoveryGeneration,
+                    deliveryKey: input.recoveryDeliveryKey,
+                })
+                : { snapshot: claim.snapshot, changed: false };
+            return claim.changed || settled.changed
+                ? { kind: 'write' as const, snapshot: settled.snapshot, value: claim.terminal }
                 : { kind: 'noop' as const, value: claim.terminal };
         },
     });

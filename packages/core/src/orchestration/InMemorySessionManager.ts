@@ -24,6 +24,7 @@ type ScannableCoordinator = {
         generation: string;
         deliveryKey: string;
         runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+        createdAt: string;
         enqueuedAt?: string;
     };
 };
@@ -43,11 +44,13 @@ function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): Scannabl
     if (rawIntent && typeof rawIntent === 'object' && !Array.isArray(rawIntent)) {
         const intent = rawIntent as Record<string, unknown>;
         if (typeof intent.generation === 'string' && typeof intent.deliveryKey === 'string' &&
+            typeof intent.createdAt === 'string' && Number.isFinite(Date.parse(intent.createdAt)) &&
             (intent.runtimeSurface === 'direct' || intent.runtimeSurface === 'in_process' || intent.runtimeSurface === 'hatchet')) {
             dispatchIntent = {
                 generation: intent.generation,
                 deliveryKey: intent.deliveryKey,
                 runtimeSurface: intent.runtimeSurface,
+                createdAt: intent.createdAt,
                 ...(typeof intent.enqueuedAt === 'string' ? { enqueuedAt: intent.enqueuedAt } : {}),
             };
         }
@@ -120,8 +123,8 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         const snapshot = await this.getSessionSnapshot(tenantId, sessionId);
         const storageNow = new Date(this.now()).toISOString();
         return snapshot === null
-            ? { wmVersion: 0n, snapshot: {}, agentId: '', updatedAt: storageNow, storageNow }
-            : { ...snapshot, storageNow };
+            ? { exists: false, wmVersion: 0n, snapshot: {}, agentId: '', updatedAt: storageNow, storageNow }
+            : { ...snapshot, exists: true, storageNow };
     }
 
     async writeSnapshotCAS(params: {
@@ -184,6 +187,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
                 sessionId,
                 agentId: row.agentId,
                 updatedAt: row.updatedAt,
+                createdAt: coordinator.dispatchIntent.createdAt,
                 generation: coordinator.dispatchIntent.generation,
                 deliveryKey: coordinator.dispatchIntent.deliveryKey,
                 runtimeSurface: coordinator.dispatchIntent.runtimeSurface,

@@ -238,6 +238,7 @@ const ALLOWED_DIMENSIONS = new Set([
     'operation',
     'phase',
     'route',
+    'runtimeSurface',
     'status',
     'surface',
     'type',

@@ -91,6 +91,12 @@ function readSnapshotAgentId(snapshot: Record<string, unknown> | undefined): str
 export class SessionManager {
     constructor(private readonly store?: IWorkingMemorySessionStore) { }
 
+    supportsDurableTaskAdmission(): boolean {
+        return this.store?.taskAdmissionCapabilities?.durablePersistence === true &&
+            this.store.taskAdmissionCapabilities.runnableTurnRecovery === true &&
+            typeof this.store.listRunnableTurnRequests === 'function';
+    }
+
     private onOutboxEnqueued?: (ref: OutboxEnqueuedRef) => void | Promise<void>;
     private outboxDelivery: { scope: 'process' | 'shared'; ownerId?: string } = {
         scope: 'process',

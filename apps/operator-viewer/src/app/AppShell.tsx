@@ -26,6 +26,7 @@ export function AppShell(): React.ReactElement {
         <nav className="grid gap-2">
           <NavLink to="/" active={location.pathname === '/'}>Fleet</NavLink>
           <NavLink to="/agents" active={location.pathname === '/agents'}>Agents</NavLink>
+          <NavLink to="/schedules" active={location.pathname === '/schedules'}>Schedules</NavLink>
           <NavLink to="/memory" active={location.pathname === '/memory'}>Memory</NavLink>
           <NavLink to="/runs/$taskId" params={{ taskId: 'open-directly' }} disabled>
             Run Detail

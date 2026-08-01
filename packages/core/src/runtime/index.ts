@@ -37,6 +37,7 @@ export type {
     RuntimeTimerFireLease,
     RuntimeTimerPrisma,
     TimerExpiredReason,
+    TaskRunTimeoutDisposition,
 } from './runtimeTimer.js';
 
 export type {

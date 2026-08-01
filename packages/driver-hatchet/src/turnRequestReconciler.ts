@@ -1,6 +1,7 @@
 import {
     defaultMetricsRegistry,
     markTaskTurnDispatchEnqueued,
+    observeTaskSubmissionBacklog,
     type SessionManager,
 } from '@a2arium/callagent-core/unstable';
 import { logger } from '@a2arium/callagent-utils';
@@ -31,6 +32,7 @@ export class TurnRequestReconciler {
         const end = defaultMetricsRegistry.startTimer('task_turn_dispatch_reconcile_ms');
         let cursor: { updatedAt: string; tenantId: string; sessionId: string } | undefined;
         let count = 0;
+        const submissionRows = [] as Awaited<ReturnType<SessionManager['listRunnableTurnRequests']>>;
         try {
             do {
                 const page = await this.sessions.listRunnableTurnRequests({
@@ -38,6 +40,7 @@ export class TurnRequestReconciler {
                     limit: this.options.batchSize ?? 100,
                 });
                 const rows = page.filter((row) => row.runtimeSurface === 'hatchet');
+                submissionRows.push(...rows);
                 for (let offset = 0; offset < rows.length; offset += 4) {
                     await Promise.all(rows.slice(offset, offset + 4).map(async (row) => {
                         const tenantTaskKey = encodeTenantTaskKey(row.tenantId, row.sessionId);
@@ -59,6 +62,7 @@ export class TurnRequestReconciler {
                             agentId: row.agentId,
                             generation: row.generation,
                             deliveryKey: row.deliveryKey,
+                            runtimeSurface: 'hatchet',
                         });
                         defaultMetricsRegistry.increment('task_turn_dispatch_recovery_total', {
                             runtimeSurface: 'hatchet',
@@ -71,6 +75,7 @@ export class TurnRequestReconciler {
                 cursor = last ? { updatedAt: last.updatedAt, tenantId: last.tenantId, sessionId: last.sessionId } : undefined;
                 if (page.length < (this.options.batchSize ?? 100)) break;
             } while (cursor !== undefined);
+            observeTaskSubmissionBacklog(submissionRows, 'hatchet');
             end({ status: 'completed' });
             return count;
         } catch (error) {
@@ -129,11 +134,6 @@ export class TurnRequestReconciler {
         const snapshot = asRecord(loaded?.snapshot);
         const meta = asRecord(snapshot.meta);
         if (!Object.prototype.hasOwnProperty.call(meta, 'initialInput')) return;
-        const processedKeys = Array.isArray(meta.processedKeys)
-            ? meta.processedKeys.filter((value): value is string => typeof value === 'string')
-            : [];
-        const idempotencyKey = processedKeys.find((key) => key.endsWith(':start'))
-            ?? `${row.sessionId}:start`;
         const rootRunKey = `${tenantTaskKey}:root:1`;
         await this.options.rootTask.runNoWait({
             tenantId: row.tenantId,
@@ -143,7 +143,9 @@ export class TurnRequestReconciler {
             rootRunKey,
             agentId: row.agentId,
             input: meta.initialInput as TaskTaskInput['input'],
-            idempotencyKey,
+            idempotencyKey: row.deliveryKey,
+            recoveryGeneration: row.generation,
+            recoveryDeliveryKey: row.deliveryKey,
         }, {
             additionalMetadata: {
                 operation: 'agent.run.recovery',

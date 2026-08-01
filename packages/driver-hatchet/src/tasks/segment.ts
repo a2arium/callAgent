@@ -61,6 +61,7 @@ export type SegmentTaskInput = JsonObject & {
     rootTaskId?: string;
     parentTaskId?: string;
     rootRunKey?: string;
+    recoveryGeneration?: string;
 };
 
 export type SegmentTaskBoundary =

@@ -121,6 +121,14 @@ export type TaskContext = {
         input: TaskInput;
         // Future: status, artifacts, createdAt, etc.
     };
+    /** Manifest-gated admission of independent same-tenant root tasks. */
+    tasks?: {
+        submit: (
+            agentId: string,
+            input: unknown,
+            options: { taskId: string; maxTurns?: number; taskRunTimeoutMs?: number }
+        ) => Promise<import('../../orchestration/TaskSubmission.js').SubmitTaskResult>;
+    };
     // Basic Output & Status Control (Implemented minimally)
     reply: (parts: string | string[] | MessagePart | MessagePart[]) => Promise<void>;
     progress: ((pct: number, msg?: string) => void) & ((status: TaskStatus) => void); // Support both signatures

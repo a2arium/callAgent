@@ -81,6 +81,13 @@ export const AgentRuntimeManifestSchema = z.object({
     agents: z.array(z.string()).optional(),
   }).strict().optional(),
 
+  /** Explicit orchestration privileges granted to this agent. */
+  orchestration: z.object({
+    rootTaskSubmission: z.object({
+      allowAgents: uniqueNonEmptyStrings,
+    }).strict().optional(),
+  }).strict().optional(),
+
   /** Memory configuration */
   memory: z.object({
     profile: z.string().optional(),

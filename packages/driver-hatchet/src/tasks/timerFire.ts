@@ -2,6 +2,7 @@ import {
     RuntimeTimerRepository,
     timerRecordToWake,
     type RuntimeTimerRecord,
+    type TaskRunTimeoutDisposition,
 } from '@a2arium/callagent-core/unstable';
 import type { Context } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
 import type { Duration } from '@hatchet-dev/typescript-sdk/v1/client/duration.js';
@@ -37,7 +38,7 @@ export type TimerFireDeps = {
         token: string;
         dueAt: string;
         payload?: unknown;
-    }) => Promise<void>;
+    }) => Promise<TaskRunTimeoutDisposition | void>;
     driverRuns?: DriverRunsRepository;
     events?: {
         push: (

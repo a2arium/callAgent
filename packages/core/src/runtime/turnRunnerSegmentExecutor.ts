@@ -58,6 +58,12 @@ export type TurnRunnerSegmentExecutorDeps = {
         state: 'completed' | 'failed' | 'canceled';
         runtimeSurface: 'direct' | 'in_process' | 'hatchet';
     }) => Promise<void>;
+    ensureInitialRootDeadline?: (params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        snapshot: Record<string, unknown>;
+    }) => Promise<'ready' | 'canceled' | 'terminal'>;
 };
 
 export type RuntimeContextBinding = {
@@ -73,6 +79,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     private readonly dedupe: SegmentDedupe;
     private readonly onChildTimeout?: (params: { tenantId: string; childTaskId: string }) => Promise<void>;
     private readonly onTaskTerminal?: TurnRunnerSegmentExecutorDeps['onTaskTerminal'];
+    private readonly ensureInitialRootDeadline?: TurnRunnerSegmentExecutorDeps['ensureInitialRootDeadline'];
 
     constructor(deps: TurnRunnerSegmentExecutorDeps) {
         this.turnRunner = deps.turnRunner;
@@ -82,6 +89,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         this.dedupe = deps.dedupe ?? createInMemorySegmentDedupe();
         this.onChildTimeout = deps.onChildTimeout;
         this.onTaskTerminal = deps.onTaskTerminal;
+        this.ensureInitialRootDeadline = deps.ensureInitialRootDeadline;
     }
 
     async runSegment(params: RunSegmentParams): Promise<SegmentResult> {
@@ -92,12 +100,42 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         // Fast replay path only. Correctness still comes from requestTaskTurn below:
         // two workers that both miss this read race through the snapshot claim and
         // only one can enter TurnRunner.
-        if (await this.hasProcessedKey(tenantId, taskId, idempotencyKey)) {
+        const replayState = await this.loadReplayState(tenantId, taskId, idempotencyKey);
+        if (replayState.processed) {
             await this.appendAttemptEvent('turn.attempt_finished', {
                 tenantId, taskId, idempotencyKey, attemptKey: runtimeAttemptKey,
                 disposition: 'matching_replay', status: 'matching_replay',
             });
             return this.buildDuplicateResult(tenantId, taskId, agentId, 'matching_replay');
+        }
+
+        if (this.ensureInitialRootDeadline !== undefined) {
+            const deadlineDisposition = await this.ensureInitialRootDeadline({
+                tenantId,
+                taskId,
+                ...(agentId ?? replayState.agentId
+                    ? { agentId: agentId ?? replayState.agentId }
+                    : {}),
+                snapshot: replayState.snapshot,
+            });
+            if (deadlineDisposition === 'canceled') {
+                return this.buildCanceledResult(
+                    tenantId,
+                    taskId,
+                    agentId ?? replayState.agentId,
+                    idempotencyKey,
+                    'active_run_timeout',
+                    params.runtimeSurface ?? 'in_process'
+                );
+            }
+            if (deadlineDisposition === 'terminal') {
+                return this.buildDuplicateResult(
+                    tenantId,
+                    taskId,
+                    agentId ?? replayState.agentId,
+                    'terminal_replay'
+                );
+            }
         }
 
         if (prepared !== undefined) {
@@ -219,8 +257,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             };
         }
 
-        const snapBeforeWake = await this.sessionManager.load(tenantId, taskId);
-        const cancellationBeforeWake = readSegmentCancellation(snapBeforeWake?.snapshot);
+        const snapBeforeWake = replayState;
+        const cancellationBeforeWake = readSegmentCancellation(snapBeforeWake.snapshot);
         if (cancellationBeforeWake !== undefined) {
             return this.buildCanceledResult(
                 tenantId,
@@ -685,23 +723,39 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         );
     }
 
-    private async hasProcessedKey(
+    private async loadReplayState(
         tenantId: string,
         taskId: string,
         idempotencyKey: string
-    ): Promise<boolean> {
+    ): Promise<{
+        processed: boolean;
+        snapshot: Record<string, unknown>;
+        agentId?: string;
+    }> {
         const snap = await this.sessionManager.load(tenantId, taskId);
+        const snapshot = snap?.snapshot !== null && typeof snap?.snapshot === 'object' &&
+            !Array.isArray(snap.snapshot)
+            ? snap.snapshot as Record<string, unknown>
+            : {};
         if (!this.dedupe.has(idempotencyKey) &&
-            !snapshotHasProcessedSegmentKey(snap?.snapshot, idempotencyKey)) {
-            return false;
+            !snapshotHasProcessedSegmentKey(snapshot, idempotencyKey)) {
+            return {
+                processed: false,
+                snapshot,
+                ...(snap?.agentId !== undefined ? { agentId: snap.agentId } : {}),
+            };
         }
-        const coordinator = readTaskTurnCoordinator(snap?.snapshot);
+        const coordinator = readTaskTurnCoordinator(snapshot);
         const requested = BigInt(coordinator.requestedGeneration);
         const completed = BigInt(coordinator.completedGeneration);
         // A processed key means the wake was durably accepted, not necessarily
         // that the generation it requested has executed. Re-enter admission
         // while work remains so the queued generation cannot be stranded.
-        return requested <= completed;
+        return {
+            processed: requested <= completed,
+            snapshot,
+            ...(snap?.agentId !== undefined ? { agentId: snap.agentId } : {}),
+        };
     }
 
     private async ensureProcessedKeyRecorded(

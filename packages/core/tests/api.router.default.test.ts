@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import { createApiRouter } from '../src/api/router.js';
 import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 import { defaultMetricsRegistry } from '../src/observability/metrics.js';
+import { AgentScheduleError } from '../src/operator/agentSchedules.js';
 
 const getRpcHandler = () => {
     const router = createApiRouter() as any;
@@ -11,6 +12,12 @@ const getRpcHandler = () => {
 
 const getHandler = (path: string, method: string) => {
     const router = createApiRouter({ runtimeOnly: false }) as any;
+    const layer = router.stack.find((l: any) => l.route?.path === path && l.route?.methods?.[method]);
+    return layer.route.stack[0].handle;
+};
+
+const getScheduleHandler = (scheduleService: any, path: string, method: string) => {
+    const router = createApiRouter({ runtimeOnly: false, scheduleService }) as any;
     const layer = router.stack.find((l: any) => l.route?.path === path && l.route?.methods?.[method]);
     return layer.route.stack[0].handle;
 };
@@ -81,6 +88,60 @@ describe('API router default branch', () => {
         expect(res.body).toEqual({ acknowledged: true });
     });
 
+    it('passes authenticated tenant context and schedule filters to the schedule service', async () => {
+        const list = jest.fn(async () => ({ items: [], nextCursor: undefined }));
+        const handler = getScheduleHandler({ list }, '/agent-schedules', 'get');
+        const res = fakeRes();
+        await handler({
+            method: 'GET',
+            query: { agentId: 'lifecycle-sweep', kind: 'cron', state: 'enabled', limit: '25', cursor: 'opaque' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-a' : undefined,
+        }, res);
+        expect(res.statusCode).toBe(200);
+        expect(list).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-a' }), {
+            agentId: 'lifecycle-sweep', kind: 'cron', state: 'enabled', limit: 25, cursor: 'opaque',
+        });
+    });
+
+    it('rejects conflicting body tenants and derives schedule tenant from operator context', async () => {
+        const create = jest.fn(async () => ({ id: 'schedule-1' }));
+        const handler = getScheduleHandler({ create }, '/agent-schedules', 'post');
+        const res = fakeRes();
+        await handler({
+            method: 'POST', query: {},
+            body: { tenantId: 'attacker-tenant', kind: 'cron', agentId: 'agent-a', displayName: 'sweep', input: {}, cronExpression: '0 * * * *' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-a' : undefined,
+        }, res);
+        expect(res.statusCode).toBe(400);
+        expect(create).not.toHaveBeenCalled();
+
+        const accepted = fakeRes();
+        await handler({
+            method: 'POST', query: {},
+            body: { kind: 'cron', agentId: 'agent-a', displayName: 'sweep', input: {}, cronExpression: '0 * * * *' },
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-a' : undefined,
+        }, accepted);
+        expect(accepted.statusCode).toBe(201);
+        expect(create.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ tenantId: 'tenant-a' }));
+    });
+
+    it('maps unavailable schedule providers to 503 and reports unconfigured service as 503', async () => {
+        const failing = getScheduleHandler({
+            list: jest.fn(async () => { throw new AgentScheduleError('SCHEDULE_PROVIDER_UNAVAILABLE', 'down', 503); }),
+        }, '/agent-schedules', 'get');
+        const request = { method: 'GET', query: {}, header: () => undefined };
+        const failed = fakeRes();
+        await failing(request, failed);
+        expect(failed.statusCode).toBe(503);
+        expect(failed.body.error).toBe('SCHEDULE_PROVIDER_UNAVAILABLE');
+
+        const unavailable = getHandler('/agent-schedules', 'get');
+        const missing = fakeRes();
+        await unavailable(request, missing);
+        expect(missing.statusCode).toBe(503);
+        expect(missing.body.error).toBe('SCHEDULE_PROVIDER_UNAVAILABLE');
+    });
+
     it('exposes operator API metrics', async () => {
         const listAgentRuns = jest.fn(async () => ({ items: [], nextCursor: null }));
         EngineLocator.setEngine({ listAgentRuns });
@@ -130,6 +191,7 @@ describe('API router default branch', () => {
                 cursor: 'cursor-1',
                 limit: '75',
                 taskId: 'root-task',
+                scheduleId: 'schedule-1',
                 hasLlm: 'true',
                 hasMemory: 'true',
                 costState: 'missing',
@@ -146,6 +208,7 @@ describe('API router default branch', () => {
             cursor: 'cursor-1',
             limit: 75,
             taskId: 'root-task',
+            scheduleId: 'schedule-1',
             hasLlm: true,
             hasMemory: true,
             costState: 'missing',

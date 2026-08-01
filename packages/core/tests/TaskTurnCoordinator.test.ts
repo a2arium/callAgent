@@ -422,9 +422,16 @@ describe('TaskTurnCoordinator', () => {
         });
         const intent = readTaskTurnCoordinator((await session.load('tenant-a', 'task-a'))?.snapshot).dispatchIntent!;
         await expect(session.listRunnableTurnRequests({ limit: 100 })).resolves.toHaveLength(1);
+        await expect(markTaskTurnDispatchEnqueued({
+            session, tenantId: 'tenant-a', taskId: 'task-a', agentId: 'agent-a',
+            generation: intent.generation, deliveryKey: intent.deliveryKey,
+            runtimeSurface: 'in_process',
+        })).resolves.toBe('stale');
+        await expect(session.listRunnableTurnRequests({ limit: 100 })).resolves.toHaveLength(1);
         await markTaskTurnDispatchEnqueued({
             session, tenantId: 'tenant-a', taskId: 'task-a', agentId: 'agent-a',
             generation: intent.generation, deliveryKey: intent.deliveryKey,
+            runtimeSurface: 'hatchet',
         });
         await expect(session.listRunnableTurnRequests({ limit: 100 })).resolves.toHaveLength(0);
         clockMs += 15_001;

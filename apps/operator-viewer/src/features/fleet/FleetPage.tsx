@@ -45,6 +45,7 @@ export function FleetPage(): React.ReactElement {
     status: search.status || undefined,
     since: search.since || undefined,
     taskId: search.taskId || undefined,
+    scheduleId: search.scheduleId || undefined,
     hasLlm: search.hasLlm || undefined,
     hasMemory: search.hasMemory || undefined,
     costState: search.costState || undefined,
@@ -192,7 +193,7 @@ function FleetFilters(props: {
   const update = (patch: Partial<FleetSearch>) => props.onChange({ ...props.search, ...patch });
   return (
     <section className="rounded-lg border border-border bg-card p-3">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
         <Field label="Tenant">
           <input className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={props.search.tenantId} onChange={(event) => update({ tenantId: event.target.value })} />
         </Field>
@@ -218,6 +219,9 @@ function FleetFilters(props: {
         </Field>
         <Field label="Task/root task">
           <input className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="taskId" value={props.search.taskId} onChange={(event) => update({ taskId: event.target.value })} />
+        </Field>
+        <Field label="Schedule">
+          <input className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="scheduleId" value={props.search.scheduleId} onChange={(event) => update({ scheduleId: event.target.value })} />
         </Field>
         <Field label="Cost">
           <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={props.search.costState} onChange={(event) => update({ costState: event.target.value as FleetSearch['costState'] })}>

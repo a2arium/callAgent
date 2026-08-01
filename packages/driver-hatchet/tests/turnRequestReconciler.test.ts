@@ -12,7 +12,6 @@ describe('TurnRequestReconciler', () => {
                 meta: {
                     agentId: 'agent-a',
                     initialInput: { caseId: 'case-a' },
-                    processedKeys: ['custom:start'],
                     taskLifecycle: {
                         taskId: 'task-a', rootTaskId: 'task-a', ancestorTaskIds: [], state: 'active',
                     },
@@ -45,7 +44,9 @@ describe('TurnRequestReconciler', () => {
             taskId: 'task-a',
             agentId: 'agent-a',
             input: { caseId: 'case-a' },
-            idempotencyKey: 'custom:start',
+            idempotencyKey: 'task-a:turn-request:1',
+            recoveryGeneration: '1',
+            recoveryDeliveryKey: 'task-a:turn-request:1',
             rootRunKey: '8:tenant-a:6:task-a:root:1',
         }), expect.objectContaining({ additionalMetadata: expect.objectContaining({
             operation: 'agent.run.recovery',

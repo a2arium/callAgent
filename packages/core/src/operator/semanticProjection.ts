@@ -10,6 +10,10 @@ import type {
 } from './runGraph.js';
 import { canonicalTurnAttemptKey, groupTurnAttempts, severityForStatus } from './runGraph.js';
 import { readDurableTaskTerminal, readTaskLifecycle } from '../orchestration/TaskLifecycle.js';
+import {
+    readTaskSubmissionMetadata,
+    type TaskSubmissionOrigin,
+} from '../orchestration/TaskSubmission.js';
 
 export type OperatorProjectionMode = 'bridge' | 'compare' | 'semantic';
 export type OperatorProjectionWriteMode = 'off' | 'shadow' | 'on';
@@ -26,6 +30,7 @@ export type SemanticAgentRunListParams = {
     hasLlm?: boolean;
     hasMemory?: boolean;
     costState?: 'captured' | 'missing';
+    scheduleId?: string;
 };
 
 export type SemanticAgentRunListItem = {
@@ -44,6 +49,7 @@ export type SemanticAgentRunListItem = {
     error?: unknown;
     traceId?: string;
     providerRunId?: string | null;
+    origin?: TaskSubmissionOrigin;
 };
 
 export type SemanticAgentRunListPage = {
@@ -191,6 +197,11 @@ type SemanticRunRow = {
     outputState?: string | null;
     traceId?: string | null;
     providerRunId?: string | null;
+    originKind?: string | null;
+    scheduleId?: string | null;
+    scheduleOccurrenceId?: string | null;
+    submittedByTaskId?: string | null;
+    scheduledFor?: Date | string | null;
     updatedAt: Date | string;
 };
 
@@ -297,6 +308,46 @@ export class OperatorProjectionRepository {
         }
     }
 
+    async projectAdmission(params: {
+        tenantId: string;
+        taskId: string;
+        agentId: string;
+        admittedAt: string;
+        origin?: TaskSubmissionOrigin;
+    }): Promise<void> {
+        const upsert = this.prisma.agentRun?.upsert;
+        if (typeof upsert !== 'function') return;
+        const startedAt = new Date(params.admittedAt);
+        const provenance = {
+            originKind: params.origin?.kind,
+            scheduleId: params.origin?.scheduleId,
+            scheduleOccurrenceId: params.origin?.scheduleOccurrenceId,
+            submittedByTaskId: params.origin?.submittedByTaskId,
+            scheduledFor: params.origin?.scheduledFor ? new Date(params.origin.scheduledFor) : undefined,
+        };
+        await upsert({
+            where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
+            create: stripUndefined({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                rootTaskId: params.taskId,
+                agentId: params.agentId,
+                operation: 'agent.run',
+                scope: 'root',
+                status: 'queued',
+                startedAt,
+                outputState: 'not_captured',
+                ...provenance,
+            }),
+            update: stripUndefined({
+                rootTaskId: params.taskId,
+                agentId: params.agentId,
+                scope: 'root',
+                ...provenance,
+            }),
+        });
+    }
+
     async projectListPage(tenantId: string, items: SemanticAgentRunListItem[]): Promise<void> {
         if (!this.isAvailable()) return;
         await Promise.all(items.map(async (item) => {
@@ -325,6 +376,11 @@ export class OperatorProjectionRepository {
                 outputState: 'not_captured',
                 traceId: item.traceId,
                 providerRunId: item.providerRunId ?? undefined,
+                originKind: item.origin?.kind,
+                scheduleId: item.origin?.scheduleId,
+                scheduleOccurrenceId: item.origin?.scheduleOccurrenceId,
+                submittedByTaskId: item.origin?.submittedByTaskId,
+                scheduledFor: item.origin?.scheduledFor ? new Date(item.origin.scheduledFor) : undefined,
             });
             const updateData = stripUndefined({
                 rootTaskId: item.rootTaskId,
@@ -343,6 +399,11 @@ export class OperatorProjectionRepository {
                 terminalMessage: preserveTerminal ? undefined : errorMessage(item.error),
                 traceId: item.traceId,
                 providerRunId: item.providerRunId ?? undefined,
+                originKind: item.origin?.kind,
+                scheduleId: item.origin?.scheduleId,
+                scheduleOccurrenceId: item.origin?.scheduleOccurrenceId,
+                submittedByTaskId: item.origin?.submittedByTaskId,
+                scheduledFor: item.origin?.scheduledFor ? new Date(item.origin.scheduledFor) : undefined,
             });
             await this.prisma.agentRun!.upsert!({
                 where: { tenantId_taskId: { tenantId, taskId: item.taskId } },
@@ -686,6 +747,14 @@ export class OperatorProjectionRepository {
         const terminalAt = terminal?.claimedAt ?? lifecycle?.changedAt;
         if (terminalAt === undefined) return false;
         const completedAt = new Date(terminalAt);
+        let origin: TaskSubmissionOrigin | undefined;
+        try {
+            origin = readTaskSubmissionMetadata(params.snapshot)?.origin;
+        } catch {
+            // Terminal convergence must remain available for historical or
+            // corrupt submission envelopes. Invalid provenance is omitted
+            // rather than projected as trusted metadata.
+        }
         const runData = stripUndefined({
             rootTaskId: lifecycle?.rootTaskId ?? params.taskId,
             parentTaskId: lifecycle?.parentTaskId,
@@ -699,6 +768,11 @@ export class OperatorProjectionRepository {
                 : undefined,
             terminalMessage: terminal?.status.message?.parts.map((part) => part.text).join(' '),
             cancelReason: lifecycle?.state === 'detached' ? lifecycle.reason : undefined,
+            originKind: origin?.kind,
+            scheduleId: origin?.scheduleId,
+            scheduleOccurrenceId: origin?.scheduleOccurrenceId,
+            submittedByTaskId: origin?.submittedByTaskId,
+            scheduledFor: origin?.scheduledFor ? new Date(origin.scheduledFor) : undefined,
         });
         await this.prisma.agentRun?.upsert?.({
             where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
@@ -837,6 +911,7 @@ export class OperatorProjectionRepository {
                 params.status ?? '',
                 params.since ?? '',
                 params.taskId ?? '',
+                params.scheduleId ?? '',
                 params.hasLlm ? 'llm' : '',
                 params.hasMemory ? 'memory' : '',
                 params.costState ?? '',
@@ -1376,6 +1451,11 @@ export class OperatorProjectionRepository {
             outputState: node.outputPreview === undefined ? 'not_captured' : 'available',
             traceId: node.traceId,
             providerRunId: node.providerRunId,
+            originKind: node.origin?.kind,
+            scheduleId: node.origin?.scheduleId,
+            scheduleOccurrenceId: node.origin?.scheduleOccurrenceId,
+            submittedByTaskId: node.origin?.submittedByTaskId,
+            scheduledFor: node.origin?.scheduledFor ? new Date(node.origin.scheduledFor) : undefined,
         });
         const updateData = stripUndefined({
             rootTaskId: node.rootTaskId,
@@ -1397,6 +1477,11 @@ export class OperatorProjectionRepository {
             outputState: node.outputPreview === undefined ? 'not_captured' : 'available',
             traceId: node.traceId,
             providerRunId: node.providerRunId,
+            originKind: node.origin?.kind,
+            scheduleId: node.origin?.scheduleId,
+            scheduleOccurrenceId: node.origin?.scheduleOccurrenceId,
+            submittedByTaskId: node.origin?.submittedByTaskId,
+            scheduledFor: node.origin?.scheduledFor ? new Date(node.origin.scheduledFor) : undefined,
         });
         await this.prisma.agentRun!.upsert!({
             where: { tenantId_taskId: { tenantId: node.tenantId, taskId: node.taskId } },
@@ -1630,6 +1715,17 @@ function rowToListItem(
         ...(row.terminalCode || row.terminalMessage ? { error: { code: row.terminalCode, message: row.terminalMessage } } : {}),
         ...(row.traceId ? { traceId: row.traceId } : {}),
         ...(row.providerRunId ? { providerRunId: row.providerRunId } : {}),
+        ...(row.originKind === 'schedule' || row.originKind === 'agent'
+            ? {
+                origin: {
+                    kind: row.originKind,
+                    ...(row.scheduleId ? { scheduleId: row.scheduleId } : {}),
+                    ...(row.scheduleOccurrenceId ? { scheduleOccurrenceId: row.scheduleOccurrenceId } : {}),
+                    ...(row.submittedByTaskId ? { submittedByTaskId: row.submittedByTaskId } : {}),
+                    ...(row.scheduledFor ? { scheduledFor: toIso(row.scheduledFor) } : {}),
+                },
+            }
+            : {}),
     };
 }
 
@@ -1639,6 +1735,7 @@ function buildSemanticAgentRunWhere(params: SemanticAgentRunListParams): Record<
         ...(params.scope === 'roots' ? { scope: 'root' } : {}),
         ...(params.agentId ? { agentId: params.agentId } : {}),
         ...(params.status ? { status: params.status } : {}),
+        ...(params.scheduleId ? { scheduleId: params.scheduleId } : {}),
     }];
     if (params.since) {
         const since = new Date(params.since);
@@ -1703,6 +1800,17 @@ function rowToNode(row: SemanticRunRow): AgentRunNode {
         ...(status === 'canceled' || row.cancelReason ? { cancellation: { requested: true, reason: row.cancelReason ?? undefined } } : {}),
         ...(row.traceId ? { traceId: row.traceId } : {}),
         ...(row.providerRunId ? { providerRunId: row.providerRunId } : {}),
+        ...(row.originKind === 'schedule' || row.originKind === 'agent'
+            ? {
+                origin: {
+                    kind: row.originKind,
+                    ...(row.scheduleId ? { scheduleId: row.scheduleId } : {}),
+                    ...(row.scheduleOccurrenceId ? { scheduleOccurrenceId: row.scheduleOccurrenceId } : {}),
+                    ...(row.submittedByTaskId ? { submittedByTaskId: row.submittedByTaskId } : {}),
+                    ...(row.scheduledFor ? { scheduledFor: toIso(row.scheduledFor) } : {}),
+                },
+            }
+            : {}),
         ...(executionOrigin ? { executionOrigin } : {}),
         ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
         ...(row.terminalAt ? { finishedAt: toIso(row.terminalAt) } : {}),

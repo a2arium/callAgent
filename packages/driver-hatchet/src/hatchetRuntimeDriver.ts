@@ -86,14 +86,27 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
         private readonly budgetEvents?: PayloadBudgetEventRecorder
     ) {}
 
-    async enqueueStart(params: EnqueueStartParams): Promise<void> {
-        const taskTask = this.resolveTaskTask(params.agentId);
-        if (taskTask === undefined) {
-            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: aplret.task is unavailable; configure a Hatchet turn executor before starting loop tasks.');
-        }
-        const rootTaskId = params.rootTaskId ?? params.taskId;
+    get taskAdmissionCapabilities(): RuntimeDriver['taskAdmissionCapabilities'] {
+        if (this.taskTask === undefined || this.events === undefined) return undefined;
+        return {
+            recoverableStarts: true,
+            preflightStart: async (params: EnqueueStartParams): Promise<void> => {
+                const input = this.buildStartInput(params);
+                const budget = enforcePayloadBudget(input, {
+                    code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
+                    limitBytes: readHatchetPayloadMaxBytes(),
+                    summary: 'Hatchet task payload exceeded the configured budget.',
+                });
+                if (!budget.ok) {
+                    throw new Error(`LIMIT_HATCHET_PAYLOAD_TOO_LARGE: ${budget.summary}`);
+                }
+            },
+        };
+    }
 
-        const input: TaskTaskInput = {
+    private buildStartInput(params: EnqueueStartParams): TaskTaskInput {
+        const rootTaskId = params.rootTaskId ?? params.taskId;
+        return {
             tenantId: params.tenantId,
             taskId: params.taskId,
             rootTaskId,
@@ -104,7 +117,23 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
             input: params.input as TaskTaskInput['input'],
             ...(params.cache !== undefined ? { cache: params.cache } : {}),
             idempotencyKey: params.idempotencyKey,
+            ...(params.recoveryGeneration !== undefined
+                ? { recoveryGeneration: params.recoveryGeneration }
+                : {}),
+            ...(params.recoveryDeliveryKey !== undefined
+                ? { recoveryDeliveryKey: params.recoveryDeliveryKey }
+                : {}),
         };
+    }
+
+    async enqueueStart(params: EnqueueStartParams): Promise<void> {
+        const taskTask = this.resolveTaskTask(params.agentId);
+        if (taskTask === undefined) {
+            throw new Error('HATCHET_RUNTIME_MISCONFIGURED: aplret.task is unavailable; configure a Hatchet turn executor before starting loop tasks.');
+        }
+        const rootTaskId = params.rootTaskId ?? params.taskId;
+
+        const input = this.buildStartInput(params);
         const budget = enforcePayloadBudget(input, {
             code: 'LIMIT_HATCHET_PAYLOAD_TOO_LARGE',
             limitBytes: readHatchetPayloadMaxBytes(),
@@ -237,7 +266,11 @@ export class HatchetRuntimeDriver implements RuntimeDriver {
                 boundaryKind: params.kind === 'sleep' ? 'sleep' : 'timer',
             });
         }
-        if (Date.parse(params.fireAt) <= Date.now() && this.timerFireTask !== undefined) {
+        const timerStorage = this.runtimeTimers as unknown as {
+            readStorageNow?: () => Promise<Date>;
+        };
+        const storageNow = await (timerStorage.readStorageNow?.() ?? Promise.resolve(new Date()));
+        if (Date.parse(params.fireAt) <= storageNow.getTime() && this.timerFireTask !== undefined) {
             const ref = await this.timerFireTask.runNoWait(
                 {
                     tenantId: params.tenantId,
@@ -483,6 +516,12 @@ function buildTaskMetadata(
     }
     if (params.token !== undefined) {
         metadata.token = params.token;
+    }
+    if (params.recoveryGeneration !== undefined) {
+        metadata.recoveryGeneration = params.recoveryGeneration;
+    }
+    if (params.recoveryDeliveryKey !== undefined) {
+        metadata.deliveryKey = params.recoveryDeliveryKey;
     }
     if (params.parentTaskId !== undefined) {
         metadata.parentTaskId = params.parentTaskId;

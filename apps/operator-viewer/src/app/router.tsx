@@ -7,6 +7,7 @@ import { AgentsPage } from '../features/agents/AgentsPage';
 import { MemoryPage } from '../features/memory/MemoryPage';
 import { parseMemorySearch } from './state';
 import { AccessPage } from '../features/access/AccessPage';
+import { SchedulesPage } from '../features/schedules/SchedulesPage';
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -39,13 +40,20 @@ const memoryRoute = createRoute({
   component: MemoryPage,
 });
 
+const schedulesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/schedules',
+  validateSearch: (search: Record<string, unknown>) => ({ agentId: typeof search.agentId === 'string' ? search.agentId : '' }),
+  component: SchedulesPage,
+});
+
 const usersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/users',
   component: AccessPage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, agentsRoute, memoryRoute, usersRoute, runRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, agentsRoute, schedulesRoute, memoryRoute, usersRoute, runRoute]);
 
 export const router = createRouter({
   routeTree,

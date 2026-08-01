@@ -8,11 +8,13 @@ const log = logger.createLogger({ prefix: 'SnapshotRepository' });
 
 export type SnapshotMutationSession = {
     load: (tenantId: string, sessionId: string) => Promise<{
+        exists?: boolean;
         snapshot?: unknown;
         wmVersion?: bigint;
         agentId?: string;
     } | null>;
     loadForMutation?: (tenantId: string, sessionId: string) => Promise<{
+        exists?: boolean;
         snapshot?: unknown;
         wmVersion?: bigint;
         agentId?: string;
@@ -28,6 +30,7 @@ export type SnapshotMutationSession = {
 };
 
 export type SnapshotMutationCurrent = {
+    exists: boolean;
     snapshot: Record<string, unknown>;
     wmVersion: bigint;
     agentId?: string;
@@ -161,6 +164,7 @@ export async function reconcileSnapshotMutation<T>(
             : await options.session.load(options.tenantId, options.sessionId);
         const loadedStorageNow = (loaded as { storageNow?: unknown } | null)?.storageNow;
         const current: SnapshotMutationCurrent = {
+            exists: loaded?.exists ?? loaded !== null,
             snapshot: (loaded?.snapshot as Record<string, unknown> | undefined) ?? {},
             wmVersion: loaded?.wmVersion ?? BigInt(0),
             agentId: loaded?.agentId,

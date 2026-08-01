@@ -65,6 +65,8 @@ import {
     assertArtifactsFactory,
     createArtifactFactory,
 } from '../../context/artifactFactory.js';
+import { PluginManager } from '../../plugin/pluginManager.js';
+import type { SubmitTaskResult } from '../TaskSubmission.js';
 
 const log = logger.createLogger({ prefix: 'ApiBinder' });
 
@@ -164,6 +166,14 @@ export interface ApiBinderDependencies {
     cancelTimer?: (params: { tenantId: string; taskId: string; token: string }) => Promise<void>;
     detachTaskBranch?: (params: { tenantId: string; taskId: string; reason: string }) => Promise<unknown>;
     getRuntimeSurface?: () => TaskTurnRuntimeSurface;
+    submitRootTask?: (params: {
+        tenantId: string;
+        sourceTaskId: string;
+        sourceAgentId: string;
+        targetAgentId: string;
+        input: unknown;
+        options: { taskId: string; maxTurns?: number; taskRunTimeoutMs?: number };
+    }) => Promise<SubmitTaskResult>;
 }
 
 export class ApiBinder {
@@ -916,6 +926,35 @@ export class ApiBinder {
         const agentId = params.agentId ?? ((ctx as any).agentId as string) ?? 'default';
         const flushMentalState = params.flushMentalState;
         const conversationService = this.deps.conversationService;
+
+        const allowRootTargets = PluginManager.findAgent(agentId)?.resolved.runtimeManifest
+            .orchestration?.rootTaskSubmission?.allowAgents ?? [];
+        if (allowRootTargets.length > 0) {
+            if (!this.deps.submitRootTask) {
+                const error = new Error(`Root task submission is unavailable for ${agentId}`);
+                error.name = 'ROOT_TASK_SUBMISSION_UNAVAILABLE';
+                throw error;
+            }
+            ctx.tasks = {
+                submit: async (targetAgentId, input, options) => {
+                    if (!allowRootTargets.includes(targetAgentId)) {
+                        const error = new Error(`Agent ${agentId} may not submit root tasks to ${targetAgentId}`);
+                        error.name = 'ROOT_TASK_SUBMISSION_TARGET_NOT_ALLOWED';
+                        throw error;
+                    }
+                    return this.deps.submitRootTask!({
+                        tenantId,
+                        sourceTaskId: sessionId,
+                        sourceAgentId: agentId,
+                        targetAgentId,
+                        input,
+                        options,
+                    });
+                },
+            };
+        } else {
+            delete ctx.tasks;
+        }
 
         (ctx as TaskContext).conversation = {
             startThread: async (options: StartThreadOptions) => {

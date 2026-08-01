@@ -16,6 +16,7 @@ import {
 } from './turnRunnerSegmentExecutor.js';
 import type { TurnExecutor } from './turnExecutor.js';
 import { RuntimeTimerRepository } from './runtimeTimer.js';
+import type { TaskRunTimeoutDisposition } from './runtimeTimer.js';
 
 export type InProcessRuntimeStack = {
     turnExecutor: TurnExecutor;
@@ -45,7 +46,13 @@ export type BuildInProcessRuntimeStackParams = {
         token: string;
         dueAt: string;
         payload?: unknown;
-    }) => Promise<void>;
+    }) => Promise<TaskRunTimeoutDisposition | void>;
+    ensureInitialRootDeadline?: (params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        snapshot: Record<string, unknown>;
+    }) => Promise<'ready' | 'canceled' | 'terminal'>;
     enableTurnRecovery?: boolean;
 };
 
@@ -60,10 +67,14 @@ export function buildInProcessRuntimeStack(
         isStreaming: params.isStreaming,
         onChildTimeout: params.onChildTimeout,
         onTaskTerminal: params.onTaskTerminal,
+        ensureInitialRootDeadline: params.ensureInitialRootDeadline,
     });
     const prisma = (params.sessionManager as unknown as { store?: { prisma?: { runtimeTimer?: unknown } } })
         .store?.prisma;
-    const runtimeTimers = prisma?.runtimeTimer
+    // An outer runtime driver (Hatchet/custom) owns durable timer storage and
+    // reconciliation. The in-process delegate must not race it for the same
+    // SQL timer leases.
+    const runtimeTimers = params.enableTurnRecovery !== false && prisma?.runtimeTimer
         ? new RuntimeTimerRepository(prisma as never)
         : undefined;
     const runtimeDriver = new InProcessRuntimeDriver({

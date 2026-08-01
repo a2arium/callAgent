@@ -40,7 +40,15 @@ export { AgentRegistry, globalAgentRegistry } from './plugin/AgentRegistry.js';
 export { PluginManager } from './plugin/pluginManager.js';
 export { ContextSerializer } from './orchestration/ContextSerializer.js';
 export { A2AService, globalA2AService } from './orchestration/A2AService.js';
-export { TaskEngine, BackgroundTaskDrainError } from './orchestration/taskEngine.js';
+export {
+    TaskEngine,
+    BackgroundTaskDrainError,
+    TaskSubmissionError,
+    type SubmitTaskParams,
+    type SubmitTaskResult,
+    type TaskSubmissionErrorCode,
+    type TaskSubmissionOrigin,
+} from './orchestration/taskEngine.js';
 export { EngineLocator } from './orchestration/EngineLocator.js';
 export {
     bootstrapCompositionRoot,
@@ -366,3 +374,5 @@ export {
     type ScaffoldResult,
     type ScaffoldFailure,
 } from './scaffold/types.js';
+export * from './operator/agentSchedules.js';
+export type { OperatorRequestContext } from './operator/operatorAuth.js';

@@ -22,6 +22,12 @@ import {
 } from '../operator/operatorAuth.js';
 import { OperatorAuditRepository, writeOperatorAudit } from '../operator/operatorAudit.js';
 import { SemanticMemoryObserverRepository } from '../operator/semanticMemoryObserver.js';
+import {
+    AgentScheduleError,
+    type AgentScheduleService,
+    type CreateAgentScheduleInput,
+    type ReplaceAgentCronInput,
+} from '../operator/agentSchedules.js';
 
 type ListedAgent = {
     id: string;
@@ -46,6 +52,7 @@ type ListedAgent = {
 export type CreateApiRouterOptions = {
     operatorAccessControl?: RequestHandler;
     runtimeOnly?: boolean;
+    scheduleService?: AgentScheduleService;
 };
 
 export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
@@ -141,6 +148,9 @@ export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
                 ...(typeof req.query.since === 'string' && req.query.since.length > 0 ? { since: req.query.since } : {}),
                 ...(typeof req.query.cursor === 'string' && req.query.cursor.length > 0 ? { cursor: req.query.cursor } : {}),
                 ...(typeof req.query.taskId === 'string' && req.query.taskId.length > 0 ? { taskId: req.query.taskId } : {}),
+                ...(typeof req.query.scheduleId === 'string' && req.query.scheduleId.length > 0
+                    ? { scheduleId: req.query.scheduleId }
+                    : {}),
                 ...(req.query.hasLlm === 'true' ? { hasLlm: true } : {}),
                 ...(req.query.hasMemory === 'true' ? { hasMemory: true } : {}),
                 ...(costState ? { costState } : {}),
@@ -559,6 +569,104 @@ export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
         res.json({ items: agents });
     }));
 
+    router.get('/agent-schedules', observeRoute('agent-schedules-list', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try {
+            const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined;
+            res.json(await options.scheduleService.list(context, {
+                ...(typeof req.query.cursor === 'string' ? { cursor: req.query.cursor } : {}),
+                ...(Number.isFinite(limit) ? { limit } : {}),
+                ...(typeof req.query.agentId === 'string' ? { agentId: req.query.agentId } : {}),
+                ...(req.query.kind === 'once' || req.query.kind === 'cron' ? { kind: req.query.kind } : {}),
+                ...(typeof req.query.state === 'string' ? { state: req.query.state } : {}),
+            }));
+        } catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.post('/agent-schedules', observeRoute('agent-schedules-create', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try {
+            const body = requestRecord(req.body);
+            const created = await options.scheduleService.create(context, body as CreateAgentScheduleInput);
+            res.status(201).json(created);
+        } catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.get('/agent-schedules/:scheduleId', observeRoute('agent-schedules-get', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try { res.json(await options.scheduleService.get(context, req.params.scheduleId!)); }
+        catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.get('/agent-schedules/:scheduleId/payload', observeRoute('agent-schedules-payload', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try { res.json(await options.scheduleService.getPayload(context, req.params.scheduleId!)); }
+        catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.post('/agent-schedules/:scheduleId/run-now', observeRoute('agent-schedules-run-now', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try { res.status(202).json(await options.scheduleService.runNow(context, req.params.scheduleId!)); }
+        catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.post('/agent-schedules/:scheduleId/pause', observeRoute('agent-schedules-pause', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try { res.json(await options.scheduleService.pause(context, req.params.scheduleId!)); }
+        catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.post('/agent-schedules/:scheduleId/resume', observeRoute('agent-schedules-resume', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try { res.json(await options.scheduleService.resume(context, req.params.scheduleId!)); }
+        catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.post('/agent-schedules/:scheduleId/reschedule', observeRoute('agent-schedules-reschedule', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try {
+            const body = requestRecord(req.body);
+            res.json(await options.scheduleService.reschedule(context, req.params.scheduleId!, String(body.triggerAt ?? '')));
+        } catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.post('/agent-schedules/:scheduleId/replace', observeRoute('agent-schedules-replace', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try {
+            res.json(await options.scheduleService.replaceCron(
+                context,
+                req.params.scheduleId!,
+                requestRecord(req.body) as ReplaceAgentCronInput
+            ));
+        } catch (error) { respondScheduleError(res, error); }
+    }));
+
+    router.delete('/agent-schedules/:scheduleId', observeRoute('agent-schedules-delete', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (!options.scheduleService) return scheduleUnavailable(res);
+        try { res.json(await options.scheduleService.delete(context, req.params.scheduleId!)); }
+        catch (error) { respondScheduleError(res, error); }
+    }));
+
     router.get('/tasks/:taskId/run-graph', observeRoute('run-graph', async (req, res) => {
         try {
             const context = contextOrRespond(req, res);
@@ -702,8 +810,29 @@ export function createRuntimeApiRouter(): Router {
 }
 
 /** Human Observer router. Authentication is mandatory at construction time. */
-export function createOperatorApiRouter(operatorAccessControl: RequestHandler): Router {
-    return createApiRouter({ operatorAccessControl, runtimeOnly: false });
+export function createOperatorApiRouter(
+    operatorAccessControl: RequestHandler,
+    options: { scheduleService?: AgentScheduleService } = {}
+): Router {
+    return createApiRouter({ operatorAccessControl, runtimeOnly: false, ...options });
+}
+
+function requestRecord(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+}
+
+function scheduleUnavailable(res: any): void {
+    res.status(503).json({ error: 'SCHEDULE_PROVIDER_UNAVAILABLE', message: 'Agent scheduling is not configured' });
+}
+
+function respondScheduleError(res: any, error: unknown): void {
+    if (error instanceof AgentScheduleError) {
+        res.status(error.status).json({ error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) });
+        return;
+    }
+    res.status(500).json({ error: 'SCHEDULE_OPERATION_FAILED', message: error instanceof Error ? error.message : String(error) });
 }
 
 function inferArtifactContentType(value: unknown): string {

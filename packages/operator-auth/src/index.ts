@@ -5,6 +5,9 @@ import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import { Router, type NextFunction, type Request, type RequestHandler, type Response } from 'express';
+import { assertTrustedOriginMutation, trustedOriginsFor } from './originPolicy.js';
+
+export { trustedOriginsFor } from './originPolicy.js';
 
 export type OperatorRole = 'viewer' | 'operator' | 'admin';
 
@@ -37,13 +40,13 @@ const ROLE_WEIGHT: Record<OperatorRole, number> = { viewer: 1, operator: 2, admi
 
 export function createOperatorAuthRuntime(options: OperatorAuthRuntimeOptions) {
   const { prisma, baseURL, secret } = options;
-  const origin = new URL(baseURL).origin;
+  const trustedOrigins = trustedOriginsFor(baseURL, options.production === true);
   const auth = betterAuth({
     appName: 'callAgent Observer',
     baseURL,
     basePath: '/operator-api/auth',
     secret,
-    trustedOrigins: trustedOriginsFor(baseURL, options.production === true),
+    trustedOrigins,
     database: prismaAdapter(prisma, { provider: 'postgresql' }),
     user: {
       modelName: 'OperatorAuthUser',
@@ -156,7 +159,7 @@ export function createOperatorAuthRuntime(options: OperatorAuthRuntimeOptions) {
 
   const operatorMiddleware: RequestHandler = async (req, res, next) => {
     try {
-      assertSameOriginMutation(req, origin);
+      assertTrustedOriginMutation(req, trustedOrigins);
       const role = requiredRole(req);
       const principal = await resolvePrincipal(req, role);
       (req as Request & { operatorContext?: OperatorPrincipal }).operatorContext = principal;
@@ -166,7 +169,7 @@ export function createOperatorAuthRuntime(options: OperatorAuthRuntimeOptions) {
     }
   };
 
-  const router = createManagementRouter({ auth, prisma, baseURL, origin, sessionFor, resolvePrincipal, ownerId });
+  const router = createManagementRouter({ auth, prisma, baseURL, trustedOrigins, sessionFor, resolvePrincipal, ownerId });
 
   return {
     auth,
@@ -176,17 +179,6 @@ export function createOperatorAuthRuntime(options: OperatorAuthRuntimeOptions) {
     bootstrap: () => bootstrapFirstOwner({ auth, prisma, options }),
     generateResetLink: (email: string) => generateResetLink(auth, email, baseURL),
   };
-}
-
-export function trustedOriginsFor(baseURL: string, production: boolean): string[] {
-  const url = new URL(baseURL);
-  const origins = new Set([url.origin]);
-  if (!production && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')) {
-    const port = url.port ? `:${url.port}` : '';
-    origins.add(`${url.protocol}//127.0.0.1${port}`);
-    origins.add(`${url.protocol}//localhost${port}`);
-  }
-  return [...origins];
 }
 
 function createManagementRouter(ctx: any): Router {
@@ -213,7 +205,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.post('/complete-bootstrap-password', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const session = await ctx.sessionFor(req);
     if (!session) throw new OperatorHttpError(401, 'AUTH_REQUIRED', 'Sign in is required');
     const user = await ctx.prisma.operatorAuthUser.findUnique({ where: { id: session.user.id } });
@@ -251,7 +243,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.post('/access/invitations', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const principal = await ctx.resolvePrincipal(req, 'admin');
     assertFresh(principal);
     const email = normalizeEmail(req.body?.email);
@@ -282,7 +274,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.post('/access/invitations/:id/revoke', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const principal = await ctx.resolvePrincipal(req, 'admin');
     assertFresh(principal);
     const result = await ctx.prisma.$transaction(async (tx: any) => {
@@ -298,7 +290,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.patch('/access/memberships/:id', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const principal = await ctx.resolvePrincipal(req, 'admin');
     assertFresh(principal);
     const updated = await ctx.prisma.$transaction(async (tx: any) => {
@@ -325,7 +317,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.post('/access/users/:userId/reset-link', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const principal = await ctx.resolvePrincipal(req, 'admin');
     assertFresh(principal);
     if (!principal.installationOwner) throw new OperatorHttpError(403, 'INSTALLATION_OWNER_REQUIRED', 'Installation owner access is required');
@@ -337,7 +329,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.post('/access/owner/transfer', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const principal = await ctx.resolvePrincipal(req, 'admin');
     assertFresh(principal);
     if (!principal.installationOwner) throw new OperatorHttpError(403, 'INSTALLATION_OWNER_REQUIRED', 'Installation owner access is required');
@@ -358,7 +350,7 @@ function createManagementRouter(ctx: any): Router {
   }));
 
   router.post('/invitations/accept', asyncRoute(async (req, res) => {
-    assertSameOriginMutation(req, ctx.origin);
+    assertTrustedOriginMutation(req, ctx.trustedOrigins);
     const rawToken = String(req.body?.token ?? '');
     const invitation = await activeInvitation(ctx.prisma, rawToken);
     const claimId = randomUUID();
@@ -484,6 +476,10 @@ function respondError(res: Response, error: unknown): void {
 }
 
 function requiredRole(req: Request): OperatorRole {
+  if (/^\/agent-schedules\/[^/]+\/payload$/.test(req.path)) return 'operator';
+  if (req.path === '/agent-schedules' && req.method === 'POST') return 'admin';
+  if (/^\/agent-schedules\/[^/]+\/(replace|reschedule)$/.test(req.path)) return 'admin';
+  if (/^\/agent-schedules\/[^/]+\/(run-now|pause|resume)$/.test(req.path)) return 'operator';
   if (req.method === 'DELETE') return 'admin';
   if (req.method === 'PATCH') return 'operator';
   if (/\/cancel$/.test(req.path)) return 'operator';
@@ -497,15 +493,6 @@ function assertFresh(principal: OperatorPrincipal): void {
   if (Date.now() - principal.sessionCreatedAt.getTime() > 15 * 60 * 1000) {
     throw new OperatorHttpError(403, 'AUTH_REAUTH_REQUIRED', 'Sign in again before changing access');
   }
-}
-
-function assertSameOriginMutation(req: Request, origin: string): void {
-  if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return;
-  const requestOrigin = req.header('origin');
-  const fetchSite = req.header('sec-fetch-site');
-  if (requestOrigin !== origin) throw new OperatorHttpError(403, 'ORIGIN_REJECTED', 'Request origin is not trusted');
-  if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) throw new OperatorHttpError(403, 'ORIGIN_REJECTED', 'Cross-site request rejected');
-  if (!req.is('application/json')) throw new OperatorHttpError(415, 'JSON_REQUIRED', 'Use application/json');
 }
 
 async function activeInvitation(prisma: PrismaLike, rawToken: string): Promise<any> {

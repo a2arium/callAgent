@@ -5,6 +5,7 @@ export type FleetSearch = {
   status: string;
   since: string;
   taskId: string;
+  scheduleId: string;
   hasLlm: boolean;
   hasMemory: boolean;
   costState: '' | 'captured' | 'missing';
@@ -42,6 +43,7 @@ export function parseFleetSearch(value: Record<string, unknown>): FleetSearch {
     status: stringParam(value.status, ''),
     since: stringParam(value.since, ''),
     taskId: stringParam(value.taskId, ''),
+    scheduleId: stringParam(value.scheduleId, ''),
     hasLlm: boolParam(value.hasLlm),
     hasMemory: boolParam(value.hasMemory),
     costState: costStateParam(value.costState),

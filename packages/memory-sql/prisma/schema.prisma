@@ -299,6 +299,11 @@ model AgentRun {
     outputArtifactId String?   @map("output_artifact_id")
     traceId          String?   @map("trace_id")
     providerRunId    String?   @map("provider_run_id")
+    originKind       String?   @map("origin_kind")
+    scheduleId       String?   @map("schedule_id")
+    scheduleOccurrenceId String? @map("schedule_occurrence_id")
+    submittedByTaskId String?  @map("submitted_by_task_id")
+    scheduledFor     DateTime? @map("scheduled_for")
     createdAt        DateTime  @default(now()) @map("created_at")
     updatedAt        DateTime  @updatedAt @map("updated_at")
 
@@ -308,6 +313,7 @@ model AgentRun {
     @@index([tenantId, scope, updatedAt, taskId])
     @@index([tenantId, agentId, updatedAt, taskId])
     @@index([tenantId, status, updatedAt, taskId])
+    @@index([tenantId, scheduleId, updatedAt, taskId])
     @@map("agent_runs")
 }
 

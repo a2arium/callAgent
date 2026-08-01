@@ -161,6 +161,75 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         expect(boundContexts).toEqual([{ tenantId, agentId }]);
     });
 
+    it('enforces the admitted root deadline before acquiring the initial turn', async () => {
+        const ensureInitialRootDeadline = jest.fn(async () => 'canceled' as const);
+        const guardedExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) => ({
+                task,
+                logger: console,
+                progress: jest.fn(),
+                fail: jest.fn(),
+            }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+            ensureInitialRootDeadline,
+        });
+
+        const result = await guardedExecutor.runSegment({
+            tenantId,
+            taskId: `${taskId}-expired`,
+            agentId,
+            idempotencyKey: `${taskId}-expired:turn-request:1`,
+            runtimeSurface: 'hatchet',
+            recoveryGeneration: '1',
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(result.taskStatus).toBe('canceled');
+        expect(ensureInitialRootDeadline).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId,
+            taskId: `${taskId}-expired`,
+            agentId,
+            snapshot: {},
+        }));
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+        await expect(sessionManager.load(tenantId, `${taskId}-expired`)).resolves.toBeNull();
+    });
+
+    it('leaves the initial turn unclaimed when deadline timer repair is unavailable', async () => {
+        const guardedExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) => ({
+                task,
+                logger: console,
+                progress: jest.fn(),
+                fail: jest.fn(),
+            }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+            ensureInitialRootDeadline: async () => {
+                const error = new Error('timer unavailable');
+                error.name = 'TASK_RUN_DEADLINE_UNAVAILABLE';
+                throw error;
+            },
+        });
+        const guardedTaskId = `${taskId}-timer-unavailable`;
+
+        await expect(guardedExecutor.runSegment({
+            tenantId,
+            taskId: guardedTaskId,
+            agentId,
+            idempotencyKey: `${guardedTaskId}:turn-request:1`,
+            runtimeSurface: 'hatchet',
+            recoveryGeneration: '1',
+            wake: { trigger: 'start', input: {} },
+        })).rejects.toMatchObject({ name: 'TASK_RUN_DEADLINE_UNAVAILABLE' });
+
+        expect(executeTurnSpy).not.toHaveBeenCalled();
+        await expect(sessionManager.load(tenantId, guardedTaskId)).resolves.toBeNull();
+    });
+
     it('rejects raw TurnRunner execution for an initialized loop task without a fence', async () => {
         await sessionManager.saveSnapshot({
             tenantId,

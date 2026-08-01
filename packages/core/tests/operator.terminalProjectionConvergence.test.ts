@@ -61,6 +61,49 @@ describe('durable terminal projection convergence', () => {
         });
     });
 
+    it('repairs durable schedule provenance from a terminal submission snapshot', async () => {
+        const prisma = {
+            agentRun: { upsert: jest.fn(async () => ({})), findMany: jest.fn(async () => []) },
+            agentRunEdge: { upsert: jest.fn(async () => ({})), updateMany: jest.fn(async () => ({ count: 0 })) },
+            turnRun: { upsert: jest.fn(async () => ({})), updateMany: jest.fn(async () => ({ count: 0 })) },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+        await projection.reconcileDurableTerminal({
+            tenantId: 'tenant-a', taskId: 'scheduled-task', agentId: 'lifecycle-sweep',
+            snapshot: {
+                meta: {
+                    taskSubmission: {
+                        schemaVersion: 1,
+                        requestDigest: 'a'.repeat(64),
+                        agentId: 'lifecycle-sweep',
+                        replyDeliveryMode: 'buffer',
+                        options: {},
+                        admittedAt: '2026-08-01T00:00:00.000Z',
+                        origin: {
+                            kind: 'schedule', scheduleId: 'schedule-1',
+                            scheduleOccurrenceId: 'occurrence-1', scheduledFor: '2026-08-01T00:00:00.000Z',
+                        },
+                    },
+                    taskLifecycle: {
+                        taskId: 'scheduled-task', rootTaskId: 'scheduled-task', ancestorTaskIds: [], state: 'completed',
+                    },
+                    taskTerminal: {
+                        taskId: 'scheduled-task', state: 'completed', claimedAt: '2026-08-01T00:01:00.000Z',
+                        deliveryKey: 'scheduled-task:terminal:completed',
+                        status: { state: 'completed', timestamp: '2026-08-01T00:01:00.000Z' },
+                    },
+                },
+            },
+        });
+        expect(prisma.agentRun.upsert).toHaveBeenCalledWith(expect.objectContaining({
+            update: expect.objectContaining({
+                originKind: 'schedule', scheduleId: 'schedule-1', scheduleOccurrenceId: 'occurrence-1',
+                scheduledFor: new Date('2026-08-01T00:00:00.000Z'),
+            }),
+        }));
+    });
+
     it('reconciles historical terminal snapshots in restart-safe keyset batches', async () => {
         const terminalSnapshot = (taskId: string) => ({
             meta: {

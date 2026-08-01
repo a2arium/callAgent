@@ -2,6 +2,7 @@ import type { SessionManager } from '../orchestration/SessionManager.js';
 import { operatorPayloadEnvelope } from './payloadBudget.js';
 import { readTaskTurnCoordinator } from '../orchestration/TaskTurnCoordinator.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
+import { readTaskSubmissionMetadata, type TaskSubmissionOrigin } from '../orchestration/TaskSubmission.js';
 
 export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'unknown';
 export type RunSeverity = 'success' | 'info' | 'warning' | 'error' | 'neutral';
@@ -93,6 +94,7 @@ export type AgentRunNode = {
     cancellation?: AgentRunCancellation;
     startedAt?: string;
     finishedAt?: string;
+    origin?: TaskSubmissionOrigin;
 };
 
 export type AgentRunCancellation = {
@@ -315,6 +317,9 @@ export async function buildAgentRunGraph(
             : isTerminalRunStatus(rootStatus)
             ? latestTerminalEventTime(rootEvents) ?? latestTerminalDriverRunTime(rootDriverRuns)
             : undefined;
+    const submissionOrigin = snapshot?.snapshot
+        ? readTaskSubmissionMetadata(snapshot.snapshot)?.origin
+        : undefined;
     const root: AgentRunNode = {
         id: params.taskId,
         kind: 'agent',
@@ -332,6 +337,7 @@ export async function buildAgentRunGraph(
         ...(rootCancellation ? { cancellation: rootCancellation } : {}),
         ...(rootStartedAt ? { startedAt: toIso(rootStartedAt) } : {}),
         ...(rootFinishedAt ? { finishedAt: rootFinishedAt } : {}),
+        ...(submissionOrigin ? { origin: submissionOrigin } : {}),
     };
 
     const rawEdges = buildChildEdges(params.taskId, agentId ?? undefined, events);

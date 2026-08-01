@@ -123,4 +123,30 @@ describe('runtime timer helpers', () => {
             take: 25,
         }));
     });
+
+    it('uses the PostgreSQL clock for due queries and local scheduling delays', async () => {
+        const storageNow = Date.parse('2026-08-01T00:00:00.000Z');
+        const findMany = jest.fn(async () => []);
+        const queryRaw = jest.fn(async () => [{ storageNowMs: BigInt(storageNow) }]);
+        const repository = new RuntimeTimerRepository({
+            $queryRaw: queryRaw,
+            runtimeTimer: {
+                findFirst: jest.fn(),
+                upsert: jest.fn(),
+                updateMany: jest.fn(),
+                update: jest.fn(),
+                findMany,
+            },
+        } as never);
+
+        await repository.listDue({ take: 10 });
+        await expect(repository.millisecondsUntil(
+            new Date(storageNow + 15_000).toISOString()
+        )).resolves.toBe(15_000);
+
+        expect(queryRaw).toHaveBeenCalledTimes(2);
+        expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ dueAt: { lte: new Date(storageNow) } }),
+        }));
+    });
 });

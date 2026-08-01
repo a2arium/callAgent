@@ -13,6 +13,7 @@ import type {
 import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/working-memory-version-conflict';
 
 export type SessionSnapshot = {
+    exists?: boolean;
     wmVersion: bigint;
     snapshot: Record<string, unknown>;
     agentId: string;
@@ -25,6 +26,7 @@ export type RunnableTurnRequest = {
     sessionId: string;
     agentId: string;
     updatedAt: string;
+    createdAt: string;
     generation: string;
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
@@ -169,6 +171,10 @@ function mapConversationTopicInviteRow(row: Record<string, unknown>): Conversati
 }
 
 export class WorkingMemorySessionStore {
+    readonly taskAdmissionCapabilities = {
+        durablePersistence: true,
+        runnableTurnRecovery: true,
+    } as const;
     private static globalPrisma: PrismaClientType | null = null;
     private readonly prisma: PrismaClientType;
     private readonly ownsPrisma: boolean;
@@ -306,6 +312,7 @@ export class WorkingMemorySessionStore {
             const storageNowIso = new Date(Number(storageNowMs)).toISOString();
             if (!rec) {
                 return {
+                    exists: false,
                     wmVersion: 0n,
                     snapshot: {},
                     agentId: '',
@@ -314,6 +321,7 @@ export class WorkingMemorySessionStore {
                 };
             }
             return {
+                exists: true,
                 wmVersion: rec.wmVersion,
                 snapshot: rec.snapshot as unknown as Record<string, unknown>,
                 agentId: rec.agentId,
@@ -339,6 +347,7 @@ export class WorkingMemorySessionStore {
             sessionId: string;
             agentId: string;
             updatedAt: Date;
+            createdAt: string;
             generation: string;
             deliveryKey: string;
             runtimeSurface: string;
@@ -348,6 +357,7 @@ export class WorkingMemorySessionStore {
                 "session_id" AS "sessionId",
                 "agent_id" AS "agentId",
                 "updated_at" AS "updatedAt",
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,createdAt}' AS "createdAt",
                 snapshot #>> '{meta,turnCoordinator,dispatchIntent,generation}' AS generation,
                 snapshot #>> '{meta,turnCoordinator,dispatchIntent,deliveryKey}' AS "deliveryKey",
                 snapshot #>> '{meta,turnCoordinator,dispatchIntent,runtimeSurface}' AS "runtimeSurface"
@@ -384,6 +394,7 @@ export class WorkingMemorySessionStore {
                 sessionId: row.sessionId,
                 agentId: row.agentId,
                 updatedAt: row.updatedAt.toISOString(),
+                createdAt: row.createdAt,
                 generation: row.generation,
                 deliveryKey: row.deliveryKey,
                 runtimeSurface: row.runtimeSurface,

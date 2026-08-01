@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { cancelRun, deleteSemanticMemory, getMemory, getOperatorConfig, getRunGraph, getSemanticMemory, getTurn, listAgentRuns, listAgents, listMemoryActivity, listMemoryEntities, listSemanticMemory, listSemanticMemoryAudit, probeSemanticMemory, retagSemanticMemory, updateSemanticMemory, type CancelRunInput, type ListAgentRunsInput, type ListMemoryActivityInput, type ListSemanticMemoryInput, type SemanticProbeInput } from './client';
+import { cancelRun, deleteSemanticMemory, getMemory, getOperatorConfig, getRunGraph, getSemanticMemory, getTurn, listAgentRuns, listAgents, listAgentSchedules, listMemoryActivity, listMemoryEntities, listSemanticMemory, listSemanticMemoryAudit, probeSemanticMemory, retagSemanticMemory, updateSemanticMemory, type CancelRunInput, type ListAgentRunsInput, type ListMemoryActivityInput, type ListSemanticMemoryInput, type SemanticProbeInput } from './client';
 import type { AgentRunGraph } from '../types';
 
 export function useOperatorConfig() {
@@ -33,6 +33,16 @@ export function useAgents(tenantId = 'default') {
     queryKey: ['agents', tenantId],
     queryFn: () => listAgents(tenantId),
     staleTime: 30_000,
+  });
+}
+
+export function useInfiniteAgentSchedules(input: { tenantId: string; agentId?: string; kind?: string; state?: string }) {
+  return useInfiniteQuery({
+    queryKey: ['agent-schedules', 'infinite', input],
+    queryFn: ({ pageParam }) => listAgentSchedules({ ...input, cursor: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    refetchInterval: 10_000,
   });
 }
 

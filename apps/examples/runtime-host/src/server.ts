@@ -6,6 +6,7 @@ import { config as loadDotenv } from 'dotenv';
 import { loadWorkspaces } from '@a2arium/callagent-core';
 import type { IEventBus } from '@a2arium/callagent-core';
 import type { HatchetOutboxBootstrap } from '@a2arium/callagent-driver-hatchet';
+import type { AgentScheduleService } from '@a2arium/callagent-core';
 
 loadNearestEnv();
 
@@ -49,6 +50,7 @@ async function main(): Promise<void> {
     let hatchetBootstrap: HatchetOutboxBootstrap | undefined;
     let transportClose: (() => Promise<void>) | undefined;
     let eventBus: IEventBus | undefined;
+    let scheduleService: AgentScheduleService | undefined;
 
     if (process.env.CALLAGENT_OUTBOX_DISPATCHER?.toLowerCase() === 'hatchet') {
         console.log('CALLAGENT_OUTBOX_DISPATCHER=hatchet; initializing Hatchet outbox mode');
@@ -83,6 +85,13 @@ async function main(): Promise<void> {
             runtimeDriverFactory: hatchetBootstrap?.runtimeDriverFactory,
         },
     });
+
+    if (sessionStore && process.env.CALLAGENT_OUTBOX_DISPATCHER?.toLowerCase() === 'hatchet') {
+        const { createHatchetAgentScheduleService } = await import('@a2arium/callagent-driver-hatchet');
+        scheduleService = createHatchetAgentScheduleService({
+            prisma: sessionStore.getPrismaClient(),
+        });
+    }
 
     const production = process.env.CALLAGENT_MODE === 'production' || process.env.NODE_ENV === 'production';
     const operatorEnabled = process.env.CALLAGENT_OPERATOR_ENABLED !== 'false' && (sessionStore !== undefined || production);
@@ -145,7 +154,7 @@ async function main(): Promise<void> {
     if (operatorAuth) {
         app.use('/operator-api', operatorAuth.managementRouter);
         app.get('/operator-api/config', operatorAuth.operatorMiddleware, sendOperatorConfig);
-        app.use('/operator-api', createOperatorApiRouter(operatorAuth.operatorMiddleware));
+        app.use('/operator-api', createOperatorApiRouter(operatorAuth.operatorMiddleware, { scheduleService }));
     } else {
         app.use('/operator-api', (_req, res) => {
             res.status(503).json({

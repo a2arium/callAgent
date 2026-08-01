@@ -23,16 +23,17 @@ export class TimerReconciler {
         private readonly options: TimerReconcilerOptions = {}
     ) {}
 
-    async scanOnce(now = new Date()): Promise<number> {
+    async scanOnce(now?: Date): Promise<number> {
         const end = defaultMetricsRegistry.startTimer('runtime.timer_reconcile_ms');
         try {
+            const storageNow = now ?? await this.readStorageNow();
             const timers = await this.runtimeTimers.listDue({
-                now,
+                now: storageNow,
                 take: this.options.batchSize ?? 100,
             });
             defaultMetricsRegistry.setGauge('runtime.timer_due_count', timers.length);
             const maxLag = timers.reduce((current, timer) => {
-                const lag = Math.max(0, now.getTime() - timer.dueAt.getTime());
+                const lag = Math.max(0, storageNow.getTime() - timer.dueAt.getTime());
                 return Math.max(current, lag);
             }, 0);
             defaultMetricsRegistry.setGauge('runtime.timer_lag_ms', maxLag);
@@ -72,6 +73,13 @@ export class TimerReconciler {
         }
         clearInterval(this.handle);
         this.handle = undefined;
+    }
+
+    private async readStorageNow(): Promise<Date> {
+        const repository = this.runtimeTimers as unknown as {
+            readStorageNow?: () => Promise<Date>;
+        };
+        return repository.readStorageNow?.() ?? new Date();
     }
 
     private async enqueueTimerFire(timer: RuntimeTimerRecord): Promise<void> {

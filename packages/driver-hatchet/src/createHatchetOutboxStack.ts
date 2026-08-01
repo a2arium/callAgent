@@ -15,6 +15,7 @@ import { createTimerFireTask, type TimerFireDeps } from './tasks/timerFire.js';
 import { TimerReconciler } from './timerReconciler.js';
 import { TurnRequestReconciler } from './turnRequestReconciler.js';
 import { resolveSharedSegmentHatchetExecutionTimeout } from './taskTimeouts.js';
+import { createScheduleDispatchTask, type ScheduleDispatchDeps } from './tasks/scheduleDispatch.js';
 
 export type HatchetOutboxStack = {
     runtimeDriver: RuntimeDriver;
@@ -83,6 +84,7 @@ export async function startOutboxWorker(params: {
     hatchet?: HatchetClient;
     turnExecutor?: TurnExecutor;
     onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
+    submitTask?: ScheduleDispatchDeps['submitTask'];
 }): Promise<{ worker: { start: () => Promise<void>; stop: () => Promise<void> } }> {
     rejectObsoleteRuntimeConfiguration();
     assertSharedOutboxEventBus(params.eventBus);
@@ -123,6 +125,9 @@ export async function startOutboxWorker(params: {
             resolveCacheConfig: (agentId) =>
                 PluginManager.findAgent(agentId ?? '')?.resolved.runtimeManifest.cache,
         });
+        const scheduleDispatchTask = params.submitTask
+            ? createScheduleDispatchTask(hatchet, { submitTask: params.submitTask })
+            : undefined;
         await worker.registerWorkflows([
             outboxDispatchTask,
             createTaskStateTask(hatchet, {
@@ -141,6 +146,7 @@ export async function startOutboxWorker(params: {
             ),
             sharedTask,
             timerFireTask,
+            ...(scheduleDispatchTask ? [scheduleDispatchTask] : []),
         ]);
         new TimerReconciler(runtimeTimers, timerFireTask).start();
         if (params.sessionManager) {

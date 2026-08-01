@@ -147,6 +147,7 @@ export function AgentsPage(): React.ReactElement {
           status: '',
           since: '',
           taskId: '',
+          scheduleId: '',
           hasLlm: false,
           hasMemory: false,
           costState: '',
@@ -231,6 +232,7 @@ export function AgentsPage(): React.ReactElement {
               onTenantId={setTenantId}
               onPresetState={setPresetState}
               onSubmit={() => void submitRun()}
+              onSchedule={() => void navigate({ to: '/schedules', search: { agentId: selectedAgent.id } })}
               canRun={canRun}
             />
           ) : (
@@ -313,6 +315,7 @@ function AgentRunner(props: {
   onTenantId: (value: string) => void;
   onPresetState: (value: AgentPayloadPresetState) => void;
   onSubmit: () => void;
+  onSchedule: () => void;
   canRun: boolean;
 }): React.ReactElement {
   const selectedPreset =
@@ -404,7 +407,10 @@ function AgentRunner(props: {
             </div>
             <p className="mt-2 max-w-3xl text-sm text-muted-foreground">{props.agent.description}</p>
           </div>
-          <CopyableId value={props.agent.id} label="agent id" />
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={props.onSchedule}>Schedule</Button>
+            <CopyableId value={props.agent.id} label="agent id" />
+          </div>
         </div>
 
         <div className="grid gap-3 rounded-lg border border-border bg-surface-muted p-3 md:grid-cols-[minmax(180px,260px)_1fr]">

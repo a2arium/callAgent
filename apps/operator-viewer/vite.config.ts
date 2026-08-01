@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     port: 8791,
+    strictPort: true,
     proxy: {
       '/operator-api': 'http://127.0.0.1:8790',
     },

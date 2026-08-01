@@ -970,6 +970,35 @@ describe('TaskEngine operator agent run list', () => {
         }));
     });
 
+    it('projects admission provenance immediately without regressing an existing status', async () => {
+        const rows = new Map<string, Record<string, unknown>>([
+            ['scheduled-root', { tenantId: 'default', taskId: 'scheduled-root', status: 'completed' }],
+        ]);
+        const upsert = jest.fn(async (args: any) => {
+            const taskId = args.where.tenantId_taskId.taskId;
+            const existing = rows.get(taskId);
+            rows.set(taskId, existing ? { ...existing, ...args.update } : args.create);
+        });
+        const projection = new OperatorProjectionRepository({ agentRun: { upsert } } as never);
+        await projection.projectAdmission({
+            tenantId: 'default', taskId: 'scheduled-root', agentId: 'lifecycle-sweep',
+            admittedAt: '2026-07-31T00:00:00.000Z',
+            origin: { kind: 'schedule', scheduleId: 'schedule-1', scheduleOccurrenceId: 'occurrence-1' },
+        });
+        expect(rows.get('scheduled-root')).toEqual(expect.objectContaining({
+            status: 'completed',
+            rootTaskId: 'scheduled-root',
+            agentId: 'lifecycle-sweep',
+            originKind: 'schedule',
+            scheduleId: 'schedule-1',
+            scheduleOccurrenceId: 'occurrence-1',
+        }));
+        expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+            create: expect.objectContaining({ status: 'queued', scope: 'root' }),
+            update: expect.not.objectContaining({ status: expect.anything() }),
+        }));
+    });
+
     it('normalizes stale semantic rows with cancellation metadata as canceled on read', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
         const terminalAt = new Date('2026-06-23T12:02:00.000Z');

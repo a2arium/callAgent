@@ -85,7 +85,15 @@ services:
   hatchet-dashboard:
     <<: *host-access
     image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:latest
-    command: sh ./entrypoint.sh --config /hatchet/config
+    command:
+      - sh
+      - -ec
+      - |
+        until nc -z hatchet-rabbitmq 5672; do
+          echo "Waiting for RabbitMQ..."
+          sleep 1
+        done
+        exec sh ./entrypoint.sh --config /hatchet/config
     ports:
       - "8080:80"
     restart: on-failure
@@ -95,6 +103,8 @@ services:
       - hatchet_certs:/hatchet/certs
       - hatchet_config:/hatchet/config
     depends_on:
+      hatchet-rabbitmq:
+        condition: service_healthy
       hatchet-setup-config:
         condition: service_completed_successfully
 

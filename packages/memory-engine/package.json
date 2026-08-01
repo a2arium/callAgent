@@ -1,54 +1,54 @@
 {
-    "name": "@a2arium/callagent-memory-engine",
-    "version": "0.1.0",
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "files": [
-        "dist"
-    ],
-    "exports": {
-        ".": {
-            "import": "./dist/index.js",
-            "types": "./dist/index.d.ts"
-        }
-    },
-    "scripts": {
-        "build": "tsc -p tsconfig.json",
-        "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
-    },
-    "publishConfig": {
-        "access": "public"
-    },
-    "description": "Memory Engine for CallAgent",
-    "license": "MIT",
-    "author": "A2arium <a2arium@gmail.com>",
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/a2arium/callAgent.git",
-        "directory": "packages/memory-engine"
-    },
-    "bugs": {
-        "url": "https://github.com/a2arium/callAgent/issues"
-    },
-    "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/memory-engine#readme",
-    "engines": {
-        "node": ">=20"
-    },
-    "dependencies": {
-        "@a2arium/callagent-memory-sql": "^0.2.0",
-        "@a2arium/callagent-types": "^0.2.0",
-        "@a2arium/callagent-utils": "^0.2.0",
-        "@prisma/adapter-pg": "7.4.0",
-        "@prisma/client": "7.4.0",
-        "callllm": "^0.3.0",
-        "dotenv": "^16.4.5",
-        "pg": "^8.13.3",
-        "uuid": "^11.1.0"
-    },
-    "devDependencies": {
-        "jest": "^29.7.0",
-        "ts-jest": "^29.3.2",
-        "typescript": "^5.8.3"
-    },
-    "type": "module"
+  "name": "@a2arium/callagent-memory-engine",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Memory Engine for CallAgent",
+  "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/memory-engine"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/memory-engine#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@a2arium/callagent-memory-sql": "^0.2.0",
+    "@a2arium/callagent-types": "^0.2.0",
+    "@a2arium/callagent-utils": "^0.2.0",
+    "@prisma/adapter-pg": "7.4.0",
+    "@prisma/client": "7.4.0",
+    "callllm": "^0.3.3",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.3",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.2",
+    "typescript": "^5.8.3"
+  },
+  "type": "module"
 }

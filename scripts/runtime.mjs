@@ -4,25 +4,31 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
+import { buildRuntimeEnvironment, resolveRuntimeWorkspacePath } from './runtime-env.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-loadDotenv({ path: path.join(repoRoot, '.env') });
+const invocationCwd = process.cwd();
+loadDotenv({ path: path.join(invocationCwd, '.env') });
+if (invocationCwd !== repoRoot) {
+    loadDotenv({ path: path.join(repoRoot, '.env') });
+}
 
-const args = new Set(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const args = new Set(argv);
 const prodMode = args.has('--prod');
 const noDashboard = args.has('--no-dashboard');
 const help = args.has('--help') || args.has('-h');
+const workspacesArg = optionValue(argv, '--workspaces');
 
 if (help) {
     printHelp();
     process.exit(0);
 }
 
-const env = {
-    ...process.env,
-    CALLAGENT_OUTBOX_DISPATCHER: process.env.CALLAGENT_OUTBOX_DISPATCHER ?? 'hatchet',
-    CALLAGENT_WORKSPACES: resolveRuntimePath(process.env.CALLAGENT_WORKSPACES ?? '.callagent/workspaces.json'),
-};
+const env = buildRuntimeEnvironment(
+    process.env,
+    resolveRuntimePath(workspacesArg ?? process.env.CALLAGENT_WORKSPACES ?? '.callagent/workspaces.json'),
+);
 
 const children = new Map();
 let shuttingDown = false;
@@ -59,7 +65,7 @@ process.once('SIGTERM', () => {
 });
 
 function printHelp() {
-    console.log(`Usage: yarn runtime [--prod] [--no-dashboard]
+    console.log(`Usage: yarn runtime [--prod] [--no-dashboard] [--workspaces <path>]
 
 Runs the local callagent runtime apps:
   worker        Hatchet runtime worker
@@ -69,6 +75,7 @@ Runs the local callagent runtime apps:
 Options:
   --prod          Build operator-viewer first and serve it from runtime-host at /operator
   --no-dashboard  Run worker and host only
+  --workspaces     Workspace registry, resolved relative to the invoking workspace
 
 Infra is not started by this command. Start Hatchet/NATS first with:
   yarn hatchet:poc:up
@@ -128,8 +135,17 @@ function normalizeHost(host) {
 }
 
 function resolveRuntimePath(value) {
-    if (path.isAbsolute(value)) return value;
-    return path.resolve(repoRoot, value);
+    return resolveRuntimeWorkspacePath(value, invocationCwd);
+}
+
+function optionValue(values, option) {
+    const index = values.indexOf(option);
+    if (index === -1) return undefined;
+    const value = values[index + 1];
+    if (!value || value.startsWith('--')) {
+        throw new Error(`${option} requires a path`);
+    }
+    return value;
 }
 
 function checkTcp(host, port) {

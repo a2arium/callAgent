@@ -69,6 +69,7 @@ import type { Observation } from '../loop/oneTurn.js';
 import { getPendingTools, setPendingTools, type PendingToolTerminal } from './ToolsRegistry.js';
 import { getPendingExternalEvents, setPendingExternalEvents } from './ExternalEventsRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
+import { validateTenantId } from '../plugin/tenantValidator.js';
 import type { AgentPlugin } from '../plugin/types.js';
 import { resolveManifestProvenance } from '../telemetry/manifestProvenance.js';
 import type { ManifestProvenance, ManifestSource } from '../types/turnTrace.js';
@@ -92,6 +93,7 @@ import {
     type RuntimeWakeEvent,
     type RuntimeContextBinding,
     type SegmentResult,
+    type TaskRunTimeoutDisposition,
     type TurnExecutor,
 } from '../runtime/index.js';
 import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
@@ -157,13 +159,36 @@ import {
     reconcileSnapshotMutation,
 } from './persistence/SnapshotRepository.js';
 import { assertTaskEffectActive } from './TaskEffectRegistration.js';
-import { assertCurrentTaskTurn } from './TaskTurnCoordinator.js';
+import {
+    assertCurrentTaskTurn,
+    markTaskTurnDispatchEnqueued,
+    readTaskTurnCoordinator,
+} from './TaskTurnCoordinator.js';
+import {
+    buildAdmittedTaskSnapshot,
+    canonicalizeTaskSubmissionInput,
+    classifyTaskSubmission,
+    normalizeTaskSubmissionMaxTurns,
+    normalizeTaskSubmissionOrigin,
+    normalizeTaskSubmissionRunTimeout,
+    readTaskSubmissionMetadata,
+    TaskSubmissionError,
+    taskSubmissionRequestDigest,
+    type SubmitTaskParams,
+    type SubmitTaskResult,
+    type TaskSubmissionOrigin,
+} from './TaskSubmission.js';
 
 export type {
     TaskEntity,
     StartTaskParams,
-    CleanChildResult
+    CleanChildResult,
+    SubmitTaskParams,
+    SubmitTaskResult,
+    TaskSubmissionOrigin,
 };
+export { TaskSubmissionError } from './TaskSubmission.js';
+export type { TaskSubmissionErrorCode } from './TaskSubmission.js';
 
 export type CancelTaskParams = {
     tenantId: string;
@@ -190,6 +215,10 @@ export type AwaitTaskTerminalResult = {
     lifecycle: 'terminal' | 'input-required';
     deadline?: RootRunDeadline;
 };
+
+type RootDeadlineInspection =
+    | { disposition: 'none' | 'claimed' | 'missing' | 'stale' | 'terminal' | 'canceled' }
+    | { disposition: 'pending' | 'due'; deadline: RootRunDeadline };
 
 
 
@@ -284,6 +313,31 @@ function resolveChildToken(
 
 const delay = (ms: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+function awaitTaskSubmissionPublish(
+    promise: Promise<void>,
+    timeoutMs = 5_000
+): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            reject(new TaskSubmissionError(
+                'TASK_SUBMISSION_PUBLISH_TIMEOUT',
+                'initial provider publication exceeded the bounded admission nudge'
+            ));
+        }, timeoutMs);
+        timeout.unref?.();
+        promise.then(
+            () => {
+                clearTimeout(timeout);
+                resolve();
+            },
+            (error) => {
+                clearTimeout(timeout);
+                reject(error);
+            }
+        );
+    });
+}
 
 function awaitingFromSnapshot(snapshot: Record<string, unknown>): { kind?: string; token?: string } {
     const meta = isRecordValue(snapshot.meta) ? snapshot.meta : undefined;
@@ -902,6 +956,7 @@ export type AgentRunListItem = {
     error?: unknown;
     traceId?: string;
     providerRunId?: string | null;
+    origin?: TaskSubmissionOrigin;
 };
 
 export type AgentRunListPage = {
@@ -942,6 +997,7 @@ type AgentRunListParams = {
     hasLlm?: boolean;
     hasMemory?: boolean;
     costState?: 'captured' | 'missing';
+    scheduleId?: string;
 };
 
 type DriverRunListRow = DriverRunView & {
@@ -1252,6 +1308,50 @@ export class TaskEngine {
             cancelTimer: (p) => this.runtimeDriver.cancelTimer?.(p) ?? Promise.resolve(),
             detachTaskBranch: (p) => this.detachTaskBranch(p),
             getRuntimeSurface: () => this.runtimeDriver.surface ?? 'in_process',
+            submitRootTask: async ({ tenantId, sourceTaskId, sourceAgentId, targetAgentId, input, options }) => {
+                const sourcePlugin = PluginManager.findAgent(sourceAgentId);
+                const allowAgents = sourcePlugin?.resolved.runtimeManifest.orchestration
+                    ?.rootTaskSubmission?.allowAgents ?? [];
+                if (!allowAgents.includes(targetAgentId)) {
+                    const error = new Error(`Agent ${sourceAgentId} may not submit root tasks to ${targetAgentId}`);
+                    error.name = 'ROOT_TASK_SUBMISSION_TARGET_NOT_ALLOWED';
+                    throw error;
+                }
+                const source = await this.sessionManager!.load(tenantId, sourceTaskId);
+                if (source === null) {
+                    const error = new Error(`Source task ${sourceTaskId} is unavailable`);
+                    error.name = 'ROOT_TASK_SUBMISSION_SOURCE_UNAVAILABLE';
+                    throw error;
+                }
+                const inherited = readTaskSubmissionMetadata(source.snapshot)?.origin;
+                return this.submitTask({
+                    tenantId,
+                    taskId: options.taskId,
+                    agentId: targetAgentId,
+                    input,
+                    ...(options.maxTurns !== undefined || options.taskRunTimeoutMs !== undefined
+                        ? {
+                              options: {
+                                  ...(options.maxTurns !== undefined
+                                      ? { maxTurns: options.maxTurns }
+                                      : {}),
+                                  ...(options.taskRunTimeoutMs !== undefined
+                                      ? { taskRunTimeoutMs: options.taskRunTimeoutMs }
+                                      : {}),
+                              },
+                          }
+                        : {}),
+                    origin: {
+                        kind: 'agent',
+                        submittedByTaskId: sourceTaskId,
+                        ...(inherited?.scheduleId ? { scheduleId: inherited.scheduleId } : {}),
+                        ...(inherited?.scheduleOccurrenceId
+                            ? { scheduleOccurrenceId: inherited.scheduleOccurrenceId }
+                            : {}),
+                        ...(inherited?.scheduledFor ? { scheduledFor: inherited.scheduledFor } : {}),
+                    },
+                });
+            },
         });
 
         this.turnRunner = new TurnRunner(
@@ -1277,6 +1377,19 @@ export class TaskEngine {
                 });
             },
             onTaskTerminal: async (params) => {
+                try {
+                    await this.runtimeDriver.cancelTimer?.({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        token: 'root-run-timeout',
+                    });
+                } catch (error) {
+                    log.warn('Root run deadline timer cancellation failed after terminal convergence', {
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
                 // Hatchet parent delivery is owned exclusively by the keyed
                 // aplret.task-state terminal projection. The shared segment
                 // executor still performs local branch cleanup, but must not
@@ -1292,6 +1405,22 @@ export class TaskEngine {
                     taskId: params.taskId,
                     reason: `task_${params.state}`,
                 });
+            },
+            ensureInitialRootDeadline: async (params) => {
+                const disposition = await this.ensureAdmittedRootDeadline({
+                    ...params,
+                    phase: 'initial_segment',
+                });
+                if (disposition === 'unavailable') {
+                    const error = new Error(
+                        `Durable root deadline timer is unavailable for ${params.tenantId}/${params.taskId}`
+                    );
+                    error.name = 'TASK_RUN_DEADLINE_UNAVAILABLE';
+                    throw error;
+                }
+                if (disposition === 'canceled') return 'canceled';
+                if (disposition === 'terminal') return 'terminal';
+                return 'ready';
             },
             onTaskRunTimeout: (params) => this.handleTaskRunTimeout(params),
             enableTurnRecovery: opts?.runtimeDriver === undefined && opts?.runtimeDriverFactory === undefined,
@@ -2452,7 +2581,7 @@ export class TaskEngine {
         const projectionWriteMode = readProjectionWriteMode();
         const limit = clampAgentRunLimit(params.limit);
         const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
-        if (projectionMode === 'semantic') {
+        if (projectionMode === 'semantic' || params.scheduleId !== undefined) {
             const semanticPage = await projection?.listAgentRuns({
                 tenantId: params.tenantId,
                 agentId: params.agentId,
@@ -2465,6 +2594,7 @@ export class TaskEngine {
                 hasLlm: params.hasLlm,
                 hasMemory: params.hasMemory,
                 costState: params.costState,
+                scheduleId: params.scheduleId,
             });
             if (semanticPage !== undefined) {
                 return semanticPage;
@@ -2662,6 +2792,7 @@ export class TaskEngine {
                 cursor: params.cursor,
                 limit,
                 scope: params.scope ?? 'roots',
+                scheduleId: params.scheduleId,
             }).then((semanticPage) => {
                 const mismatch = compareListShape(page, semanticPage);
                 if (mismatch !== undefined) {
@@ -3095,6 +3226,343 @@ export class TaskEngine {
             event.type === 'task.failed' ||
             event.type === 'task.canceled'
         );
+    }
+
+    /**
+     * Durably admit a root loop task without running or awaiting its first
+     * segment in this call chain. Provider publication is only a recoverable,
+     * best-effort nudge after the authoritative snapshot CAS.
+     */
+    async submitTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+        try {
+            return await this.submitTaskValidated(params);
+        } catch (error) {
+            defaultMetricsRegistry.increment('task_submission_total', {
+                status: 'rejected',
+                errorCode: error instanceof TaskSubmissionError
+                    ? error.code
+                    : error instanceof Error ? error.name : 'Error',
+                runtimeSurface: this.runtimeDriver.surface ?? 'unknown',
+            });
+            throw error;
+        }
+    }
+
+    private async submitTaskValidated(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+        try {
+            validateTenantId(params.tenantId);
+        } catch (error) {
+            throw new TaskSubmissionError(
+                'TASK_SUBMISSION_IDENTITY_INVALID',
+                error instanceof Error ? error.message : 'tenantId is invalid'
+            );
+        }
+        for (const [field, value] of [
+            ['taskId', params.taskId],
+            ['agentId', params.agentId],
+        ] as const) {
+            if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+                throw new TaskSubmissionError(
+                    'TASK_SUBMISSION_IDENTITY_INVALID',
+                    `${field} must be a non-empty string without surrounding whitespace`
+                );
+            }
+        }
+
+        if (!this.sessionManager?.supportsDurableTaskAdmission()) {
+            throw new TaskSubmissionError(
+                'TASK_ADMISSION_UNAVAILABLE',
+                'the configured working-memory store cannot durably recover runnable task turns'
+            );
+        }
+        const durableInput = canonicalizeTaskSubmissionInput(params.input);
+        const maxTurns = normalizeTaskSubmissionMaxTurns(params.options?.maxTurns);
+        const taskRunTimeoutMs = normalizeTaskSubmissionRunTimeout(
+            params.options?.taskRunTimeoutMs
+        );
+        const origin = normalizeTaskSubmissionOrigin(params.origin);
+        const requestDigest = taskSubmissionRequestDigest({
+            agentId: params.agentId,
+            canonicalInput: durableInput.canonical,
+            ...(maxTurns !== undefined ? { maxTurns } : {}),
+            ...(taskRunTimeoutMs !== undefined ? { taskRunTimeoutMs } : {}),
+            ...(origin ? { origin } : {}),
+        });
+
+        // Stored identity is authoritative. Exact retries must remain usable
+        // after an agent is undeployed or the submitting process is rebuilt
+        // with a different/unavailable provider. Conflicts also take
+        // precedence over current-environment validation.
+        const existing = await this.sessionManager.load(params.tenantId, params.taskId);
+        if (existing !== null) {
+            const classification = classifyTaskSubmission({
+                snapshot: existing.snapshot,
+                taskId: params.taskId,
+                requestDigest,
+            });
+            if (classification === 'missing') {
+                throw new TaskSubmissionError(
+                    'TASK_SUBMISSION_STATE_INCOMPATIBLE',
+                    'an existing task without a submission envelope cannot be adopted'
+                );
+            }
+            let storedSurface: string = 'unknown';
+            try {
+                storedSurface = readTaskTurnCoordinator(existing.snapshot, {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                }).runtimeSurface ?? 'unknown';
+            } catch {
+                // Observability enrichment must not change duplicate semantics.
+            }
+            const deadlineDisposition = classification === 'duplicate_active'
+                ? await this.ensureAdmittedRootDeadline({
+                      tenantId: params.tenantId,
+                      taskId: params.taskId,
+                      agentId: params.agentId,
+                      snapshot: existing.snapshot,
+                      phase: 'duplicate_repair',
+                  })
+                : 'terminal';
+            const effectiveClassification = deadlineDisposition === 'terminal' || deadlineDisposition === 'canceled'
+                ? 'duplicate_terminal'
+                : classification;
+            defaultMetricsRegistry.increment('task_submission_total', {
+                status: effectiveClassification,
+                runtimeSurface: storedSurface,
+            });
+            const projectionSnapshot = deadlineDisposition === 'terminal' || deadlineDisposition === 'canceled'
+                ? (await this.sessionManager.load(params.tenantId, params.taskId))?.snapshot ?? existing.snapshot
+                : existing.snapshot;
+            await this.projectTaskAdmissionSnapshot({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId,
+                snapshot: projectionSnapshot,
+            });
+            return { taskId: params.taskId, status: effectiveClassification };
+        }
+
+        const capability = this.runtimeDriver.taskAdmissionCapabilities;
+        const runtimeSurface = this.runtimeDriver.surface;
+        if (
+            capability?.recoverableStarts !== true ||
+            (runtimeSurface !== 'in_process' && runtimeSurface !== 'hatchet')
+        ) {
+            throw new TaskSubmissionError(
+                'TASK_ADMISSION_UNAVAILABLE',
+                'the configured runtime driver does not support recoverable admitted starts'
+            );
+        }
+
+        const plugin = PluginManager.findAgent(params.agentId);
+        if (plugin?.resolved === undefined) {
+            throw new TaskSubmissionError(
+                'TASK_SUBMISSION_AGENT_UNAVAILABLE',
+                `agent ${params.agentId} is not registered with resolved manifests`
+            );
+        }
+        if (plugin.resolved.runtimeManifest.runMode !== 'loop') {
+            throw new TaskSubmissionError(
+                'TASK_SUBMISSION_AGENT_UNSUPPORTED',
+                `agent ${params.agentId} is not a loop-mode agent`
+            );
+        }
+
+        let manifestProvenance: ManifestProvenance;
+        try {
+            manifestProvenance = resolveManifestProvenance({
+                agentCard: {
+                    source: plugin.resolved.agentCardSource as ManifestSource,
+                    content: plugin.resolved.agentCard,
+                },
+                runtimeManifest: {
+                    source: plugin.resolved.runtimeManifestSource as ManifestSource,
+                    content: plugin.resolved.runtimeManifest,
+                },
+            });
+        } catch (error) {
+            throw new TaskSubmissionError(
+                'TASK_SUBMISSION_MANIFEST_INVALID',
+                error instanceof Error ? error.message : String(error)
+            );
+        }
+        const generation = '1';
+        const deliveryKey = `${params.taskId}:turn-request:${generation}`;
+        const startParams = {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            rootTaskId: params.taskId,
+            agentId: params.agentId,
+            input: durableInput.input,
+            idempotencyKey: deliveryKey,
+            recoveryGeneration: generation,
+            recoveryDeliveryKey: deliveryKey,
+        } as const;
+
+        // Must happen before the admission CAS: an input that can never fit on
+        // the selected provider must not become a permanently runnable intent.
+        await capability.preflightStart(startParams);
+
+        const reconciled = await reconcileSnapshotMutation<{
+            status: SubmitTaskResult['status'];
+            generation?: string;
+            deliveryKey?: string;
+        }>({
+            session: this.sessionManager,
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            agentId: params.agentId,
+            operation: 'task.submit',
+            mutate: ({ exists, snapshot, storageNow }) => {
+                const classification = classifyTaskSubmission({
+                    snapshot,
+                    taskId: params.taskId,
+                    requestDigest,
+                });
+                if (classification !== 'missing') {
+                    return { kind: 'noop', value: { status: classification } };
+                }
+                if (exists) {
+                    throw new TaskSubmissionError(
+                        'TASK_SUBMISSION_STATE_INCOMPATIBLE',
+                        'an existing task without a submission envelope cannot be adopted'
+                    );
+                }
+                const admitted = buildAdmittedTaskSnapshot({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    input: durableInput.input,
+                    ...(maxTurns !== undefined ? { maxTurns } : {}),
+                    ...(taskRunTimeoutMs !== undefined ? { taskRunTimeoutMs } : {}),
+                    requestDigest,
+                    manifestProvenance,
+                    runtimeSurface,
+                    storageNow,
+                    ...(origin ? { origin } : {}),
+                });
+                return {
+                    kind: 'write',
+                    snapshot: admitted.snapshot,
+                    value: {
+                        status: 'accepted',
+                        generation: admitted.generation,
+                        deliveryKey: admitted.deliveryKey,
+                    },
+                };
+            },
+        });
+
+        const reconciledSurface = readTaskTurnCoordinator(reconciled.snapshot, {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+        }).runtimeSurface ?? runtimeSurface;
+        defaultMetricsRegistry.increment('task_submission_total', {
+            status: reconciled.value.status,
+            runtimeSurface: reconciledSurface,
+        });
+
+        await this.projectTaskAdmissionSnapshot({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            snapshot: reconciled.snapshot,
+        });
+
+        // Only the admission CAS winner publishes directly. Exact duplicates
+        // are read-only; the reconciler for the stored runtime surface owns all
+        // recovery nudges.
+        const coordinator = readTaskTurnCoordinator(reconciled.snapshot, {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+        });
+        const intent = coordinator.dispatchIntent;
+        const deadlineDisposition = await this.ensureAdmittedRootDeadline({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            snapshot: reconciled.snapshot,
+            phase: reconciled.value.status === 'accepted' ? 'admission' : 'cas_replay',
+        });
+        if (
+            reconciled.value.status === 'accepted' &&
+            deadlineDisposition !== 'terminal' &&
+            deadlineDisposition !== 'canceled' &&
+            deadlineDisposition !== 'unavailable' &&
+            intent?.generation === generation &&
+            intent.deliveryKey === deliveryKey &&
+            intent.runtimeSurface === runtimeSurface &&
+            intent.enqueuedAt === undefined
+        ) {
+            const publish = this.runtimeDriver.enqueueStart(startParams)
+                .then(async () => {
+                    await markTaskTurnDispatchEnqueued({
+                        session: this.sessionManager!,
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        agentId: params.agentId,
+                        generation,
+                        deliveryKey,
+                        runtimeSurface,
+                    });
+                    defaultMetricsRegistry.increment('task_submission_publish_total', {
+                        status: 'published',
+                        runtimeSurface,
+                    });
+                });
+            try {
+                await awaitTaskSubmissionPublish(publish);
+            } catch (error) {
+                defaultMetricsRegistry.increment('task_submission_publish_total', {
+                    status: 'deferred',
+                    runtimeSurface,
+                });
+                log.warn('Admitted task publication deferred to reconciliation', {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    agentId: params.agentId,
+                    generation,
+                    runtimeSurface,
+                    errorCode: error instanceof TaskSubmissionError
+                        ? error.code
+                        : error instanceof Error ? error.name : 'Error',
+                });
+            }
+        }
+
+        return { taskId: params.taskId, status: reconciled.value.status };
+    }
+
+    /**
+     * Best-effort semantic projection sourced only from the authoritative
+     * admission snapshot. Calling this for exact duplicates makes projection
+     * failures self-repairing without republishing provider work.
+     */
+    private async projectTaskAdmissionSnapshot(params: {
+        tenantId: string;
+        taskId: string;
+        agentId: string;
+        snapshot: Record<string, unknown>;
+    }): Promise<void> {
+        if (readProjectionWriteMode() === 'off') return;
+        const prisma = this.getSessionStorePrisma() as OperatorPrismaClient | undefined;
+        const submission = readTaskSubmissionMetadata(params.snapshot);
+        if (!prisma?.agentRun || !submission) return;
+        await new OperatorProjectionRepository(prisma as never).projectAdmission({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            admittedAt: submission.admittedAt,
+            ...(submission.origin ? { origin: submission.origin } : {}),
+        }).catch((error) => {
+            log.warn('Task admission semantic projection failed', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        });
     }
 
     /**
@@ -5376,13 +5844,28 @@ export class TaskEngine {
         token: string;
         dueAt: string;
         payload?: unknown;
-    }): Promise<void> {
-        const loaded = await this.sessionManager!.load(params.tenantId, params.taskId);
-        if (loaded === null) return;
-        const snapshot = (loaded.snapshot as Record<string, unknown> | undefined) ?? {};
-        const deadline = readRootRunDeadline(snapshot);
-        if (deadline === undefined || deadline.timerToken !== params.token) return;
-        if (terminalStatusFromSnapshot(snapshot, params.taskId) !== undefined) return;
+    }): Promise<TaskRunTimeoutDisposition> {
+        const inspection = await this.inspectAdmittedRootDeadline({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            expectedToken: params.token,
+            expectedDueAt: params.dueAt,
+        });
+        if (inspection.disposition !== 'due') {
+            const disposition = inspection.disposition === 'canceled'
+                ? 'canceled'
+                : inspection.disposition === 'terminal'
+                  ? 'terminal'
+                  : inspection.disposition === 'pending'
+                    ? 'not_due'
+                    : inspection.disposition === 'stale'
+                      ? 'stale'
+                      : 'missing';
+            defaultMetricsRegistry.increment('task_run_timeout_total', { disposition });
+            return disposition;
+        }
+
+        const deadline = inspection.deadline;
         await this.cancelTask({
             tenantId: params.tenantId,
             taskId: params.taskId,
@@ -5394,7 +5877,193 @@ export class TaskEngine {
                 expiresAt: deadline.expiresAt,
             },
         });
-        defaultMetricsRegistry.increment('task_run_timeout_total', { disposition: 'observed' });
+
+        const after = await this.sessionManager!.load(params.tenantId, params.taskId);
+        if (after === null) {
+            throw new Error(`Task ${params.taskId} disappeared after its root timeout was claimed.`);
+        }
+        const terminalDisposition = this.taskRunTimeoutTerminalDisposition(
+            (after.snapshot as Record<string, unknown> | undefined) ?? {},
+            params.taskId
+        );
+        if (terminalDisposition === undefined) {
+            throw new Error(`Task ${params.taskId} root timeout did not converge to durable terminality.`);
+        }
+        defaultMetricsRegistry.increment('task_run_timeout_total', {
+            disposition: terminalDisposition,
+        });
+        return terminalDisposition;
+    }
+
+    private taskRunTimeoutTerminalDisposition(
+        snapshot: Record<string, unknown>,
+        taskId: string
+    ): 'canceled' | 'terminal' | undefined {
+        const status = terminalStatusFromSnapshot(snapshot, taskId);
+        if (status === undefined) return undefined;
+        const metadata = status.metadata as Record<string, unknown> | undefined;
+        return status.state === 'canceled' && (
+            metadata?.reason === 'active_run_timeout' || metadata?.code === 'TASK_RUN_TIMEOUT'
+        )
+            ? 'canceled'
+            : 'terminal';
+    }
+
+    /**
+     * Read task identity and time from one authoritative storage snapshot.
+     * A no-op reconciliation is intentional: SQL loadForMutation supplies
+     * PostgreSQL clock_timestamp() alongside the exact snapshot inspected.
+     */
+    private async inspectAdmittedRootDeadline(params: {
+        tenantId: string;
+        taskId: string;
+        phase?: 'admission' | 'cas_replay' | 'duplicate_repair' | 'initial_segment';
+        expectedToken?: string;
+        expectedDueAt?: string;
+    }): Promise<RootDeadlineInspection> {
+        const inspected = await reconcileSnapshotMutation<RootDeadlineInspection>({
+            session: this.sessionManager!,
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            operation: 'task.run_deadline.inspect',
+            mutate: ({ exists, snapshot, storageNow }) => {
+                if (!exists) {
+                    return { kind: 'noop' as const, value: { disposition: 'missing' as const } };
+                }
+                const submission = readTaskSubmissionMetadata(snapshot);
+                if (submission === undefined || submission.options.taskRunTimeoutMs === undefined) {
+                    return { kind: 'noop' as const, value: { disposition: 'none' as const } };
+                }
+                if (params.phase === 'initial_segment' && submission.firstClaimedAt !== undefined) {
+                    return { kind: 'noop' as const, value: { disposition: 'claimed' as const } };
+                }
+
+                const taskRunTimeoutMs = submission.options.taskRunTimeoutMs;
+                const deadline = readRootRunDeadline(snapshot);
+                const admittedAtMs = Date.parse(submission.admittedAt);
+                const expectedExpiresAt = new Date(admittedAtMs + taskRunTimeoutMs).toISOString();
+                if (
+                    deadline === undefined ||
+                    deadline.timeoutMs !== taskRunTimeoutMs ||
+                    deadline.startedAt !== submission.admittedAt ||
+                    deadline.expiresAt !== expectedExpiresAt ||
+                    deadline.source !== 'task_submission' ||
+                    deadline.timerToken !== 'root-run-timeout'
+                ) {
+                    throw new TaskSubmissionError(
+                        'TASK_SUBMISSION_STATE_INVALID',
+                        'stored task submission deadline is missing or inconsistent'
+                    );
+                }
+                if (
+                    (params.expectedToken !== undefined && params.expectedToken !== deadline.timerToken) ||
+                    (params.expectedDueAt !== undefined && params.expectedDueAt !== deadline.expiresAt)
+                ) {
+                    return { kind: 'noop' as const, value: { disposition: 'stale' as const } };
+                }
+
+                const terminalDisposition = this.taskRunTimeoutTerminalDisposition(
+                    snapshot,
+                    params.taskId
+                );
+                if (terminalDisposition !== undefined) {
+                    return {
+                        kind: 'noop' as const,
+                        value: { disposition: terminalDisposition },
+                    };
+                }
+                const storageNowMs = Date.parse(storageNow);
+                if (!Number.isFinite(storageNowMs)) {
+                    throw new Error('TASK_RUN_DEADLINE_STORAGE_CLOCK_INVALID');
+                }
+                return {
+                    kind: 'noop' as const,
+                    value: {
+                        disposition: storageNowMs >= Date.parse(deadline.expiresAt)
+                            ? 'due' as const
+                            : 'pending' as const,
+                        deadline,
+                    },
+                };
+            },
+        });
+        return inspected.value;
+    }
+
+    /**
+     * Establish or enforce the immutable deadline attached by durable root
+     * admission. The authoritative snapshot supplies both identity and time;
+     * callers never derive a replacement deadline from their local clock.
+     */
+    private async ensureAdmittedRootDeadline(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        snapshot: Record<string, unknown>;
+        phase: 'admission' | 'cas_replay' | 'duplicate_repair' | 'initial_segment';
+    }): Promise<'none' | 'scheduled' | 'unavailable' | 'terminal' | 'canceled'> {
+        const inspection = await this.inspectAdmittedRootDeadline({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            phase: params.phase,
+        });
+        if (
+            inspection.disposition === 'none' ||
+            inspection.disposition === 'claimed' ||
+            inspection.disposition === 'missing'
+        ) {
+            return 'none';
+        }
+        if (inspection.disposition === 'terminal' || inspection.disposition === 'canceled') {
+            return inspection.disposition;
+        }
+        if (inspection.disposition === 'stale') {
+            throw new TaskSubmissionError(
+                'TASK_SUBMISSION_STATE_INVALID',
+                'stored task submission deadline changed while it was being inspected'
+            );
+        }
+        if (!('deadline' in inspection)) {
+            throw new TaskSubmissionError(
+                'TASK_SUBMISSION_STATE_INVALID',
+                'stored task submission deadline could not be classified'
+            );
+        }
+
+        const deadline = inspection.deadline;
+        if (inspection.disposition === 'due') {
+            const timeoutDisposition = await this.handleTaskRunTimeout({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+                token: deadline.timerToken,
+                dueAt: deadline.expiresAt,
+                payload: {
+                    code: 'TASK_RUN_TIMEOUT',
+                    timeoutMs: deadline.timeoutMs,
+                    expiresAt: deadline.expiresAt,
+                },
+            });
+            defaultMetricsRegistry.increment('task_run_deadline_registration_total', {
+                phase: params.phase,
+                disposition: timeoutDisposition,
+            });
+            if (timeoutDisposition === 'canceled' || timeoutDisposition === 'terminal') {
+                return timeoutDisposition;
+            }
+        }
+
+        const scheduled = await this.ensureRootRunDeadlineTimer({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            ...(params.agentId !== undefined ? { agentId: params.agentId } : {}),
+            deadline,
+        });
+        defaultMetricsRegistry.increment('task_run_deadline_registration_total', {
+            phase: params.phase,
+            disposition: scheduled ? 'scheduled' : 'unavailable',
+        });
+        return scheduled ? 'scheduled' : 'unavailable';
     }
 
     private async ensureRootRunDeadlineTimer(params: {

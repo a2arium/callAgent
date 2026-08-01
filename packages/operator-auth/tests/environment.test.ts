@@ -27,11 +27,15 @@ describe('operator auth environment', () => {
   it('trusts both local loopback hostnames outside production', () => {
     expect(trustedOriginsFor('http://127.0.0.1:8790', false)).toEqual([
       'http://127.0.0.1:8790',
+      'http://127.0.0.1:8791',
       'http://localhost:8790',
+      'http://localhost:8791',
     ]);
     expect(trustedOriginsFor('http://localhost:8790', false)).toEqual([
       'http://localhost:8790',
       'http://127.0.0.1:8790',
+      'http://127.0.0.1:8791',
+      'http://localhost:8791',
     ]);
   });
 

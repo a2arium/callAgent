@@ -385,7 +385,7 @@ function ActivityTable(props: { tenantId: string; items: SemanticMemoryActivityI
               <td className="px-3 py-2">{item.agentId ?? 'Not captured'}</td>
               <td className="px-3 py-2">
                 <Button asChild variant="ghost" size="sm">
-                  <Link to="/runs/$taskId" params={{ taskId: item.taskId }} search={{ tenantId: props.tenantId, tab: 'memory', turn: String(item.turnSeq ?? ''), nodeId: '', scope: 'roots', agentId: '', status: '', since: '', taskId: '', hasLlm: false, hasMemory: false, costState: '' }}>
+                  <Link to="/runs/$taskId" params={{ taskId: item.taskId }} search={{ tenantId: props.tenantId, tab: 'memory', turn: String(item.turnSeq ?? ''), nodeId: '', scope: 'roots', agentId: '', status: '', since: '', taskId: '', scheduleId: '', hasLlm: false, hasMemory: false, costState: '' }}>
                     {item.taskId.slice(0, 18)}
                   </Link>
                 </Button>

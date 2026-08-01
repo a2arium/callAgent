@@ -43,6 +43,14 @@ export {
     type MetricsSnapshot,
 } from './observability/metrics.js';
 export { makeSafeEventPreview } from './orchestration/safeEventPreview.js';
+export { observeTaskSubmissionBacklog } from './orchestration/taskSubmissionObservability.js';
+export * from './operator/agentSchedules.js';
+export {
+    OperatorAuditRepository,
+    writeOperatorAudit,
+    type OperatorAuditAction,
+    type OperatorAuditPrisma,
+} from './operator/operatorAudit.js';
 export {
     assertTaskEffectActive,
     registerTaskEffect,
@@ -51,11 +59,13 @@ export {
 } from './orchestration/TaskEffectRegistration.js';
 export { prepareChildResultForPersistence } from './orchestration/childResultPersistence.js';
 export {
+    admitInitialTaskTurnInSnapshot,
     assertCurrentTaskTurn,
     markTaskTurnDispatchEnqueued,
     readTaskTurnCoordinator,
     releaseTaskTurn,
     renewTaskTurnClaim,
+    settleUnclaimedTaskTurnInSnapshot,
     requestTaskTurn,
     type RequestTaskTurnResult,
     type TaskTurnClaim,

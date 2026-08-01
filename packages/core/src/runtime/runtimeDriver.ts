@@ -76,6 +76,10 @@ export type EnqueueStartParams = RuntimeDriverIds & {
     rootTaskId?: string;
     /** Immediate parent task for nested runtime starts. */
     parentTaskId?: string;
+    /** Generation already admitted in the durable turn coordinator. */
+    recoveryGeneration?: string;
+    /** Stable delivery identity for the admitted generation. */
+    recoveryDeliveryKey?: string;
 };
 export type EnqueueResumeParams = RuntimeDriverIds & { event: RuntimeWakeEvent };
 export type EnqueueChildDispatchParams = RuntimeDriverIds & {
@@ -110,6 +114,14 @@ export type DispatchOutboxParams = {
 export type RuntimeDriver = {
     /** Durable routing identity used by the task turn coordinator. */
     readonly surface?: 'direct' | 'in_process' | 'hatchet';
+    /**
+     * Explicit opt-in for admission-only starts. Preflight must be side-effect
+     * free and reject inputs that this driver could never publish.
+     */
+    readonly taskAdmissionCapabilities?: {
+        recoverableStarts: true;
+        preflightStart(params: EnqueueStartParams): Promise<void>;
+    };
     enqueueStart(params: EnqueueStartParams): Promise<void>;
     enqueueResume(params: EnqueueResumeParams): Promise<void>;
     enqueueChildDispatch(params: EnqueueChildDispatchParams): Promise<void>;

@@ -10,6 +10,8 @@ import type {
     TurnExecutor,
 } from '../../src/runtime/turnExecutor.js';
 import type { RuntimeWakeEvent } from '../../src/runtime/runtimeDriver.js';
+import { InMemorySessionManager } from '../../src/orchestration/InMemorySessionManager.js';
+import { SessionManager } from '../../src/orchestration/SessionManager.js';
 
 function makeFakeExecutor(
     impl?: (params: RunSegmentParams) => Promise<SegmentResult>
@@ -111,6 +113,27 @@ describe('InProcessRuntimeDriver', () => {
         expect(calls[0].idempotencyKey).toBe('idem-1');
 
         await driver.waitForIdle();
+    });
+
+    it('defers a durably admitted start outside the enqueue call stack', async () => {
+        const { executor, calls } = makeFakeExecutor();
+        const driver = new InProcessRuntimeDriver({ turnExecutor: executor, scheduler });
+
+        await driver.enqueueStart({
+            ...ids,
+            input: { hello: 'durable' },
+            recoveryGeneration: '1',
+            recoveryDeliveryKey: ids.idempotencyKey,
+        });
+
+        expect(calls).toHaveLength(0);
+        expect(scheduler.pending()).toBe(1);
+        scheduler.fireAll();
+        await driver.waitForIdle();
+        expect(calls).toEqual([expect.objectContaining({
+            recoveryGeneration: '1',
+            wake: { trigger: 'start', input: { hello: 'durable' } },
+        })]);
     });
 
     it('maps a resume wake event to the kernel trigger', async () => {
@@ -445,5 +468,50 @@ describe('InProcessRuntimeDriver', () => {
         await expect(
             noOp.dispatchOutbox({ outboxRowId: 'row-2', eventType: 'task.status' })
         ).resolves.toBeUndefined();
+    });
+
+    it('reconstructs an admitted initial generation as a start wake after runtime recreation', async () => {
+        const store = new InMemorySessionManager(() => Date.parse('2026-07-31T00:01:00.000Z'));
+        const sessions = new SessionManager(store);
+        await sessions.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'admitted-task', agentId: 'agent-a',
+            expectedWmVersion: 0n,
+            snapshot: {
+                meta: {
+                    agentId: 'agent-a',
+                    initialInput: { sourceId: 'source-a' },
+                    taskLifecycle: {
+                        taskId: 'admitted-task', rootTaskId: 'admitted-task',
+                        ancestorTaskIds: [], state: 'active',
+                    },
+                    turnCoordinator: {
+                        schemaVersion: 1, runtimeSurface: 'in_process',
+                        nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '1', completedGeneration: '0',
+                        dispatchIntent: {
+                            generation: '1', deliveryKey: 'admitted-task:turn-request:1',
+                            runtimeSurface: 'in_process', createdAt: '2026-07-31T00:00:00.000Z',
+                        },
+                    },
+                },
+            },
+        });
+        const { executor, calls } = makeFakeExecutor();
+        new InProcessRuntimeDriver({
+            turnExecutor: executor,
+            sessionManager: sessions,
+            turnReconcileIntervalMs: 60_000,
+        });
+
+        for (let attempt = 0; attempt < 20 && calls.length === 0; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        expect(calls).toEqual([expect.objectContaining({
+            tenantId: 'tenant-a',
+            taskId: 'admitted-task',
+            idempotencyKey: 'admitted-task:turn-request:1',
+            recoveryGeneration: '1',
+            wake: { trigger: 'start', input: { sourceId: 'source-a' } },
+        })]);
     });
 });

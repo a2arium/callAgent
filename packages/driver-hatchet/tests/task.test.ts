@@ -473,21 +473,23 @@ describe('executeTaskTask', () => {
             rootRunKey: '8:tenant-1:6:task-1:root:1',
             agentId: 'agent-1',
             input: { value: 'hello' },
-            idempotencyKey: 'task-1:start',
+            idempotencyKey: 'task-1:turn-request:1',
+            recoveryGeneration: '1',
+            recoveryDeliveryKey: 'task-1:turn-request:1',
         }, ctx as never);
 
         expect(ctx.sleepFor).toHaveBeenCalledWith('1s', 'turn-owner:1');
         expect(ctx.runChild).toHaveBeenNthCalledWith(
             1,
             SEGMENT_TASK_NAME,
-            expect.objectContaining({ attemptSeq: 1 }),
-            expect.objectContaining({ key: '8:tenant-1:6:task-1:root:1:segment:1:task-1:start' })
+            expect.objectContaining({ attemptSeq: 1, recoveryGeneration: '1' }),
+            expect.objectContaining({ key: '8:tenant-1:6:task-1:root:1:segment:1:task-1:turn-request:1' })
         );
         expect(ctx.runChild).toHaveBeenNthCalledWith(
             2,
             SEGMENT_TASK_NAME,
-            expect.objectContaining({ attemptSeq: 2 }),
-            expect.objectContaining({ key: '8:tenant-1:6:task-1:root:1:segment:2:task-1:start' })
+            expect.objectContaining({ attemptSeq: 2, recoveryGeneration: '1' }),
+            expect.objectContaining({ key: '8:tenant-1:6:task-1:root:1:segment:2:task-1:turn-request:1' })
         );
     });
 
@@ -664,7 +666,23 @@ describe('executeTaskTask', () => {
 
     it('persists a durable terminal when task-state projects a cached root result', async () => {
         const memory = createMemorySessions({
-            'task-1': { meta: { agentId: 'fetch-html' } },
+            'task-1': { meta: {
+                agentId: 'fetch-html',
+                turnCoordinator: {
+                    schemaVersion: 1,
+                    runtimeSurface: 'hatchet',
+                    nextFence: '0',
+                    nextTurnSeq: 0,
+                    requestedGeneration: '1',
+                    completedGeneration: '0',
+                    dispatchIntent: {
+                        generation: '1',
+                        deliveryKey: 'task-1:turn-request:1',
+                        runtimeSurface: 'hatchet',
+                        createdAt: '2026-07-31T00:00:00.000Z',
+                    },
+                },
+            } },
         });
         const setCachedResult = jest.fn(async () => undefined);
 
@@ -672,7 +690,8 @@ describe('executeTaskTask', () => {
             operation: 'project_terminal',
             task: {
                 tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html', input: { url: 'x' },
-                cache: { enabled: true }, idempotencyKey: 'task-1:start',
+                cache: { enabled: true }, idempotencyKey: 'task-1:turn-request:1',
+                recoveryGeneration: '1', recoveryDeliveryKey: 'task-1:turn-request:1',
             },
             segment: {
                 tenantId: 'tenant-1', taskId: 'task-1', agentId: 'fetch-html',
@@ -707,8 +726,14 @@ describe('executeTaskTask', () => {
                         }),
                     }),
                 }),
+                turnCoordinator: expect.objectContaining({
+                    requestedGeneration: '1',
+                    completedGeneration: '1',
+                }),
             }),
         }));
+        expect((memory.snapshots.get('task-1')?.meta as any)?.turnCoordinator?.dispatchIntent)
+            .toBeUndefined();
         expect(setCachedResult).toHaveBeenCalledTimes(1);
     });
 

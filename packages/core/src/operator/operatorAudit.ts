@@ -11,7 +11,15 @@ export type OperatorAuditAction =
     | 'memory.update'
     | 'retry'
     | 'resume'
-    | 'delete';
+    | 'delete'
+    | 'schedule.create'
+    | 'schedule.run_now'
+    | 'schedule.pause'
+    | 'schedule.resume'
+    | 'schedule.reschedule'
+    | 'schedule.replace'
+    | 'schedule.delete'
+    | 'schedule.payload.view';
 
 export type OperatorAuditRecordInput = {
     tenantId: string;
@@ -162,7 +170,15 @@ function isOperatorAuditAction(value: unknown): value is OperatorAuditAction {
         value === 'memory.update' ||
         value === 'retry' ||
         value === 'resume' ||
-        value === 'delete';
+        value === 'delete' ||
+        value === 'schedule.create' ||
+        value === 'schedule.run_now' ||
+        value === 'schedule.pause' ||
+        value === 'schedule.resume' ||
+        value === 'schedule.reschedule' ||
+        value === 'schedule.replace' ||
+        value === 'schedule.delete' ||
+        value === 'schedule.payload.view';
 }
 
 function iso(value: unknown): string {

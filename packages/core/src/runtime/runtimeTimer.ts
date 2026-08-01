@@ -4,6 +4,12 @@ import type { RuntimeDriverIds, RuntimeWakeEvent } from './runtimeDriver.js';
 export type RuntimeTimerKind = 'token_expiry' | 'sleep' | 'child_timeout' | 'task_run_timeout';
 export type RuntimeTimerStatus = 'scheduled' | 'firing' | 'fired' | 'canceled';
 export type TimerExpiredReason = 'input_timeout' | 'sleep_due' | 'child_timeout' | 'task_run_timeout';
+export type TaskRunTimeoutDisposition =
+    | 'canceled'
+    | 'terminal'
+    | 'not_due'
+    | 'stale'
+    | 'missing';
 
 export type RuntimeTimerRecord = {
     id: string;
@@ -52,6 +58,10 @@ type RuntimeTimerDelegate = {
 
 export type RuntimeTimerPrisma = {
     runtimeTimer: RuntimeTimerDelegate;
+    $queryRaw?<T = unknown>(
+        query: TemplateStringsArray,
+        ...values: unknown[]
+    ): Promise<T>;
 };
 
 export function deriveRuntimeTimerId(params: {
@@ -97,6 +107,30 @@ export function timerRecordToWake(timer: RuntimeTimerRecord, firedAt = new Date(
 
 export class RuntimeTimerRepository {
     constructor(private readonly prisma: RuntimeTimerPrisma) {}
+
+    /**
+     * Read the clock that owns durable timer timestamps. Production callers
+     * must compare dueAt against PostgreSQL, not a worker's wall clock.
+     * The fallback keeps lightweight in-memory test adapters compatible.
+     */
+    async readStorageNow(explicitNow?: Date): Promise<Date> {
+        if (explicitNow !== undefined) return explicitNow;
+        if (this.prisma.$queryRaw === undefined) return new Date();
+        const rows = await this.prisma.$queryRaw<Array<{ storageNowMs: bigint }>>`
+            SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS "storageNowMs"
+        `;
+        const storageNowMs = rows[0]?.storageNowMs;
+        if (typeof storageNowMs !== 'bigint') {
+            throw new Error('RUNTIME_TIMER_STORAGE_CLOCK_UNAVAILABLE');
+        }
+        return new Date(Number(storageNowMs));
+    }
+
+    async millisecondsUntil(fireAt: string | Date, explicitNow?: Date): Promise<number> {
+        const now = await this.readStorageNow(explicitNow);
+        const fireAtMs = typeof fireAt === 'string' ? Date.parse(fireAt) : fireAt.getTime();
+        return Math.max(0, fireAtMs - now.getTime());
+    }
 
     async schedule(params: RuntimeTimerScheduleParams): Promise<RuntimeTimerRecord> {
         const timerId = deriveRuntimeTimerId({
@@ -178,7 +212,7 @@ export class RuntimeTimerRepository {
         now?: Date;
         leaseTtlMs: number;
     }): Promise<RuntimeTimerFireLease | null> {
-        const now = params.now ?? new Date();
+        const now = await this.readStorageNow(params.now);
         const timer = await this.prisma.runtimeTimer.findFirst({
             where: {
                 tenantId: params.tenantId,
@@ -290,7 +324,7 @@ export class RuntimeTimerRepository {
     }
 
     async listDue(params: { now?: Date; take: number }): Promise<RuntimeTimerRecord[]> {
-        const now = params.now ?? new Date();
+        const now = await this.readStorageNow(params.now);
         return this.prisma.runtimeTimer.findMany({
             where: {
                 dueAt: { lte: now },
@@ -305,8 +339,8 @@ export class RuntimeTimerRepository {
         });
     }
 
-    async listScheduled(params: { take: number }): Promise<RuntimeTimerRecord[]> {
-        const now = new Date();
+    async listScheduled(params: { now?: Date; take: number }): Promise<RuntimeTimerRecord[]> {
+        const now = await this.readStorageNow(params.now);
         return this.prisma.runtimeTimer.findMany({
             where: {
                 OR: [

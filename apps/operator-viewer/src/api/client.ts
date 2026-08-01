@@ -12,6 +12,37 @@ export type ListAgentRunsInput = {
   hasLlm?: boolean;
   hasMemory?: boolean;
   costState?: 'captured' | 'missing' | '';
+  scheduleId?: string;
+};
+
+export type AgentSchedule = {
+  id: string;
+  providerId: string;
+  revision: number;
+  kind: 'once' | 'cron';
+  displayName: string;
+  agentId: string;
+  agentAvailable: boolean;
+  state: string;
+  createdAt: string;
+  updatedAt: string;
+  triggerAt?: string;
+  cronExpression?: string;
+  payloadKeys: string[];
+  maxTurns?: number;
+  cleanupRequired?: { providerIds: string[] };
+};
+
+export type AgentScheduleListPage = { items: AgentSchedule[]; nextCursor?: string };
+export type CreateAgentScheduleRequest = {
+  tenantId: string;
+  kind: 'once' | 'cron';
+  displayName: string;
+  agentId: string;
+  input: unknown;
+  triggerAt?: string;
+  cronExpression?: string;
+  maxTurns?: number;
 };
 
 export type OperatorConfig = {
@@ -285,6 +316,7 @@ export async function listAgentRuns(input: ListAgentRunsInput): Promise<AgentRun
   if (input.hasLlm) params.set('hasLlm', 'true');
   if (input.hasMemory) params.set('hasMemory', 'true');
   if (input.costState) params.set('costState', input.costState);
+  if (input.scheduleId) params.set('scheduleId', input.scheduleId);
   const suffix = params.toString();
   return fetchJson<AgentRunListPage>(`/agent-runs${suffix ? `?${suffix}` : ''}`, input.tenantId);
 }
@@ -443,7 +475,47 @@ export async function listAgents(tenantId = 'default'): Promise<ListedAgentsPage
   return fetchJson<ListedAgentsPage>('/agents', tenantId);
 }
 
+export async function listAgentSchedules(input: { tenantId: string; agentId?: string; kind?: string; state?: string; cursor?: string; limit?: number }): Promise<AgentScheduleListPage> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(input)) {
+    if (key !== 'tenantId' && value !== undefined && value !== '') params.set(key, String(value));
+  }
+  const suffix = params.toString();
+  return fetchJson<AgentScheduleListPage>(`/agent-schedules${suffix ? `?${suffix}` : ''}`, input.tenantId);
+}
+
+export async function createAgentSchedule(input: CreateAgentScheduleRequest): Promise<AgentSchedule> {
+  const { tenantId, ...body } = input;
+  return writeJson<AgentSchedule>('/agent-schedules', { tenantId, method: 'POST', body });
+}
+
+export async function getAgentSchedulePayload(tenantId: string, scheduleId: string): Promise<{ scheduleId: string; input: unknown }> {
+  return fetchJson(`/agent-schedules/${encodeURIComponent(scheduleId)}/payload`, tenantId);
+}
+
+export async function runAgentScheduleNow(tenantId: string, scheduleId: string): Promise<{ providerRunId: string }> {
+  return writeJson(`/agent-schedules/${encodeURIComponent(scheduleId)}/run-now`, { tenantId, method: 'POST', body: {} });
+}
+
+export async function setAgentSchedulePaused(tenantId: string, scheduleId: string, paused: boolean): Promise<AgentSchedule> {
+  return writeJson(`/agent-schedules/${encodeURIComponent(scheduleId)}/${paused ? 'pause' : 'resume'}`, { tenantId, method: 'POST', body: {} });
+}
+
+export async function rescheduleAgentSchedule(tenantId: string, scheduleId: string, triggerAt: string): Promise<AgentSchedule> {
+  return writeJson(`/agent-schedules/${encodeURIComponent(scheduleId)}/reschedule`, { tenantId, method: 'POST', body: { triggerAt } });
+}
+
+export async function replaceAgentCron(tenantId: string, scheduleId: string, body: { expectedRevision: number; displayName: string; agentId: string; input: unknown; cronExpression: string; maxTurns?: number }): Promise<AgentSchedule> {
+  return writeJson(`/agent-schedules/${encodeURIComponent(scheduleId)}/replace`, { tenantId, method: 'POST', body });
+}
+
+export async function deleteAgentSchedule(tenantId: string, scheduleId: string): Promise<{ deleted: true }> {
+  return writeJson(`/agent-schedules/${encodeURIComponent(scheduleId)}`, { tenantId, method: 'DELETE', body: {} });
+}
+
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> {
+  const taskId = requestedTaskId(input.payload) || createOperatorTaskId(input.agentId);
+  const requestId = `operator-run-${Date.now()}`;
   const response = await fetch('/operator-api/rpc', {
     method: 'POST',
     credentials: 'same-origin',
@@ -453,11 +525,12 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> 
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
-      id: `operator-run-${Date.now()}`,
-      method: 'tasks/send',
+      id: requestId,
+      method: 'tasks/sendSubscribe',
       params: {
         ...input.payload,
         agentId: input.agentId,
+        id: taskId,
       },
     }),
   });
@@ -466,11 +539,36 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> 
     throw new Error(`${response.status} ${response.statusText}`);
   }
 
-  return response.json() as Promise<RunAgentResponse>;
+  if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+    return response.json() as Promise<RunAgentResponse>;
+  }
+
+  await response.body?.cancel();
+  return {
+    jsonrpc: '2.0',
+    id: requestId,
+    result: {
+      id: taskId,
+      status: { state: 'submitted', timestamp: new Date().toISOString() },
+    },
+  };
 }
 
 function operatorPath(path: string): string {
   return path.startsWith('/operator-api/') ? path : `/operator-api${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+function requestedTaskId(payload: Record<string, unknown>): string | undefined {
+  return typeof payload.id === 'string' && payload.id.trim() ? payload.id.trim() : undefined;
+}
+
+function createOperatorTaskId(agentId: string): string {
+  const prefix = agentId
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'task';
+  return `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 function preferredTenantId(): string {

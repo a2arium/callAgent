@@ -100,6 +100,12 @@ function invalid(tenantId: string, taskId: string, reason: string): never {
     throw new TaskTurnCoordinatorStateError({ tenantId, taskId, reason });
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+}
+
 function decimal(value: unknown, field: string, tenantId: string, taskId: string): bigint {
     if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) {
         return invalid(tenantId, taskId, `${field} must be a non-negative decimal string`);
@@ -317,6 +323,54 @@ export function stageTaskTurnRequestInSnapshot(params: {
 }
 
 /**
+ * Pre-authorizes the first root turn without consuming its delivery key.
+ * Admission must not call stageTaskTurnRequestInSnapshot: that helper adds the
+ * request key to processedKeys, causing the eventual start delivery to replay
+ * instead of execute.
+ */
+export function admitInitialTaskTurnInSnapshot(params: {
+    snapshot: Record<string, unknown>;
+    tenantId: string;
+    taskId: string;
+    runtimeSurface: TaskTurnRuntimeSurface;
+    storageNow: string;
+}): {
+    snapshot: Record<string, unknown>;
+    state: TaskTurnCoordinatorState;
+} {
+    const current = readState(
+        params.snapshot,
+        params.tenantId,
+        params.taskId,
+        true
+    );
+    if (
+        current.requestedGeneration !== '0' ||
+        current.completedGeneration !== '0' ||
+        current.active !== undefined ||
+        current.dispatchIntent !== undefined
+    ) {
+        return invalid(params.tenantId, params.taskId, 'initial task turn is already initialized');
+    }
+    if (current.runtimeSurface !== undefined && current.runtimeSurface !== params.runtimeSurface) {
+        return invalid(params.tenantId, params.taskId, 'initial task turn runtime surface conflicts');
+    }
+    const generation = '1';
+    const state: TaskTurnCoordinatorState = {
+        ...current,
+        runtimeSurface: params.runtimeSurface,
+        requestedGeneration: generation,
+        dispatchIntent: {
+            generation,
+            deliveryKey: `${params.taskId}:turn-request:${generation}`,
+            runtimeSurface: params.runtimeSurface,
+            createdAt: params.storageNow,
+        },
+    };
+    return { snapshot: writeState(params.snapshot, state), state };
+}
+
+/**
  * Advances already-authorized durable demand from inside another winning CAS
  * (for example a child/tool terminal claim). The caller's own tombstone is the
  * idempotency guard, so this helper deliberately does not add a processed key.
@@ -347,6 +401,39 @@ export function advanceTaskTurnGenerationInSnapshot(params: {
     return { snapshot: writeState(params.snapshot, state), state };
 }
 
+/**
+ * Consumes an admitted dispatch without a segment claim. This is reserved for
+ * authoritative terminal shortcuts such as a durable result-cache hit.
+ */
+export function settleUnclaimedTaskTurnInSnapshot(params: {
+    snapshot: Record<string, unknown>;
+    tenantId: string;
+    taskId: string;
+    generation: string;
+    deliveryKey: string;
+}): { snapshot: Record<string, unknown>; changed: boolean } {
+    const current = readState(params.snapshot, params.tenantId, params.taskId);
+    if (BigInt(current.completedGeneration) >= BigInt(params.generation)) {
+        return { snapshot: params.snapshot, changed: false };
+    }
+    if (
+        current.active !== undefined ||
+        current.dispatchIntent?.generation !== params.generation ||
+        current.dispatchIntent.deliveryKey !== params.deliveryKey ||
+        current.requestedGeneration !== params.generation
+    ) {
+        return invalid(params.tenantId, params.taskId, 'unclaimed terminal shortcut does not match dispatch intent');
+    }
+    return {
+        snapshot: writeState(params.snapshot, {
+            ...current,
+            completedGeneration: params.generation,
+            dispatchIntent: undefined,
+        }),
+        changed: true,
+    };
+}
+
 export async function requestTaskTurn(params: {
     session: SessionManager;
     tenantId: string;
@@ -370,6 +457,7 @@ export async function requestTaskTurn(params: {
     const proposedClaimId = (params.claimIdFactory ?? randomUUID)();
     const surface = params.runtimeSurface ?? 'in_process';
     let futureSkewRecovered = false;
+    let firstSubmissionClaim: { admittedAt: string; claimedAt: string; runtimeSurface: TaskTurnRuntimeSurface } | undefined;
     const reconciled = await reconcileSnapshotMutation<RequestTaskTurnResult>({
         session: params.session,
         tenantId: params.tenantId,
@@ -378,6 +466,7 @@ export async function requestTaskTurn(params: {
         operation: 'task.turn.request',
         now: params.now,
         mutate: ({ snapshot, storageNow }) => {
+            firstSubmissionClaim = undefined;
             if (isTaskLifecycleTerminal(readTaskLifecycle(snapshot, params.taskId))) {
                 return { kind: 'noop', value: { disposition: 'terminal', staged: false } };
             }
@@ -477,9 +566,34 @@ export async function requestTaskTurn(params: {
                 active: { ...claim, phase: 'claimed' },
                 dispatchIntent: undefined,
             };
+            let claimedSnapshot = writeState(stagedSnapshot, state);
+            if (requested === 1n) {
+                const meta = asRecord(claimedSnapshot.meta);
+                const submission = asRecord(meta?.taskSubmission);
+                if (
+                    meta !== undefined &&
+                    submission?.schemaVersion === 1 &&
+                    typeof submission.admittedAt === 'string' &&
+                    Number.isFinite(Date.parse(submission.admittedAt)) &&
+                    submission.firstClaimedAt === undefined
+                ) {
+                    claimedSnapshot = {
+                        ...claimedSnapshot,
+                        meta: {
+                            ...meta,
+                            taskSubmission: { ...submission, firstClaimedAt: storageNow },
+                        },
+                    };
+                    firstSubmissionClaim = {
+                        admittedAt: submission.admittedAt,
+                        claimedAt: storageNow,
+                        runtimeSurface: claimSurface,
+                    };
+                }
+            }
             return {
                 kind: 'write',
-                snapshot: writeState(stagedSnapshot, state),
+                snapshot: claimedSnapshot,
                 value: { disposition: 'acquired', claim, staged: staged.staged },
             };
         },
@@ -487,6 +601,13 @@ export async function requestTaskTurn(params: {
     defaultMetricsRegistry.increment('task_turn_request_total', { status: reconciled.value.disposition });
     if (futureSkewRecovered) {
         defaultMetricsRegistry.increment('task_turn_future_skew_recovery_total');
+    }
+    if (firstSubmissionClaim !== undefined) {
+        defaultMetricsRegistry.observeDuration(
+            'task_submission_admission_to_claim_ms',
+            Date.parse(firstSubmissionClaim.claimedAt) - Date.parse(firstSubmissionClaim.admittedAt),
+            { runtimeSurface: firstSubmissionClaim.runtimeSurface }
+        );
     }
     return { result: reconciled.value, snapshot: reconciled.snapshot };
 }
@@ -714,6 +835,7 @@ export async function markTaskTurnDispatchEnqueued(params: {
     agentId?: string;
     generation: string;
     deliveryKey: string;
+    runtimeSurface: TaskTurnRuntimeSurface;
 }): Promise<'marked' | 'stale'> {
     const reconciled = await reconcileSnapshotMutation({
         session: params.session,
@@ -724,7 +846,9 @@ export async function markTaskTurnDispatchEnqueued(params: {
         mutate: ({ snapshot, storageNow }) => {
             const state = readState(snapshot, params.tenantId, params.taskId);
             if (state.dispatchIntent?.generation !== params.generation ||
-                state.dispatchIntent.deliveryKey !== params.deliveryKey || state.active !== undefined) {
+                state.dispatchIntent.deliveryKey !== params.deliveryKey ||
+                state.dispatchIntent.runtimeSurface !== params.runtimeSurface ||
+                state.active !== undefined) {
                 return { kind: 'noop', value: 'stale' as const };
             }
             return {

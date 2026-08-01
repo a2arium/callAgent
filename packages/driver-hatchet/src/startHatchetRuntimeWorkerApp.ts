@@ -86,6 +86,7 @@ export async function startHatchetRuntimeWorkerApp(
         sessionManager: budgetEvents,
         turnExecutor: composition.turnExecutor,
         onTaskRunTimeout: (params) => composition.engine.handleTaskRunTimeout(params),
+        submitTask: (params) => composition.engine.submitTask(params),
         workerName:
             options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker',
     });

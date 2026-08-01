@@ -12,6 +12,8 @@ export type {
 } from '@a2arium/callagent-types';
 
 export type WMSessionSnapshot = {
+    /** Whether a durable session row existed at mutation-read time. */
+    exists?: boolean;
     wmVersion: bigint;
     snapshot: Record<string, unknown>;
     agentId: string;
@@ -25,6 +27,8 @@ export type RunnableTurnRequest = {
     sessionId: string;
     agentId: string;
     updatedAt: string;
+    /** Original durable dispatch-intent timestamp, used for backlog age. */
+    createdAt?: string;
     generation: string;
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
@@ -147,6 +151,15 @@ export type ConversationMessageDeliveryRecord = {
 };
 
 export interface IWorkingMemorySessionStore {
+    /**
+     * Explicit opt-in for admission-only root task submission. Implementations
+     * must only advertise this when snapshots and runnable turn requests
+     * survive process termination.
+     */
+    readonly taskAdmissionCapabilities?: {
+        durablePersistence: true;
+        runnableTurnRecovery: true;
+    };
     getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null>;
     getSessionSnapshotForMutation?(
         tenantId: string,

@@ -31,7 +31,7 @@ __metadata:
     "@a2arium/callagent-utils": "npm:^0.2.0"
     "@prisma/adapter-pg": "npm:7.4.0"
     "@prisma/client": "npm:7.4.0"
-    callllm: "npm:^0.3.2"
+    callllm: "npm:^0.3.3"
     dotenv: "npm:^17.3.1"
     jest: "npm:^29.7.0"
     pg: "npm:8.13.3"
@@ -61,6 +61,7 @@ __metadata:
     "@prisma/client": "npm:7.4.0"
     "@types/jest": "npm:^29.5.14"
     "@types/node": "npm:^22.14.1"
+    cron-parser: "npm:^5.6.2"
     jest: "npm:^29.7.0"
     typescript: "npm:^5.8.3"
     zod: "npm:^4.3.6"
@@ -88,7 +89,7 @@ __metadata:
     "@a2arium/callagent-utils": "npm:^0.2.0"
     "@prisma/adapter-pg": "npm:7.4.0"
     "@prisma/client": "npm:7.4.0"
-    callllm: "npm:^0.3.0"
+    callllm: "npm:^0.3.3"
     dotenv: "npm:^16.4.5"
     jest: "npm:^29.7.0"
     pg: "npm:^8.13.3"
@@ -5813,9 +5814,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"callllm@npm:^0.3.0":
-  version: 0.3.0
-  resolution: "callllm@npm:0.3.0"
+"callllm@npm:^0.3.3":
+  version: 0.3.3
+  resolution: "callllm@npm:0.3.3"
   dependencies:
     "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
     "@dqbd/tiktoken": "npm:^1.0.18"
@@ -5838,36 +5839,7 @@ __metadata:
   peerDependencies:
     "@opentelemetry/api": ">=1.6.0"
     "@opentelemetry/semantic-conventions": ">=1.22.0"
-  checksum: 10c0/96eda7f163df27d4edb7b2a797d3ebf4b0a93318fa7c0456eb0fb8efa451a09276c0de41159eba9eb7a8d407ea5b31d29e7ac83244612bcd1acf21a4386c4e39
-  languageName: node
-  linkType: hard
-
-"callllm@npm:^0.3.2":
-  version: 0.3.2
-  resolution: "callllm@npm:0.3.2"
-  dependencies:
-    "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
-    "@dqbd/tiktoken": "npm:^1.0.18"
-    "@google/genai": "npm:^1.52.0"
-    "@modelcontextprotocol/sdk": "npm:^1.10.2"
-    "@openrouter/sdk": "npm:^0.8.0"
-    "@types/jest": "npm:^29.5.14"
-    "@types/sharp": "npm:^0.32.0"
-    dotenv: "npm:^16.4.7"
-    jest: "npm:^29.7.0"
-    jsonrepair: "npm:^3.12.0"
-    openai: "npm:^6.3.0"
-    opik: "npm:^1.8.70"
-    sharp: "npm:^0.34.1"
-    tree-kill: "npm:^1.2.2"
-    ts-jest: "npm:^29.2.5"
-    ts-morph: "npm:^25.0.1"
-    uuid: "npm:^10.0.0"
-    zod: "npm:4.3.6"
-  peerDependencies:
-    "@opentelemetry/api": ">=1.6.0"
-    "@opentelemetry/semantic-conventions": ">=1.22.0"
-  checksum: 10c0/6f600663c60125a0b9ef030072de5d210f9e66739cc2c6641f77be44abb4a162fa4b58532a0e987672825531d39afcbc0314250b50cb6594b453706da779895c
+  checksum: 10c0/139ff1364b9d07dec2f97ef5c118f7cf0de8a01580dbaa9a4652e8b8739e83b01942396f20787520f458abfb1b02451942eb4ca43a84d5ae19c360e62e7a9357
   languageName: node
   linkType: hard
 
@@ -6331,6 +6303,15 @@ __metadata:
   version: 1.0.7
   resolution: "crelt@npm:1.0.7"
   checksum: 10c0/5fdb5fcfa492a176c4cdaac611c131a183a91f2e6e3ea2ba2111b6891ca75bb7ba1ef81d67dab34387f5553c415d8a3d776690d3cf3ee68fca2dd3bfbed382e9
+  languageName: node
+  linkType: hard
+
+"cron-parser@npm:^5.6.2":
+  version: 5.6.2
+  resolution: "cron-parser@npm:5.6.2"
+  dependencies:
+    luxon: "npm:^3.7.2"
+  checksum: 10c0/c65b33329c2d69d385d07906250d0961685d0416270950a34eae5efb423cc5e878f9f62c890390bf6aa3bd7e0e5e92442db0aec8a97d6396e2473c459dce24ad
   languageName: node
   linkType: hard
 
@@ -9371,6 +9352,13 @@ __metadata:
   peerDependencies:
     react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
   checksum: 10c0/55f914e3bc06425064efb4d4d77031c2565294910c362ffd1f5b2eaabd8ee31d682b5749dde5e1d3071ecbf625bbce0d810d1a271a27ecc60b50e908a4f6133d
+  languageName: node
+  linkType: hard
+
+"luxon@npm:^3.7.2":
+  version: 3.7.2
+  resolution: "luxon@npm:3.7.2"
+  checksum: 10c0/ed8f0f637826c08c343a29dd478b00628be93bba6f068417b1d8896b61cb61c6deacbe1df1e057dbd9298334044afa150f9aaabbeb3181418ac8520acfdc2ae2
   languageName: node
   linkType: hard
 

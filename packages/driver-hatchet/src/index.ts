@@ -1,4 +1,9 @@
 export { createHatchetClient, type HatchetClient } from './hatchetClient.js';
+export {
+    HatchetAgentScheduleService,
+    createHatchetAgentScheduleService,
+    type CreateHatchetAgentScheduleServiceParams,
+} from './agentScheduleService.js';
 export { buildDriverRunMetadata } from './metadata.js';
 export { DriverRunsRepository } from './driverRunsRepository.js';
 export { HatchetRuntimeDriver } from './hatchetRuntimeDriver.js';
@@ -53,3 +58,14 @@ export {
     type TaskTaskInput,
     type TaskTaskOutput,
 } from './tasks/task.js';
+export {
+    SCHEDULE_DISPATCH_TASK_NAME,
+    SCHEDULE_SCHEMA_VERSION,
+    createScheduleDispatchTask,
+    executeScheduleDispatch,
+    scheduleMetadata,
+    validateScheduleDispatchInput,
+    type ScheduleDispatchDeps,
+    type ScheduleDispatchInput,
+    type ScheduleDispatchOutput,
+} from './tasks/scheduleDispatch.js';

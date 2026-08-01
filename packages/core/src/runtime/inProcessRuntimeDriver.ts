@@ -12,6 +12,7 @@
 import { logger } from '@a2arium/callagent-utils';
 import type { RunnableTurnRequest } from '@a2arium/callagent-memory-engine';
 import type { SessionManager } from '../orchestration/SessionManager.js';
+import { observeTaskSubmissionBacklog } from '../orchestration/taskSubmissionObservability.js';
 import type {
     CancelParams,
     CancelTimerParams,
@@ -35,6 +36,7 @@ import {
     deriveRuntimeTimerIdempotencyKey,
     timerKindToReason,
     RuntimeTimerRepository,
+    type TaskRunTimeoutDisposition,
     type RuntimeTimerKind,
 } from './runtimeTimer.js';
 
@@ -82,7 +84,7 @@ export type InProcessRuntimeDriverDeps = {
         token: string;
         dueAt: string;
         payload?: unknown;
-    }) => Promise<void>;
+    }) => Promise<TaskRunTimeoutDisposition | void>;
     timerReconcileIntervalMs?: number;
     /** Durable source for queued turn generations that need a scheduling nudge. */
     sessionManager?: SessionManager;
@@ -184,19 +186,55 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
         }
     }
 
+    get taskAdmissionCapabilities(): RuntimeDriver['taskAdmissionCapabilities'] {
+        if (this.sessionManager === undefined) return undefined;
+        return {
+            recoverableStarts: true,
+            preflightStart: async (params: EnqueueStartParams): Promise<void> => {
+                if (
+                    params.recoveryGeneration !== undefined &&
+                    params.recoveryDeliveryKey !== params.idempotencyKey
+                ) {
+                    throw new Error('TASK_ADMISSION_PREFLIGHT_INVALID: recovery delivery identity is inconsistent');
+                }
+            },
+        };
+    }
+
     /** Composition-root access for worker bootstrap (Phase 0.4). */
     getTurnExecutor(): TurnExecutor {
         return this.turnExecutor;
     }
 
     async enqueueStart(params: EnqueueStartParams): Promise<void> {
-        this.runSegmentInBackground({
+        const segment: RunSegmentParams = {
             tenantId: params.tenantId,
             taskId: params.taskId,
             agentId: params.agentId,
             idempotencyKey: params.idempotencyKey,
             wake: { trigger: 'start', input: params.input },
+            ...(params.recoveryGeneration !== undefined
+                ? { recoveryGeneration: params.recoveryGeneration }
+                : {}),
+        };
+        if (params.recoveryGeneration === undefined) {
+            this.runSegmentInBackground(segment);
+            return;
+        }
+
+        // Durable admission must not enter the segment/agent pipeline in the
+        // submitTask call stack. Once scheduled, a crash before execution is
+        // repaired from the stored dispatch intent by reconciliation.
+        let tracked!: Promise<unknown>;
+        tracked = new Promise<void>((resolve) => {
+            this.scheduler.set(() => {
+                this.runSegmentInBackground(segment);
+                resolve();
+            }, 0);
+        }).finally(() => {
+            this.inFlight.delete(tracked);
         });
+        this.inFlight.add(tracked);
     }
 
     async enqueueResume(params: EnqueueResumeParams): Promise<void> {
@@ -222,6 +260,9 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             agentId: params.agentId,
             idempotencyKey: params.idempotencyKey,
             wake: { trigger: 'start', input: params.input },
+            ...(params.recoveryGeneration !== undefined
+                ? { recoveryGeneration: params.recoveryGeneration }
+                : {}),
             prepared: params.prepared,
         });
     }
@@ -276,14 +317,20 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             kind: params.kind,
         });
         if (persisted === undefined || (persisted.status !== 'fired' && persisted.status !== 'canceled')) {
-            this.scheduleLocalTimer(params, timerId);
+            const delayMs = persisted === undefined
+                ? Math.max(0, Date.parse(params.fireAt) - this.now())
+                : await this.storageTimerDelay(params.fireAt);
+            this.scheduleLocalTimer(params, timerId, delayMs);
         }
         return { timerId };
     }
 
-    private scheduleLocalTimer(params: ScheduleTimerParams, timerId: string): void {
+    private scheduleLocalTimer(
+        params: ScheduleTimerParams,
+        timerId: string,
+        delayMs = Math.max(0, Date.parse(params.fireAt) - this.now())
+    ): void {
         if (this.timers.has(timerId)) return;
-        const delayMs = Math.max(0, Date.parse(params.fireAt) - this.now());
 
         const handle = this.scheduler.set(() => {
             const firedAt = new Date(this.now()).toISOString();
@@ -312,6 +359,17 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
             taskId: params.taskId,
             token: params.token,
         });
+    }
+
+    private async storageTimerDelay(fireAt: string | Date): Promise<number> {
+        const storageClock = this.runtimeTimers as unknown as {
+            millisecondsUntil?: (value: string | Date) => Promise<number>;
+        } | undefined;
+        if (storageClock?.millisecondsUntil !== undefined) {
+            return storageClock.millisecondsUntil(fireAt);
+        }
+        const fireAtMs = typeof fireAt === 'string' ? Date.parse(fireAt) : fireAt.getTime();
+        return Math.max(0, fireAtMs - this.now());
     }
 
     private async fireTimer(
@@ -395,6 +453,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private async reconcilePersistedTimers(): Promise<void> {
         const scheduled = await this.runtimeTimers?.listScheduled({ take: 1_000 });
         for (const timer of scheduled ?? []) {
+            const delayMs = await this.storageTimerDelay(timer.dueAt);
             this.scheduleLocalTimer(
                 {
                     tenantId: timer.tenantId,
@@ -406,7 +465,8 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                     payload: timer.payload ?? undefined,
                     idempotencyKey: timer.idempotencyKey,
                 },
-                timer.timerId
+                timer.timerId,
+                delayMs
             );
         }
     }
@@ -475,24 +535,52 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private async reconcileRunnableTurnRequests(): Promise<void> {
         if (!this.sessionManager) return;
         let cursor: { updatedAt: string; tenantId: string; sessionId: string } | undefined;
+        const submissionRows: RunnableTurnRequest[] = [];
         do {
             const rows = await this.sessionManager.listRunnableTurnRequests({
                 ...(cursor ? { cursor } : {}),
                 limit: 100,
             });
+            submissionRows.push(...rows.filter((row) => row.runtimeSurface === 'in_process'));
             await runWithConcurrency(rows, 4, (row) => this.scheduleRecoveredTurn(row));
             const last = rows.at(-1);
             cursor = last ? { updatedAt: last.updatedAt, tenantId: last.tenantId, sessionId: last.sessionId } : undefined;
             if (rows.length < 100) break;
         } while (cursor !== undefined);
+        observeTaskSubmissionBacklog(submissionRows, 'in_process', this.now());
     }
 
     private async scheduleRecoveredTurn(row: RunnableTurnRequest): Promise<void> {
         if (row.runtimeSurface === 'hatchet') return;
+        const sessions = this.sessionManager;
+        if (sessions === undefined) return;
         const key = `${row.tenantId}:${row.sessionId}:${row.generation}:${row.deliveryKey}`;
         if (this.recoveryKeys.has(key)) return;
         this.recoveryKeys.add(key);
         try {
+            const loaded = row.generation === '1'
+                ? await sessions.load(row.tenantId, row.sessionId)
+                : null;
+            const snapshot = loaded?.snapshot !== null && typeof loaded?.snapshot === 'object' &&
+                !Array.isArray(loaded.snapshot)
+                ? loaded.snapshot as Record<string, unknown>
+                : {};
+            const meta = snapshot.meta !== null && typeof snapshot.meta === 'object' &&
+                !Array.isArray(snapshot.meta)
+                ? snapshot.meta as Record<string, unknown>
+                : {};
+            const wake: TurnWake = row.generation === '1' &&
+                Object.prototype.hasOwnProperty.call(meta, 'initialInput')
+                ? { trigger: 'start', input: meta.initialInput }
+                : {
+                    trigger: 'resume',
+                    event: {
+                        kind: 'external',
+                        token: row.deliveryKey,
+                        type: 'task.turn.available',
+                        data: undefined,
+                    },
+                };
             const result = await this.runSegmentAwait({
                 tenantId: row.tenantId,
                 taskId: row.sessionId,
@@ -500,10 +588,7 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 idempotencyKey: row.deliveryKey,
                 runtimeSurface: 'in_process',
                 recoveryGeneration: row.generation,
-                wake: {
-                    trigger: 'resume',
-                    event: { kind: 'external', token: row.deliveryKey, type: 'task.turn.available', data: undefined },
-                },
+                wake,
             });
             if (result.turnDisposition === 'queued') {
                 log.debug('Recovered turn request remains owned by another worker', {
