@@ -5,7 +5,7 @@
 Scaffolded with:
 
 ```bash
-yarn create-agent --name flow-reference-agent --preset non-trivial --output apps/examples/flow-reference-agent \
+callagent create agent flow-reference-agent --project ./my-agents --preset non-trivial \
   --uses-llm --uses-tools --uses-children --uses-plans
 ```
 

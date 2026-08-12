@@ -34,11 +34,11 @@ APLRET is designed so **vibe coding stays useful after the first draft**: struct
 
 ## Canonical file layout
 
-Scaffold note:
+Generator note:
 
-- In downstream projects, run scaffold from your app root (for example via `node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js ...`).
-- `yarn create-agent --preset minimal` is the convenience script in this monorepo and generates the minimal baseline tree.
-- `yarn create-agent --preset non-trivial` (same CLI) generates the non-trivial baseline with `flow.md`, selectors/reducers, normalizers, and flag-gated `effects/`, `prompts/`, `contracts` placeholders.
+- Create a container with `callagent create agent-project my-agents --with-agent my-agent`.
+- Add a minimal agent with `callagent create agent my-agent --project ./my-agents`.
+- Use `--preset non-trivial` to generate `flow.md`, selectors/reducers, normalizers, and flag-gated `effects/`, `prompts/`, `contracts` placeholders.
 - Treat generated placeholders as starting points; replace them with domain handlers/contracts as behavior grows.
 
 ### Minimal layout (simple agents)
@@ -346,4 +346,3 @@ For conversation-enabled agents, keep thread logic discoverable:
 - keep Policy conversation branching in selector-driven form (`selectors.ts` -> `policy.ts`)
 
 This preserves the same edge-vs-core discipline used for tool and child flows.
-

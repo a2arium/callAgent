@@ -31,50 +31,38 @@ You will also see the most important boundary rules in practice:
 - Execution is the only effect boundary
 - Default manifest behavior and how to override it
 
-## Quick start: scaffold first (recommended)
+## Quick start: create an agent project (recommended)
 
-For most new agents, start from the scaffold and then customize.
+For most new agents, create an agent project and then customize its first agent.
 
 In your own project, install the framework packages first:
 
 ```bash
-yarn add @a2arium/callagent-core @a2arium/callagent-types
+yarn add -D @a2arium/callagent-cli
 ```
 
-Then run the scaffold CLI from your project root:
+Then create a project from your project root:
 
 ```bash
-node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
-  --name my-agent --preset minimal --output ./my-agent
+callagent create agent-project my-agents --with-agent my-agent
 ```
 
 For non-trivial agents (flow map + normalizers + extra tests), switch the preset:
 
 ```bash
-node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
-  --name my-agent --preset non-trivial --output ./my-agent \
+callagent create agent my-agent --project ./my-agents --preset non-trivial \
   --uses-llm --uses-tools --uses-children --uses-plans
 ```
 
 Then:
 
-1. `cd my-agent`
+1. `cd my-agents`
 2. `yarn install`
 3. `yarn build`
 4. `yarn test`
 5. Edit generated `types.ts` and modules for your domain behavior.
 
-You can also use the published `callagent-scaffold` bin (when available in your environment) or programmatic API (`scaffoldAgent`) from `@a2arium/callagent-core`.
-
-If you are developing inside the callagent monorepo, you can use the convenience script instead:
-
-```bash
-yarn create-agent --name my-agent --preset minimal --output apps/examples/my-agent
-```
-
- 
-
-The rest of this tutorial explains the manual minimal shape so you understand what the scaffold generated.
+The rest of this tutorial explains the manual minimal shape so you understand the generated files.
 
 ## Step 0: Create the manifests
 

@@ -1,14 +1,16 @@
 # Workspaces and Local Runtime
 
-Callagent can run one shared runtime while loading agents from multiple external
-folders. Each external folder can have many agents and its own `.env` file.
+CallAgent runs one shared runtime while loading agents from multiple external
+agent projects. A CallAgent workspace owns the composition registry and `.env`.
 
 ## Workspace Registry
 
-The runtime project owns the workspace registry. In local development, copy:
+Create a workspace and add agent projects:
 
 ```bash
-cp .callagent/workspaces.example.json .callagent/workspaces.json
+callagent create workspace content-team
+cd content-team
+callagent workspace add-agent-source ../../agents/content-agents
 ```
 
 Then edit `.callagent/workspaces.json`:
@@ -33,14 +35,14 @@ Fields:
 - `agentIndex`: Path to the workspace agent index, relative to `root`. Defaults to `.callagent/agent-paths.json`.
 - `envFile`: Path to the workspace env file, relative to `root`. Defaults to `.env`.
 
-Both `runtime-host` and `hatchet-worker` read the same registry on startup. That
-keeps the API process and worker process aligned: the host can enqueue tasks for
-the same agents that the worker can execute.
+`callagent dev` resolves the registry once, then gives its immutable descriptor
+to both the runtime host and Hatchet worker. They therefore load the exact same
+agents and never reread workspace `.env` files.
 
 ## Environment Loading
 
-The root callagent `.env` is loaded first by the runtime apps. Then each
-workspace env file is merged before that workspace's agents are imported.
+Inherited process environment is first, then the CallAgent workspace `.env`,
+then agent-source `.env` files in registry order.
 
 Env merge policy is first-wins:
 
@@ -73,27 +75,25 @@ Start infra separately:
 yarn hatchet:poc:up
 ```
 
-Then run the local runtime apps:
+Then run the workspace runtime:
 
 ```bash
-yarn runtime
+callagent dev
 ```
 
-Default `yarn runtime` starts:
+Default `callagent dev` starts:
 
 - Hatchet runtime worker.
 - Runtime host at `http://127.0.0.1:8790`.
 - Operator dashboard Vite dev server at `http://127.0.0.1:8791`.
 
-Useful modes:
+Useful mode:
 
 ```bash
-yarn runtime --prod
-yarn runtime --no-dashboard
+callagent dev --no-observer
 ```
 
-- `--prod`: builds `operator-viewer` and serves it from runtime-host at `/operator`.
-- `--no-dashboard`: runs only the worker and runtime-host.
+- `--no-observer`: runs only the worker and runtime host.
 
 The command does not start infra. It checks Postgres, NATS, and Hatchet before
 starting apps and fails fast if they are not reachable.

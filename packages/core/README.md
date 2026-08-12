@@ -25,26 +25,23 @@ Requirements:
 
 ## Create An Agent
 
-The recommended starting point is the scaffold. It creates the APLRET module files, manifests, TypeScript config, and a starter test.
+Agent and workspace creation is provided by `@a2arium/callagent-cli`; core retains the programmatic `scaffoldAgent` API for tooling.
 
 ```bash
-npx callagent-scaffold --name my-agent --preset minimal --output ./my-agent
+callagent create agent-project my-agents --with-agent my-agent
 ```
 
 For a larger agent with a `flow.md`, selectors, reducers, effect folders, prompts, contracts, and test stubs:
 
 ```bash
-npx callagent-scaffold \
-  --name my-agent \
-  --preset non-trivial \
-  --output ./my-agent \
+callagent create agent my-agent --project ./my-agents --preset non-trivial \
   --uses-llm \
   --uses-tools \
   --uses-children \
   --uses-plans
 ```
 
-Inside a scaffolded agent:
+Inside a generated agent project:
 
 ```bash
 yarn install

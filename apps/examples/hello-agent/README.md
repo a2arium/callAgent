@@ -24,5 +24,5 @@ The runner sends a JSON payload; perception reads `payload.value` as the user st
 To scaffold a fresh copy elsewhere:
 
 ```bash
-yarn create-agent --name hello-agent --preset minimal --output apps/examples/hello-agent
+callagent create agent hello-agent --project ./my-agents --preset minimal
 ```

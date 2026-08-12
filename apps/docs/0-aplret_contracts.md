@@ -27,18 +27,16 @@ For operator-facing orchestration views, see [Operator Run Graph](./operator-run
 
 ## Getting started
 
-**New agents** should start from the scaffold generator so manifests, `tsconfig`, module layout, and harness tests match the recommended structure. For downstream usage, run the scaffold CLI from your project root (see [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md)); the same flow is available via the `callagent-scaffold` **bin** on `@a2arium/callagent-core` or the `scaffoldAgent` API for tooling. `yarn create-agent` is the convenience script used in this monorepo.
+**New agents** should start with `@a2arium/callagent-cli` so manifests, `tsconfig`, module layout, and harness tests match the recommended structure. See [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md). `scaffoldAgent` remains a programmatic core API for tooling.
 
 Simple scaffold examples (run from your project root):
 
 ```bash
 # Minimal
-node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
-  --name my-agent --preset minimal --output ./my-agent
+callagent create agent-project my-agents --with-agent my-agent
 
 # Non-trivial
-node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
-  --name my-agent --preset non-trivial --output ./my-agent \
+callagent create agent my-agent --project ./my-agents --preset non-trivial \
   --uses-llm --uses-tools --uses-children --uses-plans
 ```
 
@@ -1686,7 +1684,7 @@ The table below lists **stable or experimental exports** authors and integrators
 | Loop: `Modules`, `runLoop`, `MentalState`, `EnvironmentState`, `Observation`, `Intent`, `ExecOutcome`, `TurnOutcome`, … | `@a2arium/callagent-core` | stable | See barrel for full type exports |
 | Stage facade: `createStageFacade`, `StageFacade`, `defineControlKeys`, control var accessors | `@a2arium/callagent-core` | stable | |
 | `createTestHarness`, `TestHarness`, deterministic stubs, harness assertion helpers | `@a2arium/callagent-core` | stable | Same `Partial<Modules>` shape as `createAgent` |
-| `scaffoldAgent`, `formatScaffoldError`, `ScaffoldOptionsSchema`, `ScaffoldOptions`, `ScaffoldResult`, `ScaffoldFailure`, `AgentPreset` | `@a2arium/callagent-core` | stable | Programmatic agent scaffolding; published **`bin`** `callagent-scaffold` — see [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md) |
+| `scaffoldAgent`, `formatScaffoldError`, `ScaffoldOptionsSchema`, `ScaffoldOptions`, `ScaffoldResult`, `ScaffoldFailure`, `AgentPreset` | `@a2arium/callagent-core` | stable | Programmatic scaffolding API; use `@a2arium/callagent-cli` for supported creation commands. |
 | Orchestration: `TaskEngine`, `A2AService`, registries, tenant helpers | `@a2arium/callagent-core` | stable / advanced | Prefer documented entrypoints for new agents |
 | Manifests: `AgentCard`, `AgentRuntimeManifest`, `ResolvedManifests`, manifest errors | `@a2arium/callagent-types` (+ re-exports from core) | stable | Zod-backed sources of truth in `callagent-types` |
 | Semantic / working memory types (`IMemory`, semantic filters, …) | `@a2arium/callagent-types` | stable | |

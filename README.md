@@ -174,30 +174,22 @@ yarn test
 
 ## Start a New Agent
 
-Use the scaffold first. It creates manifests, TypeScript config, module files, and tests that match the framework contracts.
-
-In a downstream project after installing `@a2arium/callagent-core`:
+Create an **agent project** first, then add agents to it. A **CallAgent workspace** selects one or more agent projects and runs the runtime stack.
 
 ```bash
-node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
-  --name my-agent --preset minimal --output ./my-agent
+callagent create agent-project my-agents --with-agent my-agent
+callagent create workspace my-workspace --agent-source ../my-agents
+cd my-workspace && npm install && npm run validate
 ```
 
-For a non-trivial agent with a `flow.md` map, normalizers, selectors, reducers, and test stubs:
+For a non-trivial agent:
 
 ```bash
-node node_modules/@a2arium/callagent-core/dist/scaffold/scaffoldCli.js \
-  --name my-agent --preset non-trivial --output ./my-agent \
+callagent create agent researcher --project ./my-agents --preset non-trivial \
   --uses-llm --uses-tools --uses-children --uses-plans
 ```
 
-Inside this monorepo, use the convenience script:
-
-```bash
-yarn create-agent --name my-agent --preset minimal --output apps/examples/my-agent
-```
-
-The scaffold produces an `agent.ts` that wires modules through `createAgent(...)`. `createAgent` resolves `agent-card.json` and `agent-runtime.json` by default relative to the agent module. It returns an agent plugin promise; the framework loaders and existing examples export that result directly.
+Install `@a2arium/callagent-cli` globally for convenience, or use the project-pinned CLI through the workspace scripts. The generated agent module wires itself through `createAgent(...)`.
 
 After scaffolding:
 
