@@ -21,6 +21,19 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@a2arium/callagent-cli@workspace:packages/cli":
+  version: 0.0.0-use.local
+  resolution: "@a2arium/callagent-cli@workspace:packages/cli"
+  dependencies:
+    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-runtime": "workspace:*"
+    "@types/node": "npm:^22.14.1"
+    typescript: "npm:^5.8.3"
+  bin:
+    callagent: ./dist/cli.js
+  languageName: unknown
+  linkType: soft
+
 "@a2arium/callagent-core@npm:^0.2.0, @a2arium/callagent-core@workspace:*, @a2arium/callagent-core@workspace:packages/core":
   version: 0.0.0-use.local
   resolution: "@a2arium/callagent-core@workspace:packages/core"

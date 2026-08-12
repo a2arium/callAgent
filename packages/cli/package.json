@@ -1,0 +1,32 @@
+{
+  "name": "@a2arium/callagent-cli",
+  "version": "0.1.0",
+  "description": "Command line interface for CallAgent workspaces.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "callagent": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "npm:publish": "npm publish --access public",
+    "npm:publish:dry-run": "npm publish --access public --dry-run"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
