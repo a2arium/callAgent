@@ -151,7 +151,13 @@ __metadata:
   resolution: "@a2arium/callagent-runtime@workspace:packages/runtime"
   dependencies:
     "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-driver-hatchet": "workspace:*"
+    "@a2arium/callagent-eventbus-nats": "workspace:*"
+    "@a2arium/callagent-memory-sql": "workspace:*"
+    "@a2arium/callagent-operator-auth": "workspace:*"
+    "@types/express": "npm:^5.0.1"
     "@types/node": "npm:^22.14.1"
+    express: "npm:^5.0.1"
     typescript: "npm:^5.8.3"
   languageName: unknown
   linkType: soft

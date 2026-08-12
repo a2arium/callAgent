@@ -2,6 +2,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { resolveWorkspaceRuntime, WorkspaceResolutionError } from '@a2arium/callagent-core';
+import { runtimeEntryPoints } from '@a2arium/callagent-runtime';
 import { writeRuntimeDescriptor } from './descriptorFile.js';
 
 type Options = { workspaces?: string; json: boolean; noObserver: boolean; host?: string; port?: string; hostEntry?: string; workerEntry?: string };
@@ -38,8 +39,9 @@ function printAgents(descriptor: Awaited<ReturnType<typeof resolveWorkspaceRunti
 async function dev(options: Options): Promise<void> {
     const { descriptor, environment } = await resolve(options);
     const descriptorFile = await writeRuntimeDescriptor(descriptor);
-    const hostEntry = options.hostEntry ?? process.env.CALLAGENT_HOST_ENTRY ?? localRuntimeEntry('apps/examples/runtime-host/dist/server.js');
-    const workerEntry = options.workerEntry ?? process.env.CALLAGENT_WORKER_ENTRY ?? localRuntimeEntry('apps/hatchet-worker/dist/main.js');
+    const installedEntries = runtimeEntryPoints();
+    const hostEntry = options.hostEntry ?? process.env.CALLAGENT_HOST_ENTRY ?? installedEntries.host;
+    const workerEntry = options.workerEntry ?? process.env.CALLAGENT_WORKER_ENTRY ?? installedEntries.worker;
     if (!hostEntry || !workerEntry) {
         await descriptorFile.cleanup();
         throw new Error('Runtime entries are not installed yet. Set CALLAGENT_HOST_ENTRY and CALLAGENT_WORKER_ENTRY while migrating the runtime host and Hatchet worker into @a2arium/callagent-runtime.');
@@ -79,11 +81,6 @@ async function dev(options: Options): Promise<void> {
     } catch (error) {
         await stop(error instanceof Error ? error.message : String(error), 1);
     }
-}
-
-function localRuntimeEntry(relativePath: string): string | undefined {
-    const candidate = path.resolve(process.cwd(), relativePath);
-    return process.env.CALLAGENT_CLI_ALLOW_MONOREPO_RUNTIME === 'true' ? candidate : undefined;
 }
 
 function startChild(name: string, entry: string, env: NodeJS.ProcessEnv, children: Map<string, ChildProcess>, expectedAgents: string[]): Promise<{ fingerprint: string; agentIds: string[] }> {

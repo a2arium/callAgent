@@ -13,10 +13,18 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./host": {
+      "import": "./dist/host.js",
+      "types": "./dist/host.d.ts"
+    },
+    "./worker": {
+      "import": "./dist/worker.js",
+      "types": "./dist/worker.d.ts"
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-observer-assets.mjs",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run"
   },
@@ -24,9 +32,15 @@
     "access": "public"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "workspace:*"
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-driver-hatchet": "workspace:*",
+    "@a2arium/callagent-eventbus-nats": "workspace:*",
+    "@a2arium/callagent-memory-sql": "workspace:*",
+    "@a2arium/callagent-operator-auth": "workspace:*",
+    "express": "^5.0.1"
   },
   "devDependencies": {
+    "@types/express": "^5.0.1",
     "@types/node": "^22.14.1",
     "typescript": "^5.8.3"
   },
