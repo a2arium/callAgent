@@ -4,8 +4,9 @@ import path from 'node:path';
 import { resolveWorkspaceRuntime, WorkspaceResolutionError } from '@a2arium/callagent-core';
 import { runtimeEntryPoints } from '@a2arium/callagent-runtime';
 import { writeRuntimeDescriptor } from './descriptorFile.js';
+import { addAgentSource, createAgent, createAgentProject, createWorkspace, removeAgentSource } from './generate.js';
 
-type Options = { workspaces?: string; json: boolean; noObserver: boolean; host?: string; port?: string; hostEntry?: string; workerEntry?: string };
+type Options = { workspaces?: string; json: boolean; noObserver: boolean; host?: string; port?: string; hostEntry?: string; workerEntry?: string; output?: string; project?: string; withAgent?: string; preset?: 'minimal' | 'non-trivial'; force?: boolean; monorepo?: boolean; usesLlm?: boolean; usesTools?: boolean; usesChildren?: boolean; usesPlans?: boolean; agentSources?: string[]; packageManager?: string; name?: string; envFile?: string; arguments: string[] };
 
 async function main(argv: string[]): Promise<void> {
     const { command, options } = parse(argv);
@@ -16,6 +17,11 @@ async function main(argv: string[]): Promise<void> {
         return printAgents(descriptor, options.json);
     }
     if (command === 'dev') return dev(options);
+    if (command.startsWith('create agent ')) return printMutation(await createAgent(requireName(options), options), options.json);
+    if (command.startsWith('create agent-project ')) return printMutation(await createAgentProject(requireName(options), options), options.json);
+    if (command.startsWith('create workspace ')) return printMutation(await createWorkspace(requireName(options), options), options.json);
+    if (command.startsWith('workspace add-agent-source ')) return printMutation(await addAgentSource(requireArgument(options), options), options.json);
+    if (command.startsWith('workspace remove-agent-source ')) return printMutation(await removeAgentSource(requireArgument(options), options), options.json);
     throw new Error(`Unknown command: ${command}. Run \`callagent --help\`.`);
 }
 
@@ -109,16 +115,32 @@ function startChild(name: string, entry: string, env: NodeJS.ProcessEnv, childre
 }
 
 function parse(argv: string[]): { command: string; options: Options } {
-    const options: Options = { json: false, noObserver: false };
+    const options: Options = { json: false, noObserver: false, arguments: [] };
     const positional: string[] = [];
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index]!;
         if (argument === '--help' || argument === '-h') return { command: 'help', options };
         if (argument === '--json') { options.json = true; continue; }
         if (argument === '--no-observer') { options.noObserver = true; continue; }
-        const key = ({ '--workspaces': 'workspaces', '--host': 'host', '--port': 'port', '--host-entry': 'hostEntry', '--worker-entry': 'workerEntry' } as const)[argument];
-        if (key) { const value = argv[++index]; if (!value) throw new Error(`${argument} requires a value`); options[key] = value; continue; }
-        positional.push(argument);
+        if (argument === '--force' || argument === '--monorepo' || argument === '--uses-llm' || argument === '--uses-tools' || argument === '--uses-children' || argument === '--uses-plans') {
+            const key = ({ '--force': 'force', '--monorepo': 'monorepo', '--uses-llm': 'usesLlm', '--uses-tools': 'usesTools', '--uses-children': 'usesChildren', '--uses-plans': 'usesPlans' } as const)[argument];
+            options[key] = true;
+            continue;
+        }
+        if (argument === '--agent-source') { const value = argv[++index]; if (!value) throw new Error('--agent-source requires a value'); (options.agentSources ??= []).push(value); continue; }
+        const key = ({ '--workspaces': 'workspaces', '--host': 'host', '--port': 'port', '--host-entry': 'hostEntry', '--worker-entry': 'workerEntry', '--output': 'output', '--project': 'project', '--with-agent': 'withAgent', '--preset': 'preset', '--package-manager': 'packageManager', '--name': 'name', '--env-file': 'envFile' } as const)[argument];
+        if (key) {
+            const value = argv[++index];
+            if (!value) throw new Error(`${argument} requires a value`);
+            if (key === 'preset') {
+                if (value !== 'minimal' && value !== 'non-trivial') throw new Error('--preset must be minimal or non-trivial');
+                options.preset = value;
+            } else {
+                options[key] = value;
+            }
+            continue;
+        }
+        positional.push(argument); options.arguments.push(argument);
     }
     const command = positional.join(' ');
     return { command: command || 'help', options };
@@ -127,7 +149,11 @@ function parse(argv: string[]): { command: string; options: Options } {
 function sameIds(actual: string[], expected: string[]): boolean { return actual.slice().sort().join('\0') === expected.slice().sort().join('\0'); }
 function timeout(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function waitForExit(child: ChildProcess): Promise<void> { return new Promise((resolve) => child.exitCode !== null ? resolve() : child.once('exit', () => resolve())); }
-function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  dev\n  workspace validate [--json]\n  agents list [--json]\n\nOptions:\n  --workspaces <path>\n  --no-observer\n  --host <host>\n  --port <port>`); }
+function requireName(options: Options): string { const name = options.arguments.at(-1); if (!name) throw new Error('A name is required'); return name; }
+function requireArgument(options: Options): string { const value = options.arguments.at(-1); if (!value) throw new Error('A path or agent-source name is required'); return value; }
+function printMutation(value: unknown, json: boolean): void { if (json) console.log(JSON.stringify({ schemaVersion: 1, ...asRecord(value) })); else console.log(JSON.stringify(value, null, 2)); }
+function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : { result: value }; }
+function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  dev\n  workspace validate [--json]\n  workspace add-agent-source <path>\n  workspace remove-agent-source <name>\n  agents list [--json]\n  create agent <name>\n  create agent-project <name>\n  create workspace <name>`); }
 
 main(process.argv.slice(2)).catch((error: unknown) => {
     if (error instanceof WorkspaceResolutionError) {
