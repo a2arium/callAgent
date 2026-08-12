@@ -1,0 +1,36 @@
+{
+  "name": "@a2arium/callagent-runtime",
+  "version": "0.1.0",
+  "description": "Workspace runtime primitives for CallAgent.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "npm:publish": "npm publish --access public",
+    "npm:publish:dry-run": "npm publish --access public --dry-run"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

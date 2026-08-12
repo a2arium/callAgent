@@ -4,16 +4,20 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import { loadWorkspaces } from '@a2arium/callagent-core';
+import { readRuntimeWorkspaceDescriptor, registerWorkspaceAgents } from '@a2arium/callagent-runtime';
 import type { IEventBus } from '@a2arium/callagent-core';
 import type { HatchetOutboxBootstrap } from '@a2arium/callagent-driver-hatchet';
 import type { AgentScheduleService } from '@a2arium/callagent-core';
 
-loadNearestEnv();
+if (!process.env.CALLAGENT_WORKSPACE_DESCRIPTOR) loadNearestEnv();
 
 const host = process.env.HOST ?? '127.0.0.1';
 const port = Number(process.env.PORT ?? 8790);
 
 async function main(): Promise<void> {
+    const descriptor = process.env.CALLAGENT_WORKSPACE_DESCRIPTOR
+        ? await readRuntimeWorkspaceDescriptor()
+        : undefined;
     const [
         {
             bootstrapCompositionRoot,
@@ -76,7 +80,12 @@ async function main(): Promise<void> {
             await registerDemoAgent();
             await registerPhase2LoopAgent();
             await registerPhase2ParentAgent();
-            await loadWorkspaces();
+            if (descriptor) {
+                const registered = await registerWorkspaceAgents(descriptor);
+                console.log(`CALLAGENT_RUNTIME_READY ${JSON.stringify(registered)}`);
+            } else {
+                await loadWorkspaces();
+            }
         },
         taskEngine: {
             sessionStore,
@@ -128,6 +137,7 @@ async function main(): Promise<void> {
     app.get('/health', (_req, res) => {
         res.json({
             ok: true,
+            workspaceFingerprint: descriptor?.fingerprint,
             agentId: DEMO_AGENT_ID,
             phase2AgentId: PHASE2_LOOP_AGENT_ID,
             phase2ParentAgentId: PHASE2_PARENT_AGENT_ID,

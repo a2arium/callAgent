@@ -3,18 +3,27 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import { loadWorkspaces } from '@a2arium/callagent-core';
+import { readRuntimeWorkspaceDescriptor, registerWorkspaceAgents } from '@a2arium/callagent-runtime';
 import { startHatchetRuntimeWorkerApp } from '@a2arium/callagent-driver-hatchet';
 import { registerPhase2LoopAgent } from '@a2arium/phase2-loop-agent';
 import { registerPhase2ParentAgent } from '@a2arium/phase2-parent-agent';
 
-loadNearestEnv();
+if (!process.env.CALLAGENT_WORKSPACE_DESCRIPTOR) loadNearestEnv();
 
 async function main(): Promise<void> {
+    const descriptor = process.env.CALLAGENT_WORKSPACE_DESCRIPTOR
+        ? await readRuntimeWorkspaceDescriptor()
+        : undefined;
     const app = await startHatchetRuntimeWorkerApp({
         registerAgents: async () => {
             await registerPhase2LoopAgent();
             await registerPhase2ParentAgent();
-            await loadWorkspaces();
+            if (descriptor) {
+                const registered = await registerWorkspaceAgents(descriptor);
+                console.log(`CALLAGENT_RUNTIME_READY ${JSON.stringify(registered)}`);
+            } else {
+                await loadWorkspaces();
+            }
         },
     });
 

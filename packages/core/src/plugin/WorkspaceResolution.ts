@@ -129,7 +129,7 @@ export async function resolveWorkspaceRuntime(
     return {
         descriptor: {
             ...descriptorWithoutFingerprint,
-            fingerprint: fingerprint(descriptorWithoutFingerprint),
+            fingerprint: workspaceDescriptorFingerprint(descriptorWithoutFingerprint),
         },
         environment,
     };
@@ -402,7 +402,7 @@ async function exists(filePath: string): Promise<boolean> {
     }
 }
 
-function fingerprint(value: unknown): string {
+export function workspaceDescriptorFingerprint(value: Omit<RuntimeWorkspaceDescriptor, 'fingerprint'>): string {
     return hash(JSON.stringify(value));
 }
 

@@ -32,6 +32,7 @@ export {
     WorkspaceResolutionError,
     resolveWorkspaceEnvironment,
     resolveWorkspaceRuntime,
+    workspaceDescriptorFingerprint,
     type ResolveWorkspaceOptions,
     type ResolvedAgentSource,
     type ResolvedWorkspaceAgent,
