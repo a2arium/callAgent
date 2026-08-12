@@ -27,6 +27,21 @@ export {
 } from './plugin/AgentIndexBuilder.js';
 export { loadAgentIndex, loadAgentIndexIfPresent, type LoadAgentIndexOptions } from './plugin/AgentIndexLoader.js';
 export {
+    DEFAULT_WORKSPACE_ENV_FILE,
+    DEFAULT_WORKSPACE_REGISTRY_PATH,
+    WorkspaceResolutionError,
+    resolveWorkspaceEnvironment,
+    resolveWorkspaceRuntime,
+    type ResolveWorkspaceOptions,
+    type ResolvedAgentSource,
+    type ResolvedWorkspaceAgent,
+    type ResolvedWorkspaceEnvironment,
+    type RuntimeWorkspaceDescriptor,
+    type WorkspaceEnvironmentConflict,
+    type WorkspaceEnvironmentMetadata,
+    type WorkspaceResolutionIssue,
+} from './plugin/WorkspaceResolution.js';
+export {
     getAgentWorkspaceInfo,
     loadWorkspaces,
     type AgentWorkspaceInfo,
