@@ -34,7 +34,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-observer-assets.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-observer-assets.mjs && node scripts/copy-infra-assets.mjs",
     "npm:publish": "npm publish --access public",
     "npm:publish:dry-run": "npm publish --access public --dry-run"
   },

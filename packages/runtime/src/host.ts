@@ -1,6 +1,6 @@
 import express from 'express';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
     bootstrapCompositionRoot,
@@ -40,8 +40,14 @@ async function importHatchet(): Promise<HatchetModule> {
     return import(spec) as Promise<HatchetModule>;
 }
 
-async function main(): Promise<void> {
-    const descriptor = await readRuntimeWorkspaceDescriptor();
+export type RuntimeProcessHandle = {
+    workspaceFingerprint: string;
+    agents: { fingerprint: string; agentIds: string[] };
+    stop: () => Promise<void>;
+};
+
+export async function startRuntimeHost(options: { descriptorPath?: string } = {}): Promise<RuntimeProcessHandle> {
+    const descriptor = await readRuntimeWorkspaceDescriptor(options);
     const { WorkingMemorySessionStore } = await import('@a2arium/callagent-memory-sql');
     const sessionStore = process.env.MEMORY_DATABASE_URL ? new WorkingMemorySessionStore() : undefined;
     let hatchetBootstrap: HatchetOutboxBootstrap | undefined;
@@ -103,17 +109,37 @@ async function main(): Promise<void> {
         app.get(/^\/operator\/.*/, (_req, res) => res.sendFile(join(observer, 'index.html')));
     }
     app.use('/', createRuntimeApiRouter());
-    const server = app.listen(Number(process.env.PORT ?? 8790), process.env.HOST ?? '127.0.0.1', () => {
-        if (!registered) throw new Error('Runtime host started without registering workspace agents');
-        console.log(`CALLAGENT_RUNTIME_READY ${JSON.stringify(registered)}`);
-        console.log('Runtime host ready');
+    const server = await new Promise<ReturnType<typeof app.listen>>((resolveServer, reject) => {
+        const listening = app.listen(Number(process.env.PORT ?? 8790), process.env.HOST ?? '127.0.0.1');
+        listening.once('listening', () => resolveServer(listening));
+        listening.once('error', reject);
     });
-    const shutdown = async () => {
+    if (!registered) {
+        await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+        shutdownComposition();
+        throw new Error('Runtime host started without registering workspace agents');
+    }
+    let stopped = false;
+    const stop = async () => {
+        if (stopped) return;
+        stopped = true;
         shutdownComposition();
         await new Promise<void>((resolve) => server.close(() => resolve()));
     };
-    process.once('SIGINT', () => void shutdown().finally(() => process.exit(0)));
-    process.once('SIGTERM', () => void shutdown().finally(() => process.exit(0)));
+    return {
+        workspaceFingerprint: descriptor.fingerprint,
+        agents: registered,
+        stop,
+    };
 }
 
-main().catch((error: unknown) => { console.error(error); process.exitCode = 1; });
+async function main(): Promise<void> {
+    const runtime = await startRuntimeHost();
+    console.log(`CALLAGENT_RUNTIME_READY ${JSON.stringify(runtime.agents)}`);
+    console.log('Runtime host ready');
+    process.once('SIGINT', () => void runtime.stop().finally(() => process.exit(0)));
+    process.once('SIGTERM', () => void runtime.stop().finally(() => process.exit(0)));
+}
+
+const invokedAsEntry = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsEntry) main().catch((error: unknown) => { console.error(error); process.exitCode = 1; });

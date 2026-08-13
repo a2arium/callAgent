@@ -1,12 +1,19 @@
 # Runtime Host Example
 
-Reference local host for the CallAgent runtime task protocol.
+Reference local host for CallAgent contributors.
 
 This is an example app, not a production server package. It demonstrates the
 future production shape: one shared runtime host loads agents, owns `/rpc`, and
 projects task streams for web/chat/CLI clients.
 
-## Start
+## Consumer startup
+
+Consumers should not start this example. Create a CallAgent workspace, install
+its dependencies, and run `npm run start`; that starts the installed runtime host,
+Hatchet worker, and version-matched Observer. See
+[CallAgent workspaces](../../docs/workspaces-and-runtime.md).
+
+## Contributor debugging
 
 From the repo root:
 
@@ -21,7 +28,7 @@ Infra is still started separately:
 yarn hatchet:poc:up
 ```
 
-For host-only debugging, run:
+For this example's host-only debugging, run:
 
 ```bash
 yarn workspace @a2arium/runtime-host dev

@@ -191,14 +191,24 @@ callagent create agent researcher --project ./my-agents --preset non-trivial \
 
 Install `@a2arium/callagent-cli` globally for convenience, or use the project-pinned CLI through the workspace scripts. The generated agent module wires itself through `createAgent(...)`.
 
-After scaffolding:
+After scaffolding, build the agent project (not the nested agent directory):
 
 ```bash
-cd my-agent
+cd my-agents
 yarn install
 yarn build
 yarn test
 ```
+
+## Workspace Runtime
+
+A CallAgent workspace is the runnable composition; agent projects remain
+reusable folders. Start with [the workspace guide](apps/docs/workspaces-and-runtime.md),
+then use the [CLI reference](apps/docs/callagent-cli-reference.md),
+[workspace model](apps/docs/callagent-workspace-model.md), and
+[migration guide](apps/docs/migration/callagent-cli-workspace-distribution.md).
+For the complete everyday flow, follow the
+[independent-project composition tutorial](apps/docs/tutorial-compose-agent-projects.md).
 
 ## Minimal Agent Shape
 

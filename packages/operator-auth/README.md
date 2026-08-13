@@ -21,14 +21,14 @@ CALLAGENT_OPERATOR_BOOTSTRAP_TENANT_ID=default
 CALLAGENT_OPERATOR_BOOTSTRAP_PASSWORD=<temporary-password>
 ```
 
-Apply `packages/memory-sql/prisma/migrations` before starting the runtime. The
+Apply the CallAgent SQL migrations before starting the runtime. The
 first owner must replace the temporary password within one hour. Public signup
 and self-service password-reset requests are disabled.
 
 If the first-owner credential expires or the owner loses their password, run:
 
 ```sh
-yarn workspace @a2arium/callagent-operator-auth recover-owner
+npx @a2arium/callagent-operator-auth recover-owner
 ```
 
 The command prints a one-time, one-hour reset link. Invitation and reset links

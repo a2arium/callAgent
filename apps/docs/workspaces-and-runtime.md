@@ -35,7 +35,7 @@ Fields:
 - `agentIndex`: Path to the workspace agent index, relative to `root`. Defaults to `.callagent/agent-paths.json`.
 - `envFile`: Path to the workspace env file, relative to `root`. Defaults to `.env`.
 
-`callagent dev` resolves the registry once, then gives its immutable descriptor
+`callagent start` resolves the registry once, then gives its immutable descriptor
 to both the runtime host and Hatchet worker. They therefore load the exact same
 agents and never reread workspace `.env` files.
 
@@ -69,28 +69,41 @@ Restart is required because:
 
 ## Running Locally
 
-Start infra separately:
+The CallAgent workspace owns its local infrastructure. Start the packaged
+default Hatchet/NATS profile from the workspace:
 
 ```bash
-yarn hatchet:poc:up
+npm run infra:up
 ```
+
+This starts NATS, Hatchet, and its dashboard. Postgres remains an external
+dependency you provide. After setting `MEMORY_DATABASE_URL` in the workspace
+`.env`, initialise the CallAgent schema from that same workspace:
+
+```bash
+npm run db:setup
+```
+
+The default infrastructure definition ships with `@a2arium/callagent-runtime`.
+To add or override services for one workspace, keep a Compose file in that
+workspace and run `callagent infra up --compose docker-compose.local.yml`.
 
 Then run the workspace runtime:
 
 ```bash
-callagent dev
+npm run start
 ```
 
-Default `callagent dev` starts:
+Default `callagent start` starts:
 
 - Hatchet runtime worker.
 - Runtime host at `http://127.0.0.1:8790`.
-- Operator dashboard Vite dev server at `http://127.0.0.1:8791`.
+- Observer at `http://127.0.0.1:8790/operator`.
 
 Useful mode:
 
 ```bash
-callagent dev --no-observer
+npm run start -- --no-observer
 ```
 
 - `--no-observer`: runs only the worker and runtime host.

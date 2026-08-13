@@ -79,7 +79,9 @@ This phase deliberately does **not** add:
 - multiple isolated CallAgent runtime instances in one Node.js process;
 - removal of the global agent, handler, discovery, or environment state;
 - per-agent environment isolation;
-- automatic building or package-manager installation of arbitrary agent folders;
+- automatic building of arbitrary agent folders or silent execution of their
+  lifecycle scripts; local-source dependency installation is allowed only
+  through the explicit, manifest-preserving workflow defined below;
 - automatic startup of production infrastructure;
 - a container-image distribution.
 
@@ -295,21 +297,227 @@ portable reference contract.
 
 ### Development and distribution modes
 
-This phase supports two deliberate modes:
+This phase supports two deliberate modes while generating the same publishable
+package manifests in both:
 
-1. **CallAgent repository development.** The monorepo uses Yarn workspaces and
-   current local source. Projects generated beneath the CallAgent repository may
-   use `workspace:*` ranges so contributors can exercise unreleased framework
-   changes together. Those generated projects are repository fixtures, not
-   publishable consumer projects.
-2. **Consumer and production use.** Projects outside the CallAgent repository
-   use ordinary npm semver ranges and install published package versions. They
-   must never depend on `workspace:`, `portal:`, `link:`, or `file:` ranges.
+1. **Local-source mode.** A generated project may live at any filesystem path
+   while resolving CallAgent packages from one local CallAgent source checkout.
+   This is the canonical workflow for testing unpublished CallAgent changes.
+2. **npm mode.** The generated project resolves ordinary published package
+   versions from its package manager and has no dependency on a CallAgent source
+   checkout.
 
-The project generator detects repository development automatically and also
-allows an explicit `--monorepo` override. The package manifests shipped to npm
-always contain normal semver dependency ranges. This preserves fast local work
-without weakening the published distribution contract.
+Generated `package.json` files always contain ordinary semver ranges derived
+from the selected CLI's coordinated package versions. They never contain
+`workspace:`, `portal:`, `link:`, or `file:` ranges. Local-source mode is a
+development overlay outside the publishable manifest, so the identical
+`package.json` can later be installed from npm or published as part of an agent
+package.
+
+`--monorepo` is removed from the public generator contract. Repository fixtures
+may still be Yarn workspaces, but Yarn's workspace discovery is an implementation
+detail and must not change generated dependency ranges.
+
+#### Automatic mode detection
+
+Detection is based on the executing CLI's provenance, not the generated output
+path:
+
+```text
+explicit --npm
+    -> npm mode
+
+explicit --callagent-source <path> or CALLAGENT_SOURCE_ROOT
+    -> validate that source checkout, then local-source mode
+
+CLI realpath belongs to a valid CallAgent source checkout
+    -> local-source mode
+
+invocation cwd belongs to a valid CallAgent source checkout
+    -> re-exec that checkout's built CLI, then local-source mode
+
+otherwise
+    -> npm mode
+```
+
+This means the following command may create a working local-source project
+anywhere, including outside the repository:
+
+```bash
+cd /path/to/callagent
+node packages/cli/dist/cli.js create agent-project content-agents \
+  --output /another/path/content-agents \
+  --with-agent researcher
+```
+
+A globally or one-off npm-installed CLI uses npm mode outside a CallAgent source
+checkout. When it is invoked from inside a checkout, the checkout takes
+precedence only after the CLI validates and re-executes that checkout's built
+CLI. `--npm` is the explicit escape hatch for testing published behavior from
+inside the source repository. Detection must use `fs.realpath` so symlinked CLI
+bins do not disguise their actual provenance.
+
+Automatic cwd detection is a developer convenience, not a CI input. When
+`CI=true`, local-source mode requires `--callagent-source` or
+`CALLAGENT_SOURCE_ROOT`; otherwise the CLI uses npm mode. Every mutating command
+prints `mode=local-source source=<realpath>` or `mode=npm` before changing files,
+and includes the same fields in `--json` output. This avoids silently executing
+code from an unintended checkout.
+
+A directory is a valid CallAgent source checkout only when all of these hold:
+
+- the root manifest identifies the CallAgent repository and declares its package
+  workspaces;
+- the CLI, runtime, core, and their CallAgent transitive package manifests exist
+  at the expected workspace locations;
+- the checkout dependencies are installed;
+- every required package export target exists in `dist` and has a valid build
+  provenance stamp for the current source;
+- the package versions form a compatible coordinated set.
+
+Each publishable CallAgent package build emits a deterministic
+`dist/.callagent-build.json` containing the package name/version, Node ABI
+requirements, and a digest of that package's build inputs. Local-source setup
+recomputes the digest and rejects missing, partial, or stale builds. Git commit
+alone is insufficient because a dirty checkout is a normal development state.
+The stamp contains no absolute checkout path and may ship in the npm artifact.
+
+Git presence, directory name, and the output path are not sufficient evidence.
+If a likely checkout is unbuilt or incompatible, fail with the exact build or
+install command rather than silently falling back to npm.
+
+#### Managed local-source overlay
+
+Do not use the global `npm link`/`yarn link` registries. They introduce hidden
+machine-wide state, can rewrite `package.json` or `resolutions`, behave
+differently across package managers, and are difficult to audit or undo.
+
+Local-source mode instead owns a project-local overlay:
+
+```text
+external project
+├── package.json                         # committed; semver only
+├── .callagent/
+│   └── local-source.json                # local-only provenance; ignored
+└── node_modules/@a2arium/
+    ├── callagent-core -> /real/source/packages/core
+    ├── callagent-runtime -> /real/source/packages/runtime
+    ├── callagent-cli -> /real/source/packages/cli
+    └── ...all required CallAgent packages from the same checkout
+```
+
+The overlay also owns the package-manager executable shims required by generated
+scripts, including `node_modules/.bin/callagent` and the Windows `.cmd`/`.ps1`
+forms. Merely linking `@a2arium/callagent-cli` is not sufficient because package
+managers normally create bin shims during installation. Shim ownership and
+targets are recorded and validated exactly like package links.
+
+The state file records a schema version, canonical source-root realpath,
+CallAgent package names/versions/realpaths, selected package manager, creation
+time, and CLI version. It contains no credentials. Generated `.gitignore` and
+`.npmignore` rules exclude local overlay state; `node_modules` remains ignored.
+No absolute local source path may appear in `package.json`, an agent index, the
+workspace registry, or a publishable lockfile.
+
+Each affected project owns its own state file. A CallAgent workspace additionally
+uses a short-lived coordination journal while applying the overlay to selected
+agent projects. Mutations acquire an exclusive `.callagent/local-source.lock`
+using create-if-absent semantics; concurrent setup/sync/unlink fails cleanly,
+and stale-lock recovery requires proving the recorded process is gone. Release
+packlist checks fail if `local-source.json`, a coordination journal, or an
+absolute source-root path enters a tarball.
+
+The CLI manages the overlay through:
+
+```text
+callagent local setup [--callagent-source <path>]
+callagent local sync
+callagent local status [--json]
+callagent local unlink
+```
+
+Generation by a source-checkout CLI performs `local setup` automatically for
+the newly created project. For a CallAgent workspace, setup covers the workspace
+and every selected local agent source as one transaction, because linking only
+the runtime workspace would leave agent imports resolving another physical core.
+If a selected source is read-only or owned by another overlay, setup changes
+nothing and prints the exact per-source remediation command.
+
+Setup does not run arbitrary lifecycle scripts or hide a package-manager
+install. It links only CallAgent-owned paths and refuses to replace an existing
+non-link, an unowned link, or a link recorded by another source checkout.
+`local sync` repairs only links proven to be owned by the recorded state.
+`local unlink` removes only those owned links and shims plus the state file; it
+never deletes ordinary installed packages or user files. Link creation uses
+directory symlinks on POSIX and directory junctions on Windows, with temporary
+paths plus rename where the platform permits. Partial failure rolls back links
+created during that invocation.
+
+Because an unpublished semver such as `^0.3.0` may not yet exist on npm, the
+local workflow needs an explicit dependency-install step that installs
+non-CallAgent dependencies without resolving CallAgent ranges and without
+changing `package.json` or the publishable lockfile:
+
+```text
+callagent local install
+```
+
+Package-manager adapters must preserve the exact bytes and hashes of
+`package.json` and any existing lockfile, use no-save/no-lock behavior where
+available, reject lifecycle-script execution by default, then run `local sync`.
+If a package manager requires transient manifest changes, it must write a
+recovery journal before the change, restore through an atomic rename, verify the
+original bytes afterward, and recover or refuse on the next invocation if a
+prior operation was interrupted. If an adapter cannot provide those guarantees,
+the command fails with manual instructions. A normal
+`npm install`, `yarn install`, or `pnpm install` remains the npm-mode command
+after the coordinated versions are published.
+
+`callagent local install --allow-scripts` is an explicit opt-in for a consuming
+project whose non-CallAgent dependencies require lifecycle scripts. The CLI
+prints that this executes third-party dependency code and never enables it
+implicitly during generation, setup, validation, or `dev`.
+
+The first implementation supports filesystem overlays only with a
+`node_modules` linker. npm, pnpm's normal node-modules layouts, and Yarn with
+`nodeLinker: node-modules` are eligible. Yarn Plug'n'Play and other virtual-only
+linkers must fail with an actionable message; the CLI must not silently rewrite
+the consuming project's linker configuration.
+
+#### One-checkout and one-core invariants
+
+Every process in one runtime instance and every selected agent source must use
+one canonical CallAgent source root. Mixing local and npm CallAgent packages, or
+mixing two source checkouts, is a startup error.
+
+This is stricter than matching versions. Agents are imported by absolute path,
+so Node normally resolves their dependencies from the agent project's own
+`node_modules`. Duplicate physical copies of `@a2arium/callagent-core` can split
+module-scoped registries and handlers even when their versions match. Before
+validation, build, or `dev`, the CLI must therefore resolve and `realpath` the
+CallAgent packages visible from:
+
+- the selected CLI;
+- the runtime host and worker;
+- every selected agent module or agent-project root.
+
+All runtime-bearing imports of `@a2arium/callagent-core` and other stateful
+CallAgent packages must resolve to the recorded checkout paths. Local mode also
+rejects `NODE_OPTIONS=--preserve-symlinks`, which would defeat realpath-based
+module identity. A mismatch fails before importing any agent and prints each
+conflicting resolution without printing environment values.
+
+Package managers may replace project-local links during a later install. This
+is expected: `callagent local status` reports drift, and `local sync` restores
+owned links. Generated local-mode next steps use `callagent local install`,
+`callagent local status`, build/validate, and then `callagent dev`.
+
+Local-source mode validates source behavior and integration; it does not prove
+npm tarball contents, registry dependency availability, peer resolution, or a
+consumer lockfile. The semver-only manifest is the same one that will be used
+after publication, but the installed graph is intentionally an overlay. The
+published-version and deferred `npm pack` gates remain necessary and must not be
+declared satisfied by local-source tests.
 
 `npm pack` installation testing is useful release hardening, but is deferred
 from this phase's required implementation and CI gates. Until that gate is
@@ -463,7 +671,6 @@ Options:
   --uses-tools
   --uses-children
   --uses-plans
-  --force
 ```
 
 Example:
@@ -532,8 +739,8 @@ Options:
   --uses-tools
   --uses-children
   --uses-plans
-  --monorepo
-  --force
+  --callagent-source <dir>         Explicit local-source checkout
+  --npm                            Disable automatic local-source mode
 ```
 
 Example:
@@ -596,7 +803,8 @@ Options:
   --output <dir>              Defaults to ./<name>
   --agent-source <path>       Repeatable; adds an agent-project root
   --package-manager <name>    npm | yarn | pnpm; default is inferred, then npm
-  --force
+  --callagent-source <dir>    Explicit local-source checkout
+  --npm                       Disable automatic local-source mode
 ```
 
 Example:
@@ -677,10 +885,10 @@ All creation commands must:
 - support `--json` with versioned, discriminated results for automation;
 - print absolute output paths in results while writing portable relative paths
   into generated registries;
-- fail when the output directory exists and is non-empty unless `--force` is
-  explicitly supplied;
-- never delete unrelated existing files under `--force`; overwrite only the
-  generator-owned file set and report every overwritten path;
+- fail when the output directory exists and is non-empty. This first release
+  does not overwrite generator output because it cannot safely prove ownership
+  of user-edited files; use a new output directory or create an agent in the
+  existing agent project instead;
 - validate all names before creating directories;
 - clean up incomplete new directories after a failed generation when no
   pre-existing user files were present;
@@ -887,9 +1095,19 @@ The existing `--prod` distinction should not survive as a confusing public
 mode. Installed packages always use compiled runtime code and built Observer
 assets. Repository-only watch commands may retain an internal development mode.
 
-`callagent dev` does not start Postgres, NATS, or Hatchet. It checks required
-services and returns actionable failures. Infrastructure orchestration may be
-added later under an explicit command or profile.
+`callagent dev` does not implicitly start infrastructure. The workspace control
+surface provides explicit commands instead:
+
+```text
+callagent db setup|migrate|generate
+callagent infra up|down|restart [--compose FILE]
+```
+
+`db` runs the installed `@a2arium/callagent-memory-sql` lifecycle command with
+the workspace `.env`; `infra` runs the version-matched default Hatchet/NATS
+Compose profile shipped by `@a2arium/callagent-runtime`. `--compose` appends a
+workspace-owned Compose override. Postgres remains workspace-configured external
+infrastructure, so `infra up` does not create or migrate it.
 
 ### `callagent workspace validate`
 
@@ -1120,6 +1338,23 @@ implementations.
 4. Define versioned result schemas shared by validation and creation commands.
 5. Add focused unit tests before moving process entry points.
 
+### Phase 1.5: Support external local-source projects
+
+1. Remove public `--monorepo` behavior and generate semver-only manifests in
+   every location.
+2. Add deterministic build-provenance stamps to publishable CallAgent package
+   builds and validate the coordinated local source graph.
+3. Implement CLI provenance detection with explicit `--npm` and
+   `--callagent-source` overrides and CI-safe behavior.
+4. Implement transactional project-local package links, executable shims,
+   ownership state, status/sync/unlink, and interrupted-operation recovery.
+5. Implement package-manager adapters for dependency installation that preserve
+   manifests and existing lockfiles byte-for-byte.
+6. Enforce the one-checkout/one-core realpath invariant across the CLI, runtime,
+   and every selected agent source before module import.
+7. Test arbitrary external paths and cross-platform node-modules linkers before
+   treating local-source mode as supported.
+
 ### Phase 2: Extract shared runtime composition
 
 1. Create `packages/runtime` as `@a2arium/callagent-runtime`.
@@ -1222,13 +1457,38 @@ implementations.
 - Old-to-new flag mapping examples in the migration documentation.
 - Documentation cutover matrix coverage, historical annotation allowlist, stale
   command scan, and Markdown link verification.
-- Generator `--force` ownership boundaries and cleanup after partial failure.
+- Generator refusal of non-empty output and cleanup after partial failure.
 - Versioned `--json` results for every creation/mutation command.
 - Global-to-local CLI delegation, recursion prevention, argument/environment
   preservation, and incompatible-version failures.
 - Generated project scripts work with only local dependencies and no global CLI.
 - Signal handling, startup cancellation, child failure, and bounded shutdown.
 - Runtime package asset lookup independent of `process.cwd()`.
+- CLI provenance detection through direct, symlinked, global, one-off, and
+  source-checkout invocations; `--npm` and `--callagent-source` precedence.
+- Local-source checkout validation for missing install, stale/missing `dist`,
+  incompatible coordinated versions, and a false-positive repository name.
+- Build-provenance stamp generation and validation for clean, dirty, partially
+  built, and rebuilt local checkouts.
+- External-path generation keeps identical semver-only `package.json` content
+  in local-source and npm modes.
+- Local overlay setup/status/sync/unlink ownership, idempotency, drift repair,
+  foreign-file refusal, executable-shim ownership, two-checkout conflict
+  rejection, concurrent-operation locking, stale-lock handling,
+  interrupted-operation recovery, and rollback.
+- Local install preserves `package.json` and existing lockfile bytes, installs
+  non-CallAgent dependencies, skips lifecycle scripts by default, and works
+  before the next CallAgent version exists on npm.
+- Node module identity preflight proves CLI, runtime, and every external agent
+  resolve stateful CallAgent packages to one canonical realpath; duplicate npm
+  copies, mixed source roots, and `--preserve-symlinks` fail before import.
+- npm, pnpm node-modules, Yarn node-modules, paths containing spaces, relative
+  paths, symlinked source roots, Windows junctions, read-only targets, and
+  cross-device source/project paths.
+- CI disables cwd inference while explicit source-root configuration remains
+  reproducible; JSON and human output always expose the selected mode.
+- Yarn Plug'n'Play and unsupported linkers fail without changing the consuming
+  project's package-manager configuration.
 
 ### Deferred: package-boundary smoke test
 
@@ -1311,6 +1571,27 @@ boundary silently dropped behavior.
 - Agent module changes between validation and child import.
 - A module registers an ID different from its card.
 - Two workspaces contain the same ID.
+- A global/npm CLI is run outside a checkout and correctly remains in npm mode.
+- A global/npm CLI is run inside a checkout but the checkout CLI is unbuilt;
+  startup fails with build guidance instead of mixing global and local packages.
+- A local-source CLI creates a project outside the checkout on another volume.
+- An agent project resolves `callagent-core` from a different realpath than the
+  runtime workspace, including the same version installed twice.
+- A package-manager install replaces overlay links; status detects drift and
+  sync restores only CallAgent-owned links.
+- A target path already contains a regular package or foreign symlink where an
+  overlay link would be created.
+- Local source is moved, deleted, rebuilt incompatibly, or checked out at a
+  different coordinated version after setup.
+- `package.json` or a lockfile changes during local setup/install; the command
+  rolls back and reports the changed file.
+- Two local overlay mutations run concurrently, or a stale lock/journal remains
+  after a killed process.
+- A packlist contains local overlay state, a recovery journal, or an absolute
+  checkout path.
+- A dependency requires a lifecycle script; default install refuses/skips it and
+  the explicit `--allow-scripts` path is covered separately.
+- Yarn Plug'n'Play or `NODE_OPTIONS=--preserve-symlinks` is active.
 - One child becomes ready and the other crashes.
 - Observer assets are absent from a packed runtime.
 - Infrastructure disappears during startup.
@@ -1638,6 +1919,61 @@ Also verify:
     tutorial/how-to/reference/explanation/troubleshooting/migration docs ship,
     historical docs are preserved and annotated, and stale-command/link gates
     pass.
+18. A CLI executed from a valid local CallAgent checkout can generate an agent
+    project or CallAgent workspace at an arbitrary external path, keep its
+    committed `package.json` semver-only, install non-CallAgent dependencies,
+    and build/validate/run against that checkout before those versions exist on
+    npm.
+19. Local-source mode is auditable and reversible: status identifies the exact
+    source root and package realpaths, sync repairs only owned links, unlink
+    removes only owned state, and npm mode is restored without editing the
+    committed manifest.
+20. CLI, host, worker, and every selected external agent resolve stateful
+    CallAgent packages from one canonical realpath. Mixed npm/local copies,
+    duplicate physical cores, unsupported linkers, and symlink-preservation
+    flags fail before any agent module is imported.
+
+## Implementation status (2026-08-13)
+
+The descriptor resolver, runtime package, Observer assets, CLI generators,
+validated atomic registry mutation, npm/global CLI delegation, package metadata
+checks, and documentation cutover are implemented in this repository.
+
+The first supported local-source implementation is also complete: generated
+manifests are semver-only; `--monorepo` is removed; a CLI run from a built source
+checkout detects that checkout (with `--npm`, `--callagent-source`, and CI-safe
+overrides); and it creates a managed, uncommitted project-local overlay for all
+CallAgent packages. The overlay records ownership in
+`.callagent/local-source.json`, provides `local setup|sync|status|unlink`, and
+is applied to both the CallAgent workspace and every selected agent project.
+`callagent local install` supports npm and Yarn with CallAgent dependencies
+temporarily removed and restores `package.json` and its package-manager lockfile
+byte-for-byte before resynchronising the overlay. This lets an external agent
+project install tools such as TypeScript while retaining the same publishable
+manifest it will later use from npm. Until the referenced versions are published,
+Yarn project scripts must be launched through `npm run` (or directly from
+`node_modules/.bin`), because Yarn resolves the full semver manifest even for
+`yarn run` and a clean lockfile must not record a local source path.
+
+For a source-checkout invocation, `create agent-project` performs that local
+installation automatically after creating the overlay. It infers the source
+checkout's package manager (Yarn for this repository) unless the caller passes
+`--package-manager npm|yarn`; `local install` remains available for recovery or
+for an existing project.
+
+The remaining release evidence is deliberately external to source-only checks:
+
+1. Add deterministic build-provenance stamps, cross-platform executable shims,
+   package-manager adapters beyond npm/Yarn, and an explicit pre-import one-core
+   realpath diagnostic. The present overlay links every CallAgent package from
+   one checked-out source root, but these hardening checks remain outstanding.
+2. Publish the coordinated `0.3.0` package set, then run the generated
+   consumer workflow against those published versions outside this repository.
+3. Run the real host/worker cross-agent test against a live Hatchet, NATS, and
+   Postgres stack in CI or the release gate.
+
+`npm pack` smoke testing remains a deferred release-hardening track, as agreed
+in the two-mode distribution decision above.
 
 ## Completion Checklist
 
@@ -1653,6 +1989,11 @@ Also verify:
       smoke tests, stale-command scan, and link checks are complete.
 - [ ] Global CLI installation is optional; generated projects pin and run the
       local CLI, and global invocation delegates to it when versions differ.
+- [ ] Local-source provenance detection, arbitrary-path overlay management,
+      source validation, `local install/status/sync/unlink`, and npm escape hatch
+      are implemented without changing publishable manifests or lockfiles.
+- [ ] One-checkout/one-core realpath preflight covers the CLI, runtime children,
+      and every selected agent project before module import.
 - [ ] Shared environment resolution produces one snapshot for host and worker.
 - [ ] Runtime startup descriptor and fingerprint contracts are implemented.
 - [ ] `@a2arium/callagent-runtime` is publishable and contains Observer assets.
@@ -1677,6 +2018,22 @@ After this specification is complete and stable, create separate design work for
 6. Package, Git, and remote agent source resolvers.
 7. Safe watch/restart behavior for local agent development.
 8. `npm pack` temporary-project smoke testing and tarball-boundary validation.
+9. Yarn Plug'n'Play or loader-based local-source overlays after the
+   node-modules implementation is proven.
 
 Each track must preserve the installable composition workflow established here
 instead of moving application ownership back into the framework repository.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | Not required for this packaging refinement |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | Not run |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 8 issues folded into the specification; 0 unresolved |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | No UI scope |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | Not run |
+
+**VERDICT:** ENG CLEARED — ready to implement the external local-source phase.
+
+NO UNRESOLVED DECISIONS

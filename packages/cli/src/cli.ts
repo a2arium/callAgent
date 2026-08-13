@@ -1,34 +1,152 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { resolveWorkspaceRuntime, WorkspaceResolutionError } from '@a2arium/callagent-core';
 import { runtimeEntryPoints } from '@a2arium/callagent-runtime';
+import { fileURLToPath } from 'node:url';
 import { writeRuntimeDescriptor } from './descriptorFile.js';
 import { addAgentSource, createAgent, createAgentProject, createWorkspace, removeAgentSource } from './generate.js';
+import { detectLocalSource, localInstall, localSourceStatus, setupLocalSource, syncLocalSource, unlinkLocalSource } from './localSource.js';
 
-type Options = { workspaces?: string; json: boolean; noObserver: boolean; host?: string; port?: string; hostEntry?: string; workerEntry?: string; output?: string; project?: string; withAgent?: string; preset?: 'minimal' | 'non-trivial'; force?: boolean; monorepo?: boolean; usesLlm?: boolean; usesTools?: boolean; usesChildren?: boolean; usesPlans?: boolean; agentSources?: string[]; packageManager?: string; name?: string; envFile?: string; arguments: string[] };
+type Options = { workspaces?: string; json: boolean; noObserver: boolean; host?: string; port?: string; hostEntry?: string; workerEntry?: string; output?: string; project?: string; withAgent?: string; preset?: 'minimal' | 'non-trivial'; force?: boolean; usesLlm?: boolean; usesTools?: boolean; usesChildren?: boolean; usesPlans?: boolean; agentSources?: string[]; packageManager?: string; name?: string; envFile?: string; localSource?: string; npm?: boolean; compose?: string; arguments: string[] };
 
 async function main(argv: string[]): Promise<void> {
     const { command, options } = parse(argv);
     if (command === 'help') return printHelp();
+    if (command.startsWith('local ')) return local(command, options);
+    if (command.startsWith('infra ')) return infra(command, options);
+    if (command.startsWith('db ')) return database(command, options);
+    const sourceRoot = await detectLocalSource(options);
     if (command === 'workspace validate' || command === 'agents list') {
         const { descriptor } = await resolve(options);
+        if (sourceRoot) await setupDescriptorOverlay(descriptor, sourceRoot);
         if (command === 'workspace validate') return printValidation(descriptor, options.json);
         return printAgents(descriptor, options.json);
     }
-    if (command === 'dev') return dev(options);
-    if (command.startsWith('create agent ')) return printMutation(await createAgent(requireName(options), options), options.json);
-    if (command.startsWith('create agent-project ')) return printMutation(await createAgentProject(requireName(options), options), options.json);
-    if (command.startsWith('create workspace ')) return printMutation(await createWorkspace(requireName(options), options), options.json);
-    if (command.startsWith('workspace add-agent-source ')) return printMutation(await addAgentSource(requireArgument(options), options), options.json);
+    if (command === 'start' || command === 'dev') return dev(options, sourceRoot);
+    if (command.startsWith('create agent ')) {
+        const result = await createAgent(requireName(options), options);
+        if (sourceRoot) await setupLocalSource(result.project, sourceRoot);
+        return printMutation(result, options.json);
+    }
+    if (command.startsWith('create agent-project ')) {
+        const result = await createAgentProject(requireName(options), options);
+        if (sourceRoot) {
+            await setupLocalSource(result.output, sourceRoot);
+            await localInstall(result.output, options.packageManager ?? await preferredLocalPackageManager(sourceRoot));
+        }
+        return printMutation(result, options.json);
+    }
+    if (command.startsWith('create workspace ')) {
+        const result = await createWorkspace(requireName(options), options);
+        if (sourceRoot) {
+            await setupLocalSource(result.output, sourceRoot);
+            const { descriptor } = await resolveWorkspaceRuntime({ cwd: result.output, allowEmpty: true });
+            await setupDescriptorOverlay(descriptor, sourceRoot);
+        }
+        return printMutation(result, options.json);
+    }
+    if (command.startsWith('workspace add-agent-source ')) {
+        const result = await addAgentSource(requireArgument(options), options);
+        if (sourceRoot) {
+            const { descriptor } = await resolve(options);
+            await setupDescriptorOverlay(descriptor, sourceRoot);
+        }
+        return printMutation(result, options.json);
+    }
     if (command.startsWith('workspace remove-agent-source ')) return printMutation(await removeAgentSource(requireArgument(options), options), options.json);
     throw new Error(`Unknown command: ${command}. Run \`callagent --help\`.`);
 }
 
 async function resolve(options: Options) {
     return resolveWorkspaceRuntime({ cwd: process.cwd(), registryPath: options.workspaces });
+}
+
+async function setupDescriptorOverlay(descriptor: Awaited<ReturnType<typeof resolveWorkspaceRuntime>>['descriptor'], sourceRoot: string): Promise<void> {
+    const roots = new Set<string>([path.dirname(path.dirname(descriptor.registryPath))]);
+    for (const workspace of descriptor.workspaces) roots.add(workspace.root);
+    for (const root of roots) await setupLocalSource(root, sourceRoot);
+}
+
+async function local(command: string, options: Options): Promise<void> {
+    const project = path.resolve(options.project ?? process.cwd());
+    if (command === 'local setup') {
+        const source = await detectLocalSource(options);
+        if (!source) throw new Error('No local CallAgent source was detected. Pass --callagent-source <path>.');
+        return printMutation(await setupLocalSource(project, source), options.json);
+    }
+    if (command === 'local sync') return printMutation(await syncLocalSource(project), options.json);
+    if (command === 'local status') return printMutation(await localSourceStatus(project), options.json);
+    if (command === 'local unlink') { await unlinkLocalSource(project); return printMutation({ project, unlinked: true }, options.json); }
+    if (command === 'local install') { await localInstall(project, options.packageManager); return printMutation({ project, installed: true, packageManager: options.packageManager ?? 'npm' }, options.json); }
+    throw new Error(`Unknown local command: ${command}`);
+}
+
+async function infra(command: string, options: Options): Promise<void> {
+    const action = command.slice('infra '.length);
+    if (!['up', 'down', 'restart'].includes(action)) throw new Error('Usage: callagent infra <up|down|restart> [--compose FILE]');
+    const workspace = await workspaceRoot(options);
+    const files = [runtimeComposeFile(), ...(options.compose ? [path.resolve(workspace, options.compose)] : [])];
+    for (const file of files) await fsp.access(file);
+    const args = ['compose', ...files.flatMap((file) => ['-f', file]), '--project-directory', workspace, '--env-file', path.join(workspace, '.env')];
+    console.log(`CallAgent infrastructure: ${action} (${files.join(', ')})`);
+    if (action === 'up') args.push('up', '-d');
+    if (action === 'down') args.push('down', '--remove-orphans');
+    if (action === 'restart') args.push('restart');
+    await runCommand('docker', args, workspace, 120_000);
+}
+
+async function database(command: string, options: Options): Promise<void> {
+    const action = command.slice('db '.length);
+    if (!['setup', 'migrate', 'generate'].includes(action)) throw new Error('Usage: callagent db <setup|migrate|generate>');
+    const workspace = await workspaceRoot(options);
+    const setupScript = path.join(workspace, 'node_modules', '@a2arium', 'callagent-memory-sql', 'scripts', 'setup-database.cjs');
+    await fsp.access(setupScript);
+    await runCommand(process.execPath, [setupScript, action], workspace);
+}
+
+async function workspaceRoot(options: Options): Promise<string> {
+    const registryPath = await findWorkspaceRegistry(options.workspaces);
+    return path.dirname(path.dirname(registryPath));
+}
+
+async function findWorkspaceRegistry(requested?: string): Promise<string> {
+    if (requested) return path.resolve(process.cwd(), requested);
+    let current = process.cwd();
+    while (true) {
+        const candidate = path.join(current, '.callagent', 'workspaces.json');
+        if (fs.existsSync(candidate)) return candidate;
+        const parent = path.dirname(current);
+        if (parent === current) throw new Error('No CallAgent workspace found; pass --workspaces <path>');
+        current = parent;
+    }
+}
+
+function runtimeComposeFile(): string { return path.join(path.dirname(runtimeEntryPoints().host), 'infra', 'docker-compose.yml'); }
+
+function runCommand(command: string, args: string[], cwd: string, timeoutMs?: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args, { cwd, stdio: 'inherit' });
+        let settled = false;
+        const finish = (callback: () => void) => { if (!settled) { settled = true; if (timeout) clearTimeout(timeout); callback(); } };
+        const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
+            child.kill('SIGTERM');
+            finish(() => reject(new Error(`${command} did not finish within ${Math.round(timeoutMs / 1_000)} seconds. Check Docker Desktop / Docker Engine with \`docker info\`.`)));
+        }, timeoutMs);
+        child.once('error', (error) => finish(() => reject(error)));
+        child.once('exit', (code) => finish(() => code === 0 ? resolve() : reject(new Error(`${command} ${args.join(' ')} failed with exit code ${code}`))));
+    });
+}
+
+async function preferredLocalPackageManager(sourceRoot: string): Promise<string> {
+    try {
+        const manifest = JSON.parse(await fs.promises.readFile(path.join(sourceRoot, 'package.json'), 'utf8')) as { packageManager?: unknown };
+        if (typeof manifest.packageManager === 'string' && manifest.packageManager.startsWith('yarn@')) return 'yarn';
+    } catch { /* default below */ }
+    return 'npm';
 }
 
 function printValidation(descriptor: Awaited<ReturnType<typeof resolveWorkspaceRuntime>>['descriptor'], json: boolean): void {
@@ -44,8 +162,9 @@ function printAgents(descriptor: Awaited<ReturnType<typeof resolveWorkspaceRunti
     for (const agent of agents) console.log(`${agent.id}\t${agent.workspace}\t${agent.modulePath}`);
 }
 
-async function dev(options: Options): Promise<void> {
+async function dev(options: Options, sourceRoot?: string): Promise<void> {
     const { descriptor, environment } = await resolve(options);
+    if (sourceRoot) await setupDescriptorOverlay(descriptor, sourceRoot);
     await preflight(environment.values);
     const descriptorFile = await writeRuntimeDescriptor(descriptor);
     const installedEntries = runtimeEntryPoints();
@@ -105,7 +224,7 @@ async function preflight(env: Record<string, string>): Promise<void> {
     ] as const;
     const results = await Promise.all(targets.map(async ([name, endpoint]) => ({ name, endpoint, ok: await tcpConnect(endpoint.host, endpoint.port) })));
     const failed = results.filter((result) => !result.ok);
-    if (failed.length) throw new Error(`Runtime preflight failed: ${failed.map((result) => `${result.name} at ${result.endpoint.host}:${result.endpoint.port}`).join(', ')}. Start infrastructure before callagent dev.`);
+    if (failed.length) throw new Error(`Runtime preflight failed: ${failed.map((result) => `${result.name} at ${result.endpoint.host}:${result.endpoint.port}`).join(', ')}. Start infrastructure before callagent start.`);
 }
 
 function endpointFromUrl(value: string, defaultPort: number): { host: string; port: number } {
@@ -159,13 +278,13 @@ function parse(argv: string[]): { command: string; options: Options } {
         if (argument === '--help' || argument === '-h') return { command: 'help', options };
         if (argument === '--json') { options.json = true; continue; }
         if (argument === '--no-observer') { options.noObserver = true; continue; }
-        if (argument === '--force' || argument === '--monorepo' || argument === '--uses-llm' || argument === '--uses-tools' || argument === '--uses-children' || argument === '--uses-plans') {
-            const key = ({ '--force': 'force', '--monorepo': 'monorepo', '--uses-llm': 'usesLlm', '--uses-tools': 'usesTools', '--uses-children': 'usesChildren', '--uses-plans': 'usesPlans' } as const)[argument];
+        if (argument === '--force' || argument === '--npm' || argument === '--uses-llm' || argument === '--uses-tools' || argument === '--uses-children' || argument === '--uses-plans') {
+            const key = ({ '--force': 'force', '--npm': 'npm', '--uses-llm': 'usesLlm', '--uses-tools': 'usesTools', '--uses-children': 'usesChildren', '--uses-plans': 'usesPlans' } as const)[argument];
             options[key] = true;
             continue;
         }
         if (argument === '--agent-source') { const value = argv[++index]; if (!value) throw new Error('--agent-source requires a value'); (options.agentSources ??= []).push(value); continue; }
-        const key = ({ '--workspaces': 'workspaces', '--host': 'host', '--port': 'port', '--host-entry': 'hostEntry', '--worker-entry': 'workerEntry', '--output': 'output', '--project': 'project', '--with-agent': 'withAgent', '--preset': 'preset', '--package-manager': 'packageManager', '--name': 'name', '--env-file': 'envFile' } as const)[argument];
+        const key = ({ '--workspaces': 'workspaces', '--host': 'host', '--port': 'port', '--host-entry': 'hostEntry', '--worker-entry': 'workerEntry', '--output': 'output', '--project': 'project', '--with-agent': 'withAgent', '--preset': 'preset', '--package-manager': 'packageManager', '--name': 'name', '--env-file': 'envFile', '--callagent-source': 'localSource', '--compose': 'compose' } as const)[argument];
         if (key) {
             const value = argv[++index];
             if (!value) throw new Error(`${argument} requires a value`);
@@ -202,7 +321,7 @@ function requireName(options: Options): string { const name = options.arguments.
 function requireArgument(options: Options): string { const value = options.arguments.at(-1); if (!value) throw new Error('A path or agent-source name is required'); return value; }
 function printMutation(value: unknown, json: boolean): void { if (json) console.log(JSON.stringify({ schemaVersion: 1, ...asRecord(value) })); else console.log(JSON.stringify(value, null, 2)); }
 function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : { result: value }; }
-function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  dev\n  workspace validate [--json]\n  workspace add-agent-source <path>\n  workspace remove-agent-source <name>\n  agents list [--json]\n  create agent <name>\n  create agent-project <name>\n  create workspace <name>`); }
+function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  start [--workspaces PATH] [--no-observer]\n  dev (compatibility alias for start)\n  db setup|migrate|generate\n  infra up|down|restart [--compose FILE]\n  workspace validate [--json]\n  workspace add-agent-source <path>\n  workspace remove-agent-source <name>\n  agents list [--json]\n  create agent <name>\n  create agent-project <name>\n  create workspace <name>\n  local setup|sync|status|unlink|install\n\nLocal source options:\n  --callagent-source <path>  use a built CallAgent checkout\n  --npm                       disable local-source detection\n  --package-manager npm|yarn package manager for local install`); }
 
 const localCli = localCliPath();
 if (localCli) {

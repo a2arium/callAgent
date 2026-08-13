@@ -22,6 +22,7 @@
     "verify:core-imports": "node scripts/verify-core-imports.mjs",
     "verify:publish-manifests": "node scripts/check-publish-manifests.mjs",
     "verify:packlists": "node scripts/check-packlists.mjs",
+    "verify:docs": "node scripts/check-callagent-docs.mjs",
     "run:hello": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}'",
     "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}' --no-resolve-deps",
     "input": "node packages/core/dist/runner/runnerCli.js input",

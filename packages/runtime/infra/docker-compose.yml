@@ -1,0 +1,112 @@
+# Default local CallAgent infrastructure. A workspace may append a compose file
+# through `callagent infra <command> --compose <file>` to override this profile.
+x-host-access: &host-access
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-hatchet-database-url: &hatchet-database-url
+  DATABASE_URL: ${HATCHET_DATABASE_URL:-postgres://hatchet:hatchet@host.docker.internal:5432/hatchet}
+
+services:
+  nats:
+    image: nats:2.10
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  hatchet-rabbitmq:
+    image: rabbitmq:3-management
+    hostname: hatchet-rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    volumes:
+      - hatchet_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  hatchet-migration:
+    <<: *host-access
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:latest
+    command: /hatchet/hatchet-migrate
+    environment:
+      <<: *hatchet-database-url
+
+  hatchet-setup-config:
+    <<: *host-access
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:latest
+    command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
+    environment:
+      <<: *hatchet-database-url
+      SERVER_MSGQUEUE_RABBITMQ_URL: amqp://user:password@hatchet-rabbitmq:5672/
+      SERVER_AUTH_COOKIE_DOMAIN: localhost:${HATCHET_DASHBOARD_PORT:-8080}
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_DEFAULT_ENGINE_VERSION: V1
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-migration:
+        condition: service_completed_successfully
+      hatchet-rabbitmq:
+        condition: service_healthy
+
+  hatchet-engine:
+    <<: *host-access
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:latest
+    command: /hatchet/hatchet-engine --config /hatchet/config
+    restart: on-failure
+    ports:
+      - "7077:7070"
+    environment:
+      <<: *hatchet-database-url
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+
+  hatchet-dashboard:
+    <<: *host-access
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:latest
+    command:
+      - sh
+      - -ec
+      - |
+        until nc -z hatchet-rabbitmq 5672; do
+          echo "Waiting for RabbitMQ..."
+          sleep 1
+        done
+        exec sh ./entrypoint.sh --config /hatchet/config
+    ports:
+      - "${HATCHET_DASHBOARD_PORT:-8080}:80"
+    restart: on-failure
+    environment:
+      <<: *hatchet-database-url
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-rabbitmq:
+        condition: service_healthy
+      hatchet-setup-config:
+        condition: service_completed_successfully
+
+volumes:
+  hatchet_rabbitmq_data:
+  hatchet_certs:
+  hatchet_config:

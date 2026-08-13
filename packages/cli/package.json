@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@a2arium/callagent-core": "^0.3.0",
+    "@a2arium/callagent-memory-sql": "^0.2.0",
     "@a2arium/callagent-runtime": "^0.1.0"
   },
   "devDependencies": {
