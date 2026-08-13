@@ -1,4 +1,4 @@
-import { PluginManager } from '@a2arium/callagent-core';
+import { PluginManager, registerAgentWorkspaceInfo } from '@a2arium/callagent-core';
 import type { RuntimeWorkspaceDescriptor } from '@a2arium/callagent-core';
 
 export type RegisteredWorkspaceAgents = {
@@ -22,6 +22,15 @@ export async function registerWorkspaceAgents(
             if (actualId !== agent.id) {
                 throw new Error(`Descriptor agent identity mismatch: expected ${agent.id}, loaded ${actualId}`);
             }
+            registerAgentWorkspaceInfo(actualId, {
+                workspaceName: workspace.name,
+                workspaceRoot: workspace.root,
+                agentIndexPath: workspace.agentIndexPath,
+                ...(agent.agentCardPath ? { agentCardPath: agent.agentCardPath } : {}),
+                ...(agent.runtimeManifestPath ? { runtimeManifestPath: agent.runtimeManifestPath } : {}),
+                modulePath: agent.modulePath,
+                loaded: true,
+            });
             agentIds.push(actualId);
         }
     }

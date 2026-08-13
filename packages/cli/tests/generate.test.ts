@@ -14,6 +14,7 @@ describe('CallAgent project and workspace generation', () => {
         const project = path.join(root, 'content-agents');
         await createAgentProject('content-agents', { output: project, withAgent: 'researcher' });
         await createAgent('writer', { project });
+        materializeCompiledAgents(project, ['researcher', 'writer']);
         const workspace = path.join(root, 'content-team');
         await createWorkspace('content-team', { output: workspace, agentSources: [project] });
 
@@ -23,6 +24,27 @@ describe('CallAgent project and workspace generation', () => {
         expect(descriptor.workspaces.flatMap((entry) => entry.agents.map((agent) => agent.id))).toEqual(['researcher', 'writer']);
         const registry = fs.readFileSync(path.join(workspace, '.callagent', 'workspaces.json'), 'utf8');
         expect(registry).toContain('../content-agents');
+        const projectPackage = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+        expect(projectPackage.dependencies['@a2arium/callagent-core']).toBe('^0.3.0');
+    });
+
+    test('uses workspace ranges only for projects generated inside the CallAgent repository', async () => {
+        const project = path.join(process.cwd(), 'apps', 'examples', 'generator-local-range-test');
+        try {
+            await createAgentProject('generator-local-range-test', { output: project, force: true });
+            const manifest = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+            expect(manifest.dependencies['@a2arium/callagent-core']).toBe('workspace:*');
+        } finally {
+            fs.rmSync(project, { recursive: true, force: true });
+        }
+    });
+
+    test('requires compiled agent modules before a source can be composed', async () => {
+        const project = path.join(root, 'unbuilt-agents');
+        await createAgentProject('unbuilt-agents', { output: project, withAgent: 'researcher' });
+        const workspace = path.join(root, 'workspace');
+        await createWorkspace('workspace', { output: workspace, agentSources: [project] });
+        await expect(resolveWorkspaceRuntime({ cwd: workspace })).rejects.toThrow('Build the agent project');
     });
 
     test('rejects adding an agent to a legacy flat project', async () => {
@@ -42,3 +64,14 @@ describe('CallAgent project and workspace generation', () => {
         expect(JSON.parse(fs.readFileSync(path.join(workspace, '.callagent', 'workspaces.json'), 'utf8'))).toEqual({ workspaces: [] });
     });
 });
+
+function materializeCompiledAgents(project: string, agentNames: string[]): void {
+    for (const agentName of agentNames) {
+        const source = path.join(project, 'src', 'agents', agentName);
+        const target = path.join(project, 'dist', 'agents', agentName);
+        fs.mkdirSync(target, { recursive: true });
+        fs.writeFileSync(path.join(target, 'agent.js'), 'export {};\n');
+        fs.copyFileSync(path.join(source, 'agent-card.json'), path.join(target, 'agent-card.json'));
+        fs.copyFileSync(path.join(source, 'agent-runtime.json'), path.join(target, 'agent-runtime.json'));
+    }
+}

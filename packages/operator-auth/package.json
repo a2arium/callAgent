@@ -1,16 +1,26 @@
 {
   "name": "@a2arium/callagent-operator-auth",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "recover-owner": "tsx src/recoverOwnerCli.ts"
+    "recover-owner": "tsx src/recoverOwnerCli.ts",
+    "npm:publish": "npm publish --access public",
+    "npm:publish:dry-run": "npm publish --access public --dry-run"
   },
   "dependencies": {
-    "@a2arium/callagent-memory-sql": "workspace:*",
+    "@a2arium/callagent-memory-sql": "^0.2.0",
     "better-auth": "^1.6.0",
     "express": "^5.1.0"
   },
@@ -18,5 +28,23 @@
     "@types/express": "^5.0.1",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Operator authentication runtime for CallAgent.",
+  "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/operator-auth"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/operator-auth#readme",
+  "engines": {
+    "node": ">=20"
   }
 }

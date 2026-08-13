@@ -17,7 +17,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "^0.2.0",
+    "@a2arium/callagent-core": "^0.3.0",
     "nats": "^2.29.3",
     "uuid": "^11.1.0",
     "zod": "^4.3.6"

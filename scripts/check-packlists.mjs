@@ -11,6 +11,10 @@ const packageDirs = [
   'packages/core',
   'packages/chat-bridge',
   'packages/eventbus-nats',
+  'packages/driver-hatchet',
+  'packages/operator-auth',
+  'packages/runtime',
+  'packages/cli',
 ];
 
 const forbidden = [
@@ -61,4 +65,3 @@ if (failures.length > 0) {
 }
 
 console.log('packlist checks passed');
-

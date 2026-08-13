@@ -15,15 +15,17 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
+    "test": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js",
+    "npm:publish": "npm publish --access public",
+    "npm:publish:dry-run": "npm publish --access public --dry-run"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "workspace:*",
-    "@a2arium/callagent-eventbus-nats": "workspace:*",
-    "@a2arium/callagent-memory-engine": "workspace:*",
-    "@a2arium/callagent-memory-sql": "workspace:*",
-    "@a2arium/callagent-types": "workspace:*",
-    "@a2arium/callagent-utils": "workspace:*",
+    "@a2arium/callagent-core": "^0.3.0",
+    "@a2arium/callagent-eventbus-nats": "^0.1.0",
+    "@a2arium/callagent-memory-engine": "^0.1.0",
+    "@a2arium/callagent-memory-sql": "^0.2.0",
+    "@a2arium/callagent-types": "^0.2.0",
+    "@a2arium/callagent-utils": "^0.2.0",
     "@hatchet-dev/typescript-sdk": "^1.24.2",
     "@prisma/client": "7.4.0",
     "cron-parser": "^5.6.2",
@@ -36,5 +38,21 @@
     "typescript": "^5.8.3"
   },
   "license": "MIT",
-  "description": "Hatchet runtime driver and worker handlers for CallAgent orchestrator substrate."
+  "description": "Hatchet runtime driver and worker handlers for CallAgent orchestrator substrate.",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/driver-hatchet"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/driver-hatchet#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

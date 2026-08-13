@@ -74,6 +74,11 @@ export function listAgentWorkspaceInfos(): Array<{ agentName: string; info: Agen
     return Array.from(agentWorkspaceInfo.entries()).map(([agentName, info]) => ({ agentName, info }));
 }
 
+/** Records descriptor-backed workspace metadata without loading workspace files or mutating env. */
+export function registerAgentWorkspaceInfo(agentName: string, info: AgentWorkspaceInfo): void {
+    agentWorkspaceInfo.set(agentName, info);
+}
+
 export async function loadWorkspaces(options: LoadWorkspacesOptions = {}): Promise<WorkspaceLoadSummary> {
     const cwd = options.cwd ?? process.cwd();
     const registryPath = await resolveRegistryPath(options.registryPath ?? process.env.CALLAGENT_WORKSPACES, cwd);

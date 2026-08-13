@@ -56,10 +56,10 @@ async function main(): Promise<void> {
         transportClose = nats.close;
         hatchetBootstrap = resolveHatchetOutboxBootstrap({ sessionStore, eventBus });
     }
+    let registered: Awaited<ReturnType<typeof registerWorkspaceAgents>> | undefined;
     const { shutdown: shutdownComposition } = await bootstrapCompositionRoot({
         registerAgents: async () => {
-            const registered = await registerWorkspaceAgents(descriptor);
-            console.log(`CALLAGENT_RUNTIME_READY ${JSON.stringify(registered)}`);
+            registered = await registerWorkspaceAgents(descriptor);
         },
         taskEngine: { sessionStore, eventBus, transportClose, runtimeDriverFactory: hatchetBootstrap?.runtimeDriverFactory },
     });
@@ -103,7 +103,11 @@ async function main(): Promise<void> {
         app.get(/^\/operator\/.*/, (_req, res) => res.sendFile(join(observer, 'index.html')));
     }
     app.use('/', createRuntimeApiRouter());
-    const server = app.listen(Number(process.env.PORT ?? 8790), process.env.HOST ?? '127.0.0.1', () => console.log('Runtime host ready'));
+    const server = app.listen(Number(process.env.PORT ?? 8790), process.env.HOST ?? '127.0.0.1', () => {
+        if (!registered) throw new Error('Runtime host started without registering workspace agents');
+        console.log(`CALLAGENT_RUNTIME_READY ${JSON.stringify(registered)}`);
+        console.log('Runtime host ready');
+    });
     const shutdown = async () => {
         shutdownComposition();
         await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -44,6 +44,7 @@ export {
 } from './plugin/WorkspaceResolution.js';
 export {
     getAgentWorkspaceInfo,
+    registerAgentWorkspaceInfo,
     loadWorkspaces,
     type AgentWorkspaceInfo,
     type LoadWorkspacesOptions,

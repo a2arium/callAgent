@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { resolveWorkspaceRuntime, WorkspaceResolutionError } from '@a2arium/callagent-core';
 import { runtimeEntryPoints } from '@a2arium/callagent-runtime';
@@ -44,6 +46,7 @@ function printAgents(descriptor: Awaited<ReturnType<typeof resolveWorkspaceRunti
 
 async function dev(options: Options): Promise<void> {
     const { descriptor, environment } = await resolve(options);
+    await preflight(environment.values);
     const descriptorFile = await writeRuntimeDescriptor(descriptor);
     const installedEntries = runtimeEntryPoints();
     const hostEntry = options.hostEntry ?? process.env.CALLAGENT_HOST_ENTRY ?? installedEntries.host;
@@ -58,11 +61,16 @@ async function dev(options: Options): Promise<void> {
         CALLAGENT_WORKSPACE_FINGERPRINT: descriptor.fingerprint,
         ...(options.host ? { HOST: options.host } : {}),
         ...(options.port ? { PORT: options.port } : {}),
+        ...(options.noObserver ? { CALLAGENT_OBSERVER_ENABLED: 'false' } : {}),
+        CALLAGENT_STRICT_AGENT_IDS: 'true',
     };
+    for (const conflict of environment.conflicts) {
+        console.warn(`Environment key ${conflict.key} from ${conflict.ignoredSource} was ignored; keeping ${conflict.keptSource}`);
+    }
     const expectedAgents = descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort();
     const children = new Map<string, ChildProcess>();
     let stopped = false;
-    const stop = async (reason: string, code = 0): Promise<never> => {
+    const stop = async (reason: string, code = 0): Promise<void> => {
         if (!stopped) {
             stopped = true;
             console.log(`Stopping runtime (${reason})...`);
@@ -71,14 +79,14 @@ async function dev(options: Options): Promise<void> {
             for (const child of children.values()) if (child.exitCode === null) child.kill('SIGKILL');
             await descriptorFile.cleanup();
         }
-        process.exit(code);
+        process.exitCode = code;
     };
     process.once('SIGINT', () => void stop('SIGINT'));
     process.once('SIGTERM', () => void stop('SIGTERM'));
     try {
         const ready = await Promise.all([
-            startChild('host', hostEntry, childEnv, children, expectedAgents),
-            startChild('worker', workerEntry, childEnv, children, expectedAgents),
+            startChild('host', hostEntry, childEnv, children, expectedAgents, () => void stop('host exited unexpectedly', 1)),
+            startChild('worker', workerEntry, childEnv, children, expectedAgents, () => void stop('worker exited unexpectedly', 1)),
         ]);
         if (ready.some((item) => item.fingerprint !== descriptor.fingerprint || !sameIds(item.agentIds, expectedAgents))) {
             throw new Error('Runtime child readiness did not match the resolved workspace descriptor');
@@ -89,13 +97,42 @@ async function dev(options: Options): Promise<void> {
     }
 }
 
-function startChild(name: string, entry: string, env: NodeJS.ProcessEnv, children: Map<string, ChildProcess>, expectedAgents: string[]): Promise<{ fingerprint: string; agentIds: string[] }> {
+async function preflight(env: Record<string, string>): Promise<void> {
+    const targets = [
+        ['NATS', endpointFromUrl(env.NATS_URL ?? 'nats://127.0.0.1:4222', 4222)],
+        ['Hatchet gRPC', endpointFromHostPort(env.HATCHET_CLIENT_HOST_PORT ?? '127.0.0.1:7077', 7077)],
+        ['Postgres', endpointFromUrl(env.MEMORY_DATABASE_URL ?? 'postgres://127.0.0.1:5432/callagent', 5432)],
+    ] as const;
+    const results = await Promise.all(targets.map(async ([name, endpoint]) => ({ name, endpoint, ok: await tcpConnect(endpoint.host, endpoint.port) })));
+    const failed = results.filter((result) => !result.ok);
+    if (failed.length) throw new Error(`Runtime preflight failed: ${failed.map((result) => `${result.name} at ${result.endpoint.host}:${result.endpoint.port}`).join(', ')}. Start infrastructure before callagent dev.`);
+}
+
+function endpointFromUrl(value: string, defaultPort: number): { host: string; port: number } {
+    try { const url = new URL(value); return { host: normalizeHost(url.hostname), port: Number(url.port || defaultPort) }; }
+    catch { return endpointFromHostPort(value, defaultPort); }
+}
+function endpointFromHostPort(value: string, defaultPort: number): { host: string; port: number } {
+    const separator = value.lastIndexOf(':');
+    return separator === -1 ? { host: normalizeHost(value), port: defaultPort } : { host: normalizeHost(value.slice(0, separator)), port: Number(value.slice(separator + 1) || defaultPort) };
+}
+function normalizeHost(host: string): string { return host === 'localhost' || host === '0.0.0.0' ? '127.0.0.1' : host; }
+function tcpConnect(host: string, port: number): Promise<boolean> { return new Promise((resolve) => { const socket = net.createConnection({ host, port }); const done = (result: boolean) => { socket.destroy(); resolve(result); }; socket.setTimeout(1_500); socket.once('connect', () => done(true)); socket.once('timeout', () => done(false)); socket.once('error', () => done(false)); }); }
+
+function startChild(name: string, entry: string, env: NodeJS.ProcessEnv, children: Map<string, ChildProcess>, expectedAgents: string[], onUnexpectedExit: () => void): Promise<{ fingerprint: string; agentIds: string[] }> {
     return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [path.resolve(entry)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
         children.set(name, child);
         let settled = false;
         const fail = (message: string) => { if (!settled) { settled = true; reject(new Error(message)); } };
-        child.once('exit', (code, signal) => fail(`${name} exited before readiness (${signal ?? code ?? 'unknown'})`));
+        child.once('exit', (code, signal) => {
+            children.delete(name);
+            if (settled) {
+                onUnexpectedExit();
+                return;
+            }
+            fail(`${name} exited before readiness (${signal ?? code ?? 'unknown'})`);
+        });
         child.stdout?.on('data', (chunk: Buffer) => {
             for (const line of chunk.toString().split(/\r?\n/)) {
                 if (!line) continue;
@@ -146,6 +183,18 @@ function parse(argv: string[]): { command: string; options: Options } {
     return { command: command || 'help', options };
 }
 
+function localCliPath(): string | undefined {
+    if (process.env.CALLAGENT_LOCAL_CLI_REEXEC === '1') return undefined;
+    let current = process.cwd();
+    while (true) {
+        const candidate = path.join(current, 'node_modules', '@a2arium', 'callagent-cli', 'dist', 'cli.js');
+        if (fs.existsSync(candidate) && path.resolve(candidate) !== path.resolve(process.argv[1] ?? '')) return candidate;
+        const parent = path.dirname(current);
+        if (parent === current) return undefined;
+        current = parent;
+    }
+}
+
 function sameIds(actual: string[], expected: string[]): boolean { return actual.slice().sort().join('\0') === expected.slice().sort().join('\0'); }
 function timeout(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function waitForExit(child: ChildProcess): Promise<void> { return new Promise((resolve) => child.exitCode !== null ? resolve() : child.once('exit', () => resolve())); }
@@ -155,7 +204,14 @@ function printMutation(value: unknown, json: boolean): void { if (json) console.
 function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : { result: value }; }
 function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  dev\n  workspace validate [--json]\n  workspace add-agent-source <path>\n  workspace remove-agent-source <name>\n  agents list [--json]\n  create agent <name>\n  create agent-project <name>\n  create workspace <name>`); }
 
-main(process.argv.slice(2)).catch((error: unknown) => {
+const localCli = localCliPath();
+if (localCli) {
+    const child = spawn(process.execPath, [localCli, ...process.argv.slice(2)], {
+        stdio: 'inherit',
+        env: { ...process.env, CALLAGENT_LOCAL_CLI_REEXEC: '1' },
+    });
+    child.once('exit', (code, signal) => { process.exitCode = signal ? 1 : (code ?? 1); });
+} else main(process.argv.slice(2)).catch((error: unknown) => {
     if (error instanceof WorkspaceResolutionError) {
         for (const issue of error.issues) console.error(`${issue.path ?? 'workspace'}: ${issue.message}`);
     } else console.error(error instanceof Error ? error.message : String(error));

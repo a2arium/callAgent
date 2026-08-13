@@ -10,15 +10,34 @@ export async function createAgentProject(name: string, options: GenerateOptions)
     assertName(name);
     const output = path.resolve(options.output ?? name);
     await prepareEmptyDirectory(output, options.force);
-    const deps = options.monorepo ? { '@a2arium/callagent-core': 'workspace:*', '@a2arium/callagent-types': 'workspace:*' } : { '@a2arium/callagent-core': '^0.2.0', '@a2arium/callagent-types': '^0.2.0' };
-    await write(output, 'package.json', JSON.stringify({ name, version: '0.1.0', private: true, type: 'module', scripts: { build: 'tsc -p tsconfig.json', test: 'jest' }, dependencies: deps, devDependencies: { typescript: '^5.8.3', jest: '^29.7.0' } }, null, 2) + '\n');
-    await write(output, 'tsconfig.json', JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'nodenext', moduleResolution: 'nodenext', strict: true, esModuleInterop: true, skipLibCheck: true, outDir: 'dist', rootDir: 'src', declaration: true }, include: ['src'], exclude: ['node_modules', 'dist', 'tests'] }, null, 2) + '\n');
+    const monorepo = options.monorepo ?? await isCallagentRepositoryProject(output);
+    const deps = monorepo ? { '@a2arium/callagent-core': 'workspace:*', '@a2arium/callagent-types': 'workspace:*' } : { '@a2arium/callagent-core': '^0.3.0', '@a2arium/callagent-types': '^0.2.0' };
+    await write(output, 'package.json', JSON.stringify({ name, version: '0.1.0', private: true, type: 'module', scripts: { build: 'tsc -p tsconfig.json && node scripts/copy-agent-assets.mjs', test: 'jest --config jest.config.mjs' }, dependencies: deps, devDependencies: { typescript: '^5.8.3', jest: '^29.7.0' } }, null, 2) + '\n');
+    await write(output, 'tsconfig.json', JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'nodenext', moduleResolution: 'nodenext', strict: true, esModuleInterop: true, skipLibCheck: true, outDir: 'dist', rootDir: 'src', declaration: true }, include: ['src'], exclude: ['node_modules', 'dist', 'tests', 'src/**/tests'] }, null, 2) + '\n');
     await write(output, '.callagent/agent-paths.json', '{\n  \n}\n');
+    await write(output, 'jest.config.mjs', `export default { testEnvironment: 'node', transform: {} };\n`);
+    await write(output, 'scripts/copy-agent-assets.mjs', `import { cp, mkdir, readdir } from 'node:fs/promises';
+import path from 'node:path';
+const source = path.resolve('src/agents');
+const target = path.resolve('dist/agents');
+async function visit(dir) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const from = path.join(dir, entry.name);
+    if (entry.isDirectory()) await visit(from);
+    if (entry.isFile() && (entry.name === 'agent-card.json' || entry.name === 'agent-runtime.json')) {
+      const to = path.join(target, path.relative(source, from));
+      await mkdir(path.dirname(to), { recursive: true });
+      await cp(from, to);
+    }
+  }
+}
+await visit(source);
+`);
     await fs.mkdir(path.join(output, 'src', 'agents'), { recursive: true });
     await fs.mkdir(path.join(output, 'tests', 'agents'), { recursive: true });
     if (options.withAgent) {
         const { output: _output, ...agentOptions } = options;
-        await createAgent(options.withAgent, { ...agentOptions, project: output });
+        await createAgent(options.withAgent, { ...agentOptions, monorepo, project: output });
     }
     return { output, ...(options.withAgent ? { agent: options.withAgent } : {}) };
 }
@@ -37,7 +56,9 @@ export async function createAgent(name: string, options: GenerateOptions): Promi
     await scaffoldAgent({ name, preset: options.preset ?? 'minimal', outputDir: output, force: options.force, monorepo: options.monorepo, usesLlm: options.usesLlm, usesTools: options.usesTools, usesChildren: options.usesChildren, usesPlans: options.usesPlans });
     await Promise.all(['package.json', 'tsconfig.json'].map(async (file) => fs.rm(path.join(output, file), { force: true })));
     const rel = (file: string) => path.relative(path.dirname(indexPath), path.join(output, file)).split(path.sep).join('/');
-    index[name] = { module: rel('agent.ts'), agentCard: rel('agent-card.json'), runtimeManifest: rel('agent-runtime.json') };
+    const distModule = path.relative(project, path.join(project, 'dist', 'agents', name, 'agent.js')).split(path.sep).join('/');
+    const distAgentRoot = distModule.slice(0, -'agent.js'.length);
+    index[name] = { module: `../${distModule}`, agentCard: `../${distAgentRoot}agent-card.json`, runtimeManifest: `../${distAgentRoot}agent-runtime.json` };
     await atomicJson(indexPath, index);
     return { output, project };
 }
@@ -47,7 +68,11 @@ export async function createWorkspace(name: string, options: GenerateOptions): P
     const output = path.resolve(options.output ?? name);
     await prepareEmptyDirectory(output, options.force);
     const registryPath = path.join(output, '.callagent', 'workspaces.json');
-    await write(output, 'package.json', JSON.stringify({ name, private: true, scripts: { dev: 'callagent dev', validate: 'callagent workspace validate', agents: 'callagent agents list' }, devDependencies: { '@a2arium/callagent-cli': '^0.1.0' }, dependencies: { '@a2arium/callagent-runtime': '^0.1.0' } }, null, 2) + '\n');
+    const monorepo = options.monorepo ?? await isCallagentRepositoryProject(output);
+    const packageRanges = monorepo
+        ? { cli: 'workspace:*', runtime: 'workspace:*' }
+        : { cli: '^0.1.0', runtime: '^0.1.0' };
+    await write(output, 'package.json', JSON.stringify({ name, private: true, scripts: { dev: 'callagent dev', validate: 'callagent workspace validate', agents: 'callagent agents list' }, devDependencies: { '@a2arium/callagent-cli': packageRanges.cli }, dependencies: { '@a2arium/callagent-runtime': packageRanges.runtime } }, null, 2) + '\n');
     await write(output, '.env.example', '# MEMORY_DATABASE_URL=postgres://localhost:5432/callagent\n# NATS_URL=nats://localhost:4222\n');
     await write(output, '.gitignore', '.env\n.callagent/runtime/\n');
     await write(output, 'README.md', `# ${name}\n\nRun \`npm install\`, then \`npm run validate\` and \`npm run dev\`.\n`);
@@ -89,6 +114,19 @@ async function findRegistry(requested?: string): Promise<string> { if (requested
 async function prepareEmptyDirectory(output: string, force?: boolean): Promise<void> { try { const entries = await fs.readdir(output); if (entries.length && !force) throw new Error(`Output exists and is not empty: ${output}`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } await fs.mkdir(output, { recursive: true }); }
 async function write(root: string, relative: string, content: string): Promise<void> { const target = path.join(root, relative); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, content, 'utf8'); }
 async function exists(file: string): Promise<boolean> { try { await fs.access(file); return true; } catch { return false; } }
+async function isCallagentRepositoryProject(output: string): Promise<boolean> {
+    let current = output;
+    while (true) {
+        const manifestPath = path.join(current, 'package.json');
+        try {
+            const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as { name?: unknown; workspaces?: unknown };
+            if (manifest.name === 'callagent' && Array.isArray(manifest.workspaces)) return true;
+        } catch { /* keep walking */ }
+        const parent = path.dirname(current);
+        if (parent === current) return false;
+        current = parent;
+    }
+}
 async function readRegistryIndex(file: string): Promise<Record<string, unknown>> { try { const value = JSON.parse(await fs.readFile(file, 'utf8')) as unknown; if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('not an object'); return value as Record<string, unknown>; } catch { throw new Error(`Invalid or missing agent index: ${file}`); } }
 async function readRegistry(file: string): Promise<Registry> { try { const value = JSON.parse(await fs.readFile(file, 'utf8')) as unknown; if (!value || typeof value !== 'object' || !Array.isArray((value as Registry).workspaces)) throw new Error('invalid'); return value as Registry; } catch { throw new Error(`Invalid or missing workspace registry: ${file}`); } }
 async function atomicJson(file: string, value: unknown): Promise<void> { await fs.mkdir(path.dirname(file), { recursive: true }); const temp = `${file}.${process.pid}.tmp`; await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf8'); await fs.rename(temp, file); }

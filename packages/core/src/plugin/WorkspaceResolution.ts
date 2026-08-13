@@ -246,12 +246,21 @@ function resolveSources(entries: WorkspaceRegistryEntry[], registryPath: string)
 
 async function resolveAgents(sources: ResolvedAgentSource[]): Promise<RuntimeWorkspaceDescriptor['workspaces']> {
     const agentIds = new Set<string>();
+    const aliases = new Map<string, string>();
     const workspaces: RuntimeWorkspaceDescriptor['workspaces'] = [];
     for (const source of sources) {
         const entries = await readAgentIndex(source);
         const agents: ResolvedWorkspaceAgent[] = [];
         for (const [id, entry] of Object.entries(entries)) {
             if (agentIds.has(id)) throw invalid(`Agent id "${id}" is present in more than one agent source`, source.agentIndexPath);
+            const alias = id.replace(/[-_]agent$/i, '');
+            if (alias !== id) {
+                const existing = aliases.get(alias);
+                if (existing && existing !== id) {
+                    throw invalid(`Agent alias "${alias}" would be ambiguous between "${existing}" and "${id}"`, source.agentIndexPath);
+                }
+                aliases.set(alias, id);
+            }
             agentIds.add(id);
             agents.push(await resolveAgent(source, id, entry));
         }
@@ -297,6 +306,9 @@ async function readAgentIndex(source: ResolvedAgentSource): Promise<Record<strin
 async function resolveAgent(source: ResolvedAgentSource, id: string, entry: AgentIndexEntry): Promise<ResolvedWorkspaceAgent> {
     const indexDir = path.dirname(source.agentIndexPath);
     const modulePath = path.resolve(indexDir, entry.module);
+    if (/\.(?:ts|mts|cts)$/i.test(modulePath)) {
+        throw invalid(`Agent "${id}" points to TypeScript source (${modulePath}). Build the agent project and index its compiled JavaScript module.`, modulePath);
+    }
     const agentCardPath = entry.agentCard ? path.resolve(indexDir, entry.agentCard) : undefined;
     const runtimeManifestPath = entry.runtimeManifest ? path.resolve(indexDir, entry.runtimeManifest) : undefined;
     const module = await digestFile(modulePath, 'module');
@@ -376,7 +388,8 @@ async function digestFile(filePath: string, label: string): Promise<string> {
         return hash(await fs.readFile(filePath, 'utf8'));
     } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        throw invalid(`Cannot read ${label}: ${detail}`, filePath);
+        const buildHint = label === 'module' ? ' Build the agent project before composing this workspace.' : '';
+        throw invalid(`Cannot read ${label}: ${detail}.${buildHint}`, filePath);
     }
 }
 

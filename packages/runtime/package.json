@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "description": "Workspace runtime primitives for CallAgent.",
   "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/runtime"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/runtime#readme",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,11 +42,11 @@
     "access": "public"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "workspace:*",
-    "@a2arium/callagent-driver-hatchet": "workspace:*",
-    "@a2arium/callagent-eventbus-nats": "workspace:*",
-    "@a2arium/callagent-memory-sql": "workspace:*",
-    "@a2arium/callagent-operator-auth": "workspace:*",
+    "@a2arium/callagent-core": "^0.3.0",
+    "@a2arium/callagent-driver-hatchet": "^0.1.0",
+    "@a2arium/callagent-eventbus-nats": "^0.1.0",
+    "@a2arium/callagent-memory-sql": "^0.2.0",
+    "@a2arium/callagent-operator-auth": "^0.1.0",
     "express": "^5.0.1"
   },
   "devDependencies": {

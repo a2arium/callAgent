@@ -293,6 +293,29 @@ Package-manager equivalents such as `yarn dlx`, `pnpm dlx`, and globally
 installed Yarn/pnpm binaries may be documented, but npm commands are the
 portable reference contract.
 
+### Development and distribution modes
+
+This phase supports two deliberate modes:
+
+1. **CallAgent repository development.** The monorepo uses Yarn workspaces and
+   current local source. Projects generated beneath the CallAgent repository may
+   use `workspace:*` ranges so contributors can exercise unreleased framework
+   changes together. Those generated projects are repository fixtures, not
+   publishable consumer projects.
+2. **Consumer and production use.** Projects outside the CallAgent repository
+   use ordinary npm semver ranges and install published package versions. They
+   must never depend on `workspace:`, `portal:`, `link:`, or `file:` ranges.
+
+The project generator detects repository development automatically and also
+allows an explicit `--monorepo` override. The package manifests shipped to npm
+always contain normal semver dependency ranges. This preserves fast local work
+without weakening the published distribution contract.
+
+`npm pack` installation testing is useful release hardening, but is deferred
+from this phase's required implementation and CI gates. Until that gate is
+introduced, published-version integration testing—not local tarball installs—is
+the consumer validation path.
+
 The reliability rules are:
 
 1. **CallAgent workspaces pin the CLI locally.** Generated `package.json`
@@ -1142,7 +1165,8 @@ implementations.
    ranges for all runtime packages.
 2. Extend publish-manifest and packlist checks to cover runtime, CLI, auth, and
    Hatchet driver packages.
-3. Add `npm pack` installation tests in a temporary project outside the repo.
+3. Verify published-version manifests have normal semver dependency ranges and
+   no local protocols; defer `npm pack` installation testing to release hardening.
 4. Add a real host/worker cross-agent acceptance test.
 5. Document coordinated versioning and publish order.
 
@@ -1206,7 +1230,10 @@ implementations.
 - Signal handling, startup cancellation, child failure, and bounded shutdown.
 - Runtime package asset lookup independent of `process.cwd()`.
 
-### Package-boundary smoke test
+### Deferred: package-boundary smoke test
+
+This is intentionally deferred to release hardening. It is not a required CI
+or acceptance gate for the two-mode workflow in this phase.
 
 For every supported Node.js version in package-readiness CI:
 
@@ -1561,8 +1588,8 @@ Also verify:
 - every command example passes shell/CLI smoke tests where practical;
 - generated file trees match generator golden tests;
 - `callagent --help` uses the same vocabulary as the docs;
-- local-pinned, one-off, and global installation examples execute in packed
-  temporary projects;
+- local-pinned, one-off, and global installation examples are documented
+  against published versions;
 - README reaches the tutorial, CLI reference, workspace guide, and migration
   document within two links;
 - current docs contain no consumer instruction requiring a CallAgent source
@@ -1570,11 +1597,11 @@ Also verify:
 
 ## Acceptance Criteria
 
-1. A clean project outside the CallAgent repository can install packed or
-   published CallAgent packages and run `callagent dev`.
-2. The packed CLI can generate an agent, a zero/one/multi-agent buildable agent
-   project, and a valid CallAgent workspace without using CallAgent monorepo
-   files or local-only dependency ranges.
+1. A clean project outside the CallAgent repository can install published
+   CallAgent packages and run `callagent dev`.
+2. The published CLI can generate an agent, a zero/one/multi-agent buildable
+   agent project, and a valid CallAgent workspace without using CallAgent
+   monorepo files or local-only dependency ranges.
 3. `callagent workspace add-agent-source` and `remove-agent-source` update the
    registry atomically, reject ambiguous or invalid compositions, and preserve
    portable paths.
@@ -1602,8 +1629,9 @@ Also verify:
    processes within a bounded deadline.
 14. Public manifests and tarballs contain no local dependency protocols or
     repository-relative runtime assumptions.
-15. The clean packed-project smoke test and real packed full-boundary Hatchet
-    acceptance test pass in CI or required release gates.
+15. Published-version integration and the real full-boundary Hatchet acceptance
+    test pass in CI or required release gates. `npm pack` smoke testing is a
+    deferred release-hardening enhancement.
 16. Existing framework tests, builds, type tests, import checks, manifest checks,
     and packlist checks remain green.
 17. Every maintained file in the documentation cutover matrix is updated, new
@@ -1632,8 +1660,7 @@ Also verify:
 - [ ] Operator auth and Hatchet driver are publish-ready.
 - [ ] Host and worker use one shared loader and no example-agent dependencies.
 - [ ] Root repository runtime delegates to the installed-style CLI path.
-- [ ] External packed-project smoke test passes on supported Node versions.
-- [ ] Real packed host/worker cross-agent acceptance test passes.
+- [ ] Published-version host/worker cross-agent acceptance test passes.
 - [ ] Failure, signal, security, performance, and regression tests pass.
 - [ ] Distribution and coordinated-release gates pass.
 - [ ] Required user, migration, API, and contributor docs are updated.
@@ -1649,6 +1676,7 @@ After this specification is complete and stable, create separate design work for
 5. A typed composition format and generated resolution lockfile.
 6. Package, Git, and remote agent source resolvers.
 7. Safe watch/restart behavior for local agent development.
+8. `npm pack` temporary-project smoke testing and tarball-boundary validation.
 
 Each track must preserve the installable composition workflow established here
 instead of moving application ownership back into the framework repository.

@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "description": "Command line interface for CallAgent workspaces.",
   "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/cli#readme",
   "type": "module",
   "bin": {
     "callagent": "./dist/cli.js"
@@ -19,8 +29,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@a2arium/callagent-core": "workspace:*",
-    "@a2arium/callagent-runtime": "workspace:*"
+    "@a2arium/callagent-core": "^0.3.0",
+    "@a2arium/callagent-runtime": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
