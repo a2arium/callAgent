@@ -6,24 +6,28 @@ import { formatCost, formatDuration, stringFromUnknown } from '../../design/form
 import { normalizeRuntimeStatus } from '../../domain/derive';
 import { semanticFailureFromTurn, type SemanticFailure } from '../../domain/semanticFailure';
 import { JsonPreview } from '../inspector/JsonPreview';
-import type { AgentRunEvent, TurnAttemptRun, TurnRun } from '../../types';
+import type { AgentRunEvent, AgentRunStatus, CognitiveTurnRun, TurnAttemptRun, TurnRun } from '../../types';
 import { cn } from '../../lib/utils';
 import { HatchetRunLink } from '../hatchet/HatchetRunLink';
+import { buildTurnStacks, turnStackLabel } from '../../domain/turnStacks';
 
 export function TurnTimeline(props: {
   turns: TurnRun[];
   unassignedAttempts?: TurnAttemptRun[];
   tenantId?: string;
+  ownerStatus?: AgentRunStatus;
   onSelect: (turn: TurnRun) => void;
 }): React.ReactElement {
   const attemptCount = props.turns.reduce((count, turn) => count + turn.attempts.length, 0);
+  const stacks = buildTurnStacks(props.turns, props.ownerStatus ? new Map([[props.turns[0]?.taskId ?? '', props.ownerStatus]]) : undefined);
+  const turnCount = stacks.reduce((count, stack) => count + stack.turns.length, 0);
   return (
     <section className="grid gap-3 p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h4 className="text-sm font-semibold">Turn timeline</h4>
+          <h4 className="text-sm font-semibold">Turns</h4>
           <p className="text-xs text-muted-foreground">
-            {props.turns.length} {props.turns.length === 1 ? 'turn' : 'turns'} · {attemptCount} runtime {attemptCount === 1 ? 'delivery' : 'deliveries'}
+            {turnCount} {turnCount === 1 ? 'turn' : 'turns'} in {stacks.length} {stacks.length === 1 ? 'stack' : 'stacks'} · {attemptCount} runtime {attemptCount === 1 ? 'delivery' : 'deliveries'}
           </p>
         </div>
       </div>
@@ -35,57 +39,97 @@ export function TurnTimeline(props: {
       ) : null}
 
       <div className="grid max-h-[360px] gap-2 overflow-y-auto overflow-x-hidden pr-1">
-        {props.turns.length === 0 ? <p className="text-sm text-muted-foreground">Turn summary was not captured for this node.</p> : null}
-        {props.turns.map((turn) => {
+        {stacks.length === 0 ? <p className="text-sm text-muted-foreground">Turn details were not captured for this node.</p> : null}
+        {stacks.map((stack) => {
+          const final = stack.turns.at(-1)!;
           return (
-            <button
-              key={turn.id}
-              type="button"
+            <div
+              key={stack.id}
               className={cn(
-                'min-w-0 rounded-lg border bg-background/50 p-3 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                'min-w-0 rounded-lg border bg-background/50 p-3 text-left text-sm',
                 'border-border'
               )}
-              onClick={() => props.onSelect(turn)}
             >
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="break-words font-semibold [overflow-wrap:anywhere]">Turn {turn.turnSeq}</p>
+                  <p className="break-words font-semibold [overflow-wrap:anywhere]">{turnStackLabel(stack)}</p>
                   <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                    {turnFlowLabel(turn)}
+                    {final.cognition.stageBefore ?? '?'} → {cognitiveTransitionKind(final) ?? final.cognition.stageAfter ?? 'continue'}
                   </p>
                 </div>
                 <div className="flex flex-wrap justify-end gap-1">
                   <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                    {turn.attempts.length} {turn.attempts.length === 1 ? 'delivery' : 'deliveries'}
+                    {stack.turns.length} {stack.turns.length === 1 ? 'turn' : 'turns'}
                   </span>
                   <StatusBadge
-                    status={normalizeRuntimeStatus(turn.status)}
-                    className={turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled'
-                      ? 'border-danger-border bg-danger-bg text-danger'
-                      : undefined}
+                    status={normalizeRuntimeStatus(stack.status)}
                   />
                 </div>
               </div>
-              {turn.authoritativeTerminal ? (
-                <p className="mt-2 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
-                  <FileOutput className="h-3 w-3" />
-                  Authoritative terminal winner
-                </p>
-              ) : null}
+              <button
+                type="button"
+                className="mt-2 text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => props.onSelect(stack.segment)}
+              >
+                Inspect turns
+              </button>
               <div className="mt-2 flex flex-wrap gap-1.5">
-                <Marker icon={<Brain className="h-3 w-3" />} label={intentLabel(turn)} />
-                {turn.cognition?.shield?.action ? <Marker icon={<ShieldAlert className="h-3 w-3" />} label={String(turn.cognition.shield.action) === 'pass' ? 'Shield pass' : `Shield ${String(turn.cognition.shield.action)}`} /> : null}
-                {turn.boundaryKind?.startsWith('await') ? <Marker icon={<Timer className="h-3 w-3" />} label={humanizeBoundary(turn.boundaryKind)} /> : null}
-                {hasOutputProduced(turn) ? <Marker icon={<FileOutput className="h-3 w-3" />} label="Output produced" /> : null}
-                {turn.llmCalls?.length ? <Marker icon={<DollarSign className="h-3 w-3" />} label={formatCost(turnCost(turn))} /> : null}
-                {turn.severity === 'error' ? <Marker icon={<AlertTriangle className="h-3 w-3" />} label={normalizeRuntimeStatus(turn.status) === 'cancelled' ? 'Error before cancellation' : 'Error'} /> : null}
+                <Marker icon={<Brain className="h-3 w-3" />} label={cognitiveIntentLabel(final)} />
+                {stack.boundary?.startsWith('await') ? <Marker icon={<Timer className="h-3 w-3" />} label={humanizeBoundary(stack.boundary)} /> : null}
+                {stack.status === 'failed' ? <Marker icon={<AlertTriangle className="h-3 w-3" />} label="Failed" /> : null}
               </div>
-            </button>
+              <div className="mt-3 grid gap-2 border-t border-border pt-3">
+                  {stack.turns.map((cognition, index) => (
+                    <CognitiveTimelineRow key={cognition.id} turn={cognition} open={index === stack.turns.length - 1} />
+                  ))}
+              </div>
+            </div>
           );
         })}
       </div>
     </section>
   );
+}
+
+function CognitiveTimelineRow(props: { turn: CognitiveTurnRun; open?: boolean }): React.ReactElement {
+  const turn = props.turn;
+  const timings = turn.cognition.timings as Record<string, unknown> | undefined;
+  const transition = turn.cognition.transition as Record<string, unknown> | undefined;
+  const intent = turn.cognition.intent as Record<string, unknown> | undefined;
+  const transitionLabel = typeof transition?.kind === 'string' ? transition.kind : 'completed';
+  const intentKind = typeof intent?.kind === 'string' ? intent.kind : undefined;
+  return (
+    <details className="rounded-md border border-border bg-card px-3 py-2" open={props.open}>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+        <span className="font-medium">Turn {turn.cognitionTurnSeq}</span>
+        <span className="text-xs text-muted-foreground">
+          {intentKind ? `${intentKind} · ` : ''}{transitionLabel}
+          {typeof timings?.totalMs === 'number' ? ` · ${formatDuration(timings.totalMs)}` : ''}
+          {turn.disposition === 'running' ? ' · running' : turn.disposition === 'observed' ? ' · recorded' : turn.disposition === 'superseded' ? ' · superseded' : ''}
+        </span>
+      </summary>
+      <div className="mt-2 grid gap-1 border-t border-border pt-2 text-xs">
+        <FactRow label="Intent"><JsonPreview value={turn.cognition.intent} /></FactRow>
+        <FactRow label="Transition"><JsonPreview value={turn.cognition.transition} /></FactRow>
+        <FactRow label="Stage timings"><JsonPreview value={turn.cognition.timings} /></FactRow>
+        <FactRow label="Usage"><JsonPreview value={turn.cognition.usage} /></FactRow>
+      </div>
+    </details>
+  );
+}
+
+function cognitiveTransitionKind(turn: CognitiveTurnRun): string | undefined {
+  const transition = turn.cognition.transition;
+  return transition && typeof transition === 'object' && !Array.isArray(transition) && typeof (transition as Record<string, unknown>).kind === 'string'
+    ? (transition as Record<string, unknown>).kind as string
+    : undefined;
+}
+
+function cognitiveIntentLabel(turn: CognitiveTurnRun): string {
+  const intent = turn.cognition.intent;
+  return intent && typeof intent === 'object' && !Array.isArray(intent) && typeof (intent as Record<string, unknown>).kind === 'string'
+    ? String((intent as Record<string, unknown>).kind)
+    : 'Intent not captured';
 }
 
 export function TurnDetail(props: {
@@ -94,11 +138,13 @@ export function TurnDetail(props: {
   events?: AgentRunEvent[];
   tenantId?: string;
   config?: OperatorConfig;
+  ownerStatus?: AgentRunStatus;
   onBack: () => void;
 }): React.ReactElement {
-  if (!props.turn) return <p className="text-sm text-muted-foreground">Select a turn to inspect APLRET cognition.</p>;
+  if (!props.turn) return <p className="text-sm text-muted-foreground">Select a turn stack to inspect its individual turns.</p>;
   const turn = props.turn;
-  const turnLabel = `Turn ${turn.turnSeq}`;
+  const stacks = buildTurnStacks([turn], props.ownerStatus ? new Map([[turn.taskId, props.ownerStatus]]) : undefined);
+  const turnCount = stacks.reduce((count, stack) => count + stack.turns.length, 0);
   const events = props.events ?? [];
   const semanticFailure = semanticFailureFromTurn(turn);
   const stages = [
@@ -123,20 +169,20 @@ export function TurnDetail(props: {
             <span>Back to turns</span>
           </span>
           <StatusBadge
-            status={normalizeRuntimeStatus(turn.status)}
+            status={normalizeRuntimeStatus(props.ownerStatus ? (stacks.at(-1)?.status ?? turn.status) : turn.status)}
             className={turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled'
               ? 'border-danger-border bg-danger-bg text-danger'
               : undefined}
           />
         </div>
         <p className="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-          {props.agentId ?? 'selected agent'} → {turnLabel} · {turnFlowLabel(turn)}
+          {props.agentId ?? 'selected agent'} → {turnCount} recorded {turnCount === 1 ? 'turn' : 'turns'}
         </p>
       </button>
 
       <div className="grid gap-3 px-4 pb-4">
         <section className="grid gap-2">
-          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Summary</h4>
+          <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Selected execution</h4>
           {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}
           {!semanticFailure && turn.severity === 'error' && normalizeRuntimeStatus(turn.status) === 'cancelled' ? (
             <SemanticFailureNotice failure={failureFromAttemptError(turn.error) ?? { message: 'An error occurred before this turn was cancelled.' }} />
@@ -148,7 +194,17 @@ export function TurnDetail(props: {
           ) : null}
         </section>
 
-        <ExecutionAttempts attempts={turn.attempts} tenantId={props.tenantId} config={props.config ?? {}} />
+        {(turn.cognitiveTurns?.length ?? 0) > 0 ? (
+          <section className="grid gap-2">
+            <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Individual turns</h4>
+            {turn.cognitiveTurns!.filter((cognition) => cognition.disposition !== 'superseded').map((cognition, index, all) => <CognitiveTurnDetail key={cognition.id} turn={cognition} open={index === all.length - 1} />)}
+          </section>
+        ) : null}
+
+        <details className="rounded-lg border border-border bg-background/50 p-3">
+          <summary className="cursor-pointer text-sm font-medium">Runtime segment details</summary>
+          <div className="mt-3 grid gap-3 border-t border-border pt-3">
+            <ExecutionAttempts attempts={turn.attempts} tenantId={props.tenantId} config={props.config ?? {}} />
 
         <section className="grid gap-2">
           <h4 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Key signals</h4>
@@ -207,8 +263,32 @@ export function TurnDetail(props: {
         {stages.map((stage, index) => (
           <StageDetailCard key={stage.name} index={index + 1} name={stage.name} value={stage.value} turn={turn} tenantId={props.tenantId} />
         ))}
+          </div>
+        </details>
       </div>
     </section>
+  );
+}
+
+function CognitiveTurnDetail(props: { turn: CognitiveTurnRun; open?: boolean }): React.ReactElement {
+  const turn = props.turn;
+  const timings = turn.cognition.timings as Record<string, unknown> | undefined;
+  return (
+    <details className="rounded-lg border border-border bg-background/50 p-3" open={props.open}>
+      <summary className="cursor-pointer text-sm font-medium">
+        Turn {turn.cognitionTurnSeq} · {turn.disposition === 'running' ? 'running' : turn.disposition}
+        {typeof timings?.totalMs === 'number' ? ` · ${formatDuration(timings.totalMs)}` : ''}
+      </summary>
+      <div className="mt-3 grid gap-2 text-xs">
+        {turn.startedAt ? <FactRow label={turn.startedAtEstimated ? 'Estimated start' : 'Started'}>{turn.startedAt}</FactRow> : null}
+        {turn.finishedAt ? <FactRow label="Completed">{turn.finishedAt}</FactRow> : null}
+        <FactRow label="Intent"><JsonPreview value={turn.cognition.intent} /></FactRow>
+        <FactRow label="Transition"><JsonPreview value={turn.cognition.transition} /></FactRow>
+        <FactRow label="Stage timings"><JsonPreview value={turn.cognition.timings} /></FactRow>
+        <FactRow label="Usage"><JsonPreview value={turn.cognition.usage} /></FactRow>
+        <FactRow label="Operations">{turn.llmCalls.length} LLM · {turn.toolCalls.length} tool · {turn.childCalls.length} child · {turn.memoryOps.length} memory</FactRow>
+      </div>
+    </details>
   );
 }
 

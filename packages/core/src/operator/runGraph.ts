@@ -161,6 +161,28 @@ export type TurnRun = TurnAttemptRun & {
     turnSeq: number;
     severity: RunSeverity;
     attempts: TurnAttemptRun[];
+    cognitiveTurns?: CognitiveTurnRun[];
+};
+
+export type CognitiveTurnRun = {
+    id: string;
+    rootTaskId: string;
+    taskId: string;
+    agentId?: string;
+    turnId?: string;
+    cognitionTurnSeq: number;
+    segmentSeq?: number;
+    attemptKey?: string;
+    claimId?: string;
+    disposition: 'running' | 'observed' | 'committed' | 'superseded';
+    cognition: TurnCognition;
+    llmCalls: unknown[];
+    toolCalls: unknown[];
+    childCalls: unknown[];
+    memoryOps: MemoryOperationRun[];
+    startedAt?: string;
+    startedAtEstimated?: boolean;
+    finishedAt?: string;
 };
 
 export type TurnCognition = {
@@ -727,7 +749,8 @@ function buildTurnRuns(
     memoryOps: MemoryOperationRun[],
     terminalClaim?: { claimId: string; fence: string; generation: string; turnSeq: number }
 ): { turns: TurnRun[]; unassignedAttempts: TurnAttemptRun[] } {
-    const turnEvents = events.filter((event) => event.type === 'turn.completed');
+    const turnEvents = events.filter((event) => event.type === 'turn.completed' || event.type === 'turn.observed');
+    const cognitiveTurns = buildCognitiveTurns(rootTaskId, events, memoryOps);
     const turnStartedEvents = events.filter((event) => event.type === 'turn.started');
     const turnStartedByTurn = new Map<string, AgentRunSourceEvent>();
     for (const event of turnStartedEvents) {
@@ -880,7 +903,118 @@ function buildTurnRuns(
                 return (a.turnSeq ?? 0) - (b.turnSeq ?? 0);
             })
     );
-    return groupTurnAttempts(attempts);
+    const grouped = groupTurnAttempts(attempts);
+    return {
+        ...grouped,
+        turns: grouped.turns.map((turn) => ({
+            ...turn,
+            cognitiveTurns: cognitiveTurns.filter((cognition) =>
+                cognition.taskId === turn.taskId && cognition.segmentSeq === turn.turnSeq
+            ),
+        })),
+    };
+}
+
+function buildCognitiveTurns(
+    rootTaskId: string,
+    events: AgentRunSourceEvent[],
+    memoryOps: MemoryOperationRun[],
+): CognitiveTurnRun[] {
+    const startedByIdentity = new Map<string, AgentRunSourceEvent>();
+    for (const event of events.filter((item) => item.type === 'turn.started')) {
+        startedByIdentity.set(cognitiveEventIdentity(event), event);
+    }
+    const finalized = events
+        .filter((event) => event.type === 'turn.observed' || event.type === 'turn.completed' || event.type === 'turn.superseded')
+        .map((event): CognitiveTurnRun | undefined => {
+            const cognitionTurnSeq = eventCognitionTurnSeq(event);
+            if (cognitionTurnSeq === undefined) return undefined;
+            const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
+            const segmentSeq = eventSegmentSeq(event);
+            const started = startedByIdentity.get(cognitiveEventIdentity(event));
+            const timings = recordField(event.payload, 'timings');
+            const durationMs = numberField(timings, 'totalMs');
+            const derivedStartedAt = durationMs === undefined
+                ? undefined
+                : new Date(new Date(event.createdAt).getTime() - durationMs).toISOString();
+            return {
+                id: cognitiveEventIdentity(event),
+                rootTaskId,
+                taskId,
+                ...(stringField(event.payload, 'agentId') ? { agentId: stringField(event.payload, 'agentId') } : {}),
+                ...(stringField(event.payload, 'turnId') ? { turnId: stringField(event.payload, 'turnId') } : {}),
+                cognitionTurnSeq,
+                ...(segmentSeq !== undefined ? { segmentSeq } : {}),
+                ...(stringField(event.payload, 'attemptKey') ? { attemptKey: stringField(event.payload, 'attemptKey') } : {}),
+                ...(stringField(event.payload, 'claimId') ? { claimId: stringField(event.payload, 'claimId') } : {}),
+                disposition: event.type === 'turn.superseded' ? 'superseded' : event.type === 'turn.completed' ? 'committed' : 'observed',
+                cognition: turnEventProjection(event, memoryOps).cognition!,
+                llmCalls: arrayField(event.payload, 'llmCalls'),
+                toolCalls: arrayField(event.payload, 'toolCalls'),
+                childCalls: arrayField(event.payload, 'childCalls'),
+                memoryOps: memoryOps.filter((op) => op.taskId === taskId && op.turnSeq === cognitionTurnSeq),
+                ...(started?.createdAt || derivedStartedAt ? { startedAt: started?.createdAt ?? derivedStartedAt } : {}),
+                ...(!started && derivedStartedAt ? { startedAtEstimated: true } : {}),
+                finishedAt: event.createdAt,
+            };
+        })
+        .filter((turn): turn is CognitiveTurnRun => turn !== undefined);
+    // `turn.observed` is an immediate, provisional copy of a turn. The later
+    // committed/superseded event has the same identity and must replace it,
+    // never create a second visual or aggregate turn.
+    const finalizedByIdentity = new Map<string, CognitiveTurnRun>();
+    for (const turn of finalized) {
+        const existing = finalizedByIdentity.get(turn.id);
+        if (!existing || cognitiveDispositionRank(turn.disposition) >= cognitiveDispositionRank(existing.disposition)) {
+            finalizedByIdentity.set(turn.id, turn);
+        }
+    }
+    const canonicalFinalized = [...finalizedByIdentity.values()];
+    const finalizedIdentities = new Set(canonicalFinalized.map((turn) => turn.id));
+    const running = events
+        .filter((event) => event.type === 'turn.started' && !finalizedIdentities.has(cognitiveEventIdentity(event)))
+        .map((event): CognitiveTurnRun | undefined => {
+            const cognitionTurnSeq = eventCognitionTurnSeq(event);
+            if (cognitionTurnSeq === undefined) return undefined;
+            const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? rootTaskId;
+            const segmentSeq = eventSegmentSeq(event);
+            return {
+                id: cognitiveEventIdentity(event),
+                rootTaskId,
+                taskId,
+                ...(stringField(event.payload, 'agentId') ? { agentId: stringField(event.payload, 'agentId') } : {}),
+                ...(stringField(event.payload, 'turnId') ? { turnId: stringField(event.payload, 'turnId') } : {}),
+                cognitionTurnSeq,
+                ...(segmentSeq !== undefined ? { segmentSeq } : {}),
+                disposition: 'running',
+                cognition: turnEventProjection(event, memoryOps).cognition!,
+                llmCalls: [], toolCalls: [], childCalls: [],
+                memoryOps: memoryOps.filter((op) => op.taskId === taskId && op.turnSeq === cognitionTurnSeq),
+                startedAt: event.createdAt,
+            };
+        })
+        .filter((turn): turn is CognitiveTurnRun => turn !== undefined);
+    return [...canonicalFinalized, ...running]
+        .sort((a, b) => a.taskId === b.taskId
+            ? a.cognitionTurnSeq - b.cognitionTurnSeq
+            : a.taskId.localeCompare(b.taskId));
+}
+
+function cognitiveDispositionRank(disposition: CognitiveTurnRun['disposition']): number {
+    switch (disposition) {
+        case 'committed': return 3;
+        case 'superseded': return 2;
+        case 'observed': return 1;
+        case 'running': return 0;
+    }
+}
+
+function cognitiveEventIdentity(event: AgentRunSourceEvent): string {
+    const taskId = stringField(event.payload, 'taskId') ?? event.sessionId ?? 'unknown';
+    const turnId = stringField(event.payload, 'turnId');
+    if (turnId) return `${taskId}:turn:${turnId}`;
+    const owner = stringField(event.payload, 'claimId') ?? stringField(event.payload, 'attemptKey') ?? 'unclaimed';
+    return `${taskId}:legacy:${owner}:${eventCognitionTurnSeq(event) ?? event.seq}`;
 }
 
 function finalizeSupersededRunningTurns(turns: TurnAttemptRun[]): TurnAttemptRun[] {
@@ -940,6 +1074,7 @@ export function groupTurnAttempts(attempts: TurnAttemptRun[]): {
             status,
             severity: severityForStatus(status, error),
             attempts: sorted,
+            cognitiveTurns: [],
             ...(sorted.some((attempt) => attempt.authoritativeTerminal) ? { authoritativeTerminal: true } : {}),
             ...(earliestTimestamp(sorted.map((attempt) => attempt.startedAt)) ? {
                 startedAt: earliestTimestamp(sorted.map((attempt) => attempt.startedAt)),
@@ -1404,7 +1539,24 @@ function numberField(payload: Record<string, unknown>, key: string): number | un
 }
 
 function eventTurnSeq(event: Pick<AgentRunSourceEvent, 'payload'>): number | undefined {
-    return numberField(event.payload, 'logicalTurnSeq') ?? numberField(event.payload, 'turnSeq');
+    return eventSegmentSeq(event);
+}
+
+function eventSegmentSeq(event: Pick<AgentRunSourceEvent, 'payload'>): number | undefined {
+    return numberField(event.payload, 'segmentSeq')
+        ?? numberField(event.payload, 'logicalTurnSeq')
+        ?? numberField(event.payload, 'turnSeq');
+}
+
+function eventCognitionTurnSeq(event: Pick<AgentRunSourceEvent, 'payload'>): number | undefined {
+    return numberField(event.payload, 'cognitionTurnSeq') ?? numberField(event.payload, 'turnSeq');
+}
+
+function recordField(payload: Record<string, unknown>, key: string): Record<string, unknown> {
+    const value = payload[key];
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
 }
 
 function arrayField(payload: Record<string, unknown>, key: string): unknown[] {

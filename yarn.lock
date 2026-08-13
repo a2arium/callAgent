@@ -26,6 +26,7 @@ __metadata:
   resolution: "@a2arium/callagent-cli@workspace:packages/cli"
   dependencies:
     "@a2arium/callagent-core": "npm:^0.3.0"
+    "@a2arium/callagent-memory-sql": "npm:^0.2.0"
     "@a2arium/callagent-runtime": "npm:^0.1.0"
     "@types/node": "npm:^22.14.1"
     typescript: "npm:^5.8.3"
@@ -154,6 +155,7 @@ __metadata:
     "@a2arium/callagent-eventbus-nats": "npm:^0.1.0"
     "@a2arium/callagent-memory-sql": "npm:^0.2.0"
     "@a2arium/callagent-operator-auth": "npm:^0.1.0"
+    "@a2arium/operator-viewer": "workspace:*"
     "@types/express": "npm:^5.0.1"
     "@types/node": "npm:^22.14.1"
     express: "npm:^5.0.1"
@@ -273,7 +275,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@a2arium/operator-viewer@workspace:apps/operator-viewer":
+"@a2arium/operator-viewer@workspace:*, @a2arium/operator-viewer@workspace:apps/operator-viewer":
   version: 0.0.0-use.local
   resolution: "@a2arium/operator-viewer@workspace:apps/operator-viewer"
   dependencies:

@@ -379,6 +379,50 @@ model TurnRun {
   @@map("turn_runs")
 }
 
+model CognitiveTurnRun {
+  id                 String    @id @default(cuid())
+  tenantId           String    @map("tenant_id")
+  taskId             String    @map("task_id")
+  rootTaskId         String    @map("root_task_id")
+  agentId            String?   @map("agent_id")
+  identityKey        String    @map("identity_key")
+  turnId             String?   @map("turn_id")
+  cognitionTurnSeq   Int       @map("cognition_turn_seq")
+  segmentSeq         Int?      @map("segment_seq")
+  attemptKey         String?   @map("attempt_key")
+  claimId            String?   @map("claim_id")
+  disposition        String
+  startedAt          DateTime? @map("started_at")
+  startedAtEstimated Boolean   @default(false) @map("started_at_estimated")
+  completedAt        DateTime? @map("completed_at")
+  durationMs         Int?      @map("duration_ms")
+  stageBefore        String?   @map("stage_before")
+  stageAfter         String?   @map("stage_after")
+  cognition          Json?
+  timings            Json?
+  usage              Json?
+  llmCalls           Json?     @map("llm_calls")
+  toolCalls          Json?     @map("tool_calls")
+  childCalls         Json?     @map("child_calls")
+  llmCallCount       Int       @default(0) @map("llm_call_count")
+  memoryOpCount      Int       @default(0) @map("memory_op_count")
+  toolCallCount      Int       @default(0) @map("tool_call_count")
+  childCallCount     Int       @default(0) @map("child_call_count")
+  inputTokens        Int       @default(0) @map("input_tokens")
+  outputTokens       Int       @default(0) @map("output_tokens")
+  knownCostUsd       Decimal?  @map("known_cost_usd") @db.Decimal(18, 6)
+  traceId            String?   @map("trace_id")
+  spanId             String?   @map("span_id")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId, identityKey])
+  @@index([tenantId, taskId, cognitionTurnSeq])
+  @@index([tenantId, rootTaskId, taskId, segmentSeq])
+  @@index([tenantId, taskId, attemptKey])
+  @@map("cognitive_turn_runs")
+}
+
 model RunEffect {
   id             String   @id @default(cuid())
   tenantId       String   @map("tenant_id")

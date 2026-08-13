@@ -163,6 +163,28 @@ export type TurnRun = TurnAttemptRun & {
   turnSeq: number;
   severity: RunSeverity;
   attempts: TurnAttemptRun[];
+  cognitiveTurns?: CognitiveTurnRun[];
+};
+
+export type CognitiveTurnRun = {
+  id: string;
+  rootTaskId: string;
+  taskId: string;
+  agentId?: string;
+  turnId?: string;
+  cognitionTurnSeq: number;
+  segmentSeq?: number;
+  attemptKey?: string;
+  claimId?: string;
+  disposition: 'running' | 'observed' | 'committed' | 'superseded';
+  cognition: TurnCognition;
+  llmCalls: LlmCallRun[];
+  toolCalls: unknown[];
+  childCalls: unknown[];
+  memoryOps: MemoryOperationRun[];
+  startedAt?: string;
+  startedAtEstimated?: boolean;
+  finishedAt?: string;
 };
 
 export type EffectRun = {

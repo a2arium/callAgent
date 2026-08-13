@@ -18,6 +18,7 @@ import { formatCost, formatDuration } from '../../design/format';
 import { buildNodeRollup, deriveStatus, normalizeRuntimeStatus, type GraphInsights } from '../../domain/derive';
 import { semanticFailureFromTurns } from '../../domain/semanticFailure';
 import type { AgentRunGraph, AgentRunNode, TurnRun } from '../../types';
+import { buildTurnStacks, turnStackLabel, type TurnStack } from '../../domain/turnStacks';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design/components/ui/button';
 
@@ -31,7 +32,7 @@ export type AgentNodeData = {
 
 export type TurnNodeData = {
   kind: 'turn';
-  turn: TurnRun;
+  stack: TurnStack;
   selected: boolean;
 };
 
@@ -53,7 +54,7 @@ export function AgentRunGraphView(props: {
   const nodeSignature = useMemo(
     () => [
       ...props.graph.nodes.map((node) => node.id),
-      ...props.graph.turns.map((turn) => turnNodeId(turn)),
+      ...buildTurnStacks(props.graph.turns, new Map(props.graph.nodes.map((node) => [node.taskId, node.status]))).map((stack) => stack.id),
       props.layoutKey ?? '',
     ].sort().join('|'),
     [props.graph.nodes, props.graph.turns, props.layoutKey]
@@ -85,7 +86,7 @@ export function AgentRunGraphView(props: {
         onNodeClick={(_event, node) => {
           const data = node.data as AgentNodeData | TurnNodeData;
           if (data.kind === 'turn') {
-            props.onSelectTurn(data.turn);
+            props.onSelectTurn(data.stack.segment);
             return;
           }
           props.onSelectNode(data.node.id);
@@ -178,7 +179,7 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
           </div>
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-          <Metric label="Turns" value={String(rollup.turns.length)} />
+          <Metric label="Turns" value={String(buildTurnStacks(rollup.turns).reduce((count, stack) => count + stack.turns.length, 0))} />
           <Metric label="LLM" value={String(rollup.llmCalls.length)} />
           <Metric label="Cost" value={formatCost(rollup.costUsd)} />
         </div>
@@ -220,12 +221,12 @@ function CacheBadge(props: { compact?: boolean }): React.ReactElement {
 }
 
 function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
-  const { turn, selected } = props.data;
-  const status = normalizeRuntimeStatus(turn.status);
-  const flowLabel = turnFlowLabel(turn);
-  const boundary = humanizeBoundary(effectiveBoundaryKind(turn));
-  const attemptCount = turn.attempts.length;
-  const severity = turn.severity;
+  const { stack, selected } = props.data;
+  const finalTurn = stack.turns.at(-1)!;
+  const status = normalizeRuntimeStatus(stack.status);
+  const boundary = humanizeBoundary(stack.boundary);
+  const flowLabel = `${finalTurn.cognition.stageBefore ?? '?'} → ${finalTurn.cognition.stageAfter ?? stack.boundary ?? 'continue'}`;
+  const llmCalls = stack.turns.reduce((count, turn) => count + turn.llmCalls.length, 0);
   return (
     <div className="relative">
       <Handle id="left" type="target" position={Position.Left} />
@@ -234,31 +235,28 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
         className={cn(
           'w-[146px] rounded-md border bg-background px-2 py-1.5 text-left shadow-sm transition-colors',
           selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
-          severity === 'error' ? 'border-rose-300 bg-rose-500/10' : '',
+          stack.status === 'failed' ? 'border-rose-300 bg-rose-500/10' : '',
           status === 'running' || status === 'waiting' ? 'border-sky-300 bg-sky-500/10' : ''
         )}
-        aria-label={`Turn ${turn.turnSeq} ${status}${severity === 'error' ? ', error severity' : ''}, ${attemptCount} runtime ${attemptCount === 1 ? 'delivery' : 'deliveries'}`}
+        aria-label={`${turnStackLabel(stack)} ${status}`}
       >
         <div className="flex min-w-0 items-start justify-between gap-1.5">
           <div className="min-w-0">
-            <p className="truncate text-[11px] font-semibold">Turn {turn.turnSeq}</p>
+            <p className="truncate text-[11px] font-semibold">{turnStackLabel(stack)}</p>
             <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={flowLabel}>{boundary ?? status}</p>
           </div>
           <span
             className={cn(
               'mt-0.5 h-2 w-2 shrink-0 rounded-full border',
-              severity === 'success' ? 'border-emerald-600 bg-emerald-500' : '',
-              severity === 'error' ? 'border-rose-600 bg-rose-500' : '',
-              severity === 'info' ? 'border-sky-600 bg-sky-500' : '',
-              severity === 'warning' ? 'border-amber-600 bg-amber-500' : '',
-              severity === 'neutral' ? 'border-slate-500 bg-slate-300' : ''
+              stack.status === 'completed' ? 'border-emerald-600 bg-emerald-500' : '',
+              stack.status === 'failed' ? 'border-rose-600 bg-rose-500' : '',
+              stack.status === 'running' || stack.status === 'waiting' ? 'border-sky-600 bg-sky-500' : '',
+              stack.status === 'canceled' ? 'border-slate-500 bg-slate-300' : ''
             )}
-            title={severity === 'error' && status === 'cancelled' ? 'Cancelled after error' : status}
+            title={status}
           />
         </div>
-        {attemptCount > 1 || turn.attempts.some((attempt) => attempt.disposition && attempt.disposition !== 'executed') ? (
-          <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{attemptCount} runtime deliveries</p>
-        ) : null}
+        <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{stack.turns.length} turns · {llmCalls} LLM</p>
       </article>
     </div>
   );
@@ -282,13 +280,14 @@ function buildFlow(
   nodes: Array<Node<AgentNodeData> | Node<TurnNodeData>>;
   edges: Edge[];
 } {
-  const layout = layoutExecutionGraph(graph);
+  const stacks = buildTurnStacks(graph.turns, new Map(graph.nodes.map((node) => [node.taskId, node.status])));
+  const layout = layoutExecutionGraph(graph, stacks);
   const byTask = new Map(graph.nodes.map((node) => [node.taskId, node]));
-  const turnByParentAndToken = new Map<string, TurnRun>();
-  for (const turn of graph.turns) {
-    const token = awaitChildToken(turn);
+  const turnByParentAndToken = new Map<string, TurnStack>();
+  for (const stack of stacks) {
+    const token = awaitChildToken(stack.segment) ?? awaitChildTokenFromCognition(stack.turns.at(-1)!);
     if (!token) continue;
-    turnByParentAndToken.set(`${turn.taskId}:${token}`, turn);
+    turnByParentAndToken.set(`${stack.taskId}:${token}`, stack);
   }
   const isSingleAgent = graph.nodes.length === 1;
   const agentNodes: Node<AgentNodeData>[] = graph.nodes.map((node) => {
@@ -311,10 +310,10 @@ function buildFlow(
       },
     };
   });
-  const turnNodes: Node<TurnNodeData>[] = graph.turns
-    .filter((turn) => byTask.has(turn.taskId))
-    .map((turn) => {
-      const id = turnNodeId(turn);
+  const turnNodes: Node<TurnNodeData>[] = stacks
+    .filter((stack) => byTask.has(stack.taskId))
+    .map((stack) => {
+      const id = stack.id;
       const position = layout.positions.get(id) ?? { x: 0, y: 0 };
       return {
         id,
@@ -324,26 +323,26 @@ function buildFlow(
         targetPosition: Position.Left,
         data: {
           kind: 'turn',
-          turn,
-          selected: selectedNodeId === turn.taskId && selectedTurnSeq !== undefined && selectedTurnSeq === turn.turnSeq,
+          stack,
+          selected: selectedNodeId === stack.taskId && selectedTurnSeq !== undefined && selectedTurnSeq >= stack.firstSeq && selectedTurnSeq <= stack.lastSeq,
         },
       };
     });
-  const turnEdges: Edge[] = graph.turns
-    .filter((turn) => byTask.has(turn.taskId))
-    .map((turn) => {
-      const status = normalizeRuntimeStatus(turn.status);
+  const turnEdges: Edge[] = stacks
+    .filter((stack) => byTask.has(stack.taskId))
+    .map((stack) => {
+      const status = normalizeRuntimeStatus(stack.status);
       return {
-        id: `agent-turn:${turnNodeId(turn)}`,
-        source: byTask.get(turn.taskId)?.id ?? turn.taskId,
-        target: turnNodeId(turn),
+        id: `agent-turn:${stack.id}`,
+        source: byTask.get(stack.taskId)?.id ?? stack.taskId,
+        target: stack.id,
         sourceHandle: 'right',
         targetHandle: 'left',
         animated: status === 'running' || status === 'waiting',
         markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
         style: {
           strokeWidth: 2,
-          stroke: turn.severity === 'error' ? '#fb7185' : status === 'running' || status === 'waiting' ? '#38bdf8' : '#94a3b8',
+          stroke: stack.status === 'failed' ? '#fb7185' : status === 'running' || status === 'waiting' ? '#38bdf8' : '#94a3b8',
         },
       };
     });
@@ -352,10 +351,10 @@ function buildFlow(
     .map((edge) => {
       const highlighted = insights.failurePathEdgeIds.includes(edge.id);
       const sourceTurn = edge.token ? turnByParentAndToken.get(`${edge.parentTaskId}:${edge.token}`) : undefined;
-      const temporalSourceTurn = sourceTurn ?? findTemporalSourceTurn(graph.turns, edge.parentTaskId, edge.startedAt);
+      const temporalSourceTurn = sourceTurn ?? findTemporalSourceStack(stacks, edge.parentTaskId, edge.startedAt);
       return {
         id: edge.id,
-        source: temporalSourceTurn ? turnNodeId(temporalSourceTurn) : byTask.get(edge.parentTaskId)?.id ?? edge.parentTaskId,
+        source: temporalSourceTurn ? temporalSourceTurn.id : byTask.get(edge.parentTaskId)?.id ?? edge.parentTaskId,
         target: byTask.get(edge.childTaskId ?? '')?.id ?? edge.childTaskId ?? edge.id,
         sourceHandle: 'right',
         targetHandle: 'left',
@@ -370,19 +369,18 @@ function buildFlow(
   return { nodes: [...agentNodes, ...turnNodes], edges: [...turnEdges, ...childEdges] };
 }
 
-function findTemporalSourceTurn(turns: TurnRun[], parentTaskId: string, edgeStartedAt: string | undefined): TurnRun | undefined {
+function findTemporalSourceStack(stacks: TurnStack[], parentTaskId: string, edgeStartedAt: string | undefined): TurnStack | undefined {
   const edgeStartedMs = edgeStartedAt ? Date.parse(edgeStartedAt) : Number.NaN;
-  const parentTurns = turns
-    .filter((turn) => turn.taskId === parentTaskId)
-    .sort((left, right) => (left.turnSeq ?? 0) - (right.turnSeq ?? 0));
+  const parentTurns = stacks.filter((stack) => stack.taskId === parentTaskId)
+    .sort((left, right) => left.lastSeq - right.lastSeq);
   if (!Number.isFinite(edgeStartedMs)) {
-    return parentTurns.find((turn) => normalizeRuntimeStatus(turn.status) === 'running');
+    return parentTurns.find((stack) => stack.status === 'running');
   }
   return parentTurns
-    .filter((turn) => {
-      const startedMs = turn.startedAt ? Date.parse(turn.startedAt) : Number.NaN;
+    .filter((stack) => {
+      const startedMs = stack.turns[0]?.startedAt ? Date.parse(stack.turns[0].startedAt) : Number.NaN;
       if (!Number.isFinite(startedMs) || startedMs > edgeStartedMs) return false;
-      const finishedMs = turn.finishedAt ? Date.parse(turn.finishedAt) : Number.NaN;
+      const finishedMs = stack.turns.at(-1)?.finishedAt ? Date.parse(stack.turns.at(-1)!.finishedAt!) : Number.NaN;
       return !Number.isFinite(finishedMs) || finishedMs >= edgeStartedMs;
     })
     .at(-1);
@@ -399,18 +397,18 @@ const TURN_COLUMN_OFFSET = 300;
 const TURN_GAP = 24;
 const SUBTREE_GAP = 54;
 
-function layoutExecutionGraph(graph: AgentRunGraph): { positions: Map<string, LayoutPoint> } {
+function layoutExecutionGraph(graph: AgentRunGraph, stacks: TurnStack[]): { positions: Map<string, LayoutPoint> } {
   const positions = new Map<string, LayoutPoint>();
   const nodesByTask = new Map(graph.nodes.map((node) => [node.taskId, node]));
-  const turnsByTask = new Map<string, TurnRun[]>();
-  for (const turn of graph.turns) {
-    if (!nodesByTask.has(turn.taskId)) continue;
-    const turns = turnsByTask.get(turn.taskId) ?? [];
-    turns.push(turn);
-    turnsByTask.set(turn.taskId, turns);
+  const turnsByTask = new Map<string, TurnStack[]>();
+  for (const stack of stacks) {
+    if (!nodesByTask.has(stack.taskId)) continue;
+    const taskStacks = turnsByTask.get(stack.taskId) ?? [];
+    taskStacks.push(stack);
+    turnsByTask.set(stack.taskId, taskStacks);
   }
-  for (const turns of turnsByTask.values()) {
-    turns.sort((a, b) => (a.turnSeq ?? 0) - (b.turnSeq ?? 0));
+  for (const taskStacks of turnsByTask.values()) {
+    taskStacks.sort((a, b) => a.firstSeq - b.firstSeq);
   }
 
   const childEdgesByParentToken = new Map<string, typeof graph.edges>();
@@ -445,8 +443,8 @@ function layoutExecutionGraph(graph: AgentRunGraph): { positions: Map<string, La
     const turnCenters: number[] = [];
 
     for (const turn of turns) {
-      const turnId = turnNodeId(turn);
-      const token = awaitChildToken(turn);
+      const turnId = turn.id;
+      const token = awaitChildToken(turn.segment) ?? awaitChildTokenFromCognition(turn.turns.at(-1)!);
       const childEdges = token ? childEdgesByParentToken.get(`${taskId}:${token}`) ?? [] : [];
 
       if (childEdges.length > 0) {
@@ -586,6 +584,13 @@ function awaitChildToken(turn: TurnRun): string | undefined {
     return turn.token;
   }
   return undefined;
+}
+
+function awaitChildTokenFromCognition(turn: TurnStack['turns'][number]): string | undefined {
+  const transition = turn.cognition.transition;
+  return isRecord(transition) && transition.kind === 'await_child' && typeof transition.token === 'string'
+    ? transition.token
+    : undefined;
 }
 
 function hasOutputProduced(turn: TurnRun): boolean {

@@ -89,6 +89,7 @@ type ProjectionPrisma = {
     agentRun?: PrismaDelegate;
     agentRunEdge?: PrismaDelegate;
     turnRun?: PrismaDelegate;
+    cognitiveTurnRun?: PrismaDelegate;
     runEffect?: PrismaDelegate;
     wMSession?: {
         findMany?: (args: Record<string, unknown>) => Promise<Array<{
@@ -98,6 +99,7 @@ type ProjectionPrisma = {
             snapshot: unknown;
         }>>;
     };
+    wMEvent?: PrismaDelegate;
 };
 
 export type TerminalProjectionReconciliationCursor = {
@@ -109,6 +111,11 @@ export type TerminalProjectionReconciliationSummary = {
     scanned: number;
     reconciled: number;
     batches: number;
+};
+
+export type CognitiveProjectionReconciliationSummary = {
+    scanned: number;
+    projected: number;
 };
 
 const operatorProjectionProfileEnabled = () => process.env.CALLAGENT_OPERATOR_PROFILE === '1';
@@ -247,6 +254,28 @@ type SemanticTurnRow = {
     terminalCode?: string | null;
     terminalMessage?: string | null;
     turnTraceId?: string | null;
+};
+
+type SemanticCognitiveTurnRow = {
+    id: string;
+    tenantId: string;
+    taskId: string;
+    rootTaskId: string;
+    agentId?: string | null;
+    identityKey: string;
+    turnId?: string | null;
+    cognitionTurnSeq: number;
+    segmentSeq?: number | null;
+    attemptKey?: string | null;
+    claimId?: string | null;
+    disposition: string;
+    startedAt?: Date | string | null;
+    startedAtEstimated: boolean;
+    completedAt?: Date | string | null;
+    cognition?: unknown;
+    llmCalls?: unknown;
+    toolCalls?: unknown;
+    childCalls?: unknown;
 };
 
 type SemanticEffectRow = {
@@ -633,8 +662,8 @@ export class OperatorProjectionRepository {
         // runtime attempt projection is owned by turn.attempt_* events.
         if (event.type === 'turn.started') return;
 
-        if (event.type === 'turn.completed' || event.type === 'turn.superseded') {
-            const turnSeq = eventTurnSeq(event.payload);
+        if (event.type === 'turn.observed' || event.type === 'turn.completed' || event.type === 'turn.superseded') {
+            const turnSeq = eventSegmentSeq(event.payload);
             if (turnSeq <= 0) return;
             const superseded = event.type === 'turn.superseded';
             const turnTraceId = stringField(event.payload, 'turnId');
@@ -642,10 +671,16 @@ export class OperatorProjectionRepository {
             const transitionKindValue = transitionKind(transition);
             const boundary = isAwaitBoundaryKind(transitionKindValue) ? transitionKindValue : undefined;
             const output = outputProduced({ cognition: { transition }, status: 'completed' } as TurnRun);
-            void turnTraceId;
+            await this.upsertCognitiveTurn(event, {
+                taskId,
+                rootTaskId,
+                agentId,
+                disposition: superseded ? 'superseded' : event.type === 'turn.completed' ? 'committed' : 'observed',
+                completedAt: createdAt,
+            });
             void boundary;
             void output;
-            if (superseded) return;
+            if (superseded || event.type === 'turn.observed') return;
             const runStatus = boundary
                 ? 'waiting'
                 : transitionKindValue === 'complete' ? 'completed' : 'running';
@@ -900,6 +935,46 @@ export class OperatorProjectionRepository {
         return summary;
     }
 
+    async reconcileCognitiveTurns(params: {
+        tenantId?: string;
+        taskId?: string;
+        batchSize?: number;
+    } = {}): Promise<CognitiveProjectionReconciliationSummary> {
+        if (typeof this.prisma.wMEvent?.findMany !== 'function') return { scanned: 0, projected: 0 };
+        const limit = Math.max(1, Math.min(1_000, params.batchSize ?? 100));
+        let after: string | undefined;
+        let scanned = 0;
+        let projected = 0;
+        do {
+            const rows = await this.prisma.wMEvent.findMany({
+                where: stripUndefined({
+                    tenantId: params.tenantId,
+                    sessionId: params.taskId,
+                    type: { in: ['turn.observed', 'turn.completed', 'turn.superseded'] },
+                    ...(after ? { eventId: { gt: after } } : {}),
+                }),
+                orderBy: { eventId: 'asc' },
+                take: limit,
+            }) as Array<{ eventId: string; tenantId: string; sessionId: string; seq: number; type: string; payload: unknown; createdAt: Date }>;
+            for (const row of rows) {
+                if (!row.payload || typeof row.payload !== 'object' || Array.isArray(row.payload)) continue;
+                await this.projectEvent({
+                    tenantId: row.tenantId,
+                    sessionId: row.sessionId,
+                    type: row.type,
+                    payload: row.payload as Record<string, unknown>,
+                    eventId: row.eventId,
+                    seq: row.seq,
+                    createdAt: row.createdAt,
+                });
+                projected += 1;
+            }
+            scanned += rows.length;
+            after = rows.length === limit ? rows.at(-1)?.eventId : undefined;
+        } while (after);
+        return { scanned, projected };
+    }
+
     async listAgentRuns(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
         if (!this.isAvailable()) return undefined;
         return operatorProjectionSingleFlight(
@@ -1027,7 +1102,7 @@ export class OperatorProjectionRepository {
         const root = runs.find((run) => run.taskId === params.taskId);
         if (!root) return undefined;
         const joinStartedAt = projectionNow();
-        const [edges, turns, effects] = await Promise.all([
+        const [edges, turns, cognitiveTurns, effects] = await Promise.all([
             this.prisma.agentRunEdge!.findMany!({
                 where: { tenantId: params.tenantId, rootTaskId: params.taskId },
                 orderBy: [{ createdAt: 'asc' }],
@@ -1036,6 +1111,12 @@ export class OperatorProjectionRepository {
                 where: { tenantId: params.tenantId, rootTaskId: params.taskId },
                 orderBy: [{ taskId: 'asc' }, { turnSeq: 'asc' }],
             }) as Promise<SemanticTurnRow[]>,
+            typeof this.prisma.cognitiveTurnRun?.findMany === 'function'
+                ? this.prisma.cognitiveTurnRun.findMany({
+                    where: { tenantId: params.tenantId, rootTaskId: params.taskId },
+                    orderBy: [{ taskId: 'asc' }, { cognitionTurnSeq: 'asc' }],
+                }) as Promise<SemanticCognitiveTurnRow[]>
+                : Promise.resolve([]),
             this.prisma.runEffect!.findMany!({
                 where: { tenantId: params.tenantId, rootTaskId: params.taskId },
                 orderBy: [{ createdAt: 'asc' }],
@@ -1051,7 +1132,12 @@ export class OperatorProjectionRepository {
             rootTaskId: params.taskId,
             runs,
             edges,
-            turns: turnProjection.turns,
+            turns: turnProjection.turns.map((turn) => ({
+                ...turn,
+                cognitiveTurns: cognitiveTurns
+                    .filter((cognition) => cognition.taskId === turn.taskId && cognition.segmentSeq === turn.turnSeq)
+                    .map(rowToCognitiveTurn),
+            })),
             unassignedAttempts: turnProjection.unassignedAttempts,
             expectedTurnCount,
             expectedEdgeCount,
@@ -1063,7 +1149,12 @@ export class OperatorProjectionRepository {
             root: rowToNode(root),
             nodes,
             edges: edges.map(rowToEdge),
-            turns: turnProjection.turns,
+            turns: turnProjection.turns.map((turn) => ({
+                ...turn,
+                cognitiveTurns: cognitiveTurns
+                    .filter((cognition) => cognition.taskId === turn.taskId && cognition.segmentSeq === turn.turnSeq)
+                    .map(rowToCognitiveTurn),
+            })),
             unassignedAttempts: turnProjection.unassignedAttempts,
             memoryOps: [],
             effects: effects.map(rowToEffect),
@@ -1391,6 +1482,127 @@ export class OperatorProjectionRepository {
         });
     }
 
+    private async upsertCognitiveTurn(
+        event: OperatorProjectionEvent,
+        params: {
+            taskId: string;
+            rootTaskId: string;
+            agentId?: string;
+            disposition: 'observed' | 'committed' | 'superseded';
+            completedAt: Date;
+        },
+    ): Promise<void> {
+        if (typeof this.prisma.cognitiveTurnRun?.upsert !== 'function') return;
+        const cognitionTurnSeq = eventCognitionTurnSeq(event.payload);
+        if (cognitionTurnSeq <= 0) return;
+        const turnId = stringField(event.payload, 'turnId');
+        const claimId = stringField(event.payload, 'claimId');
+        const attemptKey = stringField(event.payload, 'attemptKey');
+        const identityKey = turnId
+            ? `turn:${turnId}`
+            : `legacy:${claimId ?? attemptKey ?? 'unclaimed'}:${cognitionTurnSeq}`;
+        const timings = recordValue(event.payload.timings);
+        const usage = recordValue(event.payload.usage);
+        const durationMs = numberField(timings, 'totalMs');
+        const startedAt = durationMs > 0
+            ? new Date(params.completedAt.getTime() - durationMs)
+            : undefined;
+        const llmCalls = arrayValue(event.payload.llmCalls);
+        const toolCalls = arrayValue(event.payload.toolCalls);
+        const childCalls = arrayValue(event.payload.childCalls);
+        const llmCallCount = numberField(usage, 'llmCalls') || llmCalls.length;
+        const data = stripUndefined({
+            rootTaskId: params.rootTaskId,
+            agentId: params.agentId,
+            turnId,
+            cognitionTurnSeq,
+            segmentSeq: eventSegmentSeq(event.payload) || undefined,
+            attemptKey,
+            claimId,
+            disposition: params.disposition,
+            startedAt,
+            startedAtEstimated: startedAt !== undefined,
+            completedAt: params.completedAt,
+            durationMs: durationMs || undefined,
+            stageBefore: stringField(event.payload, 'stageBefore'),
+            stageAfter: stringField(event.payload, 'stageAfter'),
+            cognition: stripUndefined({
+                stageTransition: event.payload.stageTransition,
+                transition: event.payload.transition,
+                intent: event.payload.intent,
+                shield: event.payload.shield,
+                perception: event.payload.perception,
+                execAction: event.payload.execAction,
+                execResult: event.payload.execResult,
+                mentalStateBeforeHash: event.payload.mentalStateBeforeHash,
+                mentalStateAfterHash: event.payload.mentalStateAfterHash,
+                level: event.payload.level,
+            }),
+            timings,
+            usage,
+            llmCalls,
+            toolCalls,
+            childCalls,
+            llmCallCount,
+            toolCallCount: toolCalls.length,
+            childCallCount: childCalls.length,
+            inputTokens: numberField(usage, 'inputTokens'),
+            outputTokens: numberField(usage, 'outputTokens'),
+            knownCostUsd: costFromUsage(usage),
+            traceId: stringField(event.payload, 'traceId'),
+            spanId: stringField(event.payload, 'spanId'),
+        });
+        await this.prisma.cognitiveTurnRun.upsert({
+            where: {
+                tenantId_taskId_identityKey: {
+                    tenantId: event.tenantId,
+                    taskId: params.taskId,
+                    identityKey,
+                },
+            },
+            create: {
+                tenantId: event.tenantId,
+                taskId: params.taskId,
+                identityKey,
+                ...data,
+            },
+            update: data,
+        });
+        await this.recomputeCognitiveAggregates(event.tenantId, params.taskId);
+    }
+
+    private async recomputeCognitiveAggregates(tenantId: string, taskId: string): Promise<void> {
+        if (typeof this.prisma.cognitiveTurnRun?.findMany !== 'function') return;
+        const existingRun = await this.findRun(tenantId, taskId);
+        const terminal = existingRun ? TERMINAL_AGENT_RUN_STATUSES.has(normalizeStatus(existingRun.status)) : false;
+        const rows = await this.prisma.cognitiveTurnRun.findMany({
+            where: terminal
+                ? { tenantId, taskId, disposition: 'committed' }
+                : { tenantId, taskId, disposition: { in: ['observed', 'committed'] } },
+        }) as Array<{ llmCallCount?: number; memoryOpCount?: number; knownCostUsd?: unknown }>;
+        const knownCosts = rows.map((row) => decimalToNumber(row.knownCostUsd)).filter((value) => Number.isFinite(value));
+        await this.prisma.agentRun?.upsert?.({
+            where: { tenantId_taskId: { tenantId, taskId } },
+            create: {
+                tenantId,
+                taskId,
+                rootTaskId: taskId,
+                scope: 'root',
+                status: 'running',
+                turnCount: rows.length,
+                llmCallCount: rows.reduce((sum, row) => sum + (row.llmCallCount ?? 0), 0),
+                memoryOpCount: rows.reduce((sum, row) => sum + (row.memoryOpCount ?? 0), 0),
+                knownCostUsd: knownCosts.length > 0 ? knownCosts.reduce((sum, value) => sum + value, 0) : undefined,
+            },
+            update: {
+                turnCount: rows.length,
+                llmCallCount: rows.reduce((sum, row) => sum + (row.llmCallCount ?? 0), 0),
+                memoryOpCount: rows.reduce((sum, row) => sum + (row.memoryOpCount ?? 0), 0),
+                knownCostUsd: knownCosts.length > 0 ? knownCosts.reduce((sum, value) => sum + value, 0) : undefined,
+            },
+        });
+    }
+
     private async upsertEventEffect(params: {
         tenantId: string;
         rootTaskId: string;
@@ -1423,9 +1635,19 @@ export class OperatorProjectionRepository {
     private async upsertRun(node: AgentRunNode, graph: AgentRunGraph): Promise<void> {
         const isRoot = node.taskId === graph.root.taskId;
         const turns = graph.turns.filter((turn) => turn.taskId === node.taskId);
+        const cognitiveTurns = turns.flatMap((turn) => turn.cognitiveTurns ?? []);
+        const visibleCognitiveTurns = cognitiveTurns.filter((turn) => turn.disposition !== 'superseded');
+        const authoritativeCognitiveTurns = cognitiveTurns.filter((turn) => turn.disposition === 'committed');
+        const terminalStatus = TERMINAL_AGENT_RUN_STATUSES.has(normalizeStatus(node.status));
+        const aggregateCognitiveTurns = terminalStatus ? authoritativeCognitiveTurns : visibleCognitiveTurns;
+        const aggregateTurnCount = cognitiveTurns.length > 0 ? aggregateCognitiveTurns.length : turns.length;
         const childCount = graph.edges.filter((edge) => edge.parentTaskId === node.taskId && edge.childTaskId !== undefined).length;
-        const llmCallCount = turns.reduce((count, turn) => count + (Array.isArray(turn.llmCalls) ? turn.llmCalls.length : 0), 0);
-        const memoryOpCount = turns.reduce((count, turn) => count + (Array.isArray(turn.memoryOps) ? turn.memoryOps.length : 0), 0);
+        const llmCallCount = cognitiveTurns.length > 0
+            ? aggregateCognitiveTurns.reduce((count, turn) => count + turn.llmCalls.length, 0)
+            : turns.reduce((count, turn) => count + (Array.isArray(turn.llmCalls) ? turn.llmCalls.length : 0), 0);
+        const memoryOpCount = cognitiveTurns.length > 0
+            ? aggregateCognitiveTurns.reduce((count, turn) => count + turn.memoryOps.length, 0)
+            : turns.reduce((count, turn) => count + (Array.isArray(turn.memoryOps) ? turn.memoryOps.length : 0), 0);
         const terminalAt = node.finishedAt ? new Date(node.finishedAt) : undefined;
         const startedAt = node.startedAt ? new Date(node.startedAt) : undefined;
         const status = normalizeStatus(node.status);
@@ -1439,7 +1661,7 @@ export class OperatorProjectionRepository {
             status,
             parentTaskId: node.parentTaskId,
             childCount,
-            turnCount: turns.length,
+            turnCount: aggregateTurnCount,
             llmCallCount,
             memoryOpCount,
             startedAt,
@@ -1465,7 +1687,7 @@ export class OperatorProjectionRepository {
             status: preserveTerminal ? undefined : status,
             parentTaskId: node.parentTaskId,
             childCount,
-            turnCount: turns.length,
+            turnCount: aggregateTurnCount,
             llmCallCount,
             memoryOpCount,
             startedAt,
@@ -1843,7 +2065,12 @@ function semanticProjectionIsPartial(params: {
     expectedTurnCount: number;
     expectedEdgeCount: number;
 }): boolean {
-    if (params.turns.length < params.expectedTurnCount || params.edges.length < params.expectedEdgeCount) {
+    const projectedCognitiveTurnCount = params.turns.reduce(
+        (count, turn) => count + (turn.cognitiveTurns?.filter((item) => item.disposition === 'committed').length ?? 0),
+        0,
+    );
+    const projectedTurnCount = projectedCognitiveTurnCount > 0 ? projectedCognitiveTurnCount : params.turns.length;
+    if (projectedTurnCount < params.expectedTurnCount || params.edges.length < params.expectedEdgeCount) {
         return true;
     }
     if (params.runs.some((run) => run.rootTaskId !== params.rootTaskId) ||
@@ -1909,6 +2136,35 @@ function rowToEdge(row: SemanticEdgeRow): AgentRunEdge {
         ...(row.terminalCode || row.terminalMessage ? { error: { code: row.terminalCode, message: row.terminalMessage } } : {}),
         startedAt: toIso(row.createdAt),
         ...(row.resolvedAt ? { finishedAt: toIso(row.resolvedAt) } : {}),
+    };
+}
+
+function rowToCognitiveTurn(row: SemanticCognitiveTurnRow) {
+    const cognition = recordValue(row.cognition);
+    return {
+        id: row.identityKey,
+        rootTaskId: row.rootTaskId,
+        taskId: row.taskId,
+        ...(row.agentId ? { agentId: row.agentId } : {}),
+        ...(row.turnId ? { turnId: row.turnId } : {}),
+        cognitionTurnSeq: row.cognitionTurnSeq,
+        ...(row.segmentSeq !== null && row.segmentSeq !== undefined ? { segmentSeq: row.segmentSeq } : {}),
+        ...(row.attemptKey ? { attemptKey: row.attemptKey } : {}),
+        ...(row.claimId ? { claimId: row.claimId } : {}),
+        disposition: row.disposition === 'superseded'
+            ? 'superseded' as const
+            : row.disposition === 'committed' ? 'committed' as const : 'observed' as const,
+        cognition: {
+            ...cognition,
+            ...(row.turnId ? { turnId: row.turnId } : {}),
+        },
+        llmCalls: arrayValue(row.llmCalls),
+        toolCalls: arrayValue(row.toolCalls),
+        childCalls: arrayValue(row.childCalls),
+        memoryOps: [],
+        ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
+        ...(row.startedAtEstimated ? { startedAtEstimated: true } : {}),
+        ...(row.completedAt ? { finishedAt: toIso(row.completedAt) } : {}),
     };
 }
 
@@ -2032,7 +2288,25 @@ function numberField(value: Record<string, unknown>, key: string): number {
 }
 
 function eventTurnSeq(payload: Record<string, unknown>): number {
-    return numberField(payload, 'logicalTurnSeq') || numberField(payload, 'turnSeq');
+    return eventSegmentSeq(payload);
+}
+
+function eventSegmentSeq(payload: Record<string, unknown>): number {
+    return numberField(payload, 'segmentSeq') || numberField(payload, 'logicalTurnSeq') || numberField(payload, 'turnSeq');
+}
+
+function eventCognitionTurnSeq(payload: Record<string, unknown>): number {
+    return numberField(payload, 'cognitionTurnSeq') || numberField(payload, 'turnSeq');
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+}
+
+function arrayValue(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
 }
 
 function arrayCount(value: unknown): number {

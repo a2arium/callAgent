@@ -132,6 +132,7 @@ export function NodeInspector(props: {
               events={eventsForTurn(props.graph, props.node, selectedTurn)}
               tenantId={props.tenantId}
               config={props.config}
+              ownerStatus={props.node.status}
               onBack={props.onTurnBack}
             />
           ) : (
@@ -139,6 +140,7 @@ export function NodeInspector(props: {
               turns={rollup.turns}
               unassignedAttempts={props.graph.unassignedAttempts.filter((attempt) => attempt.taskId === props.node?.taskId)}
               tenantId={props.tenantId}
+              ownerStatus={props.node.status}
               onSelect={props.onTurnSelect}
             />
           )}
@@ -178,7 +180,8 @@ function SummaryTab(props: {
         {props.node.cancellation ? <CancellationNotice cancellation={props.node.cancellation} /> : null}
         <div className="grid grid-cols-2 gap-2 text-sm">
           <Metric label="Duration" value={formatDuration(durationBetween(props.node.startedAt, props.node.finishedAt))} />
-          <Metric label="Turns" value={formatNumber(props.rollup.turns.length)} />
+          <Metric label="Turns" value={formatNumber(props.rollup.turns.reduce((count, turn) => count + (turn.cognitiveTurns?.filter((item) => item.disposition !== 'superseded').length ?? 0), 0))} />
+          <Metric label="Segments" value={formatNumber(props.rollup.turns.length)} />
           <Metric label="LLM calls" value={formatNumber(props.rollup.llmCalls.length)} />
           <Metric label="Memory ops" value={formatNumber(props.rollup.memoryOps.length)} />
         </div>

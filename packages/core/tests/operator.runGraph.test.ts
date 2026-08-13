@@ -1547,6 +1547,64 @@ describe('buildAgentRunGraph', () => {
         expect(graph.turns).toEqual([
             expect.objectContaining({ turnSeq: 2 }),
         ]);
+        expect(graph.turns[0]?.cognitiveTurns).toEqual([
+            expect.objectContaining({ cognitionTurnSeq: 8, segmentSeq: 2, disposition: 'committed' }),
+        ]);
+    });
+
+    it('preserves every cognitive turn inside one durable segment', async () => {
+        const sessionManager = new SessionManager(new InMemorySessionManager());
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1', sessionId: 'root-task', agentId: 'root-agent', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        for (let turn = 1; turn <= 37; turn += 1) {
+            await sessionManager.appendEvent('tenant-1', 'root-task', 'turn.completed', {
+                taskId: 'root-task', agentId: 'root-agent', turnSeq: turn, cognitionTurnSeq: turn,
+                logicalTurnSeq: 1, segmentSeq: 1, claimId: 'claim-1', attemptKey: 'segment-1',
+                turnId: `cognition-${turn}`,
+                transition: { kind: turn === 37 ? 'complete' : 'continue' },
+                timings: { totalMs: turn === 37 ? 8 : 5_000, learningMs: turn === 37 ? 5 : 20 },
+                usage: { llmCalls: turn === 37 ? 0 : 1 },
+                llmCalls: turn === 37 ? [] : [{ model: 'test' }],
+            });
+        }
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1', taskId: 'root-task', sessionManager, driverRuns: [],
+        });
+
+        expect(graph.turns).toHaveLength(1);
+        expect(graph.turns[0]?.cognitiveTurns).toHaveLength(37);
+        expect(graph.turns[0]?.cognitiveTurns?.[35]).toEqual(expect.objectContaining({
+            cognitionTurnSeq: 36,
+            cognition: expect.objectContaining({ timings: expect.objectContaining({ totalMs: 5_000 }) }),
+        }));
+        expect(graph.turns[0]?.cognitiveTurns?.[36]).toEqual(expect.objectContaining({
+            cognitionTurnSeq: 37,
+            cognition: expect.objectContaining({ timings: expect.objectContaining({ totalMs: 8 }) }),
+        }));
+    });
+
+    it('shows observed cognitive turns before segment arbitration', async () => {
+        const sessionManager = new SessionManager(new InMemorySessionManager());
+        await sessionManager.saveSnapshot({
+            tenantId: 'tenant-1', sessionId: 'root-task', agentId: 'root-agent', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'root-agent' } },
+        });
+        await sessionManager.appendEvent('tenant-1', 'root-task', 'turn.observed', {
+            taskId: 'root-task', turnId: 'cognition-1', turnSeq: 1, cognitionTurnSeq: 1,
+            logicalTurnSeq: 1, segmentSeq: 1, claimId: 'claim-1', attemptKey: 'segment-1',
+            timings: { totalMs: 125 }, transition: { kind: 'continue' },
+        });
+
+        const graph = await buildAgentRunGraph({
+            tenantId: 'tenant-1', taskId: 'root-task', sessionManager, driverRuns: [],
+        });
+
+        expect(graph.turns[0]?.cognitiveTurns).toEqual([
+            expect.objectContaining({ cognitionTurnSeq: 1, disposition: 'observed' }),
+        ]);
     });
 
     it('uses the durable claim as the identity for event-only cognition turns', async () => {

@@ -13,7 +13,8 @@ export function CostSummary(props: {
     ['LLM calls', formatNumber(props.llmCalls.length)],
     ['Tokens', totalTokens > 0 ? formatNumber(totalTokens) : 'Not captured'],
     ['LLM latency', totalLatency > 0 ? formatDuration(totalLatency) : 'Not captured'],
-    ['Turns', formatNumber(props.turns.length)],
+    ['Turns', formatNumber(props.turns.reduce((count, turn) => count + (turn.cognitiveTurns?.filter((item) => item.disposition !== 'superseded').length ?? 0), 0))],
+    ['Segments', formatNumber(props.turns.length)],
   ] as const;
   return (
     <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">

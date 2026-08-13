@@ -195,14 +195,47 @@ export function deriveGraphInsights(graph: AgentRunGraph | undefined): GraphInsi
 
 export function buildNodeRollup(graph: AgentRunGraph, taskId: string): NodeRollup {
   const turns = graph.turns.filter((turn) => turn.taskId === taskId);
-  const llmCalls = turns.flatMap((turn) => turn.llmCalls ?? []);
+  // New projections attach LLM calls to actual turns. Fall back to the old
+  // segment-level field only when that run has no per-turn capture.
+  const llmCalls = turns.flatMap((turn) => {
+    const canonicalTurns = canonicalCognitiveTurns(turn);
+    return canonicalTurns.length > 0
+      ? canonicalTurns.flatMap((cognitive) => cognitive.llmCalls)
+      : turn.llmCalls ?? [];
+  });
   const memoryOps = graph.memoryOps.filter((op) => op.taskId === taskId || op.agentId === graph.nodes.find((node) => node.taskId === taskId)?.agentId);
-  const costUsd = llmCalls.reduce<number | undefined>((sum, call) => {
+  const callCostUsd = llmCalls.reduce<number | undefined>((sum, call) => {
     const value = typeof call.costUsd === 'number' ? call.costUsd : typeof call.cost === 'number' ? call.cost : undefined;
     if (typeof value !== 'number') return sum;
     return (sum ?? 0) + value;
   }, undefined);
-  return { taskId, turns, llmCalls, memoryOps, costUsd };
+  const usageCostUsd = turns.reduce<number | undefined>((sum, turn) => {
+    for (const cognitive of canonicalCognitiveTurns(turn)) {
+      const usage = cognitive.cognition.usage;
+      const value = usage && typeof usage === 'object' && !Array.isArray(usage) && typeof (usage as Record<string, unknown>).totalCost === 'number'
+        ? (usage as Record<string, unknown>).totalCost as number
+        : undefined;
+      if (typeof value === 'number') sum = (sum ?? 0) + value;
+    }
+    return sum;
+  }, undefined);
+  return { taskId, turns, llmCalls, memoryOps, costUsd: callCostUsd ?? usageCostUsd };
+}
+
+function canonicalCognitiveTurns(turn: TurnRun): NonNullable<TurnRun['cognitiveTurns']> {
+  const byIdentity = new Map<string, NonNullable<TurnRun['cognitiveTurns']>[number]>();
+  for (const cognitive of turn.cognitiveTurns ?? []) {
+    const identity = cognitive.turnId ? `${cognitive.taskId}:${cognitive.turnId}` : cognitive.id;
+    const existing = byIdentity.get(identity);
+    if (!existing || cognitiveDispositionRank(cognitive.disposition) >= cognitiveDispositionRank(existing.disposition)) {
+      byIdentity.set(identity, cognitive);
+    }
+  }
+  return [...byIdentity.values()].filter((cognitive) => cognitive.disposition !== 'superseded');
+}
+
+function cognitiveDispositionRank(disposition: NonNullable<TurnRun['cognitiveTurns']>[number]['disposition']): number {
+  return disposition === 'committed' ? 3 : disposition === 'superseded' ? 2 : disposition === 'observed' ? 1 : 0;
 }
 
 export function getNodeById(graph: AgentRunGraph | undefined, nodeId: string | undefined): AgentRunNode | undefined {

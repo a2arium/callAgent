@@ -18,6 +18,12 @@ async function main(): Promise<void> {
             },
         });
         console.info('[TerminalProjectionReconciler] complete', summary);
+        const cognition = await projection.reconcileCognitiveTurns({
+            batchSize,
+            tenantId: process.env.CALLAGENT_PROJECTION_RECONCILE_TENANT_ID,
+            taskId: process.env.CALLAGENT_PROJECTION_RECONCILE_TASK_ID,
+        });
+        console.info('[CognitiveProjectionReconciler] complete', cognition);
     } finally {
         await prisma.$disconnect();
     }

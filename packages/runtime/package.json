@@ -50,6 +50,7 @@
     "express": "^5.0.1"
   },
   "devDependencies": {
+    "@a2arium/operator-viewer": "workspace:*",
     "@types/express": "^5.0.1",
     "@types/node": "^22.14.1",
     "typescript": "^5.8.3"

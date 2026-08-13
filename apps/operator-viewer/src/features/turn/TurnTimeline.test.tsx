@@ -8,14 +8,13 @@ import type { TurnAttemptRun, TurnRun } from '../../types';
 afterEach(cleanup);
 
 describe('TurnTimeline', () => {
-  it('presents logical turns once and summarizes nested execution attempts', () => {
+  it('keeps a legacy segment visible as one turn stack', () => {
     const turn = canceledTurn();
     render(<TurnTimeline turns={[turn]} onSelect={vi.fn()} />);
 
-    expect(screen.getByText('1 turn · 4 runtime deliveries')).toBeTruthy();
-    expect(screen.getByText('Turn 2')).toBeTruthy();
-    expect(screen.getByText('4 deliveries')).toBeTruthy();
-    expect(screen.getByText('Error before cancellation')).toBeTruthy();
+    expect(screen.getByText('1 turn in 1 stack · 4 runtime deliveries')).toBeTruthy();
+    expect(screen.getAllByText('Turn 2')).toHaveLength(2);
+    expect(screen.getByText('Inspect turns')).toBeTruthy();
     expect(screen.queryByText('Turn ?')).toBeNull();
   });
 

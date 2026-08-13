@@ -257,6 +257,7 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
         return;
     }
     if (currentTaskTurnClaim() !== undefined) {
+        await appendOperatorTurnTraceProjection(ctx, trace, 'turn.observed');
         internal.__pendingOperatorTurnTraces = [...(internal.__pendingOperatorTurnTraces ?? []), trace];
         return;
     }
@@ -266,7 +267,7 @@ async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Prom
 async function appendOperatorTurnTraceProjection(
     ctx: TaskContext,
     trace: TurnTrace,
-    type: 'turn.completed' | 'turn.superseded'
+    type: 'turn.observed' | 'turn.completed' | 'turn.superseded'
 ): Promise<void> {
     const internal = ctx as InternalTaskContext;
     const level = operatorCaptureLevel(internal);
@@ -275,6 +276,7 @@ async function appendOperatorTurnTraceProjection(
         taskId: ctx.task.id,
         agentId: ctx.agentId,
         turnSeq: trace.turn,
+        cognitionTurnSeq: trace.turn,
         turnId: trace.turnId,
         stageBefore: trace.stageBefore,
         stageAfter: trace.stageAfter,
@@ -302,6 +304,7 @@ async function appendOperatorTurnTraceProjection(
             fence: claim.fence,
             claimedGeneration: claim.claimedGeneration,
             logicalTurnSeq: claim.turnSeq,
+            segmentSeq: claim.turnSeq,
             attemptKey: currentSegmentIdempotencyKey(),
         } : {}),
         level,
@@ -346,6 +349,7 @@ async function appendOperatorTurnStartedEvent(
         taskId: ctx.task.id,
         agentId: ctx.agentId,
         turnSeq,
+        cognitionTurnSeq: turnSeq,
         ...(turnId ? { turnId } : {}),
         ...(traceId ? { traceId } : {}),
         ...(spanId ? { spanId } : {}),
@@ -354,6 +358,7 @@ async function appendOperatorTurnStartedEvent(
             fence: currentTaskTurnClaim()!.fence,
             claimedGeneration: currentTaskTurnClaim()!.claimedGeneration,
             logicalTurnSeq: currentTaskTurnClaim()!.turnSeq,
+            segmentSeq: currentTaskTurnClaim()!.turnSeq,
             attemptKey: currentSegmentIdempotencyKey(),
         } : {}),
     });
@@ -372,6 +377,12 @@ async function appendOperatorMemoryEvent(
         taskId: ctx.task.id,
         agentId: event.agentId ?? ctx.agentId,
         turnSeq: event.turnSeq,
+        cognitionTurnSeq: event.turnSeq,
+        ...(currentTaskTurnClaim() ? {
+            claimId: currentTaskTurnClaim()!.claimId,
+            attemptKey: currentSegmentIdempotencyKey(),
+            segmentSeq: currentTaskTurnClaim()!.turnSeq,
+        } : {}),
         op: event.op,
         keys: event.keys.slice(0, 100),
         keyCount: event.keys.length,
