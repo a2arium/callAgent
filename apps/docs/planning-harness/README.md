@@ -5,8 +5,9 @@ model: one Plan schema, dependency-aware helpers, provenance, and the intents
 needed to execute graph plans without turning the loop into a scheduler.
 
 It mirrors the structure of `apps/docs/orchestrator-harness/` and the (now
-promoted) streaming harness. Production `packages/core` code should not change
-until the principles, ADRs, and specs here are reviewed.
+promoted) streaming harness. Production `packages/core` code changes start
+at Phase 1 (`specs/plan-schema.md`). Specs and ADRs 0001–0009 are the
+implementation contract (architect punch-list applied 2026-08-16).
 
 Delete this folder only after:
 
@@ -89,8 +90,12 @@ In particular:
 - `implementation-status.md` — where we are right now.
 - `migration-checklist.md` — promotion/deletion checklist.
 - `adr/` — decision records to review before implementation.
-- `specs/` — schema, helper, intent, and observability specs (to be written).
+- `specs/` — schema, helper, intent, and observability specs.
 - `harness/` — POC scenarios and expected outcomes.
 
-Start with `adr/0001-one-plan-truth.md` when reviewing this workspace; it carries
-the central schema decision everything else depends on.
+Start with `adr/0001-one-plan-truth.md`, then `specs/plan-schema.md`. The ADR is
+the decision; the spec is the Phase 1 implementation contract (schema, parse
+sites, tests, and docs to rewrite in the same PR).
+
+Then `adr/0002` … `adr/0009` with the matching files in `specs/README.md`.
+Do not implement a later phase before its spec prerequisites.

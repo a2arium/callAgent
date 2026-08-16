@@ -26,7 +26,9 @@ Learning call.
 4. **Helpers, not a scheduling mode.** `validatePlanGraph` and ready/blocked
    selectors are library functions. Do not add `scheduling: 'dependencies'` as a
    runtime switch until the intent contract can name a step — and even then the
-   loop does not schedule.
+   loop does not schedule. Helpers ignore `cursor` (ADR 0002). A cursor-only
+   plan has every pending step ready according to the helper; sequential Policy
+   simply does not call it.
 5. **One intent per turn.** Policy arrays are stochastic samples, not parallel
    steps. Parallel work is Execution fan-out into `pending.children` /
    `pending.tools`.
@@ -39,8 +41,9 @@ Learning call.
    “downstream-usable,” written by Learning. It is not Perception’s schema
    check and not a control flag.
 9. **Extensibility is typed overlays on existing slots.** Plan/step `meta` is
-   Zod `unknown` with a TypeScript generic overlay. Agent graph/belief state
-   goes in `meta` or `worldModel`, not a new `MentalState.extensions` bag.
+   Zod JSON (`PlanMetaSchema`) with an optional TypeScript overlay. Agent
+   graph/belief state goes in `meta` or `worldModel`, not a new
+   `MentalState.extensions` bag (originating request §8 is rejected).
 10. **TurnTrace stays compact.** New planner/retrieval detail is namespaced,
     versioned extensions. Do not add first-class TurnTrace fields for ATG.
     Sidecar bulk stays in artifacts, correlated by existing ids.

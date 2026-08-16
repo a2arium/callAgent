@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted
+
+Implementation contract: `specs/plan-schema.md`.
 
 ## Context
 
@@ -67,14 +69,15 @@ proposed | active | stale | completed | failed | cancelled
 (`create_plan`, `execute_next_step`, `repair_plan`, and the forthcoming
 `execute_step`). A plan step cannot contain “make a plan.”
 
-TypeScript generics for `meta` are overlays on Zod `unknown` / `z.record`.
-They are not a second source of truth.
+TypeScript generics for `meta` are overlays on Zod JSON (`PlanMetaSchema`,
+no `undefined`). They are not a second source of truth.
 
 ## Consequences
 
 - One breaking schema change, one migration note, before public core freeze.
 - Policy for sequential agents stays `execute_next_step` + `cursor`.
-- DAG agents can store `dependsOn` without a new loop phase.
+- DAG agents can store `dependsOn` without a new loop phase. Readiness is
+  derived by helpers that ignore `cursor` (ADR 0002); `execute_step` is later.
 - LLM-generated plans must emit `intent` objects that pass `IntentSchema`,
   not free-form `kind`+`args`.
 - Contracts, spec, and how-to must be rewritten against the schema in the

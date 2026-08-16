@@ -6,15 +6,19 @@ tests, and non-goals.
 
 | File | Phase | Status |
 |---|---|---|
-| `plan-schema.md` | 1 | not started |
-| `plan-graph-helpers.md` | 2 | not started |
-| `plan-output-refs.md` | 3 | not started |
-| `plan-validation-and-lineage.md` | 3 | not started |
-| `execute-step-intent.md` | 4 | not started |
-| `turn-trace-extensions.md` | 5 | not started |
-| `memory-read-vs-observation.md` | 5 | not started |
-| `plan-patch.md` | 6 | not started |
-| `harness-snapshot-fork.md` | 6 | not started |
+| `plan-schema.md` | 1 | written — ready for implementation |
+| `plan-graph-helpers.md` | 2 | written — ready for implementation after Phase 1 |
+| `plan-output-refs.md` | 3a | written — ready after Phase 1 (ADR 0003) |
+| `plan-validation-and-lineage.md` | 3b | written — ready after Phase 1–2 (ADR 0004) |
+| `execute-step-intent.md` | 4 | written — ready after Phase 1–2 (ADR 0005) |
+| `turn-trace-extensions.md` | 5a | written — ready (ADR 0006) |
+| `memory-read-vs-observation.md` | 5b | written — ready (ADR 0007) |
+| `plan-patch.md` | 6a | written — ready after Phase 1–2 (ADR 0008) |
+| `harness-snapshot-fork.md` | 6b | written — ready (ADR 0009) |
 
-Start with `plan-schema.md`. It must be consistent with
-`../adr/0001-one-plan-truth.md` and `../principles.md`.
+Each spec is the implementation contract for its ADR and must stay
+consistent with `../principles.md`. Do not implement a phase until its
+prerequisites in that spec have landed.
+
+`MentalState.extensions` (originating request §8) is **rejected** — see
+ADR 0001 / 0004. There is no spec for it.
