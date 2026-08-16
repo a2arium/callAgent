@@ -45,7 +45,7 @@ __metadata:
     "@a2arium/callagent-utils": "npm:^0.2.0"
     "@prisma/adapter-pg": "npm:7.4.0"
     "@prisma/client": "npm:7.4.0"
-    callllm: "npm:^0.3.3"
+    callllm: "npm:^0.4.2"
     dotenv: "npm:^17.3.1"
     jest: "npm:^29.7.0"
     pg: "npm:8.13.3"
@@ -102,7 +102,7 @@ __metadata:
     "@a2arium/callagent-utils": "npm:^0.2.0"
     "@prisma/adapter-pg": "npm:7.4.0"
     "@prisma/client": "npm:7.4.0"
-    callllm: "npm:^0.3.3"
+    callllm: "npm:^0.4.2"
     dotenv: "npm:^16.4.5"
     jest: "npm:^29.7.0"
     pg: "npm:^8.13.3"
@@ -5846,9 +5846,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"callllm@npm:^0.3.3":
-  version: 0.3.3
-  resolution: "callllm@npm:0.3.3"
+"callllm@npm:^0.4.2":
+  version: 0.4.2
+  resolution: "callllm@npm:0.4.2"
   dependencies:
     "@cerebras/cerebras_cloud_sdk": "npm:^1.50.0"
     "@dqbd/tiktoken": "npm:^1.0.18"
@@ -5871,7 +5871,7 @@ __metadata:
   peerDependencies:
     "@opentelemetry/api": ">=1.6.0"
     "@opentelemetry/semantic-conventions": ">=1.22.0"
-  checksum: 10c0/139ff1364b9d07dec2f97ef5c118f7cf0de8a01580dbaa9a4652e8b8739e83b01942396f20787520f458abfb1b02451942eb4ca43a84d5ae19c360e62e7a9357
+  checksum: 10c0/6ae2c562d468b49048133ac3c4aafe5159c03dc404d20a8e165eea493b5e17ffc9402a17ee8d74aeb7abea991f5e9ed38a3ad4d87ef06188f62af2a34b9aa42f
   languageName: node
   linkType: hard
 

@@ -12,7 +12,7 @@ import { formatCost, formatDuration, formatRelative } from '../../design/format'
 import { buildNodeRollup, deriveGraphInsights, deriveStatus, getNodeById } from '../../domain/derive';
 import { AgentRunGraphView } from '../graph/AgentRunGraphView';
 import { NodeInspector } from '../inspector/NodeInspector';
-import type { TurnRun } from '../../types';
+import type { AgentRunNode, TurnRun } from '../../types';
 import { parseRunSearch } from '../../app/state';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../app/auth';
@@ -195,7 +195,7 @@ export function RunDetailPage(): React.ReactElement {
                   Fleet
                 </Link>
               </Button>
-              <StatusBadge status={rootStatus.status} derived={rootStatus.derived} />
+              <StatusBadge status={rootStatus.status} derived={rootStatus.derived} label={terminalStatusLabel(graph?.root)} />
               {liveRefresh ? (
                 <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
                   Live
@@ -333,6 +333,12 @@ export function RunDetailPage(): React.ReactElement {
       )}
     </div>
   );
+}
+
+function terminalStatusLabel(node: AgentRunNode | undefined): string | undefined {
+  return node?.status === 'canceled' && node.cancellation?.reason === 'active_run_timeout'
+    ? 'Timed out'
+    : undefined;
 }
 
 function isTerminalStatus(status: string | undefined): boolean {

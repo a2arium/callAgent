@@ -140,6 +140,8 @@ export const LLMCallTraceSchema = z.object({
     terminalAt: z.string().datetime().optional(),
     terminalReason: z.enum(['completed', 'provider_error', 'timeout', 'cancelled']).optional(),
     errorCode: z.string().optional(),
+    /** Bounded, redacted provider failure summary; never prompt or response content. */
+    errorMessage: z.string().max(500).optional(),
     lateCompletion: z.boolean().optional(),
     durationMs: z.number().optional(),
     inputTokens: z.number().optional(),

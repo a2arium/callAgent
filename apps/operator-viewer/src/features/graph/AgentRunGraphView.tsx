@@ -16,7 +16,7 @@ import { StatusBadge } from '../../design/components/ui/status-badge';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { formatCost, formatDuration } from '../../design/format';
 import { buildNodeRollup, deriveStatus, normalizeRuntimeStatus, type GraphInsights } from '../../domain/derive';
-import { semanticFailureFromTurns } from '../../domain/semanticFailure';
+import { semanticAttentionFromTurns, semanticFailureFromTurns } from '../../domain/semanticFailure';
 import type { AgentRunGraph, AgentRunNode, TurnRun } from '../../types';
 import { buildTurnStacks, turnStackLabel, type TurnStack } from '../../domain/turnStacks';
 import { cn } from '../../lib/utils';
@@ -146,6 +146,8 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
   const rollup = buildNodeRollup(graph, node.taskId);
   const status = deriveStatus({ status: node.status, updatedAt: node.finishedAt ?? node.startedAt, turns: rollup.turns });
   const semanticFailure = semanticFailureFromTurns(rollup.turns);
+  const semanticAttention = semanticAttentionFromTurns(rollup.turns);
+  const timedOut = node.status === 'canceled' && node.cancellation?.reason === 'active_run_timeout';
   const isFailurePath = insights.failurePathNodeIds.includes(node.taskId);
   const isDeepestFailure = insights.deepestFailedNodeId === node.id;
   const isSingleNode = graph.nodes.length === 1;
@@ -159,6 +161,7 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
           isSingleNode ? 'w-[220px]' : 'w-[250px]',
           selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
           isFailurePath ? 'bg-rose-500/10' : '',
+          semanticAttention && !semanticFailure ? 'border-amber-300 bg-amber-500/10' : '',
           isDeepestFailure ? 'border-rose-300 ring-2 ring-rose-400/30' : ''
         )}
         aria-label={`${node.agentId ?? 'unknown agent'} ${status.status}`}
@@ -172,10 +175,12 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
             <CopyableId value={node.taskId} label="task ID" max={18} />
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            {node.severity === 'error' && status.status === 'cancelled' ? (
+            {node.severity === 'error' && status.status === 'cancelled' && !timedOut ? (
               <span className="h-2.5 w-2.5 rounded-full border border-rose-700 bg-rose-500" title="Error occurred before cancellation" />
             ) : null}
-            <StatusBadge status={status.status} derived={status.derived} />
+            {semanticAttention && status.status === 'completed'
+              ? <OutcomeAttentionBadge />
+              : <StatusBadge status={status.status} derived={status.derived} label={timedOut ? 'Timed out' : undefined} />}
           </div>
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
@@ -189,7 +194,19 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
             <p className="truncate opacity-85" title={semanticFailure.message}>{semanticFailure.message}</p>
           </div>
         ) : null}
-        {!semanticFailure && node.severity === 'error' && status.status === 'cancelled' ? (
+        {!semanticFailure && semanticAttention ? (
+          <div className="mt-2 min-w-0 rounded-md border border-amber-500/45 bg-amber-100 px-2 py-1 text-xs text-amber-900 dark:border-amber-400/35 dark:bg-amber-500/10 dark:text-amber-100">
+            <p className="font-medium">Completed with attention</p>
+            <p className="truncate opacity-85" title={semanticAttention.message}>{semanticAttention.message}</p>
+          </div>
+        ) : null}
+        {!semanticFailure && timedOut ? (
+          <div className="mt-2 min-w-0 rounded-md border border-amber-500/45 bg-amber-100 px-2 py-1 text-xs text-amber-900 dark:border-amber-400/35 dark:bg-amber-500/10 dark:text-amber-100">
+            <p className="font-medium">Time budget exceeded</p>
+            <p className="opacity-85">The durable root deadline stopped this run.</p>
+          </div>
+        ) : null}
+        {!semanticFailure && !timedOut && node.severity === 'error' && status.status === 'cancelled' ? (
           <div className="mt-2 min-w-0 rounded-md border border-rose-500/45 bg-rose-100 px-2 py-1 text-xs text-rose-900 dark:border-rose-400/35 dark:bg-rose-500/10 dark:text-rose-100">
             <p className="font-medium">Error occurred before cancellation</p>
             {runtimeErrorMessage(node.error) ? <p className="truncate opacity-85" title={runtimeErrorMessage(node.error)}>{runtimeErrorMessage(node.error)}</p> : null}
@@ -204,6 +221,10 @@ function AgentRunNodeCard(props: NodeProps<AgentNodeData>): React.ReactElement {
       </article>
     </div>
   );
+}
+
+function OutcomeAttentionBadge(): React.ReactElement {
+  return <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/45 bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:border-amber-400/35 dark:bg-amber-500/10 dark:text-amber-100">Completed · attention</span>;
 }
 
 function CacheBadge(props: { compact?: boolean }): React.ReactElement {
@@ -227,6 +248,7 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
   const boundary = humanizeBoundary(stack.boundary);
   const flowLabel = `${finalTurn.cognition.stageBefore ?? '?'} → ${finalTurn.cognition.stageAfter ?? stack.boundary ?? 'continue'}`;
   const llmCalls = stack.turns.reduce((count, turn) => count + turn.llmCalls.length, 0);
+  const failedLlmCalls = stack.turns.flatMap((turn) => turn.llmCalls).filter((call) => isRecord(call) && call.terminalReason !== undefined && call.terminalReason !== 'completed').length;
   return (
     <div className="relative">
       <Handle id="left" type="target" position={Position.Left} />
@@ -236,6 +258,7 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
           'w-[146px] rounded-md border bg-background px-2 py-1.5 text-left shadow-sm transition-colors',
           selected ? 'border-primary ring-2 ring-primary/30' : 'border-border',
           stack.status === 'failed' ? 'border-rose-300 bg-rose-500/10' : '',
+          failedLlmCalls > 0 && stack.status === 'completed' ? 'border-amber-300 bg-amber-500/10' : '',
           status === 'running' || status === 'waiting' ? 'border-sky-300 bg-sky-500/10' : ''
         )}
         aria-label={`${turnStackLabel(stack)} ${status}`}
@@ -245,18 +268,22 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
             <p className="truncate text-[11px] font-semibold">{turnStackLabel(stack)}</p>
             <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={flowLabel}>{boundary ?? status}</p>
           </div>
-          <span
-            className={cn(
-              'mt-0.5 h-2 w-2 shrink-0 rounded-full border',
-              stack.status === 'completed' ? 'border-emerald-600 bg-emerald-500' : '',
-              stack.status === 'failed' ? 'border-rose-600 bg-rose-500' : '',
-              stack.status === 'running' || stack.status === 'waiting' ? 'border-sky-600 bg-sky-500' : '',
-              stack.status === 'canceled' ? 'border-slate-500 bg-slate-300' : ''
-            )}
-            title={status}
-          />
+          <div className="flex shrink-0 items-start gap-1">
+            <span className="rounded border border-border bg-card px-1 py-0.5 text-[9px] font-medium text-muted-foreground" title={`Segment ${stack.segment.turnSeq}`}>#{stack.segment.turnSeq}</span>
+            <span
+              className={cn(
+                'mt-0.5 h-2 w-2 shrink-0 rounded-full border',
+                stack.status === 'completed' && failedLlmCalls === 0 ? 'border-emerald-600 bg-emerald-500' : '',
+                stack.status === 'completed' && failedLlmCalls > 0 ? 'border-amber-600 bg-amber-500' : '',
+                stack.status === 'failed' ? 'border-rose-600 bg-rose-500' : '',
+                stack.status === 'running' || stack.status === 'waiting' ? 'border-sky-600 bg-sky-500' : '',
+                stack.status === 'canceled' ? 'border-slate-500 bg-slate-300' : ''
+              )}
+              title={status}
+            />
+          </div>
         </div>
-        <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{stack.turns.length} turns · {llmCalls} LLM</p>
+        <p className="mt-1 truncate text-[9px] font-medium text-muted-foreground">{stack.turns.length} turns · {llmCalls} LLM{failedLlmCalls > 0 ? ` · ${failedLlmCalls} failed` : ''}</p>
       </article>
     </div>
   );
@@ -372,7 +399,7 @@ function buildFlow(
 function findTemporalSourceStack(stacks: TurnStack[], parentTaskId: string, edgeStartedAt: string | undefined): TurnStack | undefined {
   const edgeStartedMs = edgeStartedAt ? Date.parse(edgeStartedAt) : Number.NaN;
   const parentTurns = stacks.filter((stack) => stack.taskId === parentTaskId)
-    .sort((left, right) => left.lastSeq - right.lastSeq);
+    .sort((left, right) => left.displayLastSeq - right.displayLastSeq);
   if (!Number.isFinite(edgeStartedMs)) {
     return parentTurns.find((stack) => stack.status === 'running');
   }
@@ -408,7 +435,7 @@ function layoutExecutionGraph(graph: AgentRunGraph, stacks: TurnStack[]): { posi
     turnsByTask.set(stack.taskId, taskStacks);
   }
   for (const taskStacks of turnsByTask.values()) {
-    taskStacks.sort((a, b) => a.firstSeq - b.firstSeq);
+    taskStacks.sort((a, b) => a.displayFirstSeq - b.displayFirstSeq);
   }
 
   const childEdgesByParentToken = new Map<string, typeof graph.edges>();

@@ -3,7 +3,7 @@ import React from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TurnDetail, TurnTimeline } from './TurnTimeline';
-import type { TurnAttemptRun, TurnRun } from '../../types';
+import type { CognitiveTurnRun, TurnAttemptRun, TurnRun } from '../../types';
 
 afterEach(cleanup);
 
@@ -13,9 +13,33 @@ describe('TurnTimeline', () => {
     render(<TurnTimeline turns={[turn]} onSelect={vi.fn()} />);
 
     expect(screen.getByText('1 turn in 1 stack · 4 runtime deliveries')).toBeTruthy();
-    expect(screen.getAllByText('Turn 2')).toHaveLength(2);
-    expect(screen.getByText('Inspect turns')).toBeTruthy();
+    expect(screen.getByText('Turn 1')).toBeTruthy();
+    expect(screen.getByText('#2')).toBeTruthy();
+    expect(screen.queryByText('Inspect turns')).toBeNull();
     expect(screen.queryByText('Turn ?')).toBeNull();
+  });
+
+  it('keeps the stage inspector inside each expanded cognitive turn', () => {
+    const turn = canceledTurn();
+    turn.cognitiveTurns = [cognitiveTurn()];
+    render(<TurnDetail turn={turn} onBack={vi.fn()} />);
+
+    expect(screen.getByText('Individual turns')).toBeTruthy();
+    expect(screen.getByText('APLRET models')).toBeTruthy();
+    expect(screen.getByText('Attention')).toBeTruthy();
+    expect(screen.getByText('Perception')).toBeTruthy();
+    expect(screen.getByText('Policy')).toBeTruthy();
+    expect(screen.getAllByText('Transition').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Stage timings')).toBeNull();
+  });
+
+  it('labels a started-only final turn as cancelled by the root timeout', () => {
+    const turn = canceledTurn();
+    turn.cognitiveTurns = [{ ...cognitiveTurn(), disposition: 'running' }];
+    render(<TurnDetail turn={turn} ownerStatus="canceled" ownerCancellationReason="active_run_timeout" onBack={vi.fn()} />);
+
+    expect(screen.getByText(/Turn 1 · cancelled by timeout/)).toBeTruthy();
+    expect(screen.getByText(/time budget expired before this turn completed/i)).toBeTruthy();
   });
 
   it('keeps cancelled lifecycle wording while exposing the error and compressed attempts', () => {
@@ -54,6 +78,26 @@ function canceledTurn(): TurnRun {
     boundaryKind: 'await_child',
     attempts,
     error: { name: 'Error', message: 'RUNTIME_TIMER_REPOSITORY_MISSING' },
+  };
+}
+
+function cognitiveTurn(): CognitiveTurnRun {
+  return {
+    id: 'cognition-2',
+    rootTaskId: 'task-1',
+    taskId: 'task-1',
+    cognitionTurnSeq: 2,
+    disposition: 'committed',
+    cognition: {
+      perception: { kind: 'perception', url: 'https://example.test' },
+      intent: { kind: 'internal', intent: 'Continue' },
+      transition: { kind: 'continue', result: { ok: true } },
+      timings: { perceptionMs: 10, policyMs: 20, transitionMs: 5, totalMs: 35 },
+    },
+    llmCalls: [],
+    toolCalls: [],
+    childCalls: [],
+    memoryOps: [],
   };
 }
 

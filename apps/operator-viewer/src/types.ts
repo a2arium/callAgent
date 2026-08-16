@@ -213,6 +213,9 @@ export type LlmCallRun = {
   cost?: number;
   module?: string;
   status?: string;
+  terminalReason?: 'completed' | 'provider_error' | 'timeout' | 'cancelled';
+  errorCode?: string;
+  errorMessage?: string;
   hasOutputContract?: boolean;
   outputContractName?: string;
   outputContractStatus?: string;

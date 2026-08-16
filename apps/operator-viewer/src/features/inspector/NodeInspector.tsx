@@ -128,11 +128,13 @@ export function NodeInspector(props: {
           {selectedTurn ? (
             <TurnDetail
               turn={selectedTurn}
+              allTurns={rollup.turns}
               agentId={props.node.agentId ?? props.node.taskId}
               events={eventsForTurn(props.graph, props.node, selectedTurn)}
               tenantId={props.tenantId}
               config={props.config}
               ownerStatus={props.node.status}
+              ownerCancellationReason={props.node.cancellation?.reason}
               onBack={props.onTurnBack}
             />
           ) : (
@@ -141,6 +143,7 @@ export function NodeInspector(props: {
               unassignedAttempts={props.graph.unassignedAttempts.filter((attempt) => attempt.taskId === props.node?.taskId)}
               tenantId={props.tenantId}
               ownerStatus={props.node.status}
+              ownerCancellationReason={props.node.cancellation?.reason}
               onSelect={props.onTurnSelect}
             />
           )}

@@ -67,6 +67,7 @@ export type InternalTaskContext = TaskContext & {
         terminalAt?: string;
         terminalReason?: 'completed' | 'provider_error' | 'timeout' | 'cancelled';
         errorCode?: string;
+        errorMessage?: string;
         lateCompletion?: boolean;
         durationMs?: number;
         inputTokens?: number;

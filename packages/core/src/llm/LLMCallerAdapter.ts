@@ -15,6 +15,7 @@ import type { InternalTaskContext } from '../loop/internalContext.js';
 import { mapLLMCallError } from '../types/llmErrors.js';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 
 // Type for the recordUsage function that accepts our detailed record
 type RecordUsageFunction = (cost: number | UsageRecord) => void;
@@ -429,12 +430,13 @@ export class LLMCallerAdapter implements ILLMCaller {
     }
 
     private toCallLLMMessage(message: LLMMessage, options?: LLMCallOptions): string | Record<string, unknown> {
+        const callLLMOptions = options !== undefined ? normalizeOutputContract(options) : undefined;
         if (typeof message === 'string') {
-            return options != null ? { ...options, text: message } : message;
+            return callLLMOptions != null ? { ...callLLMOptions, text: message } : message;
         }
         // Call-site execution controls are authoritative. A data object must not be
         // able to shadow the AbortSignal or timeout supplied as the second argument.
-        return options != null ? { ...message, ...options } : message;
+        return callLLMOptions != null ? { ...message, ...callLLMOptions } : message;
     }
 
     private isExpectedTerminalError(error: unknown): error is { code: 'LLM_TIMEOUT' | 'LLM_CANCELLED' } {
@@ -490,6 +492,7 @@ export class LLMCallerAdapter implements ILLMCaller {
         const code = error !== null && typeof error === 'object'
             ? (error as { code?: unknown }).code
             : undefined;
+        const errorMessage = terminalReason === 'completed' ? undefined : boundedErrorMessage(error);
 
         defaultMetricsRegistry.increment('llm.terminal_total', { reason: terminalReason });
         const internalCtx = this.ctx as InternalTaskContext | undefined;
@@ -505,6 +508,7 @@ export class LLMCallerAdapter implements ILLMCaller {
             terminalAt: new Date(terminalAt).toISOString(),
             terminalReason,
             errorCode: typeof code === 'string' ? code : undefined,
+            ...(errorMessage ? { errorMessage } : {}),
             durationMs: terminalAt - startedAt,
             inputTokens: summary.inputTokens,
             outputTokens: summary.outputTokens,
@@ -516,4 +520,32 @@ export class LLMCallerAdapter implements ILLMCaller {
                 ?? (options?.jsonSchema ? 'failed' : 'not_applicable'),
         });
     }
+}
+
+function normalizeOutputContract(options: LLMCallOptions): Record<string, unknown> {
+    if (!options.jsonSchema || options.jsonSchema.schema instanceof z.ZodType) {
+        return options as Record<string, unknown>;
+    }
+    // CallLLM 0.4.2 accepts a Zod schema or a serialized JSON Schema. A plain
+    // object is allowed by CallAgent's public contract but fails inside
+    // CallLLM's SchemaValidator with "Unsupported schema type".
+    return {
+        ...options,
+        jsonSchema: {
+            ...options.jsonSchema,
+            schema: JSON.stringify(options.jsonSchema.schema),
+        },
+    };
+}
+
+function boundedErrorMessage(error: unknown): string | undefined {
+    const message = error instanceof Error
+        ? error.message
+        : error !== null && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+          ? (error as { message: string }).message
+          : typeof error === 'string' ? error : undefined;
+    if (!message) return undefined;
+    // Provider failures can echo request data. Preserve only a compact one-line
+    // diagnostic, and redact the most common credential-shaped strings.
+    return message.replace(/[\r\n]+/g, ' ').replace(/\b(?:sk|rk|key)[-_][A-Za-z0-9_-]{12,}\b/gi, '[redacted]').slice(0, 500);
 }

@@ -40,7 +40,7 @@
     "@a2arium/callagent-utils": "^0.2.0",
     "@prisma/adapter-pg": "7.4.0",
     "@prisma/client": "7.4.0",
-    "callllm": "^0.3.3",
+    "callllm": "^0.4.2",
     "dotenv": "^16.4.5",
     "pg": "^8.13.3",
     "uuid": "^11.1.0"
