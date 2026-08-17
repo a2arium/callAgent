@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation after Phases 1–2.
+Implemented after Phases 1–2.
 `adr/0005-execute-step-names-a-step.md` is **Accepted**.
 
 Phase 3 fields are not required. DAG Policy may ignore `validation`
@@ -46,11 +46,11 @@ This spec is the missing **intent** plus the default loop wiring.
 flowchart TD
   M["M.plans"] --> H[selectReadyPlanSteps]
   H --> P[Policy: pick one]
-  P -->|execute_step or execute_next_step| D[dispatchStoredPlanStep]
+  P -->|execute_step or execute_next_step| D[resolveStoredPlanStep]
   D -->|await| Pend["pending.tools token: planId stepId advanceCursor"]
   D -->|continue| SU[result.data.planStepUpdated]
-  Pend --> T[tool/child/user completed]
-  T --> L[Learning updateStep]
+  Pend --> Claim[claim copies stamps onto terminal]
+  Claim --> L[Learning: pending then terminals]
   SU --> Tr[Transition emits plan.step.updated]
   Tr --> L
 ```
@@ -88,11 +88,16 @@ See Phase 1. Add `execute_step` to
 
 ## Shared dispatcher
 
-Today `execute_next_step` falls through the default `loopRunner` stub.
-`create_plan` is the only planning stub that proposes a plan.
+Default Execution used to no-op `execute_next_step`. Phase 4 wires both
+planning intents through `resolveStoredPlanStep`. `create_plan` still
+proposes a plan via `result.data.planProposed`.
 
-Phase 4 MUST add one helper (e.g. `dispatchStoredPlanStep` next to
-`loopRunner` or under `packages/core/src/plans/`) used by **both**:
+Phase 4 MUST add one lookup helper (`resolveStoredPlanStep` in
+`packages/core/src/plans/dispatchStoredPlanStep.ts`) used by **both**
+planning intents. `dispatchStoredPlanStep` MAY remain a named alias of
+that lookup. It does **not** run tools; default Execution calls the
+existing `requestTool` / `requestInput` / `sendTaskToAgent` handlers
+after resolve and passes stamps in those opts.
 
 | Policy intent | Step id |
 |---|---|
@@ -147,10 +152,16 @@ advanceCursor: boolean  // true iff Policy intent was execute_next_step
 ```
 
 Do this **before** Transition returns `await_tool` / `await_child` /
-`await_input`. Default Transition already returns await when a token is
+`await_input`. Pass the stamps in `requestTool` / `requestInput` /
+`sendTaskToAgent` opts so they land in the **same mutate** that
+registers pending. Default Transition already returns await when a token is
 present; it does not emit `plan.step.updated` on that path. That is
 fine: Policy does not run while awaiting, so a still-`pending` step
 cannot double-fire mid-await.
+
+Engine claim MUST copy those stamps onto the matching terminal
+(`PendingToolTerminal` / child / input tombstones) before deleting the
+pending record. Double-delivery protection stays; do not delay claim.
 
 Default Learning (loopRunner default, which already closes over `env`)
 on `source: 'tool' | 'child' | 'user'` terminal observations
@@ -158,13 +169,18 @@ on `source: 'tool' | 'child' | 'user'` terminal observations
 
 1. Read `token` from the envelope.
 2. Look up `env.pending.tools[token]` / `children[token]` / `inputs[token]`.
-3. If `planId` and `stepId` are present, `writer.plans.updateStep` with
+3. If that pending record is gone, look up the matching **terminal** bag
+   for the same token. Correlate if `planId` / `stepId` are present on
+   either record.
+4. If `planId` and `stepId` are present, `writer.plans.updateStep` with
    `status: 'completed'` or `'failed'`.
-4. If `advanceCursor` is true and `plan.cursor` still indexes that
+5. If `advanceCursor` is true and `plan.cursor` still indexes that
    `stepId`, set `cursor` to `min(cursor + 1, steps.length)` via
    `writer.plans.update`.
-5. Do this **while the pending record still exists**. If an
-   implementation deletes pending before Learning, that is a bug.
+
+Pending deleted on engine claim is **not** a dropped correlation when
+tombstones keep `planId` / `stepId` / `advanceCursor`. Learning reads
+pending **then** terminals.
 
 Do not invent `running` on the await path. `pending` → terminal status
 on resume is enough (Policy does not run during await).
@@ -231,7 +247,9 @@ New `packages/core/tests/planning.execute-step.test.ts`:
 5. Assert `pending.tools[token]` has `planId` / `stepId` / `advanceCursor:
    false`.
 6. Inject `tool.completed` for that token; **default** Learning (not a
-   custom module) marks `A` `completed`; `B` still `pending`.
+   custom module) marks `A` `completed`; `B` still `pending`. After
+   engine claim, pending may be gone — Learning still correlates via
+   terminals that carry the stamps.
 7. Next turn `selectReadyPlanSteps` includes `B`, not `A`.
 8. `cursor` unchanged.
 
@@ -261,7 +279,7 @@ Also:
 | Default Policy tests expect DAG | Do not change default Policy |
 | Phase 1 step-intent reject list | Add `execute_step` to rejects |
 | Stochastic `Math.random` flake | `policyParams.stochastic: false` in the two-entry array test |
-| Pending deleted before Learning | Move cleanup after Learning; do not drop correlation |
+| Pending deleted before Learning | Copy stamps onto terminals; Learning looks up pending **then** terminals. Claim deleting pending is not a dropped correlation. |
 | Someone adds dependsOn checks in Execution | Revert; that test must stay green |
 
 Run `yarn test` and `yarn test:types` in `packages/core`.
@@ -292,7 +310,8 @@ Do **not** rewrite originating request / 3.1 history.
 
 - Schema/type cases pass; step cannot store `execute_step`.
 - Shared dispatcher serves both planning intents.
-- Await: pending stamp + default Learning completion; no double-fire.
+- Await: pending stamp + terminal tombstones; default Learning
+  correlates pending then terminals; no double-fire.
 - Continue: `plan.step.updated` + default Learning completion.
 - Blocked-but-named step still dispatches.
 - `execute_step` does not advance `cursor`; `execute_next_step` does
@@ -305,7 +324,8 @@ Do **not** rewrite originating request / 3.1 history.
 1. Add `ExecuteStepIntentSchema`; fold into Planning + Intent; scaffold
    parity test.
 2. Optional `advanceCursor` on `PlanStepUpdatedPayloadSchema`.
-3. `dispatchStoredPlanStep` + pending stamps; wire both intents.
+3. `resolveStoredPlanStep` + pending stamps on the handler’s record;
+   wire both intents. `dispatchStoredPlanStep` is a lookup alias.
 4. Default Learning correlation + cursor advance.
 5. HITL kind lists.
 6. Tests + docs.

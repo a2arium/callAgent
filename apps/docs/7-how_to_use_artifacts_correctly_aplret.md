@@ -208,6 +208,14 @@ Avoid:
 - binary/base64 data inline
 - raw transport wrappers
 
+## Plan steps store refs, not inline tool JSON
+
+A completed plan step MAY list `outputs?: PlanOutputRef[]` with
+`kind: 'artifact' | 'memory' | 'evidence'` and a string `ref`. That is a
+handle. Do not put tool JSON, HTML, or `kind: 'value'` on the step.
+Learning writes the handle after it knows the artifact / memory id.
+Policy reads the ref from `M.plans` and never awaits the artifact.
+
 ## Common mistakes
 
 ### Mistake 1: async Policy

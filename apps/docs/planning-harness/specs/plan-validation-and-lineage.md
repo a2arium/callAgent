@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation after Phase 1. Graph helpers (Phase 2) should
+Implemented after Phase 1. Graph helpers (Phase 2) should
 land first if this PR adds the optional ready-helper flag; schema fields
 alone only need Phase 1.
 

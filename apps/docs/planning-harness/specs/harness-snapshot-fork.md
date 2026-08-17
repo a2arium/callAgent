@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation. Independent of plan schema, but the motivating
+Implemented. Independent of plan schema, but the motivating
 tests are planning repair branches.
 `adr/0009-harness-snapshot-fork-isolates-branches.md` is **Accepted**.
 

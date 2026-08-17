@@ -21,7 +21,7 @@ Three Plan shapes exist today:
    inline `result: unknown`, no `dependsOn`, statuses
    `pending`/`running`/`completed`, plan statuses `proposed`/`cancelled`,
    numeric timestamps.
-3. **Improvement request** (`apps/docs/todo/improvements-planning-dependencies-etc.md`):
+3. **Improvement request** (`apps/docs/todo/done/improvements-planning-dependencies-etc.md`):
    extends shape (1), including generics and a `scheduling` mode.
 
 Almost no agents depend on (2). Humans and LLMs follow (1). (2) is an incomplete

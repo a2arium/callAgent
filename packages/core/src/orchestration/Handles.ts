@@ -9,7 +9,15 @@ import { registerTaskEffect } from './TaskEffectRegistration.js';
 
 const log = logger.createLogger({ prefix: 'Handles' });
 
-type PendingInputs = Record<string, { handlerName?: string; expiredHandlerName?: string; schema?: unknown; expiresAt?: string }>;
+type PendingInputs = Record<string, {
+    handlerName?: string;
+    expiredHandlerName?: string;
+    schema?: unknown;
+    expiresAt?: string;
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
+}>;
 export type PendingTaskTerminal = {
     kind: 'completed' | 'failed';
     claimedAt: string;
@@ -21,6 +29,9 @@ export type PendingTaskTerminal = {
     fence?: string;
     generation?: string;
     turnSeq?: number;
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
 export type PendingTask = {
@@ -37,6 +48,9 @@ export type PendingTask = {
     timeoutMs?: number;
     expiresAt?: string;
     terminal?: PendingTaskTerminal;
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
 export type PendingTasks = Record<string, PendingTask>;

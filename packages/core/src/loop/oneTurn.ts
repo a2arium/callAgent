@@ -281,14 +281,15 @@ export async function oneTurn<
 
     let chosen = Array.isArray(pi) ? pi[0].action : pi;
     if (Array.isArray(pi)) {
+        const rnd = iCtx.__random ?? Math.random;
         const eps = m1.policyParams?.explorationEpsilon ?? 0;
         const temp = m1.policyParams?.temperature ?? 1;
         const stochastic = m1.policyParams?.stochastic ?? true;
         const probs = pi.map(p => Math.max(0, Number(p.prob) || 0));
         const weights = probs.map(p => (temp && temp > 0 && temp !== 1) ? Math.pow(p, 1 / temp) : p);
         if (!stochastic) {
-            if (Math.random() < eps) {
-                const idx = Math.floor(Math.random() * pi.length);
+            if (rnd() < eps) {
+                const idx = Math.floor(rnd() * pi.length);
                 chosen = pi[idx].action;
             } else {
                 let maxIdx = 0; let maxVal = weights[0] ?? 0;
@@ -298,12 +299,12 @@ export async function oneTurn<
                 chosen = pi[maxIdx].action;
             }
         } else {
-            if (Math.random() < eps) {
-                const idx = Math.floor(Math.random() * pi.length);
+            if (rnd() < eps) {
+                const idx = Math.floor(rnd() * pi.length);
                 chosen = pi[idx].action;
             } else {
                 const sum = weights.reduce((a, b) => a + b, 0) || 1;
-                let t = Math.random() * sum;
+                let t = rnd() * sum;
                 let selected = pi[0].action;
                 for (let i = 0; i < weights.length; i++) {
                     t -= weights[i];

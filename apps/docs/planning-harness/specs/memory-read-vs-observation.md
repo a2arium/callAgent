@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation (mostly documentation + a regression test).
+Implemented (mostly documentation + a regression test).
 `adr/0007-durable-memory-reads-are-not-observations.md` is **Accepted**.
 Uses Phase 5a recorder only if an agent opts into a compact extension.
 

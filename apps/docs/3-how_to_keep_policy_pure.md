@@ -214,6 +214,8 @@ policy: (m) => {
 }
 ```
 
+Policy MAY call `selectReadyPlanSteps` / `validatePlanGraph` — they are pure functions of `M.plans`, not `ctx` / `env` / durable memory. DAG Policy then emits one `execute_step`. Do not turn that into a scheduler or emit two intents. Execution will run a blocked-but-named pending step; that is a Policy bug, not an Execution gate.
+
 ### Case 6: “Policy wants to branch on current Stage”
 
 #### Bad

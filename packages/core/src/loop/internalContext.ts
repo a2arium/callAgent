@@ -170,6 +170,10 @@ export type InternalTaskContext = TaskContext & {
     >;
     /** Session-level turn trace collector (test/debug). */
     __turnTraceCollector?: TurnTraceCollector;
+    /** Per-turn TurnTrace.extensions buffer; copied then cleared after the turn. */
+    __turnTraceExtensions?: import('../types/turnTrace.js').TurnTraceExtension[];
+    /** Optional seeded PRNG for Policy-array sampling (harness randomSeed). */
+    __random?: () => number;
     /** Session-level manifest provenance restored from snapshot/session metadata on every turn-entry path */
     __manifestProvenance?: ManifestProvenance;
     /** Runtime-manifest observability settings used by operator event capture. */

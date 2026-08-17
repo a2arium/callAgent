@@ -84,6 +84,10 @@ export type A2ACallOptions = {
      * Thread-only; use `ctx.conversation.startThread` first to obtain a `ThreadRef`.
      */
     conversation?: ThreadRef;
+    /** Optional plan-step correlation stamps written onto the pending child record. */
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
 /**

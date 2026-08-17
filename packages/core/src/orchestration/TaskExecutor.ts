@@ -873,6 +873,17 @@ export class TaskExecutor {
                 for (const token of Object.keys(toolTerminals)) {
                     delete tools[token];
                 }
+                const inputTerminals = {
+                    ...(remotePending.inputTerminals ?? {}),
+                    ...(localPending.inputTerminals ?? {}),
+                } as Record<string, unknown>;
+                const inputs = {
+                    ...(remotePending.inputs ?? {}),
+                    ...(localPending.inputs ?? {}),
+                } as Record<string, unknown>;
+                for (const token of Object.keys(inputTerminals)) {
+                    delete inputs[token];
+                }
 
                 const remoteInbox = filterInboxCurrentByConversationDeliveryKeys(
                     InboxManager.normalizeInbox((baseNow as any)?.inbox),
@@ -895,12 +906,13 @@ export class TaskExecutor {
                 const nextPending = {
                     ...remotePending,
                     ...localPending,
-                    inputs: { ...(remotePending.inputs ?? {}), ...(localPending.inputs ?? {}) },
+                    inputs,
                     children,
                     tasks,
                     childTerminals,
                     tools,
                     toolTerminals,
+                    inputTerminals,
                     events: { ...(remotePending.events ?? {}), ...(localPending.events ?? {}) },
                     groups: { ...(remotePending.groups ?? {}), ...(localPending.groups ?? {}) },
                     controlVars: { ...(remotePending.controlVars ?? {}), ...(localPending.controlVars ?? {}) },

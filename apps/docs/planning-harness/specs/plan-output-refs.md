@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation after Phase 1 (`specs/plan-schema.md`).
+Implemented after Phase 1 (`specs/plan-schema.md`).
 May land in the same PR as `specs/plan-validation-and-lineage.md`.
 `adr/0003-step-outputs-are-references.md` is **Accepted**.
 

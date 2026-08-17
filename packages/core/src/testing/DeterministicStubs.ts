@@ -11,6 +11,9 @@ export type DeterministicLLMStub = ILLMCaller & {
     getCalls(): ReadonlyArray<{ message: LLMMessage; options?: LLMCallOptions }>;
     /** Reset the stub (clear queue and call history) */
     reset(): void;
+    /** Clone remaining queue and call history for harness fork isolation. */
+    cloneState(): { queue: LLMStubResponse[]; calls: Array<{ message: LLMMessage; options?: LLMCallOptions }> };
+    restoreState(state: { queue: LLMStubResponse[]; calls: Array<{ message: LLMMessage; options?: LLMCallOptions }> }): void;
 };
 
 export function createDeterministicLLMStub(): DeterministicLLMStub {
@@ -45,6 +48,16 @@ export function createDeterministicLLMStub(): DeterministicLLMStub {
             calls = [];
             toolResults.length = 0;
             currentSettings = undefined;
+        },
+        cloneState() {
+            return {
+                queue: queue.map((item) => ({ ...item })),
+                calls: calls.map((item) => ({ ...item })),
+            };
+        },
+        restoreState(next) {
+            queue = next.queue.map((item) => ({ ...item }));
+            calls = next.calls.map((item) => ({ ...item }));
         },
 
         async call<T = unknown>(message: LLMMessage, options?: LLMCallOptions): Promise<UniversalChatResponse<T>[]> {
@@ -89,6 +102,8 @@ export type DeterministicToolStub = {
     invoke<T = unknown>(toolName: string, args: unknown): Promise<T>;
     getCalls(): ReadonlyArray<{ tool: string; args: unknown }>;
     reset(): void;
+    cloneState(): { registry: Array<[string, unknown]>; calls: Array<{ tool: string; args: unknown }> };
+    restoreState(state: { registry: Array<[string, unknown]>; calls: Array<{ tool: string; args: unknown }> }): void;
 };
 
 export function createDeterministicToolStub(): DeterministicToolStub {
@@ -112,6 +127,19 @@ export function createDeterministicToolStub(): DeterministicToolStub {
         reset() {
             registry.clear();
             calls = [];
-        }
+        },
+        cloneState() {
+            return {
+                registry: [...registry.entries()],
+                calls: calls.map((item) => ({ ...item })),
+            };
+        },
+        restoreState(next) {
+            registry.clear();
+            for (const [name, result] of next.registry) {
+                registry.set(name, result);
+            }
+            calls = next.calls.map((item) => ({ ...item }));
+        },
     };
 }

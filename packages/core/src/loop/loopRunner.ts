@@ -11,6 +11,15 @@ import {
     type Observation
 } from './oneTurn.js';
 import type { Intent, ExecutableAction } from '../types/intent.js';
+import { resolveStoredPlanStep } from '../plans/dispatchStoredPlanStep.js';
+import {
+    asHandlerStampOpts,
+    attachPlanStepCorrelation,
+    lookupPendingPlanStep,
+    pickPlanStepStamp,
+    type PlanStepStamp,
+    type PlanStepStampFields,
+} from '../plans/planStepCorrelation.js';
 import {
     LLMRespondedPayloadSchema,
     ValidationFailedPayloadSchema,
@@ -20,7 +29,8 @@ import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { WorkflowNode } from '../telemetry/nodes/WorkflowNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
-import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
+import { Plan, PlanState, PlanStep, PlanId, PlanSchema, PlanStepUpdatedPayloadSchema } from '../types/plan.js';
+import { applyPlanPatch, PlanPatchPayloadSchema } from '../plans/planPatch.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
 import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
@@ -98,6 +108,8 @@ type LoopRunnerOptions = {
         batchSize: number;
         autoArchiveAfterMs: number;
     };
+    /** Seeded PRNG for Policy-array sampling only. */
+    random?: () => number;
 };
 
 const DEFAULT_PROVENANCE: ManifestProvenance = {
@@ -118,6 +130,158 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const asString = (value: unknown): string | undefined =>
     typeof value === 'string' ? value : undefined;
+
+const stampPlanTimestamps = (plan: Plan): Plan => {
+    const now = new Date().toISOString();
+    return {
+        ...plan,
+        createdAt: plan.createdAt ?? now,
+        updatedAt: plan.updatedAt ?? now,
+    };
+};
+
+const maybeAdvancePlanCursor = (
+    writer: { plans: { update?: (id: PlanId, patch: Partial<Plan>) => void } },
+    prev: MentalState,
+    planId: string,
+    stepId: string
+): void => {
+    const plan = prev.plans?.plans?.[planId];
+    if (!plan) return;
+    if (plan.steps[plan.cursor]?.id !== stepId) return;
+    writer.plans.update?.(planId, { cursor: Math.min(plan.cursor + 1, plan.steps.length) });
+};
+
+const pendingSlotForObservation = (
+    source: Observation['source']
+): 'tools' | 'children' | 'inputs' | undefined => {
+    if (source === 'tool') return 'tools';
+    if (source === 'child') return 'children';
+    if (source === 'user') return 'inputs';
+    return undefined;
+};
+
+const copyPendingStampToTerminalIfAbsent = (
+    env: EnvironmentState,
+    slot: 'tools' | 'children',
+    token: string
+): void => {
+    const liveBag = env.pending[slot];
+    if (!liveBag || typeof liveBag !== 'object') return;
+    const entry = liveBag[token];
+    if (!isRecord(entry)) return;
+    const stamp = pickPlanStepStamp(entry as PlanStepStampFields);
+    if (stamp.planId === undefined && stamp.stepId === undefined && stamp.advanceCursor === undefined) {
+        return;
+    }
+    const terminalKey = slot === 'tools' ? 'toolTerminals' : 'childTerminals';
+    const terminals = (env.pending[terminalKey] ?? {}) as Record<string, unknown>;
+    env.pending[terminalKey] = terminals;
+    const existing = terminals[token];
+    if (isRecord(existing)) {
+        const existingStamp = pickPlanStepStamp(existing as PlanStepStampFields);
+        if (
+            existingStamp.planId !== undefined ||
+            existingStamp.stepId !== undefined ||
+            existingStamp.advanceCursor !== undefined
+        ) {
+            return;
+        }
+        terminals[token] = { ...existing, ...stamp };
+        return;
+    }
+    terminals[token] = { ...stamp };
+};
+
+const isTerminalEffectObservation = (item: Observation): boolean =>
+    (item.source === 'tool' && (item.kind === 'tool.completed' || item.kind === 'tool.failed')) ||
+    (item.source === 'child' && (item.kind === 'child.completed' || item.kind === 'child.failed')) ||
+    (item.source === 'user' && (item.kind === 'input.provided' || item.kind === 'input.cancelled'));
+
+const planValidationFailedObservation = (
+    original: {
+        payload: unknown;
+        provenance?: Observation['provenance'];
+        error?: Observation['error'];
+    },
+    schemaName: 'PlanSchema' | 'PlanStepUpdatedPayloadSchema' | 'PlanPatchSchema',
+    zodError: { format: () => unknown }
+): Observation => ({
+    source: 'internal',
+    kind: 'validation.failed',
+    payload: ValidationFailedPayloadSchema.parse({
+        reason: 'invalid_plan',
+        schemaName,
+        zodError: zodError.format(),
+        originalPayload: original.payload,
+    }),
+    provenance: original.provenance,
+    error: original.error,
+});
+
+const pushPlanningDataObservations = (obs: Observation[], data: unknown): void => {
+    if (!isRecord(data)) return;
+    if ('planProposed' in data) {
+        const parsed = PlanSchema.safeParse(data.planProposed);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.proposed', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planProposed },
+                'PlanSchema',
+                parsed.error
+            ));
+        }
+    }
+    if ('planUpdated' in data) {
+        const parsed = PlanSchema.safeParse(data.planUpdated);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.updated', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planUpdated },
+                'PlanSchema',
+                parsed.error
+            ));
+        }
+    }
+    if ('planStepUpdated' in data) {
+        const parsed = PlanStepUpdatedPayloadSchema.safeParse(data.planStepUpdated);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.step.updated', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planStepUpdated },
+                'PlanStepUpdatedPayloadSchema',
+                parsed.error
+            ));
+        }
+    }
+    if ('planPatch' in data) {
+        const parsed = PlanPatchPayloadSchema.safeParse(data.planPatch);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.patch', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planPatch },
+                'PlanPatchSchema',
+                parsed.error
+            ));
+        }
+    }
+};
+
+const inboxFromPerceptionObs = (obs: unknown): Observation[] => {
+    if (!obs || typeof obs !== 'object') return [];
+    const inbox = (obs as { inbox?: unknown }).inbox;
+    if (Array.isArray(inbox)) {
+        return inbox as Observation[];
+    }
+    if (inbox && typeof inbox === 'object' && Array.isArray((inbox as { current?: unknown }).current)) {
+        return (inbox as { current: Observation[] }).current;
+    }
+    return [];
+};
 
 type OperatorEventSink = {
     appendOperatorEvent: (params: {
@@ -531,6 +695,7 @@ export async function runLoop<
     });
     iCtx.__activeLoopEnv = env;
     iCtx.__manifestHitl = opts.hitl;
+    iCtx.__random = opts.random;
 
     const provenance = opts.manifestProvenance ?? iCtx.__manifestProvenance ?? DEFAULT_PROVENANCE;
     const collectTraces = opts.collectTraces ?? false;
@@ -670,7 +835,8 @@ export async function runLoop<
             rewardParamsReplace: undefined as import('./types.js').MentalState['rewardParams'] | undefined,
             plansReplace: undefined as import('../types/plan.js').PlanState | undefined,
             planUpserts: new Map<string, import('../types/plan.js').Plan>(),
-            planStepUpdates: new Map<string, { planId: string, stepId: string, patch: Partial<import('../types/plan.js').PlanStep> }>()
+            planStepUpdates: new Map<string, { planId: string, stepId: string, patch: Partial<import('../types/plan.js').PlanStep> }>(),
+            planFieldUpdates: new Map<string, Partial<import('../types/plan.js').Plan>>()
         };
 
         const writer: import('./types.js').MemoryWriter & {
@@ -736,7 +902,12 @@ export async function runLoop<
                 add: (p: Plan) => { patches.planUpserts.set(p.id, p); },
                 update: (id: PlanId, patch: Partial<Plan>) => {
                     const current = patches.planUpserts.get(id);
-                    if (current) patches.planUpserts.set(id, { ...current, ...patch });
+                    if (current) {
+                        patches.planUpserts.set(id, { ...current, ...patch });
+                        return;
+                    }
+                    const prevPatch = patches.planFieldUpdates.get(id) ?? {};
+                    patches.planFieldUpdates.set(id, { ...prevPatch, ...patch });
                 },
                 updateStep: (planId: PlanId, stepId: string, patch: Partial<PlanStep>) => {
                     patches.planStepUpdates.set(`${planId}:${stepId}`, { planId, stepId, patch });
@@ -782,6 +953,16 @@ export async function runLoop<
                         if (plan) {
                             const steps = plan.steps.map((s: PlanStep) => s.id === stepId ? { ...s, ...patch } : s);
                             plans[planId] = { ...plan, steps };
+                        }
+                    });
+                    (next as any).plans = { ...((next as any).plans || {}), plans };
+                }
+                if (patches.planFieldUpdates.size > 0) {
+                    const plans = { ...((next as any).plans?.plans || {}) };
+                    patches.planFieldUpdates.forEach((patch, planId) => {
+                        const plan = plans[planId];
+                        if (plan) {
+                            plans[planId] = { ...plan, ...patch };
                         }
                     });
                     (next as any).plans = { ...((next as any).plans || {}), plans };
@@ -879,17 +1060,42 @@ export async function runLoop<
 
             // Perception validation for plans
             turnInbox = turnInbox.map(obs => {
-                if (obs.source === 'internal' && (obs.kind === 'plan.proposed' || obs.kind === 'plan.updated')) {
-                    try {
-                        const validated = PlanSchema.parse(obs.payload);
-                        return { ...obs, payload: validated };
-                    } catch (err) {
-                        log.warn('Dropped invalid plan observation', { kind: obs.kind, error: err });
-                        return undefined;
+                if (obs.source !== 'internal') return obs;
+                if (obs.kind === 'plan.proposed' || obs.kind === 'plan.updated') {
+                    const parsed = PlanSchema.safeParse(obs.payload);
+                    if (parsed.success) {
+                        return { ...obs, payload: parsed.data };
                     }
+                    log.warn('Invalid plan observation replaced with validation.failed', {
+                        kind: obs.kind,
+                        schemaName: 'PlanSchema',
+                    });
+                    return planValidationFailedObservation(obs, 'PlanSchema', parsed.error);
+                }
+                if (obs.kind === 'plan.step.updated') {
+                    const parsed = PlanStepUpdatedPayloadSchema.safeParse(obs.payload);
+                    if (parsed.success) {
+                        return { ...obs, payload: parsed.data };
+                    }
+                    log.warn('Invalid plan observation replaced with validation.failed', {
+                        kind: obs.kind,
+                        schemaName: 'PlanStepUpdatedPayloadSchema',
+                    });
+                    return planValidationFailedObservation(obs, 'PlanStepUpdatedPayloadSchema', parsed.error);
+                }
+                if (obs.kind === 'plan.patch') {
+                    const parsed = PlanPatchPayloadSchema.safeParse(obs.payload);
+                    if (parsed.success) {
+                        return { ...obs, payload: parsed.data };
+                    }
+                    log.warn('Invalid plan observation replaced with validation.failed', {
+                        kind: obs.kind,
+                        schemaName: 'PlanPatchSchema',
+                    });
+                    return planValidationFailedObservation(obs, 'PlanPatchSchema', parsed.error);
                 }
                 return obs;
-            }).filter((o): o is NonNullable<typeof o> => !!o);
+            });
 
             // Default perception returns inbox observations
             return { time: e.time, pending: e.pending, inbox: turnInbox } as any;
@@ -915,21 +1121,80 @@ export async function runLoop<
                 );
 
                 // Learning: Single Writer for M.plans
-                const internal = (obs as any).internal?.();
-                if (internal) {
-                    const kind = internal.kind;
-                    const payload = internal.payload;
-                    if (kind === 'plan.proposed') {
-                        (writer as any).plans?.set?.({
-                            plans: { [payload.id]: payload },
-                            activePlanId: payload.id
+                const inboxForPlans = inboxArr.length > 0 ? inboxArr : inboxFromPerceptionObs(obs);
+                for (const item of inboxForPlans) {
+                    if (item.source !== 'internal') continue;
+                    if (item.kind === 'plan.proposed') {
+                        const parsed = PlanSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const stamped = stampPlanTimestamps(parsed.data);
+                        writer.plans.set({
+                            plans: { [stamped.id]: stamped },
+                            activePlanId: stamped.id,
                         });
-                    } else if (kind === 'plan.updated') {
-                        (writer as any).plans?.add?.(payload);
-                    } else if (kind === 'plan.step.updated') {
-                        // payload would need to include planId and stepId and the patch
-                        const { planId, stepId, ...patch } = payload;
-                        (writer as any).plans?.updateStep?.(planId, stepId, patch);
+                    } else if (item.kind === 'plan.updated') {
+                        const parsed = PlanSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const stamped = stampPlanTimestamps(parsed.data);
+                        writer.plans.add?.(stamped);
+                    } else if (item.kind === 'plan.step.updated') {
+                        const parsed = PlanStepUpdatedPayloadSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const { planId, stepId, patch, advanceCursor } = parsed.data;
+                        const currentPlan = (prev as MentalState<Sensory>).plans?.plans?.[planId];
+                        if (!currentPlan) continue;
+                        const nextPlan: Plan = {
+                            ...currentPlan,
+                            steps: currentPlan.steps.map((s: PlanStep) =>
+                                s.id === stepId ? { ...s, ...patch } : s
+                            ),
+                        };
+                        const validated = PlanSchema.safeParse(nextPlan);
+                        if (!validated.success) continue;
+                        writer.plans.updateStep?.(planId, stepId, patch);
+                        if (advanceCursor === true) {
+                            maybeAdvancePlanCursor(writer, prev as MentalState<Sensory>, planId, stepId);
+                        }
+                    } else if (item.kind === 'plan.patch') {
+                        const parsed = PlanPatchPayloadSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const { planId, patch } = parsed.data;
+                        const currentPlan = (prev as MentalState<Sensory>).plans?.plans?.[planId];
+                        if (!currentPlan) continue;
+                        const applied = applyPlanPatch(currentPlan, patch);
+                        if (!applied.ok) continue;
+                        const bumped: Plan = {
+                            ...applied.plan,
+                            revision: applied.plan.revision + 1,
+                            lineage: {
+                                ...(applied.plan.lineage ?? {}),
+                                parentRevision: applied.plan.revision,
+                            },
+                            updatedAt: new Date().toISOString(),
+                        };
+                        const validated = PlanSchema.safeParse(bumped);
+                        if (!validated.success) continue;
+                        writer.plans.add?.(validated.data);
+                    }
+                }
+
+                for (const item of inboxForPlans) {
+                    if (!isTerminalEffectObservation(item)) continue;
+                    const token = isRecord(item.payload) && typeof item.payload.token === 'string'
+                        ? item.payload.token
+                        : undefined;
+                    const slot = pendingSlotForObservation(item.source);
+                    if (!token || !slot) continue;
+                    const record = lookupPendingPlanStep(env, slot, token);
+                    if (!record) {
+                        continue;
+                    }
+                    const failed = item.kind.endsWith('.failed') || item.kind === 'input.cancelled';
+                    writer.plans.updateStep?.(record.planId, record.stepId, {
+                        status: failed ? 'failed' : 'completed',
+                    });
+                    if (record.advanceCursor === true) {
+                        maybeAdvancePlanCursor(writer, prev as MentalState<Sensory>, record.planId, record.stepId);
                     }
                 }
             } catch { /* noop */ }
@@ -1011,16 +1276,49 @@ export async function runLoop<
                 return { action: 'pass', intent: a };
             }
         }),
-        execution: modules.execution ?? (async (a: Intent, ctx: TaskContext, _mem) => {
+        execution: modules.execution ?? (async (policyIntent: Intent, ctx: TaskContext, _mem, mState?: MentalState<Sensory>) => {
+            let a: Intent = policyIntent;
+            let planStamp: PlanStepStamp | undefined;
+            if (policyIntent.kind === 'execute_step' || policyIntent.kind === 'execute_next_step') {
+                const resolved = resolveStoredPlanStep(policyIntent, mState ?? ({} as MentalState<Sensory>));
+                if (!resolved.ok) {
+                    return {
+                        action: { kind: 'internal', done: false } as ExecutableAction,
+                        result: {
+                            status: 'error',
+                            ts: Date.now(),
+                            error: { code: resolved.errorCode, message: resolved.message },
+                            data: { planDispatchFailed: true },
+                            toolId: 'internal',
+                        },
+                    };
+                }
+                planStamp = {
+                    planId: resolved.planId,
+                    stepId: resolved.stepId,
+                    advanceCursor: resolved.advanceCursor,
+                };
+                if (resolved.intent.kind === 'call_tool') {
+                    a = { ...resolved.intent, mode: 'async' };
+                } else {
+                    a = resolved.intent;
+                }
+            }
+
             const base: ExecResult = { status: 'ok', ts: Date.now() };
             const internalCtx = ctx as InternalTaskContext & {
                 flushSnapshot?: (state: { M: MentalState<Sensory>; env: EnvironmentState }) => Promise<void>;
             };
 
+            const stampOpts = asHandlerStampOpts(planStamp);
+
+            const outcome = await (async (): Promise<ExecOutcome> => {
+
             if (a.kind === 'prompt_user') {
                 const handle = await ctx.requestInput(a.prompt, {
                     schema: a.schema,
-                    onProvided: '__onInputProvided'
+                    onProvided: '__onInputProvided',
+                    ...stampOpts,
                 });
                 const token = isRecord(handle) && typeof handle.token === 'string' ? handle.token : '';
                 try { log.info('Execution asking for user input', { token }); } catch { /* noop */ }
@@ -1048,7 +1346,8 @@ export async function runLoop<
                 }
 
                 const res = await ctx.sendTaskToAgent(a.agentId, a.input as TaskInput, {
-                    onCompleted: '__onChildCompleted'
+                    onCompleted: '__onChildCompleted',
+                    ...stampOpts,
                 });
                 const token = isRecord(res)
                     ? (typeof res.token === 'string' ? res.token : undefined)
@@ -1080,7 +1379,8 @@ export async function runLoop<
 
                 if (a.mode === 'async') {
                     const handle = await ctx.requestTool(toolName, a.args, {
-                        onCompleted: '__onToolCompleted'
+                        onCompleted: '__onToolCompleted',
+                        ...stampOpts,
                     });
                     const token = isRecord(handle) && typeof handle.token === 'string' ? handle.token : '';
                     return {
@@ -1169,6 +1469,10 @@ export async function runLoop<
                 action: { kind: 'internal', done: false } as ExecutableAction,
                 result: { ...base, data: { intent: a.kind, done: false }, toolId: 'internal' }
             };
+            })();
+            const typedOutcome = outcome as ExecOutcome<ExecData, ExecError>;
+            if (!planStamp) return typedOutcome;
+            return attachPlanStepCorrelation(typedOutcome, env, planStamp, a);
         }),
         transition: modules.transition ?? ((env, exec: ExecOutcome<ExecData, ExecError>, _m, _mem) => {
             const { action, result } = exec;
@@ -1224,15 +1528,7 @@ export async function runLoop<
                     });
                     obs.push({ source: 'internal', kind: 'llm.responded', payload });
                 }
-                if (isRecord(data) && 'planProposed' in data) {
-                    obs.push({ source: 'internal', kind: 'plan.proposed', payload: data.planProposed });
-                }
-                if (isRecord(data) && 'planUpdated' in data) {
-                    obs.push({ source: 'internal', kind: 'plan.updated', payload: data.planUpdated });
-                }
-                if (isRecord(data) && 'planStepUpdated' in data) {
-                    obs.push({ source: 'internal', kind: 'plan.step.updated', payload: data.planStepUpdated });
-                }
+                pushPlanningDataObservations(obs, data);
 
                 if (obs.length === 0) {
                     obs.push({
@@ -1249,15 +1545,24 @@ export async function runLoop<
 
             }
 
+            const obs: Observation[] = [];
+            pushPlanningDataObservations(obs, result.data);
             const errorCode = result.error?.code;
             if (errorCode === 'schema_mismatch' || errorCode === 'contract_failed' || errorCode === 'llm_not_configured') {
                 const payload = ValidationFailedPayloadSchema.parse({
                     reason: errorCode === 'llm_not_configured' ? 'llm_not_configured' : 'llm_contract_failed',
                     error: result.error,
                 });
-                return { kind: 'continue', observations: [{ source: 'internal', kind: 'validation.failed', payload }] } as TransitionOut;
+                obs.push({ source: 'internal', kind: 'validation.failed', payload });
             }
-            return { kind: 'continue', observations: [] as Observation[] } as TransitionOut;
+            if (typeof errorCode === 'string' && errorCode.startsWith('PLAN_')) {
+                obs.push({
+                    source: 'internal',
+                    kind: 'state.noted',
+                    payload: { error: result.error },
+                });
+            }
+            return { kind: 'continue', observations: obs } as TransitionOut;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {
             try {
@@ -1792,6 +2097,10 @@ export async function runLoop<
                 backpressure: iCtx.__turnBackpressure,
             };
 
+            if (iCtx.__turnTraceExtensions && iCtx.__turnTraceExtensions.length > 0) {
+                tracePayload.extensions = [...iCtx.__turnTraceExtensions];
+            }
+
             let trace: TurnTrace;
             try {
                 trace = TurnTraceSchema.parse(tracePayload) as TurnTrace;
@@ -1837,6 +2146,7 @@ export async function runLoop<
             iCtx.__turnTopicSelectorDecision = undefined;
             iCtx.__turnFanoutSummary = undefined;
             iCtx.__turnStopPolicy = undefined;
+            iCtx.__turnTraceExtensions = undefined;
             iCtx.__turnBackpressure = undefined;
             iCtx.__turnInviteAutoJoin = undefined;
             iCtx.__operatorMemoryEvent = undefined;
@@ -1898,8 +2208,9 @@ export async function runLoop<
                     ];
                 }
                 if (nextCurrent.length > 0) {
-                    inbox.all.push(...nextCurrent);
-                    inbox.current = [...nextCurrent];
+                    const liveInbox = ensureInbox(env);
+                    liveInbox.all.push(...nextCurrent);
+                    liveInbox.current = [...nextCurrent];
                 } else {
                     env.inbox.current = [];
                 }
@@ -2040,6 +2351,7 @@ export async function runLoop<
 
                     // ✅ FIX: Remove from pending children so next turn doesn't await again
                     if (env.pending && env.pending.children && awaitToken) {
+                        copyPendingStampToTerminalIfAbsent(env, 'children', awaitToken);
                         delete env.pending.children[awaitToken];
                         log.debug('🔄 SYNC CHILD: Removed child from pending', { awaitToken: awaitToken?.substring(0, 15) });
                     }
@@ -2096,8 +2408,9 @@ export async function runLoop<
                     }
 
                     // Remove from pending tools
-                    if (env.pending && (env.pending as any).tools && awaitToken) {
-                        delete (env.pending as any).tools[awaitToken];
+                    if (env.pending?.tools && awaitToken) {
+                        copyPendingStampToTerminalIfAbsent(env, 'tools', awaitToken);
+                        delete env.pending.tools[awaitToken];
                     }
 
                     // Convert await_tool to continue so loop proceeds

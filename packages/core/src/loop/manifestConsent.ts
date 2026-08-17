@@ -12,6 +12,7 @@ export type ManifestHitlConfig = {
 };
 
 const GENERIC_WRAPPERS = new Set(['prompt_user', 'answer_with_llm', 'call_tool', 'delegate_to_child']);
+// Planning intents (create_plan, execute_next_step, execute_step, repair_plan) use intent.kind as the consent id.
 
 export function canonicalIntentIdentifier(intent: Intent): string | undefined {
     if (intent.kind === 'internal') return intent.intent.trim() || undefined;

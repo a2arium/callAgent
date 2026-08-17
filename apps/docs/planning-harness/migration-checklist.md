@@ -26,116 +26,116 @@ Mirrors the orchestrator-harness / streaming-harness checklist style.
 
 See `specs/plan-schema.md` for the full contract.
 
-- [ ] `PlanSchema` / `PlanStepSchema` match ADR 0001 and the spec.
-- [ ] `ExecutableStepIntent` rejects planning intents on steps.
-- [ ] Graph superRefine: duplicate id, missing dep, self, cycle, cursor.
-- [ ] Duplicate ids in one `dependsOn` list accepted (one edge), not rejected.
-- [ ] `PlanStep.result` / `description` / `args` gone; `.strict()`.
-- [ ] `ObservationSchema` types the three plan kinds (nested `kind` union).
-- [ ] Default Perception replaces invalid plan.* with `validation.failed`
+- [x] `PlanSchema` / `PlanStepSchema` match ADR 0001 and the spec.
+- [x] `ExecutableStepIntent` rejects planning intents on steps.
+- [x] Graph superRefine: duplicate id, missing dep, self, cycle, cursor.
+- [x] Duplicate ids in one `dependsOn` list accepted (one edge), not rejected.
+- [x] `PlanStep.result` / `description` / `args` gone; `.strict()`.
+- [x] `ObservationSchema` types the three plan kinds (nested `kind` union).
+- [x] Default Perception replaces invalid plan.* with `validation.failed`
       (does not drop).
-- [ ] Default Learning re-parses before `set`/`add` and after step patch.
-- [ ] `MemoryWriter.plans` stays trust-Learning (no writer parse).
-- [ ] `plan.types.test-d.ts` added; `yarn test:types` green.
-- [ ] Schemas exported from `@a2arium/callagent-core`.
-- [ ] `0-aplret_contracts.md` Plan types match the schema.
-- [ ] `8-spec_goals_and_plans_in_aplret.md` rewritten from the schema.
-- [ ] `9-how_to_implement_planning_without_breaking_policy_purity.md` rewritten.
-- [ ] `apps/docs/migration/plan-schema-one-truth.md` written in the same PR.
-- [ ] `planning.model.test.ts` fixtures updated; accept/reject cases from spec.
-- [ ] Loop stub `create_plan` still parses; legacy `description` payload
+- [x] Default Learning re-parses before `set`/`add` and after step patch.
+- [x] `MemoryWriter.plans` stays trust-Learning (no writer parse).
+- [x] `plan.types.test-d.ts` added; `yarn test:types` green.
+- [x] Schemas exported from `@a2arium/callagent-core`.
+- [x] `0-aplret_contracts.md` Plan types match the schema.
+- [x] `8-spec_goals_and_plans_in_aplret.md` rewritten from the schema.
+- [x] `9-how_to_implement_planning_without_breaking_policy_purity.md` rewritten.
+- [x] `apps/docs/migration/plan-schema-one-truth.md` written in the same PR.
+- [x] `planning.model.test.ts` fixtures updated; accept/reject cases from spec.
+- [x] Loop stub `create_plan` still parses; legacy `description` payload
       becomes `validation.failed`, not a drop.
-- [ ] `packages/core` test suite green; leftover Plan fixtures updated, not loosened.
+- [x] `packages/core` test suite green; leftover Plan fixtures updated, not loosened.
 
 ## Phase 2 — Graph helpers
 
 See `specs/plan-graph-helpers.md` for the full contract.
 
-- [ ] `validatePlanGraph(unknown)` result type; never throws.
-- [ ] Codes match Phase 1: missing, self, cycle, duplicate step id, cursor;
+- [x] `validatePlanGraph(unknown)` result type; never throws.
+- [x] Codes match Phase 1: missing, self, cycle, duplicate step id, cursor;
       other Zod failures → `PLAN_SCHEMA_INVALID`.
-- [ ] Ready / blocked ignore `cursor` and `plan.status`; dep satisfied iff
+- [x] Ready / blocked ignore `cursor` and `plan.status`; dep satisfied iff
       `completed`.
-- [ ] Ancestor / descendant / dependant lookups; missing id →
+- [x] Ancestor / descendant / dependant lookups; missing id →
       `PLAN_STEP_NOT_FOUND` (not `[]`).
-- [ ] No `scheduling` field; no `requireValidatedDependencies`.
-- [ ] `packages/core/tests/planGraph.test.ts`; fixtures through `PlanSchema`.
-- [ ] tsd cases in `plan.types.test-d.ts`.
-- [ ] Named exports from `@a2arium/callagent-core`.
-- [ ] Default Policy still sequential (`execute_next_step` + `cursor`).
-- [ ] `0-aplret_contracts.md` planning model: cursor **or** helpers; one intent.
-- [ ] `8-spec_goals_and_plans_in_aplret.md` no longer says Policy relies
+- [x] No `scheduling` field; no `requireValidatedDependencies`.
+- [x] `packages/core/tests/planGraph.test.ts`; fixtures through `PlanSchema`.
+- [x] tsd cases in `plan.types.test-d.ts`.
+- [x] Named exports from `@a2arium/callagent-core`.
+- [x] Default Policy still sequential (`execute_next_step` + `cursor`).
+- [x] `0-aplret_contracts.md` planning model: cursor **or** helpers; one intent.
+- [x] `8-spec_goals_and_plans_in_aplret.md` no longer says Policy relies
       *solely* on `cursor`.
-- [ ] `9-how_to_implement_planning_without_breaking_policy_purity.md` shows
+- [x] `9-how_to_implement_planning_without_breaking_policy_purity.md` shows
       both sequential and DAG patterns.
-- [ ] `3-how_to_keep_policy_pure.md` Case 5: helpers are M-only.
-- [ ] `11-how_to_test_aplret_agents.md` helper unit-test note.
-- [ ] `packages/core` `yarn test` + `yarn test:types` green; Phase 1 schema
+- [x] `3-how_to_keep_policy_pure.md` Case 5: helpers are M-only.
+- [x] `11-how_to_test_aplret_agents.md` helper unit-test note.
+- [x] `packages/core` `yarn test` + `yarn test:types` green; Phase 1 schema
       tests not loosened.
 
 ## Phase 3 — Provenance
 
 See `specs/plan-output-refs.md` and `specs/plan-validation-and-lineage.md`.
 
-- [ ] `PlanOutputRef` kinds `artifact | memory | evidence` only (no `value`).
-- [ ] Duplicate output `name` on one step rejected.
-- [ ] `result` / `payload` on steps still rejected.
-- [ ] Optional `validation` + `lineage`; `PLAN_LINEAGE_PARENT` when
+- [x] `PlanOutputRef` kinds `artifact | memory | evidence` only (no `value`).
+- [x] Duplicate output `name` on one step rejected.
+- [x] `result` / `payload` on steps still rejected.
+- [x] Optional `validation` + `lineage`; `PLAN_LINEAGE_PARENT` when
       `parentRevision >= revision`.
-- [ ] Ready helpers default unchanged; opt-in `requireValidatedDependencies`.
-- [ ] No `selectRunnablePlanSteps`; no `MentalState.extensions`.
-- [ ] JSON round-trip tests for outputs / validation / lineage.
-- [ ] Docs: contracts, spec 8, how-to 9, artifact how-to, migration note.
-- [ ] `packages/core` `yarn test` + `yarn test:types` green.
+- [x] Ready helpers default unchanged; opt-in `requireValidatedDependencies`.
+- [x] No `selectRunnablePlanSteps`; no `MentalState.extensions`.
+- [x] JSON round-trip tests for outputs / validation / lineage.
+- [x] Docs: contracts, spec 8, how-to 9, artifact how-to, migration note.
+- [x] `packages/core` `yarn test` + `yarn test:types` green.
 
 ## Phase 4 — execute_step
 
 See `specs/execute-step-intent.md`.
 
-- [ ] `execute_step` on `PlanningIntentSchema` only, not on `PlanStep.intent`.
-- [ ] Shared dispatcher for `execute_step` and `execute_next_step`.
-- [ ] Pending stamp `planId`/`stepId`/`advanceCursor`; default Learning
+- [x] `execute_step` on `PlanningIntentSchema` only, not on `PlanStep.intent`.
+- [x] Shared dispatcher for `execute_step` and `execute_next_step`.
+- [x] Pending stamp `planId`/`stepId`/`advanceCursor`; default Learning
       correlates terminal observations (cleanup after Learning).
-- [ ] Execution does not check `dependsOn` (blocked-but-named still runs).
-- [ ] `execute_step` does not advance `cursor`; `execute_next_step` does
+- [x] Execution does not check `dependsOn` (blocked-but-named still runs).
+- [x] `execute_step` does not advance `cursor`; `execute_next_step` does
       after completion when `advanceCursor` is true.
-- [ ] Kind-parity test vs memory-engine scaffold.
-- [ ] Exhaustive `Intent` / HITL kind lists updated.
-- [ ] Default Policy still sequential.
-- [ ] Exhaustive `Intent` / HITL kind lists updated.
-- [ ] Turn script: two ready steps, one executed, the other still ready.
-- [ ] Docs: contracts, spec 8, how-to 9, policy purity Case 5, tests how-to.
-- [ ] `packages/core` `yarn test` + `yarn test:types` green.
+- [x] Kind-parity test vs memory-engine scaffold.
+- [x] Exhaustive `Intent` / HITL kind lists updated.
+- [x] Default Policy still sequential.
+- [x] Exhaustive `Intent` / HITL kind lists updated.
+- [x] Turn script: two ready steps, one executed, the other still ready.
+- [x] Docs: contracts, spec 8, how-to 9, policy purity Case 5, tests how-to.
+- [x] `packages/core` `yarn test` + `yarn test:types` green.
 
 ## Phase 5 — Observability
 
 See `specs/turn-trace-extensions.md` and
 `specs/memory-read-vs-observation.md`.
 
-- [ ] `TurnTrace.extensions` (namespace + version + JSON data).
-- [ ] No first-class `related` / `memoryReads` / `DecisionTrace` / ATG fields.
-- [ ] `recordTurnTraceExtension` opt-in; invalid items do not fail the turn.
-- [ ] Durable read ≠ inbox observation (contracts + memory how-to).
-- [ ] Operator `memory.read` remains default telemetry (no payloads).
-- [ ] Turn-script: Learning read does not grow inbox with retrieved data.
-- [ ] `packages/core` `yarn test` + `yarn test:types` green.
+- [x] `TurnTrace.extensions` (namespace + version + JSON data).
+- [x] No first-class `related` / `memoryReads` / `DecisionTrace` / ATG fields.
+- [x] `recordTurnTraceExtension` opt-in; invalid items do not fail the turn.
+- [x] Durable read ≠ inbox observation (contracts + memory how-to).
+- [x] Operator `memory.read` remains default telemetry (no payloads).
+- [x] Turn-script: Learning read does not grow inbox with retrieved data.
+- [x] `packages/core` `yarn test` + `yarn test:types` green.
 
 ## Phase 6 — Repair and fork
 
 See `specs/plan-patch.md` and `specs/harness-snapshot-fork.md`.
 
-- [ ] `PlanPatch` + `internal/plan.patch`; Learning apply only.
-- [ ] Invalid patch → `validation.failed`, not drop.
-- [ ] `diffPlanGraph` pure; `baseRevision` mismatch fails apply.
-- [ ] `remove_step` that would OOB `cursor` clamps; `set_cursor` optional.
-- [ ] Opaque `snapshot()` / `fork()`; A cannot mutate B.
-- [ ] Production `Snapshot` type unchanged.
-- [ ] Optional `randomSeed` off by default; not process-wide `Math.random`.
-- [ ] Docs: contracts, planning how-to, test how-to.
-- [ ] `packages/core` `yarn test` + `yarn test:types` green.
+- [x] `PlanPatch` + `internal/plan.patch`; Learning apply only.
+- [x] Invalid patch → `validation.failed`, not drop.
+- [x] `diffPlanGraph` pure; `baseRevision` mismatch fails apply.
+- [x] `remove_step` that would OOB `cursor` clamps; `set_cursor` optional.
+- [x] Opaque `snapshot()` / `fork()`; A cannot mutate B.
+- [x] Production `Snapshot` type unchanged.
+- [x] Optional `randomSeed` off by default; not process-wide `Math.random`.
+- [x] Docs: contracts, planning how-to, test how-to.
+- [x] `packages/core` `yarn test` + `yarn test:types` green.
 
 ## Promotion / deletion
 
-- [ ] Accepted ADRs referenced from permanent docs.
-- [ ] Originating request archived under `apps/docs/todo/done/` or replaced.
+- [x] Accepted ADRs referenced from permanent docs.
+- [x] Originating request archived under `apps/docs/todo/done/` or replaced.
 - [ ] This folder deleted after promotion.

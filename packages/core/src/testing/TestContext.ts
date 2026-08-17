@@ -45,6 +45,7 @@ import type {
 } from '../public-types/conversation/types.js';
 import { MemberIdSchema } from '../public-types/conversation/schemas.js';
 import { stampTopicPostTurnTrace } from '../orchestration/api/topicTurnTraceStamp.js';
+import { mergePlanStepStamp, pickPlanStepStamp } from '../plans/planStepCorrelation.js';
 
 function observationDedupeKey(obs: Observation): string {
     if (obs.source === 'conversation' && obs.kind === 'message.received') {
@@ -59,6 +60,20 @@ function observationDedupeKey(obs: Observation): string {
     }
     return `${obs.source}:${obs.kind}:${JSON.stringify(obs.payload)}`;
 }
+
+const ensurePendingBag = (
+    state: HarnessState,
+    slot: 'tools' | 'children' | 'inputs'
+): Record<string, unknown> => {
+    if (!state.env.pending || typeof state.env.pending !== 'object') {
+        state.env.pending = { inputs: {}, children: {}, tools: {}, groups: {} };
+    }
+    const bag = state.env.pending[slot];
+    if (!bag || typeof bag !== 'object') {
+        state.env.pending[slot] = {};
+    }
+    return state.env.pending[slot] as Record<string, unknown>;
+};
 
 export type CreateTestContextOptions = {
     policyPurityStrict?: boolean;
@@ -294,10 +309,17 @@ export function createTestContext(
             throw new InvariantError(payload);
         },
 
-        sendTaskToAgent: ((targetAgent: string, taskInput: unknown, options?: { awaitCompletion?: boolean }) => {
+        sendTaskToAgent: ((targetAgent: string, taskInput: unknown, options?: { awaitCompletion?: boolean; planId?: string; stepId?: string; advanceCursor?: boolean }) => {
             state.childDispatches.push({ agent: targetAgent, input: taskInput });
             const token = generateId('child');
-            if (options?.awaitCompletion === false) {
+            const stamp = pickPlanStepStamp(options);
+            const returnToken = options?.awaitCompletion === false || stamp.planId !== undefined;
+            if (returnToken) {
+                const children = ensurePendingBag(state, 'children');
+                children[token] = mergePlanStepStamp(
+                    { agent: targetAgent, input: taskInput },
+                    stamp
+                );
                 return Promise.resolve({
                     id: generateId('task'),
                     get token() { return token; }
@@ -306,15 +328,34 @@ export function createTestContext(
             return Promise.resolve({ status: 'completed', result: {} });
         }) as unknown as TaskContext['sendTaskToAgent'],
 
-        requestInput: async (prompt, opts) => ({
-            id: generateId('input'),
-            token: generateId('tok-in')
-        } as unknown as InputHandle),
+        requestInput: async (prompt, opts) => {
+            const token = generateId('tok-in');
+            ensurePendingBag(state, 'inputs')[token] = mergePlanStepStamp(
+                { prompt },
+                pickPlanStepStamp(opts)
+            );
+            return {
+                id: generateId('input'),
+                token
+            } as unknown as InputHandle;
+        },
 
-        requestTool: async (toolName, args, opts) => ({
-            id: generateId('req-tool'),
-            token: generateId('tok-tool')
-        } as unknown as TaskHandle),
+        requestTool: async (toolName, args, opts) => {
+            const token = generateId('tok-tool');
+            ensurePendingBag(state, 'tools')[token] = mergePlanStepStamp(
+                { name: toolName, args },
+                pickPlanStepStamp(opts)
+            );
+            try {
+                await toolStub.invoke(toolName, args);
+            } catch {
+                /* stub records the call even when unregistered */
+            }
+            return {
+                id: generateId('req-tool'),
+                token
+            } as unknown as TaskHandle;
+        },
 
         allTasks: async (children, opts) => ({
             id: generateId('group'),

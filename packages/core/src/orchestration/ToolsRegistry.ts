@@ -10,6 +10,9 @@ export type PendingTool = {
     ownerTaskId?: string;
     rootTaskId?: string;
     ancestorTaskIds?: string[];
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
 export type PendingTools = Record<string, PendingTool>;
@@ -22,6 +25,9 @@ export type PendingToolTerminal = {
     rootTaskId?: string;
     deliveryKey?: string;
     reason?: string;
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
 export type PendingToolTerminals = Record<string, PendingToolTerminal>;

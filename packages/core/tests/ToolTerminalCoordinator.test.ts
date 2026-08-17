@@ -80,6 +80,33 @@ describe('ToolTerminalCoordinator', () => {
         expect((replay.snapshot as any).inbox.all).toHaveLength(1);
     });
 
+    it('copies plan stamps onto the tombstone before deleting pending', () => {
+        const snapshot = pendingToolSnapshot();
+        (snapshot.pending.tools['tool-1'] as { planId: string; stepId: string; advanceCursor: boolean }).planId = 'p1';
+        (snapshot.pending.tools['tool-1'] as { planId: string; stepId: string; advanceCursor: boolean }).stepId = 'A';
+        (snapshot.pending.tools['tool-1'] as { planId: string; stepId: string; advanceCursor: boolean }).advanceCursor = true;
+
+        const claim = claimToolTerminalInSnapshot(snapshot, {
+            taskId: 'task-a',
+            token: 'tool-1',
+            completedAt: '2026-07-16T12:00:00.000Z',
+            result: { ok: true },
+        });
+
+        expect((claim.snapshot as { pending: { tools: Record<string, unknown> } }).pending.tools['tool-1']).toBeUndefined();
+        expect(claim.terminal).toEqual(
+            expect.objectContaining({
+                kind: 'completed',
+                planId: 'p1',
+                stepId: 'A',
+                advanceCursor: true,
+            })
+        );
+        expect(
+            (claim.snapshot as { pending: { toolTerminals: Record<string, unknown> } }).pending.toolTerminals['tool-1']
+        ).toEqual(expect.objectContaining({ planId: 'p1', stepId: 'A', advanceCursor: true }));
+    });
+
     it('detaches all pending tools without staging delivery', () => {
         const terminalOwner = markTaskLifecycle(pendingToolSnapshot(), {
             taskId: 'task-a',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { coordinateChildTerminal } from '../src/orchestration/ChildTerminalCoordinator.js';
+import { coordinateChildTerminal, claimChildTerminalInSnapshot } from '../src/orchestration/ChildTerminalCoordinator.js';
 import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { snapshotHasProcessedSegmentKey } from '../src/runtime/segmentProcessedKeys.js';
@@ -162,5 +162,56 @@ describe('child terminal delivery modes', () => {
         }));
         expect(snapshot.inbox.all).toHaveLength(1);
         expect(snapshot.inbox.all[0].kind).toBe('child.failed');
+    });
+});
+
+describe('child terminal tombstones retain plan stamps', () => {
+    it('copies plan stamps onto the child terminal before deleting pending', () => {
+        const claim = claimChildTerminalInSnapshot(
+            {
+                meta: { turn: 1 },
+                pending: {
+                    tasks: {
+                        child: {
+                            agentId: 'child-agent',
+                            childTaskId: 'child-task',
+                            planId: 'p1',
+                            stepId: 'A',
+                            advanceCursor: true,
+                            options: { autoClearToken: true },
+                        },
+                    },
+                    children: { child: { agent: 'child-agent', planId: 'p1', stepId: 'A' } },
+                },
+                inbox: { current: [], all: [] },
+            },
+            {
+                kind: 'completed',
+                token: 'child',
+                completedAt: '2026-08-17T00:00:00.000Z',
+                childTaskId: 'child-task',
+                agentId: 'child-agent',
+                result: { ok: true },
+            }
+        );
+
+        expect(claim.won).toBe(true);
+        expect(claim.terminal).toEqual(
+            expect.objectContaining({
+                planId: 'p1',
+                stepId: 'A',
+                advanceCursor: true,
+            })
+        );
+        const snapshot = claim.snapshot as {
+            pending: {
+                children: Record<string, unknown>;
+                childTerminals: Record<string, unknown>;
+            };
+        };
+        expect(snapshot.pending.children.child).toBeUndefined();
+        expect(snapshot.pending.childTerminals.child).toEqual(
+            expect.objectContaining({ planId: 'p1', stepId: 'A', advanceCursor: true })
+        );
     });
 });

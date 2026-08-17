@@ -19,6 +19,12 @@ APLRET tests work best as **turn scripts**. Each script is a sequence of:
 
 This model catches bugs that only show up between turns — when data is lost between modules, or when a resume observation is misrouted — and keeps tests readable even when the agent involves LLMs.
 
+### Graph helpers vs turn scripts
+
+`validatePlanGraph`, `selectReadyPlanSteps`, and the lookup helpers are unit-tested in `packages/core/tests/planGraph.test.ts` with fixtures passed through `PlanSchema.parse`. Those tests prove graph semantics. They are **not** a substitute for turn scripts (`createTestHarness` / `runTurn` / TurnTrace). Create / execute / repair / resume still need turn scripts.
+
+A completed-but-unvalidated dependency blocks downstream **only** when Policy calls `selectReadyPlanSteps(plan, { requireValidatedDependencies: true })`. Default (no options) still treats `status === 'completed'` as enough.
+
 ## Aligning tests with `flow.md`
 
 When your agent includes **`flow.md`** (recommended for awaits, major branches, or repair loops), treat it as the **behavioral map** tests should reinforce:
@@ -102,6 +108,60 @@ To read back sensory state after a turn, use the same path:
 expect(h.currentM().memory.sensory.userInput).toBe('inv_123');
 ```
 
+### Planning: two ready steps, one executed
+
+Seed a plan with two independent pending `call_tool` steps. Policy emits
+one `execute_step` for `A`. Assert stamps on the **dispatch** turn
+(`await_tool` + `env.pending.tools[token]`: `planId` / `stepId` /
+`advanceCursor: false`). After `injectToolCompleted`, pending is gone;
+stamps live on `env.pending.toolTerminals[token]`. The next `runTurn`
+**default** Learning (do not replace the Learning module) completes via
+terminals: `A` is `completed`; `B` stays `pending` and
+`selectReadyPlanSteps` returns `B`. `cursor` is unchanged.
+
+### Repair: `data.planPatch` → `plan.patch`
+
+Default Transition maps `result.data.planPatch` to `internal/plan.patch`. Default Learning applies it and bumps `revision`. Do not assert `plan.updated` for a patch.
+
+```ts
+import { PlanPatchSchema, PlanSchema } from '@a2arium/callagent-core';
+
+const plan = PlanSchema.parse({
+    id: 'p1',
+    revision: 1,
+    status: 'stale',
+    steps: [{ id: 'A', kind: 'internal', title: 'a' }],
+});
+const patch = PlanPatchSchema.parse({
+    baseRevision: 1,
+    operations: [{ op: 'add_step', step: { id: 'B', kind: 'internal', title: 'b' } }],
+});
+
+const h = createTestHarness({
+    policy: () => ({ kind: 'repair_plan', planId: 'p1', reason: 'stale' }),
+    execution: async () => ({
+        action: { kind: 'internal', done: false },
+        result: { status: 'ok', data: { planPatch: { planId: 'p1', patch } } },
+    }),
+});
+h.seedMentalState({ plans: { plans: { p1: plan }, activePlanId: 'p1' } });
+
+await h.runTurn();
+h.expectTurn(t => t.expectInboxKinds(['plan.patch']));
+await h.runTurn();
+expect(h.currentM().plans?.plans?.p1?.revision).toBe(2);
+```
+
+### snapshot / fork
+
+`h.snapshot()` freezes `M`, env (inbox/pending/control), traces, replies, and stub queues.
+`h.fork(snapshot)` returns a **new** harness. Fork A cannot mutate fork B.
+`HarnessConfig.randomSeed` seeds Policy-array sampling only (not process-wide `Math.random`).
+
+Tests that register a `TaskEngine` via `EngineLocator.setEngine` are **not** isolation-safe: the locator is a process singleton and is not cloned.
+
+After a Learning durable read, assert `lastTrace().inboxCurrent` did not grow a new observation for the retrieved payload.
+
 **MentalState vs control vars:** `MentalState` (see the type in `loop/types`) has `memory.sensory`, `memory.longTerm`, `worldModel`, `goalState`, etc. It does **not** have a `memory.vars` field. Anything you previously put into "vars" for stage or tokens belongs in **control vars** — seed with `seedControlVars`, or let `Stage.set` / `writeControlVar` set them during the turn.
 
 ---
@@ -147,6 +207,8 @@ injectToolCompleted({ token, tool, result })
 injectChildCompleted({ token, agentId, result })
 // -> { source: 'child', kind: 'child.completed', payload: { token, agentId, result } }
 ```
+
+When `env.pending.tools[token]` exists, `injectToolCompleted` **claims** that pending record first (stamps move onto the tool terminal), then injects the observation. Tokens with no pending record still only push the observation. Child and input inject helpers do the same when those pending bags are stamped.
 
 ### Await token propagation
 
@@ -376,6 +438,9 @@ When indexing turns in tests, prefer `expectTurn(index, fn)` (or `allTraces()[in
 | `llmCalls` | Each LLM call: prompt, tokens, contract metadata |
 | `toolCalls` / `childCalls` | Tool/child dispatches with status |
 | `pendingAfter` | Pending input/tool/child tokens after this turn |
+| `extensions` | Optional compact Execution telemetry (`recordTurnTraceExtension`) |
+
+`lastTrace().extensions` is optional. `recordTurnTraceExtension` is an Execution-only recorder (`ctx`); Learning and Policy have no `ctx` and cannot write extensions. Extensions are not cognition and not inbox observations.
 
 **High-signal assertions that catch "lost between turns" bugs:**
 

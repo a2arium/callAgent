@@ -708,4 +708,138 @@ describe('ApiBinder.requestTool unified API', () => {
         expect(mockSessionManager.saveSnapshot).toHaveBeenCalled();
         expect(mockTools.invoke).not.toHaveBeenCalled();
     });
+
+    it('writes plan step stamps onto registered pending records inside mutate', async () => {
+        const stamp = { planId: 'p1', stepId: 'A', advanceCursor: true };
+        let savedSnapshot: Record<string, unknown> | undefined;
+
+        mockSessionManager.saveSnapshot.mockImplementation(async (args: { snapshot: Record<string, unknown> }) => {
+            savedSnapshot = args.snapshot;
+            return { newVersion: BigInt(2) };
+        });
+
+        const ctx: Record<string, unknown> = {
+            tools: { invoke: jest.fn() },
+            reply: jest.fn().mockResolvedValue(undefined),
+            progress: jest.fn(),
+        };
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'a1',
+            flushMentalState: jest.fn(),
+        });
+
+        const toolResult = await (ctx as { requestTool: (name: string, args: unknown, opts: Record<string, unknown>) => Promise<{ token: string }> })
+            .requestTool('my_tool', { arg: 1 }, { awaitCompletion: false, ...stamp });
+        expect((savedSnapshot as { pending: { tools: Record<string, unknown> } }).pending.tools[toolResult.token]).toEqual(
+            expect.objectContaining(stamp)
+        );
+
+        const inputHandle = await (ctx as { requestInput: (prompt: string, opts: Record<string, unknown>) => Promise<{ token: string }> })
+            .requestInput('What is your name?', { ...stamp, advanceCursor: false });
+        expect((savedSnapshot as { pending: { inputs: Record<string, unknown> } }).pending.inputs[inputHandle.token]).toEqual(
+            expect.objectContaining({ planId: 'p1', stepId: 'A', advanceCursor: false })
+        );
+    });
+
+    it('writes plan step stamps onto child pending records inside sendTaskToAgent mutate', async () => {
+        const stamp = { planId: 'p1', stepId: 'A', advanceCursor: true };
+        let savedSnapshot: Record<string, unknown> | undefined;
+        const snapshots = new Map<string, { snapshot: Record<string, unknown>; wmVersion: bigint; agentId: string }>([
+            ['s1', {
+                snapshot: {
+                    meta: {
+                        turnCoordinator: {
+                            schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                            requestedGeneration: '0', completedGeneration: '0',
+                        },
+                    },
+                    pending: { tools: {} },
+                },
+                wmVersion: BigInt(1),
+                agentId: 'parent-agent',
+            }],
+        ]);
+        mockSessionManager.load.mockImplementation(async (_tenantId, sessionId) => snapshots.get(sessionId) ?? null);
+        mockSessionManager.saveSnapshot.mockImplementation(async (params: {
+            sessionId: string;
+            snapshot: Record<string, unknown>;
+        }) => {
+            if (params.sessionId === 's1') {
+                savedSnapshot = params.snapshot;
+            }
+            const current = snapshots.get(params.sessionId);
+            const nextVersion = (current?.wmVersion ?? BigInt(0)) + BigInt(1);
+            snapshots.set(params.sessionId, {
+                snapshot: params.snapshot,
+                wmVersion: nextVersion,
+                agentId: current?.agentId ?? 'parent-agent',
+            });
+            return { newVersion: nextVersion };
+        });
+        const enqueueChildStart = jest.fn().mockResolvedValue(undefined);
+        apiBinder = new ApiBinder({
+            sessionManager: mockSessionManager,
+            snapshotRepo: {
+                saveWithRetry: jest.fn(async (opts: {
+                    sessionId: string;
+                    mutate: (base: Record<string, unknown>) => Promise<{ snapshot: Record<string, unknown> }> | { snapshot: Record<string, unknown> };
+                }) => {
+                    const session = await mockSessionManager.load('t1', opts.sessionId ?? 's1');
+                    const baseSnap = session?.snapshot || {};
+                    const nextSnap = await opts.mutate(baseSnap);
+                    await mockSessionManager.saveSnapshot({
+                        tenantId: 't1',
+                        sessionId: opts.sessionId ?? 's1',
+                        agentId: 'parent-agent',
+                        expectedWmVersion: BigInt(1),
+                        snapshot: 'snapshot' in nextSnap ? nextSnap.snapshot : nextSnap,
+                    });
+                    return nextSnap;
+                }),
+            } as never,
+            getTraceContext: () => ({}),
+            getSessionStorePrisma: () => null,
+            taskCreationMutex: { runExclusive: jest.fn((_key: string, fn: () => unknown) => fn()) } as never,
+            backgroundTaskPromises: new Set(),
+            handleChildCompleted: jest.fn().mockResolvedValue(undefined),
+            conversationService: {
+                startThread: jest.fn().mockResolvedValue({
+                    thread: { threadId: 'thread-1' },
+                    receipt: { status: 'accepted', messageId: 'msg-1', sequenceNumber: 1 },
+                }),
+                send: jest.fn().mockResolvedValue({
+                    status: 'accepted',
+                    messageId: 'msg-1',
+                    sequenceNumber: 1,
+                }),
+                close: jest.fn().mockResolvedValue(undefined),
+            } as never,
+            enqueueChildStart,
+        });
+
+        const ctx: Record<string, unknown> = {
+            task: { id: 's1', input: {} },
+            tenantId: 't1',
+            agentId: 'parent-agent',
+            telemetry: { traceId: 'trace-1', nodeId: 'node-1' },
+        };
+        await apiBinder.attachOrchestrationAPIs(ctx, {
+            tenantId: 't1',
+            sessionId: 's1',
+            agentId: 'parent-agent',
+            flushMentalState: jest.fn(),
+        });
+
+        const childResult = await (ctx as {
+            sendTaskToAgent: (agent: string, input: unknown, opts: Record<string, unknown>) => Promise<{ token: string }>;
+        }).sendTaskToAgent('child-agent', { url: 'https://example.test' }, {
+            awaitCompletion: false,
+            ...stamp,
+        });
+        expect((savedSnapshot as { pending: { tasks: Record<string, unknown> } }).pending.tasks[childResult.token]).toEqual(
+            expect.objectContaining(stamp)
+        );
+    });
 });

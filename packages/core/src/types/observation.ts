@@ -17,6 +17,8 @@ import {
     ResolvedTopicMemberSchema,
     TopicSelectorSchema,
 } from '../public-types/conversation/schemas.js';
+import { PlanSchema, PlanStepUpdatedPayloadSchema } from './plan.js';
+import { PlanPatchPayloadSchema } from '../plans/planPatch.js';
 
 export const ObservationProvenanceSchema = z.object({
     ts: z.number(),
@@ -260,50 +262,6 @@ export const ConversationObservationSchema = z
 
 export type ConversationObservation = z.infer<typeof ConversationObservationSchema>;
 
-export const ObservationSchema = z.discriminatedUnion('source', [
-    z.object({ 
-        source: z.literal('user'), 
-        kind: z.enum(['input.provided', 'input.cancelled']), 
-        payload: UserEnvelopeSchema,
-        ...BaseObservationProps
-    }),
-    z.object({ 
-        source: z.literal('tool'), 
-        kind: z.enum(['tool.completed', 'tool.failed', 'tool.progress']), 
-        payload: ToolEnvelopeSchema,
-        ...BaseObservationProps
-    }),
-    z.object({ 
-        source: z.literal('child'), 
-        kind: z.enum(['child.completed', 'child.failed', 'child.progress']), 
-        payload: ChildEnvelopeSchema,
-        ...BaseObservationProps
-    }),
-    z.object({ 
-        source: z.literal('internal'), 
-        kind: z.enum([
-            'llm.responded', 
-            'plan.proposed', 
-            'plan.updated', 
-            'plan.step.updated',
-            'goal.updated', 
-            'validation.failed', 
-            'state.noted'
-        ]), 
-        payload: z.unknown(),
-        ...BaseObservationProps
-    }),
-    z.object({ 
-        source: z.literal('env'), 
-        kind: z.enum(['config.updated', 'clock.tick', 'snapshot.available', 'external.event', 'timer.expired']), 
-        payload: z.unknown(),
-        ...BaseObservationProps
-    }),
-    ConversationObservationSchema,
-]);
-
-export type Observation = z.infer<typeof ObservationSchema>;
-
 export const LLMRespondedPayloadSchema = z.object({
     model: z.string().optional(),
     contentSummary: z.string().optional(),
@@ -323,3 +281,85 @@ export const ValidationFailedPayloadSchema = z.object({
 });
 
 export type ValidationFailedPayload = z.infer<typeof ValidationFailedPayloadSchema>;
+
+const InternalObservationSchema = z.discriminatedUnion('kind', [
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('plan.proposed'),
+        payload: PlanSchema,
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('plan.updated'),
+        payload: PlanSchema,
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('plan.step.updated'),
+        payload: PlanStepUpdatedPayloadSchema,
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('plan.patch'),
+        payload: PlanPatchPayloadSchema,
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('llm.responded'),
+        payload: z.unknown(),
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('goal.updated'),
+        payload: z.unknown(),
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('validation.failed'),
+        payload: ValidationFailedPayloadSchema,
+        ...BaseObservationProps,
+    }),
+    z.object({
+        source: z.literal('internal'),
+        kind: z.literal('state.noted'),
+        payload: z.unknown(),
+        ...BaseObservationProps,
+    }),
+]);
+
+export const ObservationSchema = z.union([
+    z.object({
+        source: z.literal('user'),
+        kind: z.enum(['input.provided', 'input.cancelled']),
+        payload: UserEnvelopeSchema,
+        ...BaseObservationProps
+    }),
+    z.object({
+        source: z.literal('tool'),
+        kind: z.enum(['tool.completed', 'tool.failed', 'tool.progress']),
+        payload: ToolEnvelopeSchema,
+        ...BaseObservationProps
+    }),
+    z.object({
+        source: z.literal('child'),
+        kind: z.enum(['child.completed', 'child.failed', 'child.progress']),
+        payload: ChildEnvelopeSchema,
+        ...BaseObservationProps
+    }),
+    InternalObservationSchema,
+    z.object({
+        source: z.literal('env'),
+        kind: z.enum(['config.updated', 'clock.tick', 'snapshot.available', 'external.event', 'timer.expired']),
+        payload: z.unknown(),
+        ...BaseObservationProps
+    }),
+    ConversationObservationSchema,
+]);
+
+export type Observation = z.infer<typeof ObservationSchema>;

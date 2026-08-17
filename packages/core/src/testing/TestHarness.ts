@@ -31,6 +31,13 @@ import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { v7 as uuidv7 } from 'uuid';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
 import type { TaskEngine } from '../orchestration/taskEngine.js';
+import { claimToolTerminalInSnapshot } from '../orchestration/ToolTerminalCoordinator.js';
+import { claimChildTerminalInSnapshot } from '../orchestration/ChildTerminalCoordinator.js';
+import { tombstonePendingInput } from '../orchestration/DurableHandlerRegistry.js';
+
+export type HarnessSnapshot = {
+    readonly __brand: 'HarnessSnapshot';
+};
 
 export type TestHarness<Sensory = unknown> = {
     seedMentalState(m: DeepPartial<MentalState<Sensory>>): TestHarness<Sensory>;
@@ -102,6 +109,8 @@ export type TestHarness<Sensory = unknown> = {
     replies(): readonly unknown[];
     llmStub(): DeterministicLLMStub;
     toolStub(): DeterministicToolStub;
+    snapshot(): HarnessSnapshot;
+    fork(snapshot: HarnessSnapshot): TestHarness<Sensory>;
 
     /** Pin invite-related time for `ConversationService` / sweeper (ISO-8601). */
     setInviteClockNow(iso: string): TestHarness<Sensory>;
@@ -155,6 +164,78 @@ function mergeDeep(target: unknown, source: unknown): void {
 function isBudgetTurnsExceeded(error: unknown): error is InvariantError {
     return error instanceof InvariantError && error.code === 'BUDGET_TURNS_EXCEEDED';
 }
+
+function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+        a += 0x6D2B79F5;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+type HarnessSnapshotRecord = {
+    m: unknown;
+    env: unknown;
+    inboxAll: unknown;
+    traces: unknown;
+    replies: unknown;
+    errors: unknown;
+    turnCount: number;
+    childDispatches: unknown;
+    inviteClockNowMs?: number;
+    llm: ReturnType<DeterministicLLMStub['cloneState']>;
+    tool: ReturnType<DeterministicToolStub['cloneState']>;
+    config: HarnessConfig;
+    modules: Partial<Modules>;
+};
+
+const HARNESS_SNAPSHOTS = new WeakMap<HarnessSnapshot, HarnessSnapshotRecord>();
+const HARNESS_SLOTS = new WeakMap<
+    TestHarness<unknown>,
+    {
+        state: HarnessState<unknown>;
+        llmStub: DeterministicLLMStub;
+        toolStub: DeterministicToolStub;
+    }
+>();
+
+function structuredCloneOrThrow<T>(value: T, label: string): T {
+    try {
+        return structuredClone(value);
+    } catch (err) {
+        throw new Error(
+            `TestHarness.snapshot() failed: ${label} contains values structuredClone cannot clone (${err instanceof Error ? err.message : String(err)}). Do not store functions in MentalState.`
+        );
+    }
+}
+
+const harnessSnapshotFromEnv = (env: EnvironmentState): Record<string, unknown> => {
+    const pending = env.pending as EnvironmentState['pending'] & { tasks?: Record<string, unknown> };
+    return {
+        pending: {
+            ...pending,
+            tasks: pending.tasks ?? pending.children ?? {},
+        },
+        inbox: env.inbox,
+        meta: { turn: env.turn },
+    };
+};
+
+const applyClaimedPending = (env: EnvironmentState, snapshot: Record<string, unknown>): void => {
+    const pending = (snapshot as { pending: EnvironmentState['pending'] & { tasks?: Record<string, unknown> } }).pending;
+    env.pending.tools = pending.tools ?? env.pending.tools;
+    env.pending.toolTerminals = pending.toolTerminals ?? env.pending.toolTerminals;
+    env.pending.inputTerminals = pending.inputTerminals ?? env.pending.inputTerminals;
+    env.pending.childTerminals = pending.childTerminals ?? env.pending.childTerminals;
+    if (pending.tasks !== undefined) {
+        env.pending.children = pending.tasks;
+        (env.pending as { tasks?: Record<string, unknown> }).tasks = pending.tasks;
+    }
+    env.pending.inputs = pending.inputs ?? env.pending.inputs;
+};
 
 export function createTestHarness<
     Sensory = unknown,
@@ -235,13 +316,33 @@ export function createTestHarness<
             return harness;
         },
         injectUserInput(value) {
+            const token = 'test-input-tok';
+            if (state.env.pending.inputs?.[token]) {
+                const next = tombstonePendingInput(
+                    harnessSnapshotFromEnv(state.env),
+                    token,
+                    'provided'
+                );
+                applyClaimedPending(state.env, next);
+            }
             return harness.injectObservation({
                 source: 'user',
                 kind: 'input.provided',
-                payload: { token: 'test-input-tok', value }
+                payload: { token, value }
             });
         },
         injectToolCompleted(params) {
+            if (state.env.pending.tools?.[params.token]) {
+                const claim = claimToolTerminalInSnapshot(harnessSnapshotFromEnv(state.env), {
+                    token: params.token,
+                    completedAt: new Date().toISOString(),
+                    result: params.result ?? {},
+                    taskId: state.env.sessionId ?? 'test-session',
+                });
+                if (claim.won) {
+                    applyClaimedPending(state.env, claim.snapshot);
+                }
+            }
             return harness.injectObservation({
                 source: 'tool',
                 kind: 'tool.completed',
@@ -249,6 +350,18 @@ export function createTestHarness<
             });
         },
         injectToolFailed(params) {
+            if (state.env.pending.tools?.[params.token]) {
+                const claim = claimToolTerminalInSnapshot(harnessSnapshotFromEnv(state.env), {
+                    token: params.token,
+                    completedAt: new Date().toISOString(),
+                    result: {},
+                    taskId: state.env.sessionId ?? 'test-session',
+                    detachReason: 'tool_failed',
+                });
+                if (claim.won) {
+                    applyClaimedPending(state.env, claim.snapshot);
+                }
+            }
             return harness.injectObservation({
                 source: 'tool',
                 kind: 'tool.failed',
@@ -256,6 +369,20 @@ export function createTestHarness<
             });
         },
         injectChildCompleted(params) {
+            const pendingTasks = (state.env.pending as { tasks?: Record<string, unknown> }).tasks ??
+                state.env.pending.children;
+            if (pendingTasks?.[params.token]) {
+                const claim = claimChildTerminalInSnapshot(harnessSnapshotFromEnv(state.env), {
+                    kind: 'completed',
+                    token: params.token,
+                    completedAt: new Date().toISOString(),
+                    agentId: params.agentId,
+                    result: params.result ?? {},
+                });
+                if (claim.won) {
+                    applyClaimedPending(state.env, claim.snapshot);
+                }
+            }
             return harness.injectObservation({
                 source: 'child',
                 kind: 'child.completed',
@@ -263,6 +390,20 @@ export function createTestHarness<
             });
         },
         injectChildFailed(params) {
+            const pendingTasks = (state.env.pending as { tasks?: Record<string, unknown> }).tasks ??
+                state.env.pending.children;
+            if (pendingTasks?.[params.token]) {
+                const claim = claimChildTerminalInSnapshot(harnessSnapshotFromEnv(state.env), {
+                    kind: 'failed',
+                    token: params.token,
+                    failedAt: new Date().toISOString(),
+                    agentId: params.agentId,
+                    error: { code: 'E1', message: String(params.error) },
+                });
+                if (claim.won) {
+                    applyClaimedPending(state.env, claim.snapshot);
+                }
+            }
             return harness.injectObservation({
                 source: 'child',
                 kind: 'child.failed',
@@ -407,6 +548,9 @@ export function createTestHarness<
                         collectTraces: true,
                         autoJoinInvitedTopics,
                         ...(topicSweeperOpts !== undefined ? { topicSweeper: topicSweeperOpts } : {}),
+                        ...(typeof configParsed.randomSeed === 'number'
+                            ? { random: mulberry32(configParsed.randomSeed) }
+                            : {}),
                     }
                 );
                 
@@ -578,6 +722,53 @@ export function createTestHarness<
         toolStub() {
             return toolStub;
         },
+        snapshot() {
+            const snap: HarnessSnapshot = { __brand: 'HarnessSnapshot' };
+            const inboxPlain = {
+                current: state.env.inbox.current,
+                all: state.env.inbox.all,
+            };
+            HARNESS_SNAPSHOTS.set(snap, {
+                m: structuredCloneOrThrow(state.m, 'MentalState'),
+                env: structuredCloneOrThrow({ ...state.env, inbox: inboxPlain }, 'env'),
+                inboxAll: structuredCloneOrThrow(state.inboxAll, 'inboxAll'),
+                traces: structuredCloneOrThrow(state.traces, 'traces'),
+                replies: structuredCloneOrThrow(state.replies, 'replies'),
+                errors: structuredCloneOrThrow(state.errors, 'errors'),
+                turnCount: state.turnCount,
+                childDispatches: structuredCloneOrThrow(state.childDispatches, 'childDispatches'),
+                inviteClockNowMs: state.inviteClockNowMs,
+                llm: llmStub.cloneState(),
+                tool: toolStub.cloneState(),
+                config: configParsed,
+                modules: modules as Partial<Modules>,
+            });
+            return snap;
+        },
+        fork(snapshot) {
+            const record = HARNESS_SNAPSHOTS.get(snapshot);
+            if (!record) {
+                throw new Error('TestHarness.fork: unknown snapshot (not produced by snapshot())');
+            }
+            const child = createTestHarness(record.modules, record.config) as TestHarness<Sensory>;
+            const slot = HARNESS_SLOTS.get(child as TestHarness<unknown>);
+            if (!slot) {
+                throw new Error('TestHarness.fork: child harness slot missing');
+            }
+            slot.state.m = structuredCloneOrThrow(record.m, 'MentalState') as MentalState<unknown>;
+            slot.state.env = structuredCloneOrThrow(record.env, 'env') as EnvironmentState;
+            slot.state.env.inbox = normalizeObservationInbox(slot.state.env.inbox);
+            slot.state.inboxAll = structuredCloneOrThrow(record.inboxAll, 'inboxAll') as Observation[];
+            slot.state.traces = structuredCloneOrThrow(record.traces, 'traces') as TurnTrace[];
+            slot.state.replies = structuredCloneOrThrow(record.replies, 'replies') as unknown[];
+            slot.state.errors = structuredCloneOrThrow(record.errors, 'errors') as Error[];
+            slot.state.turnCount = record.turnCount;
+            slot.state.childDispatches = structuredCloneOrThrow(record.childDispatches, 'childDispatches') as HarnessState['childDispatches'];
+            slot.state.inviteClockNowMs = record.inviteClockNowMs;
+            slot.llmStub.restoreState(structuredCloneOrThrow(record.llm, 'llm stub'));
+            slot.toolStub.restoreState(structuredCloneOrThrow(record.tool, 'tool stub'));
+            return child;
+        },
 
         setInviteClockNow(iso: string) {
             const ms = Date.parse(iso);
@@ -663,5 +854,6 @@ export function createTestHarness<
         },
     };
 
+    HARNESS_SLOTS.set(harness as TestHarness<unknown>, { state: state as HarnessState<unknown>, llmStub, toolStub });
     return harness;
 }

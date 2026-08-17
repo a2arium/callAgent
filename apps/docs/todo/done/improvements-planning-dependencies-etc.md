@@ -1,3 +1,16 @@
+# Archive note
+
+**Status:** archived originating request. The **implemented** contract is
+[`apps/docs/planning-harness/adr/`](../../planning-harness/adr/) (`0001`–`0009`)
+and [`apps/docs/planning-harness/specs/README.md`](../../planning-harness/specs/README.md),
+not this document.
+
+This file is the historical problem statement. Several items here were
+**rejected** (including `Plan.scheduling`, `MentalState.extensions`, and
+output `kind: 'value'`). Do not implement from this document.
+
+---
+
 # Improvement Request: Dependency-Aware Planning, Extensibility, Provenance, and Replay Support in CallAgent / APLRET
 
 ## Summary

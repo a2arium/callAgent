@@ -48,6 +48,7 @@ import type { A2ACallOptions } from '../../shared/types/A2ATypes.js';
 import { bootstrapConversationForSendTaskToAgent } from './bootstrapConversationForSendTaskToAgent.js';
 import { readA2aResultTelemetry } from './a2aResultTelemetry.js';
 import type { IEventBus } from '../../public-types/eventbus/types.js';
+import { pickPlanStepStamp } from '../../plans/planStepCorrelation.js';
 import { createBusEvent } from '../../eventbus/busEventHelpers.js';
 import { taskChannel } from '../../eventbus/taskEventEmitter.js';
 import { segmentEffectIdempotencyKey } from '../../runtime/segmentProcessedKeys.js';
@@ -280,6 +281,7 @@ export class ApiBinder {
                             },
                             agentId: agent,
                             childTaskId,
+                            ...pickPlanStepStamp(options),
                             ...(timeoutMs !== undefined && expiresAt !== undefined
                                 ? { timeoutMs, expiresAt }
                                 : {}),
@@ -832,6 +834,7 @@ export class ApiBinder {
                     loopEnv.pending.children[token] = {
                         agent,
                         input: childInput,
+                        ...pickPlanStepStamp(options),
                     };
                 }
             }
@@ -1128,7 +1131,18 @@ export class ApiBinder {
         // requestInput implementation
         (ctx as any).requestInput = async (
             promptOrParts: string | string[] | any | any[],
-            opts?: { ttlMs?: number; schema?: unknown; onProvided?: string; onExpired?: string; __existingToken?: string; setToken?: boolean; setStage?: string }
+            opts?: {
+                ttlMs?: number;
+                schema?: unknown;
+                onProvided?: string;
+                onExpired?: string;
+                __existingToken?: string;
+                setToken?: boolean;
+                setStage?: string;
+                planId?: string;
+                stepId?: string;
+                advanceCursor?: boolean;
+            }
         ) => {
             const promptOrPartsStrict = promptOrParts as string | string[] | any | any[];
             if (!this.deps.sessionManager) throw new Error('Session manager not configured');
@@ -1191,7 +1205,8 @@ export class ApiBinder {
                             schema: opts?.schema,
                             expiresAt,
                             handlerName: opts?.onProvided,
-                            expiredHandlerName: opts?.onExpired
+                            expiredHandlerName: opts?.onExpired,
+                            ...pickPlanStepStamp(opts),
                         } as any;
                     }
                     let nextSnapshot = setPendingInputs(snapshot, pending);
@@ -1316,6 +1331,7 @@ export class ApiBinder {
                         rootTaskId: lifecycle.rootTaskId,
                         ancestorTaskIds: lifecycle.ancestorTaskIds,
                         ...(effectIdempotencyKey !== undefined ? { idempotencyKey: effectIdempotencyKey } : {}),
+                        ...pickPlanStepStamp(opts),
                     };
                     if (opts?.setToken || opts?.setStage) {
                         toolsNow[toolToken].options = { setToken: opts.setToken, setStage: opts.setStage };

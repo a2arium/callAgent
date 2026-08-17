@@ -2,12 +2,10 @@
 
 ## Status
 
-Ready for implementation **after** Phase 1 code (`specs/plan-schema.md`).
+Implemented after Phase 1 (`specs/plan-schema.md`).
 `adr/0002-graph-helpers-ignore-cursor.md` is **Accepted**.
 
-This spec is the implementation contract for that ADR. Do not start this
-code until `PlanSchema` has `dependsOn`, the file-local graph walk, and the
-Phase 1 error codes.
+This spec is the implementation contract for that ADR.
 
 ## Goal
 
@@ -18,7 +16,7 @@ Give agents **pure, deterministic, structured** functions over a Plan graph:
 - direct dependants and transitive ancestors / descendants.
 
 The originating request
-(`apps/docs/todo/improvements-planning-dependencies-etc.md` §4) wanted this
+(`apps/docs/todo/done/improvements-planning-dependencies-etc.md` §4) wanted this
 so DAG agents can see multiple ready steps, repair can see fan-out, and
 tests can assert the graph. It also wanted a `scheduling` mode on `Plan` and
 an optional `cursor`. We do **not** add that mode (ADR 0002).
@@ -77,7 +75,7 @@ flowchart LR
   subgraph dag [DAG Policy]
     H[selectReadyPlanSteps]
     P[pick one ready step]
-    E["execute_step — Phase 4"]
+    E[execute_step]
     H --> P --> E
   end
   M["M.plans"] --> C
@@ -279,11 +277,15 @@ that is steps order.
 
 Returning `[A, B]` does **not** mean both run this turn.
 
-Until Phase 4, core Intent still has only `execute_next_step(planId)`.
-Phase 2 Policy that wants DAG semantics can:
+DAG Policy is **implemented** (`execute_step` in Phase 4). Policy that
+wants DAG semantics:
 
-- use the helper for tests, UI, or Learning repair;
-- or keep sequential `cursor` until `execute_step` exists.
+- calls `selectReadyPlanSteps` over `M.plans` (still only `M`);
+- picks **one** ready step;
+- emits `execute_step { planId, stepId }`.
+
+Sequential Policy keeps `cursor` + `execute_next_step`. Helpers are also
+fine for tests, UI, or Learning repair. One intent per turn.
 
 Do not add a core Policy that picks `ready[0]` and mutates cursor. Do not
 change default `loopRunner` Policy.

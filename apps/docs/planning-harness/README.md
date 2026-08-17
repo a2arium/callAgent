@@ -1,13 +1,15 @@
 # Planning Model Harness
 
-This is a temporary design and validation workspace for the APLRET planning
-model: one Plan schema, dependency-aware helpers, provenance, and the intents
-needed to execute graph plans without turning the loop into a scheduler.
+This workspace designed and validated the APLRET planning model: one Plan
+schema, dependency-aware helpers, provenance, and the intents needed to
+execute graph plans without turning the loop into a scheduler.
 
-It mirrors the structure of `apps/docs/orchestrator-harness/` and the (now
-promoted) streaming harness. Production `packages/core` code changes start
-at Phase 1 (`specs/plan-schema.md`). Specs and ADRs 0001–0009 are the
-implementation contract (architect punch-list applied 2026-08-16).
+**Status: implemented.** Phases 1–6 are in `packages/core`. Specs and
+ADRs 0001–0009 remain the implementation contract. This folder stays
+until a later deletion PR (see `migration-checklist.md`).
+
+It mirrors the structure of `apps/docs/orchestrator-harness/` and the
+(now promoted) streaming harness.
 
 Delete this folder only after:
 
@@ -20,38 +22,34 @@ Delete this folder only after:
 
 ## Core thesis
 
-callAgent already has a planning *slot* (`M.plans`, `create_plan` /
-`execute_next_step` / `repair_plan`, `internal/plan.*` observations,
-`MemoryWriter.plans`). It does not yet have one Plan *truth*.
+callAgent has one Plan *truth*: `PlanSchema` / `PlanStepSchema` in
+`@a2arium/callagent-core` (`.strict()`).
 
-Contracts and how-tos describe a DAG-capable step (`dependsOn`, action-kinds,
-`args`). Runtime `packages/core/src/types/plan.ts` describes a sequential step
-(`description`, structural `kind`, optional `intent`, inline `result`, no
-`dependsOn`). Neither side is the public contract we want.
+- Plan fields: `id`, optional `goalId`, `steps`, `cursor`, `status`,
+  `revision` (optional `lineage`, `meta`, ISO timestamps). **`title` is
+  on each step**, not on `Plan`.
+- Step: structural `kind` (`action` | `subgoal` | `internal`), `title`,
+  optional validated `intent`, optional `dependsOn`.
+- Ready/blocked helpers are pure and ignore `cursor` / `plan.status`.
+- Policy still emits **one intent per turn**.
+- DAG agents select a ready step via helpers and `execute_step`.
+- Large results stay in artifacts; TurnTrace stays compact.
 
-This workspace designs the merged model:
-
-- one Zod-backed `Plan` / `PlanStep`;
-- structural step kind + optional validated `intent`;
-- optional `dependsOn` with pure graph helpers;
-- Policy still emits **one intent per turn**;
-- DAG agents select a ready step via helpers and `execute_step`;
-- large results stay in artifacts; TurnTrace stays compact.
-
-Atomic Task Graph, beliefs, and repair policy stay in agent `meta` /
-`worldModel`. They are not framework types.
+There is no `Plan.scheduling`, no `MentalState.extensions`, and no
+output `kind: 'value'`. Atomic Task Graph, beliefs, and repair policy
+stay in agent `meta` / `worldModel`. They are not framework types.
 
 ## Scope
 
-This workspace covers:
+This workspace covered (now implemented):
 
-- Reconciling Plan/PlanStep/PlanStatus across code and docs.
+- One Plan/PlanStep/PlanStatus across code and docs.
 - Dependency graph validation and ready/blocked selectors as library helpers.
 - Step output refs, optional validation state, and revision lineage.
 - `execute_step(planId, stepId)` and the sequential-vs-DAG Policy contract.
 - TurnTrace extension points for planner telemetry (not new first-class fields).
 - The normative rule that durable memory reads are not new observations.
-- Later: `PlanPatch`, plan diffs, and test-harness snapshot fork.
+- `PlanPatch`, plan diffs, and test-harness snapshot fork.
 
 This workspace does **not** add ATG, active inference, a second cognitive store,
 a loop-level DAG scheduler, or parallel Policy intents.
@@ -61,8 +59,7 @@ a loop-level DAG scheduler, or parallel Policy intents.
 The design here must comply with:
 
 - `apps/docs/0-aplret_contracts.md` (APLRET contracts).
-- `apps/docs/8-spec_goals_and_plans_in_aplret.md` (goals/plans spec — currently
-  drifted from `plan.ts`).
+- `apps/docs/8-spec_goals_and_plans_in_aplret.md` (goals/plans spec).
 - `apps/docs/9-how_to_implement_planning_without_breaking_policy_purity.md`.
 - `apps/docs/7-how_to_use_artifacts_correctly_aplret.md`.
 - `apps/docs/11-how_to_test_aplret_agents.md`.
@@ -70,9 +67,9 @@ The design here must comply with:
 - `apps/docs/18-how_to_use_memory_in_aplret.md`.
 - `apps/docs/todo/types-rules.md` (Zod-first, no public `any`, closed unions).
 
-Non-normative origin (problem statement, not the API to implement):
+Archived originating request (problem statement, not the API to implement):
 
-- `apps/docs/todo/improvements-planning-dependencies-etc.md`
+- `apps/docs/todo/done/improvements-planning-dependencies-etc.md`
 
 In particular:
 
@@ -89,13 +86,11 @@ In particular:
 - `implementation-plan.md` — staged implementation plan.
 - `implementation-status.md` — where we are right now.
 - `migration-checklist.md` — promotion/deletion checklist.
-- `adr/` — decision records to review before implementation.
+- `adr/` — decision records (`0001`–`0009`).
 - `specs/` — schema, helper, intent, and observability specs.
 - `harness/` — POC scenarios and expected outcomes.
 
 Start with `adr/0001-one-plan-truth.md`, then `specs/plan-schema.md`. The ADR is
-the decision; the spec is the Phase 1 implementation contract (schema, parse
-sites, tests, and docs to rewrite in the same PR).
+the decision; the spec is the Phase 1 implementation contract.
 
 Then `adr/0002` … `adr/0009` with the matching files in `specs/README.md`.
-Do not implement a later phase before its spec prerequisites.

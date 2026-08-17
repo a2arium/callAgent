@@ -2,18 +2,30 @@ import type { Observation } from '../loop/oneTurn.js';
 import { normalizeObservationInbox, type ObservationInbox } from '../loop/types.js';
 import type { IntentConsentReceipt } from '../loop/types.js';
 import { isConsentDecision } from '../loop/manifestConsent.js';
+import { pickPlanStepStamp } from '../plans/planStepCorrelation.js';
 
 export type PendingInputHandler = {
-    // optional metadata like schema, expiresAt, etc.
     schema?: unknown;
     expiresAt?: string;
+    handlerName?: string;
+    expiredHandlerName?: string;
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
-
+export type PendingInputTerminal = {
+    kind: 'provided' | 'expired' | 'cancelled';
+    claimedAt: string;
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
+};
 
 export type SnapshotShape = {
     pending?: {
         inputs?: Record<string, PendingInputHandler>;
+        inputTerminals?: Record<string, PendingInputTerminal>;
         manifestConsents?: Record<string, IntentConsentReceipt>;
     };
     inbox?: ObservationInbox | Observation[];
@@ -33,7 +45,7 @@ const addObservationToInbox = (value: SnapshotShape['inbox'], observation: Obser
 
 export function getPendingInputs(snapshot: Record<string, unknown>): Record<string, PendingInputHandler> {
     const s = snapshot as SnapshotShape;
-    return (s.pending?.inputs as Record<string, PendingInputHandler>) || {};
+    return { ...((s.pending?.inputs as Record<string, PendingInputHandler>) || {}) };
 }
 
 export function setPendingInputs(
@@ -51,6 +63,45 @@ export function setPendingInputs(
     return next as Record<string, unknown>;
 }
 
+export function getPendingInputTerminals(snapshot: Record<string, unknown>): Record<string, PendingInputTerminal> {
+    const s = snapshot as SnapshotShape;
+    return { ...((s.pending?.inputTerminals as Record<string, PendingInputTerminal>) || {}) };
+}
+
+export function setPendingInputTerminals(
+    snapshot: Record<string, unknown>,
+    terminals: Record<string, PendingInputTerminal>
+): Record<string, unknown> {
+    const s = snapshot as SnapshotShape;
+    const next: SnapshotShape = {
+        ...snapshot,
+        pending: {
+            ...(s.pending || {}),
+            inputTerminals: terminals,
+        }
+    };
+    return next as Record<string, unknown>;
+}
+
+export function tombstonePendingInput(
+    snapshot: Record<string, unknown>,
+    token: string,
+    kind: PendingInputTerminal['kind'],
+    claimedAt?: string
+): Record<string, unknown> {
+    const pending = getPendingInputs(snapshot);
+    const entry = pending[token];
+    if (!entry) return snapshot;
+    const terminals = getPendingInputTerminals(snapshot);
+    terminals[token] = {
+        kind,
+        claimedAt: claimedAt ?? new Date().toISOString(),
+        ...pickPlanStepStamp(entry),
+    };
+    delete pending[token];
+    return setPendingInputTerminals(setPendingInputs(snapshot, pending), terminals);
+}
+
 /**
  * Apply a user-provided input for the given token. Delivered values are not persisted
  * in the snapshot; the observation in the inbox is the source of truth for this turn.
@@ -61,7 +112,6 @@ export function applyInputProvided(
     input: unknown,
     expected?: { tenantId?: string; taskId?: string; agentId?: string }
 ): { next: Record<string, unknown> } {
-    const pending = { ...getPendingInputs(snapshot) };
     const s = snapshot as SnapshotShape;
     const consents = { ...(s.pending?.manifestConsents ?? {}) };
     const consent = consents[token];
@@ -81,8 +131,9 @@ export function applyInputProvided(
         }
         consents[token] = consent;
     }
-    if (pending[token]) {
-        delete pending[token];
+    let nextSnapshot = tombstonePendingInput(snapshot, token, 'provided') as SnapshotShape;
+    if (consent) {
+        nextSnapshot.pending = { ...(nextSnapshot.pending ?? {}), manifestConsents: consents };
     }
     const provenance = {
         ts: Date.now(),
@@ -99,11 +150,7 @@ export function applyInputProvided(
               provenance,
           }
         : { source: 'user', kind: 'input.provided', payload: { token, value: input }, provenance };
-    const nextSnapshot = setPendingInputs(snapshot, pending) as SnapshotShape;
-    if (consent) {
-        nextSnapshot.pending = { ...(nextSnapshot.pending ?? {}), manifestConsents: consents };
-    }
     const nextInbox = addObservationToInbox(nextSnapshot.inbox, observation);
     const next = { ...nextSnapshot, inbox: nextInbox } as Record<string, unknown>;
     return { next };
-}
+};

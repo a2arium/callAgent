@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation after Phases 1–2 (schema + graph walk).
+Implemented after Phases 1–2 (schema + graph walk).
 Phase 3 lineage SHOULD exist so apply can set `parentRevision`; if Phase
 3b has not landed, omit lineage in default Learning and still bump
 `revision`.

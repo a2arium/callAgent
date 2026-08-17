@@ -2,9 +2,9 @@
 
 ## Status
 
-Ready for implementation. Does not depend on plan schema Phases 1–4, but
-planning agents are the first intended users.
-`adr/0006-turntrace-extensions-are-telemetry.md` is **Accepted**.
+Implemented. `adr/0006-turntrace-extensions-are-telemetry.md` is **Accepted**.
+Does not depend on plan schema Phases 1–4, but planning agents are the
+first intended users.
 
 ## Goal
 
@@ -82,11 +82,14 @@ Do not add `related` on `TurnTrace`.
 buffer** the loop copies into `TurnTrace.extensions` when it builds the
 trace.
 
-Suggested:
+Learning has **no** `ctx`. Do **not** pass `ctx` into Learning so it can
+record extensions. `recordTurnTraceExtension` is an **Execution** API
+(Execution already has `ctx`), or a factory that closes over `ctx` from
+Execution / loop setup. Policy is `(m, mem)` and also has no `ctx`.
 
 ```ts
 export function recordTurnTraceExtension(
-  ctx: InternalTaskContext,
+  ctx: TaskContext,
   extension: TurnTraceExtension
 ): void
 ```
@@ -98,10 +101,8 @@ export function recordTurnTraceExtension(
 - Duplicate `namespace`+`version` MAY both appear (two notes same turn).
   Do not last-write-wins unless we document it — **keep both** (simpler,
   lossless).
-- Export from `@a2arium/callagent-core` for agent Learning/Execution.
-- Policy **may** call it technically (same `ctx` is not available to
-  Policy — Policy is `(m, mem)`). Keep it that way. Do not pass `ctx`
-  into Policy to record extensions.
+- Export from `@a2arium/callagent-core` for agent **Execution**.
+- Do not pass `ctx` into Learning or Policy to record extensions.
 
 LoopRunner copies the buffer onto the trace object before
 `collector.push`. Clear the buffer after the turn so the next turn
@@ -127,8 +128,8 @@ Schema:
 
 Loop / harness:
 
-- `recordTurnTraceExtension` during Learning; `lastTrace().extensions`
-  contains it;
+- `recordTurnTraceExtension` during **Execution**; `lastTrace().extensions`
+  contains it (do **not** record from Learning — Learning has no `ctx`);
 - invalid extension does not throw and is absent from the trace;
 - next `runTurn` does not leak the previous turn’s extensions;
 - Policy-only turn with no recorder → `extensions` omitted or `[]`.

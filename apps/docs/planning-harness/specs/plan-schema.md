@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation. `adr/0001-one-plan-truth.md` is **Accepted**. This
+Implemented. `adr/0001-one-plan-truth.md` is **Accepted**. This
 spec is the implementation contract for that ADR.
 
 ## Goal
@@ -28,7 +28,7 @@ validation state, lineage, TurnTrace extensions, or `MentalState.extensions`.
 ## Why this shape
 
 The originating request
-(`apps/docs/todo/improvements-planning-dependencies-etc.md`) needs
+(`apps/docs/todo/done/improvements-planning-dependencies-etc.md`) needs
 dependency-aware plans, typed extension metadata, and provenance. It assumed
 the **documented** Plan (`dependsOn`, action-kinds, `args`) already existed.
 
@@ -589,7 +589,7 @@ Do **not** rewrite in this phase:
 - Goal types in contracts (`Goal` vs runtime `GoalNode`) — separate drift.
 - Drafts under `apps/docs/drafts/` unless a snippet is copy-pasted into a
   permanent how-to in the same PR.
-- `apps/docs/todo/improvements-planning-dependencies-etc.md` — originating
+- `apps/docs/todo/done/improvements-planning-dependencies-etc.md` — originating
   request; point at this harness instead of editing it into a third schema.
 
 ### New migration note (required)

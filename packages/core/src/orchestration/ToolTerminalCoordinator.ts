@@ -6,6 +6,7 @@ import { reconcileSnapshotMutation, type SnapshotMutationSession } from './persi
 import { isTaskLifecycleTerminal, readTaskLifecycle } from './TaskLifecycle.js';
 import { advanceTaskTurnGenerationInSnapshot } from './TaskTurnCoordinator.js';
 import { addProcessedSegmentKey } from '../runtime/segmentProcessedKeys.js';
+import { pickPlanStepStamp } from '../plans/planStepCorrelation.js';
 import {
     getPendingTools,
     getPendingToolTerminals,
@@ -86,6 +87,7 @@ export function claimToolTerminalInSnapshot(
         ownerTaskId: entry.ownerTaskId ?? params.taskId,
         rootTaskId: entry.rootTaskId ?? lifecycle?.rootTaskId ?? params.taskId,
         deliveryKey: entry.idempotencyKey ?? `${params.taskId}:tool:${params.token}`,
+        ...pickPlanStepStamp(entry),
         ...(detached
             ? { reason: params.detachReason ?? `owner_${lifecycle?.state ?? 'terminal'}` }
             : {}),

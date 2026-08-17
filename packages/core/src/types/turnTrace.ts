@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { StopPolicyFanoutTraceSchema } from '../public-types/conversation/schemas.js';
 import { InvariantErrorPayloadSchema } from './invariantError.js';
+import { PlanJsonValueSchema, type PlanJsonValue } from './plan.js';
 
 /** Module names for turn-failure attribution; must match FrameworkModule in utils/errors.js */
 const FrameworkModuleNameSchema = z.enum([
@@ -261,6 +262,18 @@ export const InviteDeliveryTraceSchema = z.object({
 });
 export type InviteDeliveryTrace = z.infer<typeof InviteDeliveryTraceSchema>;
 
+export const TurnTraceExtensionDataSchema = PlanJsonValueSchema;
+export type TurnTraceExtensionData = PlanJsonValue;
+
+export const TurnTraceExtensionSchema = z
+    .object({
+        namespace: z.string().min(1),
+        version: z.string().min(1),
+        data: TurnTraceExtensionDataSchema,
+    })
+    .strict();
+export type TurnTraceExtension = z.infer<typeof TurnTraceExtensionSchema>;
+
 export const TurnTraceSchema = z.object({
     turn: z.number(),
     turnId: z.string(),
@@ -364,6 +377,8 @@ export const TurnTraceSchema = z.object({
             unackedCount: z.number().int().nonnegative(),
         })
         .optional(),
+
+    extensions: z.array(TurnTraceExtensionSchema).optional(),
 
     // Error (if turn failed)
     error: z

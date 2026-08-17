@@ -108,8 +108,96 @@ export type {
 export type { Modules } from './loop/oneTurn.js';
 export type { ExecOutcome } from './types/execOutcome.js';
 export { ExecOutcomeSchema, ExecResultSchema } from './types/execOutcome.js';
-export { IntentSchema, ExecutableActionSchema } from './types/intent.js';
-export type { Intent, ExecutableAction } from './types/intent.js';
+export { IntentSchema, ExecutableActionSchema, ExecutableStepIntentSchema, PlanningIntentSchema, ExecuteStepIntentSchema } from './types/intent.js';
+export type { Intent, ExecutableAction, ExecutableStepIntent, PlanningIntent } from './types/intent.js';
+export {
+    PlanIdSchema,
+    PlanStatusSchema,
+    StepStatusSchema,
+    StepKindSchema,
+    PlanStepSchema,
+    PlanSchema,
+    PlanStateSchema,
+    PlanStepUpdatedPayloadSchema,
+    PlanMetaSchema,
+    PlanJsonValueSchema,
+    PlanOutputKindSchema,
+    PlanOutputRefSchema,
+    ValidationStatusSchema,
+    ValidationStateSchema,
+    PlanRevisionCauseKindSchema,
+    PlanRevisionCauseSchema,
+    PlanRevisionLineageSchema,
+} from './types/plan.js';
+export type {
+    PlanId,
+    PlanStatus,
+    StepStatus,
+    StepKind,
+    PlanStep,
+    Plan,
+    PlanState,
+    PlanStepUpdatedPayload,
+    PlanJsonValue,
+    PlanStepWithMeta,
+    PlanWithMeta,
+    PlanOutputKind,
+    PlanOutputRef,
+    ValidationStatus,
+    ValidationState,
+    PlanRevisionCauseKind,
+    PlanRevisionCause,
+    PlanRevisionLineage,
+} from './types/plan.js';
+export {
+    validatePlanGraph,
+    selectReadyPlanSteps,
+    selectBlockedPlanSteps,
+    getPlanDependants,
+    getPlanAncestors,
+    getPlanDescendants,
+    PlanGraphIssueSchema,
+    PlanGraphErrorCodeSchema,
+    SelectReadyPlanStepsOptionsSchema,
+} from './plans/planGraph.js';
+export type {
+    PlanGraphIssue,
+    PlanGraphErrorCode,
+    ValidatePlanGraphResult,
+    PlanGraphLookup,
+    SelectReadyPlanStepsOptions,
+} from './plans/planGraph.js';
+export { resolveStoredPlanStep, dispatchStoredPlanStep } from './plans/dispatchStoredPlanStep.js';
+export type { ResolveStoredPlanStepResult, PlanStepDispatchErrorCode } from './plans/dispatchStoredPlanStep.js';
+export {
+    pickPlanStepStamp,
+    asHandlerStampOpts,
+    mergePlanStepStamp,
+    stampPendingPlanStep,
+    lookupPendingPlanStep,
+    attachPlanStepCorrelation,
+} from './plans/planStepCorrelation.js';
+export type {
+    PlanStepStamp,
+    PlanStepStampFields,
+    PlanStepPendingSlot,
+} from './plans/planStepCorrelation.js';
+export {
+    PlanPatchSchema,
+    PlanPatchOpSchema,
+    PlanPatchPayloadSchema,
+    PlanGraphDiffSchema,
+    applyPlanPatch,
+    validatePlanPatch,
+    diffPlanGraph,
+} from './plans/planPatch.js';
+export type {
+    PlanPatch,
+    PlanPatchOp,
+    PlanPatchPayload,
+    PlanPatchResult,
+    PlanGraphDiff,
+} from './plans/planPatch.js';
 export type {
     LLMCallOptions,
     LLMSettings,
@@ -316,6 +404,8 @@ export {
 // TurnTrace
 export type {
     TurnTrace,
+    TurnTraceExtension,
+    TurnTraceExtensionData,
     TurnTimings,
     TurnUsage,
     PendingSummary,
@@ -324,9 +414,15 @@ export type {
     ManifestSource,
     JsonValue,
 } from './types/turnTrace.js';
+export {
+    TurnTraceSchema,
+    TurnTraceExtensionSchema,
+    TurnTraceExtensionDataSchema,
+} from './types/turnTrace.js';
 
 // TurnTrace collection
 export { TurnTraceCollector } from './telemetry/TurnTraceCollector.js';
+export { recordTurnTraceExtension } from './telemetry/recordTurnTraceExtension.js';
 
 // Manifest provenance
 export {
@@ -358,7 +454,7 @@ export { throwInvariantError } from './utils/invariantError.js';
 export type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail, InvariantErrorPayload } from './types/invariantError.js';
 
 // Testing Harness exports
-export { createTestHarness, type TestHarness } from './testing/TestHarness.js';
+export { createTestHarness, type TestHarness, type HarnessSnapshot } from './testing/TestHarness.js';
 export { createDeterministicLLMStub, createDeterministicToolStub, type DeterministicLLMStub, type DeterministicToolStub } from './testing/DeterministicStubs.js';
 export { createTestContext, type CreateTestContextOptions } from './testing/TestContext.js';
 export { HarnessAssertionError, createTurnAssertionContext } from './testing/HarnessAssertions.js';

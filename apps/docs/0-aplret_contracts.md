@@ -201,9 +201,9 @@ export type GoalId = string;
 export type PlanId = string;
 
 export type GoalStatus = 'active' | 'blocked' | 'done' | 'failed';
-export type PlanStatus = 'draft' | 'active' | 'stale' | 'completed' | 'failed';
-export type StepStatus = 'todo' | 'doing' | 'done' | 'failed' | 'skipped';
-export type StepKind = 'ask_user' | 'call_tool' | 'delegate_child' | 'llm' | 'internal';
+export type PlanStatus = 'proposed' | 'active' | 'stale' | 'completed' | 'failed' | 'cancelled';
+export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export type StepKind = 'action' | 'subgoal' | 'internal';
 
 export type Goal = {
   id: GoalId;
@@ -217,25 +217,31 @@ export type Goal = {
   updatedAt: string;
 };
 
+/** Inferred from `PlanSchema` / `PlanStepSchema` in `@a2arium/callagent-core`. */
 export type PlanStep = {
   id: string;
+  kind: StepKind;
   goalId?: GoalId;
   title: string;
-  kind: StepKind;
-  args?: Record<string, unknown>;
-  dependsOn?: string[];
   status: StepStatus;
+  intent?: ExecutableStepIntent;
+  dependsOn?: string[];
+  outputs?: PlanOutputRef[];
+  validation?: ValidationState;
+  meta?: Record<string, PlanJsonValue>;
 };
 
 export type Plan = {
   id: PlanId;
   goalId?: GoalId;
-  status: PlanStatus;
   steps: PlanStep[];
   cursor: number;
+  status: PlanStatus;
   revision: number;
-  createdAt: string;
-  updatedAt: string;
+  lineage?: PlanRevisionLineage;
+  meta?: Record<string, PlanJsonValue>;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type MentalState<Sensory = unknown> = {
@@ -401,6 +407,8 @@ Internal:
 - `internal / llm.responded`
 - `internal / plan.proposed`
 - `internal / plan.updated`
+- `internal / plan.step.updated`
+- `internal / plan.patch`
 - `internal / goal.updated`
 - `internal / validation.failed`
 
@@ -557,6 +565,8 @@ type InternalObservation<T> = {
     | 'llm.responded'
     | 'plan.proposed'
     | 'plan.updated'
+    | 'plan.step.updated'
+    | 'plan.patch'
     | 'goal.updated'
     | 'validation.failed'
     | 'state.noted';
@@ -567,6 +577,8 @@ type InternalObservation<T> = {
   };
 };
 ```
+
+Plan observation payloads (`plan.proposed`, `plan.updated`, `plan.step.updated`, `plan.patch`) are the Plan or patch object itself, not `{ value: T }`.
 
 ### Env
 
@@ -901,6 +913,7 @@ type Intent =
   // Planning
   | { kind: 'create_plan'; goalId: string }
   | { kind: 'execute_next_step'; planId: string }
+  | { kind: 'execute_step'; planId: string; stepId: string }
   | { kind: 'repair_plan'; planId: string; reason: string }
 
   // Terminal / idle
@@ -1017,10 +1030,10 @@ Planning computation is an effect. Plan state is cognition.
 
 * Policy emits `create_plan(goalId)` or `repair_plan(planId, reason)`
 * Shield checks budgets/policy
-* Execution calls the LLM to produce a structured plan object
-* Transition emits `internal/plan.proposed` or `internal/plan.updated`
-* Perception validates the plan schema
-* Learning writes the plan into `M.plans` (sets `activePlanId`, bumps `revision`, updates `cursor/status`)
+* Execution calls the LLM: create returns `data.planProposed` (a Plan); repair returns `data.planPatch` (`{ planId, patch }`)
+* Transition emits `internal/plan.proposed` (create) or `internal/plan.patch` (repair). `internal/plan.updated` remains a full Plan, not a patch.
+* Perception validates the plan / patch schema
+* Learning writes create into `M.plans` (sets `activePlanId`, bumps `revision`, updates `cursor/status`); repair applies `applyPlanPatch` and bumps `revision`
 * Next turn Policy emits `execute_next_step(planId)`
 
 ### LLM output contract requirements
@@ -1214,7 +1227,7 @@ Do not store entire transport wrappers if the framework already provides a norma
 If a child result completes a plan step:
 
 * Perception normalizes the completion
-* Learning marks the corresponding `M.plans.steps[stepId].status` as `done` or `failed`
+* Learning marks the corresponding `M.plans.steps[stepId].status` as `completed` or `failed`
 * Learning advances `cursor` when appropriate
 
 Policy remains small and reads only the updated `MentalState`.
@@ -1229,9 +1242,19 @@ Planning computation is an effect.
 Rules:
 
 - plan generation/repair via LLM/tool happens in Execution
-- plan changes enter through observations (`internal/plan.proposed`, `internal/plan.updated`)
-- Learning validates and writes plans into `MentalState.plans`
-- Policy remains small: create plan, execute next step, repair plan
+- plan changes enter through observations (`internal/plan.proposed`, `internal/plan.updated`, `internal/plan.step.updated`, `internal/plan.patch`)
+- Perception validates those payloads against `PlanSchema` / `PlanStepUpdatedPayloadSchema` / `PlanPatchSchema`; invalid plan observations become `internal/validation.failed` (they are not dropped)
+- Learning validates and writes plans into `MentalState.plans`. `applyPlanPatch` is Learning-owned; Policy does not apply patches. After ops, an explicit `set_cursor` past `steps.length` fails (`PLAN_CURSOR_OUT_OF_BOUNDS`); otherwise cursor is clamped, then the graph walk runs.
+- Policy remains small: create plan, execute next step, execute a named DAG step, repair plan
+- Sequential Policy uses `cursor` + `execute_next_step`. DAG Policy uses `selectReadyPlanSteps` / `selectBlockedPlanSteps` over `M.plans` (still only `M`; helpers are not a new APLRET phase) and emits **one** `execute_step { planId, stepId }` per turn. One intent per turn even when several steps are ready. Default Execution does **not** check `dependsOn`; naming a blocked pending step is a Policy bug. Default Learning correlates `pending.tools` / `children` / `inputs` tokens (stamped `planId` / `stepId` / `advanceCursor`) and applies `plan.step.updated`. Default readiness: a dependency is satisfied iff `status === 'completed'`. Opt-in `{ requireValidatedDependencies: true }` also requires `validation.status === 'valid'`.
+- Step results are compact `outputs` refs (`artifact | memory | evidence`), not inline blobs. `validation` is optional cognition (“downstream-usable”), not inbox schema-check. `lineage` explains a revision; when set, `parentRevision < revision`.
+- `validatePlanGraph` maps the same graph codes as `PlanSchema` (`PLAN_DEPENDENCY_MISSING`, `PLAN_DEPENDENCY_SELF`, `PLAN_DEPENDENCY_CYCLE`, `PLAN_DUPLICATE_STEP_ID`, `PLAN_CURSOR_OUT_OF_BOUNDS`) plus `PLAN_SCHEMA_INVALID`. Patch apply adds `PLAN_PATCH_REVISION_MISMATCH` and `PLAN_PATCH_INVALID`.
+- `PlanStep.kind` is structural (`action | subgoal | internal`). What to run is optional `intent` (`ExecutableStepIntent`). A step MUST NOT store `create_plan` / `execute_next_step` / `execute_step` / `repair_plan`.
+- `dependsOn` is a first-class graph field. Duplicate ids in one list are one edge. Missing / self / cycle targets are illegal.
+
+### Planning decisions
+
+Accepted decisions live in [`planning-harness/adr/`](./planning-harness/adr/) (`0001`–`0009`) and the matching specs in [`planning-harness/specs/README.md`](./planning-harness/specs/README.md). Those documents are the decision record (no `scheduling`, no `MentalState.extensions`, no output `kind: 'value'`). This contracts document is the author-facing APLRET surface. Do not copy ADR bodies here. The harness folder remains until a later deletion PR.
 
 ---
 
@@ -1293,6 +1316,9 @@ type TurnTrace = {
   toolCalls?: ToolCallTrace[];
   childCalls?: ChildCallTrace[];
 
+  // Optional compact telemetry (not cognition). Namespaced, versioned JSON. Dropped if invalid.
+  extensions?: Array<{ namespace: string; version: string; data: PlanJsonValue }>;
+
   // Conversation metadata (optional, compact summary only)
   conversation?: { id: string; kind: 'thread' | 'topic' };
   incomingMessages?: ConversationMessageSummary[];
@@ -1315,6 +1341,10 @@ type TurnTrace = {
   error?: { code?: string; message: string; module?: FrameworkModule; detail?: JsonValue };
 };
 ```
+
+TurnTrace `extensions` are optional telemetry (`recordTurnTraceExtension`). They are not cognition and not inbox observations. Invalid items are dropped (the turn still succeeds). Agents MUST NOT use reserved prefixes `aplret.` / `callagent.`. There is no first-class `related`, `memoryReads`, or `DecisionTrace` field.
+
+Durable memory reads (`MemoryReader` / `mem.semantic.read`) are **not** new environment observations. Inbox is new evidence this turn; historical reads hydrate `M`. Operator `memory.read` events record keys/counts, not retrieved payloads.
 
 **Manifest provenance persistence/resume:** When TurnTrace is enabled, the runtime stores `ManifestProvenance` (agentCardSource, runtimeManifestSource, agentCardHash, runtimeManifestHash) on the task context and in snapshot meta. On resume, provenance is restored from snapshot so every TurnTrace carries the same provenance for the run. Identity (name/version) must match between Agent Card and Runtime Manifest or the loop will not start.
 
@@ -1377,7 +1407,7 @@ These invariants MUST be enforced by a combination of:
 | **Served Agent Card is resolved Agent Card** (`/.well-known/agent-card.json`)   |              no |            required | serving must not diverge from runtime resolution                     |
 | **TurnTrace includes manifest provenance when enabled**                         |              no |            required | `agentCardSource/runtimeManifestSource` + hashes                     |
 | **Goals and plans are written only by Learning**                                |         partial |            required | no direct cognition writes from `ctx.*`                              |
-| **Plan invariants**: `cursor` in bounds, `revision` monotonic                   |         partial |            required | validate on Learning write                                           |
+| **Plan invariants**: unique step ids; `dependsOn` targets exist; no self-edge; no cycle; `cursor` in `0..steps.length`; `revision` monotonic |         partial |            required | `PlanSchema` parse + Learning write; invalid plan observations → `internal/validation.failed` |
 | **Structured LLM output uses output contract**                                  |         partial |            required | require zod/jsonSchema in `ctx.llm.call` when not free text          |
 | **Structured tool/child results are validated before Learning writes facts**    |         partial |            required | Perception validates schema/type guards                              |
 
@@ -1524,7 +1554,7 @@ If the agent uses `M.plans`, it MUST include tests for:
 
 * create plan flow (`internal/plan.proposed` enters inbox; Learning writes `M.plans.activePlanId`)
 * execute next step flow (cursor advances only after completion re-enters via inbox)
-* repair plan flow (`internal/plan.updated`; `revision` increments; plan returns to `active`)
+* repair plan flow (`internal/plan.patch`; `revision` increments; plan returns to `active`)
 
 ### Recommended harness shape
 
@@ -1684,6 +1714,7 @@ The table below lists **stable or experimental exports** authors and integrators
 | Loop: `Modules`, `runLoop`, `MentalState`, `EnvironmentState`, `Observation`, `Intent`, `ExecOutcome`, `TurnOutcome`, … | `@a2arium/callagent-core` | stable | See barrel for full type exports |
 | Stage facade: `createStageFacade`, `StageFacade`, `defineControlKeys`, control var accessors | `@a2arium/callagent-core` | stable | |
 | `createTestHarness`, `TestHarness`, deterministic stubs, harness assertion helpers | `@a2arium/callagent-core` | stable | Same `Partial<Modules>` shape as `createAgent` |
+| Planning: `PlanSchema`, `PlanPatchSchema`, `validatePlanGraph`, `selectReadyPlanSteps`, `selectBlockedPlanSteps`, `resolveStoredPlanStep`, `applyPlanPatch`, `recordTurnTraceExtension`; harness `snapshot()` / `fork()` | `@a2arium/callagent-core` | stable | One Plan truth (`.strict()`); graph helpers ignore `cursor`; Learning owns patch apply; `recordTurnTraceExtension` is Execution-only (`ctx`). `snapshot`/`fork` isolate harness branches. No `scheduling`, no `MentalState.extensions`, no output `kind: 'value'`. |
 | `scaffoldAgent`, `formatScaffoldError`, `ScaffoldOptionsSchema`, `ScaffoldOptions`, `ScaffoldResult`, `ScaffoldFailure`, `AgentPreset` | `@a2arium/callagent-core` | stable | Programmatic scaffolding API; use `@a2arium/callagent-cli` for supported creation commands. |
 | Orchestration: `TaskEngine`, `A2AService`, registries, tenant helpers | `@a2arium/callagent-core` | stable / advanced | Prefer documented entrypoints for new agents |
 | Manifests: `AgentCard`, `AgentRuntimeManifest`, `ResolvedManifests`, manifest errors | `@a2arium/callagent-types` (+ re-exports from core) | stable | Zod-backed sources of truth in `callagent-types` |

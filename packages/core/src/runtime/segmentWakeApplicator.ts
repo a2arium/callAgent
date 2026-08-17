@@ -8,7 +8,7 @@
  * INTERNAL — not exported from the public package index.
  */
 
-import { applyInputProvided } from '../orchestration/DurableHandlerRegistry.js';
+import { applyInputProvided, getPendingInputs, tombstonePendingInput } from '../orchestration/DurableHandlerRegistry.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import {
     getPendingExternalEvents,
@@ -44,6 +44,7 @@ import {
     readTaskLifecycle,
 } from '../orchestration/TaskLifecycle.js';
 import { getPendingTasks, setPendingTasks } from '../orchestration/Handles.js';
+import { synthesizeOwnerDetachedChildTerminal } from '../plans/planStepCorrelation.js';
 
 const log = logger.createLogger({ prefix: 'SegmentWakeApplicator' });
 
@@ -331,15 +332,29 @@ export function applyWakeToSnapshot(
             };
             let timerBase = base;
             if (event.reason === 'input_timeout') {
-                const pending = { ...((base as any).pending ?? {}) };
-                const inputs = { ...(pending.inputs ?? {}) };
-                delete inputs[event.token];
-                const manifestConsents = { ...(pending.manifestConsents ?? {}) };
+                const pending = { ...((base as { pending?: Record<string, unknown> }).pending ?? {}) };
+                const rawConsents = pending.manifestConsents;
+                const manifestConsents =
+                    rawConsents !== null && typeof rawConsents === 'object' && !Array.isArray(rawConsents)
+                        ? { ...(rawConsents as Record<string, unknown>) }
+                        : {};
+                timerBase = tombstonePendingInput(base, event.token, 'expired', event.firedAt);
                 const receipt = manifestConsents[event.token];
-                if (receipt?.status === 'pending') {
-                    manifestConsents[event.token] = { ...receipt, status: 'expired', decidedAt: event.firedAt };
+                if (
+                    receipt !== null &&
+                    typeof receipt === 'object' &&
+                    !Array.isArray(receipt) &&
+                    (receipt as { status?: unknown }).status === 'pending'
+                ) {
+                    const nextPending = {
+                        ...((timerBase as { pending?: Record<string, unknown> }).pending ?? {}),
+                    };
+                    nextPending.manifestConsents = {
+                        ...manifestConsents,
+                        [event.token]: { ...receipt, status: 'expired', decidedAt: event.firedAt },
+                    };
+                    timerBase = { ...timerBase, pending: nextPending };
                 }
-                timerBase = { ...base, pending: { ...pending, inputs, manifestConsents } };
             }
             const next = {
                 ...timerBase,
@@ -487,34 +502,34 @@ async function reconcileTerminalOwnerEffects(
                 detachedAt,
             });
             const tasks = getPendingTasks(tools.snapshot);
-            const pending = (tools.snapshot as any).pending ?? {};
-            const childTerminals = {
+            const pending = (tools.snapshot as { pending?: Record<string, unknown> }).pending ?? {};
+            const childTerminals: Record<string, unknown> = {
                 ...((pending.childTerminals ?? {}) as Record<string, unknown>),
-            } as Record<string, any>;
+            };
             for (const [token, entry] of Object.entries(tasks)) {
-                childTerminals[token] ??= {
-                    kind: 'failed',
-                    claimedAt: detachedAt,
-                    ...(entry.childTaskId !== undefined ? { childTaskId: entry.childTaskId } : {}),
-                    ...(entry.agentId !== undefined ? { agentId: entry.agentId } : {}),
-                    error: {
-                        code: 'CHILD_OWNER_TERMINAL',
-                        message: `Child result delivery detached because owner task ${taskId} is terminal.`,
-                    },
-                };
+                childTerminals[token] ??= synthesizeOwnerDetachedChildTerminal(entry, {
+                    detachedAt,
+                    ownerTaskId: taskId,
+                });
             }
-            if (tools.detached.length === 0 && Object.keys(tasks).length === 0) {
+            let inputSnapshot = tools.snapshot;
+            const inputTokens = Object.keys(getPendingInputs(inputSnapshot));
+            for (const token of inputTokens) {
+                inputSnapshot = tombstonePendingInput(inputSnapshot, token, 'cancelled', detachedAt);
+            }
+            if (tools.detached.length === 0 && Object.keys(tasks).length === 0 && inputTokens.length === 0) {
                 return { kind: 'noop', value: undefined };
             }
-            const withoutTasks = setPendingTasks(tools.snapshot, {});
+            const withoutTasks = setPendingTasks(inputSnapshot, {});
             return {
                 kind: 'write',
                 value: undefined,
                 snapshot: {
                     ...withoutTasks,
                     pending: {
-                        ...((withoutTasks as any).pending ?? {}),
+                        ...((withoutTasks as { pending?: Record<string, unknown> }).pending ?? {}),
                         childTerminals,
+                        inputs: {},
                     },
                 },
             };

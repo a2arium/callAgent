@@ -430,6 +430,28 @@ describe('applyWakeToSnapshot', () => {
         let version = BigInt(3);
         let snapshot: Record<string, unknown> = {
             ...base,
+            pending: {
+                ...base.pending,
+                tasks: {
+                    'child-tok': {
+                        target: 'child-agent',
+                        agentId: 'child-agent',
+                        childTaskId: 'child-1',
+                        handlers: {},
+                        planId: 'p1',
+                        stepId: 'A',
+                        advanceCursor: true,
+                    },
+                },
+                inputs: {
+                    'tok-in': {
+                        schema: { type: 'string' },
+                        planId: 'p1',
+                        stepId: 'B',
+                        advanceCursor: false,
+                    },
+                },
+            },
             meta: {
                 ...base.meta,
                 taskLifecycle: {
@@ -462,6 +484,16 @@ describe('applyWakeToSnapshot', () => {
         expect((snapshot as any).pending.childTerminals['child-tok']).toMatchObject({
             kind: 'failed',
             error: { code: 'CHILD_OWNER_TERMINAL' },
+            planId: 'p1',
+            stepId: 'A',
+            advanceCursor: true,
+        });
+        expect((snapshot as any).pending.inputs).toEqual({});
+        expect((snapshot as any).pending.inputTerminals['tok-in']).toMatchObject({
+            kind: 'cancelled',
+            planId: 'p1',
+            stepId: 'B',
+            advanceCursor: false,
         });
     });
 

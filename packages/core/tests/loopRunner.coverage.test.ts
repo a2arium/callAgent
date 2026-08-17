@@ -434,6 +434,136 @@ describe('runLoop await_child fast-paths', () => {
         expect(env.inbox.current.length).toBe(0);
     });
 
+    it('copies plan stamps onto childTerminals before SYNC pending delete', async () => {
+        const ctx: any = { task: { id: 'child-sync-stamp', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const childObs = { source: 'child', kind: 'child.completed', payload: { token: 'child-token', data: 'ok' } };
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({ current: [], all: [childObs] }),
+            pending: {
+                inputs: {},
+                children: {
+                    'child-token': { agentId: 'child-agent', planId: 'p1', stepId: 'A', advanceCursor: true },
+                },
+                tools: {},
+                groups: {},
+            },
+        });
+
+        let call = 0;
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => { call += 1; return prev; },
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => (call === 1
+                ? { kind: 'await_child', token: 'child-token' } as any
+                : { kind: 'await_input', token: 'end' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+
+        const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 2 });
+
+        expect(env.pending.children['child-token']).toBeUndefined();
+        expect(env.pending.childTerminals?.['child-token']).toEqual(
+            expect.objectContaining({ planId: 'p1', stepId: 'A', advanceCursor: true })
+        );
+        expect(result.outcome.kind).toBe('await_input');
+    });
+
+    it('copies plan stamps onto toolTerminals before SYNC pending delete', async () => {
+        const ctx: any = { task: { id: 'tool-sync-stamp', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const toolObs = {
+            source: 'tool',
+            kind: 'tool.completed',
+            payload: { token: 'tool-token', tool: 'search', result: {} },
+        };
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({ current: [], all: [toolObs] }),
+            pending: {
+                inputs: {},
+                children: {},
+                tools: {
+                    'tool-token': { name: 'search', planId: 'p1', stepId: 'B', advanceCursor: false },
+                },
+                groups: {},
+            },
+        });
+
+        let call = 0;
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => { call += 1; return prev; },
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => (call === 1
+                ? { kind: 'await_tool', token: 'tool-token' } as any
+                : { kind: 'await_input', token: 'end' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+
+        const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 2 });
+
+        expect(env.pending.tools['tool-token']).toBeUndefined();
+        expect(env.pending.toolTerminals?.['tool-token']).toEqual(
+            expect.objectContaining({ planId: 'p1', stepId: 'B', advanceCursor: false })
+        );
+        expect(result.outcome.kind).toBe('await_input');
+    });
+
+    it('does not overwrite existing toolTerminal stamps on SYNC delete', async () => {
+        const ctx: any = { task: { id: 'tool-sync-keep', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const toolObs = {
+            source: 'tool',
+            kind: 'tool.completed',
+            payload: { token: 'tool-token', tool: 'search', result: {} },
+        };
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({ current: [], all: [toolObs] }),
+            pending: {
+                inputs: {},
+                children: {},
+                tools: {
+                    'tool-token': { name: 'search', planId: 'p-new', stepId: 'Z', advanceCursor: true },
+                },
+                toolTerminals: {
+                    'tool-token': { kind: 'completed', planId: 'p1', stepId: 'A', advanceCursor: false },
+                },
+                groups: {},
+            },
+        });
+
+        let call = 0;
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => { call += 1; return prev; },
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => (call === 1
+                ? { kind: 'await_tool', token: 'tool-token' } as any
+                : { kind: 'await_input', token: 'end' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+
+        await runLoop(ctx, M, env, modules as any, { maxTurns: 2 });
+
+        expect(env.pending.tools['tool-token']).toBeUndefined();
+        expect(env.pending.toolTerminals?.['tool-token']).toEqual(
+            expect.objectContaining({ kind: 'completed', planId: 'p1', stepId: 'A', advanceCursor: false })
+        );
+    });
+
     it('reloads inbox from session manager when child completion is persisted externally', async () => {
         const childObs = { source: 'child', kind: 'child.completed', payload: { token: 'reload-child', value: 1 } };
         const sessionManager = { load: jest.fn<any>().mockResolvedValue({ snapshot: { inbox: { all: [childObs], current: [] } } }) };

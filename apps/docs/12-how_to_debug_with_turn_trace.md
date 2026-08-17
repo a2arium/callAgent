@@ -92,6 +92,9 @@ Primary fields:
 - `perception`
 - `mentalStateBeforeHash`, `mentalStateAfterHash`
 - `intent`
+- `extensions` (optional compact telemetry; not cognition)
+
+Do not expect retrieved memory payloads in `inboxCurrent`. Durable reads are not observations; operator `memory.read` records keys/counts. Attach a namespace with `recordTurnTraceExtension` (put sidecar artifact ids in `data`; do not dump RAG chunks). `inboxCurrent` may show `plan.patch` or `validation.failed`. Forked harnesses have their own `allTraces()`.
 
 ### B) Wrong control flow
 
@@ -129,7 +132,7 @@ Primary fields:
 Symptoms:
 
 - expected result never influenced memory
-- observation silently dropped
+- observation silently dropped (invalid **plan** payloads are **not** dropped: they become `internal/validation.failed` in `inboxCurrent`)
 - source/kind mismatch
 
 Primary fields:

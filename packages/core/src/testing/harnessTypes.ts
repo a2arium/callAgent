@@ -28,6 +28,7 @@ export const HarnessConfigSchema = z.object({
     seedTokens: z.boolean().default(true),
     manifestProvenance: z.custom<ManifestProvenance>().optional(),
     maxTurns: z.number().int().positive().default(1),
+    randomSeed: z.number().int().optional(),
     autoJoinInvitedTopics: z.boolean().default(false),
     /**
      * When true (default), topic selector / stop policies registered on the harness conversation service

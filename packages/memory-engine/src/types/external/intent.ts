@@ -1,3 +1,9 @@
+/**
+ * Historical Intent scaffold — not the product Intent.
+ * Product source of truth: `packages/core/src/types/intent.ts` (`IntentSchema`).
+ * This copy cannot re-export from core (cycle: core depends on memory-engine).
+ * Keep members in lockstep with core; `execute_step` is in both files (kind-parity test).
+ */
 import { z } from 'zod';
 
 export const IntentSchema = z.discriminatedUnion('kind', [
@@ -12,6 +18,7 @@ export const IntentSchema = z.discriminatedUnion('kind', [
     // Planning
     z.object({ kind: z.literal('create_plan'), goalId: z.string() }),
     z.object({ kind: z.literal('execute_next_step'), planId: z.string() }),
+    z.object({ kind: z.literal('execute_step'), planId: z.string().min(1), stepId: z.string().min(1) }).strict(),
     z.object({ kind: z.literal('repair_plan'), planId: z.string(), reason: z.string() }),
 
     // Terminal / idle

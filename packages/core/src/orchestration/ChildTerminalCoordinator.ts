@@ -8,6 +8,7 @@ import { logger } from '@a2arium/callagent-utils';
 import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
 import { advanceTaskTurnGenerationInSnapshot } from './TaskTurnCoordinator.js';
 import { addProcessedSegmentKey } from '../runtime/segmentProcessedKeys.js';
+import { pickPlanStepStamp } from '../plans/planStepCorrelation.js';
 
 const log = logger.createLogger({ prefix: 'ChildTerminalCoordinator' });
 
@@ -152,6 +153,7 @@ export function claimChildTerminalInSnapshot(
         ...(childTaskId !== undefined ? { childTaskId } : {}),
         ...(agentId !== undefined ? { agentId } : {}),
         ...(error !== undefined ? { error } : {}),
+        ...pickPlanStepStamp(entry),
     };
     const identity = request.terminalIdentity;
     if (identity !== undefined) {

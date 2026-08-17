@@ -23,7 +23,7 @@ import { SessionManager } from './SessionManager.js';
 import { InMemorySessionManager } from './InMemorySessionManager.js';
 import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
 import { decide } from './reducer.js';
-import { applyInputProvided, getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
+import { applyInputProvided, getPendingInputs, setPendingInputs, tombstonePendingInput } from './DurableHandlerRegistry.js';
 import type { DurableHandlerInvoker } from './DurableHandlerInvoker.js';
 import { DurableHandlerInvokerCore } from './DurableHandlerInvoker.js';
 import { InputHandle, createTaskHandle, createGroupHandle, type GroupHandle } from './Handles.js';
@@ -136,6 +136,7 @@ import { readA2aResultTelemetry } from './api/a2aResultTelemetry.js';
 import { coordinateChildTerminal, type ChildTerminalIdentity } from './ChildTerminalCoordinator.js';
 import { coordinateToolTerminal } from './ToolTerminalCoordinator.js';
 import { detachPendingToolsInSnapshot } from './ToolTerminalCoordinator.js';
+import { synthesizeOwnerDetachedChildTerminal } from '../plans/planStepCorrelation.js';
 import {
     claimTaskTerminalInSnapshot,
     isTaskLifecycleTerminal,
@@ -2142,21 +2143,20 @@ export class TaskEngine {
                         ...((pending.childTerminals ?? {}) as Record<string, unknown>),
                     } as Record<string, any>;
                     for (const [token, entry] of Object.entries(activeChildTasks)) {
-                        childTerminals[token] ??= {
-                            kind: 'failed',
-                            claimedAt: detachedAt,
-                            ...(typeof entry?.childTaskId === 'string' ? { childTaskId: entry.childTaskId } : {}),
-                            ...(typeof entry?.agentId === 'string' ? { agentId: entry.agentId } : {}),
-                            error: {
-                                code: 'CHILD_OWNER_TERMINAL',
-                                message: `Child result delivery detached because owner task ${taskId} is terminal.`,
-                            },
-                        };
+                        childTerminals[token] ??= synthesizeOwnerDetachedChildTerminal(entry, {
+                            detachedAt,
+                            ownerTaskId: taskId,
+                        });
                     }
+                    let inputSnapshot = tools.snapshot;
+                    for (const token of Object.keys(getPendingInputs(inputSnapshot))) {
+                        inputSnapshot = tombstonePendingInput(inputSnapshot, token, 'cancelled', detachedAt);
+                    }
+                    const inputPending = (inputSnapshot as { pending?: Record<string, unknown> }).pending ?? pending;
                     const cleanedSnapshot = {
-                        ...tools.snapshot,
+                        ...inputSnapshot,
                         pending: {
-                            ...pending,
+                            ...inputPending,
                             tasks: {},
                             inputs: {},
                             childTerminals,

@@ -240,7 +240,10 @@ export type TaskContext = {
             onProvided?: string;
             onExpired?: string;
             setToken?: boolean;
-            setStage?: string
+            setStage?: string;
+            planId?: string;
+            stepId?: string;
+            advanceCursor?: boolean;
         }
     ) => Promise<import('../../orchestration/Handles.js').InputHandle>;
 
@@ -257,6 +260,9 @@ export type TaskContext = {
             awaitCompletion?: boolean;
             onCompleted?: string;
             onFailed?: string;
+            planId?: string;
+            stepId?: string;
+            advanceCursor?: boolean;
         }
     ) => Promise<import('../../orchestration/Handles.js').TaskHandle>;
 

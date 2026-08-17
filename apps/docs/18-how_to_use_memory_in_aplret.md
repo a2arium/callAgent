@@ -191,6 +191,7 @@ Rules:
 - Return a **new** `MentalState` (or equivalent immutable update).
 - Use **`mem`** for async durable reads needed to build cognition (e.g. load user prefs from SQL into `M`).
 - Use **`writer`** for durable semantic writes and for explicit `worldModel` / goal / plan patches the runtime should flush or merge.
+- **A durable read is not an observation.** Do not wrap `mem.semantic.read` results as `source: 'internal'` inbox items. A tool failure observed once, saved, then retrieved five times is still **one** observation plus history — not six inbox events. Operator `memory.read` is telemetry (ids/counts, no payloads).
 - May `await` artifacts when content changes beliefs (see [artifacts how-to](./7-how_to_use_artifacts_correctly_aplret.md)).
 - **No other external side effects** (no direct `ctx.memory` calls from Learning module code).
 
