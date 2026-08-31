@@ -5473,6 +5473,7 @@ export class TaskEngine {
         // This is a simplified version - a real implementation would
         // inject all required dependencies like LLM, tools, etc.
         const ctx: TaskContext = {
+            ...(binding?.abortSignal !== undefined ? { abortSignal: binding.abortSignal } : {}),
             tenantId: binding?.tenantId ?? 'default',
             agentId: binding?.agentId ?? 'default',
             task: {

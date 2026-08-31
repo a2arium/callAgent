@@ -165,6 +165,7 @@ async function executeSegmentTaskInner(
             wake: input.wake as TurnWake,
             runtimeAttemptKey: `hatchet:${ctx.workflowRunId()}:${ctx.taskRunExternalId()}`,
             runtimeSurface: 'hatchet',
+            abortSignal: ctx.abortController.signal,
         });
         const output = toSegmentTaskOutput(result);
         if (deps.driverRuns) {

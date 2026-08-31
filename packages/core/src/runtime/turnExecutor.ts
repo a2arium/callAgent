@@ -118,6 +118,8 @@ export type RunSegmentParams = {
     recoveryGeneration?: string;
     /** When set, invoke runTurn directly without wake applicator mutation. */
     prepared?: PreparedTurnInvocation;
+    /** Cancellation supplied by the runtime driver for this execution attempt. */
+    abortSignal?: AbortSignal;
 };
 
 /**

@@ -110,6 +110,8 @@ export type TaskInput = {
 
 // --- Task Context (Interface for agent task handling) ---
 export type TaskContext = {
+    /** Aborted when the active runtime attempt is cancelled or loses its lease. */
+    readonly abortSignal?: AbortSignal;
     // Readonly mental state view for queries
     M?: Readonly<import('../../loop/types.js').MentalState>;
     // Tenant context for multi-tenant operations

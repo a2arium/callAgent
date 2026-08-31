@@ -126,6 +126,7 @@ describe('executeTaskTask', () => {
             workflowRunId: () => 'workflow-1',
             taskRunExternalId: () => 'task-run-1',
             retryCount: () => 0,
+            abortController: new AbortController(),
         };
         const upsertByProviderRunId = jest.fn(async () => undefined);
 
@@ -150,6 +151,26 @@ describe('executeTaskTask', () => {
         expect(upsertByProviderRunId).toHaveBeenNthCalledWith(2, expect.objectContaining({
             rootTaskId: 'root-task', parentTaskId: 'parent-task', status: 'failed',
         }));
+    });
+
+    it('passes Hatchet cancellation to the turn executor', async () => {
+        const abortController = new AbortController();
+        const runSegment = jest.fn(async (params) => {
+            expect(params.abortSignal).toBe(abortController.signal);
+            return {
+                tenantId: 'tenant-1', taskId: 'task-1',
+                boundary: { kind: 'complete' }, taskStatus: { state: 'completed' },
+            };
+        });
+        await executeSegmentTask({
+            tenantId: 'tenant-1', taskId: 'task-1',
+            wake: { trigger: 'start', input: {} }, idempotencyKey: 'task-1:start',
+        }, {
+            workflowRunId: () => 'workflow-1',
+            taskRunExternalId: () => 'task-run-1',
+            abortController,
+        } as never, { turnExecutor: { runSegment } as never });
+        expect(runSegment).toHaveBeenCalledTimes(1);
     });
 
     it('declares durable parent tasks with an explicit execution timeout', () => {

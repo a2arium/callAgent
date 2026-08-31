@@ -123,6 +123,7 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         const boundContexts: Array<{
             tenantId?: string;
             agentId?: string;
+            abortSignal?: AbortSignal;
         }> = [];
         const boundExecutor = new TurnRunnerSegmentExecutor({
             turnRunner,
@@ -149,16 +150,20 @@ describe('TurnRunnerSegmentExecutor integration', () => {
             },
         }));
 
+        const runtimeAbort = new AbortController();
+        runtimeAbort.abort(new Error('cancelled by Hatchet'));
         await boundExecutor.runSegment({
             tenantId,
             taskId: `${taskId}-binding`,
             agentId,
             idempotencyKey: `${taskId}-binding:start`,
             runtimeSurface: 'hatchet',
+            abortSignal: runtimeAbort.signal,
             wake: { trigger: 'start', input: {} },
         });
 
-        expect(boundContexts).toEqual([{ tenantId, agentId }]);
+        expect(boundContexts).toEqual([expect.objectContaining({ tenantId, agentId, abortSignal: expect.any(Object) })]);
+        expect(boundContexts[0]!.abortSignal?.aborted).toBe(true);
     });
 
     it('enforces the admitted root deadline before acquiring the initial turn', async () => {

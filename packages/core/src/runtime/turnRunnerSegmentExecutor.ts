@@ -69,6 +69,7 @@ export type TurnRunnerSegmentExecutorDeps = {
 export type RuntimeContextBinding = {
     tenantId: string;
     agentId?: string;
+    abortSignal?: AbortSignal;
 };
 
 export class TurnRunnerSegmentExecutor implements TurnExecutor {
@@ -190,10 +191,12 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     input: wake.trigger === 'start' ? wake.input : {},
                 };
             }
+            const executionAbort = createExecutionAbortController(params.abortSignal);
+            (prepared.ctx as { abortSignal?: AbortSignal }).abortSignal = executionAbort.controller.signal;
             let taskEntity;
             try {
                 taskEntity = await this.runClaimedTurn(
-                    { tenantId, taskId, agentId, idempotencyKey, claim: admission.result.claim },
+                    { tenantId, taskId, agentId, idempotencyKey, claim: admission.result.claim, abortController: executionAbort.controller },
                     () => this.turnRunner.runTurn(
                         prepared.ctx,
                         prepared.turnParams,
@@ -215,6 +218,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 if (disposition === undefined) throw error;
                 this.dedupe.record(idempotencyKey);
                 return this.buildDuplicateResult(tenantId, taskId, agentId, disposition);
+            } finally {
+                executionAbort.dispose();
             }
             const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
                 .__turnPersistence?.disposition;
@@ -331,6 +336,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, 'matching_replay');
         }
 
+        const executionAbort = createExecutionAbortController(params.abortSignal);
         const ctx = this.createContext(
             {
                 id: taskId,
@@ -341,6 +347,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 ...(preparedWake.agentId !== undefined
                     ? { agentId: preparedWake.agentId }
                     : {}),
+                abortSignal: executionAbort.controller.signal,
             }
         );
         if ((ctx as { task?: unknown }).task === undefined) {
@@ -375,7 +382,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                         initialM: M,
                         snapshot: admission.snapshot,
                     }
-                )
+                ),
+                executionAbort.controller
             );
         } catch (error) {
             const disposition = await this.classifySupersededExecutionError({
@@ -389,6 +397,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             if (disposition === undefined) throw error;
             this.dedupe.record(idempotencyKey);
             return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, disposition);
+        } finally {
+            executionAbort.dispose();
         }
 
         const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
@@ -469,7 +479,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         agentId?: string;
         idempotencyKey: string;
         claim: TaskTurnClaim;
-    }, body: () => Promise<T>): Promise<T> {
+        abortController?: AbortController;
+    }, body: () => Promise<T>, abortControllerOverride?: AbortController): Promise<T> {
         await markTaskTurnExecuting({
             session: this.sessionManager,
             tenantId: params.tenantId,
@@ -485,7 +496,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             disposition: 'executed',
         });
         let renewing = false;
-        const abortController = new AbortController();
+        const abortController = abortControllerOverride ?? params.abortController ?? new AbortController();
         const leaseConfig = resolveTaskTurnLeaseConfig();
         const timer = setInterval(() => {
             if (renewing) return;
@@ -929,6 +940,20 @@ function supersedingCauseCode(error: unknown): string {
         current = (current as { cause?: unknown }).cause;
     }
     return 'TASK_TURN_SUPERSEDED';
+}
+
+function createExecutionAbortController(parent?: AbortSignal): {
+    controller: AbortController;
+    dispose: () => void;
+} {
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(parent?.reason);
+    if (parent?.aborted) forwardAbort();
+    else parent?.addEventListener('abort', forwardAbort, { once: true });
+    return {
+        controller,
+        dispose: () => parent?.removeEventListener('abort', forwardAbort),
+    };
 }
 
 function describeWake(

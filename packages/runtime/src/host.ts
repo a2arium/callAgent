@@ -7,6 +7,7 @@ import {
     createOperatorApiRouter,
     createRuntimeApiRouter,
     type AgentScheduleService,
+    AgentScheduleError,
     type IEventBus,
 } from '@a2arium/callagent-core';
 import type { HatchetOutboxBootstrap } from '@a2arium/callagent-driver-hatchet';
@@ -46,6 +47,59 @@ export type RuntimeProcessHandle = {
     stop: () => Promise<void>;
 };
 
+export class HatchetScheduleReadiness {
+    private healthy = false;
+    private stopped = false;
+    private timer?: NodeJS.Timeout;
+    private attempt = 0;
+
+    constructor(private readonly probe: () => Promise<void>) {}
+
+    start(): void { void this.run(); }
+    isHealthy(): boolean { return this.healthy; }
+    stop(): void {
+        this.stopped = true;
+        if (this.timer) clearTimeout(this.timer);
+    }
+
+    private async run(): Promise<void> {
+        try {
+            await this.probe();
+            this.healthy = true;
+            this.attempt = 0;
+        } catch (error) {
+            this.healthy = false;
+            this.attempt += 1;
+            console.warn('HATCHET_SCHEDULE_API_UNAVAILABLE', {
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+        if (this.stopped) return;
+        const delay = this.healthy ? 30_000 : Math.min(30_000, 1_000 * 2 ** Math.min(this.attempt - 1, 5));
+        this.timer = setTimeout(() => void this.run(), delay);
+        this.timer.unref?.();
+    }
+}
+
+export function gateScheduleService(service: AgentScheduleService, readiness: HatchetScheduleReadiness): AgentScheduleService {
+    return new Proxy(service, {
+        get(target, property, receiver) {
+            const value = Reflect.get(target, property, receiver);
+            if (typeof value !== 'function') return value;
+            return (...args: unknown[]) => {
+                if (!readiness.isHealthy()) {
+                    throw new AgentScheduleError(
+                        'SCHEDULE_PROVIDER_UNAVAILABLE',
+                        'Hatchet schedule API is temporarily unavailable',
+                        503
+                    );
+                }
+                return value.apply(target, args);
+            };
+        },
+    }) as AgentScheduleService;
+}
+
 export async function startRuntimeHost(options: { descriptorPath?: string } = {}): Promise<RuntimeProcessHandle> {
     const descriptor = await readRuntimeWorkspaceDescriptor(options);
     const { WorkingMemorySessionStore } = await import('@a2arium/callagent-memory-sql');
@@ -54,6 +108,7 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     let transportClose: (() => Promise<void>) | undefined;
     let eventBus: IEventBus | undefined;
     let scheduleService: AgentScheduleService | undefined;
+    let scheduleReadiness: HatchetScheduleReadiness | undefined;
 
     if (process.env.CALLAGENT_OUTBOX_DISPATCHER?.toLowerCase() === 'hatchet') {
         const [{ createNatsJetStreamEventBusStandalone }, { resolveHatchetOutboxBootstrap }] = await Promise.all([importNats(), importHatchet()]);
@@ -71,7 +126,19 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     });
     if (sessionStore && hatchetBootstrap) {
         const { createHatchetAgentScheduleService } = await importHatchet();
-        scheduleService = createHatchetAgentScheduleService({ prisma: sessionStore.getPrismaClient() });
+        const rawScheduleService = createHatchetAgentScheduleService({ prisma: sessionStore.getPrismaClient() });
+        const probeContext = {
+            tenantId: process.env.CALLAGENT_OPERATOR_TENANT_ID ?? 'default',
+            actorId: 'hatchet-readiness',
+            actorType: 'service' as const,
+            production: true,
+            role: 'viewer' as const,
+        };
+        scheduleReadiness = new HatchetScheduleReadiness(async () => {
+            await rawScheduleService.list(probeContext, { limit: 1 });
+        });
+        scheduleService = gateScheduleService(rawScheduleService, scheduleReadiness);
+        scheduleReadiness.start();
     }
     const production = process.env.CALLAGENT_MODE === 'production' || process.env.NODE_ENV === 'production';
     const operatorEnabled = process.env.CALLAGENT_OPERATOR_ENABLED !== 'false' && (sessionStore !== undefined || production);
@@ -87,7 +154,13 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     if (operatorAuth) app.all('/operator-api/auth/*splat', operatorAuth.authHandler);
     app.use(express.json({ limit: '1mb' }));
     app.get('/health', (_req, res) => res.json({ ok: true, rpc: '/rpc' }));
-    app.get('/ready', (_req, res) => res.json({ ok: true, workspaceFingerprint: descriptor.fingerprint, agents: descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort() }));
+    app.get('/ready', (_req, res) => {
+        if (scheduleReadiness && !scheduleReadiness.isHealthy()) {
+            res.status(503).json({ ok: false, code: 'HATCHET_SCHEDULE_API_UNAVAILABLE' });
+            return;
+        }
+        res.json({ ok: true, workspaceFingerprint: descriptor.fingerprint, agents: descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort() });
+    });
     if (operatorAuth) {
         app.use('/operator-api', operatorAuth.managementRouter);
         app.get('/operator-api/config', operatorAuth.operatorMiddleware, (_req, res) => res.json({
@@ -123,6 +196,7 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     const stop = async () => {
         if (stopped) return;
         stopped = true;
+        scheduleReadiness?.stop();
         shutdownComposition();
         await new Promise<void>((resolve) => server.close(() => resolve()));
     };
