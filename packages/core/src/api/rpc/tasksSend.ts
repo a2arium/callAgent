@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { normalizeRpcTaskParams } from './taskParams.js';
-import { resolveActiveRunTimeout } from '../../runner/backgroundTaskTimeout.js';
+import { resolveRpcActiveRunTimeout } from './activeRunTimeout.js';
 
 type RequestWithTenant = Request & { tenantId?: string };
 
@@ -46,10 +46,9 @@ export async function handleTasksSend(req: Request, res: Response): Promise<void
                 resultTask.status.state === 'submitted' ||
                 resultTask.status.state === 'working')
         ) {
-            const timeout = resolveActiveRunTimeout({
-                explicitTimeoutMs: process.env.CALLAGENT_ACTIVE_RUN_TIMEOUT_MS,
-                realRunTimeoutMs: process.env.REAL_RUN_TIMEOUT_MS,
-            });
+            const timeout = resolveRpcActiveRunTimeout(
+                typeof params.agentId === 'string' ? params.agentId : undefined,
+            );
             const observed = await engine.awaitTaskTerminal({
                 tenantId: typeof params.tenantId === 'string'
                     ? params.tenantId

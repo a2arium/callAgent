@@ -4,7 +4,7 @@ import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
 import { normalizeRpcTaskParams } from './taskParams.js';
-import { resolveActiveRunTimeout } from '../../runner/backgroundTaskTimeout.js';
+import { resolveRpcActiveRunTimeout } from './activeRunTimeout.js';
 
 type RequestWithTenant = Request & { tenantId?: string };
 
@@ -51,10 +51,9 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
                     started.status.state === 'submitted' ||
                     started.status.state === 'working')
             ) {
-                const timeout = resolveActiveRunTimeout({
-                    explicitTimeoutMs: process.env.CALLAGENT_ACTIVE_RUN_TIMEOUT_MS,
-                    realRunTimeoutMs: process.env.REAL_RUN_TIMEOUT_MS,
-                });
+                const timeout = resolveRpcActiveRunTimeout(
+                    typeof params.agentId === 'string' ? params.agentId : undefined,
+                );
                 await engine.awaitTaskTerminal({
                     tenantId,
                     taskId: task.id,
