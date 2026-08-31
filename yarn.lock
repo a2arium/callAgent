@@ -26,6 +26,7 @@ __metadata:
   resolution: "@a2arium/callagent-cli@workspace:packages/cli"
   dependencies:
     "@a2arium/callagent-core": "npm:^0.3.0"
+    "@a2arium/callagent-driver-hatchet": "npm:^0.1.0"
     "@a2arium/callagent-memory-sql": "npm:^0.2.0"
     "@a2arium/callagent-runtime": "npm:^0.1.0"
     "@types/node": "npm:^22.14.1"
