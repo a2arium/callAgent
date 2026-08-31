@@ -6,7 +6,11 @@ import type {
 import { bootstrapCompositionRootInternal, SessionManager } from '@a2arium/callagent-core/unstable';
 import type { IWorkingMemorySessionStore } from '@a2arium/callagent-memory-engine';
 import type { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
-import { createHatchetOutboxStack, startOutboxWorker } from './createHatchetOutboxStack.js';
+import {
+    createHatchetOutboxStack,
+    startOutboxWorker,
+    type StartedHatchetWorker,
+} from './createHatchetOutboxStack.js';
 
 export type HatchetRuntimeWorkerApp = {
     composition: RuntimeCompositionRootInternal;
@@ -18,6 +22,19 @@ export type StartHatchetRuntimeWorkerAppOptions = {
     natsUrl?: string;
     registerAgents?: BootstrapCompositionRootParams['registerAgents'];
 };
+
+/** Starts Hatchet's long-lived loop and waits only for its startup handshake. */
+export async function startHatchetWorkerUntilReady(
+    worker: StartedHatchetWorker,
+    timeoutMs = 30_000
+): Promise<{ workerRun: Promise<void> }> {
+    const workerRun = worker.start();
+    // Keep an unexpected background failure from becoming an unhandled
+    // rejection; shutdown still awaits the original promise and propagates it.
+    void workerRun.catch(() => undefined);
+    await worker.waitUntilReady(timeoutMs);
+    return { workerRun };
+}
 
 type NatsStandaloneModule = {
     createNatsJetStreamEventBusStandalone: (opts: {
@@ -92,15 +109,32 @@ export async function startHatchetRuntimeWorkerApp(
     });
 
     console.log('Starting Hatchet runtime worker (composition root + aplret.outbox.dispatch)...');
-    await worker.start();
+    // Hatchet's start promise deliberately remains pending for the worker's
+    // whole lifetime. Awaiting it here delays CallAgent readiness until the
+    // worker is already stopping. Start it in the background, then wait for
+    // Hatchet's explicit readiness handshake instead.
+    let workerRun: Promise<void>;
+    try {
+        ({ workerRun } = await startHatchetWorkerUntilReady(worker));
+    } catch (error) {
+        await worker.stop().catch(() => undefined);
+        composition.shutdown();
+        await closeNats();
+        await sessionStore.close();
+        throw error;
+    }
 
     return {
         composition,
         shutdown: async () => {
-            await worker.stop();
-            composition.shutdown();
-            await closeNats();
-            await sessionStore.close();
+            try {
+                await worker.stop();
+                await workerRun;
+            } finally {
+                composition.shutdown();
+                await closeNats();
+                await sessionStore.close();
+            }
         },
     };
 }

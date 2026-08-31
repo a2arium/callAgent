@@ -100,6 +100,11 @@ Default `callagent start` starts:
 - Runtime host at `http://127.0.0.1:8790`.
 - Observer at `http://127.0.0.1:8790/operator`.
 
+Once both the host and worker confirm the same agent set, the CLI prints a
+startup summary with the exact Runtime API, Operator, and configured Hatchet
+dashboard URLs. Treat that summary as the source of truth when ports or hosts
+have been customised.
+
 Useful mode:
 
 ```bash

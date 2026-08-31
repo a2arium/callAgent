@@ -76,6 +76,12 @@ export function createHatchetOutboxStack(params: CreateHatchetOutboxStackParams)
     return { runtimeDriver, hatchet, outboxDispatchTask, driverRuns, timerReconciler };
 }
 
+export type StartedHatchetWorker = {
+    start: () => Promise<void>;
+    stop: () => Promise<void>;
+    waitUntilReady: (timeout?: number) => Promise<void>;
+};
+
 export async function startOutboxWorker(params: {
     eventBus: IEventBus;
     prisma: PrismaClient;
@@ -85,7 +91,7 @@ export async function startOutboxWorker(params: {
     turnExecutor?: TurnExecutor;
     onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
     submitTask?: ScheduleDispatchDeps['submitTask'];
-}): Promise<{ worker: { start: () => Promise<void>; stop: () => Promise<void> } }> {
+}): Promise<{ worker: StartedHatchetWorker }> {
     rejectObsoleteRuntimeConfiguration();
     assertSharedOutboxEventBus(params.eventBus);
     const hatchet = params.hatchet ?? createHatchetClient();

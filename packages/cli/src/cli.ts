@@ -210,10 +210,36 @@ async function dev(options: Options, sourceRoot?: string): Promise<void> {
         if (ready.some((item) => item.fingerprint !== descriptor.fingerprint || !sameIds(item.agentIds, expectedAgents))) {
             throw new Error('Runtime child readiness did not match the resolved workspace descriptor');
         }
-        console.log(`Runtime started (${expectedAgents.length} agent(s), fingerprint ${descriptor.fingerprint})`);
+        printStartupSummary({
+            agentCount: expectedAgents.length,
+            fingerprint: descriptor.fingerprint,
+            host: childEnv.HOST ?? '127.0.0.1',
+            port: Number(childEnv.PORT ?? 8790),
+            observerEnabled: childEnv.CALLAGENT_OBSERVER_ENABLED !== 'false',
+            hatchetDashboardUrl: environment.values.HATCHET_DASHBOARD_URL,
+        });
     } catch (error) {
         await stop(error instanceof Error ? error.message : String(error), 1);
     }
+}
+
+export function printStartupSummary(options: {
+    agentCount: number;
+    fingerprint: string;
+    host: string;
+    port: number;
+    observerEnabled: boolean;
+    hatchetDashboardUrl?: string;
+}): void {
+    const host = displayHost(options.host);
+    const runtimeUrl = `http://${host}:${options.port}`;
+    console.log(`\nCallAgent workspace is running\n`);
+    console.log(`  Runtime API  ${runtimeUrl}`);
+    if (options.observerEnabled) console.log(`  Operator     ${runtimeUrl}/operator`);
+    else console.log('  Operator     disabled (--no-observer)');
+    if (options.hatchetDashboardUrl) console.log(`  Hatchet      ${options.hatchetDashboardUrl}`);
+    console.log(`\n  ${options.agentCount} agent(s) ready  ·  ${options.fingerprint.slice(0, 12)}\n`);
+    console.log('Press Ctrl-C to stop the runtime.');
 }
 
 async function preflight(env: Record<string, string>): Promise<void> {
@@ -236,6 +262,7 @@ function endpointFromHostPort(value: string, defaultPort: number): { host: strin
     return separator === -1 ? { host: normalizeHost(value), port: defaultPort } : { host: normalizeHost(value.slice(0, separator)), port: Number(value.slice(separator + 1) || defaultPort) };
 }
 function normalizeHost(host: string): string { return host === 'localhost' || host === '0.0.0.0' ? '127.0.0.1' : host; }
+function displayHost(host: string): string { return host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host; }
 function tcpConnect(host: string, port: number): Promise<boolean> { return new Promise((resolve) => { const socket = net.createConnection({ host, port }); const done = (result: boolean) => { socket.destroy(); resolve(result); }; socket.setTimeout(1_500); socket.once('connect', () => done(true)); socket.once('timeout', () => done(false)); socket.once('error', () => done(false)); }); }
 
 function startChild(name: string, entry: string, env: NodeJS.ProcessEnv, children: Map<string, ChildProcess>, expectedAgents: string[], onUnexpectedExit: () => void): Promise<{ fingerprint: string; agentIds: string[] }> {
