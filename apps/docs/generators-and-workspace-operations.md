@@ -53,6 +53,7 @@ cp .env.example .env
 
 npm run db:setup       # Apply CallAgent database migrations and generate Prisma client.
 npm run infra:up       # Start the packaged local Hatchet + NATS Docker profile.
+npm run maintenance:status # Read-only expiry and retention report.
 ```
 
 Then open the configured `HATCHET_DASHBOARD_URL` (default
@@ -77,6 +78,24 @@ database commands always use that same `.env` value.
 
 Stop or restart the local Docker services with `npm run infra:down` and
 `npm run infra:restart`.
+
+## Automatic maintenance
+
+Every generated workspace gets a stable maintenance installation id. The owner
+workspace registers and reconciles an hourly expiry cleanup and a daily
+retention review in Hatchet when `npm run start` launches its worker.
+
+```bash
+npm run maintenance:status
+npm run maintenance:run
+```
+
+The status command is read-only. The run command follows the same durable lease
+and retention policy as Hatchet. Expired cache records (including the current
+30-day artifact records) are safe to remove automatically; debug retention is
+report-only until `CALLAGENT_RETENTION_APPLY=true` is set. For shared Hatchet
+tenant/database policies, keep exactly one workspace with
+`CALLAGENT_MAINTENANCE_OWNER=true` and set it to `false` elsewhere.
 
 ## Override local Docker infrastructure
 

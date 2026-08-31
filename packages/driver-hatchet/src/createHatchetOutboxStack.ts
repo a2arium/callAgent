@@ -16,6 +16,7 @@ import { TimerReconciler } from './timerReconciler.js';
 import { TurnRequestReconciler } from './turnRequestReconciler.js';
 import { resolveSharedSegmentHatchetExecutionTimeout } from './taskTimeouts.js';
 import { createScheduleDispatchTask, type ScheduleDispatchDeps } from './tasks/scheduleDispatch.js';
+import { createMaintenanceTask, WorkspaceMaintenanceService } from './maintenance.js';
 
 export type HatchetOutboxStack = {
     runtimeDriver: RuntimeDriver;
@@ -91,7 +92,11 @@ export async function startOutboxWorker(params: {
     turnExecutor?: TurnExecutor;
     onTaskRunTimeout?: TimerFireDeps['onTaskRunTimeout'];
     submitTask?: ScheduleDispatchDeps['submitTask'];
-}): Promise<{ worker: StartedHatchetWorker }> {
+}): Promise<{
+    worker: StartedHatchetWorker;
+    hatchet: HatchetClient;
+    maintenance?: { service: WorkspaceMaintenanceService; task: ReturnType<typeof createMaintenanceTask> };
+}> {
     rejectObsoleteRuntimeConfiguration();
     assertSharedOutboxEventBus(params.eventBus);
     const hatchet = params.hatchet ?? createHatchetClient();
@@ -122,18 +127,25 @@ export async function startOutboxWorker(params: {
         });
         const registeredAgents = globalAgentRegistry.listAgents();
         const agentPlugins = registeredAgents.map((agent) => PluginManager.findAgent(agent.name));
+        // A durable root owns the full agent run and may wait across several
+        // segments.  It must therefore receive the same maximum declared
+        // budget as its segments; otherwise Hatchet's 30-minute task default
+        // cancels long-running importers despite their manifest budget.
+        const sharedExecutionTimeout = resolveSharedSegmentHatchetExecutionTimeout(agentPlugins);
         const sharedTask = createTaskTask(hatchet, {
             prisma: params.prisma,
             sessionManager: params.sessionManager,
             driverRuns,
             runtimeTimers,
             events,
-            resolveCacheConfig: (agentId) =>
-                PluginManager.findAgent(agentId ?? '')?.resolved.runtimeManifest.cache,
-        });
+                resolveCacheConfig: (agentId) =>
+                    PluginManager.findAgent(agentId ?? '')?.resolved.runtimeManifest.cache,
+        }, undefined, { executionTimeout: sharedExecutionTimeout });
         const scheduleDispatchTask = params.submitTask
             ? createScheduleDispatchTask(hatchet, { submitTask: params.submitTask })
             : undefined;
+        const maintenance = new WorkspaceMaintenanceService(params.prisma);
+        const maintenanceTask = maintenance.config.owner ? createMaintenanceTask(hatchet, maintenance) : undefined;
         await worker.registerWorkflows([
             outboxDispatchTask,
             createTaskStateTask(hatchet, {
@@ -148,11 +160,12 @@ export async function startOutboxWorker(params: {
             createSegmentTask(
                 hatchet,
                 { turnExecutor: params.turnExecutor, driverRuns },
-                { executionTimeout: resolveSharedSegmentHatchetExecutionTimeout(agentPlugins) }
+                { executionTimeout: sharedExecutionTimeout }
             ),
             sharedTask,
             timerFireTask,
             ...(scheduleDispatchTask ? [scheduleDispatchTask] : []),
+            ...(maintenanceTask ? [maintenanceTask] : []),
         ]);
         new TimerReconciler(runtimeTimers, timerFireTask).start();
         if (params.sessionManager) {
@@ -160,11 +173,11 @@ export async function startOutboxWorker(params: {
                 rootTask: sharedTask,
             }).start();
         }
-        return { worker };
+        return { worker, hatchet, maintenance: maintenanceTask ? { service: maintenance, task: maintenanceTask } : undefined };
     } else {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker');
         await worker.registerWorkflows([outboxDispatchTask, timerFireTask]);
-        return { worker };
+        return { worker, hatchet };
     }
 }
 

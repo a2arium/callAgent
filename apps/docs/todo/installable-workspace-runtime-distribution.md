@@ -88,6 +88,29 @@ This phase deliberately does **not** add:
 These remain valid follow-up directions. They must not be pulled into this
 extraction unless a separate specification changes the phase boundary.
 
+## Workspace-owned automatic maintenance
+
+The runnable workspace owns scheduled maintenance for its configured Hatchet
+tenant and database policy. Generation creates a stable installation id and
+defaults for an hourly expiry cron and daily retention cron. Exactly one
+workspace sharing that policy is the owner; only it registers the
+installation-specific workflow and reconciles the two crons. Non-owners remain
+fully runnable but do not create schedules.
+
+Expiry deletion is strict, tenant-scoped, bounded in fixed batches, and uses the
+existing `CacheCleanupService`. Database errors fail the Hatchet task. Manual
+and scheduled paths acquire the same durable `MaintenanceLease`, refresh it
+while processing, and release it in `finally`.
+
+Retention reuses `OperatorRetentionService`: it reports candidates by default
+and applies debug deletion only with `CALLAGENT_RETENTION_APPLY=true`. Workspace
+scripts expose `maintenance:status` and `maintenance:run`; status is read-only.
+
+Deferred TODO: artifacts and result-cache entries currently share
+`agent_result_cache` and therefore share expiry cleanup and a 30-day artifact
+TTL. Split their storage/lifecycle only when distinct retention requirements
+actually emerge.
+
 ## Existing Capabilities to Reuse
 
 The extraction must reuse the current implementation rather than build a second

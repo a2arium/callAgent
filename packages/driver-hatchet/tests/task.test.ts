@@ -77,6 +77,14 @@ describe('executeTaskTask', () => {
         ])).toBe('30m');
     });
 
+    it('preserves a four-hour importer budget for shared Hatchet workflows', () => {
+        const importer = {
+            resolved: { runtimeManifest: { budgets: { latencyMs: 4 * 60 * 60 * 1000 } } },
+        };
+
+        expect(resolveSharedSegmentHatchetExecutionTimeout([importer])).toBe('241m');
+    });
+
     it('declares segment tasks with an explicit execution timeout', () => {
         const task = jest.fn((options: unknown) => options);
 

@@ -6,6 +6,8 @@ import net from 'node:net';
 import path from 'node:path';
 import { resolveWorkspaceRuntime, WorkspaceResolutionError } from '@a2arium/callagent-core';
 import { runtimeEntryPoints } from '@a2arium/callagent-runtime';
+import { createHatchetClient, maintenanceScheduleStatus, WorkspaceMaintenanceService, type MaintenanceAction } from '@a2arium/callagent-driver-hatchet';
+import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 import { fileURLToPath } from 'node:url';
 import { writeRuntimeDescriptor } from './descriptorFile.js';
 import { addAgentSource, createAgent, createAgentProject, createWorkspace, removeAgentSource } from './generate.js';
@@ -19,6 +21,7 @@ async function main(argv: string[]): Promise<void> {
     if (command.startsWith('local ')) return local(command, options);
     if (command.startsWith('infra ')) return infra(command, options);
     if (command.startsWith('db ')) return database(command, options);
+    if (command.startsWith('maintenance ')) return maintenance(command, options);
     const sourceRoot = await detectLocalSource(options);
     if (command === 'workspace validate' || command === 'agents list') {
         const { descriptor } = await resolve(options);
@@ -59,6 +62,32 @@ async function main(argv: string[]): Promise<void> {
     }
     if (command.startsWith('workspace remove-agent-source ')) return printMutation(await removeAgentSource(requireArgument(options), options), options.json);
     throw new Error(`Unknown command: ${command}. Run \`callagent --help\`.`);
+}
+
+async function maintenance(command: string, options: Options): Promise<void> {
+    const action = command.slice('maintenance '.length);
+    if (action !== 'status' && action !== 'run') throw new Error('Usage: callagent maintenance <status|run>');
+    const { environment } = await resolve(options);
+    Object.assign(process.env, environment.values);
+    const store = new WorkingMemorySessionStore();
+    await store.connect();
+    try {
+        const service = new WorkspaceMaintenanceService(store.getPrismaClient(), process.env);
+        if (action === 'status') {
+            const result = await service.status();
+            result.scheduleProvider = service.config.owner
+                ? await maintenanceScheduleStatus(createHatchetClient(), service.config)
+                : { state: 'not-owner' };
+            return printMutation(result, options.json);
+        }
+        const [expire, retention] = await Promise.all([
+            service.run('expire' as MaintenanceAction, { requireOwner: true }),
+            service.run('retention' as MaintenanceAction, { requireOwner: true }),
+        ]);
+        printMutation({ expire, retention }, options.json);
+    } finally {
+        await store.close();
+    }
 }
 
 async function resolve(options: Options) {
@@ -348,7 +377,7 @@ function requireName(options: Options): string { const name = options.arguments.
 function requireArgument(options: Options): string { const value = options.arguments.at(-1); if (!value) throw new Error('A path or agent-source name is required'); return value; }
 function printMutation(value: unknown, json: boolean): void { if (json) console.log(JSON.stringify({ schemaVersion: 1, ...asRecord(value) })); else console.log(JSON.stringify(value, null, 2)); }
 function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : { result: value }; }
-function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  start [--workspaces PATH] [--no-observer]\n  dev (compatibility alias for start)\n  db setup|migrate|generate\n  infra up|down|restart [--compose FILE]\n  workspace validate [--json]\n  workspace add-agent-source <path>\n  workspace remove-agent-source <name>\n  agents list [--json]\n  create agent <name>\n  create agent-project <name>\n  create workspace <name>\n  local setup|sync|status|unlink|install\n\nLocal source options:\n  --callagent-source <path>  use a built CallAgent checkout\n  --npm                       disable local-source detection\n  --package-manager npm|yarn package manager for local install`); }
+function printHelp(): void { console.log(`Usage: callagent <command> [options]\n\nCommands:\n  start [--workspaces PATH] [--no-observer]\n  dev (compatibility alias for start)\n  db setup|migrate|generate\n  infra up|down|restart [--compose FILE]\n  maintenance status|run [--json]\n  workspace validate [--json]\n  workspace add-agent-source <path>\n  workspace remove-agent-source <name>\n  agents list [--json]\n  create agent <name>\n  create agent-project <name>\n  create workspace <name>\n  local setup|sync|status|unlink|install\n\nLocal source options:\n  --callagent-source <path>  use a built CallAgent checkout\n  --npm                       disable local-source detection\n  --package-manager npm|yarn package manager for local install`); }
 
 const localCli = localCliPath();
 if (localCli) {

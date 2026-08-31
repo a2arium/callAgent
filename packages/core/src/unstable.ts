@@ -46,6 +46,13 @@ export { makeSafeEventPreview } from './orchestration/safeEventPreview.js';
 export { observeTaskSubmissionBacklog } from './orchestration/taskSubmissionObservability.js';
 export * from './operator/agentSchedules.js';
 export {
+    OperatorRetentionService,
+    readRetentionPolicyFromEnv,
+    type RetentionPlan,
+    type RetentionPolicy,
+    type RetentionTablePlan,
+} from './operator/retention.js';
+export {
     OperatorAuditRepository,
     writeOperatorAudit,
     type OperatorAuditAction,

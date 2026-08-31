@@ -1,5 +1,16 @@
 export { createHatchetClient, type HatchetClient } from './hatchetClient.js';
 export {
+    WorkspaceMaintenanceService,
+    readMaintenanceConfig,
+    type MaintenanceAction,
+    type MaintenanceConfig,
+    type MaintenanceRunResult,
+    createMaintenanceTask,
+    reconcileMaintenanceCrons,
+    maintenanceScheduleStatus,
+    maintenanceWorkflowName,
+} from './maintenance.js';
+export {
     HatchetAgentScheduleService,
     createHatchetAgentScheduleService,
     type CreateHatchetAgentScheduleServiceParams,

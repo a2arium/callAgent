@@ -34,14 +34,14 @@ services:
 
   hatchet-migration:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:latest
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.105.13
     command: /hatchet/hatchet-migrate
     environment:
       <<: *hatchet-database-url
 
   hatchet-setup-config:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:latest
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.105.13
     command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
     environment:
       <<: *hatchet-database-url
@@ -64,7 +64,7 @@ services:
 
   hatchet-engine:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:latest
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.105.13
     command: /hatchet/hatchet-engine --config /hatchet/config
     restart: on-failure
     ports:
@@ -80,23 +80,23 @@ services:
       hatchet-setup-config:
         condition: service_completed_successfully
 
-  hatchet-dashboard:
+  # The API image owns both the REST API used by the SDK and the web UI. The
+  # former dashboard-only image is nginx and cannot create/list cron schedules.
+  hatchet-api:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:latest
-    command:
-      - sh
-      - -ec
-      - |
-        until nc -z hatchet-rabbitmq 5672; do
-          echo "Waiting for RabbitMQ..."
-          sleep 1
-        done
-        exec sh ./entrypoint.sh --config /hatchet/config
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-api:v0.105.13
+    command: /hatchet/hatchet-api --config /hatchet/config
     ports:
-      - "${HATCHET_DASHBOARD_PORT:-8080}:80"
+      - "${HATCHET_DASHBOARD_PORT:-8080}:8080"
     restart: on-failure
     environment:
       <<: *hatchet-database-url
+      SERVER_PORT: "8080"
+      SERVER_URL: http://localhost:${HATCHET_DASHBOARD_PORT:-8080}
+      SERVER_GRPC_PORT: "7070"
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
     volumes:
       - hatchet_certs:/hatchet/certs
       - hatchet_config:/hatchet/config

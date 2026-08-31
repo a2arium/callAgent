@@ -11,6 +11,7 @@ import {
     startOutboxWorker,
     type StartedHatchetWorker,
 } from './createHatchetOutboxStack.js';
+import { reconcileMaintenanceCrons } from './maintenance.js';
 
 export type HatchetRuntimeWorkerApp = {
     composition: RuntimeCompositionRootInternal;
@@ -97,7 +98,7 @@ export async function startHatchetRuntimeWorkerApp(
         },
     });
 
-    const { worker } = await startOutboxWorker({
+    const started = await startOutboxWorker({
         eventBus,
         prisma: sessionStore.getPrismaClient(),
         sessionManager: budgetEvents,
@@ -115,9 +116,10 @@ export async function startHatchetRuntimeWorkerApp(
     // Hatchet's explicit readiness handshake instead.
     let workerRun: Promise<void>;
     try {
-        ({ workerRun } = await startHatchetWorkerUntilReady(worker));
+        ({ workerRun } = await startHatchetWorkerUntilReady(started.worker));
+        if (started.maintenance) await reconcileMaintenanceCrons(started.hatchet, started.maintenance.task, started.maintenance.service);
     } catch (error) {
-        await worker.stop().catch(() => undefined);
+        await started.worker.stop().catch(() => undefined);
         composition.shutdown();
         await closeNats();
         await sessionStore.close();
@@ -128,7 +130,7 @@ export async function startHatchetRuntimeWorkerApp(
         composition,
         shutdown: async () => {
             try {
-                await worker.stop();
+                await started.worker.stop();
                 await workerRun;
             } finally {
                 composition.shutdown();

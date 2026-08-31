@@ -116,6 +116,34 @@ npm run start -- --no-observer
 The command does not start infra. It checks Postgres, NATS, and Hatchet before
 starting apps and fails fast if they are not reachable.
 
+## Workspace-owned maintenance
+
+Maintenance belongs to the CallAgent workspace, not to an agent project or the
+framework checkout. A generated workspace includes a stable
+`CALLAGENT_MAINTENANCE_INSTALLATION_ID` and two commands:
+
+```bash
+npm run maintenance:status # read-only cache and retention candidates
+npm run maintenance:run    # immediate maintenance using the same lease as Hatchet
+```
+
+On startup, the designated owner workspace reconciles two durable Hatchet cron
+workflows: expiry cleanup hourly (`17 * * * *`) and retention review daily
+(`23 3 * * *`). Expiry cleanup deletes only rows in
+`agent_result_cache` whose TTL has passed, scoped to
+`CALLAGENT_MAINTENANCE_TENANT_ID`; this includes the current 30-day artifact
+records because artifacts still share that table.
+
+Only one workspace may own maintenance for a shared Hatchet tenant and database
+policy. Keep `CALLAGENT_MAINTENANCE_OWNER=true` only there; set it to `false`
+in every other workspace. Both scheduled and manual runs use the same durable
+database lease, so concurrent work is skipped safely.
+
+Debug retention is report-only by default. Set `CALLAGENT_RETENTION_APPLY=true`
+only when you intentionally want eligible debug records deleted. Semantic
+summaries, audits, semantic memory, NATS retention, and Hatchet history are not
+part of this maintenance subsystem.
+
 ## Back Compatibility
 
 If `.callagent/workspaces.json` is missing and `CALLAGENT_AGENT_INDEX` is set,

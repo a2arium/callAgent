@@ -39,7 +39,20 @@ model AgentResultCache {
   @@unique([tenantId, agentName, cacheKey])
   @@index([tenantId, agentName])
   @@index([expiresAt])
+  @@index([tenantId, expiresAt])
   @@map("agent_result_cache")
+}
+
+model MaintenanceLease {
+  tenantId String @map("tenant_id")
+  key String
+  holderId String @map("holder_id")
+  leaseUntil DateTime @map("lease_until")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, key])
+  @@index([leaseUntil])
+  @@map("maintenance_leases")
 }
 
 model Outbox {

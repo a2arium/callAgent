@@ -15,6 +15,7 @@ callagent agents list [--workspaces PATH] [--json]
 callagent start [--workspaces PATH] [--no-observer]
 callagent db setup|migrate|generate
 callagent infra up|down|restart [--compose FILE]
+callagent maintenance status|run [--json]
 callagent local setup|sync|status|unlink|install [--project DIR]
 ```
 
