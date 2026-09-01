@@ -100,6 +100,14 @@ export function gateScheduleService(service: AgentScheduleService, readiness: Ha
     }) as AgentScheduleService;
 }
 
+export function databaseMigrationReadinessCode(
+    markerPath: string | undefined,
+    markerExists: (path: string) => boolean = existsSync,
+): 'DATABASE_MIGRATIONS_PENDING' | undefined {
+    if (!markerPath) return undefined;
+    return markerExists(markerPath) ? undefined : 'DATABASE_MIGRATIONS_PENDING';
+}
+
 export async function startRuntimeHost(options: { descriptorPath?: string } = {}): Promise<RuntimeProcessHandle> {
     const descriptor = await readRuntimeWorkspaceDescriptor(options);
     const { WorkingMemorySessionStore } = await import('@a2arium/callagent-memory-sql');
@@ -155,6 +163,11 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     app.use(express.json({ limit: '1mb' }));
     app.get('/health', (_req, res) => res.json({ ok: true, rpc: '/rpc' }));
     app.get('/ready', (_req, res) => {
+        const databaseCode = databaseMigrationReadinessCode(process.env.CALLAGENT_MIGRATION_MARKER_PATH);
+        if (databaseCode) {
+            res.status(503).json({ ok: false, code: databaseCode });
+            return;
+        }
         if (scheduleReadiness && !scheduleReadiness.isHealthy()) {
             res.status(503).json({ ok: false, code: 'HATCHET_SCHEDULE_API_UNAVAILABLE' });
             return;

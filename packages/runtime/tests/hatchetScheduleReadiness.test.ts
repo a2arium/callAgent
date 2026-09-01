@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { HatchetScheduleReadiness, gateScheduleService } from '../src/host.js';
+import { databaseMigrationReadinessCode, HatchetScheduleReadiness, gateScheduleService } from '../src/host.js';
 
 describe('HatchetScheduleReadiness', () => {
     afterEach(() => jest.useRealTimers());
@@ -32,5 +32,16 @@ describe('HatchetScheduleReadiness', () => {
         const service = gateScheduleService({ list: jest.fn() } as never, readiness);
         await expect(Promise.resolve().then(() => service.list({ tenantId: 't', actorId: 'a', actorType: 'service', production: true, role: 'viewer' })))
             .rejects.toMatchObject({ code: 'SCHEDULE_PROVIDER_UNAVAILABLE', status: 503 });
+    });
+});
+
+describe('databaseMigrationReadinessCode', () => {
+    it('keeps local runtimes compatible when no deployment marker is configured', () => {
+        expect(databaseMigrationReadinessCode(undefined, () => false)).toBeUndefined();
+    });
+
+    it('reports pending migrations until the deployment marker exists', () => {
+        expect(databaseMigrationReadinessCode('/release/.migrations-verified', () => false)).toBe('DATABASE_MIGRATIONS_PENDING');
+        expect(databaseMigrationReadinessCode('/release/.migrations-verified', () => true)).toBeUndefined();
     });
 });
