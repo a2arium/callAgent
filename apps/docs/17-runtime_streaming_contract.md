@@ -193,7 +193,9 @@ Examples:
 - The durable terminal record emits exactly one terminal `task.status` per local
   transport and closes the stream. A `complete` transition remains lifecycle
   `completed` even when its application result contains `{ ok: false }`; agents
-  return `kind: 'fail'` when the task lifecycle itself must fail.
+  return `kind: 'fail'` when the task lifecycle itself must fail. See
+  [task lifecycle outcome versus domain outcome](./0-aplret_contracts.md#task-lifecycle-outcome-versus-domain-outcome)
+  for the authoring contract and result-shape convention.
 - `input-required` pauses an interactive stream and is never emitted with
   `final:true`.
 

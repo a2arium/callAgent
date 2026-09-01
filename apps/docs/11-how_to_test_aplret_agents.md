@@ -32,6 +32,12 @@ When your agent includes **`flow.md`** (recommended for awaits, major branches, 
 - Major **flow table** rows should have at least one test path (dominant success, each material failure, each await/resume).
 - **`### B1`, `B2`, …** branch IDs in `flow.md` should map cleanly to test files or `describe` blocks (e.g. golden / resume / failure splits).
 - Optionally add a **Covered by tests** section at the end of `flow.md` pointing to files.
+- A failure branch that must make the task fail must assert
+  `trace.transition?.kind === 'fail'`; asserting only `{ ok: false }` in the
+  execution result does not prove the durable task failed.
+- Test intentional negative-but-completed outcomes separately. They should use
+  an explicit successful domain outcome such as `ok: true, outcome: 'not_found'`,
+  then assert `complete`.
 
 Authoring rules and format: [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md). Contract expectation: [APLRET contracts](./0-aplret_contracts.md).
 

@@ -255,6 +255,23 @@ Ask:
 
 If the effect happened but control flow is wrong: fix Transition/control plumbing.
 
+### “Why is this completed with attention?”
+
+This means the durable lifecycle and the agent's domain result disagree. Inspect
+`trace.execResult` and `trace.transition` together:
+
+- `result.ok === false` plus `transition.kind === 'complete'` means the agent
+  converted a logical failure into a completed task. Fix `transition.ts` to
+  return `fail` with the structured error.
+- `result.ok === false` plus `transition.kind === 'fail'` is correct: inspect
+  the error code/message to fix the underlying effect or configuration.
+- A valid negative business outcome should be represented as a successful,
+  named outcome (for example `ok: true, outcome: 'not_found'`), not `ok: false`.
+
+Operator intentionally shows the first case as attention rather than silently
+calling it healthy. The durable terminal status remains the transition result.
+See [APLRET contracts](./0-aplret_contracts.md#task-lifecycle-outcome-versus-domain-outcome).
+
 ## Playbooks for common questions
 
 ### “Why did we await?”

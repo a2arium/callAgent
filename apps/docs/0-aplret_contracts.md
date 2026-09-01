@@ -819,6 +819,44 @@ Rules:
 - must enforce await invariants
 - if `continue`, must include observations
 
+### Task lifecycle outcome versus domain outcome
+
+`TransitionOut` owns the durable task lifecycle. A successful Execution call is
+not, by itself, a successful task: Transition must decide whether the requested
+domain operation succeeded.
+
+| Situation | Result shape | Transition | Durable task status |
+| --- | --- | --- | --- |
+| Requested operation succeeded | `{ ok: true, ... }` | `complete` | `completed` |
+| Expected negative business outcome (for example, no matching records) | `{ ok: true, outcome: 'not_found', ... }` | `complete` | `completed` |
+| Requested operation failed (for example, a download timed out) | `{ ok: false, code, message }` | `fail` | `failed` |
+| More work or recovery is required | structured result/observation | `continue` or an explicit `await_*` | non-terminal |
+
+Do **not** return `complete` merely because Execution caught an exception and
+packaged it as data. That produces a technically completed task with a semantic
+failure/attention signal in Operator. For a terminal domain failure, preserve
+the structured error and fail explicitly:
+
+```ts
+const result = exec.result.data?.result;
+
+if (result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
+  const failure = result as { code?: string; message?: string };
+  return {
+    kind: 'fail',
+    reason: failure.code ?? failure.message ?? 'operation_failed',
+    error: failure,
+  };
+}
+
+return { kind: 'complete', result };
+```
+
+Reserve `ok: false` for a real logical failure. If a negative result is still a
+valid completion, use an explicit successful outcome such as
+`{ ok: true, outcome: 'not_found' }`. Operator treats `result.ok === false` as
+a semantic failure by design.
+
 ### Suspending the loop (`await_input` / `await_tool` / `await_child`)
 
 Runtime obligations may also suspend after Shield and before Execution. Manifest consent uses the same durable `await_input` token contract, but its receipt belongs to private `env.pending` control state—not MentalState—and its structured decision is normalized by the resume boundary. Policy must re-propose the exact approved intent; Execution must not parse raw approval input. See [manifest consent](./19-how_to_use_manifest_consent.md).
