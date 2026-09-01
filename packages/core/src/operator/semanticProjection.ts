@@ -10,6 +10,7 @@ import type {
 } from './runGraph.js';
 import { canonicalTurnAttemptKey, groupTurnAttempts, severityForStatus } from './runGraph.js';
 import { readDurableTaskTerminal, readTaskLifecycle } from '../orchestration/TaskLifecycle.js';
+import { readTaskTurnCoordinator } from '../orchestration/TaskTurnCoordinator.js';
 import {
     readTaskSubmissionMetadata,
     type TaskSubmissionOrigin,
@@ -569,9 +570,32 @@ export class OperatorProjectionRepository {
                 turnFence: stringField(event.payload, 'fence'),
                 claimedGeneration: stringField(event.payload, 'claimedGeneration'),
                 status,
+                boundaryKind: stringField(event.payload, 'boundaryKind'),
                 ...(finished ? { completedAt: createdAt } : { startedAt: createdAt }),
                 authoritativeTerminal,
             });
+            if (!finished && disposition === 'executed' && typeof this.prisma.turnRun?.updateMany === 'function') {
+                const turnSeq = eventTurnSeq(event.payload);
+                const claimedGeneration = stringField(event.payload, 'claimedGeneration');
+                if (turnSeq > 0 && claimedGeneration !== undefined) {
+                    await this.prisma.turnRun.updateMany({
+                        where: {
+                            tenantId: event.tenantId,
+                            taskId,
+                            attemptKey: { not: attemptKey },
+                            turnSeq,
+                            claimedGeneration,
+                            authoritativeTerminal: false,
+                        },
+                        data: {
+                            status: 'completed',
+                            disposition: 'superseded',
+                            completedAt: createdAt,
+                            authoritativeTerminal: false,
+                        },
+                    });
+                }
+            }
             if (authoritativeTerminal) {
                 await this.convergeTerminalAttempts({
                     tenantId: event.tenantId,
@@ -710,6 +734,26 @@ export class OperatorProjectionRepository {
             return;
         }
 
+        if (event.type === 'artifact.projection_started' ||
+            event.type === 'artifact.projection_completed' ||
+            event.type === 'artifact.projection_failed') {
+            const status = event.type === 'artifact.projection_started'
+                ? 'running'
+                : event.type === 'artifact.projection_failed' ? 'failed' : 'completed';
+            await this.upsertEventEffect({
+                tenantId: event.tenantId,
+                rootTaskId,
+                taskId,
+                operation: stringField(event.payload, 'operation') ?? 'artifact.post_commit_projection',
+                status,
+                idempotencyKey: stringField(event.payload, 'idempotencyKey') ??
+                    `${event.tenantId}:${event.sessionId}:artifact-post-commit`,
+                errorCode: stringField(event.payload, 'errorCode'),
+                errorMessage: stringField(event.payload, 'message'),
+            });
+            return;
+        }
+
         if (event.type.startsWith('memory.')) {
             await this.upsertEventEffect({
                 tenantId: event.tenantId,
@@ -764,6 +808,87 @@ export class OperatorProjectionRepository {
                 errorMessage: stringField(event.payload, 'message') ?? 'Observability incident recorded.',
             });
         }
+    }
+
+    /** Reconciles the repairable turn read model against the active coordinator claim. */
+    async reconcileDurableTurnOwnership(params: {
+        tenantId: string;
+        taskId: string;
+        snapshot: Record<string, unknown> | undefined;
+        agentId?: string;
+    }): Promise<boolean> {
+        if (!this.isAvailable() || !params.snapshot || typeof this.prisma.turnRun?.updateMany !== 'function') {
+            return false;
+        }
+        let coordinator;
+        try {
+            coordinator = readTaskTurnCoordinator(params.snapshot, {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+            });
+        } catch {
+            return false;
+        }
+        const lifecycle = readTaskLifecycle(params.snapshot, params.taskId);
+        const rootTaskId = lifecycle?.rootTaskId ?? params.taskId;
+        const active = coordinator.active !== undefined &&
+            Date.parse(coordinator.active.expiresAt) > Date.now()
+            ? coordinator.active
+            : undefined;
+        const reconciledAt = new Date();
+        if (active !== undefined) {
+            const attemptKey = `claim:${active.claimId}`;
+            await this.upsertEventTurn({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                rootTaskId,
+                agentId: params.agentId,
+                turnSeq: active.turnSeq,
+                attemptKey,
+                disposition: 'executed',
+                claimId: active.claimId,
+                turnFence: active.fence,
+                claimedGeneration: active.claimedGeneration,
+                status: 'running',
+                startedAt: new Date(active.acquiredAt),
+            });
+            await this.prisma.turnRun.updateMany({
+                where: {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    attemptKey,
+                    authoritativeTerminal: false,
+                },
+                data: { status: 'running', completedAt: null },
+            });
+            await this.prisma.turnRun.updateMany({
+                where: {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    attemptKey: { not: attemptKey },
+                    turnSeq: active.turnSeq,
+                    claimedGeneration: active.claimedGeneration,
+                    authoritativeTerminal: false,
+                },
+                data: {
+                    status: 'completed',
+                    disposition: 'superseded',
+                    completedAt: reconciledAt,
+                    authoritativeTerminal: false,
+                },
+            });
+            return true;
+        }
+        await this.prisma.turnRun.updateMany({
+            where: {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                authoritativeTerminal: false,
+                status: { in: ['unknown', 'queued', 'running', 'waiting'] },
+            },
+            data: { status: 'completed', completedAt: reconciledAt },
+        });
+        return true;
     }
 
     /** Idempotently converges semantic rows on the authoritative terminal snapshot. */
@@ -1573,12 +1698,8 @@ export class OperatorProjectionRepository {
 
     private async recomputeCognitiveAggregates(tenantId: string, taskId: string): Promise<void> {
         if (typeof this.prisma.cognitiveTurnRun?.findMany !== 'function') return;
-        const existingRun = await this.findRun(tenantId, taskId);
-        const terminal = existingRun ? TERMINAL_AGENT_RUN_STATUSES.has(normalizeStatus(existingRun.status)) : false;
         const rows = await this.prisma.cognitiveTurnRun.findMany({
-            where: terminal
-                ? { tenantId, taskId, disposition: 'committed' }
-                : { tenantId, taskId, disposition: { in: ['observed', 'committed'] } },
+            where: { tenantId, taskId, disposition: 'committed' },
         }) as Array<{ llmCallCount?: number; memoryOpCount?: number; knownCostUsd?: unknown }>;
         const knownCosts = rows.map((row) => decimalToNumber(row.knownCostUsd)).filter((value) => Number.isFinite(value));
         await this.prisma.agentRun?.upsert?.({
@@ -1636,11 +1757,9 @@ export class OperatorProjectionRepository {
         const isRoot = node.taskId === graph.root.taskId;
         const turns = graph.turns.filter((turn) => turn.taskId === node.taskId);
         const cognitiveTurns = turns.flatMap((turn) => turn.cognitiveTurns ?? []);
-        const visibleCognitiveTurns = cognitiveTurns.filter((turn) => turn.disposition !== 'superseded');
         const authoritativeCognitiveTurns = cognitiveTurns.filter((turn) => turn.disposition === 'committed');
-        const terminalStatus = TERMINAL_AGENT_RUN_STATUSES.has(normalizeStatus(node.status));
-        const aggregateCognitiveTurns = terminalStatus ? authoritativeCognitiveTurns : visibleCognitiveTurns;
-        const aggregateTurnCount = cognitiveTurns.length > 0 ? aggregateCognitiveTurns.length : turns.length;
+        const aggregateCognitiveTurns = authoritativeCognitiveTurns;
+        const aggregateTurnCount = aggregateCognitiveTurns.length;
         const childCount = graph.edges.filter((edge) => edge.parentTaskId === node.taskId && edge.childTaskId !== undefined).length;
         const llmCallCount = cognitiveTurns.length > 0
             ? aggregateCognitiveTurns.reduce((count, turn) => count + turn.llmCalls.length, 0)

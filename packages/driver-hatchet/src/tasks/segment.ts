@@ -196,6 +196,14 @@ async function executeSegmentTaskInner(
                 status: statusFromBoundary(output.boundary),
             });
         }
+        // The durable/provider attempt is already closed. Optional artifact
+        // projection must never extend or reopen authoritative turn ownership.
+        try {
+            await result.postCommitWork?.();
+        } catch {
+            // The core callback records its own failed hidden effect. Keep this
+            // defensive guard so optional work cannot fail a committed segment.
+        }
         return output;
     } catch (error) {
         if (deps.driverRuns) {

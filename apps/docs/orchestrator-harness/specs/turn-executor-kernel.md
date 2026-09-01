@@ -17,6 +17,11 @@ drivers schedule.
 This is the boundary that lets Hatchet use native durable control while keeping
 callAgent cognition unchanged.
 
+Identity is deliberately layered: `turnSeq` identifies this durable segment,
+`cognitiveTurnSeq` identifies each internal `continue` iteration, `generation`
+identifies accepted demand, and `claimId`/fence/provider `attemptSeq` identify
+execution attempts. Recovering the same generation must reuse its `turnSeq`.
+
 ## Existing implementation to reuse
 
 The kernel already mostly exists:

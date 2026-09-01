@@ -287,6 +287,10 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     /** Runs one segment to completion (tracked for `waitForIdle`). */
     async runSegmentAwait(params: RunSegmentParams): Promise<SegmentResult> {
         const tracked: Promise<unknown> = this.turnExecutor.runSegment(params)
+            .then(async (result) => {
+                await this.runPostCommitWork(result, params);
+                return result;
+            })
             .catch((error: unknown) => {
                 this.onSegmentError(error, params);
                 throw error;
@@ -521,7 +525,9 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
     private runSegmentInBackground(params: RunSegmentParams): void {
         const tracked: Promise<unknown> = this.turnExecutor.runSegment(params)
             .then(
-                () => undefined,
+                async (result) => {
+                    await this.runPostCommitWork(result, params);
+                },
                 (error: unknown) => {
                     this.onSegmentError(error, params);
                 }
@@ -530,6 +536,15 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
                 this.inFlight.delete(tracked);
             });
         this.inFlight.add(tracked);
+    }
+
+    private async runPostCommitWork(result: SegmentResult, params: RunSegmentParams): Promise<void> {
+        try {
+            await result.postCommitWork?.();
+        } catch (error) {
+            // Optional projection cannot change the already-completed segment.
+            this.onSegmentError(error, params);
+        }
     }
 
     private async reconcileRunnableTurnRequests(): Promise<void> {

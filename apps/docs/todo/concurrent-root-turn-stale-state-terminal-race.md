@@ -419,6 +419,7 @@ type TaskTurnCoordinatorState = {
   };
   dispatchIntent?: {
     generation: string;
+    turnSeq?: number; // preserved only when retrying an already allocated segment
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
     createdAt: string;

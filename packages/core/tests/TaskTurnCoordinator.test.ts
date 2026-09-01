@@ -207,6 +207,61 @@ describe('TaskTurnCoordinator', () => {
         expect(takeover.result.claim.fence).toBe('2');
     });
 
+    it('reuses the logical turn sequence when the same generation is recovered', async () => {
+        let clockMs = Date.parse('2026-07-19T00:00:00.000Z');
+        const session = new SessionManager(new InMemorySessionManager(() => clockMs));
+        await session.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'task-a', agentId: 'agent-a', expectedWmVersion: 0n,
+            snapshot: { meta: { agentId: 'agent-a' } },
+        });
+        const first = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-a',
+            requestKey: 'task-a:start', leaseMs: 1_000, takeoverGraceMs: 100,
+            allowInitialize: true,
+        });
+        expect(first.result.disposition).toBe('acquired');
+        if (first.result.disposition !== 'acquired') throw new Error('claim missing');
+
+        clockMs += 1_101;
+        const recovered = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-b',
+            requestKey: 'task-a:start', leaseMs: 1_000, takeoverGraceMs: 100,
+        });
+
+        expect(recovered.result.disposition).toBe('acquired');
+        if (recovered.result.disposition !== 'acquired') throw new Error('recovery missing');
+        expect(recovered.result.claim).toMatchObject({
+            claimedGeneration: '1', turnSeq: 1, fence: '2',
+        });
+        expect(recovered.result.replacedClaim).toMatchObject({
+            claimId: first.result.claim.claimId, claimedGeneration: '1', turnSeq: 1, fence: '1',
+        });
+        expect(readTaskTurnCoordinator(recovered.snapshot).nextTurnSeq).toBe(1);
+    });
+
+    it('preserves an allocated logical sequence when an unstarted claim is released', async () => {
+        const session = await seededSession();
+        const first = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-a',
+            requestKey: 'task-a:start',
+        });
+        expect(first.result.disposition).toBe('acquired');
+        if (first.result.disposition !== 'acquired') throw new Error('claim missing');
+        await releaseTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', claim: first.result.claim,
+        });
+        const released = readTaskTurnCoordinator((await session.load('tenant-a', 'task-a'))?.snapshot);
+        expect(released.dispatchIntent).toMatchObject({ generation: '1', turnSeq: 1 });
+
+        const retried = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-b',
+            requestKey: 'task-a:start',
+        });
+        expect(retried.result.disposition).toBe('acquired');
+        if (retried.result.disposition !== 'acquired') throw new Error('retry missing');
+        expect(retried.result.claim).toMatchObject({ claimedGeneration: '1', turnSeq: 1, fence: '2' });
+    });
+
     it('recovers a coordinator claim whose storage heartbeat is implausibly in the future', async () => {
         const clockMs = Date.parse('2026-07-19T00:00:00.000Z');
         const session = new SessionManager(new InMemorySessionManager(() => clockMs));
@@ -318,6 +373,7 @@ describe('TaskTurnCoordinator', () => {
         if (second.result.disposition !== 'acquired') throw new Error('second claim missing');
         expect(second.result.claim.fence).toBe('2');
         expect(second.result.claim.claimedGeneration).toBe('2');
+        expect(second.result.claim.turnSeq).toBe(2);
     });
 
     it('rejects effect registration from a replaced fence', async () => {

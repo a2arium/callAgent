@@ -52,6 +52,8 @@ export type TaskTurnCoordinatorState = {
     active?: TaskTurnClaim & { phase: 'claimed' | 'executing' | 'committing' };
     dispatchIntent?: {
         generation: string;
+        /** Logical segment already assigned to this generation during an earlier claim. */
+        turnSeq?: number;
         deliveryKey: string;
         runtimeSurface: TaskTurnRuntimeSurface;
         createdAt: string;
@@ -60,7 +62,7 @@ export type TaskTurnCoordinatorState = {
 };
 
 export type RequestTaskTurnResult =
-    | { disposition: 'acquired'; claim: TaskTurnClaim; staged: boolean }
+    | { disposition: 'acquired'; claim: TaskTurnClaim; replacedClaim?: TaskTurnClaim; staged: boolean }
     | { disposition: 'queued'; activeClaim?: TaskTurnClaim; staged: boolean; availableAt?: string }
     | { disposition: 'matching_replay'; staged: false }
     | { disposition: 'terminal'; staged: false };
@@ -218,11 +220,17 @@ function readState(
         const enqueuedAt = candidate.enqueuedAt !== undefined
             ? timestamp(candidate.enqueuedAt, 'dispatchIntent.enqueuedAt', tenantId, taskId)
             : undefined;
+        if (candidate.turnSeq !== undefined &&
+            (!Number.isSafeInteger(candidate.turnSeq) || (candidate.turnSeq as number) <= 0 ||
+                (candidate.turnSeq as number) > (value.nextTurnSeq as number))) {
+            return invalid(tenantId, taskId, 'dispatchIntent.turnSeq is invalid');
+        }
         if (enqueuedAt !== undefined && Date.parse(enqueuedAt) < Date.parse(createdAt)) {
             return invalid(tenantId, taskId, 'dispatchIntent timestamps are not monotonic');
         }
         dispatchIntent = {
             generation: generation.toString(),
+            ...(candidate.turnSeq !== undefined ? { turnSeq: candidate.turnSeq as number } : {}),
             deliveryKey: candidate.deliveryKey,
             runtimeSurface: candidate.runtimeSurface as TaskTurnRuntimeSurface,
             createdAt,
@@ -457,6 +465,7 @@ export async function requestTaskTurn(params: {
     const proposedClaimId = (params.claimIdFactory ?? randomUUID)();
     const surface = params.runtimeSurface ?? 'in_process';
     let futureSkewRecovered = false;
+    let replacedClaim: TaskTurnClaim | undefined;
     let firstSubmissionClaim: { admittedAt: string; claimedAt: string; runtimeSurface: TaskTurnRuntimeSurface } | undefined;
     const reconciled = await reconcileSnapshotMutation<RequestTaskTurnResult>({
         session: params.session,
@@ -467,6 +476,7 @@ export async function requestTaskTurn(params: {
         now: params.now,
         mutate: ({ snapshot, storageNow }) => {
             firstSubmissionClaim = undefined;
+            replacedClaim = undefined;
             if (isTaskLifecycleTerminal(readTaskLifecycle(snapshot, params.taskId))) {
                 return { kind: 'noop', value: { disposition: 'terminal', staged: false } };
             }
@@ -497,11 +507,15 @@ export async function requestTaskTurn(params: {
                 Date.parse(current.active.heartbeatAt) - nowMs > leaseMs
             ) {
                 futureSkewRecovered = true;
+                replacedClaim = current.active;
                 current = {
                     ...current,
                     active: undefined,
                     dispatchIntent: {
                         generation: current.requestedGeneration,
+                        ...(current.requestedGeneration === current.active.claimedGeneration
+                            ? { turnSeq: current.active.turnSeq }
+                            : {}),
                         deliveryKey: `${params.taskId}:turn-request:${current.requestedGeneration}`,
                         runtimeSurface: current.active.runtimeSurface,
                         createdAt: storageNow,
@@ -525,6 +539,7 @@ export async function requestTaskTurn(params: {
                     };
                     return staged.staged ? { kind: 'write', snapshot: stagedSnapshot, value } : { kind: 'noop', value };
                 }
+                replacedClaim = current.active;
             }
             const requested = BigInt(current.requestedGeneration);
             const completed = BigInt(current.completedGeneration);
@@ -537,7 +552,12 @@ export async function requestTaskTurn(params: {
                 return { kind: 'noop', value: { disposition: 'matching_replay', staged: false } };
             }
             const fence = BigInt(current.nextFence) + 1n;
-            const turnSeq = current.nextTurnSeq + 1;
+            const recoveredTurnSeq = current.active?.claimedGeneration === requested.toString()
+                ? current.active.turnSeq
+                : current.dispatchIntent?.generation === requested.toString()
+                    ? current.dispatchIntent.turnSeq
+                    : undefined;
+            const turnSeq = recoveredTurnSeq ?? current.nextTurnSeq + 1;
             const claimSurface = current.runtimeSurface ?? current.dispatchIntent?.runtimeSurface ?? surface;
             if (claimSurface !== surface) {
                 return invalid(
@@ -562,7 +582,7 @@ export async function requestTaskTurn(params: {
                 ...current,
                 runtimeSurface: claimSurface,
                 nextFence: fence.toString(),
-                nextTurnSeq: turnSeq,
+                nextTurnSeq: Math.max(current.nextTurnSeq, turnSeq),
                 active: { ...claim, phase: 'claimed' },
                 dispatchIntent: undefined,
             };
@@ -594,7 +614,12 @@ export async function requestTaskTurn(params: {
             return {
                 kind: 'write',
                 snapshot: claimedSnapshot,
-                value: { disposition: 'acquired', claim, staged: staged.staged },
+                value: {
+                    disposition: 'acquired',
+                    claim,
+                    ...(replacedClaim !== undefined ? { replacedClaim } : {}),
+                    staged: staged.staged,
+                },
             };
         },
     });
@@ -694,6 +719,9 @@ export async function releaseUnstartedTaskTurn(params: {
                     active: undefined,
                     dispatchIntent: {
                         generation: requested.toString(),
+                        ...(requested.toString() === params.claim.claimedGeneration
+                            ? { turnSeq: params.claim.turnSeq }
+                            : {}),
                         deliveryKey: `${params.taskId}:turn-request:${requested}`,
                         runtimeSurface: params.claim.runtimeSurface,
                         createdAt: storageNow,

@@ -173,6 +173,37 @@ describe('executeTaskTask', () => {
         expect(runSegment).toHaveBeenCalledTimes(1);
     });
 
+    it('closes the provider attempt before optional post-commit work', async () => {
+        const order: string[] = [];
+        const upsertByProviderRunId = jest.fn(async (record: { status: string }) => {
+            order.push(`driver:${record.status}`);
+        });
+        const postCommitWork = jest.fn(async () => {
+            order.push('post-commit');
+        });
+        const runSegment = jest.fn(async () => ({
+            tenantId: 'tenant-1',
+            taskId: 'task-1',
+            boundary: { kind: 'complete' as const },
+            taskStatus: 'completed' as const,
+            postCommitWork,
+        }));
+
+        await executeSegmentTask({
+            tenantId: 'tenant-1', taskId: 'task-1',
+            wake: { trigger: 'start', input: {} }, idempotencyKey: 'task-1:start',
+        }, {
+            workflowRunId: () => 'workflow-1',
+            taskRunExternalId: () => 'task-run-1',
+            abortController: new AbortController(),
+        } as never, {
+            turnExecutor: { runSegment } as never,
+            driverRuns: { upsertByProviderRunId } as never,
+        });
+
+        expect(order).toEqual(['driver:running', 'driver:completed', 'post-commit']);
+    });
+
     it('declares durable parent tasks with an explicit execution timeout', () => {
         const durableTask = jest.fn((options: unknown) => options);
 

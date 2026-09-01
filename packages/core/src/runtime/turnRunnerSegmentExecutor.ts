@@ -215,7 +215,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     idempotencyKey,
                     claim: admission.result.claim,
                 });
-                if (disposition === undefined) throw error;
+                if (disposition === undefined) {
+                    await this.appendAttemptEvent('turn.attempt_finished', {
+                        tenantId, taskId, idempotencyKey, claim: admission.result.claim,
+                        disposition: 'executed', status: 'failed',
+                    });
+                    throw error;
+                }
                 this.dedupe.record(idempotencyKey);
                 return this.buildDuplicateResult(tenantId, taskId, agentId, disposition);
             } finally {
@@ -224,6 +230,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
                 .__turnPersistence?.disposition;
             if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
+                await this.appendAttemptEvent('turn.attempt_finished', {
+                    tenantId, taskId, idempotencyKey, claim: admission.result.claim,
+                    disposition: 'superseded', status: 'superseded',
+                });
                 this.dedupe.record(idempotencyKey);
                 return this.buildDuplicateResult(tenantId, taskId, agentId, 'superseded');
             }
@@ -236,6 +246,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 undefined
             );
             const taskStatus = mapTaskEntityStatus(taskEntity.status?.state, boundary);
+            await this.finishClaimedTurn({
+                tenantId, taskId, idempotencyKey, claim: admission.result.claim,
+                taskEntity, boundary,
+            });
             await this.finalizeIfTerminal(
                 tenantId,
                 taskId,
@@ -259,6 +273,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 taskEntity,
                 turnDisposition: 'executed',
                 turnClaim: admission.result.claim,
+                ...this.postCommitResultFields(taskEntity as unknown as {
+                    __turnPersistence?: { postCommitWork?: () => Promise<void> };
+                }),
             };
         }
 
@@ -394,7 +411,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 idempotencyKey,
                 claim: admission.result.claim,
             });
-            if (disposition === undefined) throw error;
+            if (disposition === undefined) {
+                await this.appendAttemptEvent('turn.attempt_finished', {
+                    tenantId, taskId, idempotencyKey, claim: admission.result.claim,
+                    disposition: 'executed', status: 'failed',
+                });
+                throw error;
+            }
             this.dedupe.record(idempotencyKey);
             return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, disposition);
         } finally {
@@ -404,6 +427,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
             .__turnPersistence?.disposition;
         if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId, taskId, idempotencyKey, claim: admission.result.claim,
+                disposition: 'superseded', status: 'superseded',
+            });
             this.dedupe.record(idempotencyKey);
             return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, 'superseded');
         }
@@ -417,6 +444,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             preparedWake.inputExpiresAt
         );
         const taskStatus = mapTaskEntityStatus(taskEntity.status?.state, boundary);
+        await this.finishClaimedTurn({
+            tenantId, taskId, idempotencyKey, claim: admission.result.claim,
+            taskEntity, boundary,
+        });
         await this.finalizeIfTerminal(
             tenantId,
             taskId,
@@ -437,6 +468,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             traceId: telemetry?.traceId ?? (ctx as { telemetry?: { traceId?: string } }).telemetry?.traceId,
             turnDisposition: 'executed',
             turnClaim: admission.result.claim,
+            ...this.postCommitResultFields(taskEntity as unknown as {
+                __turnPersistence?: { postCommitWork?: () => Promise<void> };
+            }),
         };
     }
 
@@ -470,6 +504,16 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 return prepared.snapshot;
             },
         });
+        if (admitted.result.disposition === 'acquired' && admitted.result.replacedClaim !== undefined) {
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                idempotencyKey: admitted.result.replacedClaim.requestKey,
+                claim: admitted.result.replacedClaim,
+                disposition: 'superseded',
+                status: 'superseded',
+            });
+        }
         return { ...admitted, prepared };
     }
 
@@ -527,27 +571,6 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     abortSignal: abortController.signal,
                 }
             );
-            const entity = value as {
-                status?: { state?: string };
-                __turnPersistence?: { disposition?: string; terminal?: { turnClaim?: { claimId?: string } } };
-            };
-            const disposition = entity.__turnPersistence?.disposition === 'superseded' ||
-                entity.__turnPersistence?.disposition === 'competing_terminal'
-                ? 'superseded'
-                : 'executed';
-            const terminal = entity.__turnPersistence?.terminal;
-            await this.appendAttemptEvent('turn.attempt_finished', {
-                tenantId: params.tenantId,
-                taskId: params.taskId,
-                idempotencyKey: params.idempotencyKey,
-                claim: params.claim,
-                disposition,
-                status: disposition === 'superseded'
-                    ? 'superseded'
-                    : entity.status?.state ?? 'completed',
-                authoritativeTerminal: terminal?.turnClaim?.claimId === params.claim.claimId,
-                deliveryKey: (terminal as { deliveryKey?: string } | undefined)?.deliveryKey,
-            });
             return value;
         } finally {
             clearInterval(timer);
@@ -646,6 +669,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             status?: string;
             authoritativeTerminal?: boolean;
             deliveryKey?: string;
+            boundaryKind?: string;
         }
     ): Promise<void> {
         try {
@@ -663,10 +687,56 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 ...(params.status ? { status: params.status } : {}),
                 ...(params.authoritativeTerminal ? { authoritativeTerminal: true } : {}),
                 ...(params.deliveryKey ? { deliveryKey: params.deliveryKey } : {}),
+                ...(params.boundaryKind ? { boundaryKind: params.boundaryKind } : {}),
             });
         } catch {
             // Attempt projection is repairable; snapshot arbitration is authoritative.
         }
+    }
+
+    private async finishClaimedTurn(params: {
+        tenantId: string;
+        taskId: string;
+        idempotencyKey: string;
+        claim: TaskTurnClaim;
+        taskEntity: {
+            status?: { state?: string };
+            __turnPersistence?: {
+                disposition?: string;
+                terminal?: { turnClaim?: { claimId?: string }; deliveryKey?: string };
+            };
+        };
+        boundary: SegmentResult['boundary'];
+    }): Promise<void> {
+        const persistence = params.taskEntity.__turnPersistence;
+        const superseded = persistence?.disposition === 'superseded' ||
+            persistence?.disposition === 'competing_terminal';
+        const status = superseded
+            ? 'superseded'
+            : params.boundary.kind === 'fail'
+                ? 'failed'
+                : params.boundary.kind === 'canceled'
+                    ? 'canceled'
+                    : 'completed';
+        await this.appendAttemptEvent('turn.attempt_finished', {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            idempotencyKey: params.idempotencyKey,
+            claim: params.claim,
+            disposition: superseded ? 'superseded' : 'executed',
+            status,
+            boundaryKind: params.boundary.kind,
+            authoritativeTerminal:
+                persistence?.terminal?.turnClaim?.claimId === params.claim.claimId,
+            deliveryKey: persistence?.terminal?.deliveryKey,
+        });
+    }
+
+    private postCommitResultFields(taskEntity: {
+        __turnPersistence?: { postCommitWork?: () => Promise<void> };
+    }): Pick<SegmentResult, 'postCommitWork'> {
+        const postCommitWork = taskEntity.__turnPersistence?.postCommitWork;
+        return postCommitWork === undefined ? {} : { postCommitWork };
     }
 
     private async resolveBoundary(

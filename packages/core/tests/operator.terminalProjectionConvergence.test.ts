@@ -2,6 +2,160 @@ import { describe, expect, it, jest } from '@jest/globals';
 import { OperatorProjectionRepository } from '../src/operator/semanticProjection.js';
 
 describe('durable terminal projection convergence', () => {
+    it('supersedes an older running attempt when replacement ownership starts', async () => {
+        const prisma = {
+            agentRun: { findMany: jest.fn(async () => []), upsert: jest.fn(async () => ({})) },
+            agentRunEdge: {},
+            turnRun: {
+                upsert: jest.fn(async () => ({})),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+            },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+        const startedAt = new Date('2026-09-01T11:49:09.370Z');
+
+        await projection.projectEvent({
+            tenantId: 'tenant-a', sessionId: 'task-1', type: 'turn.attempt_started', createdAt: startedAt,
+            payload: {
+                taskId: 'task-1', attemptKey: 'claim:new', claimId: 'new', fence: '2',
+                turnSeq: 1, claimedGeneration: '1', disposition: 'executed',
+            },
+        });
+
+        expect(prisma.turnRun.updateMany).toHaveBeenCalledWith({
+            where: {
+                tenantId: 'tenant-a', taskId: 'task-1', attemptKey: { not: 'claim:new' },
+                turnSeq: 1, claimedGeneration: '1', authoritativeTerminal: false,
+            },
+            data: {
+                status: 'completed', disposition: 'superseded', completedAt: startedAt,
+                authoritativeTerminal: false,
+            },
+        });
+    });
+
+    it('does not resurrect a superseded attempt when its finish arrives late', async () => {
+        const prisma = {
+            agentRun: { findMany: jest.fn(async () => []), upsert: jest.fn(async () => ({})) },
+            agentRunEdge: {},
+            turnRun: {
+                findMany: jest.fn(async () => [{
+                    tenantId: 'tenant-a', taskId: 'task-1', rootTaskId: 'task-1',
+                    attemptKey: 'claim:old', turnSeq: 1, claimedGeneration: '1',
+                    disposition: 'superseded', status: 'completed', authoritativeTerminal: false,
+                }] as never),
+                upsert: jest.fn(async () => ({})),
+                updateMany: jest.fn(async () => ({ count: 0 })),
+            },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+
+        await projection.projectEvent({
+            tenantId: 'tenant-a', sessionId: 'task-1', type: 'turn.attempt_finished',
+            payload: {
+                taskId: 'task-1', attemptKey: 'claim:old', claimId: 'old',
+                turnSeq: 1, claimedGeneration: '1', disposition: 'executed', status: 'failed',
+            },
+        });
+
+        expect(prisma.turnRun.upsert).toHaveBeenCalledWith(expect.objectContaining({
+            update: expect.objectContaining({ disposition: 'superseded' }),
+        }));
+        expect(prisma.turnRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                attemptKey: 'claim:old', status: { notIn: ['completed', 'failed', 'canceled'] },
+            }),
+        }));
+    });
+
+    it('repairs the active attempt from the authoritative coordinator snapshot', async () => {
+        const prisma = {
+            agentRun: { findMany: jest.fn(async () => []), upsert: jest.fn(async () => ({})) },
+            agentRunEdge: {},
+            turnRun: {
+                findMany: jest.fn(async () => []),
+                upsert: jest.fn(async () => ({})),
+                updateMany: jest.fn(async () => ({ count: 1 })),
+            },
+            runEffect: {},
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+        await expect(projection.reconcileDurableTurnOwnership({
+            tenantId: 'tenant-a', taskId: 'task-1', agentId: 'agent-a',
+            snapshot: {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1', rootTaskId: 'task-1', ancestorTaskIds: [], state: 'active',
+                    },
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '2', nextTurnSeq: 1,
+                        requestedGeneration: '1', completedGeneration: '0', runtimeSurface: 'hatchet',
+                        active: {
+                            claimId: 'new', fence: '2', ownerId: 'worker-b', requestKey: 'task-1:start',
+                            claimedGeneration: '1', turnSeq: 1, phase: 'executing', runtimeSurface: 'hatchet',
+                            acquiredAt: '2026-09-01T11:49:09.370Z',
+                            heartbeatAt: '2026-09-01T11:49:09.370Z',
+                            expiresAt: '2126-09-01T11:51:09.370Z',
+                        },
+                    },
+                },
+            },
+        })).resolves.toBe(true);
+
+        expect(prisma.turnRun.upsert).toHaveBeenCalledWith(expect.objectContaining({
+            create: expect.objectContaining({
+                attemptKey: 'claim:new', claimId: 'new', turnSeq: 1,
+                claimedGeneration: '1', status: 'running',
+            }),
+        }));
+        expect(prisma.turnRun.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({
+            where: expect.objectContaining({
+                attemptKey: { not: 'claim:new' }, turnSeq: 1, claimedGeneration: '1',
+            }),
+            data: expect.objectContaining({ status: 'completed', disposition: 'superseded' }),
+        }));
+    });
+
+    it('counts only committed cognitive turns in the run aggregate', async () => {
+        let committed = false;
+        const prisma = {
+            agentRun: { findMany: jest.fn(async () => []), upsert: jest.fn(async () => ({})) },
+            agentRunEdge: {}, turnRun: {}, runEffect: {},
+            cognitiveTurnRun: {
+                upsert: jest.fn(async (args: any) => {
+                    committed = args.create.disposition === 'committed';
+                    return {};
+                }),
+                findMany: jest.fn(async (args: any) => {
+                    expect(args.where).toEqual({ tenantId: 'tenant-a', taskId: 'task-1', disposition: 'committed' });
+                    return committed ? [{ llmCallCount: 1, memoryOpCount: 0 }] : [];
+                }),
+            },
+        };
+        const projection = new OperatorProjectionRepository(prisma as never);
+        const payload = {
+            taskId: 'task-1', turnId: 'cognition-1', turnSeq: 1, cognitionTurnSeq: 1,
+            logicalTurnSeq: 1, segmentSeq: 1, claimId: 'claim-1', attemptKey: 'claim:claim-1',
+            transition: { kind: 'continue' }, llmCalls: [{ model: 'test' }],
+        };
+
+        await projection.projectEvent({
+            tenantId: 'tenant-a', sessionId: 'task-1', type: 'turn.observed', payload,
+        });
+        expect(prisma.agentRun.upsert).toHaveBeenLastCalledWith(expect.objectContaining({
+            update: expect.objectContaining({ turnCount: 0 }),
+        }));
+
+        await projection.projectEvent({
+            tenantId: 'tenant-a', sessionId: 'task-1', type: 'turn.completed', payload,
+        });
+        expect(prisma.agentRun.upsert).toHaveBeenCalledWith(expect.objectContaining({
+            update: expect.objectContaining({ turnCount: 1, llmCallCount: 1 }),
+        }));
+    });
+
     it('repairs completed ok:false tasks and supersedes orphan running attempts', async () => {
         const prisma = {
             agentRun: { upsert: jest.fn(async () => ({})), findMany: jest.fn(async () => []) },

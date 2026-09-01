@@ -67,9 +67,20 @@ Important fields:
 - `resultPreview`
 - `error`
 
+### Turn identity vocabulary
+
+- `cognitiveTurnSeq`: one internal APLRET reasoning iteration.
+- `turnSeq`: one durable segment, which may contain several cognitive turns.
+- `generation`: accepted durable demand consumed by a segment.
+- `attemptSeq`, `claimId`, and `fence`: provider polling, retry, and takeover identity.
+
+A retry or lease takeover of the same generation remains part of the same `turnSeq`.
+Only the snapshot coordinator authorizes execution; Operator rows are repairable read
+models and never establish ownership.
+
 ### `TurnRun`
 
-One APLRET cognition segment. This is debug detail under an agent node, not a top-level product concept.
+One durable segment. This is debug detail under an agent node, not a top-level product concept.
 
 Important fields:
 
@@ -83,6 +94,11 @@ Important fields:
 - `llmCalls` with model/provider/token/cost/latency metadata only
 - `memoryOps` with memory operation keys touched during the turn
 - `providerRunId`
+- `attempts`, including queued, executed, and superseded provider attempts
+- `cognitiveTurns`, containing committed or provisional APLRET iterations
+
+`AgentRun.turnCount` counts committed cognitive turns only. A provisional
+`turn.observed` may be shown for live diagnosis, but it does not advance the aggregate.
 
 ### `MemoryOperationRun`
 
@@ -102,7 +118,8 @@ Memory operation events do not store raw memory values.
 
 ### `EffectRun`
 
-Effect delivery such as outbox dispatch. Effects are hidden by default and shown in debug views.
+Effect delivery such as outbox dispatch or best-effort post-commit artifact projection.
+Effects are hidden by default and shown in debug views.
 
 Important fields:
 

@@ -57,6 +57,9 @@ async function persistMockTurn(
             scheduleNext: persisted.value.scheduleNext,
             snapshot: persisted.snapshot,
             wmVersion: persisted.wmVersion,
+            ...(result.persistence?.postCommitWork
+                ? { postCommitWork: result.persistence.postCommitWork }
+                : {}),
         },
     };
 }
@@ -117,6 +120,71 @@ describe('TurnRunnerSegmentExecutor integration', () => {
 
     afterEach(() => {
         executeTurnSpy.mockRestore();
+    });
+
+    it('closes a paused attempt after resolving its boundary', async () => {
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
+            M: initialM(params.ctx),
+            outcome: { kind: 'continue', observations: [] },
+            metrics: {},
+            taskStatus: { state: 'working', timestamp: new Date().toISOString() },
+        }));
+
+        const result = await executor.runSegment({
+            tenantId,
+            taskId: `${taskId}-paused`,
+            agentId,
+            idempotencyKey: `${taskId}-paused:start`,
+            runtimeSurface: 'hatchet',
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(result.boundary).toEqual({ kind: 'paused', reason: 'budget_or_latency' });
+        const events = await sessionManager.listEventsSince({
+            tenantId, sessionId: `${taskId}-paused`, sinceSeq: 0,
+        });
+        const finished = events.find((event) => event.type === 'turn.attempt_finished');
+        expect(finished?.payload).toMatchObject({
+            disposition: 'executed', status: 'completed', boundaryKind: 'paused', turnSeq: 1,
+        });
+    });
+
+    it('runs optional post-commit work after attempt closure without turn ownership', async () => {
+        const observedOrder: string[] = [];
+        const postCommitWork = jest.fn(async () => {
+            const events = await sessionManager.listEventsSince({
+                tenantId, sessionId: `${taskId}-post-commit`, sinceSeq: 0,
+            });
+            observedOrder.push(events.some((event) => event.type === 'turn.attempt_finished')
+                ? 'attempt-finished'
+                : 'attempt-open');
+            expect(currentTaskTurnClaim()).toBeUndefined();
+        });
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
+            M: initialM(params.ctx),
+            outcome: { kind: 'continue', observations: [] },
+            metrics: {},
+            taskStatus: { state: 'working', timestamp: new Date().toISOString() },
+            persistence: {
+                disposition: 'committed', scheduleNext: false, snapshot: {}, wmVersion: 1n,
+                postCommitWork,
+            },
+        }));
+
+        const result = await executor.runSegment({
+            tenantId,
+            taskId: `${taskId}-post-commit`,
+            agentId,
+            idempotencyKey: `${taskId}-post-commit:start`,
+            runtimeSurface: 'hatchet',
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(postCommitWork).not.toHaveBeenCalled();
+        expect(result.postCommitWork).toBe(postCommitWork);
+        await result.postCommitWork?.();
+        expect(postCommitWork).toHaveBeenCalledTimes(1);
+        expect(observedOrder).toEqual(['attempt-finished']);
     });
 
     it('passes authoritative tenant and agent identity into reconstructed contexts', async () => {
@@ -772,6 +840,100 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         expect(executed.turnDisposition).toBe('executed');
         expect(executed.boundary).toEqual({ kind: 'complete', result: { generation: 2 } });
         expect(executeTurnSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('projects lease takeover as two attempts of one logical turn', async () => {
+        const recoveryTaskId = `${taskId}-takeover`;
+        let releaseExpiredAttempt!: () => void;
+        let firstEntered!: () => void;
+        const expiredAttemptGate = new Promise<void>((resolve) => { releaseExpiredAttempt = resolve; });
+        const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+        let invocation = 0;
+        executeTurnSpy.mockImplementation(async (params) => {
+            invocation += 1;
+            const M = params.M ?? initialM(params.ctx);
+            if (invocation === 1) {
+                firstEntered();
+                await expiredAttemptGate;
+                const current = await sessionManager.load(tenantId, recoveryTaskId);
+                return {
+                    M,
+                    outcome: { kind: 'continue', observations: [] },
+                    metrics: {},
+                    taskStatus: { state: 'working', timestamp: new Date().toISOString() },
+                    persistence: {
+                        disposition: 'superseded', scheduleNext: false,
+                        snapshot: current?.snapshot ?? {}, wmVersion: current?.wmVersion ?? 0n,
+                    },
+                };
+            }
+            return persistMockTurn(params, {
+                M,
+                outcome: { kind: 'complete', result: { recovered: true } },
+                metrics: {},
+                taskStatus: {
+                    state: 'completed', timestamp: new Date().toISOString(),
+                    metadata: { result: { recovered: true } },
+                },
+            });
+        });
+
+        const first = executor.runSegment({
+            tenantId, taskId: recoveryTaskId, agentId,
+            idempotencyKey: `${recoveryTaskId}:turn-request:1:first`,
+            runtimeSurface: 'hatchet', wake: { trigger: 'start', input: {} },
+        });
+        await entered;
+
+        const claimed = await sessionManager.load(tenantId, recoveryTaskId);
+        expect(claimed).not.toBeNull();
+        const claimedMeta = claimed!.snapshot.meta as Record<string, unknown>;
+        const coordinator = claimedMeta.turnCoordinator as Record<string, unknown>;
+        const active = coordinator.active as Record<string, unknown>;
+        const firstClaimId = active.claimId;
+        await sessionManager.saveSnapshot({
+            tenantId, sessionId: recoveryTaskId, agentId,
+            expectedWmVersion: claimed!.wmVersion,
+            snapshot: {
+                ...claimed!.snapshot,
+                meta: {
+                    ...claimedMeta,
+                    turnCoordinator: {
+                        ...coordinator,
+                        active: {
+                            ...active,
+                            acquiredAt: '2020-01-01T00:00:00.000Z',
+                            heartbeatAt: '2020-01-01T00:00:00.000Z',
+                            expiresAt: '2020-01-01T00:00:01.000Z',
+                        },
+                    },
+                },
+            },
+        });
+
+        const recovered = await executor.runSegment({
+            tenantId, taskId: recoveryTaskId, agentId,
+            idempotencyKey: `${recoveryTaskId}:turn-request:1:first`,
+            runtimeSurface: 'hatchet',
+            wake: { trigger: 'start', input: {} },
+        });
+        releaseExpiredAttempt();
+        const expired = await first;
+
+        expect(recovered.turnClaim).toMatchObject({ turnSeq: 1, claimedGeneration: '1', fence: '2' });
+        expect(recovered.turnClaim?.claimId).not.toBe(firstClaimId);
+        expect(expired.turnDisposition).toBe('superseded');
+        const events = await sessionManager.listEventsSince({
+            tenantId, sessionId: recoveryTaskId, sinceSeq: 0,
+        });
+        const started = events.filter((event) => event.type === 'turn.attempt_started');
+        // Rewriting the in-memory snapshot to advance the controlled lease clock
+        // replaces its embedded event buffer; the recovered start remains visible.
+        expect(started).toHaveLength(1);
+        expect(started[0]?.payload).toMatchObject({ turnSeq: 1, claimId: recovered.turnClaim?.claimId });
+        expect(events.filter((event) =>
+            event.type === 'turn.attempt_finished' && event.payload.disposition === 'superseded'
+        ).length).toBeGreaterThanOrEqual(1);
     });
 
     it('persists processed keys in the snapshot for durable duplicate detection', async () => {

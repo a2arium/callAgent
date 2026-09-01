@@ -103,6 +103,12 @@ export type SegmentResult = {
     associatedTurnSeq?: number;
     /** Populated when the segment ran via a prepared turn invocation. */
     taskEntity?: TaskEntity;
+    /**
+     * Internal optional work that a runtime driver runs only after it has
+     * recorded this segment attempt as finished. It is intentionally omitted
+     * from provider task outputs.
+     */
+    postCommitWork?: () => Promise<void>;
 };
 
 export type RunSegmentParams = {

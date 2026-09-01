@@ -35,6 +35,16 @@ export async function runWithSegmentIdempotencyKey<T>(
     return activeSegmentContext.run({ idempotencyKey, outboxSeq: 0, turnClaim }, fn);
 }
 
+/** Runs post-commit work with the segment identity but without authoritative turn ownership. */
+export async function runWithoutTaskTurnClaim<T>(fn: () => Promise<T>): Promise<T> {
+    const current = activeSegmentContext.getStore();
+    if (current === undefined) return fn();
+    return activeSegmentContext.run({
+        idempotencyKey: current.idempotencyKey,
+        outboxSeq: current.outboxSeq,
+    }, fn);
+}
+
 export function nextSegmentOutboxIdempotencyKey(topic: string): string | undefined {
     const context = activeSegmentContext.getStore();
     if (context === undefined) {

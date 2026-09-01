@@ -1,6 +1,6 @@
 import * as uuid from 'uuid';
 
-import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
+import { logger, updateLoggingContext, withLoggingContext } from '@a2arium/callagent-utils';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { TaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
 import { InboxManager, type EngineObservation } from './InboxManager.js';
@@ -20,6 +20,7 @@ import {
     addProcessedSegmentKey,
     currentSegmentIdempotencyKey,
     currentTaskTurnClaim,
+    runWithoutTaskTurnClaim,
 } from '../runtime/segmentProcessedKeys.js';
 import {
     assertCurrentTaskTurn,
@@ -105,6 +106,8 @@ export type TurnPersistenceResult = {
     wmVersion: bigint;
     terminal?: DurableTaskTerminal;
     scheduleNext: boolean;
+    /** Best-effort normalization that runs only after the authoritative attempt is closed. */
+    postCommitWork?: () => Promise<void>;
 };
 
 export class TaskExecutor {
@@ -963,25 +966,70 @@ export class TaskExecutor {
                 };
             },
         });
-        let committedSnapshot = persisted.snapshot;
-        let committedVersion = persisted.wmVersion;
-        if (persisted.value.disposition === 'committed' && snapshotPrisma && childResultCache) {
-            const projected = await publishArtifactProjection({
-                sessionManager,
-                tenantId,
-                sessionId,
-                agentId: agentId || 'default',
-                snapshot: committedSnapshot,
-                wmVersion: committedVersion,
-                cache: childResultCache,
-            });
-            committedSnapshot = projected.snapshot;
-            committedVersion = projected.wmVersion;
-        }
+        const committedSnapshot = persisted.snapshot;
+        const committedVersion = persisted.wmVersion;
+        const postCommitEffectKey = activeIdempotencyKey !== undefined
+            ? `${activeIdempotencyKey}:artifact-post-commit`
+            : `artifact-post-commit:${committedVersion.toString()}`;
+        const postCommitWork = persisted.value.disposition === 'committed' && snapshotPrisma && childResultCache
+            ? async () => {
+                  await runWithoutTaskTurnClaim(async () => {
+                      await withLoggingContext({ turn: undefined }, async () => {
+                          try {
+                              try {
+                                  await sessionManager.appendEvent(tenantId, sessionId, 'artifact.projection_started', {
+                                      taskId: sessionId,
+                                      operation: 'artifact.post_commit_projection',
+                                      idempotencyKey: postCommitEffectKey,
+                                  });
+                              } catch {
+                                  // Effect projection is repairable and must not block normalization.
+                              }
+                              await publishArtifactProjection({
+                                  sessionManager,
+                                  tenantId,
+                                  sessionId,
+                                  agentId: agentId || 'default',
+                                  snapshot: committedSnapshot,
+                                  wmVersion: committedVersion,
+                                  cache: childResultCache,
+                              });
+                              try {
+                                  await sessionManager.appendEvent(tenantId, sessionId, 'artifact.projection_completed', {
+                                      taskId: sessionId,
+                                      operation: 'artifact.post_commit_projection',
+                                      idempotencyKey: postCommitEffectKey,
+                                  });
+                              } catch {
+                                  // Effect projection is repairable.
+                              }
+                          } catch (error) {
+                              log.warn('Post-commit artifact projection effect failed', {
+                                  tenantId,
+                                  sessionId,
+                                  error: error instanceof Error ? error.message : String(error),
+                              });
+                              try {
+                                  await sessionManager.appendEvent(tenantId, sessionId, 'artifact.projection_failed', {
+                                      taskId: sessionId,
+                                      operation: 'artifact.post_commit_projection',
+                                      idempotencyKey: postCommitEffectKey,
+                                      errorCode: 'ARTIFACT_POST_COMMIT_PROJECTION_FAILED',
+                                      message: error instanceof Error ? error.message : String(error),
+                                  });
+                              } catch {
+                                  // The projection is optional and must not reopen the committed turn.
+                              }
+                          }
+                      });
+                  });
+              }
+            : undefined;
         return {
             ...persisted.value,
             snapshot: committedSnapshot,
             wmVersion: committedVersion,
+            ...(postCommitWork !== undefined ? { postCommitWork } : {}),
         } satisfies TurnPersistenceResult;
     }
 
@@ -1139,7 +1187,7 @@ async function publishArtifactProjection(params: {
                 sessionId: params.sessionId,
                 error: error instanceof Error ? error.message : String(error),
             });
-            return { snapshot, wmVersion };
+            throw error;
         }
         if (JSON.stringify(projected) === JSON.stringify(snapshot)) return { snapshot, wmVersion };
         try {
@@ -1157,10 +1205,10 @@ async function publishArtifactProjection(params: {
                     tenantId: params.tenantId,
                     sessionId: params.sessionId,
                 });
-                return { snapshot, wmVersion };
+                throw new Error('Post-commit artifact snapshot projection was superseded');
             }
             const latest = await params.sessionManager.load(params.tenantId, params.sessionId);
-            if (!latest) return { snapshot, wmVersion };
+            if (!latest) throw new Error('Post-commit artifact snapshot disappeared');
             snapshot = latest.snapshot;
             wmVersion = latest.wmVersion;
         }

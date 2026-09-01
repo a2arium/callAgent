@@ -61,13 +61,15 @@ re-executed segment collapses to the same effect:
 | Effect | Idempotency key |
 |---|---|
 | child dispatch | `parentTaskId:token:childTaskId` (already specified, ADR 0005) |
-| tool call | `taskId:turnSeq:toolCallId` |
-| outbox publish | `taskId:turnSeq:eventKind` (dedupe on insert) |
+| tool call | `taskId:cognitiveTurnSeq:toolCallId` |
+| outbox publish | `taskId:cognitiveTurnSeq:eventKind` (dedupe on insert) |
 | stream event | `taskId:seq` (already monotonic; consumers dedupe on `seq`) |
 | timer schedule | `taskId:token:timerId` (ADR 0003/0005) |
 
-`turnSeq` is the internal turn counter within the segment (`env.turn`), which is
-deterministic for a given wake + snapshot base.
+`cognitiveTurnSeq` is the internal counter within the segment (`env.turn`) and is
+deterministic for a given wake + snapshot base. `turnSeq` identifies the durable
+segment instead; retry and takeover attempts keep that `turnSeq` and receive a new
+`claimId`, fence, and provider `attemptSeq`.
 
 ### 2. Retry classification owned by callAgent, bounded by Hatchet
 

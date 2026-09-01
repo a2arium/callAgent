@@ -2460,6 +2460,12 @@ export class TaskEngine {
         const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
         if (projectionMode === 'semantic') {
             const current = await this.sessionManager.load(params.tenantId, params.taskId);
+            await projection?.reconcileDurableTurnOwnership({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                snapshot: current?.snapshot,
+                agentId: current?.agentId,
+            });
             await projection?.reconcileDurableTerminal({
                 tenantId: params.tenantId,
                 taskId: params.taskId,
