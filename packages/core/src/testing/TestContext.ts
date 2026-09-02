@@ -254,7 +254,14 @@ export function createTestContext(
                 preview: '',
                 length: 0,
                 uri: `memory://artifact/${generateId('uri')}`
-            } as unknown as import('@a2arium/callagent-memory-engine').Artifact<T>)
+            } as unknown as import('@a2arium/callagent-memory-engine').Artifact<T>),
+            retain: async () => {},
+            retainMany: async () => {},
+            retainIds: async () => {},
+            inheritOwner: async () => [],
+            release: async () => {},
+            releaseOwner: async () => 0,
+            delete: async () => true,
         },
 
         goals: {

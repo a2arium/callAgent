@@ -24,7 +24,8 @@ export class CacheCleanupService {
             const now = new Date();
             const result = await this.prisma.agentResultCache.deleteMany({
                 where: {
-                    expiresAt: { lt: now }
+                    expiresAt: { lt: now },
+                    artifactReferences: { none: {} },
                 }
             });
 
@@ -56,7 +57,7 @@ export class CacheCleanupService {
     }): Promise<{ deleted: number; hasMore: boolean }> {
         const now = params.now ?? new Date();
         const rows = await this.prisma.agentResultCache.findMany({
-            where: { tenantId: params.tenantId, expiresAt: { lt: now } },
+            where: { tenantId: params.tenantId, expiresAt: { lt: now }, artifactReferences: { none: {} } },
             select: { id: true },
             orderBy: { expiresAt: 'asc' },
             take: params.batchSize,
@@ -72,7 +73,7 @@ export class CacheCleanupService {
     async getTenantStats(tenantId: string, now = new Date()): Promise<{ totalEntries: number; expiredEntries: number }> {
         const [totalEntries, expiredEntries] = await Promise.all([
             this.prisma.agentResultCache.count({ where: { tenantId } }),
-            this.prisma.agentResultCache.count({ where: { tenantId, expiresAt: { lt: now } } }),
+            this.prisma.agentResultCache.count({ where: { tenantId, expiresAt: { lt: now }, artifactReferences: { none: {} } } }),
         ]);
         return { totalEntries, expiredEntries };
     }
@@ -90,7 +91,7 @@ export class CacheCleanupService {
 
                 // Expired entries count
                 this.prisma.agentResultCache.count({
-                    where: { expiresAt: { lt: now } }
+                    where: { expiresAt: { lt: now }, artifactReferences: { none: {} } }
                 }),
 
                 // Oldest entry

@@ -124,6 +124,14 @@ export type TaskContext = {
          * Helper to create a JSON artifact.
          */
         json<T>(val?: T): ArtifactType<T>;
+
+        retain(artifact: ArtifactHandle<unknown>, ownerId: string): Promise<void>;
+        retainMany(artifacts: readonly ArtifactHandle<unknown>[], ownerId: string): Promise<void>;
+        retainIds(artifactIds: readonly string[], ownerId: string): Promise<void>;
+        inheritOwner(fromOwnerId: string, toOwnerId: string, excludedArtifactIds?: readonly string[]): Promise<readonly string[]>;
+        release(artifactId: string, ownerId: string): Promise<void>;
+        releaseOwner(ownerId: string): Promise<number>;
+        delete(artifactId: string): Promise<boolean>;
     };
 
     // Namespaced helpers (minimal, ergonomic)

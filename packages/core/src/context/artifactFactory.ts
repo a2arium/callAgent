@@ -95,6 +95,45 @@ export function createArtifactFactory(
         create,
         text: (value?: string) => create(value, { mimeType: 'text/plain' }),
         json: <T>(value?: T) => create(value, { mimeType: 'application/json' }),
+        retain: async (artifact, ownerId) => {
+            await artifact.load();
+            if (!artifact.id) throw new Error('Artifact has no ID after storage completed');
+            const cache = await getCache();
+            await cache.retainArtifact(params.tenantId, artifact.id, ownerId);
+        },
+        retainMany: async (artifactHandles, ownerId) => {
+            // Keep verification/storage completion bounded. Recovered artifact
+            // graphs can contain thousands of multi-megabyte handles; loading
+            // all of them concurrently would defeat bulk retention's memory
+            // safety even though the database write itself is batched.
+            for (const artifact of artifactHandles) await artifact.load();
+            const artifactIds = artifactHandles.map((artifact) => {
+                if (!artifact.id) throw new Error('Artifact has no ID after storage completed');
+                return artifact.id;
+            });
+            const cache = await getCache();
+            await cache.retainArtifacts(params.tenantId, artifactIds, ownerId);
+        },
+        retainIds: async (artifactIds, ownerId) => {
+            const cache = await getCache();
+            await cache.retainArtifacts(params.tenantId, artifactIds, ownerId);
+        },
+        inheritOwner: async (fromOwnerId, toOwnerId, excludedArtifactIds) => {
+            const cache = await getCache();
+            return cache.inheritArtifactOwner(params.tenantId, fromOwnerId, toOwnerId, excludedArtifactIds);
+        },
+        release: async (artifactId, ownerId) => {
+            const cache = await getCache();
+            await cache.releaseArtifact(params.tenantId, artifactId, ownerId);
+        },
+        releaseOwner: async (ownerId) => {
+            const cache = await getCache();
+            return cache.releaseArtifactOwner(params.tenantId, ownerId);
+        },
+        delete: async (artifactId) => {
+            const cache = await getCache();
+            return cache.deleteArtifact(params.tenantId, artifactId);
+        },
     };
     assertArtifactsFactory(artifacts);
     return artifacts;

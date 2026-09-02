@@ -114,4 +114,41 @@ describe('createArtifactFactory', () => {
             artifactId: expect.any(String),
         }));
     });
+
+    it('retains many completed handles through one cache operation', async () => {
+        const { cache } = createArtifactCache();
+        const retainArtifacts = jest.fn(async () => 2);
+        (cache as any).retainArtifacts = retainArtifacts;
+        const artifacts = createArtifactFactory({ tenantId: 'tenant-a', resolveCache: () => cache });
+        const first = artifacts.text('first');
+        const second = artifacts.json({ second: true });
+
+        await artifacts.retainMany([first, second], 'checkpoint:cig');
+
+        expect(retainArtifacts).toHaveBeenCalledWith(
+            'tenant-a',
+            [expect.any(String), expect.any(String)],
+            'checkpoint:cig'
+        );
+    });
+
+    it('inherits artifact ownership without loading handles', async () => {
+        const { cache } = createArtifactCache();
+        const inheritArtifactOwner = jest.fn(async () => ['artifact-1']);
+        (cache as any).inheritArtifactOwner = inheritArtifactOwner;
+        const artifacts = createArtifactFactory({ tenantId: 'tenant-a', resolveCache: () => cache });
+
+        await expect(artifacts.inheritOwner('checkpoint:old', 'checkpoint:new')).resolves.toEqual(['artifact-1']);
+        expect(inheritArtifactOwner).toHaveBeenCalledWith('tenant-a', 'checkpoint:old', 'checkpoint:new', undefined);
+    });
+
+    it('retains already-persisted IDs without creating artifact handles', async () => {
+        const { cache } = createArtifactCache();
+        const retainArtifacts = jest.fn(async () => 2);
+        (cache as any).retainArtifacts = retainArtifacts;
+        const artifacts = createArtifactFactory({ tenantId: 'tenant-a', resolveCache: () => cache });
+
+        await artifacts.retainIds(['artifact-1', 'artifact-2'], 'checkpoint:new');
+        expect(retainArtifacts).toHaveBeenCalledWith('tenant-a', ['artifact-1', 'artifact-2'], 'checkpoint:new');
+    });
 });

@@ -59,6 +59,12 @@ export class AgentResultCache {
                 });
                 return cached.result as T;
             } else if (cached && cached.expiresAt <= new Date()) {
+                if (agentName === 'artifact_store') {
+                    const retained = await this.prisma.artifactReference.count({
+                        where: { cacheEntryId: cached.id },
+                    });
+                    if (retained > 0) return cached.result as T;
+                }
                 // Remove expired entry
                 await this.prisma.agentResultCache.delete({
                     where: { id: cached.id }
@@ -174,7 +180,11 @@ export class AgentResultCache {
                 cacheKey,
                 result: value as any,
                 expiresAt
-            }
+            },
+            // Artifact payloads can be several MiB. Prisma otherwise returns
+            // and JSON-parses the complete JSONB value after every upsert even
+            // though this path only needs durable-write confirmation.
+            select: { id: true },
         });
 
         return { size, artifactId: id };
@@ -227,6 +237,145 @@ export class AgentResultCache {
             throw new Error(`Artifact ${artifactId} not found`);
         }
         return result;
+    }
+
+    /** Protect one stored artifact while a durable checkpoint owner references it. */
+    async retainArtifact(tenantId: string, artifactId: string, ownerId: string): Promise<void> {
+        this.assertArtifactIdentity(artifactId, ownerId);
+        const cacheKey = this.generateCacheKey({ artifactId }, []);
+        await this.prisma.$transaction(async (tx: any) => {
+            const entry = await tx.agentResultCache.findUnique({
+                where: { tenantId_agentName_cacheKey: { tenantId, agentName: 'artifact_store', cacheKey } },
+                select: { id: true },
+            });
+            if (!entry) throw new Error(`Artifact ${artifactId} not found`);
+            await tx.artifactReference.upsert({
+                where: { tenantId_artifactId_ownerId: { tenantId, artifactId, ownerId } },
+                update: { cacheEntryId: entry.id },
+                create: { tenantId, artifactId, ownerId, cacheEntryId: entry.id },
+            });
+        });
+    }
+
+    /**
+     * Protect many stored artifacts under one owner without opening one
+     * interactive transaction per artifact. All requested artifacts are
+     * validated before the reference writes, and the batched writes commit in
+     * one database transaction.
+     */
+    async retainArtifacts(tenantId: string, artifactIds: readonly string[], ownerId: string): Promise<number> {
+        this.assertArtifactIdentity('bulk-retain', ownerId);
+        const uniqueIds = [...new Set(artifactIds)];
+        for (const artifactId of uniqueIds) this.assertArtifactIdentity(artifactId, ownerId);
+        if (uniqueIds.length === 0) return 0;
+
+        const batchSize = 1_000;
+        const entries: Array<{ id: string; cacheKey: string }> = [];
+        const idByCacheKey = new Map(uniqueIds.map((artifactId) => [
+            this.generateCacheKey({ artifactId }, []),
+            artifactId,
+        ]));
+        const cacheKeys = [...idByCacheKey.keys()];
+        for (let offset = 0; offset < cacheKeys.length; offset += batchSize) {
+            const page = await this.prisma.agentResultCache.findMany({
+                where: {
+                    tenantId,
+                    agentName: 'artifact_store',
+                    cacheKey: { in: cacheKeys.slice(offset, offset + batchSize) },
+                },
+                select: { id: true, cacheKey: true },
+            });
+            entries.push(...page);
+        }
+
+        const foundKeys = new Set(entries.map((entry) => entry.cacheKey));
+        const missing = cacheKeys.find((cacheKey) => !foundKeys.has(cacheKey));
+        if (missing) throw new Error(`Artifact ${idByCacheKey.get(missing)} not found`);
+
+        const data = entries.map((entry) => ({
+            tenantId,
+            artifactId: idByCacheKey.get(entry.cacheKey)!,
+            ownerId,
+            cacheEntryId: entry.id,
+        }));
+        const writes = [];
+        for (let offset = 0; offset < data.length; offset += batchSize) {
+            writes.push(this.prisma.artifactReference.createMany({
+                data: data.slice(offset, offset + batchSize),
+                skipDuplicates: true,
+            }));
+        }
+        await this.prisma.$transaction(writes);
+        return uniqueIds.length;
+    }
+
+    /**
+     * Copy an existing checkpoint owner's references to a successor owner in
+     * one transaction. The artifact payloads are immutable, so successor
+     * checkpoints can inherit their protection without loading every payload.
+     */
+    async inheritArtifactOwner(tenantId: string, fromOwnerId: string, toOwnerId: string, excludedArtifactIds: readonly string[] = []): Promise<readonly string[]> {
+        this.assertArtifactIdentity('owner-inherit', fromOwnerId);
+        this.assertArtifactIdentity('owner-inherit', toOwnerId);
+        if (fromOwnerId === toOwnerId) {
+            const existing: Array<{ artifactId: string }> = await this.prisma.artifactReference.findMany({
+                where: { tenantId, ownerId: fromOwnerId },
+                select: { artifactId: true },
+            });
+            return existing.map((reference) => reference.artifactId);
+        }
+        const excluded = [...new Set(excludedArtifactIds)];
+        for (const artifactId of excluded) this.assertArtifactIdentity(artifactId, toOwnerId);
+        return this.prisma.$transaction(async (tx: any) => {
+            const existing: Array<{ artifactId: string; cacheEntryId: string }> = await tx.artifactReference.findMany({
+                where: { tenantId, ownerId: fromOwnerId, ...(excluded.length ? { artifactId: { notIn: excluded } } : {}) },
+                select: { artifactId: true, cacheEntryId: true },
+            });
+            if (existing.length) {
+                await tx.artifactReference.createMany({
+                    data: existing.map((reference) => ({ tenantId, artifactId: reference.artifactId, ownerId: toOwnerId, cacheEntryId: reference.cacheEntryId })),
+                    skipDuplicates: true,
+                });
+            }
+            return existing.map((reference) => reference.artifactId);
+        });
+    }
+
+    /** Release exactly one owner; other owners continue to protect the artifact. */
+    async releaseArtifact(tenantId: string, artifactId: string, ownerId: string): Promise<void> {
+        this.assertArtifactIdentity(artifactId, ownerId);
+        await this.prisma.artifactReference.deleteMany({ where: { tenantId, artifactId, ownerId } });
+    }
+
+    /** Release every artifact held by a terminal checkpoint owner. Idempotent. */
+    async releaseArtifactOwner(tenantId: string, ownerId: string): Promise<number> {
+        this.assertArtifactIdentity('owner-release', ownerId);
+        const result = await this.prisma.artifactReference.deleteMany({ where: { tenantId, ownerId } });
+        return result.count;
+    }
+
+    /** Delete an artifact only when no durable owner still references it. */
+    async deleteArtifact(tenantId: string, artifactId: string): Promise<boolean> {
+        this.assertArtifactIdentity(artifactId);
+        const cacheKey = this.generateCacheKey({ artifactId }, []);
+        return this.prisma.$transaction(async (tx: any) => {
+            const entry = await tx.agentResultCache.findUnique({
+                where: { tenantId_agentName_cacheKey: { tenantId, agentName: 'artifact_store', cacheKey } },
+                select: { id: true },
+            });
+            if (!entry) return true;
+            const retained = await tx.artifactReference.count({ where: { cacheEntryId: entry.id } });
+            if (retained > 0) return false;
+            await tx.agentResultCache.delete({ where: { id: entry.id } });
+            return true;
+        }, { isolationLevel: 'Serializable' });
+    }
+
+    private assertArtifactIdentity(artifactId: string, ownerId?: string): void {
+        if (!artifactId || artifactId !== artifactId.trim()) throw new Error('Artifact ID is invalid');
+        if (ownerId !== undefined && (!ownerId || ownerId !== ownerId.trim() || ownerId.length > 512)) {
+            throw new Error('Artifact retention owner ID is invalid');
+        }
     }
 
     /**

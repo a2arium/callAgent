@@ -37,6 +37,7 @@ describe('WorkingMemorySessionStore.writeSnapshotCAS', () => {
         const store = new WorkingMemorySessionStore(prisma as never);
 
         await expect(store.getSessionSnapshotForMutation('tenant', 'session')).resolves.toEqual({
+            exists: true,
             wmVersion: 4n,
             snapshot: { active: true },
             agentId: 'agent',

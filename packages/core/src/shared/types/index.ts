@@ -176,6 +176,27 @@ export type TaskContext = {
          * Helper to create a JSON artifact.
          */
         json<T>(val?: T): ArtifactType<T>;
+
+        /** Protect an artifact from TTL cleanup while a durable owner references it. */
+        retain(artifact: ArtifactHandle<unknown>, ownerId: string): Promise<void>;
+
+        /** Atomically protect many artifacts under the same durable owner. */
+        retainMany(artifacts: readonly ArtifactHandle<unknown>[], ownerId: string): Promise<void>;
+
+        /** Protect already-persisted artifact IDs without materializing payloads. */
+        retainIds(artifactIds: readonly string[], ownerId: string): Promise<void>;
+
+        /** Copy immutable artifact protection from a predecessor checkpoint owner. */
+        inheritOwner(fromOwnerId: string, toOwnerId: string, excludedArtifactIds?: readonly string[]): Promise<readonly string[]>;
+
+        /** Release one durable owner reference. The artifact is not deleted implicitly. */
+        release(artifactId: string, ownerId: string): Promise<void>;
+
+        /** Release all references owned by a terminal durable checkpoint. */
+        releaseOwner(ownerId: string): Promise<number>;
+
+        /** Delete an unreferenced artifact. Returns false while any owner retains it. */
+        delete(artifactId: string): Promise<boolean>;
     };
 
     // Namespaced helpers (minimal, ergonomic)
