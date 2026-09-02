@@ -152,7 +152,9 @@ async function ensureOwnedLink(target: string, source: string, owned?: PackageLi
         await fs.rm(target, { recursive: false, force: true });
     }
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.symlink(source, target, process.platform === 'win32' ? 'junction' : 'dir');
+    const linkParent = await fs.realpath(path.dirname(target));
+    const linkSource = process.platform === 'win32' ? source : path.relative(linkParent, source);
+    await fs.symlink(linkSource, target, process.platform === 'win32' ? 'junction' : 'dir');
     return true;
 }
 
@@ -167,7 +169,10 @@ async function ensureCliShim(project: string, packages: PackageLink[], owned: st
         await fs.rm(shim, { force: true });
     }
     await fs.mkdir(path.dirname(shim), { recursive: true });
-    await fs.symlink(path.join(cli.source, 'dist', 'cli.js'), shim, 'file');
+    const cliSource = path.join(cli.source, 'dist', 'cli.js');
+    const linkParent = await fs.realpath(path.dirname(shim));
+    const linkSource = process.platform === 'win32' ? cliSource : path.relative(linkParent, cliSource);
+    await fs.symlink(linkSource, shim, 'file');
     created.push(shim);
     return [shim];
 }

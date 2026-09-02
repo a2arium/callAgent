@@ -61,7 +61,12 @@ describe('CallAgent project and workspace generation', () => {
 
         await setupLocalSource(project, source);
         expect(fs.readFileSync(path.join(project, 'package.json'), 'utf8')).toBe(manifest);
-        expect(fs.realpathSync(path.join(project, 'node_modules', '@a2arium', 'callagent-core'))).toBe(fs.realpathSync(path.join(source, 'packages', 'core')));
+        const coreLink = path.join(project, 'node_modules', '@a2arium', 'callagent-core');
+        expect(fs.realpathSync(coreLink)).toBe(fs.realpathSync(path.join(source, 'packages', 'core')));
+        if (process.platform !== 'win32') {
+            expect(path.isAbsolute(fs.readlinkSync(coreLink))).toBe(false);
+            expect(path.isAbsolute(fs.readlinkSync(path.join(project, 'node_modules', '.bin', 'callagent')))).toBe(false);
+        }
         expect(await localSourceStatus(project)).toMatchObject({ mode: 'local-source', ok: true });
         await unlinkLocalSource(project);
         expect(fs.existsSync(path.join(project, 'node_modules', '@a2arium', 'callagent-core'))).toBe(false);
