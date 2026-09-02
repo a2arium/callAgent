@@ -347,11 +347,30 @@ export class AgentResultCache {
         await this.prisma.artifactReference.deleteMany({ where: { tenantId, artifactId, ownerId } });
     }
 
-    /** Release every artifact held by a terminal checkpoint owner. Idempotent. */
+    /**
+     * Release every artifact held by a terminal checkpoint owner and remove
+     * payloads that no remaining owner protects. Keeping both operations in
+     * one transaction prevents inherited-but-no-longer-reachable checkpoint
+     * artifacts from becoming permanent orphans.
+     */
     async releaseArtifactOwner(tenantId: string, ownerId: string): Promise<number> {
         this.assertArtifactIdentity('owner-release', ownerId);
-        const result = await this.prisma.artifactReference.deleteMany({ where: { tenantId, ownerId } });
-        return result.count;
+        return this.prisma.$transaction(async (tx: any) => {
+            const references: Array<{ cacheEntryId: string }> = await tx.artifactReference.findMany({
+                where: { tenantId, ownerId },
+                select: { cacheEntryId: true },
+            });
+            if (references.length === 0) return 0;
+            const result = await tx.artifactReference.deleteMany({ where: { tenantId, ownerId } });
+            const cacheEntryIds = [...new Set(references.map((reference) => reference.cacheEntryId))];
+            await tx.agentResultCache.deleteMany({
+                where: {
+                    id: { in: cacheEntryIds },
+                    artifactReferences: { none: {} },
+                },
+            });
+            return result.count;
+        });
     }
 
     /** Delete an artifact only when no durable owner still references it. */
