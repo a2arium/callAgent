@@ -3,12 +3,18 @@ import { AgentResultCache } from '../src/cache/AgentResultCache.js';
 import { CacheCleanupService } from '../src/cache/CacheCleanupService.js';
 
 describe('durable artifact references', () => {
-    it('does not return and parse a stored artifact payload after upsert', async () => {
-        const upsert = jest.fn(async () => ({ id: 'cache-1' }));
-        const cache = new AgentResultCache({ agentResultCache: { upsert } } as any);
+    it('stores artifacts through scalar SQL instead of the retaining Prisma JSON model path', async () => {
+        const executeRaw = jest.fn(async () => 1);
+        const upsert = jest.fn();
+        const cache = new AgentResultCache({ $executeRaw: executeRaw, agentResultCache: { upsert } } as any);
 
         await cache.storeArtifact('tenant', 'artifact-1', 'large-value', 'application/json');
-        expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ select: { id: true } }));
+        expect(executeRaw).toHaveBeenCalledTimes(1);
+        expect(upsert).not.toHaveBeenCalled();
+        const [sql, ...parameters] = executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]];
+        expect(sql.join('?')).toContain('INSERT INTO agent_result_cache');
+        expect(sql.join('?')).toContain('ON CONFLICT (tenant_id, agent_name, cache_key)');
+        expect(parameters).toEqual(expect.arrayContaining(['artifact-1', 'tenant', 'artifact_store', '"large-value"']));
     });
     it('retains a large artifact set with one atomic batched write phase', async () => {
         const createMany = jest.fn(async () => ({ count: 0 }));

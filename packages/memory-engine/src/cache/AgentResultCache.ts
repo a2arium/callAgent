@@ -157,7 +157,11 @@ export class AgentResultCache {
         const id = artifactId || crypto.randomUUID();
         // We use the virtual agent 'artifact_store' and cacheKey = artifactId
         // This reuses the existing table structure without changes.
-        const size = JSON.stringify(value).length;
+        const serialized = JSON.stringify(value);
+        if (serialized === undefined) {
+            throw new Error('Artifact value is not JSON serializable');
+        }
+        const size = serialized.length;
         const agentName = 'artifact_store';
         const cacheKey = this.generateCacheKey({ artifactId: id }, []);
         const expiresAt = new Date(Date.now() + 86400 * 30 * 1000);
@@ -165,27 +169,34 @@ export class AgentResultCache {
         // Artifact publication is not a best-effort cache write. Returning an ID
         // after a rejected write creates an unusable durable marker, so propagate
         // the storage error to the persistence boundary.
-        await this.prisma.agentResultCache.upsert({
-            where: {
-                tenantId_agentName_cacheKey: { tenantId, agentName, cacheKey }
-            },
-            update: {
-                result: value as any,
-                expiresAt,
-                createdAt: new Date()
-            },
-            create: {
-                tenantId,
-                agentName,
-                cacheKey,
-                result: value as any,
-                expiresAt
-            },
-            // Artifact payloads can be several MiB. Prisma otherwise returns
-            // and JSON-parses the complete JSONB value after every upsert even
-            // though this path only needs durable-write confirmation.
-            select: { id: true },
-        });
+        // Do not use the generated-model JSON upsert here. Prisma's JS driver
+        // adapter retains the encoded JSON argument after each model write, so
+        // a sequence of bounded artifacts grows the heap with the total bytes
+        // written. A parameterized scalar SQL write has identical persistence
+        // semantics and releases each serialized payload after the await.
+        if (typeof this.prisma.$executeRaw === 'function') {
+            await this.prisma.$executeRaw`
+                INSERT INTO agent_result_cache
+                    (id, tenant_id, agent_name, cache_key, result, created_at, expires_at)
+                VALUES
+                    (${id}, ${tenantId}, ${agentName}, ${cacheKey}, ${serialized}::jsonb, NOW(), ${expiresAt})
+                ON CONFLICT (tenant_id, agent_name, cache_key)
+                DO UPDATE SET
+                    result = EXCLUDED.result,
+                    expires_at = EXCLUDED.expires_at,
+                    created_at = NOW()
+            `;
+        } else {
+            // Lightweight/custom adapters used by tests and embedders may only
+            // implement the generated model surface. They preserve historical
+            // behavior; the PostgreSQL runtime always exposes $executeRaw.
+            await this.prisma.agentResultCache.upsert({
+                where: { tenantId_agentName_cacheKey: { tenantId, agentName, cacheKey } },
+                update: { result: value as any, expiresAt, createdAt: new Date() },
+                create: { id, tenantId, agentName, cacheKey, result: value as any, expiresAt },
+                select: { id: true },
+            });
+        }
 
         return { size, artifactId: id };
     }
