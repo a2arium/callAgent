@@ -1051,7 +1051,10 @@ export class TaskExecutor {
                 state: 'failed',
                 timestamp: new Date().toISOString(),
                 message: { role: 'agent', parts: [{ type: 'text', text: `Loop failed: ${outcome.reason}` }] },
-                metadata: { reason: outcome.reason }
+                metadata: {
+                    reason: outcome.reason,
+                    ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+                }
             } as any;
         }
         if (outcome.kind === 'complete') {

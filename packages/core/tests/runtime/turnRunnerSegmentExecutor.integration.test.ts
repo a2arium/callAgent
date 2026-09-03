@@ -149,6 +149,36 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         });
     });
 
+    it('preserves a structured execution failure at the segment boundary', async () => {
+        const failure = {
+            ok: false,
+            code: 'ANAC_CANDIDATE_FAILED',
+            phase: 'PROCESS_RESOURCE',
+            message: 'candidate checkpoint is incompatible',
+        };
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
+            M: initialM(params.ctx),
+            outcome: { kind: 'fail', reason: failure.code, error: failure },
+            metrics: {},
+            taskStatus: {
+                state: 'failed',
+                timestamp: new Date().toISOString(),
+                metadata: { reason: failure.code, error: failure },
+            },
+        }));
+
+        const result = await executor.runSegment({
+            tenantId,
+            taskId: `${taskId}-structured-failure`,
+            agentId,
+            idempotencyKey: `${taskId}-structured-failure:start`,
+            runtimeSurface: 'hatchet',
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(result.boundary).toEqual({ kind: 'fail', error: failure });
+    });
+
     it('runs optional post-commit work after attempt closure without turn ownership', async () => {
         const observedOrder: string[] = [];
         const postCommitWork = jest.fn(async () => {

@@ -752,7 +752,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
     ): Promise<SegmentResult['boundary']> {
         const state = taskEntity.status?.state;
         if (state === 'failed') {
-            return { kind: 'fail', error: 'segment failed' };
+            const metadata = taskEntity.status?.metadata as
+                | { error?: unknown; reason?: unknown }
+                | undefined;
+            return {
+                kind: 'fail',
+                error: metadata?.error ?? metadata?.reason ?? 'segment failed',
+            };
         }
         if (state === 'completed') {
             return { kind: 'complete', result: taskEntity.status?.metadata?.result };
