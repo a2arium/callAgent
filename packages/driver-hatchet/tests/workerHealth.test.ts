@@ -40,6 +40,7 @@ describe('worker health monitor', () => {
             }] })) } } as any,
             workerName: 'runtime-a',
             intervalMs: 60_000,
+            initialRegistrationGraceMs: 0,
             onStreamUnavailable: unavailable,
         });
 
@@ -47,6 +48,32 @@ describe('worker health monitor', () => {
             create: expect.objectContaining({ state: 'failed', errorCode: 'HATCHET_WORKER_STREAM_UNAVAILABLE' }),
         }));
         expect(unavailable).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('missing required workflows') }));
+        await monitor.stop();
+    });
+
+    it('allows Hatchet a bounded window to publish the initial ACTIVE registration', async () => {
+        const upsert = jest.fn(async () => undefined);
+        const unavailable = jest.fn();
+        const list = jest.fn()
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValue({ rows: [{
+                name: 'runtime-a', status: 'ACTIVE', lastHeartbeatAt: new Date().toISOString(), registeredWorkflows,
+            }] });
+        const monitor = await startWorkerHealthMonitor({
+            prisma: { runtimeWorkerHealth: { upsert } },
+            hatchet: { workers: { list } } as any,
+            workerName: 'runtime-a',
+            intervalMs: 5,
+            initialRegistrationGraceMs: 1_000,
+            onStreamUnavailable: unavailable,
+        });
+
+        expect(unavailable).not.toHaveBeenCalled();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+            update: expect.objectContaining({ state: 'ready' }),
+        }));
+        expect(unavailable).not.toHaveBeenCalled();
         await monitor.stop();
     });
 });
