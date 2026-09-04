@@ -4,7 +4,9 @@ import type {
     AgentRunGraph,
     AgentRunNode,
     AgentRunStatus,
+    CognitiveTurnRun,
     EffectRun,
+    OperatorPage,
     TurnAttemptRun,
     TurnRun,
 } from './runGraph.js';
@@ -16,7 +18,7 @@ import {
     type TaskSubmissionOrigin,
 } from '../orchestration/TaskSubmission.js';
 
-export type OperatorProjectionMode = 'bridge' | 'compare' | 'semantic';
+export type OperatorProjectionMode = 'auto' | 'bridge' | 'compare' | 'semantic';
 export type OperatorProjectionWriteMode = 'off' | 'shadow' | 'on';
 
 export type SemanticAgentRunListParams = {
@@ -297,7 +299,7 @@ type SemanticEffectRow = {
 
 export function readProjectionMode(): OperatorProjectionMode {
     const raw = process.env.CALLAGENT_OPERATOR_PROJECTION_READ;
-    return raw === 'compare' || raw === 'semantic' ? raw : 'bridge';
+    return raw === 'bridge' || raw === 'compare' || raw === 'semantic' || raw === 'auto' ? raw : 'auto';
 }
 
 export function readProjectionWriteMode(): OperatorProjectionWriteMode {
@@ -1214,6 +1216,198 @@ export class OperatorProjectionRepository {
             ['runGraph', params.tenantId, params.taskId].join('\x1f'),
             () => this.buildGraphUncoalesced(params),
         );
+    }
+
+    /**
+     * The polling graph is intentionally a summary read.  Do not route it
+     * through buildGraph(): that method remains useful for projection repair
+     * and comparison, but it materializes every historical row.
+     */
+    async buildSummaryGraph(params: { tenantId: string; taskId: string }): Promise<AgentRunGraph | undefined> {
+        if (!this.isAvailable()) return undefined;
+        const rootRows = await this.prisma.agentRun!.findMany!({
+            where: { tenantId: params.tenantId, taskId: params.taskId }, take: 1,
+        }) as SemanticRunRow[];
+        const rootRow = rootRows[0];
+        if (!rootRow) return undefined;
+
+        const [runs, edges, turnRows, counts] = await Promise.all([
+            this.prisma.agentRun!.findMany!({
+                where: { tenantId: params.tenantId, rootTaskId: params.taskId },
+                orderBy: [{ startedAt: 'asc' }, { taskId: 'asc' }], take: 251,
+            }) as Promise<SemanticRunRow[]>,
+            this.prisma.agentRunEdge!.findMany!({
+                where: { tenantId: params.tenantId, rootTaskId: params.taskId },
+                orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 351,
+            }) as Promise<SemanticEdgeRow[]>,
+            this.prisma.turnRun!.findMany!({
+                where: { tenantId: params.tenantId, rootTaskId: params.taskId, turnSeq: { not: null } },
+                orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: 241,
+            }) as Promise<SemanticTurnRow[]>,
+            this.summaryCounts(params.tenantId, params.taskId),
+        ]);
+        const nodes = runs.some((row) => row.taskId === rootRow.taskId)
+            ? runs.map(rowToNode)
+            : [rowToNode(rootRow), ...runs.map(rowToNode)];
+        const grouped = groupTurnAttempts(turnRows.map(rowToTurnAttempt)).turns
+            .sort((a, b) => Number(Boolean(b.status === 'running')) - Number(Boolean(a.status === 'running')) || b.turnSeq - a.turnSeq);
+        const active = grouped.filter((turn) => turn.status === 'running' || turn.status === 'queued' || turn.status === 'waiting');
+        const recent = grouped.filter((turn) => !active.includes(turn)).slice(0, Math.max(0, 20 - active.length));
+        const turns = [...active, ...recent].slice(0, 20).map((turn) => ({ ...turn, cognitiveTurns: undefined }));
+        const totalTurns = counts.turns || grouped.length;
+        const omittedTurns = Math.max(0, totalTurns - turns.length);
+        const topologyTruncated = runs.length >= 251 || edges.length >= 351;
+        // `auto` may only claim a semantic graph when the root's authoritative
+        // aggregates are represented by the indexed facts we just read.
+        const incompleteRootProjection = (rootRow.childCount ?? 0) > edges.length ||
+            ((rootRow.turnCount ?? 0) > 0 && totalTurns === 0) ||
+            grouped.some((turn) => turn.status === 'unknown' || !turn.agentId || !isCanonicalAttemptIdentity(turn));
+        return {
+            schemaVersion: 4,
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            root: rowToNode(rootRow),
+            nodes,
+            edges: edges.map(rowToEdge),
+            turns,
+            unassignedAttempts: [], memoryOps: [], effects: [], events: [],
+            coordination: {
+                taskId: params.taskId, state: 'idle', health: 'attention', observedAt: new Date().toISOString(),
+                requestedGeneration: '0', completedGeneration: '0', issues: ['projection_partial'],
+            },
+            debug: { driverRuns: [] },
+            caps: { nodeLimit: 250, edgeLimit: 350, depthLimit: 4, truncated: topologyTruncated },
+            projection: { source: 'semantic', partial: incompleteRootProjection },
+            summary: {
+                turns: { total: totalTurns, returned: turns.length, latestTurnSeq: turns[0]?.turnSeq },
+                cognition: { total: counts.cognition, returned: 0 }, attempts: { total: counts.attempts, returned: turns.reduce((n, t) => n + t.attempts.length, 0) },
+                memoryOps: { total: 0, returned: 0 }, events: { total: counts.events, returned: 0 },
+                effects: { total: counts.effects, returned: 0 }, driverRuns: { total: counts.driverRuns, returned: 0 },
+            },
+            omissions: [
+                ...(omittedTurns ? [{ collection: 'turns' as const, reason: 'collection_limit' as const, omitted: omittedTurns }] : []),
+                ...(counts.cognition ? [{ collection: 'cognition' as const, reason: 'collection_limit' as const, omitted: counts.cognition }] : []),
+                ...(counts.effects ? [{ collection: 'effects' as const, reason: 'collection_limit' as const, omitted: counts.effects }] : []),
+                ...(counts.events ? [{ collection: 'events' as const, reason: 'collection_limit' as const, omitted: counts.events }] : []),
+                ...(counts.driverRuns ? [{ collection: 'driverRuns' as const, reason: 'collection_limit' as const, omitted: counts.driverRuns }] : []),
+            ],
+        };
+    }
+
+    private async summaryCounts(tenantId: string, rootTaskId: string): Promise<{ turns: number; attempts: number; cognition: number; effects: number; events: number; driverRuns: number }> {
+        const count = async (delegate: PrismaDelegate | undefined, where: Record<string, unknown>) =>
+            typeof delegate?.count === 'function' ? delegate.count({ where }) : 0;
+        const [attempts, cognition, effects, events, driverRuns] = await Promise.all([
+            count(this.prisma.turnRun, { tenantId, rootTaskId }),
+            count(this.prisma.cognitiveTurnRun, { tenantId, rootTaskId }),
+            count(this.prisma.runEffect, { tenantId, rootTaskId }),
+            count(this.prisma.wMEvent, { tenantId, sessionId: rootTaskId }),
+            count((this.prisma as ProjectionPrisma & { driverRun?: PrismaDelegate }).driverRun, { tenantId, rootTaskId }),
+        ]);
+        const uniqueTurns = typeof (this.prisma.turnRun as any)?.groupBy === 'function'
+            ? (await (this.prisma.turnRun as any).groupBy({ by: ['taskId', 'turnSeq'], where: { tenantId, rootTaskId, turnSeq: { not: null } } })).length
+            : attempts;
+        return { turns: uniqueTurns, attempts, cognition, effects, events, driverRuns };
+    }
+
+    /** Direct, bounded logical-turn page. It deliberately does not build a graph first. */
+    async listTurns(params: {
+        tenantId: string;
+        taskId: string;
+        cursor?: string;
+        limit: number;
+    }): Promise<OperatorPage<TurnRun> | undefined> {
+        if (typeof this.prisma.turnRun?.findMany !== 'function') return undefined;
+        const cursor = decodeDetailCursor(params.cursor);
+        const where = {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            turnSeq: { not: null, ...(cursor?.turnSeq !== undefined ? { lt: cursor.turnSeq } : {}) },
+        };
+        // Fetch a bounded attempt window then group it into durable logical turns.
+        // The detail endpoint provides full retry history when an individual turn is opened.
+        const rows = await this.prisma.turnRun.findMany({
+            where,
+            orderBy: [{ turnSeq: 'desc' }, { createdAt: 'desc' }],
+            take: params.limit * 12 + 1,
+        }) as SemanticTurnRow[];
+        const grouped = groupTurnAttempts(rows.map(rowToTurnAttempt)).turns
+            .sort((left, right) => right.turnSeq - left.turnSeq);
+        const items = grouped.slice(0, params.limit);
+        const hasMore = grouped.length > params.limit || rows.length > params.limit * 12;
+        const next = items.at(-1)?.turnSeq;
+        const total = typeof (this.prisma.turnRun as any).groupBy === 'function'
+            ? (await (this.prisma.turnRun as any).groupBy({
+                by: ['turnSeq'], where: { tenantId: params.tenantId, taskId: params.taskId, turnSeq: { not: null } },
+            })).length
+            : items.length + (hasMore ? 1 : 0);
+        return pageResult(items, params.limit, hasMore, next === undefined ? undefined : encodeDetailCursor({ turnSeq: next }), {
+            total,
+            returned: items.length,
+            latestTurnSeq: items[0]?.turnSeq,
+        });
+    }
+
+    async getTurn(params: { tenantId: string; taskId: string; turnSeq: number }): Promise<TurnRun | null | undefined> {
+        if (typeof this.prisma.turnRun?.findMany !== 'function') return undefined;
+        const rows = await this.prisma.turnRun.findMany({
+            where: { tenantId: params.tenantId, taskId: params.taskId, turnSeq: params.turnSeq },
+            orderBy: [{ createdAt: 'asc' }],
+            take: 101,
+        }) as SemanticTurnRow[];
+        return groupTurnAttempts(rows.map(rowToTurnAttempt)).turns[0] ?? null;
+    }
+
+    async listTurnAttempts(params: { tenantId: string; taskId: string; turnSeq: number; cursor?: string; limit: number }): Promise<OperatorPage<TurnAttemptRun> | undefined> {
+        if (typeof this.prisma.turnRun?.findMany !== 'function') return undefined;
+        const cursor = decodeDetailCursor(params.cursor);
+        const rows = await this.prisma.turnRun.findMany({
+            where: {
+                tenantId: params.tenantId, taskId: params.taskId, turnSeq: params.turnSeq,
+                ...(cursor?.id ? { id: { lt: cursor.id } } : {}),
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: params.limit + 1,
+        }) as SemanticTurnRow[];
+        const hasMore = rows.length > params.limit;
+        const items = rows.slice(0, params.limit).map(rowToTurnAttempt);
+        return pageResult(items, params.limit, hasMore, hasMore ? encodeDetailCursor({ id: rows[params.limit - 1]?.id }) : undefined, {
+            total: items.length + (hasMore ? 1 : 0), returned: items.length,
+        });
+    }
+
+    async listCognitiveTurns(params: { tenantId: string; taskId: string; turnSeq: number; cursor?: string; limit: number }): Promise<OperatorPage<CognitiveTurnRun> | undefined> {
+        if (typeof this.prisma.cognitiveTurnRun?.findMany !== 'function') return undefined;
+        const cursor = decodeDetailCursor(params.cursor);
+        const rows = await this.prisma.cognitiveTurnRun.findMany({
+            where: {
+                tenantId: params.tenantId, taskId: params.taskId, segmentSeq: params.turnSeq,
+                ...(cursor?.cognitionTurnSeq !== undefined ? { cognitionTurnSeq: { lt: cursor.cognitionTurnSeq } } : {}),
+            },
+            orderBy: [{ cognitionTurnSeq: 'desc' }, { id: 'desc' }], take: params.limit + 1,
+        }) as SemanticCognitiveTurnRow[];
+        const hasMore = rows.length > params.limit;
+        const items = rows.slice(0, params.limit).map(rowToCognitiveTurn);
+        return pageResult(items, params.limit, hasMore, hasMore ? encodeDetailCursor({ cognitionTurnSeq: rows[params.limit - 1]?.cognitionTurnSeq }) : undefined, {
+            total: items.length + (hasMore ? 1 : 0), returned: items.length,
+        });
+    }
+
+    async listEffects(params: { tenantId: string; taskId: string; cursor?: string; limit: number }): Promise<OperatorPage<EffectRun> | undefined> {
+        if (typeof this.prisma.runEffect?.findMany !== 'function') return undefined;
+        const cursor = decodeDetailCursor(params.cursor);
+        const rows = await this.prisma.runEffect.findMany({
+            where: {
+                tenantId: params.tenantId, taskId: params.taskId,
+                ...(cursor?.updatedAt && cursor.id ? { OR: [{ updatedAt: { lt: new Date(cursor.updatedAt) } }, { updatedAt: new Date(cursor.updatedAt), id: { lt: cursor.id } }] } : {}),
+            },
+            orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }], take: params.limit + 1,
+        }) as SemanticEffectRow[];
+        const hasMore = rows.length > params.limit;
+        const items = rows.slice(0, params.limit).map(rowToEffect);
+        const last = rows[params.limit - 1];
+        return pageResult(items, params.limit, hasMore, hasMore && last ? encodeDetailCursor({ updatedAt: toIso(last.updatedAt), id: last.id }) : undefined, {
+            total: items.length + (hasMore ? 1 : 0), returned: items.length,
+        });
     }
 
     private async buildGraphUncoalesced(params: { tenantId: string; taskId: string }): Promise<AgentRunGraph | undefined> {
@@ -2574,6 +2768,41 @@ type CursorValue = { updatedAt: string; id: string };
 
 function encodeCursor(cursor: CursorValue): string {
     return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+type DetailCursor = { turnSeq?: number; cognitionTurnSeq?: number; updatedAt?: string; id?: string };
+
+function decodeDetailCursor(cursor: string | undefined): DetailCursor | undefined {
+    if (!cursor) return undefined;
+    try {
+        const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Record<string, unknown>;
+        const output: DetailCursor = {};
+        if (typeof parsed.turnSeq === 'number' && Number.isSafeInteger(parsed.turnSeq)) output.turnSeq = parsed.turnSeq;
+        if (typeof parsed.cognitionTurnSeq === 'number' && Number.isSafeInteger(parsed.cognitionTurnSeq)) output.cognitionTurnSeq = parsed.cognitionTurnSeq;
+        if (typeof parsed.updatedAt === 'string' && !Number.isNaN(Date.parse(parsed.updatedAt))) output.updatedAt = parsed.updatedAt;
+        if (typeof parsed.id === 'string' && parsed.id.length > 0) output.id = parsed.id;
+        return Object.keys(output).length > 0 ? output : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function encodeDetailCursor(cursor: DetailCursor): string {
+    return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function pageResult<T>(
+    items: T[],
+    limit: number,
+    hasMore: boolean,
+    nextCursor: string | undefined,
+    summary: { total: number; returned: number; latestTurnSeq?: number },
+): OperatorPage<T> {
+    return {
+        items,
+        pageInfo: { limit, hasMore, ...(nextCursor ? { nextCursor } : {}) },
+        summary,
+    };
 }
 
 function decodeCursor(value: string | undefined): CursorValue | undefined {

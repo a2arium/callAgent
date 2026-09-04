@@ -12,7 +12,7 @@ import { formatCost, formatDuration, formatRelative } from '../../design/format'
 import { buildNodeRollup, deriveGraphInsights, deriveStatus, getNodeById } from '../../domain/derive';
 import { AgentRunGraphView } from '../graph/AgentRunGraphView';
 import { NodeInspector } from '../inspector/NodeInspector';
-import type { AgentRunNode, TurnRun } from '../../types';
+import type { AgentRunGraph, AgentRunNode, TurnRun } from '../../types';
 import { parseRunSearch } from '../../app/state';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../app/auth';
@@ -48,7 +48,9 @@ export function RunDetailPage(): React.ReactElement {
   });
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const collapseButtonRef = useRef<HTMLButtonElement | null>(null);
-  const graph = graphQuery.data;
+  // v3 bridge responses from older runtimes occasionally omitted `nodes` even
+  // though they included a valid root. Never turn that into a blank canvas.
+  const graph = useMemo(() => normalizeGraph(graphQuery.data), [graphQuery.data]);
   const insights = useMemo(() => deriveGraphInsights(graph), [graph]);
   const selectedNode = getNodeById(graph, search.nodeId || insights.selectedNodeId);
   const selectedTurnSeq = numberFromString(search.turn);
@@ -278,6 +280,12 @@ export function RunDetailPage(): React.ReactElement {
         </Notice>
       ) : null}
 
+      {graph && ((graph.omissions?.length ?? 0) > 0 || graph.responseBudget?.truncated) ? (
+        <Notice title="Some run detail is loaded on demand">
+          The graph shows the current topology and recent turns. Historical details are available from the inspector and do not affect run status.
+        </Notice>
+      ) : null}
+
       {graph ? (
         <div
           className="grid min-h-[520px] grid-cols-1 gap-y-3 xl:min-h-[calc(100vh-250px)] xl:grid-cols-[minmax(620px,1fr)_var(--splitter-width)_var(--inspector-width)] xl:items-stretch xl:gap-y-0"
@@ -333,6 +341,11 @@ export function RunDetailPage(): React.ReactElement {
       )}
     </div>
   );
+}
+
+function normalizeGraph(graph: AgentRunGraph | undefined): AgentRunGraph | undefined {
+  if (!graph || graph.nodes.length > 0) return graph;
+  return { ...graph, nodes: [graph.root] };
 }
 
 function terminalStatusLabel(node: AgentRunNode | undefined): string | undefined {

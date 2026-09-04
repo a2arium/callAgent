@@ -8,7 +8,8 @@ export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'f
 export type RunSeverity = 'success' | 'info' | 'warning' | 'error' | 'neutral';
 
 export type AgentRunGraph = {
-    schemaVersion: 3;
+    /** v4 adds bounded-response summary and omission metadata. */
+    schemaVersion: 3 | 4;
     tenantId: string;
     taskId: string;
     root: AgentRunNode;
@@ -26,6 +27,47 @@ export type AgentRunGraph = {
     caps?: AgentRunGraphCaps;
     collapsedBranches?: CollapsedGraphBranch[];
     projection?: OperatorProjectionInfo;
+    summary?: AgentRunGraphSummary;
+    omissions?: AgentRunGraphOmission[];
+    responseBudget?: OperatorResponseBudget;
+};
+
+export type AgentRunGraphSummary = {
+    turns: GraphCollectionSummary;
+    cognition: GraphCollectionSummary;
+    attempts: GraphCollectionSummary;
+    memoryOps: GraphCollectionSummary;
+    events: GraphCollectionSummary;
+    effects: GraphCollectionSummary;
+    driverRuns: GraphCollectionSummary;
+};
+
+export type GraphCollectionSummary = {
+    total: number;
+    returned: number;
+    running?: number;
+    completed?: number;
+    failed?: number;
+    latestTurnSeq?: number;
+    nextCursor?: string;
+};
+
+export type AgentRunGraphOmission = {
+    collection: 'turns' | 'cognition' | 'attempts' | 'memoryOps' | 'events' | 'effects' | 'driverRuns' | 'previews';
+    reason: 'collection_limit' | 'response_budget' | 'projection_unavailable';
+    omitted: number;
+};
+
+export type OperatorResponseBudget = {
+    limitBytes: number;
+    actualBytes: number;
+    truncated: boolean;
+};
+
+export type OperatorPage<T> = {
+    items: T[];
+    pageInfo: { limit: number; hasMore: boolean; nextCursor?: string };
+    summary: GraphCollectionSummary;
 };
 
 export type TaskCoordinationView = {

@@ -14,6 +14,7 @@ import { LlmCallsTable } from '../llm/LlmCallsTable';
 import { MemoryOpsTable } from '../memory/MemoryOpsTable';
 import { TurnDetail, TurnTimeline } from '../turn/TurnTimeline';
 import { HatchetRunLink } from '../hatchet/HatchetRunLink';
+import { useTurn } from '../../api/hooks';
 import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, TaskCoordinationView, TurnRun } from '../../types';
 
 export function NodeInspector(props: {
@@ -32,6 +33,7 @@ export function NodeInspector(props: {
   onCollapse?: () => void;
   onCancel?: () => void;
 }): React.ReactElement {
+  const selectedTurnQuery = useTurn(props.tenantId, props.node?.taskId, props.selectedTurnSeq);
   if (!props.node) {
     return (
       <aside className="min-w-0 overflow-hidden rounded-lg border border-border bg-card p-4 xl:h-full xl:max-h-[calc(100vh-250px)]">
@@ -43,7 +45,7 @@ export function NodeInspector(props: {
   const rollup = buildNodeRollup(props.graph, props.node.taskId);
   const status = deriveStatus({ status: props.node.status, updatedAt: props.node.finishedAt ?? props.node.startedAt, turns: rollup.turns });
   const selectedTurn = props.selectedTurnSeq !== undefined
-    ? rollup.turns.find((turn) => turn.turnSeq === props.selectedTurnSeq)
+    ? selectedTurnQuery.data ?? rollup.turns.find((turn) => turn.turnSeq === props.selectedTurnSeq)
     : undefined;
 
   return (

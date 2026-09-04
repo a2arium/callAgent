@@ -164,16 +164,20 @@ curl http://127.0.0.1:8790/tasks/<taskId>/run-graph \
   -H 'x-tenant-id: <tenantId>'
 ```
 
-The response is an `AgentRunGraph`:
+The response is an `AgentRunGraph` schema version 4. It is a bounded polling
+summary, rather than a dump of every historical event:
 
 - `root`: the root `AgentRun`
 - `nodes`: root and child agent nodes
 - `edges`: child-agent calls
-- `turns`: turn details with TurnTrace references
-- `memoryOps`: memory read/write/delete key timeline
-- `effects`: debug effect runs
-- `events`: normalized event/log entries grouped by task, agent, trace, span, and token
-- `debug.driverRuns`: normalized raw driver rows
+- `turns`: active turns plus at most 20 recent logical-turn summaries
+- `summary`: complete collection counts before page truncation
+- `omissions`: explicit history/payload omissions and their reason
+- `responseBudget`: configured and measured response bytes
+
+`caps.truncated` applies only to topology limits. It never means that history
+or a large payload was omitted; those cases are listed in `omissions` and do
+not create a failed effect or change the agent's outcome.
 
 Additional read-only detail endpoints:
 
@@ -184,6 +188,36 @@ curl http://127.0.0.1:8790/tasks/<taskId>/turns/<turnSeq> \
 curl http://127.0.0.1:8790/tasks/<taskId>/memory \
   -H 'x-tenant-id: <tenantId>'
 ```
+
+For long histories, use keyset-paginated endpoints (`cursor`, default `limit=50`,
+maximum `100`) instead of asking the graph endpoint to inline detail:
+
+```text
+GET /tasks/:taskId/turns
+GET /tasks/:taskId/turns/:turnSeq/attempts
+GET /tasks/:taskId/turns/:turnSeq/cognitive-turns
+GET /tasks/:taskId/effects
+GET /tasks/:taskId/events
+GET /tasks/:taskId/memory-operations
+GET /tasks/:taskId/driver-runs
+```
+
+Each returns `{ items, nextCursor?, pageInfo, summary }`. Cursors are opaque and
+tenant-scoped; callers must not construct them. A direct turn lookup does not
+rebuild the complete graph.
+
+## Read mode and response budget
+
+`CALLAGENT_OPERATOR_PROJECTION_READ` accepts `auto`, `semantic`, `bridge`, or
+`compare`. Its default is `auto`: semantic facts are preferred when the root
+projection is ready; otherwise CallAgent returns a bounded bridge shell marked
+`projection.partial=true`. `bridge` remains an explicit rollback mode, and
+`compare` is for migration diagnostics.
+
+`CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES` defaults to 1 MiB and must be at
+least 16 KiB. A value below that minimum stops runtime readiness with a clear
+configuration error. The graph builder preserves the root and topology first,
+then strips optional previews/history until the serialized response fits.
 
 The operator SPA lives in `apps/operator-viewer`. In development it runs on Vite
 with a proxy to `runtime-host`. In production/local host mode, `runtime-host`

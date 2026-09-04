@@ -286,7 +286,7 @@ Phase 5 implementation must be staged behind read/write flags:
 
 ```text
 CALLAGENT_OPERATOR_PROJECTION_WRITE=off|shadow|on
-CALLAGENT_OPERATOR_PROJECTION_READ=bridge|compare|semantic
+CALLAGENT_OPERATOR_PROJECTION_READ=auto|bridge|compare|semantic
 ```
 
 Required migration sequence:

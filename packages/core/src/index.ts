@@ -19,6 +19,7 @@ export {
     type TurnRun,
     type EffectRun,
 } from './operator/runGraph.js';
+export { validateOperatorRawPayloadBudget } from './operator/payloadBudget.js';
 export {
     buildAgentIndex,
     type AgentIndexBuildResult,

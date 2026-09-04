@@ -1,5 +1,5 @@
 // src/api/router.ts
-import { Router, type RequestHandler } from 'express';
+import { Router, type Request, type RequestHandler, type Response } from 'express';
 import fs from 'node:fs/promises';
 import {
     handleTasksSend,
@@ -745,6 +745,54 @@ export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
             }).catch(() => undefined);
             res.status(500).json({ error: 'Failed to cancel task', message });
         }
+    }));
+
+    const operatorDetailParams = (req: Request) => ({
+        cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+        limit: typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined,
+    });
+    const operatorDetailEngine = (res: Response) => {
+        const engine = EngineLocator.getEngine<TaskEngine>();
+        if (!engine) res.status(503).json({ error: 'Task engine is not available' });
+        return engine;
+    };
+
+    router.get('/tasks/:taskId/turns', observeRoute('turns-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        res.json(await engine.listAgentRunTurns({ tenantId: context.tenantId, taskId: req.params.taskId!, ...operatorDetailParams(req) }));
+    }));
+    router.get('/tasks/:taskId/turns/:turnSeq/attempts', observeRoute('turn-attempts-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        const turnSeq = Number.parseInt(req.params.turnSeq ?? '', 10); if (!Number.isSafeInteger(turnSeq)) { res.status(400).json({ error: 'turnSeq must be a number' }); return; }
+        res.json(await engine.listAgentRunTurnAttempts({ tenantId: context.tenantId, taskId: req.params.taskId!, turnSeq, ...operatorDetailParams(req) }));
+    }));
+    router.get('/tasks/:taskId/turns/:turnSeq/cognitive-turns', observeRoute('cognitive-turns-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        const turnSeq = Number.parseInt(req.params.turnSeq ?? '', 10); if (!Number.isSafeInteger(turnSeq)) { res.status(400).json({ error: 'turnSeq must be a number' }); return; }
+        res.json(await engine.listAgentRunCognitiveTurns({ tenantId: context.tenantId, taskId: req.params.taskId!, turnSeq, ...operatorDetailParams(req) }));
+    }));
+    router.get('/tasks/:taskId/effects', observeRoute('effects-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        res.json(await engine.listAgentRunEffects({ tenantId: context.tenantId, taskId: req.params.taskId!, ...operatorDetailParams(req) }));
+    }));
+    router.get('/tasks/:taskId/events', observeRoute('events-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        res.json(await engine.listAgentRunEvents({ tenantId: context.tenantId, taskId: req.params.taskId!, ...operatorDetailParams(req) }));
+    }));
+    router.get('/tasks/:taskId/memory-operations', observeRoute('memory-operations-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        res.json(await engine.listAgentRunMemoryOperations({ tenantId: context.tenantId, taskId: req.params.taskId!, ...operatorDetailParams(req) }));
+    }));
+    router.get('/tasks/:taskId/driver-runs', observeRoute('driver-runs-page', async (req, res) => {
+        const context = contextOrRespond(req, res); if (!context) return;
+        const engine = operatorDetailEngine(res); if (!engine) return;
+        res.json(await engine.listAgentRunDriverRuns({ tenantId: context.tenantId, taskId: req.params.taskId!, ...operatorDetailParams(req) }));
     }));
 
     router.get('/tasks/:taskId/turns/:turnSeq', observeRoute('turn-detail', async (req, res) => {

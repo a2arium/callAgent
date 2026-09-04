@@ -203,6 +203,7 @@ model WMEvent {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([tenantId, sessionId, seq])
+  @@index([tenantId, sessionId, seq, eventId])
   @@map("wm_events")
 }
 
@@ -265,6 +266,7 @@ model DriverRun {
   @@index([tenantId, taskId, status])
   @@index([tenantId, rootTaskId, status])
   @@index([tenantId, createdAt])
+  @@index([tenantId, taskId, createdAt, id])
   @@index([tenantId, agentId, createdAt])
   @@index([tenantId, status, createdAt])
   @@map("driver_runs")
@@ -405,6 +407,7 @@ model TurnRun {
 
   @@unique([tenantId, taskId, attemptKey])
   @@index([tenantId, taskId, turnSeq])
+  @@index([tenantId, taskId, turnSeq, id])
   @@index([tenantId, rootTaskId, taskId, turnSeq])
   @@map("turn_runs")
 }
@@ -449,6 +452,7 @@ model CognitiveTurnRun {
   @@unique([tenantId, taskId, identityKey])
   @@index([tenantId, taskId, cognitionTurnSeq])
   @@index([tenantId, rootTaskId, taskId, segmentSeq])
+  @@index([tenantId, taskId, segmentSeq, cognitionTurnSeq, id])
   @@index([tenantId, taskId, attemptKey])
   @@map("cognitive_turn_runs")
 }
@@ -473,6 +477,7 @@ model RunEffect {
 
   @@index([tenantId, rootTaskId, operation, updatedAt])
   @@index([tenantId, taskId, turnSeq, operation])
+  @@index([tenantId, taskId, updatedAt, id])
   @@map("run_effects")
 }
 

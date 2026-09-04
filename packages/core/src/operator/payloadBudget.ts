@@ -29,6 +29,8 @@ export const DEFAULT_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024;
 export const DEFAULT_DRIVER_METADATA_MAX_BYTES = 64 * 1024;
 export const DEFAULT_HATCHET_PAYLOAD_MAX_BYTES = 64 * 1024;
 export const DEFAULT_OPERATOR_RAW_PAYLOAD_MAX_BYTES = 1024 * 1024;
+/** Smallest size that can safely contain the mandatory root graph shell. */
+export const MIN_OPERATOR_RAW_PAYLOAD_MAX_BYTES = 16 * 1024;
 
 const COMPACT_STRING_LIMIT = 1200;
 const COMPACT_ARRAY_ITEMS = 8;
@@ -246,7 +248,19 @@ export function readHatchetPayloadMaxBytes(): number {
 }
 
 export function readOperatorRawPayloadMaxBytes(): number {
-    return readByteBudget('CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES', DEFAULT_OPERATOR_RAW_PAYLOAD_MAX_BYTES);
+    const configured = readByteBudget('CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES', DEFAULT_OPERATOR_RAW_PAYLOAD_MAX_BYTES);
+    return Math.max(MIN_OPERATOR_RAW_PAYLOAD_MAX_BYTES, configured);
+}
+
+export function validateOperatorRawPayloadBudget(env: NodeJS.ProcessEnv = process.env): void {
+    const raw = env.CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES;
+    if (raw === undefined || raw.trim().length === 0) return;
+    const configured = Number(raw);
+    if (!Number.isFinite(configured) || configured < MIN_OPERATOR_RAW_PAYLOAD_MAX_BYTES) {
+        throw new Error(
+            `CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES must be at least ${MIN_OPERATOR_RAW_PAYLOAD_MAX_BYTES} bytes.`,
+        );
+    }
 }
 
 function compactTransition(transition: Record<string, unknown>): Record<string, unknown> {

@@ -1355,7 +1355,7 @@ describe('TaskEngine operator agent run list', () => {
         expect(JSON.stringify(appended[0]?.payload)).not.toContain('[truncated');
     });
 
-    it('surfaces payload budget events as graph effects', async () => {
+    it('keeps payload budget effects out of the bounded initial graph', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
         const engine = new TaskEngine({});
         const sessionManager = (engine as unknown as { sessionManager: SessionManager }).sessionManager;
@@ -1374,21 +1374,13 @@ describe('TaskEngine operator agent run list', () => {
 
         const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
 
-        expect(graph.effects).toEqual([
-            expect.objectContaining({
-                operation: 'payload.budget',
-                status: 'failed',
-                hiddenByDefault: false,
-                error: expect.objectContaining({
-                    code: 'LIMIT_EVENT_PAYLOAD_TOO_LARGE',
-                    message: 'event payload too large',
-                    eventType: 'turn.completed',
-                }),
-            }),
-        ]);
+        expect(graph.effects).toEqual([]);
+        expect(graph.omissions).toEqual(expect.arrayContaining([
+            expect.objectContaining({ collection: 'effects', reason: 'collection_limit' }),
+        ]));
     });
 
-    it('surfaces artifact resolution failures as payload budget effects', async () => {
+    it('does not inline artifact resolution effects in the bounded graph', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
         const engine = new TaskEngine({});
         const sessionManager = (engine as unknown as { sessionManager: SessionManager }).sessionManager;
@@ -1407,16 +1399,9 @@ describe('TaskEngine operator agent run list', () => {
 
         const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'child-task' });
 
-        expect(graph.effects).toEqual(expect.arrayContaining([
-            expect.objectContaining({
-                operation: 'payload.budget',
-                status: 'failed',
-                error: expect.objectContaining({
-                    code: 'ARTIFACT_RESOLUTION_FAILED',
-                    message: 'artifact art-1 could not be loaded',
-                    eventType: 'a2a.live_result.hydrate',
-                }),
-            }),
+        expect(graph.effects).toEqual([]);
+        expect(graph.omissions).toEqual(expect.arrayContaining([
+            expect.objectContaining({ collection: 'effects', reason: 'collection_limit' }),
         ]));
     });
 
@@ -1454,7 +1439,7 @@ describe('TaskEngine operator agent run list', () => {
         ]);
     });
 
-    it('caps oversized operator graph responses and surfaces a semantic effect', async () => {
+    it('caps oversized operator graph responses without creating a false failed effect', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_WRITE = 'off';
         process.env.CALLAGENT_OPERATOR_RAW_PAYLOAD_MAX_BYTES = '900';
         const engine = new TaskEngine({});
@@ -1474,16 +1459,10 @@ describe('TaskEngine operator agent run list', () => {
         const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
 
         expect(graph.projection).toEqual(expect.objectContaining({ partial: true }));
-        expect(graph.effects).toEqual(expect.arrayContaining([
-            expect.objectContaining({
-                operation: 'operator.response_budget',
-                status: 'failed',
-                error: expect.objectContaining({
-                    code: 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE',
-                }),
-            }),
-        ]));
-        expect(JSON.stringify(graph).length).toBeLessThan(1200);
+        expect(graph.effects).toEqual([]);
+        expect(graph.responseBudget).toEqual(expect.objectContaining({ truncated: true }));
+        expect(graph.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ taskId: 'root-task' })]));
+        expect(JSON.stringify(graph).length).toBeLessThanOrEqual(16 * 1024);
     });
 
     it('falls back to bridge graph when semantic graph rows are incomplete', async () => {
@@ -1551,7 +1530,7 @@ describe('TaskEngine operator agent run list', () => {
 
         const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
 
-        expect(graph.projection).toEqual({ source: 'bridge', partial: false });
+        expect(graph.projection).toEqual({ source: 'bridge', partial: true });
         expect(graph.root.taskId).toBe('root-task');
     });
 
@@ -1588,7 +1567,7 @@ describe('TaskEngine operator agent run list', () => {
 
         const graph = await engine.buildAgentRunGraph({ tenantId: 'default', taskId: 'root-task' });
 
-        expect(graph.projection).toEqual({ source: 'bridge', partial: false });
+        expect(graph.projection).toEqual({ source: 'bridge', partial: true });
         expect(prisma.driverRun.findMany).toHaveBeenCalled();
     });
 

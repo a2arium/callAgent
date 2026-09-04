@@ -444,7 +444,7 @@ export class SessionManager {
         return agentId !== undefined ? { ...payload, agentId } : payload;
     }
 
-    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }) {
+    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number; limit?: number }) {
         if (!this.store) return [] as Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>;
         return this.store.listEventsSince(params);
     }

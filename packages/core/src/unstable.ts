@@ -31,6 +31,7 @@ export {
     readEventPayloadMaxBytes,
     readHatchetPayloadMaxBytes,
     readOperatorRawPayloadMaxBytes,
+    validateOperatorRawPayloadBudget,
     type PayloadBudgetCode,
     type PayloadBudgetResult,
     type PayloadEnvelope,

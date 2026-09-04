@@ -182,7 +182,7 @@ export interface IWorkingMemorySessionStore {
         type: string;
         payload: Record<string, unknown>;
     }): Promise<{ eventId: string; seq: number }>;
-    listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>>;
+    listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number; limit?: number }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>>;
     enqueueOutbox(params: {
         tenantId: string;
         topic: string;

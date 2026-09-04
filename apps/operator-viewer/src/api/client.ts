@@ -1,4 +1,4 @@
-import type { AgentRunGraph, AgentRunListPage, AgentRunMemoryView, TurnRun } from '../types';
+import type { AgentRunEvent, AgentRunGraph, AgentRunListPage, AgentRunMemoryView, CognitiveTurnRun, EffectRun, OperatorPage, TurnAttemptRun, TurnRun } from '../types';
 
 export type ListAgentRunsInput = {
   tenantId: string;
@@ -346,6 +346,29 @@ export async function cancelRun(input: CancelRunInput): Promise<CancelRunRespons
 
 export async function getTurn(tenantId: string, taskId: string, turnSeq: number): Promise<TurnRun> {
   return fetchJson<TurnRun>(`/tasks/${encodeURIComponent(taskId)}/turns/${encodeURIComponent(String(turnSeq))}`, tenantId);
+}
+
+function detailPath(path: string, cursor?: string, limit?: number): string {
+  const query = new URLSearchParams();
+  if (cursor) query.set('cursor', cursor);
+  if (limit) query.set('limit', String(limit));
+  return `${path}${query.size ? `?${query}` : ''}`;
+}
+
+export async function listRunTurns(tenantId: string, taskId: string, cursor?: string, limit?: number): Promise<OperatorPage<TurnRun>> {
+  return fetchJson(detailPath(`/tasks/${encodeURIComponent(taskId)}/turns`, cursor, limit), tenantId);
+}
+export async function listTurnAttempts(tenantId: string, taskId: string, turnSeq: number, cursor?: string, limit?: number): Promise<OperatorPage<TurnAttemptRun>> {
+  return fetchJson(detailPath(`/tasks/${encodeURIComponent(taskId)}/turns/${turnSeq}/attempts`, cursor, limit), tenantId);
+}
+export async function listCognitiveTurns(tenantId: string, taskId: string, turnSeq: number, cursor?: string, limit?: number): Promise<OperatorPage<CognitiveTurnRun>> {
+  return fetchJson(detailPath(`/tasks/${encodeURIComponent(taskId)}/turns/${turnSeq}/cognitive-turns`, cursor, limit), tenantId);
+}
+export async function listRunEffects(tenantId: string, taskId: string, cursor?: string, limit?: number): Promise<OperatorPage<EffectRun>> {
+  return fetchJson(detailPath(`/tasks/${encodeURIComponent(taskId)}/effects`, cursor, limit), tenantId);
+}
+export async function listRunEvents(tenantId: string, taskId: string, cursor?: string, limit?: number): Promise<OperatorPage<AgentRunEvent>> {
+  return fetchJson(detailPath(`/tasks/${encodeURIComponent(taskId)}/events`, cursor, limit), tenantId);
 }
 
 export async function getMemory(tenantId: string, taskId: string): Promise<AgentRunMemoryView> {

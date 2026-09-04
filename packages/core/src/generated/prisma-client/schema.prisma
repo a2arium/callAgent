@@ -129,6 +129,7 @@ model DriverRun {
   @@index([tenantId, rootTaskId])
   @@index([tenantId, taskId, status])
   @@index([tenantId, rootTaskId, status])
+  @@index([tenantId, taskId, createdAt, id])
   @@map("driver_runs")
 }
 
@@ -261,6 +262,7 @@ model TurnRun {
 
   @@unique([tenantId, taskId, attemptKey])
   @@index([tenantId, taskId, turnSeq])
+  @@index([tenantId, taskId, turnSeq, id])
   @@index([tenantId, rootTaskId, taskId, turnSeq])
   @@map("turn_runs")
 }
@@ -305,6 +307,7 @@ model CognitiveTurnRun {
   @@unique([tenantId, taskId, identityKey])
   @@index([tenantId, taskId, cognitionTurnSeq])
   @@index([tenantId, rootTaskId, taskId, segmentSeq])
+  @@index([tenantId, taskId, segmentSeq, cognitionTurnSeq, id])
   @@index([tenantId, taskId, attemptKey])
   @@map("cognitive_turn_runs")
 }
@@ -329,6 +332,7 @@ model RunEffect {
 
   @@index([tenantId, rootTaskId, operation, updatedAt])
   @@index([tenantId, taskId, turnSeq, operation])
+  @@index([tenantId, taskId, updatedAt, id])
   @@map("run_effects")
 }
 

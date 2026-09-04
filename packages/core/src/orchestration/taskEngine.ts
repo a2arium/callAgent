@@ -117,6 +117,13 @@ import {
     type AgentRunGraph,
     type AgentRunSourceEvent,
     type DriverRunView,
+    type OperatorPage,
+    type TurnRun,
+    type TurnAttemptRun,
+    type CognitiveTurnRun,
+    type EffectRun,
+    type AgentRunEvent,
+    type MemoryOperationRun,
 } from '../operator/runGraph.js';
 import {
     OperatorProjectionRepository,
@@ -124,7 +131,6 @@ import {
     readProjectionWriteMode,
 } from '../operator/semanticProjection.js';
 import {
-    budgetEnvelope,
     measureJsonBytes,
     readOperatorRawPayloadMaxBytes,
 } from '../operator/payloadBudget.js';
@@ -698,73 +704,205 @@ function withGraphCaps(graph: AgentRunGraph, source: 'bridge' | 'semantic'): Age
 function withOperatorResponseBudget(graph: AgentRunGraph, source: 'bridge' | 'semantic'): AgentRunGraph {
     const limitBytes = readOperatorRawPayloadMaxBytes();
     const initialBytes = measureJsonBytes(graph);
-    if (initialBytes <= limitBytes) {
-        return graph;
+    const base = compactGraphForOperator(graph, source, limitBytes, initialBytes);
+    if (measureJsonBytes(base) <= limitBytes) return base;
+
+    // Historical detail is always lower priority than topology. Remove it in
+    // whole collections first, then reduce topology while keeping the root.
+    let candidate = base;
+    for (const collection of ['events', 'memoryOps', 'unassignedAttempts', 'effects', 'turns'] as const) {
+        if (measureJsonBytes(candidate) <= limitBytes) return candidate;
+        const current = candidate[collection];
+        if (current.length === 0) continue;
+        candidate = omitGraphCollection(candidate, collection, current.length);
     }
-    const budgetEffect = {
-        id: `${graph.taskId}:operator-response-budget`,
-        rootTaskId: graph.taskId,
-        taskId: graph.taskId,
-        operation: 'operator.response_budget',
-        status: 'failed' as const,
-        hiddenByDefault: false,
-        error: {
-            code: 'LIMIT_OPERATOR_RESPONSE_TOO_LARGE',
-            message: 'Operator graph response exceeded the configured size limit. Raw debug events were omitted.',
-            limitBytes,
-            actualBytes: initialBytes,
-        },
-    };
-    const compacted: AgentRunGraph = {
-        ...graph,
-        events: graph.events.slice(0, 25).map((event) => ({
-            ...event,
-            payload: {
-                envelope: budgetEnvelope(
-                    'LIMIT_OPERATOR_RESPONSE_TOO_LARGE',
-                    limitBytes,
-                    initialBytes,
-                    'Raw event payload omitted because the operator response exceeded the configured size limit.'
-                ),
+    while (candidate.nodes.length > 1 && measureJsonBytes(candidate) > limitBytes) {
+        const removed = candidate.nodes.at(-1)!;
+        candidate = withGraphBudgetMetadata({
+            ...candidate,
+            nodes: candidate.nodes.slice(0, -1),
+            edges: candidate.edges.filter((edge) => edge.parentTaskId !== removed.taskId && edge.childTaskId !== removed.taskId),
+            caps: {
+                ...(candidate.caps ?? defaultGraphCaps()),
+                truncated: true,
             },
-        })),
-        debug: { driverRuns: [] },
-        effects: [...graph.effects, budgetEffect],
-        projection: {
-            source,
-            partial: true,
-        },
-        caps: {
-            nodeLimit: graph.caps?.nodeLimit ?? GRAPH_NODE_LIMIT,
-            edgeLimit: graph.caps?.edgeLimit ?? GRAPH_EDGE_LIMIT,
-            depthLimit: graph.caps?.depthLimit ?? GRAPH_DEPTH_LIMIT,
-            truncated: true,
-        },
-    };
-    if (measureJsonBytes(compacted) <= limitBytes || compacted.events.length === 0) {
-        return compacted;
+            omissions: appendGraphOmission(candidate.omissions, {
+                collection: 'previews', reason: 'response_budget', omitted: 1,
+            }),
+        }, limitBytes, initialBytes, true);
     }
-    const withoutEvents: AgentRunGraph = {
-        ...compacted,
-        events: [],
-    };
-    if (measureJsonBytes(withoutEvents) <= limitBytes) return withoutEvents;
-    return {
-        schemaVersion: 3,
-        tenantId: withoutEvents.tenantId,
-        taskId: withoutEvents.taskId,
-        root: withoutEvents.root,
-        coordination: withoutEvents.coordination,
-        nodes: [],
+    // A valid root-only shell is the final contract. The configured minimum is
+    // deliberately large enough for this shape.
+    return withGraphBudgetMetadata({
+        ...candidate,
+        nodes: [compactOperatorNode(graph.root)],
         edges: [],
         turns: [],
         unassignedAttempts: [],
         memoryOps: [],
-        effects: [budgetEffect],
+        effects: [],
         events: [],
         debug: { driverRuns: [] },
-        projection: { source, partial: true },
+        caps: { ...(candidate.caps ?? defaultGraphCaps()), truncated: candidate.nodes.length > 1 },
+        omissions: appendGraphOmission(candidate.omissions, {
+            collection: 'previews', reason: 'response_budget', omitted: Math.max(0, graph.nodes.length - 1),
+        }),
+    }, limitBytes, initialBytes, true);
+}
+
+function compactGraphForOperator(
+    graph: AgentRunGraph,
+    source: 'bridge' | 'semantic',
+    limitBytes: number,
+    initialBytes: number,
+): AgentRunGraph {
+    const root = compactOperatorNode(graph.root);
+    const nodes = [root, ...graph.nodes
+        .filter((node) => node.taskId !== root.taskId)
+        .map(compactOperatorNode)];
+    const nodeIds = new Set(nodes.map((node) => node.taskId));
+    const turns = graph.turns
+        .slice(-20)
+        .map(compactOperatorTurn);
+    const omissions = [
+        ...(graph.turns.length > turns.length ? [{ collection: 'turns' as const, reason: 'collection_limit' as const, omitted: graph.turns.length - turns.length }] : []),
+        ...(graph.memoryOps.length > 0 ? [{ collection: 'memoryOps' as const, reason: 'collection_limit' as const, omitted: graph.memoryOps.length }] : []),
+        ...(graph.events.length > 0 ? [{ collection: 'events' as const, reason: 'collection_limit' as const, omitted: graph.events.length }] : []),
+        ...(graph.effects.length > 0 ? [{ collection: 'effects' as const, reason: 'collection_limit' as const, omitted: graph.effects.length }] : []),
+        ...(graph.debug.driverRuns.length > 0 ? [{ collection: 'driverRuns' as const, reason: 'collection_limit' as const, omitted: graph.debug.driverRuns.length }] : []),
+    ];
+    const summary = graph.summary ?? {
+        turns: { total: graph.turns.length, returned: turns.length, latestTurnSeq: graph.turns.at(-1)?.turnSeq },
+        cognition: { total: graph.turns.reduce((total, turn) => total + (turn.cognitiveTurns?.length ?? 0), 0), returned: 0 },
+        attempts: { total: graph.turns.reduce((total, turn) => total + turn.attempts.length, 0) + graph.unassignedAttempts.length, returned: turns.reduce((total, turn) => total + turn.attempts.length, 0) },
+        memoryOps: { total: graph.memoryOps.length, returned: 0 },
+        events: { total: graph.events.length, returned: 0 },
+        effects: { total: graph.effects.length, returned: 0 },
+        driverRuns: { total: graph.debug.driverRuns.length, returned: 0 },
     };
+    return withGraphBudgetMetadata({
+        ...graph,
+        schemaVersion: 4,
+        root,
+        nodes,
+        edges: graph.edges.filter((edge) => nodeIds.has(edge.parentTaskId) && (!edge.childTaskId || nodeIds.has(edge.childTaskId))).map(compactOperatorEdge),
+        turns,
+        unassignedAttempts: [],
+        memoryOps: [],
+        effects: [],
+        events: [],
+        debug: { driverRuns: [] },
+        projection: { source, partial: graph.projection?.partial === true || omissions.length > 0 || initialBytes > limitBytes },
+        caps: graph.caps ?? defaultGraphCaps(),
+        summary,
+        omissions,
+    }, limitBytes, initialBytes, initialBytes > limitBytes || omissions.length > 0);
+}
+
+function compactOperatorNode(node: AgentRunGraph['root']): AgentRunGraph['root'] {
+    const { inputPreview: _inputPreview, outputPreview: _outputPreview, ...summary } = node;
+    return summary;
+}
+
+function compactOperatorEdge(edge: AgentRunGraph['edges'][number]): AgentRunGraph['edges'][number] {
+    const { inputPreview: _inputPreview, resultPreview: _resultPreview, ...summary } = edge;
+    return summary;
+}
+
+function compactOperatorTurn(turn: AgentRunGraph['turns'][number]): AgentRunGraph['turns'][number] {
+    const attempts = turn.attempts.slice(-1).map((attempt) => {
+        const { cognition: _cognition, llmCalls: _llmCalls, memoryOps: _memoryOps, ...summary } = attempt;
+        return summary;
+    });
+    const { cognitiveTurns: _cognitiveTurns, cognition: _cognition, llmCalls: _llmCalls, memoryOps: _memoryOps, ...summary } = turn;
+    return { ...summary, attempts };
+}
+
+function defaultGraphCaps() {
+    return { nodeLimit: GRAPH_NODE_LIMIT, edgeLimit: GRAPH_EDGE_LIMIT, depthLimit: GRAPH_DEPTH_LIMIT, truncated: false };
+}
+
+function appendGraphOmission(
+    omissions: AgentRunGraph['omissions'] | undefined,
+    omission: NonNullable<AgentRunGraph['omissions']>[number],
+): NonNullable<AgentRunGraph['omissions']> {
+    const existing = omissions ?? [];
+    const matched = existing.find((entry) => entry.collection === omission.collection && entry.reason === omission.reason);
+    return matched === undefined
+        ? [...existing, omission]
+        : existing.map((entry) => entry === matched ? { ...entry, omitted: entry.omitted + omission.omitted } : entry);
+}
+
+function omitGraphCollection(
+    graph: AgentRunGraph,
+    collection: 'events' | 'memoryOps' | 'unassignedAttempts' | 'effects' | 'turns',
+    count: number,
+): AgentRunGraph {
+    return withGraphBudgetMetadata({
+        ...graph,
+        [collection]: [],
+        omissions: appendGraphOmission(graph.omissions, {
+            collection: collection === 'unassignedAttempts' ? 'attempts' : collection,
+            reason: 'response_budget',
+            omitted: count,
+        }),
+    }, graph.responseBudget?.limitBytes ?? readOperatorRawPayloadMaxBytes(), graph.responseBudget?.actualBytes ?? measureJsonBytes(graph), true);
+}
+
+function withGraphBudgetMetadata(
+    graph: AgentRunGraph,
+    limitBytes: number,
+    _actualBytes: number,
+    truncated: boolean,
+): AgentRunGraph {
+    const base = {
+        ...graph,
+        responseBudget: { limitBytes, actualBytes: 0, truncated },
+    };
+    // The metadata is part of the response, so measure the serialized shape
+    // users actually receive. A second pass stabilizes the digit count.
+    const first = measureJsonBytes(base);
+    const measured = measureJsonBytes({ ...base, responseBudget: { limitBytes, actualBytes: first, truncated } });
+    return { ...base, responseBudget: { limitBytes, actualBytes: measured, truncated } };
+}
+
+const OPERATOR_DETAIL_DEFAULT_LIMIT = 50;
+const OPERATOR_DETAIL_MAX_LIMIT = 100;
+
+function clampOperatorDetailLimit(value: number | undefined): number {
+    if (value === undefined || !Number.isFinite(value)) return OPERATOR_DETAIL_DEFAULT_LIMIT;
+    return Math.max(1, Math.min(OPERATOR_DETAIL_MAX_LIMIT, Math.floor(value)));
+}
+
+function emptyOperatorPage<T>(limit: number): OperatorPage<T> {
+    return { items: [], pageInfo: { limit, hasMore: false }, summary: { total: 0, returned: 0 } };
+}
+
+function decodeOperatorEventCursor(value: string | undefined): number | undefined {
+    if (!value) return undefined;
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as { seq?: unknown };
+        return typeof parsed.seq === 'number' && Number.isSafeInteger(parsed.seq) ? parsed.seq : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function encodeOperatorEventCursor(seq: number): string {
+    return Buffer.from(JSON.stringify({ seq }), 'utf8').toString('base64url');
+}
+
+function decodeOperatorDriverCursor(value: string | undefined): { createdAt: string; id: string } | undefined {
+    if (!value) return undefined;
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as { createdAt?: unknown; id?: unknown };
+        return typeof parsed.createdAt === 'string' && !Number.isNaN(Date.parse(parsed.createdAt)) && typeof parsed.id === 'string'
+            ? { createdAt: parsed.createdAt, id: parsed.id } : undefined;
+    } catch { return undefined; }
+}
+
+function encodeOperatorDriverCursor(value: { createdAt: string; id: string }): string {
+    return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
 }
 
 function compareGraphShape(bridge: AgentRunGraph, semantic: AgentRunGraph): string | undefined {
@@ -2458,7 +2596,7 @@ export class TaskEngine {
               }
             | undefined;
         const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
-        if (projectionMode === 'semantic') {
+        if (projectionMode === 'semantic' || projectionMode === 'auto') {
             const current = await this.sessionManager.load(params.tenantId, params.taskId);
             await projection?.reconcileDurableTurnOwnership({
                 tenantId: params.tenantId,
@@ -2472,7 +2610,7 @@ export class TaskEngine {
                 snapshot: current?.snapshot,
                 agentId: current?.agentId,
             });
-            const semanticGraph = await projection?.buildGraph(params);
+            const semanticGraph = await projection?.buildSummaryGraph(params);
             if (semanticGraph !== undefined && semanticGraph.projection?.partial !== true) {
                 const coordination = buildTaskCoordinationView(params.taskId, current?.snapshot);
                 const terminalClaim = readDurableTaskTerminal(current?.snapshot)?.turnClaim;
@@ -2488,7 +2626,7 @@ export class TaskEngine {
                 }, 'semantic');
             }
         }
-        const { events: sessionEvents, taskIds } = await this.collectRunGraphEvents({
+        const { events: sessionEvents, taskIds, truncated: bridgeTruncated } = await this.collectRunGraphEvents({
             tenantId: params.tenantId,
             rootTaskId: params.taskId,
         });
@@ -2543,13 +2681,17 @@ export class TaskEngine {
                 });
             });
         }
-        return withGraphCaps(graph, 'bridge');
+        return withGraphCaps({
+            ...graph,
+            projection: { source: 'bridge', partial: bridgeTruncated },
+            ...(bridgeTruncated ? { omissions: [{ collection: 'events' as const, reason: 'projection_unavailable' as const, omitted: 1 }] } : {}),
+        }, 'bridge');
     }
 
     private async collectRunGraphEvents(params: {
         tenantId: string;
         rootTaskId: string;
-    }): Promise<{ events: AgentRunSourceEvent[]; taskIds: string[] }> {
+    }): Promise<{ events: AgentRunSourceEvent[]; taskIds: string[]; truncated: boolean }> {
         const sessionManager = this.sessionManager;
         if (!sessionManager) {
             throw new Error('Session manager is not configured');
@@ -2557,8 +2699,9 @@ export class TaskEngine {
         const queue = [params.rootTaskId];
         const seen = new Set<string>();
         const events: AgentRunSourceEvent[] = [];
+        let truncated = false;
 
-        while (queue.length > 0) {
+        while (queue.length > 0 && seen.size < GRAPH_NODE_LIMIT) {
             const taskId = queue.shift()!;
             if (seen.has(taskId)) continue;
             seen.add(taskId);
@@ -2567,8 +2710,10 @@ export class TaskEngine {
                 tenantId: params.tenantId,
                 sessionId: taskId,
                 sinceSeq: -1,
-            });
-            for (const event of taskEvents) {
+                limit: 501,
+            } as never);
+            if (taskEvents.length > 500) truncated = true;
+            for (const event of taskEvents.slice(0, 500)) {
                 const eventWithSession = { ...event, sessionId: taskId };
                 events.push(eventWithSession);
                 const childTaskId = event.payload.childTaskId;
@@ -2577,8 +2722,8 @@ export class TaskEngine {
                 }
             }
         }
-
-        return { events, taskIds: [...seen] };
+        if (queue.length > 0) truncated = true;
+        return { events, taskIds: [...seen], truncated };
     }
 
     async listAgentRuns(params: AgentRunListParams): Promise<AgentRunListPage> {
@@ -2821,12 +2966,107 @@ export class TaskEngine {
         tenantId: string;
         taskId: string;
         turnSeq: number;
-    }) {
-        const graph = await this.buildAgentRunGraph({
-            tenantId: params.tenantId,
-            taskId: params.taskId,
+    }): Promise<TurnRun | null> {
+        const prisma = this.getSessionStorePrisma();
+        const direct = prisma ? await new OperatorProjectionRepository(prisma as never).getTurn(params) : undefined;
+        if (direct !== undefined) return direct;
+        // Bridge fallback is deliberately bounded and only reconstructs one turn.
+        const events = await this.sessionManager!.listEventsSince({
+            tenantId: params.tenantId, sessionId: params.taskId, sinceSeq: -1, limit: 500,
+        } as never);
+        const graph = await buildAgentRunGraph({
+            tenantId: params.tenantId, taskId: params.taskId, sessionManager: this.sessionManager!,
+            driverRuns: [], events: events.map((event) => ({ ...event, sessionId: params.taskId })),
         });
         return graph.turns.find((turn) => turn.turnSeq === params.turnSeq) ?? null;
+    }
+
+    async listAgentRunTurns(params: { tenantId: string; taskId: string; cursor?: string; limit?: number }): Promise<OperatorPage<TurnRun>> {
+        const limit = clampOperatorDetailLimit(params.limit);
+        const prisma = this.getSessionStorePrisma();
+        const page = prisma ? await new OperatorProjectionRepository(prisma as never).listTurns({ ...params, limit }) : undefined;
+        return page ?? emptyOperatorPage(limit);
+    }
+
+    async listAgentRunTurnAttempts(params: { tenantId: string; taskId: string; turnSeq: number; cursor?: string; limit?: number }): Promise<OperatorPage<TurnAttemptRun>> {
+        const limit = clampOperatorDetailLimit(params.limit);
+        const prisma = this.getSessionStorePrisma();
+        const page = prisma ? await new OperatorProjectionRepository(prisma as never).listTurnAttempts({ ...params, limit }) : undefined;
+        return page ?? emptyOperatorPage(limit);
+    }
+
+    async listAgentRunCognitiveTurns(params: { tenantId: string; taskId: string; turnSeq: number; cursor?: string; limit?: number }): Promise<OperatorPage<CognitiveTurnRun>> {
+        const limit = clampOperatorDetailLimit(params.limit);
+        const prisma = this.getSessionStorePrisma();
+        const page = prisma ? await new OperatorProjectionRepository(prisma as never).listCognitiveTurns({ ...params, limit }) : undefined;
+        return page ?? emptyOperatorPage(limit);
+    }
+
+    async listAgentRunEffects(params: { tenantId: string; taskId: string; cursor?: string; limit?: number }): Promise<OperatorPage<EffectRun>> {
+        const limit = clampOperatorDetailLimit(params.limit);
+        const prisma = this.getSessionStorePrisma();
+        const page = prisma ? await new OperatorProjectionRepository(prisma as never).listEffects({ ...params, limit }) : undefined;
+        return page ?? emptyOperatorPage(limit);
+    }
+
+    async listAgentRunMemoryOperations(params: { tenantId: string; taskId: string; cursor?: string; limit?: number }): Promise<OperatorPage<MemoryOperationRun>> {
+        const page = await this.listAgentRunEvents(params);
+        const items = page.items.filter((event) => event.type === 'memory.read' || event.type === 'memory.write' || event.type === 'memory.delete').map((event) => {
+            const payload = event.payload as Record<string, unknown>;
+            const keys = Array.isArray(payload.keys) ? payload.keys.filter((key): key is string => typeof key === 'string') : [];
+            return { id: event.id, taskId: params.taskId, seq: event.seq ?? 0, timestamp: event.timestamp, op: event.type.slice('memory.'.length) as MemoryOperationRun['op'], keys, keyCount: typeof payload.keyCount === 'number' ? payload.keyCount : keys.length };
+        });
+        return { ...page, items };
+    }
+
+    async listAgentRunDriverRuns(params: { tenantId: string; taskId: string; cursor?: string; limit?: number }): Promise<OperatorPage<DriverRunView>> {
+        const limit = clampOperatorDetailLimit(params.limit);
+        const cursor = decodeOperatorDriverCursor(params.cursor);
+        const prisma = this.getSessionStorePrisma() as {
+            driverRun?: { findMany?: (args: Record<string, unknown>) => Promise<DriverRunView[]>; count?: (args: Record<string, unknown>) => Promise<number> };
+        } | undefined;
+        if (typeof prisma?.driverRun?.findMany !== 'function') return emptyOperatorPage(limit);
+        const where = { tenantId: params.tenantId, taskId: params.taskId, ...(cursor ? { OR: [{ createdAt: { lt: new Date(cursor.createdAt) } }, { createdAt: new Date(cursor.createdAt), id: { lt: cursor.id } }] } : {}) };
+        const rows = await prisma.driverRun.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: limit + 1 });
+        const items = rows.slice(0, limit);
+        const hasMore = rows.length > limit;
+        const last = items.at(-1) as (DriverRunView & { createdAt?: Date | string }) | undefined;
+        const createdAt = last?.createdAt instanceof Date ? last.createdAt.toISOString() : last?.createdAt;
+        return { items, pageInfo: { limit, hasMore, ...(hasMore && last?.id && createdAt ? { nextCursor: encodeOperatorDriverCursor({ id: last.id, createdAt }) } : {}) }, summary: { total: typeof prisma.driverRun.count === 'function' ? await prisma.driverRun.count({ where: { tenantId: params.tenantId, taskId: params.taskId } }) : items.length + (hasMore ? 1 : 0), returned: items.length } };
+    }
+
+    async listAgentRunEvents(params: { tenantId: string; taskId: string; cursor?: string; limit?: number }): Promise<OperatorPage<AgentRunEvent>> {
+        const limit = clampOperatorDetailLimit(params.limit);
+        const cursor = decodeOperatorEventCursor(params.cursor);
+        const prisma = this.getSessionStorePrisma() as {
+            wMEvent?: { findMany?: (args: Record<string, unknown>) => Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: Date }>>; count?: (args: Record<string, unknown>) => Promise<number> };
+        } | undefined;
+        if (typeof prisma?.wMEvent?.findMany === 'function') {
+            const where = { tenantId: params.tenantId, sessionId: params.taskId, ...(cursor !== undefined ? { seq: { lt: cursor } } : {}) };
+            const rows = await prisma.wMEvent.findMany({ where, orderBy: [{ seq: 'desc' }, { eventId: 'desc' }], take: limit + 1 });
+            const pageRows = rows.slice(0, limit);
+            const hasMore = rows.length > limit;
+            return {
+                items: pageRows.map((event) => ({ id: event.eventId, source: 'wm_event', type: event.type, taskId: params.taskId, seq: event.seq, timestamp: event.createdAt.toISOString(), visibility: 'operator', group: { taskId: params.taskId }, payload: event.payload })),
+                pageInfo: { limit, hasMore, ...(hasMore && pageRows.at(-1) ? { nextCursor: encodeOperatorEventCursor(pageRows.at(-1)!.seq) } : {}) },
+                summary: { total: typeof prisma.wMEvent.count === 'function' ? await prisma.wMEvent.count({ where: { tenantId: params.tenantId, sessionId: params.taskId } }) : pageRows.length + (hasMore ? 1 : 0), returned: pageRows.length },
+            };
+        }
+        const events = await this.sessionManager!.listEventsSince({
+            tenantId: params.tenantId, sessionId: params.taskId, sinceSeq: cursor ?? -1, limit: limit + 1,
+        });
+        const newestFirst = events.slice().reverse();
+        const items = newestFirst.slice(0, limit).map((event) => ({
+            id: event.eventId, source: 'wm_event' as const, type: event.type, taskId: params.taskId,
+            seq: event.seq, timestamp: event.createdAt, visibility: 'operator' as const,
+            group: { taskId: params.taskId }, payload: event.payload,
+        }));
+        const hasMore = newestFirst.length > limit;
+        return {
+            items,
+            pageInfo: { limit, hasMore, ...(hasMore && items.at(-1) ? { nextCursor: encodeOperatorEventCursor(items.at(-1)!.seq) } : {}) },
+            summary: { total: items.length + (hasMore ? 1 : 0), returned: items.length },
+        };
     }
 
     async getAgentRunMemory(params: {

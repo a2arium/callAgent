@@ -495,11 +495,12 @@ export class WorkingMemorySessionStore {
         }));
     }
 
-    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>> {
+    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number; limit?: number }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>> {
         const { tenantId, sessionId, sinceSeq } = params;
         const rows = await this.prisma.wMEvent.findMany({
             where: { tenantId, sessionId, seq: { gt: sinceSeq } },
-            orderBy: { seq: 'asc' }
+            orderBy: { seq: 'asc' },
+            ...(params.limit !== undefined ? { take: params.limit } : {}),
         });
         return rows.map((r: any) => ({ eventId: r.eventId, seq: r.seq, type: r.type, payload: r.payload as any, createdAt: r.createdAt.toISOString() }));
     }

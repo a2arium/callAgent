@@ -9,6 +9,7 @@ import {
     type AgentScheduleService,
     AgentScheduleError,
     type IEventBus,
+    validateOperatorRawPayloadBudget,
 } from '@a2arium/callagent-core';
 import type { HatchetOutboxBootstrap } from '@a2arium/callagent-driver-hatchet';
 import { readRuntimeWorkspaceDescriptor } from './descriptor.js';
@@ -109,6 +110,9 @@ export function databaseMigrationReadinessCode(
 }
 
 export async function startRuntimeHost(options: { descriptorPath?: string } = {}): Promise<RuntimeProcessHandle> {
+    // Fail before accepting work. Silently clamping a too-small graph budget
+    // makes an operator deployment appear healthy while ignoring its config.
+    validateOperatorRawPayloadBudget();
     const descriptor = await readRuntimeWorkspaceDescriptor(options);
     const { WorkingMemorySessionStore } = await import('@a2arium/callagent-memory-sql');
     const sessionStore = process.env.MEMORY_DATABASE_URL ? new WorkingMemorySessionStore() : undefined;

@@ -229,6 +229,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
         tenantId: string;
         sessionId: string;
         sinceSeq: number;
+        limit?: number;
     }): Promise<Array<{
         eventId: string;
         seq: number;
@@ -238,7 +239,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
     }>> {
         const key = `${params.tenantId}:${params.sessionId}`;
         const eventList = this.events.get(key) || [];
-        return eventList.filter(e => e.seq > params.sinceSeq);
+        return eventList.filter(e => e.seq > params.sinceSeq).slice(0, params.limit);
     }
 
     async enqueueOutbox(params: {
