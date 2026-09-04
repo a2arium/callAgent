@@ -241,6 +241,13 @@ These gates must be automated or repeatable runbooks with recorded results.
 - Live cutover from in-process waits/timers to Hatchet mode with no lost wakes,
   no duplicate effects, and a rollback runbook.
 - Cold-start recovery after all workers are stopped while tasks are waiting.
+- Expire an executing turn lease and verify that the indexed scanner creates a
+  same-generation recovery dispatch within one healthy scan interval. The old
+  fence must reject commits/effects, the replacement must retain `turnSeq` and
+  the absolute root deadline, and Operator must show recovery rather than an
+  indefinitely owned run.
+- Verify custom working-memory stores without expired-claim discovery reject
+  new durable admission with `TASK_ADMISSION_UNAVAILABLE`.
 
 ## Promotion Criteria
 

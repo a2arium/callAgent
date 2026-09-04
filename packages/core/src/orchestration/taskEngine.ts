@@ -3582,7 +3582,7 @@ export class TaskEngine {
         if (!this.sessionManager?.supportsDurableTaskAdmission()) {
             throw new TaskSubmissionError(
                 'TASK_ADMISSION_UNAVAILABLE',
-                'the configured working-memory store cannot durably recover runnable task turns'
+                'the configured working-memory store cannot durably recover runnable and expired-lease task turns'
             );
         }
         const durableInput = canonicalizeTaskSubmissionInput(params.input);
@@ -5783,7 +5783,11 @@ export class TaskEngine {
         // This is a simplified version - a real implementation would
         // inject all required dependencies like LLM, tools, etc.
         const transientProgress = (() => { throw new TaskReplyCapabilityUnavailableError(task.id); }) as TaskContext['progress'];
-        if (readRunProgressMode() === 'enabled' && this.sessionManager?.supportsDurableRunProgress()) {
+        if (
+            readRunProgressMode() === 'enabled' &&
+            typeof this.sessionManager?.supportsDurableRunProgress === 'function' &&
+            this.sessionManager.supportsDurableRunProgress()
+        ) {
             transientProgress.report = async (value): Promise<RunProgressReportResult> => {
                 const parsed = validateRunProgressSnapshot(value);
                 if (!parsed.success) return { status: 'rejected', code: 'RUN_PROGRESS_INVALID', message: parsed.message };

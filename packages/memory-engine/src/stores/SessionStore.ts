@@ -40,6 +40,23 @@ export type RunnableTurnRequestCursor = {
     sessionId: string;
 };
 
+export type ExpiredTaskTurnClaimCandidate = {
+    tenantId: string;
+    taskId: string;
+    agentId: string;
+    claimId: string;
+    fence: string;
+    claimedGeneration: string;
+    expiresAt: string;
+    runtimeSurface: 'hatchet' | 'in_process';
+};
+
+export type ExpiredTaskTurnClaimCursor = {
+    expiresAt: string;
+    tenantId: string;
+    taskId: string;
+};
+
 export type DurableRunProgressRecord = {
     tenantId: string; taskId: string; rootTaskId: string; agentId: string;
     snapshot: Record<string, unknown>; revision: string; reportedAt: string;
@@ -169,6 +186,7 @@ export interface IWorkingMemorySessionStore {
     readonly taskAdmissionCapabilities?: {
         durablePersistence: true;
         runnableTurnRecovery: true;
+        expiredTurnLeaseRecovery?: true;
     };
     readonly runProgressCapabilities?: { durableLatestProjection: true; atomicFenceValidation: true };
     writeRunProgress?(params: {
@@ -195,6 +213,11 @@ export interface IWorkingMemorySessionStore {
         cursor?: RunnableTurnRequestCursor;
         limit: number;
     }): Promise<RunnableTurnRequest[]>;
+    listExpiredTaskTurnClaims?(params: {
+        runtimeSurface: 'hatchet' | 'in_process';
+        cursor?: ExpiredTaskTurnClaimCursor;
+        limit: number;
+    }): Promise<ExpiredTaskTurnClaimCandidate[]>;
     appendEvent(params: {
         tenantId: string;
         sessionId: string;

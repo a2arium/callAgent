@@ -83,6 +83,13 @@ A retry or lease takeover of the same generation remains part of the same `turnS
 Only the snapshot coordinator authorizes execution; Operator rows are repairable read
 models and never establish ownership.
 
+When an active lease expires, coordination changes to `recovering` immediately.
+After the recovery CAS is committed, Operator shows **Recovering after lease
+expiry** with the preserved generation and turn number. The expired attempt is
+`superseded` with reason `lease_expired`; its replacement is another attempt
+under the same `turnSeq`, not another business turn. Late events from the expired
+claim cannot restore ownership.
+
 ### `TurnRun`
 
 One durable segment. This is debug detail under an agent node, not a top-level product concept.

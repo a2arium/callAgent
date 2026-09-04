@@ -553,6 +553,49 @@ describe('executeTaskTask', () => {
         );
     });
 
+    it('waits for same-generation redelivery after an expired-lease recovery handoff', async () => {
+        const segmentOutputs = [
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                boundary: { kind: 'paused', reason: 'authoritative_state_unavailable' },
+                taskStatus: { state: 'working', timestamp: '2026-09-04T10:00:00.000Z' },
+                turnDisposition: 'lease_expired_recovery_staged',
+                claimedGeneration: '1', turnSeq: 1,
+            },
+            {
+                tenantId: 'tenant-1', taskId: 'task-1', agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { recovered: true } },
+                taskStatus: { state: 'completed', timestamp: '2026-09-04T10:00:01.000Z' },
+                turnDisposition: 'executed', claimedGeneration: '1', turnSeq: 1,
+            },
+        ];
+        const ctx = {
+            runChild: jest.fn(async () => segmentOutputs.shift()),
+            runNoWaitChild: jest.fn(async () => undefined),
+            sleepFor: jest.fn(async () => undefined),
+        };
+
+        const result = await executeTaskTask({
+            tenantId: 'tenant-1', taskId: 'task-1', rootTaskId: 'task-1',
+            tenantTaskKey: '8:tenant-1:6:task-1', rootRunKey: '8:tenant-1:6:task-1:root:1',
+            agentId: 'agent-1', input: {}, idempotencyKey: 'task-1:start',
+        }, ctx as never);
+
+        expect(result.boundary).toEqual({ kind: 'complete', result: { recovered: true } });
+        expect(ctx.sleepFor).toHaveBeenCalledWith('1s', 'turn-owner:1');
+        expect(ctx.runChild).toHaveBeenNthCalledWith(
+            2,
+            SEGMENT_TASK_NAME,
+            expect.objectContaining({
+                recoveryGeneration: '1',
+                idempotencyKey: 'task-1:turn-request:1',
+            }),
+            expect.objectContaining({
+                key: '8:tenant-1:6:task-1:root:1:segment:2:task-1:turn-request:1',
+            })
+        );
+    });
+
     it('finalizes the root driver run when the durable parent reaches a complete boundary', async () => {
         const finalizeRootRun = jest.fn(async () => undefined);
         const ctx = {

@@ -59,4 +59,47 @@ describe('TurnRequestReconciler', () => {
         );
         await expect(sessions.listRunnableTurnRequests({ limit: 100 })).resolves.toHaveLength(0);
     });
+
+    it('stages an expired claim before publishing its recovery nudge', async () => {
+        const clockMs = Date.parse('2026-09-04T12:00:00.000Z');
+        const sessions = new SessionManager(new InMemorySessionManager(() => clockMs));
+        await sessions.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'task-expired', agentId: 'agent-a', expectedWmVersion: 0n,
+            snapshot: { meta: {
+                agentId: 'agent-a', initialInput: { caseId: 'case-a' },
+                taskLifecycle: {
+                    taskId: 'task-expired', rootTaskId: 'task-expired', ancestorTaskIds: [], state: 'active',
+                },
+                turnCoordinator: {
+                    schemaVersion: 1, nextFence: '1', nextTurnSeq: 1,
+                    requestedGeneration: '1', completedGeneration: '0', runtimeSurface: 'hatchet',
+                    active: {
+                        claimId: 'claim-expired', fence: '1', ownerId: 'old-worker',
+                        requestKey: 'task-expired:start', claimedGeneration: '1', turnSeq: 1,
+                        phase: 'executing', runtimeSurface: 'hatchet',
+                        acquiredAt: '2026-09-04T11:00:00.000Z',
+                        heartbeatAt: '2026-09-04T11:00:00.000Z',
+                        expiresAt: '2026-09-04T11:01:00.000Z',
+                    },
+                },
+            } },
+        });
+        const push = jest.fn(async () => undefined);
+        const runNoWait = jest.fn(async () => ({ runId: 'recovered-root' }));
+        const reconciler = new TurnRequestReconciler(sessions, { push }, {
+            rootTask: { runNoWait } as never,
+        });
+
+        await expect(reconciler.scanOnce()).resolves.toBe(1);
+        expect(push).toHaveBeenCalledWith(
+            expect.stringContaining('task-turn-available:'),
+            expect.objectContaining({ generation: '1', deliveryKey: 'task-expired:turn-request:1' }),
+            { key: 'task-expired:turn-request:1' },
+        );
+        const state = (await sessions.load('tenant-a', 'task-expired'))?.snapshot as {
+            meta?: { turnCoordinator?: { active?: unknown; dispatchIntent?: { recovery?: { reason?: string } } } };
+        };
+        expect(state.meta?.turnCoordinator?.active).toBeUndefined();
+        expect(state.meta?.turnCoordinator?.dispatchIntent?.recovery?.reason).toBe('lease_expired');
+    });
 });

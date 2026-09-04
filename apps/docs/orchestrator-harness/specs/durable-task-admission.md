@@ -56,6 +56,23 @@ driver. Only the reconciler for the task's stored runtime surface may recover a
 missing publication.
 
 Admission requires a durable session store and a runtime driver advertising
-recoverable starts. Invalid identities, non-JSON input, unsupported agents,
+recoverable starts. The store must also advertise expired-turn-lease discovery;
+stores that implement runnable dispatch scanning but cannot discover expired
+active claims fail closed with `TASK_ADMISSION_UNAVAILABLE`.
+
+An active turn whose lease reaches its authoritative database expiry is made
+runnable automatically. CallAgent atomically replaces the expired claim with a
+recovery dispatch for the same generation and logical `turnSeq`. Reacquisition
+uses a new claim ID and higher fence, while the original root deadline and
+checkpoint remain unchanged. Later queued generations wait until that recovered
+turn commits. Hatchet and in-process runtimes use the same snapshot transition
+and bounded store scan.
+
+Provider publication is only a wake-up hint and may be repeated. The snapshot
+claim and fence remain the ownership boundary. Framework-registered effects are
+fenced after lease loss; arbitrary external calls made outside CallAgent's
+effect/idempotency facilities cannot be stopped or deduplicated by the runtime.
+
+Invalid identities, non-JSON input, unsupported agents,
 provider payload preflight failures, and pre-existing non-admission task state
 fail before a new admission is committed.

@@ -88,6 +88,13 @@ control program deterministic on replay while letting cognition mint the tokens.
 - Worker crashes around orchestration waits can resume from Hatchet checkpoints.
 - A failed or retried turn child may be delivered more than once; callAgent
   idempotency and CAS remain mandatory.
+- An expired segment claim is not ordinary successful supersession. CallAgent
+  first commits a same-generation recovery dispatch, then lets the provider
+  segment complete as a recovery handoff. The replacement keeps `turnSeq` and
+  receives a new claim ID and fence.
+- A bounded, indexed store scan repairs expiry when the original process dies
+  before it can stage that handoff. Hatchet and in-process drivers invoke the
+  same provider-neutral recovery transition.
 - Hatchet task names (`aplret.task`, `aplret.segment`, `aplret.outbox.dispatch`)
   must not leak as the product vocabulary. They are raw execution primitives
   linked from the semantic `AgentRunGraph`.
@@ -95,7 +102,8 @@ control program deterministic on replay while letting cognition mint the tokens.
 ## Open Validation
 
 - POC B1 must kill a worker during `aplret.segment` and prove one effective
-  snapshot transition.
+  snapshot transition, same-generation redelivery, and rejection of the stale
+  claim's later commit/effects.
 - POC B9 must prove child fan-out/fan-in while parent cognition remains in
   callAgent.
 - POC B8 must confirm that internal `continue` turns stay in-process (no Hatchet

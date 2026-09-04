@@ -27,6 +27,18 @@ const publishTaskEvent = async (bus: ReturnType<typeof createInMemoryEventBus>, 
 };
 
 describe('streaming finality', () => {
+    it('installs progress on legacy contexts that omit the progress facade', () => {
+        const ctx: any = {
+            task: { id: 'legacy-context' },
+            tenantId: 'tenant-test',
+            agentId: 'agent-test',
+        };
+
+        expect(() => extendContextWithStreaming(ctx, true, createInMemoryEventBus())).not.toThrow();
+        expect(typeof ctx.progress).toBe('function');
+        expect(ctx.progress.report).toBeUndefined();
+    });
+
     afterEach(() => {
         EngineLocator.setEngine(null as any);
         jest.restoreAllMocks();

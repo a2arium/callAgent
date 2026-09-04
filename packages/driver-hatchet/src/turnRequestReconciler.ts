@@ -2,6 +2,7 @@ import {
     defaultMetricsRegistry,
     markTaskTurnDispatchEnqueued,
     observeTaskSubmissionBacklog,
+    sweepExpiredTaskTurnClaims,
     type SessionManager,
 } from '@a2arium/callagent-core/unstable';
 import { logger } from '@a2arium/callagent-utils';
@@ -34,6 +35,13 @@ export class TurnRequestReconciler {
         let count = 0;
         const submissionRows = [] as Awaited<ReturnType<SessionManager['listRunnableTurnRequests']>>;
         try {
+            if (this.sessions.supportsExpiredTaskTurnLeaseRecovery()) {
+                await sweepExpiredTaskTurnClaims({
+                    session: this.sessions,
+                    runtimeSurface: 'hatchet',
+                    pageSize: this.options.batchSize ?? 100,
+                });
+            }
             do {
                 const page = await this.sessions.listRunnableTurnRequests({
                     ...(cursor ? { cursor } : {}),

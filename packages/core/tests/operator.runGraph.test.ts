@@ -3,6 +3,7 @@ import { InMemorySessionManager } from '../src/orchestration/InMemorySessionMana
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import {
     buildAgentRunGraph,
+    buildTaskCoordinationView,
     groupTurnAttempts,
     type AgentRunSourceEvent,
     type DriverRunView,
@@ -1661,5 +1662,44 @@ describe('buildAgentRunGraph', () => {
             }),
             expect.objectContaining({ attemptKey: 'claim:claim-3', status: 'queued' }),
         ]));
+    });
+});
+
+describe('buildTaskCoordinationView lease recovery', () => {
+    const expiredClaim = {
+        claimId: 'claim-old', fence: '4', ownerId: 'worker-old', requestKey: 'task-1:start',
+        claimedGeneration: '2', turnSeq: 7, phase: 'executing', runtimeSurface: 'hatchet',
+        acquiredAt: '2026-09-04T09:00:00.000Z', heartbeatAt: '2026-09-04T09:00:00.000Z',
+        expiresAt: '2026-09-04T09:02:00.000Z',
+    } as const;
+
+    it('shows an expired active owner as recovering before the scanner stages dispatch', () => {
+        const view = buildTaskCoordinationView('task-1', { meta: {
+            taskLifecycle: { taskId: 'task-1', rootTaskId: 'task-1', ancestorTaskIds: [], state: 'active' },
+            turnCoordinator: {
+                schemaVersion: 1, runtimeSurface: 'hatchet', nextFence: '4', nextTurnSeq: 7,
+                requestedGeneration: '2', completedGeneration: '1', active: expiredClaim,
+            },
+        } }, Date.parse('2026-09-04T09:03:00.000Z'));
+        expect(view).toMatchObject({ state: 'recovering', health: 'stuck', issues: ['claim_expired'] });
+    });
+
+    it('labels the durable recovery dispatch without creating a new logical turn', () => {
+        const view = buildTaskCoordinationView('task-1', { meta: {
+            taskLifecycle: { taskId: 'task-1', rootTaskId: 'task-1', ancestorTaskIds: [], state: 'active' },
+            turnCoordinator: {
+                schemaVersion: 1, runtimeSurface: 'hatchet', nextFence: '4', nextTurnSeq: 7,
+                requestedGeneration: '2', completedGeneration: '1',
+                dispatchIntent: {
+                    generation: '2', turnSeq: 7, deliveryKey: 'task-1:turn-request:2',
+                    runtimeSurface: 'hatchet', createdAt: '2026-09-04T09:03:00.000Z',
+                    recovery: { reason: 'lease_expired', sourceClaim: expiredClaim },
+                },
+            },
+        } }, Date.parse('2026-09-04T09:03:01.000Z'));
+        expect(view).toMatchObject({
+            state: 'recovering', health: 'attention',
+            dispatchIntent: { generation: '2', recoveryReason: 'lease_expired' },
+        });
     });
 });

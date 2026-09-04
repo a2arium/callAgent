@@ -13,13 +13,21 @@ import type {
     WMSessionSnapshot,
     RunnableTurnRequest,
     RunnableTurnRequestCursor,
+    ExpiredTaskTurnClaimCandidate,
+    ExpiredTaskTurnClaimCursor,
 } from '@a2arium/callagent-memory-engine';
 import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/working-memory-version-conflict';
 
 type ScannableCoordinator = {
     requestedGeneration: string;
     completedGeneration: string;
-    active?: unknown;
+    active?: {
+        claimId: string;
+        fence: string;
+        claimedGeneration: string;
+        expiresAt: string;
+        runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+    };
     dispatchIntent?: {
         generation: string;
         deliveryKey: string;
@@ -58,7 +66,7 @@ function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): Scannabl
     return {
         requestedGeneration: candidate.requestedGeneration,
         completedGeneration: candidate.completedGeneration,
-        ...(candidate.active !== undefined ? { active: candidate.active } : {}),
+        ...(candidate.active !== undefined ? { active: candidate.active as ScannableCoordinator['active'] } : {}),
         ...(dispatchIntent ? { dispatchIntent } : {}),
     };
 }
@@ -67,6 +75,15 @@ function compareRunnableCursor(row: RunnableTurnRequest, cursor: RunnableTurnReq
     return row.updatedAt.localeCompare(cursor.updatedAt) ||
         row.tenantId.localeCompare(cursor.tenantId) ||
         row.sessionId.localeCompare(cursor.sessionId);
+}
+
+function compareExpiredCursor(
+    row: ExpiredTaskTurnClaimCandidate,
+    cursor: ExpiredTaskTurnClaimCursor
+): number {
+    return row.expiresAt.localeCompare(cursor.expiresAt) ||
+        row.tenantId.localeCompare(cursor.tenantId) ||
+        row.taskId.localeCompare(cursor.taskId);
 }
 
 /**
@@ -197,6 +214,48 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
             a.tenantId.localeCompare(b.tenantId) || a.sessionId.localeCompare(b.sessionId));
         const after = params.cursor
             ? rows.filter((row) => compareRunnableCursor(row, params.cursor!) > 0)
+            : rows;
+        return after.slice(0, Math.max(1, Math.min(1000, params.limit)));
+    }
+
+    async listExpiredTaskTurnClaims(params: {
+        runtimeSurface: 'hatchet' | 'in_process';
+        cursor?: ExpiredTaskTurnClaimCursor;
+        limit: number;
+    }): Promise<ExpiredTaskTurnClaimCandidate[]> {
+        const rows: ExpiredTaskTurnClaimCandidate[] = [];
+        const storageNow = this.now();
+        for (const [key, row] of this.snapshots.entries()) {
+            const identity = this.snapshotIdentities.get(key);
+            if (!identity) continue;
+            const coordinator = readTurnCoordinatorForScan(row.snapshot);
+            const active = coordinator?.active;
+            if (!coordinator || !active || coordinator.dispatchIntent !== undefined) continue;
+            if (active.runtimeSurface !== params.runtimeSurface || !Number.isFinite(Date.parse(active.expiresAt)) ||
+                Date.parse(active.expiresAt) > storageNow) continue;
+            if (BigInt(coordinator.completedGeneration) >= BigInt(active.claimedGeneration)) continue;
+            const lifecycle = ((row.snapshot.meta as { taskLifecycle?: { state?: unknown } } | undefined)
+                ?.taskLifecycle?.state);
+            if (lifecycle === 'completed' || lifecycle === 'failed' || lifecycle === 'canceled' || lifecycle === 'detached') {
+                continue;
+            }
+            if (typeof active.claimId !== 'string' || typeof active.fence !== 'string' ||
+                typeof active.claimedGeneration !== 'string') continue;
+            rows.push({
+                tenantId: identity.tenantId,
+                taskId: identity.sessionId,
+                agentId: row.agentId,
+                claimId: active.claimId,
+                fence: active.fence,
+                claimedGeneration: active.claimedGeneration,
+                expiresAt: active.expiresAt,
+                runtimeSurface: params.runtimeSurface,
+            });
+        }
+        rows.sort((a, b) => a.expiresAt.localeCompare(b.expiresAt) ||
+            a.tenantId.localeCompare(b.tenantId) || a.taskId.localeCompare(b.taskId));
+        const after = params.cursor
+            ? rows.filter((row) => compareExpiredCursor(row, params.cursor!) > 0)
             : rows;
         return after.slice(0, Math.max(1, Math.min(1000, params.limit)));
     }

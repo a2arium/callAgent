@@ -20,6 +20,14 @@ class DurableTestStore extends InMemorySessionManager {
     readonly taskAdmissionCapabilities = {
         durablePersistence: true,
         runnableTurnRecovery: true,
+        expiredTurnLeaseRecovery: true,
+    } as const;
+}
+
+class LegacyDurableTestStore extends InMemorySessionManager {
+    readonly taskAdmissionCapabilities = {
+        durablePersistence: true,
+        runnableTurnRecovery: true,
     } as const;
 }
 
@@ -654,6 +662,17 @@ describe('durable task submission', () => {
         await expect(unsupported.submitTask({
             tenantId: 'tenant_a', taskId: 'unsupported', agentId: 'admission-agent', input: {},
         })).rejects.toMatchObject({ code: 'TASK_ADMISSION_UNAVAILABLE' });
+
+        const missingExpiryRecovery = new TaskEngine({
+            sessionStore: new LegacyDurableTestStore(),
+            runtimeDriver: admissionDriver(),
+        });
+        await expect(missingExpiryRecovery.submitTask({
+            tenantId: 'tenant_a', taskId: 'legacy-store', agentId: 'admission-agent', input: {},
+        })).rejects.toMatchObject({
+            code: 'TASK_ADMISSION_UNAVAILABLE',
+            message: expect.stringContaining('expired-lease'),
+        });
 
         const store = new DurableTestStore();
         await store.writeSnapshotCAS({

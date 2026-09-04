@@ -29,11 +29,13 @@ import {
     readTaskTurnCoordinator,
     markTaskTurnExecuting,
     releaseUnstartedTaskTurn,
+    recoverExpiredTaskTurnClaim,
     renewTaskTurnClaim,
     requestTaskTurn,
     resolveTaskTurnLeaseConfig,
     type TaskTurnClaim,
 } from '../orchestration/TaskTurnCoordinator.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
@@ -65,6 +67,28 @@ export type TurnRunnerSegmentExecutorDeps = {
         snapshot: Record<string, unknown>;
     }) => Promise<'ready' | 'canceled' | 'terminal'>;
 };
+
+type TaskTurnOwnershipLossDisposition =
+    | 'expired'
+    | 'missing'
+    | 'superseded'
+    | 'terminal'
+    | 'renewal_failed';
+
+class TaskTurnOwnershipLostError extends Error {
+    readonly code = 'TASK_TURN_OWNERSHIP_LOST';
+    readonly cause?: unknown;
+
+    constructor(
+        readonly disposition: TaskTurnOwnershipLossDisposition,
+        readonly claim: TaskTurnClaim,
+        cause?: unknown
+    ) {
+        super(`Task turn ownership lost: ${disposition}`);
+        this.name = 'TaskTurnOwnershipLostError';
+        this.cause = cause;
+    }
+}
 
 export type RuntimeContextBinding = {
     tenantId: string;
@@ -223,19 +247,32 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     throw error;
                 }
                 this.dedupe.record(idempotencyKey);
-                return this.buildDuplicateResult(tenantId, taskId, agentId, disposition);
+                return this.buildDuplicateResult(
+                    tenantId,
+                    taskId,
+                    agentId,
+                    disposition,
+                    admission.result.claim.turnSeq,
+                    admission.result.claim
+                );
             } finally {
                 executionAbort.dispose();
             }
             const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
                 .__turnPersistence?.disposition;
             if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
-                await this.appendAttemptEvent('turn.attempt_finished', {
-                    tenantId, taskId, idempotencyKey, claim: admission.result.claim,
-                    disposition: 'superseded', status: 'superseded',
+                const disposition = await this.classifySupersededExecutionError({
+                    error: new TaskTurnOwnershipLostError('missing', admission.result.claim),
+                    tenantId, taskId, agentId, idempotencyKey, claim: admission.result.claim,
                 });
+                if (disposition === undefined) {
+                    throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: superseded persistence retained live ownership');
+                }
                 this.dedupe.record(idempotencyKey);
-                return this.buildDuplicateResult(tenantId, taskId, agentId, 'superseded');
+                return this.buildDuplicateResult(
+                    tenantId, taskId, agentId, disposition,
+                    admission.result.claim.turnSeq, admission.result.claim
+                );
             }
             this.dedupe.record(idempotencyKey);
 
@@ -419,7 +456,14 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 throw error;
             }
             this.dedupe.record(idempotencyKey);
-            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, disposition);
+            return this.buildDuplicateResult(
+                tenantId,
+                taskId,
+                preparedWake.agentId,
+                disposition,
+                admission.result.claim.turnSeq,
+                admission.result.claim
+            );
         } finally {
             executionAbort.dispose();
         }
@@ -427,12 +471,19 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
             .__turnPersistence?.disposition;
         if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
-            await this.appendAttemptEvent('turn.attempt_finished', {
-                tenantId, taskId, idempotencyKey, claim: admission.result.claim,
-                disposition: 'superseded', status: 'superseded',
+            const disposition = await this.classifySupersededExecutionError({
+                error: new TaskTurnOwnershipLostError('missing', admission.result.claim),
+                tenantId, taskId, agentId: preparedWake.agentId,
+                idempotencyKey, claim: admission.result.claim,
             });
+            if (disposition === undefined) {
+                throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: superseded persistence retained live ownership');
+            }
             this.dedupe.record(idempotencyKey);
-            return this.buildDuplicateResult(tenantId, taskId, preparedWake.agentId, 'superseded');
+            return this.buildDuplicateResult(
+                tenantId, taskId, preparedWake.agentId, disposition,
+                admission.result.claim.turnSeq, admission.result.claim
+            );
         }
 
         this.dedupe.record(idempotencyKey);
@@ -540,10 +591,19 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             disposition: 'executed',
         });
         let renewing = false;
+        let ownershipLoss: TaskTurnOwnershipLostError | undefined;
         const abortController = abortControllerOverride ?? params.abortController ?? new AbortController();
         const leaseConfig = resolveTaskTurnLeaseConfig();
+        const loseOwnership = (error: TaskTurnOwnershipLostError) => {
+            if (ownershipLoss !== undefined) return;
+            ownershipLoss = error;
+            defaultMetricsRegistry.increment('task_turn_lease_loss_total', {
+                disposition: error.disposition,
+            });
+            abortController.abort(ownershipLoss);
+        };
         const timer = setInterval(() => {
-            if (renewing) return;
+            if (renewing || ownershipLoss !== undefined) return;
             renewing = true;
             void renewTaskTurnClaim({
                 session: this.sessionManager,
@@ -553,24 +613,31 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 claim: params.claim,
             }).then((disposition) => {
                 if (disposition !== 'renewed') {
-                    abortController.abort(new Error(`Task turn renewal ${disposition}`));
+                    loseOwnership(new TaskTurnOwnershipLostError(disposition, params.claim));
                 }
             }).catch((error) => {
-                abortController.abort(error);
+                loseOwnership(new TaskTurnOwnershipLostError('renewal_failed', params.claim, error));
             }).finally(() => { renewing = false; });
         }, leaseConfig.heartbeatMs);
         timer.unref?.();
         try {
-            const value = await runWithSegmentIdempotencyKey(
-                params.idempotencyKey,
-                body,
-                {
-                    ...params.claim,
-                    tenantId: params.tenantId,
-                    taskId: params.taskId,
-                    abortSignal: abortController.signal,
-                }
-            );
+            let value: T;
+            try {
+                value = await runWithSegmentIdempotencyKey(
+                    params.idempotencyKey,
+                    body,
+                    {
+                        ...params.claim,
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        abortSignal: abortController.signal,
+                    }
+                );
+            } catch (error) {
+                if (ownershipLoss !== undefined) throw ownershipLoss;
+                throw error;
+            }
+            if (ownershipLoss !== undefined) throw ownershipLoss;
             return value;
         } finally {
             clearInterval(timer);
@@ -605,42 +672,30 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         agentId?: string;
         idempotencyKey: string;
         claim: TaskTurnClaim;
-    }): Promise<'superseded' | 'terminal_replay' | undefined> {
+    }): Promise<'superseded' | 'terminal_replay' | 'lease_expired_recovery_staged' | undefined> {
         if (!hasSupersedingCause(params.error)) return undefined;
-
-        const proof = await reconcileSnapshotMutation<{
-            disposition?: 'superseded' | 'terminal_replay';
-        }>({
+        const recovery = await recoverExpiredTaskTurnClaim({
             session: this.sessionManager,
             tenantId: params.tenantId,
-            sessionId: params.taskId,
+            taskId: params.taskId,
             agentId: params.agentId,
-            operation: 'turn.supersession.classify',
-            mutate: ({ snapshot, storageNow }) => {
-                const terminal = readDurableTaskTerminal(snapshot);
-                if (terminal !== undefined) {
-                    return { kind: 'noop', value: { disposition: 'terminal_replay' } };
-                }
-                const coordinator = readTaskTurnCoordinator(snapshot);
-                const active = coordinator.active;
-                const replaced = active === undefined ||
-                    active.claimId !== params.claim.claimId ||
-                    active.fence !== params.claim.fence ||
-                    Date.parse(storageNow) >= Date.parse(active.expiresAt);
-                return {
-                    kind: 'noop',
-                    value: replaced ? { disposition: 'superseded' } : {},
-                };
-            },
+            expectedClaim: params.claim,
         });
-        const disposition = proof.value.disposition;
+        const disposition = recovery.disposition === 'terminal'
+            ? 'terminal_replay' as const
+            : recovery.disposition === 'recovery_staged' || recovery.disposition === 'already_recovering'
+                ? 'lease_expired_recovery_staged' as const
+                : recovery.disposition === 'competing_owner' || recovery.disposition === 'settled'
+                    ? 'superseded' as const
+                    : undefined;
         if (disposition === undefined) return undefined;
         try {
-            await this.sessionManager.appendEvent(params.tenantId, params.taskId, 'turn.superseded', {
+            await this.sessionManager.appendEvent(params.tenantId, params.taskId,
+                disposition === 'lease_expired_recovery_staged' ? 'turn.lease_expired' : 'turn.superseded', {
                 requestKey: params.idempotencyKey,
                 claimId: params.claim.claimId,
                 fence: params.claim.fence,
-                reason: disposition,
+                reason: recovery.disposition,
                 errorCode: supersedingCauseCode(params.error),
             });
             await this.appendAttemptEvent('turn.attempt_finished', {
@@ -650,6 +705,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 claim: params.claim,
                 disposition,
                 status: 'superseded',
+                ...(disposition === 'lease_expired_recovery_staged'
+                    ? { reason: 'lease_expired' }
+                    : {}),
             });
         } catch {
             // Snapshot ownership is authoritative; this is a repairable diagnostic projection.
@@ -665,11 +723,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             idempotencyKey: string;
             claim?: TaskTurnClaim;
             attemptKey?: string;
-            disposition: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+            disposition: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
+                'terminal_replay' | 'lease_expired_recovery_staged';
             status?: string;
             authoritativeTerminal?: boolean;
             deliveryKey?: string;
             boundaryKind?: string;
+            reason?: string;
         }
     ): Promise<void> {
         try {
@@ -688,6 +748,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 ...(params.authoritativeTerminal ? { authoritativeTerminal: true } : {}),
                 ...(params.deliveryKey ? { deliveryKey: params.deliveryKey } : {}),
                 ...(params.boundaryKind ? { boundaryKind: params.boundaryKind } : {}),
+                ...(params.reason ? { reason: params.reason } : {}),
             });
         } catch {
             // Attempt projection is repairable; snapshot arbitration is authoritative.
@@ -875,7 +936,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         taskId: string,
         agentId?: string,
         turnDisposition: SegmentResult['turnDisposition'] = 'matching_replay',
-        associatedTurnSeq?: number
+        associatedTurnSeq?: number,
+        turnClaim?: TaskTurnClaim
     ): Promise<SegmentResult> {
         const snap = await this.sessionManager.load(tenantId, taskId);
         const base = (snap?.snapshot ?? {}) as {
@@ -911,6 +973,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             boundary,
             taskStatus: boundaryToTaskStatus(boundary),
             turnDisposition,
+            ...(turnClaim !== undefined ? { turnClaim } : {}),
             ...(associatedTurnSeq !== undefined
                 ? { associatedTurnSeq }
                 : terminal?.turnClaim?.turnSeq !== undefined
@@ -996,7 +1059,8 @@ function hasSupersedingCause(error: unknown): boolean {
     const seen = new Set<object>();
     let current: unknown = error;
     for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
-        if (isTaskTurnSupersededError(current) || isTaskLifecycleTerminalError(current)) return true;
+        if (current instanceof TaskTurnOwnershipLostError ||
+            isTaskTurnSupersededError(current) || isTaskLifecycleTerminalError(current)) return true;
         if (typeof current !== 'object') return false;
         if (seen.has(current)) return false;
         seen.add(current);
@@ -1009,6 +1073,7 @@ function supersedingCauseCode(error: unknown): string {
     const seen = new Set<object>();
     let current: unknown = error;
     for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+        if (current instanceof TaskTurnOwnershipLostError) return current.code;
         if (isTaskTurnSupersededError(current)) return 'TASK_TURN_SUPERSEDED';
         if (isTaskLifecycleTerminalError(current)) return 'TASK_LIFECYCLE_TERMINAL';
         if (typeof current !== 'object' || seen.has(current)) break;

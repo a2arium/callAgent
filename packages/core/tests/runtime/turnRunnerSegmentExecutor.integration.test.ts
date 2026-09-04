@@ -17,6 +17,7 @@ import { readProcessedSegmentKeys } from '../../src/runtime/segmentProcessedKeys
 import { markSegmentCancellationRequested } from '../../src/runtime/segmentCancellation.js';
 import { currentTaskTurnClaim } from '../../src/runtime/segmentProcessedKeys.js';
 import { completeTaskTurnInSnapshot } from '../../src/orchestration/TaskTurnCoordinator.js';
+import { registerTaskEffect } from '../../src/orchestration/TaskEffectRegistration.js';
 import { reconcileSnapshotMutation } from '../../src/orchestration/persistence/SnapshotRepository.js';
 import { ModuleExecutionError, FrameworkModule } from '../../src/utils/errors.js';
 import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
@@ -964,6 +965,69 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         expect(events.filter((event) =>
             event.type === 'turn.attempt_finished' && event.payload.disposition === 'superseded'
         ).length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('stages durable redelivery when the executing claim expires without a replacement owner', async () => {
+        const recoveryTaskId = `${taskId}-self-expired`;
+        let releaseAttempt!: () => void;
+        let enteredAttempt!: () => void;
+        const gate = new Promise<void>((resolve) => { releaseAttempt = resolve; });
+        const entered = new Promise<void>((resolve) => { enteredAttempt = resolve; });
+        executeTurnSpy.mockImplementation(async (params) => {
+            enteredAttempt();
+            await gate;
+            await registerTaskEffect({
+                session: params.sessionManager!,
+                tenantId: params.tenantId,
+                taskId: params.sessionId,
+                effectKind: 'tool',
+                operation: 'test.expired_attempt_effect',
+                mutate: ({ snapshot }) => ({ snapshot, value: undefined }),
+            });
+            throw new Error('unreachable');
+        });
+
+        const running = executor.runSegment({
+            tenantId, taskId: recoveryTaskId, agentId,
+            idempotencyKey: `${recoveryTaskId}:start`,
+            runtimeSurface: 'hatchet', wake: { trigger: 'start', input: {} },
+        });
+        await entered;
+        const claimed = await sessionManager.load(tenantId, recoveryTaskId);
+        const meta = claimed!.snapshot.meta as Record<string, unknown>;
+        const coordinator = meta.turnCoordinator as Record<string, unknown>;
+        const active = coordinator.active as Record<string, unknown>;
+        await sessionManager.saveSnapshot({
+            tenantId, sessionId: recoveryTaskId, agentId,
+            expectedWmVersion: claimed!.wmVersion,
+            snapshot: { ...claimed!.snapshot, meta: { ...meta, turnCoordinator: {
+                ...coordinator,
+                active: {
+                    ...active,
+                    acquiredAt: '2020-01-01T00:00:00.000Z',
+                    heartbeatAt: '2020-01-01T00:00:00.000Z',
+                    expiresAt: '2020-01-01T00:00:01.000Z',
+                },
+            } } },
+        });
+        releaseAttempt();
+
+        const result = await running;
+        expect(result).toMatchObject({
+            turnDisposition: 'lease_expired_recovery_staged',
+            associatedTurnSeq: 1,
+            turnClaim: { claimId: active.claimId, fence: active.fence, claimedGeneration: '1', turnSeq: 1 },
+        });
+        const recovered = await sessionManager.load(tenantId, recoveryTaskId);
+        expect((recovered!.snapshot.meta as any).turnCoordinator).toMatchObject({
+            requestedGeneration: '1', completedGeneration: '0',
+            dispatchIntent: {
+                generation: '1', turnSeq: 1,
+                deliveryKey: `${recoveryTaskId}:turn-request:1`,
+                recovery: { reason: 'lease_expired', sourceClaim: { claimId: active.claimId } },
+            },
+        });
+        expect((recovered!.snapshot.meta as any).turnCoordinator.active).toBeUndefined();
     });
 
     it('persists processed keys in the snapshot for durable duplicate detection', async () => {

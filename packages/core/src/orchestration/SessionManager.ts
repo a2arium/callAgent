@@ -15,6 +15,8 @@ import type {
     RunnableTurnRequestCursor,
     DurableRunProgressRecord,
     DurableRunProgressWriteResult,
+    ExpiredTaskTurnClaimCandidate,
+    ExpiredTaskTurnClaimCursor,
 } from '@a2arium/callagent-memory-engine';
 import { preserveConversationInboxForSnapshot } from '../loop/conversationInboxIdentity.js';
 import {
@@ -96,7 +98,13 @@ export class SessionManager {
     supportsDurableTaskAdmission(): boolean {
         return this.store?.taskAdmissionCapabilities?.durablePersistence === true &&
             this.store.taskAdmissionCapabilities.runnableTurnRecovery === true &&
-            typeof this.store.listRunnableTurnRequests === 'function';
+            typeof this.store.listRunnableTurnRequests === 'function' &&
+            this.store.taskAdmissionCapabilities.expiredTurnLeaseRecovery === true &&
+            this.supportsExpiredTaskTurnLeaseRecovery();
+    }
+
+    supportsExpiredTaskTurnLeaseRecovery(): boolean {
+        return typeof this.store?.listExpiredTaskTurnClaims === 'function';
     }
 
     supportsDurableRunProgress(): boolean {
@@ -159,6 +167,21 @@ export class SessionManager {
     }): Promise<RunnableTurnRequest[]> {
         if (!this.store?.listRunnableTurnRequests) return [];
         return this.store.listRunnableTurnRequests({
+            ...(params.cursor ? { cursor: params.cursor } : {}),
+            limit: params.limit ?? 100,
+        });
+    }
+
+    async listExpiredTaskTurnClaims(params: {
+        runtimeSurface: 'hatchet' | 'in_process';
+        cursor?: ExpiredTaskTurnClaimCursor;
+        limit?: number;
+    }): Promise<ExpiredTaskTurnClaimCandidate[]> {
+        if (!this.store?.listExpiredTaskTurnClaims) {
+            throw new Error('TASK_TURN_EXPIRED_LEASE_RECOVERY_UNAVAILABLE');
+        }
+        return this.store.listExpiredTaskTurnClaims({
+            runtimeSurface: params.runtimeSurface,
             ...(params.cursor ? { cursor: params.cursor } : {}),
             limit: params.limit ?? 100,
         });

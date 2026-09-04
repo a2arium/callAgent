@@ -91,7 +91,10 @@ export function extendContextWithStreaming(
     isStreaming: boolean,
     eventBusParam?: IEventBus
 ): void {
-    const durableProgressReport = ctx.progress.report;
+    // Runtime adapters and older custom contexts may omit the optional progress
+    // facade entirely. The streaming layer installs the canonical callable
+    // facade below, preserving durable reporting only when it already exists.
+    const durableProgressReport = ctx.progress?.report;
     const capabilityContext = ctx as ContextWithTaskReplyCapability;
     const existingCapability = capabilityContext[TASK_REPLY_CAPABILITY];
     const eventBus = eventBusParam ?? existingCapability?.eventBus ?? createInMemoryEventBus();

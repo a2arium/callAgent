@@ -72,6 +72,8 @@ export {
     assertCurrentTaskTurn,
     finalizeTaskTurnsForTerminalSnapshot,
     markTaskTurnDispatchEnqueued,
+    recoverExpiredTaskTurnClaim,
+    recoverExpiredTaskTurnClaimInSnapshot,
     readTaskTurnCoordinator,
     releaseTaskTurn,
     renewTaskTurnClaim,
@@ -80,7 +82,12 @@ export {
     type RequestTaskTurnResult,
     type TaskTurnClaim,
     type TaskTurnCoordinatorState,
+    type TaskTurnRecoveryDisposition,
 } from './orchestration/TaskTurnCoordinator.js';
+export {
+    sweepExpiredTaskTurnClaims,
+    type ExpiredTaskTurnRecoverySweepResult,
+} from './orchestration/ExpiredTaskTurnRecovery.js';
 export {
     reconcileSnapshotMutation,
     SnapshotReconciliationError,

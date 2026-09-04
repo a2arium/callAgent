@@ -13,6 +13,7 @@ import { logger } from '@a2arium/callagent-utils';
 import type { RunnableTurnRequest } from '@a2arium/callagent-memory-engine';
 import type { SessionManager } from '../orchestration/SessionManager.js';
 import { observeTaskSubmissionBacklog } from '../orchestration/taskSubmissionObservability.js';
+import { sweepExpiredTaskTurnClaims } from '../orchestration/ExpiredTaskTurnRecovery.js';
 import type {
     CancelParams,
     CancelTimerParams,
@@ -549,6 +550,13 @@ export class InProcessRuntimeDriver implements RuntimeDriver {
 
     private async reconcileRunnableTurnRequests(): Promise<void> {
         if (!this.sessionManager) return;
+        if (this.sessionManager.supportsExpiredTaskTurnLeaseRecovery()) {
+            await sweepExpiredTaskTurnClaims({
+                session: this.sessionManager,
+                runtimeSurface: 'in_process',
+                now: this.now,
+            });
+        }
         let cursor: { updatedAt: string; tenantId: string; sessionId: string } | undefined;
         const submissionRows: RunnableTurnRequest[] = [];
         do {

@@ -326,6 +326,15 @@ async function executeTaskTaskInner(
                 await waitForTurnAvailability(ctx, input, turnSeq);
                 continue;
             }
+            if (segment.turnDisposition === 'lease_expired_recovery_staged') {
+                if (segment.claimedGeneration === undefined) {
+                    throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: lease recovery omitted claimedGeneration');
+                }
+                recoveryGeneration = segment.claimedGeneration;
+                idempotencyKey = `${input.taskId}:turn-request:${segment.claimedGeneration}`;
+                await waitForTurnAvailability(ctx, input, turnSeq);
+                continue;
+            }
             recoveryGeneration = undefined;
 
             let boundary = segment.boundary;

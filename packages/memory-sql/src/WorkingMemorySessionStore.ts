@@ -47,6 +47,23 @@ export type RunnableTurnRequestCursor = {
     sessionId: string;
 };
 
+export type ExpiredTaskTurnClaimCandidate = {
+    tenantId: string;
+    taskId: string;
+    agentId: string;
+    claimId: string;
+    fence: string;
+    claimedGeneration: string;
+    expiresAt: string;
+    runtimeSurface: 'hatchet' | 'in_process';
+};
+
+export type ExpiredTaskTurnClaimCursor = {
+    expiresAt: string;
+    tenantId: string;
+    taskId: string;
+};
+
 type ConversationKind = 'thread' | 'topic';
 
 type ConversationMessageRecord = {
@@ -183,6 +200,7 @@ export class WorkingMemorySessionStore {
     readonly taskAdmissionCapabilities = {
         durablePersistence: true,
         runnableTurnRecovery: true,
+        expiredTurnLeaseRecovery: true,
     } as const;
     readonly runProgressCapabilities = {
         durableLatestProjection: true,
@@ -413,6 +431,58 @@ export class WorkingMemorySessionStore {
                 runtimeSurface: row.runtimeSurface,
             }];
         });
+    }
+
+    async listExpiredTaskTurnClaims(params: {
+        runtimeSurface: 'hatchet' | 'in_process';
+        cursor?: ExpiredTaskTurnClaimCursor;
+        limit: number;
+    }): Promise<ExpiredTaskTurnClaimCandidate[]> {
+        await this.ensureConnected();
+        const limit = Math.max(1, Math.min(1000, params.limit));
+        const cursorClause = params.cursor
+            ? Prisma.sql`AND (
+                snapshot #>> '{meta,turnCoordinator,active,expiresAt}', "tenant_id", "session_id"
+              ) > (${params.cursor.expiresAt}, ${params.cursor.tenantId}, ${params.cursor.taskId})`
+            : Prisma.empty;
+        const rows = await this.runWithReconnect(() => this.prisma.$queryRaw<Array<{
+            tenantId: string;
+            taskId: string;
+            agentId: string;
+            claimId: string;
+            fence: string;
+            claimedGeneration: string;
+            expiresAt: string;
+        }>>(Prisma.sql`
+            SELECT
+                "tenant_id" AS "tenantId",
+                "session_id" AS "taskId",
+                "agent_id" AS "agentId",
+                snapshot #>> '{meta,turnCoordinator,active,claimId}' AS "claimId",
+                snapshot #>> '{meta,turnCoordinator,active,fence}' AS fence,
+                snapshot #>> '{meta,turnCoordinator,active,claimedGeneration}' AS "claimedGeneration",
+                snapshot #>> '{meta,turnCoordinator,active,expiresAt}' AS "expiresAt"
+            FROM "wm_sessions"
+            WHERE snapshot #> '{meta,turnCoordinator,active}' IS NOT NULL
+              AND snapshot #> '{meta,turnCoordinator,dispatchIntent}' IS NULL
+              AND snapshot #>> '{meta,turnCoordinator,active,runtimeSurface}' = ${params.runtimeSurface}
+              AND snapshot #>> '{meta,turnCoordinator,active,expiresAt}' ~
+                  '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$'
+              AND snapshot #>> '{meta,turnCoordinator,active,expiresAt}' <=
+                  to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+              AND snapshot #>> '{meta,turnCoordinator,active,claimId}' IS NOT NULL
+              AND snapshot #>> '{meta,turnCoordinator,active,fence}' ~ '^[0-9]+$'
+              AND snapshot #>> '{meta,turnCoordinator,active,claimedGeneration}' ~ '^[0-9]+$'
+              AND snapshot #>> '{meta,turnCoordinator,completedGeneration}' ~ '^[0-9]+$'
+              AND (snapshot #>> '{meta,turnCoordinator,completedGeneration}')::numeric <
+                  (snapshot #>> '{meta,turnCoordinator,active,claimedGeneration}')::numeric
+              AND COALESCE(snapshot #>> '{meta,taskLifecycle,state}', 'active') NOT IN
+                  ('completed', 'failed', 'canceled', 'detached')
+              ${cursorClause}
+            ORDER BY snapshot #>> '{meta,turnCoordinator,active,expiresAt}', "tenant_id", "session_id"
+            LIMIT ${limit}
+        `));
+        return rows.map((row) => ({ ...row, runtimeSurface: params.runtimeSurface }));
     }
 
     /** Atomic compare-and-set snapshot. */

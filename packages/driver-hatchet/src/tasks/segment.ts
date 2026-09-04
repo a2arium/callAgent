@@ -91,7 +91,8 @@ export type SegmentTaskOutput = JsonObject & {
     traceId?: string;
     turnTraceId?: string;
     executionMetadata?: { origin?: 'cache' | 'runtime' };
-    turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+    turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
+        'terminal_replay' | 'lease_expired_recovery_staged';
     claimId?: string;
     turnFence?: string;
     claimedGeneration?: string;

@@ -107,3 +107,29 @@ describe('WorkingMemorySessionStore.writeSnapshotCAS', () => {
         expect(update.data.agentId).toBeUndefined();
     });
 });
+
+describe('WorkingMemorySessionStore.listExpiredTaskTurnClaims', () => {
+    test('returns bounded runtime-scoped candidates from the indexed keyset query', async () => {
+        const prisma = createPrisma();
+        prisma.$queryRaw.mockResolvedValue([{
+            tenantId: 'tenant', taskId: 'task-a', agentId: 'agent', claimId: 'claim-a',
+            fence: '7', claimedGeneration: '3', expiresAt: '2026-09-04T10:00:00.000Z',
+        }]);
+        const store = new WorkingMemorySessionStore(prisma as never);
+
+        await expect(store.listExpiredTaskTurnClaims({
+            runtimeSurface: 'hatchet',
+            cursor: { expiresAt: '2026-09-04T09:00:00.000Z', tenantId: 'tenant', taskId: 'task-0' },
+            limit: 5_000,
+        })).resolves.toEqual([{
+            tenantId: 'tenant', taskId: 'task-a', agentId: 'agent', claimId: 'claim-a',
+            fence: '7', claimedGeneration: '3', expiresAt: '2026-09-04T10:00:00.000Z',
+            runtimeSurface: 'hatchet',
+        }]);
+        expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+        const query = prisma.$queryRaw.mock.calls[0]?.[0] as { strings?: string[]; values?: unknown[] };
+        expect(query.strings?.join(' ')).toContain('clock_timestamp()');
+        expect(query.strings?.join(' ')).toContain('active,expiresAt');
+        expect(query.values).toEqual(expect.arrayContaining(['hatchet', 1000]));
+    });
+});

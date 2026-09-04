@@ -150,7 +150,8 @@ export type TurnAttemptRun = {
   turnSeq?: number;
   attemptKey?: string;
   attemptSeq?: number;
-  disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+  disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
+    'terminal_replay' | 'lease_expired_recovery_staged';
   claimId?: string;
   turnFence?: string;
   claimedGeneration?: string;
@@ -378,6 +379,7 @@ export type TaskCoordinationView = {
   dispatchIntent?: {
     generation: string;
     state: 'pending' | 'enqueued' | 'overdue';
+    recoveryReason?: 'lease_expired';
     createdAt: string;
     enqueuedAt?: string;
   };

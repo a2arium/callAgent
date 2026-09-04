@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { TaskTurnCoordinatorStateError } from '@a2arium/callagent-types/task-turn-coordinator-state';
 import { TaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
+import { logger } from '@a2arium/callagent-utils';
 import {
     addProcessedSegmentKey,
     snapshotHasProcessedSegmentKey,
@@ -14,6 +15,7 @@ const DEFAULT_LEASE_MS = 120_000;
 const DEFAULT_HEARTBEAT_MS = 20_000;
 const DEFAULT_RENEWAL_SAFETY_MS = 40_000;
 const DEFAULT_TAKEOVER_GRACE_MS = 10_000;
+const log = logger.createLogger({ prefix: 'TaskTurnCoordinator' });
 
 export type TaskTurnRuntimeSurface = 'direct' | 'in_process' | 'hatchet';
 
@@ -37,6 +39,18 @@ export type TaskTurnClaim = {
     runtimeSurface: TaskTurnRuntimeSurface;
 };
 
+export type ActiveTaskTurnClaim = TaskTurnClaim & {
+    phase: 'claimed' | 'executing' | 'committing';
+};
+
+export type TaskTurnRecoveryDisposition =
+    | 'recovery_staged'
+    | 'already_recovering'
+    | 'not_expired'
+    | 'competing_owner'
+    | 'terminal'
+    | 'settled';
+
 export type TaskTurnCoordinatorState = {
     schemaVersion: 1;
     /**
@@ -49,7 +63,7 @@ export type TaskTurnCoordinatorState = {
     nextTurnSeq: number;
     requestedGeneration: string;
     completedGeneration: string;
-    active?: TaskTurnClaim & { phase: 'claimed' | 'executing' | 'committing' };
+    active?: ActiveTaskTurnClaim;
     dispatchIntent?: {
         generation: string;
         /** Logical segment already assigned to this generation during an earlier claim. */
@@ -58,6 +72,10 @@ export type TaskTurnCoordinatorState = {
         runtimeSurface: TaskTurnRuntimeSurface;
         createdAt: string;
         enqueuedAt?: string;
+        recovery?: {
+            reason: 'lease_expired';
+            sourceClaim: ActiveTaskTurnClaim;
+        };
     };
 };
 
@@ -122,6 +140,69 @@ function timestamp(value: unknown, field: string, tenantId: string, taskId: stri
         return invalid(tenantId, taskId, `${field} must be a canonical ISO timestamp`);
     }
     return value;
+}
+
+function readRecoverySourceClaim(
+    value: unknown,
+    counters: { nextFence: bigint; requested: bigint; completed: bigint; nextTurnSeq: number },
+    tenantId: string,
+    taskId: string
+): ActiveTaskTurnClaim {
+    const candidate = asRecord(value);
+    if (candidate === undefined) return invalid(tenantId, taskId, 'dispatchIntent.recovery.sourceClaim must be an object');
+    const fence = decimal(candidate.fence, 'dispatchIntent.recovery.sourceClaim.fence', tenantId, taskId);
+    const generation = decimal(
+        candidate.claimedGeneration,
+        'dispatchIntent.recovery.sourceClaim.claimedGeneration',
+        tenantId,
+        taskId
+    );
+    if (fence <= 0n || fence > counters.nextFence || generation <= counters.completed || generation > counters.requested) {
+        return invalid(tenantId, taskId, 'dispatchIntent recovery source exceeds coordinator counters');
+    }
+    if (typeof candidate.claimId !== 'string' || candidate.claimId.length === 0 ||
+        typeof candidate.ownerId !== 'string' || candidate.ownerId.length === 0 ||
+        typeof candidate.requestKey !== 'string' || candidate.requestKey.length === 0 ||
+        !Number.isSafeInteger(candidate.turnSeq) || (candidate.turnSeq as number) <= 0 ||
+        (candidate.turnSeq as number) > counters.nextTurnSeq ||
+        !['claimed', 'executing', 'committing'].includes(String(candidate.phase)) ||
+        !['direct', 'in_process', 'hatchet'].includes(String(candidate.runtimeSurface))) {
+        return invalid(tenantId, taskId, 'dispatchIntent recovery source identity is invalid');
+    }
+    const acquiredAt = timestamp(
+        candidate.acquiredAt,
+        'dispatchIntent.recovery.sourceClaim.acquiredAt',
+        tenantId,
+        taskId
+    );
+    const heartbeatAt = timestamp(
+        candidate.heartbeatAt,
+        'dispatchIntent.recovery.sourceClaim.heartbeatAt',
+        tenantId,
+        taskId
+    );
+    const expiresAt = timestamp(
+        candidate.expiresAt,
+        'dispatchIntent.recovery.sourceClaim.expiresAt',
+        tenantId,
+        taskId
+    );
+    if (Date.parse(acquiredAt) > Date.parse(heartbeatAt) || Date.parse(heartbeatAt) >= Date.parse(expiresAt)) {
+        return invalid(tenantId, taskId, 'dispatchIntent recovery source timestamps are not monotonic');
+    }
+    return {
+        claimId: candidate.claimId,
+        ownerId: candidate.ownerId,
+        requestKey: candidate.requestKey,
+        fence: fence.toString(),
+        claimedGeneration: generation.toString(),
+        turnSeq: candidate.turnSeq as number,
+        phase: candidate.phase as ActiveTaskTurnClaim['phase'],
+        runtimeSurface: candidate.runtimeSurface as TaskTurnRuntimeSurface,
+        acquiredAt,
+        heartbeatAt,
+        expiresAt,
+    };
 }
 
 function initialState(): TaskTurnCoordinatorState {
@@ -211,7 +292,27 @@ function readState(
         }
         const candidate = value.dispatchIntent as Record<string, unknown>;
         const generation = decimal(candidate.generation, 'dispatchIntent.generation', tenantId, taskId);
-        if (generation !== requested || generation <= completed ||
+        const recovery = candidate.recovery === undefined
+            ? undefined
+            : (() => {
+                  const rawRecovery = asRecord(candidate.recovery);
+                  if (rawRecovery?.reason !== 'lease_expired') {
+                      return invalid(tenantId, taskId, 'dispatchIntent recovery reason is invalid');
+                  }
+                  return {
+                      reason: 'lease_expired' as const,
+                      sourceClaim: readRecoverySourceClaim(rawRecovery.sourceClaim, {
+                          nextFence,
+                          requested,
+                          completed,
+                          nextTurnSeq: value.nextTurnSeq as number,
+                      }, tenantId, taskId),
+                  };
+              })();
+        if ((recovery === undefined
+                ? generation !== requested
+                : generation !== BigInt(recovery.sourceClaim.claimedGeneration)) ||
+            generation > requested || generation <= completed ||
             typeof candidate.deliveryKey !== 'string' || candidate.deliveryKey.length === 0 ||
             !['direct', 'in_process', 'hatchet'].includes(String(candidate.runtimeSurface))) {
             return invalid(tenantId, taskId, 'dispatchIntent is inconsistent');
@@ -225,6 +326,15 @@ function readState(
                 (candidate.turnSeq as number) > (value.nextTurnSeq as number))) {
             return invalid(tenantId, taskId, 'dispatchIntent.turnSeq is invalid');
         }
+        if (recovery !== undefined && (
+            candidate.turnSeq !== recovery.sourceClaim.turnSeq ||
+            candidate.runtimeSurface !== recovery.sourceClaim.runtimeSurface ||
+            (taskId !== 'unknown'
+                ? candidate.deliveryKey !== `${taskId}:turn-request:${generation}`
+                : !candidate.deliveryKey.endsWith(`:turn-request:${generation}`))
+        )) {
+            return invalid(tenantId, taskId, 'dispatchIntent recovery lineage is inconsistent');
+        }
         if (enqueuedAt !== undefined && Date.parse(enqueuedAt) < Date.parse(createdAt)) {
             return invalid(tenantId, taskId, 'dispatchIntent timestamps are not monotonic');
         }
@@ -235,6 +345,7 @@ function readState(
             runtimeSurface: candidate.runtimeSurface as TaskTurnRuntimeSurface,
             createdAt,
             ...(enqueuedAt !== undefined ? { enqueuedAt } : {}),
+            ...(recovery !== undefined ? { recovery } : {}),
         };
     }
     if (active !== undefined && dispatchIntent !== undefined) {
@@ -289,6 +400,116 @@ export function readTaskTurnCoordinator(
     );
 }
 
+export type RecoverExpiredTaskTurnClaimParams = {
+    tenantId: string;
+    taskId: string;
+    expectedClaim: Pick<TaskTurnClaim, 'claimId' | 'fence' | 'claimedGeneration' | 'expiresAt'>;
+    storageNow: string;
+};
+
+export function recoverExpiredTaskTurnClaimInSnapshot(
+    snapshot: Record<string, unknown>,
+    params: RecoverExpiredTaskTurnClaimParams
+): {
+    snapshot: Record<string, unknown>;
+    disposition: TaskTurnRecoveryDisposition;
+    sourceClaim?: ActiveTaskTurnClaim;
+    recoveryLagMs?: number;
+} {
+    if (isTaskLifecycleTerminal(readTaskLifecycle(snapshot, params.taskId))) {
+        return { snapshot, disposition: 'terminal' };
+    }
+    const state = readState(snapshot, params.tenantId, params.taskId);
+    const expected = params.expectedClaim;
+    const recovering = state.dispatchIntent?.recovery?.sourceClaim;
+    if (recovering?.claimId === expected.claimId && recovering.fence === expected.fence) {
+        return { snapshot, disposition: 'already_recovering', sourceClaim: recovering };
+    }
+    if (BigInt(state.completedGeneration) >= BigInt(expected.claimedGeneration)) {
+        return { snapshot, disposition: 'settled' };
+    }
+    const active = state.active;
+    if (active?.claimId !== expected.claimId || active.fence !== expected.fence ||
+        active.claimedGeneration !== expected.claimedGeneration) {
+        return { snapshot, disposition: 'competing_owner' };
+    }
+    const nowMs = storageTime(params.storageNow, params.tenantId, params.taskId);
+    if (nowMs < Date.parse(active.expiresAt)) {
+        return { snapshot, disposition: 'not_expired', sourceClaim: active };
+    }
+    const dispatchIntent: NonNullable<TaskTurnCoordinatorState['dispatchIntent']> = {
+        generation: active.claimedGeneration,
+        turnSeq: active.turnSeq,
+        deliveryKey: `${params.taskId}:turn-request:${active.claimedGeneration}`,
+        runtimeSurface: active.runtimeSurface,
+        createdAt: params.storageNow,
+        recovery: {
+            reason: 'lease_expired',
+            sourceClaim: active,
+        },
+    };
+    return {
+        snapshot: writeState(snapshot, { ...state, active: undefined, dispatchIntent }),
+        disposition: 'recovery_staged',
+        sourceClaim: active,
+        recoveryLagMs: Math.max(0, nowMs - Date.parse(active.expiresAt)),
+    };
+}
+
+export async function recoverExpiredTaskTurnClaim(params: {
+    session: SessionManager;
+    tenantId: string;
+    taskId: string;
+    agentId?: string;
+    expectedClaim: RecoverExpiredTaskTurnClaimParams['expectedClaim'];
+    now?: () => number;
+}): Promise<{ disposition: TaskTurnRecoveryDisposition; sourceClaim?: ActiveTaskTurnClaim }> {
+    const reconciled = await reconcileSnapshotMutation({
+        session: params.session,
+        tenantId: params.tenantId,
+        sessionId: params.taskId,
+        agentId: params.agentId,
+        operation: 'task.turn.recover_expired',
+        now: params.now,
+        mutate: ({ snapshot, storageNow }) => {
+            const result = recoverExpiredTaskTurnClaimInSnapshot(snapshot, {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                expectedClaim: params.expectedClaim,
+                storageNow,
+            });
+            return result.disposition === 'recovery_staged'
+                ? { kind: 'write' as const, snapshot: result.snapshot, value: result }
+                : { kind: 'noop' as const, value: result };
+        },
+    });
+    defaultMetricsRegistry.increment('task_turn_expiry_recovery_total', {
+        outcome: reconciled.value.disposition,
+        runtimeSurface: reconciled.value.sourceClaim?.runtimeSurface ?? 'unknown',
+    });
+    if (reconciled.value.disposition === 'recovery_staged' && reconciled.value.recoveryLagMs !== undefined) {
+        defaultMetricsRegistry.observeDuration(
+            'task_turn_expiry_recovery_lag_ms',
+            reconciled.value.recoveryLagMs,
+            { runtimeSurface: reconciled.value.sourceClaim?.runtimeSurface ?? 'unknown' }
+        );
+        log.warn('Expired task turn lease staged for durable recovery', {
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            claimId: reconciled.value.sourceClaim?.claimId,
+            fence: reconciled.value.sourceClaim?.fence,
+            generation: reconciled.value.sourceClaim?.claimedGeneration,
+            turnSeq: reconciled.value.sourceClaim?.turnSeq,
+            runtimeSurface: reconciled.value.sourceClaim?.runtimeSurface,
+            recoveryLagMs: reconciled.value.recoveryLagMs,
+        });
+    }
+    return {
+        disposition: reconciled.value.disposition,
+        ...(reconciled.value.sourceClaim !== undefined ? { sourceClaim: reconciled.value.sourceClaim } : {}),
+    };
+}
+
 export function stageTaskTurnRequestInSnapshot(params: {
     snapshot: Record<string, unknown>;
     tenantId: string;
@@ -318,7 +539,7 @@ export function stageTaskTurnRequestInSnapshot(params: {
         ...current,
         runtimeSurface,
         requestedGeneration: requested.toString(),
-        ...(!current.active ? {
+        ...(!current.active && current.dispatchIntent?.recovery === undefined ? {
             dispatchIntent: {
                 generation: requested.toString(),
                 deliveryKey: `${params.taskId}:turn-request:${requested}`,
@@ -397,7 +618,7 @@ export function advanceTaskTurnGenerationInSnapshot(params: {
         ...current,
         runtimeSurface,
         requestedGeneration: requested.toString(),
-        ...(!current.active ? {
+        ...(!current.active && current.dispatchIntent?.recovery === undefined ? {
             dispatchIntent: {
                 generation: requested.toString(),
                 deliveryKey: `${params.taskId}:turn-request:${requested}`,
@@ -532,6 +753,15 @@ export async function requestTaskTurn(params: {
                   });
             let current = staged.state;
             let stagedSnapshot = staged.snapshot;
+            if (current.dispatchIntent?.recovery !== undefined) {
+                replacedClaim = current.dispatchIntent.recovery.sourceClaim;
+            }
+            if (params.recoveryGeneration === undefined && current.dispatchIntent?.recovery !== undefined) {
+                const value: RequestTaskTurnResult = { disposition: 'queued', staged: staged.staged };
+                return staged.staged
+                    ? { kind: 'write', snapshot: stagedSnapshot, value }
+                    : { kind: 'noop', value };
+            }
             const nowMs = storageTime(storageNow, params.tenantId, params.taskId);
             if (
                 current.active !== undefined &&
@@ -582,10 +812,13 @@ export async function requestTaskTurn(params: {
             if (!staged.staged && requested <= completed) {
                 return { kind: 'noop', value: { disposition: 'matching_replay', staged: false } };
             }
+            const claimGeneration = current.dispatchIntent?.recovery !== undefined
+                ? BigInt(current.dispatchIntent.generation)
+                : requested;
             const fence = BigInt(current.nextFence) + 1n;
-            const recoveredTurnSeq = current.active?.claimedGeneration === requested.toString()
+            const recoveredTurnSeq = current.active?.claimedGeneration === claimGeneration.toString()
                 ? current.active.turnSeq
-                : current.dispatchIntent?.generation === requested.toString()
+                : current.dispatchIntent?.generation === claimGeneration.toString()
                     ? current.dispatchIntent.turnSeq
                     : undefined;
             const turnSeq = recoveredTurnSeq ?? current.nextTurnSeq + 1;
@@ -602,7 +835,7 @@ export async function requestTaskTurn(params: {
                 fence: fence.toString(),
                 ownerId: params.ownerId,
                 requestKey: params.requestKey,
-                claimedGeneration: requested.toString(),
+                claimedGeneration: claimGeneration.toString(),
                 turnSeq,
                 acquiredAt: storageNow,
                 heartbeatAt: storageNow,
@@ -618,7 +851,7 @@ export async function requestTaskTurn(params: {
                 dispatchIntent: undefined,
             };
             let claimedSnapshot = writeState(stagedSnapshot, state);
-            if (requested === 1n) {
+            if (claimGeneration === 1n) {
                 const meta = asRecord(claimedSnapshot.meta);
                 const submission = asRecord(meta?.taskSubmission);
                 if (

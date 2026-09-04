@@ -91,6 +91,7 @@ export type TaskCoordinationView = {
     dispatchIntent?: {
         generation: string;
         state: 'pending' | 'enqueued' | 'overdue';
+        recoveryReason?: 'lease_expired';
         createdAt: string;
         enqueuedAt?: string;
     };
@@ -175,7 +176,8 @@ export type TurnAttemptRun = {
     turnSeq?: number;
     attemptKey?: string;
     attemptSeq?: number;
-    disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' | 'terminal_replay';
+    disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
+        'terminal_replay' | 'lease_expired_recovery_staged';
     claimId?: string;
     turnFence?: string;
     claimedGeneration?: string;
@@ -495,6 +497,8 @@ export function buildTaskCoordinationView(
     }
     const state: TaskCoordinationView['state'] = terminal
         ? 'terminal'
+        : coordinator.active && leaseState === 'expired'
+            ? 'recovering'
         : coordinator.active
             ? requested > BigInt(coordinator.active.claimedGeneration) ? 'queued' : 'owned'
             : coordinator.dispatchIntent ? 'recovering'
@@ -525,6 +529,9 @@ export function buildTaskCoordinationView(
         ...(coordinator.dispatchIntent ? {
             dispatchIntent: {
                 generation: coordinator.dispatchIntent.generation,
+                ...(coordinator.dispatchIntent.recovery !== undefined
+                    ? { recoveryReason: coordinator.dispatchIntent.recovery.reason }
+                    : {}),
                 state: coordinator.dispatchIntent.enqueuedAt
                     ? 'enqueued'
                     : intentAge > 30_000 ? 'overdue' : 'pending',
@@ -538,7 +545,8 @@ export function buildTaskCoordinationView(
 
 function isTurnDisposition(value: unknown): value is NonNullable<TurnRun['disposition']> {
     return value === 'executed' || value === 'queued' || value === 'matching_replay' ||
-        value === 'superseded' || value === 'terminal_replay';
+        value === 'superseded' || value === 'terminal_replay' ||
+        value === 'lease_expired_recovery_staged';
 }
 
 function deriveRootStatus(events: AgentRunSourceEvent[], driverRuns: DriverRunView[]): AgentRunStatus {

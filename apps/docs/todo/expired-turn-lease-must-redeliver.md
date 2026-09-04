@@ -1,6 +1,7 @@
 # Bug Report: Expired task-turn lease completes provider segment and strands durable demand
 
-> **Status:** Open.
+> **Status:** Implemented on 2026-09-04; verification is covered by coordinator,
+> runtime-reconciler, SQL-store, Hatchet-root, and Operator regression tests.
 >
 > **Severity:** Critical for correctness of long-running durable agents. The
 > expired owner is correctly fenced from committing, but CallAgent can then lose

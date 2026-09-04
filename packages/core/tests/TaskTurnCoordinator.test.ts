@@ -3,11 +3,13 @@ import { InMemorySessionManager } from '../src/orchestration/InMemorySessionMana
 import { SessionManager } from '../src/orchestration/SessionManager.js';
 import {
     advanceTaskTurnGenerationInSnapshot,
+    completeTaskTurnInSnapshot,
     readTaskTurnCoordinator,
     markTaskTurnDispatchEnqueued,
     releaseTaskTurn,
     requestTaskTurn,
     renewTaskTurnClaim,
+    recoverExpiredTaskTurnClaim,
 } from '../src/orchestration/TaskTurnCoordinator.js';
 import { registerTaskEffect } from '../src/orchestration/TaskEffectRegistration.js';
 import { runWithSegmentIdempotencyKey } from '../src/runtime/segmentProcessedKeys.js';
@@ -492,5 +494,114 @@ describe('TaskTurnCoordinator', () => {
         await expect(session.listRunnableTurnRequests({ limit: 100 })).resolves.toHaveLength(0);
         clockMs += 15_001;
         await expect(session.listRunnableTurnRequests({ limit: 100 })).resolves.toHaveLength(1);
+    });
+
+    it('redelivers an expired generation before later queued demand with the same logical turn', async () => {
+        let clockMs = Date.parse('2026-09-04T10:00:00.000Z');
+        const session = new SessionManager(new InMemorySessionManager(() => clockMs));
+        await session.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'task-a', agentId: 'agent-a', expectedWmVersion: 0n,
+            snapshot: {
+                meta: {
+                    taskLifecycle: { taskId: 'task-a', rootTaskId: 'task-a', ancestorTaskIds: [], state: 'active' },
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    },
+                },
+            },
+        });
+        const first = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-a',
+            requestKey: 'task-a:start', runtimeSurface: 'hatchet', leaseMs: 1_000,
+        });
+        if (first.result.disposition !== 'acquired') throw new Error('claim missing');
+        await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-b',
+            requestKey: 'task-a:wake:2', runtimeSurface: 'hatchet', leaseMs: 1_000,
+        });
+        await expect(recoverExpiredTaskTurnClaim({
+            session, tenantId: 'tenant-a', taskId: 'task-a', expectedClaim: first.result.claim,
+        })).resolves.toMatchObject({ disposition: 'not_expired' });
+        clockMs = Date.parse(first.result.claim.expiresAt);
+
+        await expect(recoverExpiredTaskTurnClaim({
+            session, tenantId: 'tenant-a', taskId: 'task-a', expectedClaim: first.result.claim,
+        })).resolves.toMatchObject({ disposition: 'recovery_staged' });
+        await expect(recoverExpiredTaskTurnClaim({
+            session, tenantId: 'tenant-a', taskId: 'task-a', expectedClaim: first.result.claim,
+        })).resolves.toMatchObject({ disposition: 'already_recovering' });
+        let state = readTaskTurnCoordinator((await session.load('tenant-a', 'task-a'))?.snapshot);
+        expect(state).toMatchObject({
+            requestedGeneration: '2', completedGeneration: '0',
+            dispatchIntent: {
+                generation: '1', turnSeq: first.result.claim.turnSeq,
+                deliveryKey: 'task-a:turn-request:1', recovery: { reason: 'lease_expired' },
+            },
+        });
+        expect(state.active).toBeUndefined();
+
+        const laterWake = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-c',
+            requestKey: 'task-a:wake:3', runtimeSurface: 'hatchet', leaseMs: 1_000,
+        });
+        expect(laterWake.result.disposition).toBe('queued');
+        state = readTaskTurnCoordinator((await session.load('tenant-a', 'task-a'))?.snapshot);
+        expect(state.requestedGeneration).toBe('3');
+        expect(state.dispatchIntent?.generation).toBe('1');
+
+        const recovered = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-recovery',
+            requestKey: 'task-a:turn-request:1', runtimeSurface: 'hatchet', leaseMs: 1_000,
+            recoveryGeneration: '1',
+        });
+        if (recovered.result.disposition !== 'acquired') throw new Error('recovery claim missing');
+        expect(recovered.result.claim).toMatchObject({
+            claimedGeneration: '1', turnSeq: first.result.claim.turnSeq, fence: '2',
+        });
+        expect(recovered.result.claim.claimId).not.toBe(first.result.claim.claimId);
+        expect(recovered.result.replacedClaim?.claimId).toBe(first.result.claim.claimId);
+
+        const completed = completeTaskTurnInSnapshot(recovered.snapshot, {
+            tenantId: 'tenant-a', taskId: 'task-a', claim: recovered.result.claim,
+            storageNow: clockMs.toString() === '' ? '' : new Date(clockMs).toISOString(),
+        });
+        expect(completed.disposition).toBe('committed');
+        expect(readTaskTurnCoordinator(completed.snapshot).dispatchIntent).toMatchObject({ generation: '3' });
+    });
+
+    it('discovers expired claims by surface with stable keyset pagination', async () => {
+        let clockMs = Date.parse('2026-09-04T11:00:00.000Z');
+        const store = new InMemorySessionManager(() => clockMs);
+        const session = new SessionManager(store);
+        for (const taskId of ['task-a', 'task-b']) {
+            await session.saveSnapshot({
+                tenantId: 'tenant-a', sessionId: taskId, agentId: 'agent-a', expectedWmVersion: 0n,
+                snapshot: { meta: {
+                    taskLifecycle: { taskId, rootTaskId: taskId, ancestorTaskIds: [], state: 'active' },
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '1', nextTurnSeq: 1,
+                        requestedGeneration: '1', completedGeneration: '0',
+                        active: {
+                            claimId: `claim-${taskId}`, fence: '1', ownerId: 'worker-a',
+                            requestKey: `${taskId}:start`, claimedGeneration: '1', turnSeq: 1,
+                            phase: 'executing', runtimeSurface: 'hatchet',
+                            acquiredAt: '2026-09-04T10:00:00.000Z',
+                            heartbeatAt: '2026-09-04T10:00:00.000Z',
+                            expiresAt: '2026-09-04T10:01:00.000Z',
+                        },
+                    },
+                } },
+            });
+        }
+        const first = await session.listExpiredTaskTurnClaims({ runtimeSurface: 'hatchet', limit: 1 });
+        expect(first.map((row) => row.taskId)).toEqual(['task-a']);
+        const second = await session.listExpiredTaskTurnClaims({
+            runtimeSurface: 'hatchet', limit: 1,
+            cursor: { expiresAt: first[0]!.expiresAt, tenantId: first[0]!.tenantId, taskId: first[0]!.taskId },
+        });
+        expect(second.map((row) => row.taskId)).toEqual(['task-b']);
+        await expect(session.listExpiredTaskTurnClaims({ runtimeSurface: 'in_process', limit: 10 }))
+            .resolves.toEqual([]);
     });
 });
