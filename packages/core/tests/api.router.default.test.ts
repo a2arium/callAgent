@@ -88,6 +88,52 @@ describe('API router default branch', () => {
         expect(res.body).toEqual({ acknowledged: true });
     });
 
+    it('loads a terminal run input on demand for a new operator instance', async () => {
+        const getAgentRunReplayInput = jest.fn(async () => ({
+            agentId: 'agent-1',
+            input: { input: { url: 'https://example.test' }, id: 'old-task' },
+        }));
+        EngineLocator.setEngine({ getAgentRunReplayInput });
+        const handler = getHandler('/tasks/:taskId/replay-input', 'get');
+        const res = fakeRes();
+
+        await handler({
+            method: 'GET',
+            params: { taskId: 'task-1' },
+            query: {},
+            header: (name: string) => name === 'x-tenant-id' ? 'tenant-1' : undefined,
+        }, res);
+
+        expect(res.statusCode).toBe(200);
+        expect(getAgentRunReplayInput).toHaveBeenCalledWith({ tenantId: 'tenant-1', taskId: 'task-1' });
+        expect(res.body).toEqual({
+            taskId: 'task-1',
+            agentId: 'agent-1',
+            payload: { input: { url: 'https://example.test' }, id: 'old-task' },
+        });
+    });
+
+    it('does not expose replay input to viewer-only operator users', async () => {
+        const getAgentRunReplayInput = jest.fn();
+        EngineLocator.setEngine({ getAgentRunReplayInput });
+        const handler = getHandler('/tasks/:taskId/replay-input', 'get');
+        const res = fakeRes();
+
+        await handler({
+            method: 'GET',
+            params: { taskId: 'task-1' },
+            query: {},
+            header: () => undefined,
+            operatorContext: {
+                tenantId: 'tenant-1', actorId: 'viewer-1', actorType: 'user', production: true, role: 'viewer',
+            },
+        }, res);
+
+        expect(res.statusCode).toBe(403);
+        expect(res.body).toEqual(expect.objectContaining({ error: 'OPERATOR_ACTION_FORBIDDEN' }));
+        expect(getAgentRunReplayInput).not.toHaveBeenCalled();
+    });
+
     it('passes authenticated tenant context and schedule filters to the schedule service', async () => {
         const list = jest.fn(async () => ({ items: [], nextCursor: undefined }));
         const handler = getScheduleHandler({ list }, '/agent-schedules', 'get');
@@ -286,6 +332,7 @@ describe('API router default branch', () => {
             { path: '/memory/semantic/:key/tags', method: 'patch', req: { method: 'PATCH', params: { key: 'memory-1' }, query: {}, body: {}, header: () => undefined } },
             { path: '/memory/semantic/:key', method: 'delete', req: { method: 'DELETE', params: { key: 'memory-1' }, query: {}, body: {}, header: () => undefined } },
             { path: '/tasks/:taskId/run-graph', method: 'get', req: { method: 'GET', params: { taskId: 'task-1' }, query: {}, header: () => undefined } },
+            { path: '/tasks/:taskId/replay-input', method: 'get', req: { method: 'GET', params: { taskId: 'task-1' }, query: {}, header: () => undefined } },
             { path: '/tasks/:taskId/cancel', method: 'post', req: { method: 'POST', params: { taskId: 'task-1' }, query: {}, body: {}, header: () => undefined } },
             { path: '/tasks/:taskId/turns/:turnSeq', method: 'get', req: { method: 'GET', params: { taskId: 'task-1', turnSeq: '1' }, query: {}, header: () => undefined } },
             { path: '/tasks/:taskId/memory', method: 'get', req: { method: 'GET', params: { taskId: 'task-1' }, query: {}, header: () => undefined } },

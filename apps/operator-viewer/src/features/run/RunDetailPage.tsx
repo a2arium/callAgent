@@ -3,7 +3,7 @@ import { ReactFlowProvider } from 'reactflow';
 import { ArrowLeft, PanelRightOpen, Play, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCancelRun, useOperatorConfig, useRunGraph } from '../../api/hooks';
-import { runAgent } from '../../api/client';
+import { getAgentRunReplayInput, runAgent } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
@@ -64,8 +64,7 @@ export function RunDetailPage(): React.ReactElement {
   const rootCancelable = taskId !== undefined && graph !== undefined && !isTerminalStatus(graph.root.status);
   const cancelDisabled = !rootCancelable || cancelRun.isPending;
   const selectedNodeCancelable = selectedNode !== undefined && !isTerminalStatus(selectedNode.status);
-  const replayPayload = graph ? replayPayloadFromInputPreview(graph.root.inputPreview) : undefined;
-  const canRunNewInstance = graph?.root.agentId !== undefined && isTerminalStatus(graph.root.status) && replayPayload !== undefined;
+  const canRunNewInstance = graph?.root.agentId !== undefined && isTerminalStatus(graph.root.status);
 
   const updateSearch = (patch: Partial<typeof search>) => {
     void navigate({
@@ -151,13 +150,23 @@ export function RunDetailPage(): React.ReactElement {
   };
 
   const runNewInstance = async () => {
-    if (!graph?.root.agentId || !replayPayload) return;
+    if (!graph?.root.agentId || !taskId) return;
     setLaunchState({ state: 'running' });
     try {
+      // Older, small graph responses can still contain the preview. Modern
+      // bounded responses omit it, so load the persisted input only on demand.
+      const previewPayload = replayPayloadFromInputPreview(graph.root.inputPreview);
+      const replay = previewPayload
+        ? { agentId: graph.root.agentId, payload: previewPayload }
+        : await getAgentRunReplayInput(search.tenantId, taskId);
+      const payload = replayPayloadFromInputPreview(replay.payload);
+      if (!payload) {
+        throw new Error('This run does not retain replayable input.');
+      }
       const response = await runAgent({
         tenantId: search.tenantId,
-        agentId: graph.root.agentId,
-        payload: replayPayload,
+        agentId: replay.agentId,
+        payload,
       });
       if (response.error) {
         setLaunchState({ state: 'error', message: response.error.message });

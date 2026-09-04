@@ -206,6 +206,13 @@ Each returns `{ items, nextCursor?, pageInfo, summary }`. Cursors are opaque and
 tenant-scoped; callers must not construct them. A direct turn lookup does not
 rebuild the complete graph.
 
+To run a completed root again, Operator loads its original accepted input only
+when the operator invokes the action: `GET /tasks/:taskId/replay-input`. This
+operator/admin-only endpoint is tenant-scoped and intentionally separate from
+the bounded graph response. It returns the original agent ID and launch payload,
+or `409 REPLAY_INPUT_UNAVAILABLE` for historical runs that did not retain a
+replayable object input.
+
 ## Read mode and response budget
 
 `CALLAGENT_OPERATOR_PROJECTION_READ` accepts `auto`, `semantic`, `bridge`, or

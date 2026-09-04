@@ -110,6 +110,12 @@ export type RunAgentResponse = {
   };
 };
 
+export type AgentRunReplayInput = {
+  taskId: string;
+  agentId: string;
+  payload: Record<string, unknown>;
+};
+
 export type CancelRunInput = {
   tenantId: string;
   taskId: string;
@@ -575,6 +581,10 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResponse> 
       status: { state: 'submitted', timestamp: new Date().toISOString() },
     },
   };
+}
+
+export async function getAgentRunReplayInput(tenantId: string, taskId: string): Promise<AgentRunReplayInput> {
+  return fetchJson<AgentRunReplayInput>(`/tasks/${encodeURIComponent(taskId)}/replay-input`, tenantId);
 }
 
 function operatorPath(path: string): string {

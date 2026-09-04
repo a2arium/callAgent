@@ -3092,6 +3092,29 @@ export class TaskEngine {
         };
     }
 
+    /**
+     * Return the original accepted input for an operator-initiated new instance.
+     * This is deliberately a direct snapshot read: the bounded run graph must not
+     * retain raw input merely to keep a replay control available in the UI.
+     */
+    async getAgentRunReplayInput(params: {
+        tenantId: string;
+        taskId: string;
+    }): Promise<{ agentId: string; input: Record<string, unknown> } | null> {
+        const loaded = await this.sessionManager?.load(params.tenantId, params.taskId);
+        const snapshot = loaded?.snapshot;
+        if (!isRecordValue(snapshot)) return null;
+        const meta = isRecordValue(snapshot.meta) ? snapshot.meta : undefined;
+        const input = meta?.initialInput;
+        const agentId = typeof meta?.agentId === 'string' && meta.agentId.length > 0
+            ? meta.agentId
+            : loaded?.agentId;
+        if (typeof agentId !== 'string' || agentId.length === 0 || !isRecordValue(input)) {
+            return null;
+        }
+        return { agentId, input };
+    }
+
     // Persist a child's minimal context so durable handlers can restore it later
     public async persistChildContext(params: { tenantId: string; sessionId: string; agentId: string }): Promise<void> {
         if (!this.sessionManager) return;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runAgent } from './client';
+import { getAgentRunReplayInput, runAgent } from './client';
 
 describe('runAgent', () => {
   afterEach(() => {
@@ -66,5 +66,19 @@ describe('runAgent', () => {
     expect(response.result?.id).toBe('manual-task-id');
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(body.params.id).toBe('manual-task-id');
+  });
+
+  it('loads replay input directly instead of requiring it in the run graph', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      taskId: 'task-1', agentId: 'listing-agent', payload: { input: { url: 'https://example.test' } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getAgentRunReplayInput('tenant-1', 'task / 1')).resolves.toEqual({
+      taskId: 'task-1', agentId: 'listing-agent', payload: { input: { url: 'https://example.test' } },
+    });
+    expect(fetchMock).toHaveBeenCalledWith('/operator-api/tasks/task%20%2F%201/replay-input', expect.objectContaining({
+      headers: { 'x-tenant-id': 'tenant-1' },
+    }));
   });
 });

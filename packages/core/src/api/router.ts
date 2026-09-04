@@ -692,6 +692,36 @@ export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
         }
     }));
 
+    router.get('/tasks/:taskId/replay-input', observeRoute('replay-input', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        if (context.actorType !== 'dev-local' && context.role !== 'operator' && context.role !== 'admin') {
+            throw new OperatorAuthError('Operator or admin role is required to run a new instance', 403, 'OPERATOR_ACTION_FORBIDDEN');
+        }
+        const taskId = req.params.taskId;
+        if (taskId === undefined || taskId.length === 0) {
+            res.status(400).json({ error: 'taskId is required' });
+            return;
+        }
+        const engine = EngineLocator.getEngine<TaskEngine>();
+        if (!engine) {
+            res.status(503).json({ error: 'Task engine is not available' });
+            return;
+        }
+        const replay = await engine.getAgentRunReplayInput({
+            tenantId: context.tenantId,
+            taskId,
+        });
+        if (!replay) {
+            res.status(409).json({
+                error: 'REPLAY_INPUT_UNAVAILABLE',
+                message: 'This run does not retain replayable input.',
+            });
+            return;
+        }
+        res.json({ taskId, agentId: replay.agentId, payload: replay.input });
+    }));
+
     router.post('/tasks/:taskId/cancel', observeRoute('task-cancel', async (req, res) => {
         const context = contextOrRespond(req, res);
         if (!context) return;
