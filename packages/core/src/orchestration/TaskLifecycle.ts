@@ -240,6 +240,11 @@ export function claimTaskTerminalInSnapshot(
         reason?: string;
         status: DurableTaskTerminal['status'];
         turnClaim?: DurableTaskTerminal['turnClaim'];
+        /**
+         * A provider terminal observed before a locally claimed root timeout
+         * may correct that timeout. No other terminal state is replaceable.
+         */
+        allowProviderTimeoutCorrection?: boolean;
     }
 ): {
     snapshot: Record<string, unknown>;
@@ -250,6 +255,49 @@ export function claimTaskTerminalInSnapshot(
     const lifecycle = readTaskLifecycle(snapshot, params.taskId);
     const existingTerminal = readDurableTaskTerminal(snapshot);
     if (lifecycle !== undefined && isTaskLifecycleTerminal(lifecycle)) {
+        const existingStatusMetadata = recordValue(existingTerminal?.status.metadata);
+        const timeoutTerminal = lifecycle.state === 'canceled' && (
+            lifecycle.reason === 'active_run_timeout' ||
+            existingStatusMetadata?.reason === 'active_run_timeout' ||
+            existingStatusMetadata?.code === 'TASK_RUN_TIMEOUT'
+        );
+        const incomingBeforeTimeout = Date.parse(params.claimedAt) < Date.parse(lifecycle.changedAt ?? '');
+        if (
+            params.allowProviderTimeoutCorrection === true &&
+            params.state === 'failed' &&
+            timeoutTerminal &&
+            Number.isFinite(Date.parse(params.claimedAt)) &&
+            incomingBeforeTimeout
+        ) {
+            const priorDeliveryKey = existingTerminal?.deliveryKey ?? `${params.taskId}:terminal:canceled`;
+            const status = {
+                ...params.status,
+                metadata: {
+                    ...(params.status.metadata ?? {}),
+                    supersedesDeliveryKey: priorDeliveryKey,
+                },
+            } satisfies DurableTaskTerminal['status'];
+            const correctedLifecycle: TaskLifecycle = {
+                ...lifecycle,
+                state: 'failed',
+                changedAt: params.claimedAt,
+                ...(params.reason !== undefined ? { reason: params.reason } : {}),
+            };
+            const correctedTerminal: DurableTaskTerminal = {
+                taskId: params.taskId,
+                state: 'failed',
+                claimedAt: params.claimedAt,
+                deliveryKey: `${params.taskId}:terminal:failed:provider-correction:${priorDeliveryKey}`,
+                status,
+                ...(params.turnClaim ? { turnClaim: params.turnClaim } : {}),
+            };
+            return {
+                snapshot: writeDurableTaskTerminal(writeTaskLifecycle(snapshot, correctedLifecycle), correctedTerminal),
+                terminal: correctedTerminal,
+                disposition: 'committed',
+                changed: true,
+            };
+        }
         const same = lifecycle.state === params.state;
         const terminalState: DurableTaskTerminal['state'] =
             lifecycle.state === 'completed' || lifecycle.state === 'failed' || lifecycle.state === 'canceled'

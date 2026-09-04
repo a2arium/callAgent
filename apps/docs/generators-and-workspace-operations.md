@@ -72,6 +72,14 @@ preflight succeeds. It starts the runtime host at `http://127.0.0.1:8790`, the
 Hatchet worker, and Observer at `http://127.0.0.1:8790/operator`. Use
 `npm run start -- --no-observer` to run host and worker without Observer.
 
+The generated `.env.example` also includes a stable
+`CALLAGENT_RUNTIME_INSTALLATION_ID` and
+`CALLAGENT_HATCHET_WORKER_READINESS=required`. Keep that installation id when
+redeploying the same workspace. The host's `/ready` endpoint requires its
+worker's fresh Hatchet health lease; `/health` remains available for the
+deployment supervisor. Set worker readiness to `disabled` only when this host
+is deliberately API-only and another installation owns its workers.
+
 Postgres is intentionally not started by `infra:up`: it is a workspace-owned
 external dependency configured through `MEMORY_DATABASE_URL`. The workspace
 database commands always use that same `.env` value.

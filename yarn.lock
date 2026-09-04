@@ -71,7 +71,7 @@ __metadata:
     "@a2arium/callagent-memory-sql": "npm:^0.2.0"
     "@a2arium/callagent-types": "npm:^0.2.0"
     "@a2arium/callagent-utils": "npm:^0.2.0"
-    "@hatchet-dev/typescript-sdk": "npm:^1.24.2"
+    "@hatchet-dev/typescript-sdk": "npm:1.31.1"
     "@prisma/client": "npm:7.4.0"
     "@types/jest": "npm:^29.5.14"
     "@types/node": "npm:^22.14.1"
@@ -1732,9 +1732,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@hatchet-dev/typescript-sdk@npm:^1.24.2":
-  version: 1.24.2
-  resolution: "@hatchet-dev/typescript-sdk@npm:1.24.2"
+"@hatchet-dev/typescript-sdk@npm:1.31.1":
+  version: 1.31.1
+  resolution: "@hatchet-dev/typescript-sdk@npm:1.31.1"
   dependencies:
     "@bufbuild/protobuf": "npm:^2.11.0"
     "@types/qs": "npm:^6.15.0"
@@ -1744,7 +1744,7 @@ __metadata:
     nice-grpc: "npm:^2.1.14"
     nice-grpc-common: "npm:^2.0.2"
     protobufjs: "npm:^7.5.5"
-    qs: "npm:^6.14.2"
+    qs: "npm:^6.16.0"
     semver: "npm:^7.7.4"
     yaml: "npm:^2.8.3"
     zod-to-json-schema: "npm:^3.24.2"
@@ -1752,11 +1752,11 @@ __metadata:
     "@anthropic-ai/claude-agent-sdk": ^0.3.148
     "@grpc/grpc-js": ^1.14.3
     "@modelcontextprotocol/sdk": ^1.29.0
-    "@openai/agents": 0.11.6
+    "@openai/agents": 0.14.2
     "@opentelemetry/api": ^1.9.0
     "@opentelemetry/core": ^2.0.0
-    "@opentelemetry/exporter-trace-otlp-grpc": ^0.218.0
-    "@opentelemetry/instrumentation": ^0.218.0
+    "@opentelemetry/exporter-trace-otlp-grpc": ^0.221.0
+    "@opentelemetry/instrumentation": ^0.221.0
     "@opentelemetry/sdk-trace-base": ^2.0.0
     prom-client: ^15.1.3
     zod: ^3.25.0 || ^4.0.0
@@ -1783,7 +1783,7 @@ __metadata:
       optional: true
     zod:
       optional: false
-  checksum: 10c0/b705cf6d15dcd3f9579eba8e36a6ec67544a1f7797227aa15335a7ea5ad8858ec276ac4a08aeaa7bd11ac9645ff7ca53891a419c30a2f482d203eaee399d9f30
+  checksum: 10c0/b87190ead7139c6352c6317d46b9284fd0f45a420ef2ead6328c567898f9a83c536c8752d82d6b58e7712766850c2530a25e38b05c13bbb0771a955fe9322d87
   languageName: node
   linkType: hard
 
@@ -10824,15 +10824,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"qs@npm:^6.14.2":
-  version: 6.15.2
-  resolution: "qs@npm:6.15.2"
-  dependencies:
-    side-channel: "npm:^1.1.0"
-  checksum: 10c0/e6fd5f6f0aab06d480fe9ab15cebfc4ce4235303e2f91dc69a8f7f4df1e668a61c11d1cfbabacf4295cbbeb7b670ed23db45307480726259761f98e5695e93a7
-  languageName: node
-  linkType: hard
-
 "qs@npm:^6.15.2":
   version: 6.15.3
   resolution: "qs@npm:6.15.3"
@@ -10840,6 +10831,16 @@ __metadata:
     es-define-property: "npm:^1.0.1"
     side-channel: "npm:^1.1.1"
   checksum: 10c0/8f3f6e45ece255347d57696628401cde29e9ec649fff698b53bd3150dea7cefdf33036e1bc1826b9f110bfa7cb0ec4ab9f5297eca628ce216c55af82c304e08e
+  languageName: node
+  linkType: hard
+
+"qs@npm:^6.16.0":
+  version: 6.16.0
+  resolution: "qs@npm:6.16.0"
+  dependencies:
+    es-define-property: "npm:^1.0.1"
+    side-channel: "npm:^1.1.1"
+  checksum: 10c0/eb3e31992fbd70e31a1791e571ed817d70975de7d3bfcbbbec93d77d1dd305877e9e8fdbcc62303c228ee5c3606685622cd6231c042dbc4790bb4e7c65fcbe18
   languageName: node
   linkType: hard
 

@@ -499,8 +499,9 @@ export class OperatorProjectionRepository {
                 status: 'failed',
                 terminalAt: createdAt,
                 traceId,
-                terminalCode: errorCode(error),
+                terminalCode: stringField(event.payload, 'code') ?? errorCode(error),
                 terminalMessage: errorMessage(error) ?? (typeof error === 'string' ? error : undefined),
+                allowTerminalCorrection: typeof event.payload.supersedesDeliveryKey === 'string',
             });
             await this.resolveEdgesForTerminalChild({
                 tenantId: event.tenantId,
@@ -1526,12 +1527,13 @@ export class OperatorProjectionRepository {
         terminalCode?: string;
         terminalMessage?: string;
         cancelReason?: string;
+        allowTerminalCorrection?: boolean;
         traceId?: string;
         outputState?: string;
     }): Promise<void> {
         const status = normalizeStatus(params.status);
         const existing = await this.findRun(params.tenantId, params.taskId);
-        const preserveTerminal = shouldPreserveTerminal(existing?.status, status);
+        const preserveTerminal = params.allowTerminalCorrection !== true && shouldPreserveTerminal(existing?.status, status);
         const createData = stripUndefined({
             rootTaskId: params.rootTaskId,
             agentId: params.agentId,

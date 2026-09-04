@@ -71,6 +71,28 @@ model MaintenanceLease {
   @@map("maintenance_leases")
 }
 
+// Cross-process worker readiness. The API host reads this lease instead of
+// assuming that successful schedule REST calls imply a usable durable stream.
+model RuntimeWorkerHealth {
+  tenantId       String    @map("tenant_id")
+  installationId String    @map("installation_id")
+  instanceId     String    @map("instance_id")
+  workerName     String    @map("worker_name")
+  state          String
+  generation     Int       @default(1)
+  workflowHash   String    @map("workflow_hash")
+  observedAt     DateTime  @map("observed_at")
+  heartbeatAt    DateTime? @map("heartbeat_at")
+  leaseUntil     DateTime  @map("lease_until")
+  errorCode      String?   @map("error_code")
+  errorMessage   String?   @map("error_message")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@id([tenantId, installationId, instanceId])
+  @@index([tenantId, installationId, leaseUntil])
+  @@map("runtime_worker_health")
+}
+
 model Outbox {
   id                 String    @id @default(cuid())
   tenantId           String    @map("tenant_id")
@@ -130,6 +152,7 @@ model DriverRun {
   @@index([tenantId, taskId, status])
   @@index([tenantId, rootTaskId, status])
   @@index([tenantId, taskId, createdAt, id])
+  @@index([tenantId, operation, status, updatedAt, id])
   @@map("driver_runs")
 }
 

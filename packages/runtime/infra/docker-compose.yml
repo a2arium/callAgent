@@ -34,14 +34,14 @@ services:
 
   hatchet-migration:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.105.13
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.105.16
     command: /hatchet/hatchet-migrate
     environment:
       <<: *hatchet-database-url
 
   hatchet-setup-config:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.105.13
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.105.16
     command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
     environment:
       <<: *hatchet-database-url
@@ -64,7 +64,7 @@ services:
 
   hatchet-engine:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.105.13
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.105.16
     command: /hatchet/hatchet-engine --config /hatchet/config
     restart: on-failure
     ports:
@@ -84,7 +84,7 @@ services:
   # former dashboard-only image is nginx and cannot create/list cron schedules.
   hatchet-api:
     <<: *host-access
-    image: ghcr.io/hatchet-dev/hatchet/hatchet-api:v0.105.13
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-api:v0.105.16
     command: /hatchet/hatchet-api --config /hatchet/config
     ports:
       - "${HATCHET_DASHBOARD_PORT:-8080}:8080"

@@ -37,6 +37,13 @@ async function main(): Promise<void> {
     process.once('SIGTERM', () => {
         void shutdown().finally(() => process.exit(0));
     });
+    await app.done.catch(async (error) => {
+        console.error('HATCHET_WORKER_STREAM_UNAVAILABLE', {
+            message: error instanceof Error ? error.message : String(error),
+        });
+        await app.shutdown();
+        process.exitCode = 1;
+    });
 }
 
 main().catch((error) => {

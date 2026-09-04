@@ -12,9 +12,15 @@ import {
     type StartedHatchetWorker,
 } from './createHatchetOutboxStack.js';
 import { reconcileMaintenanceCrons } from './maintenance.js';
+import { startWorkerHealthMonitor, type WorkerHealthMonitor } from './workerHealth.js';
+import { ProviderTerminalReconciler } from './providerTerminalReconciler.js';
+import { randomUUID } from 'node:crypto';
 
 export type HatchetRuntimeWorkerApp = {
     composition: RuntimeCompositionRootInternal;
+    /** Rejects when Hatchet's long-lived worker loop ends unexpectedly. */
+    done: Promise<never>;
+    health: () => { state: 'ready' | 'failed' | 'stopped'; lastError?: string };
     shutdown: () => Promise<void>;
 };
 
@@ -98,6 +104,7 @@ export async function startHatchetRuntimeWorkerApp(
         },
     });
 
+    const workerName = `${options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker'}-${randomUUID().slice(0, 8)}`;
     const started = await startOutboxWorker({
         eventBus,
         prisma: sessionStore.getPrismaClient(),
@@ -105,8 +112,7 @@ export async function startHatchetRuntimeWorkerApp(
         turnExecutor: composition.turnExecutor,
         onTaskRunTimeout: (params) => composition.engine.handleTaskRunTimeout(params),
         submitTask: (params) => composition.engine.submitTask(params),
-        workerName:
-            options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker',
+        workerName,
     });
 
     console.log('Starting Hatchet runtime worker (composition root + aplret.outbox.dispatch)...');
@@ -115,8 +121,50 @@ export async function startHatchetRuntimeWorkerApp(
     // worker is already stopping. Start it in the background, then wait for
     // Hatchet's explicit readiness handshake instead.
     let workerRun: Promise<void>;
+    let healthMonitor: WorkerHealthMonitor | undefined;
+    let terminalTimer: ReturnType<typeof setInterval> | undefined;
+    let state: 'ready' | 'failed' | 'stopped' = 'ready';
+    let lastError: string | undefined;
+    let rejectDone!: (error: Error) => void;
+    const done = new Promise<never>((_resolve, reject) => { rejectDone = reject; });
+    // The caller owns this promise and installs the process-level failure
+    // policy. Keep a handler here solely to avoid an unhandled rejection.
+    void done.catch(() => undefined);
+    function failWorker(error: unknown): void {
+        if (state !== 'ready') return;
+        state = 'failed';
+        lastError = error instanceof Error ? error.message : String(error);
+        console.error('HATCHET_WORKER_STREAM_UNAVAILABLE', { message: lastError });
+        if (terminalTimer) clearInterval(terminalTimer);
+        void healthMonitor?.stop();
+        // Do not keep a damaged worker accepting new work while its process
+        // supervisor prepares a replacement instance.
+        void started.worker.stop().catch(() => undefined);
+        rejectDone(error instanceof Error ? error : new Error(lastError));
+    }
     try {
         ({ workerRun } = await startHatchetWorkerUntilReady(started.worker));
+        healthMonitor = await startWorkerHealthMonitor({
+            prisma: sessionStore.getPrismaClient(), hatchet: started.hatchet,
+            workerName,
+            onStreamUnavailable: failWorker,
+        });
+        if (lastError !== undefined) throw new Error(lastError);
+        const terminalReconciler = new ProviderTerminalReconciler(
+            sessionStore.getPrismaClient(), new SessionManager(sessionStore), started.hatchet,
+        );
+        const reconcileProviderTerminals = () => terminalReconciler.scanOnce().catch((error) => {
+            console.error('HATCHET_PROVIDER_TERMINAL_RECONCILE_FAILED', {
+                message: error instanceof Error ? error.message : String(error),
+            });
+        });
+        void reconcileProviderTerminals();
+        terminalTimer = setInterval(() => void reconcileProviderTerminals(), 15_000);
+        terminalTimer.unref?.();
+        void workerRun.then(
+            () => failWorker(new Error('HATCHET_WORKER_LOOP_ENDED')),
+            (error) => failWorker(error),
+        );
         if (started.maintenance) await reconcileMaintenanceCrons(started.hatchet, started.maintenance.task, started.maintenance.service);
     } catch (error) {
         await started.worker.stop().catch(() => undefined);
@@ -128,10 +176,15 @@ export async function startHatchetRuntimeWorkerApp(
 
     return {
         composition,
+        done,
+        health: () => ({ state, ...(lastError ? { lastError } : {}) }),
         shutdown: async () => {
             try {
+                if (state === 'ready') state = 'stopped';
+                if (terminalTimer) clearInterval(terminalTimer);
+                await healthMonitor?.stop();
                 await started.worker.stop();
-                await workerRun;
+                await workerRun.catch(() => undefined);
             } finally {
                 composition.shutdown();
                 await closeNats();

@@ -442,6 +442,37 @@ export function settleUnclaimedTaskTurnInSnapshot(params: {
     };
 }
 
+/**
+ * A durable task terminal wins over every queued, claimed, or executing turn.
+ * This is used by out-of-band terminal reconciliation where no live claim is
+ * trustworthy enough to complete normally.
+ */
+export function finalizeTaskTurnsForTerminalSnapshot(params: {
+    snapshot: Record<string, unknown>;
+    tenantId: string;
+    taskId: string;
+}): { snapshot: Record<string, unknown>; changed: boolean } {
+    const meta = params.snapshot.meta;
+    if (meta === null || typeof meta !== 'object' || Array.isArray(meta) ||
+        !Object.prototype.hasOwnProperty.call(meta, 'taskTurnCoordinator')) {
+        return { snapshot: params.snapshot, changed: false };
+    }
+    const current = readState(params.snapshot, params.tenantId, params.taskId);
+    if (current.active === undefined && current.dispatchIntent === undefined &&
+        current.completedGeneration === current.requestedGeneration) {
+        return { snapshot: params.snapshot, changed: false };
+    }
+    return {
+        snapshot: writeState(params.snapshot, {
+            ...current,
+            completedGeneration: current.requestedGeneration,
+            active: undefined,
+            dispatchIntent: undefined,
+        }),
+        changed: true,
+    };
+}
+
 export async function requestTaskTurn(params: {
     session: SessionManager;
     tenantId: string;

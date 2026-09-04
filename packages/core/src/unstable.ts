@@ -9,6 +9,7 @@ export { InMemorySessionManager } from './orchestration/InMemorySessionManager.j
 export { SessionManager } from './orchestration/SessionManager.js';
 export {
     claimTaskTerminalInSnapshot,
+    markDurableTaskTerminalEnqueued,
     readDurableTaskTerminal,
     type DurableTaskTerminal,
 } from './orchestration/TaskLifecycle.js';
@@ -69,6 +70,7 @@ export { prepareChildResultForPersistence } from './orchestration/childResultPer
 export {
     admitInitialTaskTurnInSnapshot,
     assertCurrentTaskTurn,
+    finalizeTaskTurnsForTerminalSnapshot,
     markTaskTurnDispatchEnqueued,
     readTaskTurnCoordinator,
     releaseTaskTurn,

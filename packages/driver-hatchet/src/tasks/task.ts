@@ -16,6 +16,7 @@ import {
     settleUnclaimedTaskTurnInSnapshot,
     timerKindToReason,
 } from '@a2arium/callagent-core/unstable';
+import type { SessionManager } from '@a2arium/callagent-core/unstable';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { Prisma } from '@a2arium/callagent-memory-sql/generated';
 import type { DurableContext } from '@hatchet-dev/typescript-sdk/v1/client/worker/context.js';
@@ -39,6 +40,7 @@ import { OUTBOX_DISPATCH_TASK_NAME } from './outboxDispatch.js';
 import { serializeDriverRunError, type DriverRunsRepository } from '../driverRunsRepository.js';
 import { withHatchetTaskLogging } from '../hatchetLogging.js';
 import { logger } from '@a2arium/callagent-utils';
+import { convergeProviderTerminal } from '../providerTerminalReconciler.js';
 
 export const TASK_TASK_NAME = 'aplret.task';
 export const TASK_STATE_TASK_NAME = 'aplret.task-state';
@@ -390,10 +392,25 @@ async function executeTaskTaskInner(
                 operation: 'project_canceled', task: input,
             }, `canceled:${idempotencyKey}`)) await finalizeRootRunAsCanceled(input, deps);
         } else if (!isHatchetDurableEvictionAbort(error)) {
-            if (!await runTaskState(ctx, input, deps, {
-                operation: 'project_failed', task: input,
-                error: serializeDriverRunError(error) as JsonValue,
-            }, `failed:${idempotencyKey}`)) await finalizeRootRunAsFailed(input, deps, error);
+            try {
+                if (!await runTaskState(ctx, input, deps, {
+                    operation: 'project_failed', task: input,
+                    error: serializeDriverRunError(error) as JsonValue,
+                }, `failed:${idempotencyKey}`)) {
+                    await finalizeRootRunAsFailed(input, deps, error);
+                    await convergeFailedProviderTerminal(input, deps, error);
+                }
+            } catch (projectionError) {
+                // A broken durable stream can prevent task.state from running.
+                // Preserve the original provider failure in the durable driver
+                // ledger so the independent reconciler can converge it later.
+                await finalizeRootRunAsFailed(input, deps, error).catch(() => undefined);
+                await convergeFailedProviderTerminal(input, deps, error).catch(() => undefined);
+                console.error('HATCHET_TERMINAL_PROJECTION_FAILED', {
+                    taskId: input.taskId,
+                    message: projectionError instanceof Error ? projectionError.message : String(projectionError),
+                });
+            }
         }
         throw error;
     }
@@ -513,6 +530,7 @@ export async function executeTaskStateTask(
         }
         case 'project_failed':
             await finalizeRootRunAsFailed(task, deps, input.error);
+            await convergeFailedProviderTerminal(task, deps, input.error);
             return {};
         case 'project_canceled':
             await finalizeRootRunAsCanceled(task, deps);
@@ -875,6 +893,22 @@ async function finalizeRootRunAsFailed(
         agentId: input.agentId ?? null,
         boundaryKind: 'fail',
         error: serializeDriverRunError(error),
+    });
+}
+
+async function convergeFailedProviderTerminal(
+    input: TaskTaskInput,
+    deps: TaskTaskDeps | undefined,
+    error: unknown,
+): Promise<void> {
+    if (deps?.sessionManager === undefined) return;
+    await convergeProviderTerminal(deps.sessionManager as SessionManager, {
+        tenantId: input.tenantId,
+        taskId: input.taskId,
+        agentId: input.agentId,
+        error,
+        observedAt: new Date(),
+        source: 'provider_callback',
     });
 }
 

@@ -110,6 +110,16 @@ Production must make overload explicit and bounded.
   next durable boundary must honor cancellation.
 - Add queue-age and wait-age limits so a task cannot remain "waiting" forever
   when the expected wake or child never arrives.
+- Supervise the complete Hatchet worker lifecycle. A terminated or rejected
+  durable stream must stop that worker process, fail `/ready` with
+  `HATCHET_WORKER_STREAM_UNAVAILABLE`, and be replaced by the deployment
+  supervisor. Schedule REST health is a separate check, not evidence that the
+  worker can renew durable work.
+- Reconcile provider-terminal `driver_runs` into the fenced durable snapshot,
+  final status outbox, and semantic run model. The sole permitted terminal
+  correction is a provider failure observed before an `active_run_timeout`;
+  completion, explicit cancellation, and established domain failure stay
+  immutable.
 
 ### 3. Payload, Artifact, and Snapshot Budgets
 

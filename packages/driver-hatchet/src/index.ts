@@ -39,6 +39,12 @@ export {
     type StartHatchetRuntimeWorkerAppOptions,
 } from './startHatchetRuntimeWorkerApp.js';
 export {
+    ProviderTerminalReconciler,
+    convergeProviderTerminal,
+    normalizeProviderError,
+    type ProviderTerminalSignal,
+} from './providerTerminalReconciler.js';
+export {
     OUTBOX_DISPATCH_TASK_NAME,
     createOutboxDispatchTask,
     executeOutboxDispatch,

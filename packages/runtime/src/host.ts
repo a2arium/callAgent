@@ -166,7 +166,7 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     if (operatorAuth) app.all('/operator-api/auth/*splat', operatorAuth.authHandler);
     app.use(express.json({ limit: '1mb' }));
     app.get('/health', (_req, res) => res.json({ ok: true, rpc: '/rpc' }));
-    app.get('/ready', (_req, res) => {
+    app.get('/ready', async (_req, res) => {
         const databaseCode = databaseMigrationReadinessCode(process.env.CALLAGENT_MIGRATION_MARKER_PATH);
         if (databaseCode) {
             res.status(503).json({ ok: false, code: databaseCode });
@@ -175,6 +175,24 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
         if (scheduleReadiness && !scheduleReadiness.isHealthy()) {
             res.status(503).json({ ok: false, code: 'HATCHET_SCHEDULE_API_UNAVAILABLE' });
             return;
+        }
+        const requiresWorker = process.env.CALLAGENT_HATCHET_WORKER_READINESS !== 'disabled' && process.env.CALLAGENT_OUTBOX_DISPATCHER === 'hatchet';
+        if (requiresWorker && sessionStore) {
+            const installationId = process.env.CALLAGENT_RUNTIME_INSTALLATION_ID?.trim() || 'default';
+            let healthy: unknown;
+            try {
+                healthy = await sessionStore.getPrismaClient().runtimeWorkerHealth.findFirst({
+                    where: { tenantId: process.env.CALLAGENT_OPERATOR_TENANT_ID ?? process.env.CALLAGENT_OPERATOR_BOOTSTRAP_TENANT_ID ?? 'default', installationId, state: 'ready', leaseUntil: { gt: new Date() } },
+                });
+            } catch (error) {
+                console.warn('HATCHET_WORKER_HEALTH_READ_FAILED', {
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            }
+            if (!healthy) {
+                res.status(503).json({ ok: false, code: 'HATCHET_WORKER_STREAM_UNAVAILABLE' });
+                return;
+            }
         }
         res.json({ ok: true, workspaceFingerprint: descriptor.fingerprint, agents: descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort() });
     });

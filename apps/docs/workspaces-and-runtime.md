@@ -116,6 +116,38 @@ npm run start -- --no-observer
 The command does not start infra. It checks Postgres, NATS, and Hatchet before
 starting apps and fails fast if they are not reachable.
 
+## Durable worker readiness and recovery
+
+The runtime host and the Hatchet worker have different health responsibilities:
+
+- `GET /health` means the HTTP host is alive.
+- `GET /ready` also requires the Hatchet schedule API and, when
+  `CALLAGENT_OUTBOX_DISPATCHER=hatchet`, a fresh registered durable worker for
+  this workspace installation.
+
+Each generated workspace has a stable `CALLAGENT_RUNTIME_INSTALLATION_ID`.
+Every worker process uses a unique Hatchet worker name and writes a short-lived
+health lease after Hatchet reports that exact worker as active, heartbeating,
+and registered for all required CallAgent workflows. This prevents a healthy
+HTTP process or schedule REST token from masking a dead durable stream.
+
+If the worker loop ends unexpectedly, it stops accepting work and exits with a
+non-zero code. Run it under a normal process supervisor (Docker restart policy,
+systemd, Kubernetes, and so on); the replacement worker registers with a new
+identity and durable work re-enters through the existing generation/fence
+rules. Do not try to restart individual action listeners inside a live process.
+
+`/ready` returns `503 HATCHET_WORKER_STREAM_UNAVAILABLE` while no fresh lease
+exists. `HATCHET_SCHEDULE_API_UNAVAILABLE` remains a separate code for the
+schedule REST API. API-only installations with workers managed elsewhere can
+set `CALLAGENT_HATCHET_WORKER_READINESS=disabled`.
+
+Provider-reported root failures are reconciled into the durable task snapshot,
+semantic run state, final status outbox, and Observer. This reconciliation is
+idempotent. A provider failure may correct only an `active_run_timeout` that
+was claimed later; it never overwrites a completed task, an operator
+cancellation, or an established domain failure.
+
 ## Workspace-owned maintenance
 
 Maintenance belongs to the CallAgent workspace, not to an agent project or the
