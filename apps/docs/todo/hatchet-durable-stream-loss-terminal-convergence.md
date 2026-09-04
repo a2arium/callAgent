@@ -1,6 +1,8 @@
 # Bug Report: Hatchet durable stream loss fails active work and leaves CallAgent falsely running
 
-> **Status:** Open. Reproduced in production on 2026-09-03/04.
+> **Status:** Core remediation implemented in `9e75bf2` on 2026-09-04;
+> packaged Hatchet interruption/soak verification remains required before this
+> incident can be closed.
 >
 > **Severity:** Critical for long-running durable agents. A recoverable transport
 > interruption failed the provider root, while CallAgent continued to expose the run as
@@ -265,3 +267,76 @@ Record, without credentials or payloads:
   hash and references are intact, and no prior provider root remains active.
 - Avoid overlapping retries for the same family.
 
+## Implementation Report Back
+
+### What changed
+
+The failure is now handled in two independent layers.
+
+1. **Worker-stream supervision.** CallAgent uses Hatchet SDK `1.31.1` and
+   starts every worker under a unique name derived from the workspace worker
+   name plus a process instance suffix. It observes the long-lived worker loop,
+   and also polls Hatchet's worker API every 10 seconds. A worker is considered
+   healthy only when that exact instance is active, has a fresh heartbeat, and
+   has all required CallAgent workflows registered.
+
+   If the loop ends, the heartbeat becomes stale, or Hatchet marks the worker
+   inactive, the worker stops accepting work, records
+   `HATCHET_WORKER_STREAM_UNAVAILABLE`, and exits non-zero. Docker, systemd, or
+   Kubernetes must restart it; CallAgent intentionally does not attempt to
+   reconnect individual SDK listeners inside the damaged process.
+
+2. **Authoritative terminal convergence.** Provider failures now converge
+   through one SQL-backed path whether they arrive during a worker callback or
+   are discovered later by periodic `runs.get_status` polling. That path:
+
+   - CAS-writes the durable task terminal snapshot;
+   - clears queued/active task-turn ownership from that terminal snapshot;
+   - appends the authoritative `task.failed` event;
+   - enqueues the final `task.status` outbox message under the terminal delivery
+     key; and
+   - drives the existing semantic projection used by Operator.
+
+   A failure from a broken durable stream is classified as
+   `HATCHET_DURABLE_STREAM_UNAVAILABLE`; other provider failures are
+   `HATCHET_PROVIDER_FAILED`. Error messages are bounded before persistence.
+
+### Timeout correction rule
+
+Completed work, an operator cancellation, and an established domain failure are
+immutable. The only correction allowed is the incident-specific race: if
+Hatchet's provider failure predates a local `active_run_timeout`, the provider
+failure replaces that timeout and records the timeout delivery key it
+superseded. This prevents the six-hour stale-timeout outcome from obscuring the
+original transport failure.
+
+### Readiness and deployment behavior
+
+`GET /health` continues to mean that the HTTP host is alive. With Hatchet
+execution enabled, `GET /ready` now additionally requires a fresh
+`RuntimeWorkerHealth` lease for the workspace's stable
+`CALLAGENT_RUNTIME_INSTALLATION_ID`. It returns
+`503 HATCHET_WORKER_STREAM_UNAVAILABLE` otherwise. Schedule REST failure stays
+separate as `HATCHET_SCHEDULE_API_UNAVAILABLE`.
+
+Generated workspaces now include the installation id and required worker
+readiness setting. API-only hosts may explicitly use
+`CALLAGENT_HATCHET_WORKER_READINESS=disabled` when workers are operated
+elsewhere. The packaged Hatchet compose services are pinned to `v0.105.16`.
+
+### Verification completed
+
+- Built core, SQL memory, Hatchet driver, runtime, CLI, and worker packages.
+- Ran the full Hatchet driver suite: **115 passing tests** (six intentionally
+  skipped; one suite skipped).
+- Added focused automated coverage for fresh/incomplete worker registration,
+  provider failure convergence, timeout correction, and provider-status polling.
+
+### Remaining closure evidence
+
+The production-specific Hatchet/PostgreSQL integration drill still needs to
+invalidate a real durable stream and prove process replacement/redelivery with
+a checkpointing agent. The CPU/artifact-heavy soak and deployment-supervisor
+restart proof are also pending. Until those drills pass, retain the operational
+guidance above and treat this incident as remediated in code but not yet fully
+closed in production evidence.
