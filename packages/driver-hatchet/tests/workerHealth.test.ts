@@ -76,4 +76,24 @@ describe('worker health monitor', () => {
         expect(unavailable).not.toHaveBeenCalled();
         await monitor.stop();
     });
+
+    it('accepts Hatchet 0.105 action registrations', async () => {
+        const upsert = jest.fn(async () => undefined);
+        const monitor = await startWorkerHealthMonitor({
+            prisma: { runtimeWorkerHealth: { upsert } },
+            hatchet: { workers: { list: jest.fn(async () => ({ rows: [{
+                name: 'runtime-a',
+                status: 'ACTIVE',
+                lastHeartbeatAt: new Date().toISOString(),
+                actions: registeredWorkflows.map(({ name }) => `${name}:${name}`),
+            }] })) } } as any,
+            workerName: 'runtime-a',
+            intervalMs: 60_000,
+        });
+
+        expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+            create: expect.objectContaining({ state: 'ready' }),
+        }));
+        await monitor.stop();
+    });
 });

@@ -59,7 +59,17 @@ export async function startWorkerHealthMonitor(params: {
                 await unavailable(error);
                 return;
             }
-            const registered = new Set((worker.registeredWorkflows ?? []).map((workflow: { name?: unknown }) => workflow.name).filter((name: unknown): name is string => typeof name === 'string'));
+            // Hatchet 0.105 exposes registered handlers as `actions` using
+            // `<workflow>:<action>` strings. Retain compatibility with SDK/API
+            // versions that expose a richer `registeredWorkflows` collection.
+            const registered = new Set<string>([
+                ...(worker.registeredWorkflows ?? [])
+                    .map((workflow: { name?: unknown }) => workflow.name)
+                    .filter((name: unknown): name is string => typeof name === 'string'),
+                ...(worker.actions ?? [])
+                    .filter((action: unknown): action is string => typeof action === 'string')
+                    .map((action: string) => action.split(':', 1)[0]!),
+            ]);
             const missing = requiredWorkflows.filter((workflow) => !registered.has(workflow));
             if (missing.length > 0) {
                 const error = new Error(`Hatchet worker is missing required workflows: ${missing.join(', ')}`);
