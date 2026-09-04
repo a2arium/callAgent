@@ -1,5 +1,11 @@
 # CallAgent workspace troubleshooting
 
+- **Progress missing or stale**: “No progress reported” is normal for agents that
+  do not opt in. Staleness alone is not failure. `RUN_PROGRESS_INVALID` is a bad
+  payload, `RUN_PROGRESS_FENCE_LOST` a superseded attempt,
+  `RUN_PROGRESS_TERMINAL` a late report, `RUN_PROGRESS_RATE_LIMITED` throttling,
+  and `RUN_PROGRESS_UNAVAILABLE` a storage/configuration outage.
+
 - **“Build the agent project”**: run the agent project's build command. A
   workspace loads compiled JavaScript and compiled copies of both manifests.
 - **Duplicate IDs or ambiguous aliases**: every selected agent source must

@@ -40,6 +40,16 @@ export type RunnableTurnRequestCursor = {
     sessionId: string;
 };
 
+export type DurableRunProgressRecord = {
+    tenantId: string; taskId: string; rootTaskId: string; agentId: string;
+    snapshot: Record<string, unknown>; revision: string; reportedAt: string;
+    terminalState?: string; terminalAt?: string;
+};
+
+export type DurableRunProgressWriteResult =
+    | { status: 'accepted' | 'coalesced'; revision: string; reportedAt: string }
+    | { status: 'rate_limited' | 'fence_lost' | 'terminal' };
+
 export type ConversationKind = 'thread' | 'topic';
 
 export type ConversationMessageRecord = {
@@ -160,6 +170,15 @@ export interface IWorkingMemorySessionStore {
         durablePersistence: true;
         runnableTurnRecovery: true;
     };
+    readonly runProgressCapabilities?: { durableLatestProjection: true; atomicFenceValidation: true };
+    writeRunProgress?(params: {
+        tenantId: string; taskId: string; rootTaskId: string; agentId: string;
+        snapshot: Record<string, unknown>; claimId: string; fence: string;
+        claimedGeneration: string; turnSeq: number; minimumIntervalMs: number;
+    }): Promise<DurableRunProgressWriteResult>;
+    getRunProgress?(tenantId: string, taskId: string): Promise<DurableRunProgressRecord | null>;
+    listRunProgress?(tenantId: string, taskIds: string[]): Promise<DurableRunProgressRecord[]>;
+    markRunProgressTerminal?(params: { tenantId: string; taskId: string; state: string; terminalAt: string }): Promise<void>;
     getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null>;
     getSessionSnapshotForMutation?(
         tenantId: string,

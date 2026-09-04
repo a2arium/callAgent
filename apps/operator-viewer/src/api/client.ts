@@ -1,4 +1,4 @@
-import type { AgentRunEvent, AgentRunGraph, AgentRunListPage, AgentRunMemoryView, CognitiveTurnRun, EffectRun, OperatorPage, TurnAttemptRun, TurnRun } from '../types';
+import type { AgentRunEvent, AgentRunGraph, AgentRunListPage, AgentRunMemoryView, CognitiveTurnRun, EffectRun, OperatorPage, RunProgressResponse, TurnAttemptRun, TurnRun } from '../types';
 
 export type ListAgentRunsInput = {
   tenantId: string;
@@ -329,6 +329,10 @@ export async function listAgentRuns(input: ListAgentRunsInput): Promise<AgentRun
 
 export async function getRunGraph(tenantId: string, taskId: string): Promise<AgentRunGraph> {
   return fetchJson<AgentRunGraph>(`/tasks/${encodeURIComponent(taskId)}/run-graph`, tenantId);
+}
+
+export async function getRunProgress(tenantId: string, taskId: string): Promise<RunProgressResponse> {
+  return fetchJson<RunProgressResponse>(`/tasks/${encodeURIComponent(taskId)}/progress`, tenantId);
 }
 
 export async function cancelRun(input: CancelRunInput): Promise<CancelRunResponse> {

@@ -6,6 +6,13 @@ callAgent is a TypeScript framework for building agents with the APLRET architec
 
 The project is also referred to as the APLRET framework. The canonical contract is [apps/docs/0-aplret_contracts.md](apps/docs/0-aplret_contracts.md). When README guidance and the contracts differ, the contracts document wins.
 
+Long-running durable work can publish a bounded Operator projection after each checkpoint:
+
+```ts
+ctx.progress(25, 'Downloading'); // transient A2A status
+await ctx.progress.report?.({ schemaVersion: 'run-progress-v1', phase: 'download', state: 'working', units: [{ key: 'files', completed: 5, total: 20 }] });
+```
+
 ## Why Use It
 
 Most agent code becomes hard to change when reasoning, memory writes, tool calls, LLM calls, retries, and transport details live in the same function. callAgent gives those concerns explicit places to live.

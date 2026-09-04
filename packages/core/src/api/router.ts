@@ -722,6 +722,16 @@ export function createApiRouter(options: CreateApiRouterOptions = {}): Router {
         res.json({ taskId, agentId: replay.agentId, payload: replay.input });
     }));
 
+    router.get('/tasks/:taskId/progress', observeRoute('task-progress', async (req, res) => {
+        const context = contextOrRespond(req, res);
+        if (!context) return;
+        const taskId = req.params.taskId;
+        if (!taskId) { res.status(400).json({ error: 'taskId is required' }); return; }
+        const engine = EngineLocator.getEngine<TaskEngine>();
+        if (!engine) { res.status(503).json({ error: 'Task engine is not available' }); return; }
+        res.json(await engine.getAgentRunProgress({ tenantId: context.tenantId, taskId }));
+    }));
+
     router.post('/tasks/:taskId/cancel', observeRoute('task-cancel', async (req, res) => {
         const context = contextOrRespond(req, res);
         if (!context) return;

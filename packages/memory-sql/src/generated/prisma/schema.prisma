@@ -229,6 +229,29 @@ model WMEvent {
   @@map("wm_events")
 }
 
+model RunProgress {
+  tenantId          String    @map("tenant_id")
+  taskId            String    @map("task_id")
+  rootTaskId        String    @map("root_task_id")
+  agentId           String    @map("agent_id")
+  schemaVersion     String    @map("schema_version")
+  snapshot          Json
+  revision          BigInt    @default(1)
+  claimId           String    @map("claim_id")
+  turnFence         String    @map("turn_fence")
+  claimedGeneration String    @map("claimed_generation")
+  turnSeq           Int       @map("turn_seq")
+  reportedAt        DateTime  @map("reported_at") @db.Timestamptz(3)
+  terminalState     String?   @map("terminal_state")
+  terminalAt        DateTime? @map("terminal_at") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  @@id([tenantId, taskId])
+  @@index([tenantId, rootTaskId, updatedAt])
+  @@map("run_progress")
+}
+
 model Outbox {
   id                 String    @id @default(cuid())
   tenantId           String    @map("tenant_id")

@@ -3,6 +3,7 @@ import React from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NodeInspector } from './NodeInspector';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { AgentRunGraph, AgentRunNode } from '../../types';
 
 afterEach(cleanup);
@@ -10,7 +11,7 @@ afterEach(cleanup);
 describe('NodeInspector Hatchet links', () => {
   it('places agent and effect links in context and removes the generic Links tab', () => {
     const node = agentNode();
-    render(
+    renderWithQueries(
       <NodeInspector
         graph={graph(node)}
         node={node}
@@ -39,7 +40,7 @@ describe('NodeInspector Hatchet links', () => {
 
   it('omits Hatchet actions when provider run IDs are unavailable', () => {
     const node = agentNode({ providerRunId: undefined });
-    render(
+    renderWithQueries(
       <NodeInspector
         graph={graph(node, false)}
         node={node}
@@ -56,6 +57,11 @@ describe('NodeInspector Hatchet links', () => {
     expect(screen.queryByText('Provider run ID not captured')).toBeNull();
   });
 });
+
+function renderWithQueries(element: React.ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
+}
 
 function agentNode(overrides: Partial<AgentRunNode> = {}): AgentRunNode {
   return {

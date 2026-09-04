@@ -2,7 +2,7 @@ import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { ReactFlowProvider } from 'reactflow';
 import { ArrowLeft, PanelRightOpen, Play, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useCancelRun, useOperatorConfig, useRunGraph } from '../../api/hooks';
+import { useCancelRun, useOperatorConfig, useRunGraph, useRunProgress } from '../../api/hooks';
 import { getAgentRunReplayInput, runAgent } from '../../api/client';
 import { Button } from '../../design/components/ui/button';
 import { CopyableId } from '../../design/components/ui/copyable';
@@ -12,7 +12,7 @@ import { formatCost, formatDuration, formatRelative } from '../../design/format'
 import { buildNodeRollup, deriveGraphInsights, deriveStatus, getNodeById } from '../../domain/derive';
 import { AgentRunGraphView } from '../graph/AgentRunGraphView';
 import { NodeInspector } from '../inspector/NodeInspector';
-import type { AgentRunGraph, AgentRunNode, TurnRun } from '../../types';
+import type { AgentRunGraph, AgentRunNode, RunProgressResponse, TurnRun } from '../../types';
 import { parseRunSearch } from '../../app/state';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../app/auth';
@@ -61,6 +61,7 @@ export function RunDetailPage(): React.ReactElement {
     turns: rootRollup?.turns,
   });
   const liveRefresh = graph === undefined || graph.nodes.some((node) => ['queued', 'running', 'unknown'].includes(node.status));
+  const progressQuery = useRunProgress(search.tenantId, taskId, liveRefresh);
   const rootCancelable = taskId !== undefined && graph !== undefined && !isTerminalStatus(graph.root.status);
   const cancelDisabled = !rootCancelable || cancelRun.isPending;
   const selectedNodeCancelable = selectedNode !== undefined && !isTerminalStatus(selectedNode.status);
@@ -265,6 +266,8 @@ export function RunDetailPage(): React.ReactElement {
         </div>
       </header>
 
+      <RunProgressPanel progress={progressQuery.data} active={liveRefresh} error={progressQuery.error} />
+
       {cancelRun.error instanceof Error ? (
         <Notice kind="error" title="Cancel failed">
           {cancelRun.error.message}
@@ -350,6 +353,27 @@ export function RunDetailPage(): React.ReactElement {
       )}
     </div>
   );
+}
+
+function humanizePhase(value: string): string {
+  return value.replace(/[._-]+/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function RunProgressPanel(props: { progress?: RunProgressResponse; active: boolean; error: unknown }): React.ReactElement {
+  if (props.error) return <Notice title="Live progress unavailable">The run status is unaffected; progress will retry automatically.</Notice>;
+  if (!props.progress || props.progress.status === 'unreported') {
+    return <section className="rounded-xl border border-border bg-card p-4"><h3 className="font-semibold">Live progress</h3><p className="mt-1 text-sm text-muted-foreground">{props.active ? 'Working — agent has not reported progress yet.' : 'No progress was reported.'}</p></section>;
+  }
+  const { snapshot } = props.progress;
+  const primary = snapshot.units?.[0];
+  const percent = primary?.total ? Math.min(100, primary.completed / primary.total * 100) : undefined;
+  return <section className="rounded-xl border border-border bg-card p-4">
+    <div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{props.progress.terminal ? 'Last reported progress' : 'Live progress'}</h3><span className="text-xs text-muted-foreground">{formatRelative(props.progress.reportedAt)}</span></div>
+    <p className="mt-2 text-sm font-medium">{humanizePhase(snapshot.phase)} · {humanizePhase(snapshot.state)}</p>
+    {primary ? <div className="mt-3"><div className="flex justify-between text-sm"><span>{primary.label ?? humanizePhase(primary.key)}</span><span>{primary.completed}{primary.total !== undefined ? ` / ${primary.total}` : ' completed'}</span></div>{percent !== undefined ? <div className="mt-1 h-2 overflow-hidden rounded bg-muted"><div className="h-full bg-primary" style={{ width: `${percent}%` }} /></div> : null}</div> : null}
+    {snapshot.summary ? <p className="mt-3 text-sm text-muted-foreground">{snapshot.summary}</p> : null}
+    <div className="mt-2 flex flex-wrap gap-x-4 text-xs text-muted-foreground">{snapshot.checkpoint ? <span>Checkpoint {formatRelative(snapshot.checkpoint.committedAt)}</span> : null}{snapshot.next ? <span>Next: {snapshot.next}</span> : null}{Object.entries(snapshot.metrics ?? {}).map(([key, value]) => <span key={key}>{humanizePhase(key)} {value}</span>)}</div>
+  </section>;
 }
 
 function normalizeGraph(graph: AgentRunGraph | undefined): AgentRunGraph | undefined {

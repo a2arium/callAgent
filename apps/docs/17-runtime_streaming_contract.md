@@ -4,6 +4,10 @@
 
 Normative reference for live runtime streaming in the callagent framework.
 
+`ctx.progress(number, message)` and `ctx.progress(TaskStatus)` publish transient
+A2A status. `ctx.progress.report(snapshot)` instead writes the latest bounded
+Operator projection. It emits no lifecycle event and cannot complete or fail a task.
+
 This document defines what can be streamed to clients, which stream surfaces are
 public, and how canonical runtime stream events relate to existing A2A SSE and
 chat bridge behavior.

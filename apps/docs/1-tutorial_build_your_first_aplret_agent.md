@@ -2,6 +2,10 @@
 
 This tutorial walks you through a minimal loop-mode agent using the APLRET model.
 
+For a long Execution step, commit the domain checkpoint and then call
+`await ctx.progress.report?.({ schemaVersion: 'run-progress-v1', phase: 'work', state: 'working' })`.
+The report is operational display state, not the checkpoint itself.
+
 ## What you will build
 
 A simple agent that:

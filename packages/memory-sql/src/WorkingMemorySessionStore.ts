@@ -12,6 +12,15 @@ import type {
 } from '@a2arium/callagent-types';
 import { WorkingMemoryVersionConflictError } from '@a2arium/callagent-types/working-memory-version-conflict';
 
+function stableJson(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+    if (value !== null && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'null';
+}
+
 export type SessionSnapshot = {
     exists?: boolean;
     wmVersion: bigint;
@@ -174,6 +183,10 @@ export class WorkingMemorySessionStore {
     readonly taskAdmissionCapabilities = {
         durablePersistence: true,
         runnableTurnRecovery: true,
+    } as const;
+    readonly runProgressCapabilities = {
+        durableLatestProjection: true,
+        atomicFenceValidation: true,
     } as const;
     private static globalPrisma: PrismaClientType | null = null;
     private readonly prisma: PrismaClientType;
@@ -467,6 +480,99 @@ export class WorkingMemorySessionStore {
                 'CAS_MISMATCH'
             );
         });
+    }
+
+    async writeRunProgress(params: {
+        tenantId: string; taskId: string; rootTaskId: string; agentId: string;
+        snapshot: Record<string, unknown>; claimId: string; fence: string;
+        claimedGeneration: string; turnSeq: number; minimumIntervalMs: number;
+    }): Promise<
+        | { status: 'accepted' | 'coalesced'; revision: string; reportedAt: string }
+        | { status: 'rate_limited' | 'fence_lost' | 'terminal' }
+    > {
+        await this.ensureConnected();
+        return this.runWithReconnect(() => this.prisma.$transaction(async (tx) => {
+            const sessions = await tx.$queryRaw<Array<{ snapshot: unknown; storage_now: Date }>>(Prisma.sql`
+                SELECT "snapshot", clock_timestamp() AS "storage_now"
+                FROM "wm_sessions"
+                WHERE "tenant_id" = ${params.tenantId} AND "session_id" = ${params.taskId}
+                FOR UPDATE
+            `);
+            const session = sessions[0];
+            if (!session) return { status: 'fence_lost' as const };
+            const snapshot = session.snapshot as { meta?: { taskTerminal?: unknown; cancellation?: { requested?: unknown }; turnCoordinator?: { active?: Record<string, unknown> } } };
+            if (snapshot.meta?.taskTerminal !== undefined) return { status: 'terminal' as const };
+            if (snapshot.meta?.cancellation?.requested === true) return { status: 'fence_lost' as const };
+            const active = snapshot.meta?.turnCoordinator?.active;
+            if (active?.claimId !== params.claimId || active?.fence !== params.fence ||
+                active?.claimedGeneration !== params.claimedGeneration || active?.turnSeq !== params.turnSeq ||
+                typeof active.expiresAt !== 'string' || Date.parse(active.expiresAt) <= session.storage_now.getTime()) {
+                return { status: 'fence_lost' as const };
+            }
+            const now = session.storage_now;
+            const existing = await tx.runProgress.findUnique({
+                where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
+            });
+            if (existing?.terminalState) return { status: 'terminal' as const };
+            if (existing && stableJson(existing.snapshot) === stableJson(params.snapshot)) {
+                return { status: 'coalesced' as const, revision: existing.revision.toString(), reportedAt: existing.reportedAt.toISOString() };
+            }
+            const phaseChanged = (existing?.snapshot as { phase?: unknown } | null)?.phase !== params.snapshot.phase;
+            const stateChanged = (existing?.snapshot as { state?: unknown } | null)?.state !== params.snapshot.state;
+            if (existing && !phaseChanged && !stateChanged && now.getTime() - existing.reportedAt.getTime() < params.minimumIntervalMs) {
+                return { status: 'rate_limited' as const };
+            }
+            const row = await tx.runProgress.upsert({
+                where: { tenantId_taskId: { tenantId: params.tenantId, taskId: params.taskId } },
+                create: {
+                    tenantId: params.tenantId, taskId: params.taskId, rootTaskId: params.rootTaskId,
+                    agentId: params.agentId, schemaVersion: 'run-progress-v1', snapshot: params.snapshot as Prisma.InputJsonValue,
+                    revision: 1n, claimId: params.claimId, turnFence: params.fence,
+                    claimedGeneration: params.claimedGeneration, turnSeq: params.turnSeq, reportedAt: now,
+                },
+                update: {
+                    rootTaskId: params.rootTaskId, agentId: params.agentId, snapshot: params.snapshot as Prisma.InputJsonValue,
+                    revision: { increment: 1 }, claimId: params.claimId, turnFence: params.fence,
+                    claimedGeneration: params.claimedGeneration, turnSeq: params.turnSeq, reportedAt: now,
+                },
+            });
+            return { status: 'accepted' as const, revision: row.revision.toString(), reportedAt: row.reportedAt.toISOString() };
+        }));
+    }
+
+    private mapRunProgress(row: Awaited<ReturnType<PrismaClientType['runProgress']['findFirst']>>) {
+        if (!row) return null;
+        return {
+            tenantId: row.tenantId, taskId: row.taskId, rootTaskId: row.rootTaskId, agentId: row.agentId,
+            snapshot: row.snapshot as Record<string, unknown>, revision: row.revision.toString(),
+            reportedAt: row.reportedAt.toISOString(),
+            ...(row.terminalState ? { terminalState: row.terminalState } : {}),
+            ...(row.terminalAt ? { terminalAt: row.terminalAt.toISOString() } : {}),
+        };
+    }
+
+    async getRunProgress(tenantId: string, taskId: string) {
+        await this.ensureConnected();
+        return this.mapRunProgress(await this.runWithReconnect(() => this.prisma.runProgress.findUnique({
+            where: { tenantId_taskId: { tenantId, taskId } },
+        })));
+    }
+
+    async listRunProgress(tenantId: string, taskIds: string[]) {
+        if (taskIds.length === 0) return [];
+        await this.ensureConnected();
+        const rows = await this.runWithReconnect(() => this.prisma.runProgress.findMany({
+            where: { tenantId, taskId: { in: taskIds.slice(0, 100) } },
+        }));
+        return rows.map((row) => this.mapRunProgress(row)!);
+    }
+
+    async markRunProgressTerminal(params: { tenantId: string; taskId: string; state: string; terminalAt: string }): Promise<void> {
+        await this.ensureConnected();
+        await this.runWithReconnect(() => this.prisma.runProgress.updateMany({
+            where: { tenantId: params.tenantId, taskId: params.taskId },
+            data: { terminalState: params.state, terminalAt: new Date(params.terminalAt) },
+        }));
     }
 
     /**

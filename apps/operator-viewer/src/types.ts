@@ -17,7 +17,22 @@ export type AgentRunListItem = {
   error?: unknown;
   traceId?: string;
   providerRunId?: string | null;
+  progress?: RunProgressView;
 };
+
+export type RunProgressSnapshot = {
+  schemaVersion: 'run-progress-v1'; phase: string;
+  state: 'working' | 'waiting' | 'blocked' | 'retrying'; summary?: string;
+  units?: Array<{ key: string; completed: number; total?: number; label?: string }>;
+  metrics?: Record<string, number>; next?: string;
+  checkpoint?: { committedAt: string; version?: string };
+};
+export type RunProgressView = {
+  status: 'reported'; taskId: string; rootTaskId: string; agentId: string;
+  snapshot: RunProgressSnapshot; revision: string; reportedAt: string;
+  terminal?: { state: string; at: string };
+};
+export type RunProgressResponse = RunProgressView | { status: 'unreported'; taskId: string };
 
 export type AgentRunListPage = {
   items: AgentRunListItem[];

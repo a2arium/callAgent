@@ -30,7 +30,7 @@ type FleetRow = AgentRunListItem & {
 
 const columnHelper = createColumnHelper<FleetRow>();
 const fleetGridColumns =
-  'grid-cols-[130px_minmax(170px,1.4fr)_minmax(210px,1.7fr)_80px_95px_80px_100px_120px_120px_104px]';
+  'grid-cols-[130px_minmax(190px,1.4fr)_minmax(170px,1.2fr)_minmax(210px,1.7fr)_80px_95px_80px_100px_120px_120px_104px]';
 
 export function FleetPage(): React.ReactElement {
   const search = parseFleetSearch(useSearch({ strict: false }) as Record<string, unknown>);
@@ -257,6 +257,17 @@ function FleetTable(props: {
       columnHelper.accessor('displayStatus', {
         header: 'Status',
         cell: (info) => <StatusBadge status={normalizeRuntimeStatus(info.getValue())} />,
+      }),
+      columnHelper.display({
+        id: 'progress',
+        header: 'Progress',
+        cell: (info) => {
+          const progress = info.row.original.progress;
+          if (!progress) return <span className="text-muted-foreground">No progress reported</span>;
+          const primary = progress.snapshot.units?.[0];
+          const phase = progress.snapshot.phase.replace(/[._-]+/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+          return <span title={progress.snapshot.summary}>{phase}{primary ? ` · ${primary.completed}${primary.total !== undefined ? `/${primary.total}` : ''} ${primary.label ?? primary.key}` : ''} · {formatRelative(progress.reportedAt)}</span>;
+        },
       }),
       columnHelper.accessor('agentId', {
         header: 'Agent',

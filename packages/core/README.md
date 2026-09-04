@@ -6,6 +6,10 @@ Use this package when an agent needs more than a single prompt call: multi-turn 
 
 Provider SDKs help you call a model. `@a2arium/callagent-core` helps you operate an agent.
 
+For long-running work, `ctx.progress(...)` remains transient status while
+`await ctx.progress.report?.(...)` stores a bounded, fenced latest-progress view
+for Operator. Report only after the corresponding domain checkpoint commits.
+
 ## Installation
 
 ```bash

@@ -6,6 +6,16 @@ Normative reference for loop-mode agents in the callagent framework.
 
 This document defines the stable contract for building APLRET agents. If a behavior is documented here, users and tools may depend on it.
 
+## Durable live progress
+
+Execution may call `ctx.progress.report()` with mandatory `schemaVersion`,
+`phase`, and `state`, plus optional summary, units, metrics, next work, and
+checkpoint identity. Reports are complete replacements, limited to 8 KiB, and
+accepted only while the caller's durable claim and fence are current. Report
+completed units after the authoritative domain checkpoint commits. Progress does
+not control lifecycle, retry, lease, or scheduling state. Existing
+`ctx.progress(...)` calls remain transient A2A status.
+
 ## Purpose
 
 APLRET is a turn-based agent architecture with explicit separation between:

@@ -5,6 +5,11 @@
 Implement Phase 5 as a measurable production-readiness gate for the
 Hatchet-backed runtime and Operator Dashboard.
 
+Live-progress readiness requires tenant isolation, exact claim/fence validation
+inside the write transaction, an 8 KiB payload bound, latest-only storage, one
+bounded fleet hydration query, restart/takeover rejection tests, and proof that
+progress refreshes do not trigger graph layout.
+
 Phase 5 must prove that the system can:
 
 - serve operator fleet/detail views from a stable semantic read model;

@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { cancelRun, deleteSemanticMemory, getMemory, getOperatorConfig, getRunGraph, getSemanticMemory, getTurn, listAgentRuns, listAgents, listAgentSchedules, listMemoryActivity, listMemoryEntities, listSemanticMemory, listSemanticMemoryAudit, probeSemanticMemory, retagSemanticMemory, updateSemanticMemory, type CancelRunInput, type ListAgentRunsInput, type ListMemoryActivityInput, type ListSemanticMemoryInput, type SemanticProbeInput } from './client';
+import { cancelRun, deleteSemanticMemory, getMemory, getOperatorConfig, getRunGraph, getRunProgress, getSemanticMemory, getTurn, listAgentRuns, listAgents, listAgentSchedules, listMemoryActivity, listMemoryEntities, listSemanticMemory, listSemanticMemoryAudit, probeSemanticMemory, retagSemanticMemory, updateSemanticMemory, type CancelRunInput, type ListAgentRunsInput, type ListMemoryActivityInput, type ListSemanticMemoryInput, type SemanticProbeInput } from './client';
 import type { AgentRunGraph } from '../types';
 
 export function useOperatorConfig() {
@@ -55,6 +55,15 @@ export function useRunGraph(tenantId: string, taskId: string | undefined) {
       const graph = query.state.data as AgentRunGraph | undefined;
       return shouldLiveRefreshGraph(graph) ? 2_000 : false;
     },
+  });
+}
+
+export function useRunProgress(tenantId: string, taskId: string | undefined, active: boolean) {
+  return useQuery({
+    queryKey: ['run-progress', tenantId, taskId],
+    queryFn: () => getRunProgress(tenantId, taskId ?? ''),
+    enabled: taskId !== undefined && taskId.length > 0,
+    refetchInterval: active ? 5_000 : false,
   });
 }
 

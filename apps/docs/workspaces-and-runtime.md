@@ -3,6 +3,11 @@
 CallAgent runs one shared runtime while loading agents from multiple external
 agent projects. A CallAgent workspace owns the composition registry and `.env`.
 
+Durable Operator progress is enabled by default with the SQL session store. Set
+`CALLAGENT_RUN_PROGRESS=disabled` to suppress it; any other value is invalid.
+Apply database migrations before use. Progress survives restart, is fenced to the
+current turn owner, and is preserved as the last report after terminality.
+
 ## Workspace Registry
 
 Create a workspace and add agent projects:

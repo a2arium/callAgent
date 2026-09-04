@@ -43,6 +43,7 @@ export type { A2AEvent, TaskStatus, ProtocolArtifact };
 
 import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../../types/invariantError.js';
 import type { ConversationApi } from '../../public-types/conversation/types.js';
+import type { RunProgressReportResult, RunProgressSnapshot } from '../../progress/runProgress.js';
 
 
 // Export the unified Artifact type and interfaces
@@ -133,7 +134,7 @@ export type TaskContext = {
     };
     // Basic Output & Status Control (Implemented minimally)
     reply: (parts: string | string[] | MessagePart | MessagePart[]) => Promise<void>;
-    progress: ((pct: number, msg?: string) => void) & ((status: TaskStatus) => void); // Support both signatures
+    progress: TaskProgress;
     complete: (pct?: number, status?: string) => void; // Basic console log
     fail: (error: unknown) => Promise<void>; // Added fail method
 
@@ -362,6 +363,12 @@ export type ChildCompletionInput = {
     childTaskId?: string;
     agentId?: string;
     result: unknown;
+};
+
+export type TaskProgress = {
+    (pct: number, msg?: string): void;
+    (status: TaskStatus): void;
+    report?: (snapshot: RunProgressSnapshot) => Promise<RunProgressReportResult>;
 };
 
 /**

@@ -91,6 +91,7 @@ export function extendContextWithStreaming(
     isStreaming: boolean,
     eventBusParam?: IEventBus
 ): void {
+    const durableProgressReport = ctx.progress.report;
     const capabilityContext = ctx as ContextWithTaskReplyCapability;
     const existingCapability = capabilityContext[TASK_REPLY_CAPABILITY];
     const eventBus = eventBusParam ?? existingCapability?.eventBus ?? createInMemoryEventBus();
@@ -484,6 +485,7 @@ export function extendContextWithStreaming(
             throwInvariantError(code, message, detail, context);
         },
     });
+    if (durableProgressReport) ctx.progress.report = durableProgressReport;
     Object.defineProperty(capabilityContext, TASK_REPLY_CAPABILITY, {
         value: { eventBus, isStreaming },
         configurable: true,

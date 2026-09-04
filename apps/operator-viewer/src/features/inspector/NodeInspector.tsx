@@ -14,8 +14,8 @@ import { LlmCallsTable } from '../llm/LlmCallsTable';
 import { MemoryOpsTable } from '../memory/MemoryOpsTable';
 import { TurnDetail, TurnTimeline } from '../turn/TurnTimeline';
 import { HatchetRunLink } from '../hatchet/HatchetRunLink';
-import { useTurn } from '../../api/hooks';
-import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, TaskCoordinationView, TurnRun } from '../../types';
+import { useRunProgress, useTurn } from '../../api/hooks';
+import type { AgentRunEvent, AgentRunGraph, AgentRunNode, EffectRun, RunProgressResponse, TaskCoordinationView, TurnRun } from '../../types';
 
 export function NodeInspector(props: {
   graph: AgentRunGraph;
@@ -34,6 +34,7 @@ export function NodeInspector(props: {
   onCancel?: () => void;
 }): React.ReactElement {
   const selectedTurnQuery = useTurn(props.tenantId, props.node?.taskId, props.selectedTurnSeq);
+  const progressQuery = useRunProgress(props.tenantId, props.node?.taskId, !!props.node && !['completed', 'failed', 'canceled', 'cancelled'].includes(props.node.status));
   if (!props.node) {
     return (
       <aside className="min-w-0 overflow-hidden rounded-lg border border-border bg-card p-4 xl:h-full xl:max-h-[calc(100vh-250px)]">
@@ -124,7 +125,7 @@ export function NodeInspector(props: {
         </div>
 
         <TabsContent value="summary" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-          <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} tenantId={props.tenantId} config={props.config} />
+          <SummaryTab graph={props.graph} node={props.node} rollup={rollup} status={status.status} tenantId={props.tenantId} config={props.config} progress={progressQuery.data} />
         </TabsContent>
         <TabsContent value="turns" className="m-0 min-h-0 overflow-y-auto overflow-x-hidden p-0">
           {selectedTurn ? (
@@ -171,6 +172,7 @@ function SummaryTab(props: {
   status: ReturnType<typeof deriveStatus>['status'];
   tenantId: string;
   config: OperatorConfig;
+  progress?: RunProgressResponse;
 }): React.ReactElement {
   const children = props.graph.nodes.filter((node) => node.parentTaskId === props.node.taskId).length;
   const outboxRows = outboxRowsForNode(props.graph, props.node);
@@ -178,6 +180,14 @@ function SummaryTab(props: {
   const runtimeError = runtimeErrorForNode(props.graph, props.node, props.rollup.turns);
   return (
     <div className="grid gap-4">
+      <InspectorSection title="Progress">
+        {props.progress?.status === 'reported' ? <>
+          <FactRow label="Phase">{props.progress.snapshot.phase.replace(/[._-]+/g, ' ')}</FactRow>
+          <FactRow label="State">{props.progress.snapshot.state}</FactRow>
+          {props.progress.snapshot.summary ? <p className="text-sm text-muted-foreground">{props.progress.snapshot.summary}</p> : null}
+          <FactRow label="Reported">{formatRelative(props.progress.reportedAt)}</FactRow>
+        </> : <p className="text-sm text-muted-foreground">No progress reported</p>}
+      </InspectorSection>
       <InspectorSection title="At a glance">
         {props.node.executionOrigin === 'cache' ? <CacheOriginNotice /> : null}
         {semanticFailure ? <SemanticFailureNotice failure={semanticFailure} /> : null}

@@ -4,6 +4,11 @@
 
 Reference for the operator-facing agent DAG.
 
+Live progress is task-scoped in `run_progress`, tenant isolated, and atomically
+fenced against the working-memory turn coordinator. It is read separately from
+topology through `/tasks/:taskId/progress`; progress polling never relayouts the
+graph. Terminal rows preserve the last truthful report.
+
 The product-level unit is an **Agent Run**, not a Hatchet workflow. Hatchet remains an execution backend. The callAgent API exposes a semantic graph that answers what users actually need to know:
 
 - which agent ran

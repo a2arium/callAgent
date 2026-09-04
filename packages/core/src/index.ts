@@ -79,6 +79,7 @@ export { Artifact } from './shared/types/index.js';
 export type {
     A2AEvent,
     TaskContext,
+    TaskProgress,
     AgentCard,
     AgentRuntimeManifest,
     ResolvedManifests,
@@ -490,3 +491,4 @@ export {
 } from './scaffold/types.js';
 export * from './operator/agentSchedules.js';
 export type { OperatorRequestContext } from './operator/operatorAuth.js';
+export * from './progress/runProgress.js';

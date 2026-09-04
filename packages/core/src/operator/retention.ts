@@ -82,7 +82,7 @@ const TARGETS: RetentionTarget[] = [
     { table: 'operator_audit_events', delegate: 'operatorAuditEvent', retentionClass: 'audit', dateField: 'createdAt', idField: 'id', preserved: true },
 ];
 
-const SEMANTIC_TABLES = ['agent_runs', 'agent_run_edges', 'turn_runs', 'run_effects'];
+const SEMANTIC_TABLES = ['agent_runs', 'agent_run_edges', 'turn_runs', 'run_effects', 'run_progress'];
 
 export function readRetentionPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): RetentionPolicy {
     return {

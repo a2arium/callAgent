@@ -13,6 +13,8 @@ import type {
     WMSessionSnapshot,
     RunnableTurnRequest,
     RunnableTurnRequestCursor,
+    DurableRunProgressRecord,
+    DurableRunProgressWriteResult,
 } from '@a2arium/callagent-memory-engine';
 import { preserveConversationInboxForSnapshot } from '../loop/conversationInboxIdentity.js';
 import {
@@ -95,6 +97,29 @@ export class SessionManager {
         return this.store?.taskAdmissionCapabilities?.durablePersistence === true &&
             this.store.taskAdmissionCapabilities.runnableTurnRecovery === true &&
             typeof this.store.listRunnableTurnRequests === 'function';
+    }
+
+    supportsDurableRunProgress(): boolean {
+        return this.store?.runProgressCapabilities?.durableLatestProjection === true &&
+            this.store.runProgressCapabilities.atomicFenceValidation === true &&
+            typeof this.store.writeRunProgress === 'function';
+    }
+
+    writeRunProgress(params: Parameters<NonNullable<IWorkingMemorySessionStore['writeRunProgress']>>[0]): Promise<DurableRunProgressWriteResult> {
+        if (!this.store?.writeRunProgress) throw new Error('RUN_PROGRESS_UNAVAILABLE');
+        return this.store.writeRunProgress(params);
+    }
+
+    getRunProgress(tenantId: string, taskId: string): Promise<DurableRunProgressRecord | null> {
+        return this.store?.getRunProgress?.(tenantId, taskId) ?? Promise.resolve(null);
+    }
+
+    listRunProgress(tenantId: string, taskIds: string[]): Promise<DurableRunProgressRecord[]> {
+        return this.store?.listRunProgress?.(tenantId, taskIds) ?? Promise.resolve([]);
+    }
+
+    async markRunProgressTerminal(params: { tenantId: string; taskId: string; state: string; terminalAt: string }): Promise<void> {
+        await this.store?.markRunProgressTerminal?.(params);
     }
 
     private onOutboxEnqueued?: (ref: OutboxEnqueuedRef) => void | Promise<void>;

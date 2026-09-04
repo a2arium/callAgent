@@ -97,6 +97,7 @@ import {
     type TurnExecutor,
 } from '../runtime/index.js';
 import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
+import { readRunProgressMode, validateRunProgressSnapshot, type RunProgressReportResult } from '../progress/runProgress.js';
 import {
     markSegmentCancellationRequested,
     readSegmentCancellation,
@@ -1096,7 +1097,16 @@ export type AgentRunListItem = {
     traceId?: string;
     providerRunId?: string | null;
     origin?: TaskSubmissionOrigin;
+    progress?: AgentRunProgressView;
 };
+
+export type AgentRunProgressView = {
+    status: 'reported'; taskId: string; rootTaskId: string; agentId: string;
+    snapshot: Record<string, unknown>; revision: string; reportedAt: string;
+    terminal?: { state: string; at: string };
+};
+
+export type AgentRunProgressResponse = AgentRunProgressView | { status: 'unreported'; taskId: string };
 
 export type AgentRunListPage = {
     items: AgentRunListItem[];
@@ -1320,6 +1330,7 @@ export class TaskEngine {
         /** Wrap the default in-process stack driver (e.g. Hatchet outbox delegation). */
         runtimeDriverFactory?: (stack: InProcessRuntimeStack) => RuntimeDriver;
     }) {
+        readRunProgressMode();
         this.transportClose = opts?.transportClose;
         this.createDurableSubscription = opts?.createDurableSubscription;
         this.eventBus = opts?.eventBus ?? createInMemoryEventBus();
@@ -1516,6 +1527,11 @@ export class TaskEngine {
                 });
             },
             onTaskTerminal: async (params) => {
+                try {
+                    await this.sessionManager?.markRunProgressTerminal({ tenantId: params.tenantId, taskId: params.taskId, state: params.state, terminalAt: new Date().toISOString() });
+                } catch (error) {
+                    log.warn('Unable to mark run progress terminal', { taskId: params.taskId, message: error instanceof Error ? error.message : String(error) });
+                }
                 try {
                     await this.runtimeDriver.cancelTimer?.({
                         tenantId: params.tenantId,
@@ -2748,7 +2764,7 @@ export class TaskEngine {
                 scheduleId: params.scheduleId,
             });
             if (semanticPage !== undefined) {
-                return semanticPage;
+                return this.hydrateAgentRunProgress(params.tenantId, semanticPage);
             }
         }
         if (!prisma?.driverRun) {
@@ -2959,7 +2975,32 @@ export class TaskEngine {
                 });
             });
         }
-        return page;
+        return this.hydrateAgentRunProgress(params.tenantId, page);
+    }
+
+    private toAgentRunProgressView(record: Awaited<ReturnType<SessionManager['getRunProgress']>>): AgentRunProgressView | undefined {
+        if (!record) return undefined;
+        const parsed = validateRunProgressSnapshot(record.snapshot);
+        if (!parsed.success) {
+            defaultMetricsRegistry.increment('run_progress_read_total', { outcome: 'invalid' });
+            return undefined;
+        }
+        return {
+            status: 'reported', taskId: record.taskId, rootTaskId: record.rootTaskId, agentId: record.agentId,
+            snapshot: parsed.data, revision: record.revision, reportedAt: record.reportedAt,
+            ...(record.terminalState && record.terminalAt ? { terminal: { state: record.terminalState, at: record.terminalAt } } : {}),
+        };
+    }
+
+    private async hydrateAgentRunProgress(tenantId: string, page: AgentRunListPage): Promise<AgentRunListPage> {
+        const records = await this.sessionManager?.listRunProgress(tenantId, page.items.map((item) => item.taskId)) ?? [];
+        const byTask = new Map(records.map((record) => [record.taskId, this.toAgentRunProgressView(record)!]));
+        return { ...page, items: page.items.map((item) => ({ ...item, ...(byTask.get(item.taskId) ? { progress: byTask.get(item.taskId) } : {}) })) };
+    }
+
+    async getAgentRunProgress(params: { tenantId: string; taskId: string }): Promise<AgentRunProgressResponse> {
+        const progress = this.toAgentRunProgressView(await this.sessionManager?.getRunProgress(params.tenantId, params.taskId) ?? null);
+        return progress ?? { status: 'unreported', taskId: params.taskId };
     }
 
     async getAgentRunTurn(params: {
@@ -5741,6 +5782,35 @@ export class TaskEngine {
     ): TaskContext {
         // This is a simplified version - a real implementation would
         // inject all required dependencies like LLM, tools, etc.
+        const transientProgress = (() => { throw new TaskReplyCapabilityUnavailableError(task.id); }) as TaskContext['progress'];
+        if (readRunProgressMode() === 'enabled' && this.sessionManager?.supportsDurableRunProgress()) {
+            transientProgress.report = async (value): Promise<RunProgressReportResult> => {
+                const parsed = validateRunProgressSnapshot(value);
+                if (!parsed.success) return { status: 'rejected', code: 'RUN_PROGRESS_INVALID', message: parsed.message };
+                const claim = currentTaskTurnClaim();
+                if (!claim || claim.abortSignal?.aborted || claim.tenantId !== (binding?.tenantId ?? 'default') || claim.taskId !== task.id) {
+                    return { status: 'rejected', code: 'RUN_PROGRESS_FENCE_LOST', message: 'The active durable turn claim no longer owns this task.' };
+                }
+                try {
+                    const prisma = this.getSessionStorePrisma() as { agentRun?: { findUnique(args: unknown): Promise<{ rootTaskId?: string } | null> } } | undefined;
+                    const run = await prisma?.agentRun?.findUnique({ where: { tenantId_taskId: { tenantId: claim.tenantId, taskId: task.id } }, select: { rootTaskId: true } });
+                    const result = await this.sessionManager!.writeRunProgress({
+                        tenantId: claim.tenantId, taskId: task.id, rootTaskId: run?.rootTaskId ?? task.id,
+                        agentId: binding?.agentId ?? 'default', snapshot: parsed.data,
+                        claimId: claim.claimId, fence: claim.fence, claimedGeneration: claim.claimedGeneration,
+                        turnSeq: claim.turnSeq, minimumIntervalMs: 1_000,
+                    });
+                    if (result.status === 'fence_lost') return { status: 'rejected', code: 'RUN_PROGRESS_FENCE_LOST', message: 'The active durable turn claim no longer owns this task.' };
+                    if (result.status === 'terminal') return { status: 'rejected', code: 'RUN_PROGRESS_TERMINAL', message: 'The task is already terminal.' };
+                    if (result.status === 'rate_limited') return { status: 'skipped', code: 'RUN_PROGRESS_RATE_LIMITED' };
+                    if (result.status === 'accepted' || result.status === 'coalesced') return result;
+                    return { status: 'skipped', code: 'RUN_PROGRESS_UNAVAILABLE' };
+                } catch (error) {
+                    log.warn('Durable run progress report unavailable', { taskId: task.id, message: error instanceof Error ? error.message : String(error) });
+                    return { status: 'skipped', code: 'RUN_PROGRESS_UNAVAILABLE' };
+                }
+            };
+        }
         const ctx: TaskContext = {
             ...(binding?.abortSignal !== undefined ? { abortSignal: binding.abortSignal } : {}),
             tenantId: binding?.tenantId ?? 'default',
@@ -5771,9 +5841,7 @@ export class TaskEngine {
             reply: async () => {
                 throw new TaskReplyCapabilityUnavailableError(task.id);
             },
-            progress: () => {
-                throw new TaskReplyCapabilityUnavailableError(task.id);
-            },
+            progress: transientProgress,
             complete: () => { },
             fail: async () => { },
             // Add stub for recordUsage
@@ -6375,7 +6443,16 @@ export class TaskEngine {
         snapshot: Record<string, unknown>;
     }): Promise<void> {
         const terminal = readDurableTaskTerminal(params.snapshot);
-        if (terminal === undefined || terminal.enqueuedAt !== undefined) return;
+        if (terminal === undefined) return;
+        try {
+            await this.sessionManager?.markRunProgressTerminal({
+                tenantId: params.tenantId, taskId: params.taskId, state: terminal.state,
+                terminalAt: terminal.status.timestamp,
+            });
+        } catch (error) {
+            log.warn('Unable to converge terminal run progress', { taskId: params.taskId, message: error instanceof Error ? error.message : String(error) });
+        }
+        if (terminal.enqueuedAt !== undefined) return;
         const terminalEventPayload = {
             taskId: params.taskId,
             ...(params.agentId ? { agentId: params.agentId } : {}),

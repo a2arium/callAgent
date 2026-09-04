@@ -4,6 +4,11 @@
 
 Implementation spec for the Phase 3.1 Operator Dashboard MVP.
 
+Operator shows Progress beside Status in Fleet, an always-visible Live progress
+panel above the run graph, and selected child progress in Summary. Direct detail
+polls every five seconds only while active. Missing data is “No progress reported”;
+blocked/retrying and stale reports warn without changing authoritative status.
+
 Canonical companion docs:
 
 - [`../Operator Dashboard — UI/UX Development Requirements v1.0.md`](../Operator%20Dashboard%20%E2%80%94%20UI%2FUX%20Development%20Requirements%20v1.0.md) — UI/UX requirements, stack decision, auth/security reservations, and MVP scope.
